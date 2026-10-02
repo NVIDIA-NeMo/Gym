@@ -1,0 +1,36 @@
+# Visual agent benchmark (MiMo-V2.6 §4.2.3): 100 synthetic tasks over websites, interactive apps,
+# games, 3D scenes, slides, SVG, videos and Figma designs, run through the image-capable OpenCode
+# agent and graded by the agentic verifier of resources_servers/visual_agent.
+#
+# 4 rollouts per task. Groupwise grading of open-ended tasks is on, so `reward` includes the
+# within-group adjustment; `pointwise_reward` is the absolute score to report.
+config_paths:
+- resources_servers/visual_agent/configs/visual_agent.yaml
+
+visual_agent_resources_server:
+  resources_servers:
+    visual_agent:
+      groupwise:
+        enabled: true
+        group_size: 4
+        # A verify holds its rollout slot while it waits for the rest of its group, so keep this
+        # short: on a resumed run the members written by an earlier job never arrive, and those
+        # rollouts keep their pointwise reward after the timeout (groupwise_status=timeout).
+        collection_timeout_s: 1200
+        bonus: 0.15
+      judge:
+        # The v2 tasks script long checks (e.g. a 90-move Klondike line, a 10-wave tower-defense
+        # run); a judge that runs out of time is a masked sample, not a zero.
+        timeout_s: 2700
+
+visual_agent_opencode_visual_sandboxed_agent:
+  responses_api_agents:
+    opencode_visual_sandboxed_agent:
+      # Harness budget per rollout (building, previewing and iterating on the artifact).
+      sandbox_timeout: 3600
+      datasets:
+        - name: visual_agent
+          type: benchmark
+          jsonl_fpath: benchmarks/visual_agent/data/benchmark.jsonl
+          prepare_script: benchmarks/visual_agent/prepare.py
+          num_repeats: 4

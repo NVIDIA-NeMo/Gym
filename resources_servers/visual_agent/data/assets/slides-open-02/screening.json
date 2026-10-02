@@ -1,0 +1,26 @@
+{
+  "study": "NRP-24-201",
+  "screened": 212,
+  "screen_failures": [
+    {
+      "reason": "HbA1c outside 7.0-10.5%",
+      "count": 49
+    },
+    {
+      "reason": "eGFR below 45",
+      "count": 21
+    },
+    {
+      "reason": "Withdrew before randomization",
+      "count": 13
+    },
+    {
+      "reason": "Other eligibility criteria",
+      "count": 9
+    }
+  ],
+  "randomization": "1:1:1, stratified by baseline HbA1c (<8.5% vs >=8.5%)",
+  "run_in_weeks": 2,
+  "treatment_weeks": 24,
+  "follow_up_weeks": 4
+}

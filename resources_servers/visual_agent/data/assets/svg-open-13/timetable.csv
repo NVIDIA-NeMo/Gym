@@ -1,0 +1,72 @@
+train,type,station,arrive,depart
+L101,local,Port Alder,,06:05
+L101,local,Gullhaven,06:16,06:17
+L101,local,Saltmarsh,06:27,06:28
+L101,local,Redcliff,06:39,06:44
+L101,local,Harwick Junction,06:56,06:57
+L101,local,Linmouth,07:10,07:11
+L101,local,Dunmore,07:21,07:22
+L101,local,Oakbay,07:37,07:38
+L101,local,Kingsmouth,07:53,
+L102,local,Kingsmouth,,06:12
+L102,local,Oakbay,06:27,06:28
+L102,local,Dunmore,06:43,06:44
+L102,local,Linmouth,06:54,06:55
+L102,local,Harwick Junction,07:08,07:09
+L102,local,Redcliff,07:21,07:27
+L102,local,Saltmarsh,07:38,07:39
+L102,local,Gullhaven,07:49,07:50
+L102,local,Port Alder,08:01,
+X201,express,Port Alder,,06:25
+X201,express,Harwick Junction,06:48,06:50
+X201,express,Kingsmouth,07:18,
+X202,express,Kingsmouth,,06:48
+X202,express,Harwick Junction,07:16,07:18
+X202,express,Port Alder,07:41,
+F301,freight,Port Alder,,06:50
+F301,freight,Linmouth,07:52,08:06
+F301,freight,Kingsmouth,08:50,
+L103,local,Port Alder,,07:10
+L103,local,Gullhaven,07:21,07:22
+L103,local,Saltmarsh,07:32,07:33
+L103,local,Redcliff,07:44,07:50
+L103,local,Harwick Junction,08:02,08:03
+L103,local,Linmouth,08:16,08:17
+L103,local,Dunmore,08:27,08:28
+L103,local,Oakbay,08:43,08:44
+L103,local,Kingsmouth,08:59,
+L104,local,Kingsmouth,,07:12
+L104,local,Oakbay,07:27,07:28
+L104,local,Dunmore,07:43,07:44
+L104,local,Linmouth,07:54,07:59
+L104,local,Harwick Junction,08:12,08:13
+L104,local,Redcliff,08:25,08:26
+L104,local,Saltmarsh,08:37,08:38
+L104,local,Gullhaven,08:48,08:49
+L104,local,Port Alder,09:00,
+X203,express,Port Alder,,07:30
+X203,express,Harwick Junction,07:53,07:55
+X203,express,Kingsmouth,08:23,
+X204,express,Kingsmouth,,07:35
+X204,express,Harwick Junction,08:03,08:05
+X204,express,Port Alder,08:28,
+L105,local,Port Alder,,08:10
+L105,local,Gullhaven,08:21,08:22
+L105,local,Saltmarsh,08:32,08:33
+L105,local,Redcliff,08:44,08:45
+L105,local,Harwick Junction,08:57,08:58
+L105,local,Linmouth,09:11,09:12
+L105,local,Dunmore,09:22,09:23
+L105,local,Oakbay,09:38,09:39
+L105,local,Kingsmouth,09:54,
+L106,local,Kingsmouth,,08:14
+L106,local,Oakbay,08:29,08:30
+L106,local,Dunmore,08:45,08:46
+L106,local,Linmouth,08:56,08:57
+L106,local,Harwick Junction,09:10,09:11
+L106,local,Redcliff,09:23,09:24
+L106,local,Saltmarsh,09:35,09:36
+L106,local,Gullhaven,09:46,09:47
+L106,local,Port Alder,09:58,
+F302,freight,Kingsmouth,,08:40
+F302,freight,Port Alder,10:25,

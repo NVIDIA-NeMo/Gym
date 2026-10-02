@@ -1,0 +1,60 @@
+{
+ "references": {
+  "frame_1.png": {
+   "distinct_coarse_colors": 25,
+   "dominant_color_fraction": 0.8445,
+   "gray_std": 29.74,
+   "height": 1080,
+   "width": 1080
+  },
+  "frame_2.png": {
+   "distinct_coarse_colors": 28,
+   "dominant_color_fraction": 0.8394,
+   "gray_std": 30.828,
+   "height": 1080,
+   "width": 1080
+  },
+  "frame_3.png": {
+   "distinct_coarse_colors": 24,
+   "dominant_color_fraction": 0.8467,
+   "gray_std": 33.625,
+   "height": 1080,
+   "width": 1080
+  },
+  "frame_4.png": {
+   "distinct_coarse_colors": 27,
+   "dominant_color_fraction": 0.8901,
+   "gray_std": 32.273,
+   "height": 1080,
+   "width": 1080
+  },
+  "frame_5.png": {
+   "distinct_coarse_colors": 23,
+   "dominant_color_fraction": 0.8047,
+   "gray_std": 33.652,
+   "height": 1080,
+   "width": 1080
+  },
+  "frame_6.png": {
+   "distinct_coarse_colors": 23,
+   "dominant_color_fraction": 0.8071,
+   "gray_std": 30.897,
+   "height": 1080,
+   "width": 1080
+  }
+ },
+ "self_check_blank": false,
+ "self_similarity": 1.0,
+ "video": {
+  "codec": "h264",
+  "duration_s": 12.0,
+  "format": "mov,mp4,m4a,3gp,3g2,mj2",
+  "fps": 30.0,
+  "has_audio": false,
+  "height": 1080,
+  "nb_frames": 360,
+  "ok": true,
+  "pix_fmt": "yuv420p",
+  "width": 1080
+ }
+}

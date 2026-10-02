@@ -1,0 +1,285 @@
+{
+  "site": "Kestrel Labs HQ",
+  "notes": "tier 0 is the top of the diagram. Nodes and links are in no particular order; you may order nodes within a tier freely.",
+  "nodes": [
+    {
+      "id": "isp",
+      "label": "Internet",
+      "type": "cloud",
+      "tier": 0,
+      "address": "ISP uplink"
+    },
+    {
+      "id": "fw-b",
+      "label": "FW-B",
+      "type": "firewall",
+      "tier": 1,
+      "address": "10.0.0.3"
+    },
+    {
+      "id": "fw-a",
+      "label": "FW-A",
+      "type": "firewall",
+      "tier": 1,
+      "address": "10.0.0.2"
+    },
+    {
+      "id": "core-2",
+      "label": "CORE-2",
+      "type": "core-switch",
+      "tier": 2,
+      "address": "10.0.1.2"
+    },
+    {
+      "id": "core-1",
+      "label": "CORE-1",
+      "type": "core-switch",
+      "tier": 2,
+      "address": "10.0.1.1"
+    },
+    {
+      "id": "acc-lab",
+      "label": "ACC-LAB",
+      "type": "access-switch",
+      "tier": 3,
+      "address": "10.30.0.1"
+    },
+    {
+      "id": "acc-eng",
+      "label": "ACC-ENG",
+      "type": "access-switch",
+      "tier": 3,
+      "address": "10.10.0.1"
+    },
+    {
+      "id": "acc-guest",
+      "label": "ACC-GUEST",
+      "type": "access-switch",
+      "tier": 3,
+      "address": "10.99.0.1"
+    },
+    {
+      "id": "acc-ops",
+      "label": "ACC-OPS",
+      "type": "access-switch",
+      "tier": 3,
+      "address": "10.20.0.1"
+    },
+    {
+      "id": "gpu-2",
+      "label": "LAB-GPU-2",
+      "type": "server",
+      "tier": 4,
+      "address": "10.30.0.12"
+    },
+    {
+      "id": "build",
+      "label": "SRV-BUILD",
+      "type": "server",
+      "tier": 4,
+      "address": "10.10.0.10"
+    },
+    {
+      "id": "ap-cafe",
+      "label": "AP-CAFE",
+      "type": "wifi-ap",
+      "tier": 4,
+      "address": "10.99.0.21"
+    },
+    {
+      "id": "nas",
+      "label": "NAS-01",
+      "type": "storage",
+      "tier": 4,
+      "address": "10.20.0.30"
+    },
+    {
+      "id": "git",
+      "label": "SRV-GIT",
+      "type": "server",
+      "tier": 4,
+      "address": "10.10.0.11"
+    },
+    {
+      "id": "gpu-1",
+      "label": "LAB-GPU-1",
+      "type": "server",
+      "tier": 4,
+      "address": "10.30.0.11"
+    },
+    {
+      "id": "mon",
+      "label": "SRV-MON",
+      "type": "server",
+      "tier": 4,
+      "address": "10.20.0.20"
+    },
+    {
+      "id": "ap-lobby",
+      "label": "AP-LOBBY",
+      "type": "wifi-ap",
+      "tier": 4,
+      "address": "10.99.0.20"
+    }
+  ],
+  "links": [
+    {
+      "a": "acc-lab",
+      "b": "gpu-1",
+      "speed": "10G",
+      "role": "primary"
+    },
+    {
+      "a": "isp",
+      "b": "fw-a",
+      "speed": "10G",
+      "role": "primary"
+    },
+    {
+      "a": "core-2",
+      "b": "acc-ops",
+      "speed": "10G",
+      "role": "backup"
+    },
+    {
+      "a": "fw-a",
+      "b": "core-1",
+      "speed": "10G",
+      "role": "primary"
+    },
+    {
+      "a": "acc-ops",
+      "b": "nas",
+      "speed": "10G",
+      "role": "primary"
+    },
+    {
+      "a": "core-1",
+      "b": "core-2",
+      "speed": "40G",
+      "role": "primary"
+    },
+    {
+      "a": "acc-guest",
+      "b": "ap-lobby",
+      "speed": "1G",
+      "role": "primary"
+    },
+    {
+      "a": "core-2",
+      "b": "acc-lab",
+      "speed": "40G",
+      "role": "primary"
+    },
+    {
+      "a": "isp",
+      "b": "fw-b",
+      "speed": "10G",
+      "role": "backup"
+    },
+    {
+      "a": "acc-eng",
+      "b": "git",
+      "speed": "10G",
+      "role": "primary"
+    },
+    {
+      "a": "core-1",
+      "b": "acc-ops",
+      "speed": "10G",
+      "role": "primary"
+    },
+    {
+      "a": "fw-a",
+      "b": "fw-b",
+      "speed": "1G",
+      "role": "backup"
+    },
+    {
+      "a": "acc-lab",
+      "b": "nas",
+      "speed": "10G",
+      "role": "backup"
+    },
+    {
+      "a": "acc-ops",
+      "b": "mon",
+      "speed": "1G",
+      "role": "primary"
+    },
+    {
+      "a": "core-2",
+      "b": "acc-guest",
+      "speed": "10G",
+      "role": "primary"
+    },
+    {
+      "a": "fw-b",
+      "b": "core-2",
+      "speed": "10G",
+      "role": "primary"
+    },
+    {
+      "a": "acc-eng",
+      "b": "build",
+      "speed": "10G",
+      "role": "primary"
+    },
+    {
+      "a": "acc-lab",
+      "b": "gpu-2",
+      "speed": "10G",
+      "role": "primary"
+    },
+    {
+      "a": "core-1",
+      "b": "acc-eng",
+      "speed": "40G",
+      "role": "primary"
+    },
+    {
+      "a": "acc-guest",
+      "b": "ap-cafe",
+      "speed": "1G",
+      "role": "primary"
+    }
+  ],
+  "vlans": [
+    {
+      "id": 10,
+      "name": "Engineering",
+      "members": [
+        "acc-eng",
+        "build",
+        "git"
+      ]
+    },
+    {
+      "id": 20,
+      "name": "Operations",
+      "members": [
+        "acc-ops",
+        "mon",
+        "nas"
+      ]
+    },
+    {
+      "id": 30,
+      "name": "Lab",
+      "members": [
+        "acc-lab",
+        "gpu-1",
+        "gpu-2"
+      ]
+    },
+    {
+      "id": 99,
+      "name": "Guest",
+      "members": [
+        "acc-guest",
+        "ap-lobby",
+        "ap-cafe"
+      ]
+    }
+  ]
+}

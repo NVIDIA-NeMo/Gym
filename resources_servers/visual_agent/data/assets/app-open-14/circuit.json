@@ -1,0 +1,122 @@
+{
+ "name": "Tank controller",
+ "components": [
+  {
+   "id": "Low",
+   "type": "SWITCH",
+   "x": 40,
+   "y": 80
+  },
+  {
+   "id": "High",
+   "type": "SWITCH",
+   "x": 40,
+   "y": 240
+  },
+  {
+   "id": "Manual",
+   "type": "SWITCH",
+   "x": 40,
+   "y": 400
+  },
+  {
+   "id": "NOT1",
+   "type": "NOT",
+   "x": 180,
+   "y": 220
+  },
+  {
+   "id": "AND1",
+   "type": "AND",
+   "x": 340,
+   "y": 120
+  },
+  {
+   "id": "XOR1",
+   "type": "XOR",
+   "x": 340,
+   "y": 300
+  },
+  {
+   "id": "OR1",
+   "type": "OR",
+   "x": 520,
+   "y": 160
+  },
+  {
+   "id": "AND2",
+   "type": "AND",
+   "x": 520,
+   "y": 340
+  },
+  {
+   "id": "Pump",
+   "type": "LED",
+   "x": 700,
+   "y": 170
+  },
+  {
+   "id": "Alarm",
+   "type": "LED",
+   "x": 700,
+   "y": 350
+  }
+ ],
+ "wires": [
+  {
+   "from": "Low",
+   "to": "AND1",
+   "input": 0
+  },
+  {
+   "from": "High",
+   "to": "NOT1",
+   "input": 0
+  },
+  {
+   "from": "NOT1",
+   "to": "AND1",
+   "input": 1
+  },
+  {
+   "from": "AND1",
+   "to": "OR1",
+   "input": 0
+  },
+  {
+   "from": "Manual",
+   "to": "OR1",
+   "input": 1
+  },
+  {
+   "from": "OR1",
+   "to": "Pump",
+   "input": 0
+  },
+  {
+   "from": "Low",
+   "to": "XOR1",
+   "input": 0
+  },
+  {
+   "from": "High",
+   "to": "XOR1",
+   "input": 1
+  },
+  {
+   "from": "XOR1",
+   "to": "AND2",
+   "input": 0
+  },
+  {
+   "from": "High",
+   "to": "AND2",
+   "input": 1
+  },
+  {
+   "from": "AND2",
+   "to": "Alarm",
+   "input": 0
+  }
+ ]
+}

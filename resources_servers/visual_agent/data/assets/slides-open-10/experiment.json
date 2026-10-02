@@ -1,0 +1,33 @@
+{
+  "experiment_id": "EXP-2291",
+  "name": "One-page checkout",
+  "hypothesis": "Collapsing the four-step checkout into a single page raises checkout conversion without lowering order value.",
+  "start_date": "2026-09-01",
+  "end_date": "2026-09-28",
+  "allocation": {
+    "control": 0.5,
+    "treatment": 0.5
+  },
+  "unit": "checkout session",
+  "control": "Four-step checkout (address, delivery slot, payment, review)",
+  "treatment": "One-page checkout with inline delivery-slot picker",
+  "primary_metric": "checkout conversion rate (orders / checkout sessions)",
+  "alpha": 0.05,
+  "minimum_detectable_effect_relative": 0.03,
+  "planned_sessions_per_arm": 21000,
+  "srm_alert_p_value": 0.001,
+  "guardrails": [
+    {
+      "metric": "average order value",
+      "max_relative_drop": 0.02
+    },
+    {
+      "metric": "revenue per checkout session",
+      "max_relative_drop": 0.0
+    }
+  ],
+  "segments": [
+    "platform",
+    "user_type"
+  ]
+}

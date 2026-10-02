@@ -1,0 +1,40 @@
+date,description,category,amount
+2026-01-01,"Rent, January",Housing,-1450.00
+2026-01-03,Whole Foods,Groceries,-86.42
+2026-01-05,Metro card,Transport,-64.00
+2026-01-08,Electric bill,Utilities,-72.18
+2026-01-10,Trader Joe's,Groceries,-54.37
+2026-01-12,Cinema,Entertainment,-28.50
+2026-01-15,Salary,Income,3200
+2026-01-17,"Dinner at ""Luigi's""",Dining,-63.80
+2026-01-20,Pharmacy,Health,-19.99
+2026-01-24,Farmers market,Groceries,-41.25
+2026-01-27,Internet,Utilities,-55.00
+2026-01-30,Freelance: logo project,Income,450.00
+2026-01-31,Ramen bar,Dining,-32.40
+2026-02-01,"Rent, February",Housing,-1450.00
+2026-02-02,Whole Foods,Groceries,-92.15
+2026-02-05,Metro card,Transport,-64.00
+2026-02-09,Electric bill,Utilities,-81.06
+2026-02-11,Concert,Entertainment,-75.00
+2026-02-14,"Valentine's dinner, Osteria",Dining,-118.60
+2026-02-15,Salary,Income,3200.00
+2026-02-19,Trader Joe's,Groceries,-47.83
+2026-02-22,Dentist copay,Health,-40.00
+2026-02-26,Internet,Utilities,-55.00
+2026-02-30,Coffee refund,Dining,4.50
+2026-02-28,Taxi,Transport,-23.70
+
+2026-03-01,"Rent, March",Housing,-1450.00
+2026-03-04,Whole Foods,Groceries,-101.06
+2026-03-05,Metro card,Transport,-64.00
+2026-03-09,Electric bill,Utilities,-66.94
+2026-03-12,Bookshop,Entertainment,twelve
+2026-03-13,Tax refund,Income,612.00
+2026-03-15,Salary,Income,3200.00
+2026-03-18,Sushi night,Dining,-57.25
+2026-03-21,Trader Joe's,Groceries,-61.49
+2026-03-24,Gym membership,Health,-45.00
+2026-03-26,Internet,Utilities,-55.00
+2026-03-28,Theatre tickets,Entertainment,-96.00
+2026-03-30,Farmers market,Groceries,-38.60

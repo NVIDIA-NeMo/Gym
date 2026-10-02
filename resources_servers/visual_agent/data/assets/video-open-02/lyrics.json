@@ -1,0 +1,53 @@
+{
+ "title": "Lanterns on the Water",
+ "artist": "Marlow & the Low Tide",
+ "duration_s": 20.0,
+ "lines": [
+  {"line": 1, "words": [
+   {"text": "Light", "start": 2.40, "end": 2.80},
+   {"text": "a", "start": 2.80, "end": 2.95},
+   {"text": "lantern", "start": 2.95, "end": 3.60},
+   {"text": "on", "start": 3.60, "end": 3.80},
+   {"text": "the", "start": 3.80, "end": 3.95},
+   {"text": "water", "start": 3.95, "end": 4.70}
+  ]},
+  {"line": 2, "words": [
+   {"text": "send", "start": 5.00, "end": 5.30},
+   {"text": "it", "start": 5.30, "end": 5.45},
+   {"text": "drifting", "start": 5.45, "end": 6.10},
+   {"text": "past", "start": 6.10, "end": 6.40},
+   {"text": "the", "start": 6.40, "end": 6.55},
+   {"text": "pier", "start": 6.55, "end": 7.30}
+  ]},
+  {"line": 3, "words": [
+   {"text": "every", "start": 7.60, "end": 8.00},
+   {"text": "ember", "start": 8.00, "end": 8.50},
+   {"text": "is", "start": 8.50, "end": 8.65},
+   {"text": "a", "start": 8.65, "end": 8.80},
+   {"text": "letter", "start": 8.80, "end": 9.60}
+  ]},
+  {"line": 4, "words": [
+   {"text": "saying", "start": 12.00, "end": 12.40},
+   {"text": "I", "start": 12.40, "end": 12.60},
+   {"text": "am", "start": 12.60, "end": 12.80},
+   {"text": "always", "start": 12.80, "end": 13.40},
+   {"text": "here", "start": 13.40, "end": 14.20}
+  ]},
+  {"line": 5, "words": [
+   {"text": "when", "start": 14.50, "end": 14.70},
+   {"text": "the", "start": 14.70, "end": 14.85},
+   {"text": "tide", "start": 14.85, "end": 15.30},
+   {"text": "turns", "start": 15.30, "end": 15.70},
+   {"text": "in", "start": 15.70, "end": 15.85},
+   {"text": "the", "start": 15.85, "end": 16.00},
+   {"text": "morning", "start": 16.00, "end": 16.70}
+  ]},
+  {"line": 6, "words": [
+   {"text": "follow", "start": 16.90, "end": 17.30},
+   {"text": "every", "start": 17.30, "end": 17.60},
+   {"text": "light", "start": 17.60, "end": 18.00},
+   {"text": "back", "start": 18.00, "end": 18.30},
+   {"text": "home", "start": 18.30, "end": 19.20}
+  ]}
+ ]
+}

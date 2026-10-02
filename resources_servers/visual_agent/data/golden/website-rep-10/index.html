@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tidelines Festival 2026 · 17–19 July · Saltmarsh Park</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --ink: #0f1e36; --navy: #13294b; --sand: #f7f0e3; --paper: #fffaf1; --line: #e3d7c2;
+    --muted: #5d6475; --coral: #ef5a3c; --teal: #1a9b8e; --sun: #f2a93b; --violet: #6d5bd0;
+  }
+  body { font-family: Inter, sans-serif; background: var(--sand); color: var(--ink); font-size: 15px; line-height: 1.5; }
+  .mono { font-family: 'DejaVu Sans Mono', monospace; }
+  .wrap { width: 1152px; margin: 0 auto; }
+  a { color: inherit; text-decoration: none; }
+
+  /* header */
+  header { height: 72px; border-bottom: 1px solid var(--line); }
+  header .wrap { height: 72px; display: flex; align-items: center; }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .word { font-weight: 900; font-size: 20px; letter-spacing: 0.06em; }
+  .brand .yr { font-family: 'DejaVu Sans Mono', monospace; font-size: 11px; color: var(--coral); font-weight: 700; margin-left: -4px; margin-top: -10px; }
+  nav { display: flex; gap: 28px; margin-left: 56px; font-size: 14px; font-weight: 600; }
+  nav a.on { border-bottom: 2px solid var(--coral); padding-bottom: 3px; }
+  .hright { margin-left: auto; display: flex; align-items: center; gap: 20px; }
+  .hright .when { font-family: 'DejaVu Sans Mono', monospace; font-size: 12px; color: var(--muted); letter-spacing: 0.04em; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; height: 40px; padding: 0 20px; border-radius: 999px; font-size: 14px; font-weight: 700; }
+  .btn-coral { background: var(--coral); color: #fff; }
+
+  /* hero */
+  .hero { margin-top: 24px; height: 420px; border-radius: 28px; background: var(--navy); position: relative; overflow: hidden; color: var(--sand); }
+  .hero .art { position: absolute; left: 600px; top: 0; }
+  .hero .copy { position: absolute; left: 56px; top: 40px; width: 520px; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 12px; border-radius: 999px; font-family: 'DejaVu Sans Mono', monospace; font-size: 11px; letter-spacing: 0.08em; }
+  .hero .pill { background: rgba(247,240,227,0.12); color: var(--sand); }
+  .hero .pill i { width: 8px; height: 8px; border-radius: 50%; background: var(--sun); display: block; }
+  .hero h1 { margin-top: 20px; font-size: 96px; line-height: 0.9; font-weight: 900; letter-spacing: -0.03em; }
+  .hero .sub { margin-top: 8px; font-size: 40px; line-height: 1; font-weight: 900; letter-spacing: 0.08em; color: var(--coral); }
+  .hero .facts { margin-top: 26px; display: flex; gap: 20px; align-items: stretch; }
+  .hero .facts div { font-family: 'DejaVu Sans Mono', monospace; font-size: 13px; letter-spacing: 0.06em; line-height: 1.6; }
+  .hero .facts b { display: block; font-family: Inter, sans-serif; font-size: 22px; letter-spacing: 0; font-weight: 800; color: #fff; }
+  .hero .facts .sep { width: 1px; background: rgba(247,240,227,0.3); }
+  .hero .ctas { margin-top: 26px; display: flex; gap: 12px; align-items: center; }
+  .hero .ctas .btn { height: 48px; padding: 0 26px; font-size: 15px; }
+  .btn-ghost { border: 2px solid rgba(247,240,227,0.6); color: var(--sand); }
+  .hero .note { margin-top: 18px; font-size: 13px; color: rgba(247,240,227,0.72); }
+  .hero .chip { position: absolute; left: 632px; bottom: 22px; background: var(--paper); color: var(--ink); border-radius: 999px; height: 36px; padding: 0 16px; display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; }
+  .hero .chip i { width: 10px; height: 10px; border-radius: 50%; background: var(--coral); display: block; }
+
+  /* sections */
+  section { margin-top: 52px; }
+  .shead { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 24px; }
+  .eyebrow { font-family: 'DejaVu Sans Mono', monospace; font-size: 12px; letter-spacing: 0.12em; color: var(--coral); font-weight: 700; }
+  h2 { font-size: 40px; line-height: 1.1; font-weight: 900; letter-spacing: -0.02em; margin-top: 6px; }
+  .lede { font-size: 16px; color: var(--muted); text-align: right; white-space: nowrap; margin-bottom: 4px; }
+  .sright { display: flex; align-items: center; gap: 20px; }
+  .sright .lede { width: auto; margin-bottom: 0; }
+  .seg { display: flex; background: var(--paper); border: 1px solid var(--line); border-radius: 999px; padding: 4px; gap: 2px; }
+  .seg span { height: 34px; padding: 0 16px; display: flex; align-items: center; border-radius: 999px; font-size: 13px; font-weight: 700; color: var(--muted); }
+  .seg span.on { background: var(--ink); color: var(--sand); }
+
+  /* lineup */
+  .days { display: grid; grid-template-columns: repeat(3, 368px); gap: 24px; }
+  .day { background: var(--paper); border: 1px solid var(--line); border-radius: 22px; padding: 24px 24px 22px; text-align: center; }
+  .day.feat { background: var(--navy); border-color: var(--navy); color: var(--sand); }
+  .day .dh { display: flex; justify-content: space-between; align-items: baseline; }
+  .day .dh b { font-size: 22px; font-weight: 900; letter-spacing: 0.04em; }
+  .day .dh span { font-family: 'DejaVu Sans Mono', monospace; font-size: 12px; letter-spacing: 0.08em; color: var(--muted); }
+  .day.feat .dh span { color: rgba(247,240,227,0.7); }
+  .day .rule { height: 4px; border-radius: 2px; margin: 14px 0 18px; }
+  .day .hl { font-size: 32px; line-height: 1.1; font-weight: 900; text-transform: uppercase; letter-spacing: -0.01em; }
+  .day .star { margin: 10px auto 10px; font-size: 14px; color: var(--coral); letter-spacing: 0.4em; padding-left: 0.4em; }
+  .day .t2 { font-size: 18px; line-height: 1.45; font-weight: 800; }
+  .day .t3 { margin-top: 12px; font-size: 14px; line-height: 1.6; font-weight: 500; color: var(--muted); }
+  .day.feat .t3 { color: rgba(247,240,227,0.75); }
+  .day .more { margin-top: 16px; font-family: 'DejaVu Sans Mono', monospace; font-size: 11px; letter-spacing: 0.12em; color: var(--muted); }
+  .day.feat .more { color: rgba(247,240,227,0.7); }
+  .dot { color: var(--coral); }
+
+  /* timetable */
+  .tt { background: var(--paper); border: 1px solid var(--line); border-radius: 22px; padding: 20px 24px 18px; }
+  .tt-stages { display: grid; grid-template-columns: 64px repeat(4, 260px); height: 44px; align-items: center; border-bottom: 1px solid var(--line); }
+  .tt-stages .st { padding-left: 6px; display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 800; }
+  .tt-stages .st i { width: 12px; height: 12px; border-radius: 4px; display: block; }
+  .tt-stages .st small { font-family: 'DejaVu Sans Mono', monospace; font-size: 11px; font-weight: 400; color: var(--muted); }
+  .tt-body { position: relative; height: 456px; padding-top: 8px; margin-top: 8px; }
+  .tt-grid { position: absolute; left: 64px; top: 8px; width: 1040px; height: 440px; }
+  .hline { position: absolute; left: 0; width: 1040px; height: 0; border-top: 1px dashed #dccfb8; }
+  .vline { position: absolute; top: -8px; bottom: -8px; width: 1px; background: var(--line); }
+  .tlabel { position: absolute; left: 0; width: 52px; font-family: 'DejaVu Sans Mono', monospace; font-size: 11px; color: var(--muted); line-height: 14px; margin-top: -7px; }
+  .set { position: absolute; width: 248px; border-radius: 8px; padding: 3px 10px; border-left: 4px solid; overflow: hidden; }
+  .set b { display: block; font-size: 13px; line-height: 16px; font-weight: 700; }
+  .set span { display: block; font-family: 'DejaVu Sans Mono', monospace; font-size: 11px; line-height: 14px; color: var(--muted); }
+  .s-main { background: #fde3dc; border-color: var(--coral); }
+  .s-lag { background: #d6efec; border-color: var(--teal); }
+  .s-dune { background: #fcebcd; border-color: var(--sun); }
+  .s-pier { background: #e6e1f7; border-color: var(--violet); }
+  .set.head { color: #fff; padding: 6px 12px; }
+  .set.head b { font-size: 19px; line-height: 22px; font-weight: 900; letter-spacing: 0.02em; }
+  .set.head span { color: rgba(255,255,255,0.85); margin-top: 2px; }
+  .set.head em { position: absolute; right: 10px; top: 8px; font-style: normal; font-family: 'DejaVu Sans Mono', monospace; font-size: 9px; letter-spacing: 0.1em; background: rgba(255,255,255,0.22); padding: 2px 6px; border-radius: 4px; }
+  .s-main.head { background: var(--coral); }
+  .s-lag.head { background: var(--teal); }
+  .tt-foot { display: flex; justify-content: space-between; border-top: 1px solid var(--line); margin-top: 10px; padding-top: 14px; font-size: 13px; color: var(--muted); }
+  .tt-foot .lg { display: flex; gap: 18px; }
+  .tt-foot .lg span { display: flex; align-items: center; gap: 6px; }
+  .tt-foot .lg i { width: 18px; height: 10px; border-radius: 3px; display: block; }
+
+  /* map + info */
+  .plan { display: grid; grid-template-columns: 728px 400px; gap: 24px; }
+  .mapcard { background: var(--paper); border: 1px solid var(--line); border-radius: 22px; padding: 20px; }
+  .mapcard svg { display: block; border-radius: 14px; }
+  .legend { display: grid; grid-template-columns: repeat(5, 1fr); row-gap: 10px; margin-top: 16px; font-size: 13px; font-weight: 600; }
+  .legend span { display: flex; align-items: center; gap: 8px; }
+  .legend i { width: 22px; height: 22px; border-radius: 50%; color: #fff; font-style: normal; font-size: 11px; font-weight: 800; display: flex; align-items: center; justify-content: center; flex: none; }
+  .infos { display: grid; grid-template-rows: repeat(3, 1fr); gap: 16px; }
+  .info { background: var(--paper); border: 1px solid var(--line); border-radius: 22px; padding: 20px 22px; display: grid; grid-template-columns: 48px 1fr; column-gap: 16px; }
+  .info .ic { width: 48px; height: 48px; border-radius: 14px; display: flex; align-items: center; justify-content: center; }
+  .info h3 { font-size: 17px; font-weight: 800; line-height: 1.3; }
+  .info p { font-size: 14px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+  .info .d { font-family: 'DejaVu Sans Mono', monospace; font-size: 11px; letter-spacing: 0.06em; color: var(--ink); margin-top: 8px; }
+
+  /* tickets */
+  .tickets { display: grid; grid-template-columns: repeat(4, 270px); gap: 24px; }
+  .tk { background: var(--paper); border: 1px solid var(--line); border-radius: 22px; padding: 24px; position: relative; }
+  .tk .nm { font-family: 'DejaVu Sans Mono', monospace; font-size: 12px; letter-spacing: 0.1em; font-weight: 700; }
+  .tk .pr { font-size: 46px; line-height: 1; font-weight: 900; margin-top: 12px; letter-spacing: -0.02em; }
+  .tk .per { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .tk ul { list-style: none; border-top: 1px solid var(--line); margin-top: 16px; padding-top: 14px; }
+  .tk li { display: flex; gap: 10px; font-size: 14px; line-height: 20px; margin-bottom: 8px; }
+  .tk li svg { flex: none; margin-top: 3px; }
+  .tk .btn { width: 100%; height: 44px; margin-top: 14px; }
+  .tk .badge { position: absolute; right: 20px; top: 20px; height: 24px; padding: 0 10px; border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: 0.04em; display: flex; align-items: center; }
+  .tk.out { background: #efe7d8; color: #8a8f9c; }
+  .tk.out .pr { text-decoration: line-through; text-decoration-thickness: 4px; }
+  .tk.out .per { color: #8a8f9c; }
+  .tk.out .badge { background: #d9d0bf; color: #5d6475; }
+  .tk.out .btn { background: #ddd4c3; color: #8a8f9c; }
+  .tk.best { background: var(--navy); border-color: var(--navy); color: var(--sand); }
+  .tk.best .per { color: rgba(247,240,227,0.7); }
+  .tk.best ul { border-color: rgba(247,240,227,0.2); }
+  .tk.best .badge { background: var(--coral); color: #fff; }
+  .btn-ink { background: var(--ink); color: var(--sand); }
+
+  /* faq */
+  .faq { display: grid; grid-template-columns: 264px 1fr 1fr; column-gap: 40px; }
+  .faq > .fh { border-top: none; padding: 0; grid-row: span 2; }
+  .faq .fh h2 { font-size: 36px; }
+  .faq > div { border-top: 2px solid var(--ink); padding: 14px 0 18px; }
+  .faq h3 { font-size: 17px; font-weight: 800; }
+  .faq p { font-size: 14px; color: var(--muted); margin-top: 4px; }
+
+  /* footer */
+  footer { margin-top: 56px; background: var(--ink); color: var(--sand); padding: 40px 0 22px; }
+  .fgrid { display: grid; grid-template-columns: 300px 140px 140px 140px 1fr; column-gap: 32px; }
+  footer .brand .word { color: var(--sand); }
+  footer .blurb { font-size: 14px; color: rgba(247,240,227,0.7); margin-top: 14px; width: 280px; }
+  footer h4 { font-family: 'DejaVu Sans Mono', monospace; font-size: 11px; letter-spacing: 0.12em; color: var(--sun); margin-bottom: 12px; }
+  footer li { list-style: none; font-size: 14px; line-height: 26px; }
+  .news p { font-size: 14px; color: rgba(247,240,227,0.7); }
+  .news .row { display: flex; margin-top: 12px; }
+  .news .in { flex: 1; min-width: 0; height: 42px; border: 1px solid rgba(247,240,227,0.3); border-right: none; border-radius: 999px 0 0 999px; padding: 0 16px; font-size: 13px; color: rgba(247,240,227,0.55); display: flex; align-items: center; }
+  .news .btn { height: 42px; border-radius: 0 999px 999px 0; white-space: nowrap; flex: none; }
+  .fbot { display: flex; justify-content: space-between; border-top: 1px solid rgba(247,240,227,0.15); margin-top: 28px; padding-top: 18px; font-size: 13px; color: rgba(247,240,227,0.6); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <a class="brand" href="#">
+      <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
+        <circle cx="17" cy="17" r="17" fill="#13294b"/>
+        <path d="M9 18 A8 8 0 0 1 25 18 Z" fill="#f2a93b"/>
+        <path d="M5 21 q3 -3 6 0 t6 0 t6 0 t6 0" fill="none" stroke="#1a9b8e" stroke-width="2.4" stroke-linecap="round"/>
+        <path d="M8 26 q3 -3 6 0 t6 0 t6 0" fill="none" stroke="#ef5a3c" stroke-width="2.4" stroke-linecap="round"/>
+      </svg>
+      <span class="word">TIDELINES</span><span class="yr">2026</span>
+    </a>
+    <nav>
+      <a class="on" href="#lineup">Lineup</a>
+      <a href="#timetable">Timetable</a>
+      <a href="#map">Map</a>
+      <a href="#tickets">Tickets</a>
+      <a href="#info">Info</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <div class="hright">
+      <span class="when">17–19 JUL · NORTH BAY</span>
+      <a class="btn btn-coral" href="#tickets">Buy tickets</a>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="hero">
+    <svg class="art" width="552" height="420" viewBox="0 20 552 420" aria-hidden="true">
+      <defs>
+        <linearGradient id="sky" x1="0" y1="0" x2="0" y2="440" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stop-color="#13294b"/>
+          <stop offset="0.45" stop-color="#8a4a6b"/>
+          <stop offset="0.72" stop-color="#ef7a4f"/>
+          <stop offset="1" stop-color="#f6b872"/>
+        </linearGradient>
+        <clipPath id="sunclip"><circle cx="290" cy="250" r="128"/></clipPath>
+      </defs>
+      <rect width="552" height="440" fill="url(#sky)"/>
+      <g fill="#f7f0e3" opacity="0.75">
+        <circle cx="60" cy="48" r="2"/><circle cx="140" cy="86" r="1.6"/><circle cx="228" cy="34" r="2.2"/>
+        <circle cx="352" cy="60" r="1.6"/><circle cx="470" cy="30" r="2"/><circle cx="96" cy="140" r="1.4"/>
+        <circle cx="520" cy="120" r="1.6"/><circle cx="410" cy="104" r="1.2"/>
+      </g>
+      <circle cx="290" cy="250" r="128" fill="#f6b53c"/>
+      <g clip-path="url(#sunclip)">
+        <rect x="150" y="236" width="280" height="5" fill="url(#sky)"/>
+        <rect x="150" y="256" width="280" height="8" fill="url(#sky)"/>
+        <rect x="150" y="278" width="280" height="11" fill="url(#sky)"/>
+        <rect x="150" y="302" width="280" height="14" fill="url(#sky)"/>
+      </g>
+      <g fill="none" stroke="#13294b" stroke-width="2.4" stroke-linecap="round">
+        <path d="M92 104 q7 -7 14 0 q7 -7 14 0"/>
+        <path d="M130 128 q5 -5 10 0 q5 -5 10 0"/>
+        <path d="M404 150 q6 -6 12 0 q6 -6 12 0"/>
+      </g>
+      <path d="M0 300 C110 262 210 280 300 304 S470 326 552 288 L552 440 L0 440 Z" fill="#e9b872"/>
+      <path d="M0 336 C96 312 196 318 290 342 S462 364 552 334 L552 440 L0 440 Z" fill="#d4945a"/>
+      <g>
+        <path d="M424 318 L448 318 L444 244 L428 244 Z" fill="#fffaf1"/>
+        <path d="M427.2 262 L444.8 262 L445.8 280 L426.2 280 Z" fill="#ef5a3c"/>
+        <path d="M425.6 292 L446.4 292 L447.2 306 L424.8 306 Z" fill="#ef5a3c"/>
+        <rect x="425" y="232" width="22" height="12" rx="2" fill="#13294b"/>
+        <rect x="430" y="235" width="12" height="7" fill="#f6d27a"/>
+        <path d="M423 232 L436 220 L449 232 Z" fill="#ef5a3c"/>
+      </g>
+      <path d="M0 362 Q23 350 46 362 T92 362 T138 362 T184 362 T230 362 T276 362 T322 362 T368 362 T414 362 T460 362 T506 362 T552 362 L552 440 L0 440 Z" fill="#1a9b8e"/>
+      <path d="M0 388 Q23 376 46 388 T92 388 T138 388 T184 388 T230 388 T276 388 T322 388 T368 388 T414 388 T460 388 T506 388 T552 388 L552 440 L0 440 Z" fill="#137c73"/>
+      <path d="M0 414 Q23 402 46 414 T92 414 T138 414 T184 414 T230 414 T276 414 T322 414 T368 414 T414 414 T460 414 T506 414 T552 414 L552 440 L0 440 Z" fill="#0d5a58"/>
+      <g>
+        <circle cx="468" cy="100" r="54" fill="#ef5a3c"/>
+        <circle cx="468" cy="100" r="46" fill="none" stroke="#fffaf1" stroke-width="1.5" stroke-dasharray="3 4"/>
+        <text x="468" y="88" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="10" letter-spacing="1.5" fill="#fffaf1">NEW IN 2026</text>
+        <text x="468" y="110" text-anchor="middle" font-family="Inter, sans-serif" font-weight="900" font-size="18" fill="#fffaf1">THE PIER</text>
+        <text x="468" y="126" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="10" letter-spacing="1.5" fill="#fffaf1">STAGE</text>
+      </g>
+    </svg>
+    <div class="copy">
+      <span class="pill"><i></i>3 DAYS · 4 STAGES · 62 ARTISTS</span>
+      <h1>TIDELINES</h1>
+      <div class="sub">FESTIVAL 2026</div>
+      <div class="facts">
+        <div><b>17–19 July</b>FRI – SUN</div>
+        <span class="sep"></span>
+        <div><b>Saltmarsh Park</b>NORTH BAY COAST</div>
+      </div>
+      <div class="ctas">
+        <a class="btn btn-coral" href="#tickets">Buy tickets</a>
+        <a class="btn btn-ghost" href="#lineup">See the lineup</a>
+      </div>
+    </div>
+    <div class="chip"><i></i>Sat 18 · Solenne closes the Main Stage</div>
+  </div>
+
+  <section id="lineup">
+    <div class="shead">
+      <div>
+        <div class="eyebrow">01 · WHO'S PLAYING</div>
+        <h2>The lineup</h2>
+      </div>
+      <p class="lede">Sixty-two artists, three days, four stages by the water.</p>
+    </div>
+    <div class="days">
+      <div class="day">
+        <div class="dh"><b>FRIDAY</b><span>17 JULY</span></div>
+        <div class="rule" style="background:#1a9b8e"></div>
+        <div class="hl">Marlow Bay</div>
+        <div class="hl">The Kestrels</div>
+        <div class="star">★★★</div>
+        <div class="t2">Ivy&nbsp;Calder <span class="dot">·</span> Saltwater&nbsp;Radio<br>Juno&nbsp;Park <span class="dot">·</span> Hollow&nbsp;Pines</div>
+        <div class="t3">Cass&nbsp;Ferro · Lumen&nbsp;Drift · The&nbsp;Tidewalkers<br>Oda&nbsp;Rae · Paper&nbsp;Harbour · Nilo&nbsp;Vance</div>
+        <div class="more">+ 8 MORE ARTISTS</div>
+      </div>
+      <div class="day feat">
+        <div class="dh"><b>SATURDAY</b><span>18 JULY</span></div>
+        <div class="rule" style="background:#ef5a3c"></div>
+        <div class="hl">Solenne</div>
+        <div class="hl">Glass Atlas</div>
+        <div class="star">★★★</div>
+        <div class="t2">Rook&nbsp;&amp;&nbsp;Wren <span class="dot">·</span> Midnight&nbsp;Ferry<br>Tamsin&nbsp;Lowe <span class="dot">·</span> Night&nbsp;Swim</div>
+        <div class="t3">Coastline&nbsp;Choir · Kaia&nbsp;Moon · The&nbsp;Driftwoods<br>Harbor&nbsp;Static · Lio&nbsp;Sandoval · Kite&nbsp;Theory</div>
+        <div class="more">+ 9 MORE ARTISTS</div>
+      </div>
+      <div class="day">
+        <div class="dh"><b>SUNDAY</b><span>19 JULY</span></div>
+        <div class="rule" style="background:#f2a93b"></div>
+        <div class="hl">Orca Summer</div>
+        <div class="hl">Delphine</div>
+        <div class="star">★★★</div>
+        <div class="t2">Sea&nbsp;Glass&nbsp;Club <span class="dot">·</span> Noor&nbsp;Haddad<br>The&nbsp;Low&nbsp;Tides <span class="dot">·</span> Wilder&nbsp;Coast</div>
+        <div class="t3">Mara&nbsp;Quinn · Pelican&nbsp;Hifi · Ottoline<br>Sunbleach · Ezra&nbsp;Holm · Aurora&nbsp;Keys</div>
+        <div class="more">+ 9 MORE ARTISTS</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="timetable">
+    <div class="shead">
+      <div>
+        <div class="eyebrow">02 · WHEN AND WHERE</div>
+        <h2>Saturday timetable</h2>
+      </div>
+      <div class="sright">
+        <p class="lede">Gates open 12:00 · last music 01:00</p>
+        <div class="seg"><span>Fri 17</span><span class="on">Sat 18</span><span>Sun 19</span></div>
+      </div>
+    </div>
+    <div class="tt">
+      <div class="tt-stages">
+        <div></div>
+        <div class="st"><i style="background:#ef5a3c"></i>Main Stage <small>big nights</small></div>
+        <div class="st"><i style="background:#1a9b8e"></i>Lagoon <small>indie &amp; folk</small></div>
+        <div class="st"><i style="background:#f2a93b"></i>Dune Tent <small>electronic</small></div>
+        <div class="st"><i style="background:#6d5bd0"></i>The Pier <small>DJs till late</small></div>
+      </div>
+      <div class="tt-body">
+        <div class="tlabel" style="top:8px">14:00</div>
+        <div class="tlabel" style="top:48px">15:00</div>
+        <div class="tlabel" style="top:88px">16:00</div>
+        <div class="tlabel" style="top:128px">17:00</div>
+        <div class="tlabel" style="top:168px">18:00</div>
+        <div class="tlabel" style="top:208px">19:00</div>
+        <div class="tlabel" style="top:248px">20:00</div>
+        <div class="tlabel" style="top:288px">21:00</div>
+        <div class="tlabel" style="top:328px">22:00</div>
+        <div class="tlabel" style="top:368px">23:00</div>
+        <div class="tlabel" style="top:408px">00:00</div>
+        <div class="tlabel" style="top:448px">01:00</div>
+        <div class="tt-grid">
+          <div class="hline" style="top:0"></div><div class="hline" style="top:40px"></div>
+          <div class="hline" style="top:80px"></div><div class="hline" style="top:120px"></div>
+          <div class="hline" style="top:160px"></div><div class="hline" style="top:200px"></div>
+          <div class="hline" style="top:240px"></div><div class="hline" style="top:280px"></div>
+          <div class="hline" style="top:320px"></div><div class="hline" style="top:360px"></div>
+          <div class="hline" style="top:400px"></div><div class="hline" style="top:440px"></div>
+          <div class="vline" style="left:0"></div><div class="vline" style="left:260px"></div>
+          <div class="vline" style="left:520px"></div><div class="vline" style="left:780px"></div>
+
+          <div class="set s-main" style="left:6px; top:2px; height:36px"><b>Bex Arno</b><span>14:00–15:00</span></div>
+          <div class="set s-main" style="left:6px; top:72px; height:36px"><b>Coastline Choir</b><span>15:45–16:45</span></div>
+          <div class="set s-main" style="left:6px; top:142px; height:36px"><b>Tamsin Lowe</b><span>17:30–18:30</span></div>
+          <div class="set s-main" style="left:6px; top:212px; height:46px"><b>Rook &amp; Wren</b><span>19:15–20:30</span></div>
+          <div class="set s-main head" style="left:6px; top:302px; height:56px"><b>SOLENNE</b><span>21:30–23:00</span><em>HEADLINER</em></div>
+
+          <div class="set s-lag" style="left:266px; top:22px; height:36px"><b>Fenn</b><span>14:30–15:30</span></div>
+          <div class="set s-lag" style="left:266px; top:92px; height:36px"><b>Kaia Moon</b><span>16:15–17:15</span></div>
+          <div class="set s-lag" style="left:266px; top:162px; height:36px"><b>Lio Sandoval</b><span>18:00–19:00</span></div>
+          <div class="set s-lag" style="left:266px; top:232px; height:46px"><b>Midnight Ferry</b><span>19:45–21:00</span></div>
+          <div class="set s-lag head" style="left:266px; top:332px; height:56px"><b>GLASS ATLAS</b><span>22:15–23:45</span><em>HEADLINER</em></div>
+
+          <div class="set s-dune" style="left:526px; top:42px; height:36px"><b>The Driftwoods</b><span>15:00–16:00</span></div>
+          <div class="set s-dune" style="left:526px; top:112px; height:36px"><b>Harbor Static</b><span>16:45–17:45</span></div>
+          <div class="set s-dune" style="left:526px; top:182px; height:36px"><b>Wavelength Duo</b><span>18:30–19:30</span></div>
+          <div class="set s-dune" style="left:526px; top:252px; height:56px"><b>Night Swim</b><span>20:15–21:45</span></div>
+          <div class="set s-dune" style="left:526px; top:372px; height:66px"><b>Kite Theory</b><span>23:15–01:00</span></div>
+
+          <div class="set s-pier" style="left:786px; top:2px; height:76px"><b>Tern Club</b><span>14:00–16:00</span></div>
+          <div class="set s-pier" style="left:786px; top:102px; height:76px"><b>Low Orbit</b><span>16:30–18:30</span></div>
+          <div class="set s-pier" style="left:786px; top:202px; height:76px"><b>Moss Parade</b><span>19:00–21:00</span></div>
+          <div class="set s-pier" style="left:786px; top:302px; height:116px"><b>Low Tide Sound System</b><span>21:30–00:30</span></div>
+
+        </div>
+      </div>
+      <div class="tt-foot">
+        <span>All times BST. Set times can change: check the Tidelines app on the day.</span>
+        <div class="lg">
+          <span><i style="background:#fde3dc; border-left:4px solid #ef5a3c"></i>Set</span>
+          <span><i style="background:#ef5a3c"></i>Headliner</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="map">
+    <div class="shead">
+      <div>
+        <div class="eyebrow">03 · PLAN YOUR WEEKEND</div>
+        <h2>Find your way</h2>
+      </div>
+      <p class="lede">Between the lagoon and the sea, ten minutes from North Bay.</p>
+    </div>
+    <div class="plan">
+      <div class="mapcard">
+        <svg width="688" height="300" viewBox="0 15 688 300" aria-label="Site map">
+          <rect width="688" height="330" fill="#efe3cb"/>
+          <path d="M0 250 C120 234 220 280 340 284 S560 262 688 274 L688 330 L0 330 Z" fill="#b9dfda"/>
+          <g fill="none" stroke="#fffaf1" stroke-width="1.6" stroke-linecap="round" opacity="0.8">
+            <path d="M60 300 q8 -5 16 0 t16 0"/><path d="M220 312 q8 -5 16 0 t16 0"/>
+            <path d="M420 300 q8 -5 16 0 t16 0"/><path d="M590 304 q8 -5 16 0 t16 0"/>
+          </g>
+          <ellipse cx="170" cy="104" rx="96" ry="54" fill="#b9dfda"/>
+          <path d="M120 100 q8 -5 16 0 t16 0 M170 118 q8 -5 16 0 t16 0" fill="none" stroke="#fffaf1" stroke-width="1.6" stroke-linecap="round"/>
+          <ellipse cx="420" cy="214" rx="86" ry="34" fill="#e6cf9f"/>
+          <rect x="520" y="26" width="146" height="104" rx="12" fill="#dbe8c9"/>
+          <g fill="#1a9b8e">
+            <path d="M540 70 l10 -16 l10 16 Z"/><path d="M570 70 l10 -16 l10 16 Z"/><path d="M600 70 l10 -16 l10 16 Z"/><path d="M630 70 l10 -16 l10 16 Z"/>
+            <path d="M540 106 l10 -16 l10 16 Z"/><path d="M570 106 l10 -16 l10 16 Z"/><path d="M600 106 l10 -16 l10 16 Z"/><path d="M630 106 l10 -16 l10 16 Z"/>
+          </g>
+          <g fill="#9cc48f">
+            <circle cx="300" cy="40" r="12"/><circle cx="322" cy="30" r="10"/><circle cx="340" cy="46" r="11"/>
+            <circle cx="470" cy="60" r="10"/><circle cx="488" cy="74" r="9"/><circle cx="36" cy="200" r="10"/><circle cx="54" cy="214" r="8"/>
+          </g>
+          <g fill="none" stroke="#fffaf1" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M40 150 L150 176 L300 196 L420 214 L492 240"/>
+            <path d="M300 196 L330 132 L240 116"/>
+            <path d="M330 132 L420 110 L520 80"/>
+          </g>
+          <g fill="none" stroke="#c9b38a" stroke-width="2" stroke-dasharray="6 6" stroke-linecap="round">
+            <path d="M40 150 L150 176 L300 196 L420 214 L492 240"/>
+            <path d="M300 196 L330 132 L240 116"/>
+            <path d="M330 132 L420 110 L520 80"/>
+          </g>
+          <rect x="480" y="240" width="26" height="80" fill="#b08a5a"/>
+          <g stroke="#8a6a42" stroke-width="1.2">
+            <path d="M480 254 H506 M480 268 H506 M480 282 H506 M480 296 H506 M480 310 H506"/>
+          </g>
+          <g font-family="Inter, sans-serif" font-size="11" font-weight="800" fill="#fff" text-anchor="middle">
+            <circle cx="330" cy="132" r="14" fill="#ef5a3c" stroke="#fffaf1" stroke-width="3"/><text x="330" y="136">1</text>
+            <circle cx="240" cy="116" r="14" fill="#1a9b8e" stroke="#fffaf1" stroke-width="3"/><text x="240" y="120">2</text>
+            <circle cx="420" cy="214" r="14" fill="#f2a93b" stroke="#fffaf1" stroke-width="3"/><text x="420" y="218">3</text>
+            <circle cx="493" cy="296" r="14" fill="#6d5bd0" stroke="#fffaf1" stroke-width="3"/><text x="493" y="300">4</text>
+            <circle cx="300" cy="196" r="14" fill="#13294b" stroke="#fffaf1" stroke-width="3"/><text x="300" y="200">5</text>
+            <circle cx="593" cy="138" r="14" fill="#13294b" stroke="#fffaf1" stroke-width="3"/><text x="593" y="142">6</text>
+            <circle cx="40" cy="150" r="14" fill="#13294b" stroke="#fffaf1" stroke-width="3"/><text x="40" y="154">7</text>
+            <circle cx="40" cy="52" r="14" fill="#13294b" stroke="#fffaf1" stroke-width="3"/><text x="40" y="56">8</text>
+            <circle cx="420" cy="110" r="14" fill="#13294b" stroke="#fffaf1" stroke-width="3"/><text x="420" y="114">9</text>
+            <circle cx="150" cy="176" r="14" fill="#13294b" stroke="#fffaf1" stroke-width="3"/><text x="150" y="180">10</text>
+          </g>
+          <path d="M40 66 L40 136" stroke="#13294b" stroke-width="2" stroke-dasharray="3 5"/>
+          <g transform="translate(648 176)">
+            <circle r="18" fill="#fffaf1" stroke="#c9b38a" stroke-width="1.5"/>
+            <path d="M0 -12 L6 6 L0 2 L-6 6 Z" fill="#13294b"/>
+            <text y="-22" text-anchor="middle" font-family="Inter, sans-serif" font-size="11" font-weight="800" fill="#13294b">N</text>
+          </g>
+          <g transform="translate(560 226)" font-family="DejaVu Sans Mono, monospace" font-size="10" fill="#5d6475">
+            <rect width="80" height="5" fill="#13294b"/><rect width="40" height="5" fill="#fffaf1"/>
+            <rect width="80" height="5" fill="none" stroke="#13294b"/>
+            <text y="18">0</text><text x="66" y="18">200 m</text>
+          </g>
+          <text x="170" y="86" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="10" letter-spacing="2" fill="#137c73">THE LAGOON</text>
+          <text x="140" y="306" font-family="DejaVu Sans Mono, monospace" font-size="10" letter-spacing="2" fill="#137c73">NORTH BAY</text>
+          <text x="593" y="46" text-anchor="middle" font-family="DejaVu Sans Mono, monospace" font-size="10" letter-spacing="2" fill="#4f7a45">CAMPING</text>
+        </svg>
+        <div class="legend">
+          <span><i style="background:#ef5a3c">1</i>Main Stage</span>
+          <span><i style="background:#1a9b8e">2</i>Lagoon</span>
+          <span><i style="background:#f2a93b">3</i>Dune Tent</span>
+          <span><i style="background:#6d5bd0">4</i>The Pier</span>
+          <span><i style="background:#13294b">5</i>Food court</span>
+          <span><i style="background:#13294b">6</i>Campsites</span>
+          <span><i style="background:#13294b">7</i>Main gate</span>
+          <span><i style="background:#13294b">8</i>Shuttle stop</span>
+          <span><i style="background:#13294b">9</i>First aid</span>
+          <span><i style="background:#13294b">10</i>Water refill</span>
+        </div>
+      </div>
+      <div class="infos" id="info">
+        <div class="info">
+          <div class="ic" style="background:#fde3dc">
+            <svg width="26" height="26" viewBox="0 0 26 26" fill="none" stroke="#ef5a3c" stroke-width="2.2" stroke-linejoin="round"><rect x="4" y="3" width="18" height="17" rx="4"/><path d="M4 12 H22"/><circle cx="9" cy="16" r="1.2" fill="#ef5a3c"/><circle cx="17" cy="16" r="1.2" fill="#ef5a3c"/><path d="M8 20 V23 M18 20 V23"/></svg>
+          </div>
+          <div>
+            <h3>Getting here</h3>
+            <p>Free shuttle buses run from North Bay station every 10 minutes.</p>
+            <div class="d">SHUTTLES 11:00–02:00</div>
+          </div>
+        </div>
+        <div class="info">
+          <div class="ic" style="background:#d6efec">
+            <svg width="26" height="26" viewBox="0 0 26 26" fill="none" stroke="#1a9b8e" stroke-width="2.2" stroke-linejoin="round"><path d="M2 22 L13 4 L24 22 Z"/><path d="M13 22 L13 14 M9 22 L13 14 L17 22"/></svg>
+          </div>
+          <div>
+            <h3>Camping</h3>
+            <p>Three campsites beside the dunes, with hot showers and lockers.</p>
+            <div class="d">OPENS THU 16 JULY 16:00</div>
+          </div>
+        </div>
+        <div class="info">
+          <div class="ic" style="background:#e6e1f7">
+            <svg width="26" height="26" viewBox="0 0 26 26" fill="none" stroke="#6d5bd0" stroke-width="2.2" stroke-linecap="round"><circle cx="13" cy="4.5" r="2.3" fill="#6d5bd0" stroke="none"/><path d="M5 9 H21 M13 9 V16 M13 16 L8 24 M13 16 L18 24"/></svg>
+          </div>
+          <div>
+            <h3>Accessibility</h3>
+            <p>Viewing platforms at Main Stage and Lagoon, plus free carer tickets.</p>
+            <div class="d">ACCESS@TIDELINES.FM</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tickets">
+    <div class="shead">
+      <div>
+        <div class="eyebrow">04 · GET IN</div>
+        <h2>Tickets</h2>
+      </div>
+      <p class="lede">Prices include booking fees. Under-12s go free with a paying adult.</p>
+    </div>
+    <div class="tickets">
+      <div class="tk out">
+        <span class="badge">SOLD OUT</span>
+        <div class="nm">EARLY BIRD</div>
+        <div class="pr">£169</div>
+        <div class="per">Weekend · released in October</div>
+        <ul>
+          <li><svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 7.5 L5.5 11 L12 3.5" fill="none" stroke="#a3a8b3" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>All three days, all stages</li>
+          <li><svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 7.5 L5.5 11 L12 3.5" fill="none" stroke="#a3a8b3" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Free shuttle from North Bay</li>
+          <li><svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 7.5 L5.5 11 L12 3.5" fill="none" stroke="#a3a8b3" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Limited to 2,000 passes</li>
+        </ul>
+        <span class="btn">Sold out</span>
+      </div>
+      <div class="tk best">
+        <span class="badge">BEST VALUE</span>
+        <div class="nm">WEEKEND PASS</div>
+        <div class="pr">£189</div>
+        <div class="per">Fri–Sun · per person</div>
+        <ul>
+          <li><svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 7.5 L5.5 11 L12 3.5" fill="none" stroke="#f2a93b" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>All three days, all stages</li>
+          <li><svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 7.5 L5.5 11 L12 3.5" fill="none" stroke="#f2a93b" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Free shuttle from North Bay</li>
+          <li><svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 7.5 L5.5 11 L12 3.5" fill="none" stroke="#f2a93b" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Re-entry until 22:00 daily</li>
+        </ul>
+        <a class="btn btn-coral" href="#">Buy weekend pass</a>
+      </div>
+      <div class="tk">
+        <div class="nm">WEEKEND + CAMPING</div>
+        <div class="pr">£249</div>
+        <div class="per">Thu–Mon · per person</div>
+        <ul>
+          <li><svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 7.5 L5.5 11 L12 3.5" fill="none" stroke="#1a9b8e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Everything in Weekend Pass</li>
+          <li><svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 7.5 L5.5 11 L12 3.5" fill="none" stroke="#1a9b8e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Four nights by the dunes</li>
+          <li><svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 7.5 L5.5 11 L12 3.5" fill="none" stroke="#1a9b8e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Hot showers and lockers</li>
+        </ul>
+        <a class="btn btn-ink" href="#">Buy with camping</a>
+      </div>
+      <div class="tk">
+        <div class="nm">DAY TICKET</div>
+        <div class="pr">£79</div>
+        <div class="per">Friday, Saturday or Sunday</div>
+        <ul>
+          <li><svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 7.5 L5.5 11 L12 3.5" fill="none" stroke="#1a9b8e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>One day, all stages</li>
+          <li><svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 7.5 L5.5 11 L12 3.5" fill="none" stroke="#1a9b8e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Free shuttle from North Bay</li>
+          <li><svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 7.5 L5.5 11 L12 3.5" fill="none" stroke="#1a9b8e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Upgrade on site</li>
+        </ul>
+        <a class="btn btn-ink" href="#">Choose a day</a>
+      </div>
+    </div>
+  </section>
+
+  <section id="faq">
+    <div class="faq">
+      <div class="fh"><div class="eyebrow">05 · GOOD TO KNOW</div><h2>Questions, answered</h2></div>
+      <div><h3>Can I leave and come back in?</h3><p>Yes. Wristbands allow re-entry until 22:00 each day.</p></div>
+      <div><h3>Is the festival cashless?</h3><p>All bars and food stalls take cards and phones. Top-up points are at both gates.</p></div>
+      <div><h3>What can I bring in?</h3><p>Sealed soft drinks up to 1 litre, empty reusable bottles and small bags. No glass.</p></div>
+      <div><h3>Are children welcome?</h3><p>Under-12s go free with a paying adult. Ear defenders are free at First aid.</p></div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="fgrid">
+      <div>
+        <div class="brand">
+          <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true">
+            <circle cx="17" cy="17" r="17" fill="#f7f0e3"/>
+            <path d="M9 18 A8 8 0 0 1 25 18 Z" fill="#f2a93b"/>
+            <path d="M5 21 q3 -3 6 0 t6 0 t6 0 t6 0" fill="none" stroke="#1a9b8e" stroke-width="2.4" stroke-linecap="round"/>
+            <path d="M8 26 q3 -3 6 0 t6 0 t6 0" fill="none" stroke="#ef5a3c" stroke-width="2.4" stroke-linecap="round"/>
+          </svg>
+          <span class="word">TIDELINES</span><span class="yr">2026</span>
+        </div>
+        <p class="blurb">Three days of music, sea swims and long evenings on the North Bay coast.</p>
+      </div>
+      <div><h4>FESTIVAL</h4><ul><li>Lineup</li><li>Timetable</li><li>Site map</li><li>Tickets</li></ul></div>
+      <div><h4>HELP</h4><ul><li>FAQ</li><li>Accessibility</li><li>Refunds</li><li>Contact</li></ul></div>
+      <div><h4>COMPANY</h4><ul><li>About</li><li>Sustainability</li><li>Jobs</li><li>Press</li></ul></div>
+      <div class="news">
+        <h4>NEWSLETTER</h4>
+        <p>Lineup news and ticket drops, first.</p>
+        <div class="row"><span class="in">you@example.com</span><span class="btn btn-coral">Sign up</span></div>
+      </div>
+    </div>
+    <div class="fbot">
+      <span>© 2026 Tidelines Festival Ltd · Saltmarsh Park, North Bay</span>
+      <span>Privacy · Terms · Cookies</span>
+    </div>
+  </div>
+</footer>
+</body>
+</html>

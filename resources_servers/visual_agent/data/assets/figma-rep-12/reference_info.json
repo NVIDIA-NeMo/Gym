@@ -1,0 +1,20 @@
+{
+ "references": {
+  "desktop.png": {
+   "distinct_coarse_colors": 35,
+   "dominant_color_fraction": 0.821,
+   "gray_std": 47.463,
+   "height": 1048,
+   "width": 1280
+  },
+  "mobile.png": {
+   "distinct_coarse_colors": 30,
+   "dominant_color_fraction": 0.7803,
+   "gray_std": 59.317,
+   "height": 1110,
+   "width": 390
+  }
+ },
+ "self_check_blank": false,
+ "self_similarity": 1.0
+}

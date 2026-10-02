@@ -1,0 +1,181 @@
+{
+ "stations": [
+  {
+   "name": "Abbey",
+   "x": 120,
+   "y": 380
+  },
+  {
+   "name": "Bridge",
+   "x": 260,
+   "y": 220
+  },
+  {
+   "name": "Canal",
+   "x": 270,
+   "y": 520
+  },
+  {
+   "name": "Docks",
+   "x": 420,
+   "y": 380
+  },
+  {
+   "name": "Elm",
+   "x": 430,
+   "y": 150
+  },
+  {
+   "name": "Foundry",
+   "x": 440,
+   "y": 620
+  },
+  {
+   "name": "Grove",
+   "x": 590,
+   "y": 250
+  },
+  {
+   "name": "Harbor",
+   "x": 600,
+   "y": 500
+  },
+  {
+   "name": "Iris",
+   "x": 760,
+   "y": 140
+  },
+  {
+   "name": "Jetty",
+   "x": 780,
+   "y": 380
+  },
+  {
+   "name": "Kiln",
+   "x": 770,
+   "y": 610
+  },
+  {
+   "name": "Lantern",
+   "x": 930,
+   "y": 640
+  },
+  {
+   "name": "Mill",
+   "x": 930,
+   "y": 200
+  }
+ ],
+ "lines": [
+  {
+   "from": "Abbey",
+   "to": "Bridge",
+   "minutes": 4
+  },
+  {
+   "from": "Abbey",
+   "to": "Canal",
+   "minutes": 3
+  },
+  {
+   "from": "Abbey",
+   "to": "Docks",
+   "minutes": 9
+  },
+  {
+   "from": "Bridge",
+   "to": "Docks",
+   "minutes": 4
+  },
+  {
+   "from": "Bridge",
+   "to": "Elm",
+   "minutes": 5
+  },
+  {
+   "from": "Canal",
+   "to": "Docks",
+   "minutes": 5
+  },
+  {
+   "from": "Canal",
+   "to": "Foundry",
+   "minutes": 4
+  },
+  {
+   "from": "Docks",
+   "to": "Grove",
+   "minutes": 6
+  },
+  {
+   "from": "Docks",
+   "to": "Harbor",
+   "minutes": 5
+  },
+  {
+   "from": "Elm",
+   "to": "Grove",
+   "minutes": 3
+  },
+  {
+   "from": "Elm",
+   "to": "Iris",
+   "minutes": 8
+  },
+  {
+   "from": "Foundry",
+   "to": "Harbor",
+   "minutes": 5
+  },
+  {
+   "from": "Grove",
+   "to": "Iris",
+   "minutes": 4
+  },
+  {
+   "from": "Grove",
+   "to": "Jetty",
+   "minutes": 7
+  },
+  {
+   "from": "Harbor",
+   "to": "Jetty",
+   "minutes": 4
+  },
+  {
+   "from": "Harbor",
+   "to": "Kiln",
+   "minutes": 3
+  },
+  {
+   "from": "Iris",
+   "to": "Jetty",
+   "minutes": 5
+  },
+  {
+   "from": "Kiln",
+   "to": "Jetty",
+   "minutes": 6
+  },
+  {
+   "from": "Foundry",
+   "to": "Kiln",
+   "minutes": 9
+  },
+  {
+   "from": "Kiln",
+   "to": "Lantern",
+   "minutes": 7
+  },
+  {
+   "from": "Iris",
+   "to": "Mill",
+   "minutes": 6
+  },
+  {
+   "from": "Jetty",
+   "to": "Mill",
+   "minutes": 7
+  }
+ ]
+}

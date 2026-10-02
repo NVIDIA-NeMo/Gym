@@ -1,0 +1,1001 @@
+{
+ "type": "FeatureCollection",
+ "name": "veloria",
+ "crs_note": "coordinates are [longitude, latitude] in degrees",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Veloria",
+    "kind": "coastline"
+   },
+   "geometry": {
+    "type": "MultiPolygon",
+    "coordinates": [
+     [
+      [
+       [
+        13.894,
+        45.72
+       ],
+       [
+        13.926,
+        45.805
+       ],
+       [
+        13.903,
+        45.89
+       ],
+       [
+        13.751,
+        45.963
+       ],
+       [
+        13.465,
+        46.012
+       ],
+       [
+        13.264,
+        46.058
+       ],
+       [
+        13.269,
+        46.131
+       ],
+       [
+        13.296,
+        46.211
+       ],
+       [
+        13.249,
+        46.278
+       ],
+       [
+        13.177,
+        46.338
+       ],
+       [
+        13.102,
+        46.396
+       ],
+       [
+        13.018,
+        46.45
+       ],
+       [
+        12.927,
+        46.5
+       ],
+       [
+        12.839,
+        46.549
+       ],
+       [
+        12.759,
+        46.602
+       ],
+       [
+        12.682,
+        46.657
+       ],
+       [
+        12.598,
+        46.708
+       ],
+       [
+        12.5,
+        46.752
+       ],
+       [
+        12.396,
+        46.79
+       ],
+       [
+        12.295,
+        46.83
+       ],
+       [
+        12.2,
+        46.877
+       ],
+       [
+        12.105,
+        46.928
+       ],
+       [
+        12.002,
+        46.973
+       ],
+       [
+        11.888,
+        47.009
+       ],
+       [
+        11.769,
+        47.038
+       ],
+       [
+        11.648,
+        47.067
+       ],
+       [
+        11.526,
+        47.098
+       ],
+       [
+        11.399,
+        47.123
+       ],
+       [
+        11.265,
+        47.126
+       ],
+       [
+        11.13,
+        47.105
+       ],
+       [
+        11.0,
+        47.071
+       ],
+       [
+        10.875,
+        47.044
+       ],
+       [
+        10.751,
+        47.039
+       ],
+       [
+        10.621,
+        47.054
+       ],
+       [
+        10.484,
+        47.073
+       ],
+       [
+        10.348,
+        47.076
+       ],
+       [
+        10.222,
+        47.054
+       ],
+       [
+        10.108,
+        47.014
+       ],
+       [
+        9.997,
+        46.974
+       ],
+       [
+        9.875,
+        46.95
+       ],
+       [
+        9.73,
+        46.945
+       ],
+       [
+        9.569,
+        46.947
+       ],
+       [
+        9.416,
+        46.934
+       ],
+       [
+        9.299,
+        46.89
+       ],
+       [
+        9.232,
+        46.814
+       ],
+       [
+        9.202,
+        46.721
+       ],
+       [
+        9.18,
+        46.633
+       ],
+       [
+        9.156,
+        46.552
+       ],
+       [
+        9.185,
+        46.454
+       ],
+       [
+        9.307,
+        46.332
+       ],
+       [
+        9.376,
+        46.242
+       ],
+       [
+        9.225,
+        46.224
+       ],
+       [
+        8.968,
+        46.224
+       ],
+       [
+        8.781,
+        46.194
+       ],
+       [
+        8.665,
+        46.143
+       ],
+       [
+        8.569,
+        46.083
+       ],
+       [
+        8.487,
+        46.017
+       ],
+       [
+        8.42,
+        45.948
+       ],
+       [
+        8.352,
+        45.875
+       ],
+       [
+        8.27,
+        45.8
+       ],
+       [
+        8.182,
+        45.72
+       ],
+       [
+        8.127,
+        45.636
+       ],
+       [
+        8.134,
+        45.552
+       ],
+       [
+        8.203,
+        45.473
+       ],
+       [
+        8.292,
+        45.4
+       ],
+       [
+        8.357,
+        45.326
+       ],
+       [
+        8.378,
+        45.246
+       ],
+       [
+        8.372,
+        45.158
+       ],
+       [
+        8.372,
+        45.068
+       ],
+       [
+        8.399,
+        44.982
+       ],
+       [
+        8.46,
+        44.903
+       ],
+       [
+        8.555,
+        44.836
+       ],
+       [
+        8.689,
+        44.785
+       ],
+       [
+        8.862,
+        44.756
+       ],
+       [
+        9.058,
+        44.746
+       ],
+       [
+        9.245,
+        44.743
+       ],
+       [
+        9.395,
+        44.727
+       ],
+       [
+        9.506,
+        44.693
+       ],
+       [
+        9.602,
+        44.649
+       ],
+       [
+        9.711,
+        44.615
+       ],
+       [
+        9.839,
+        44.6
+       ],
+       [
+        9.978,
+        44.603
+       ],
+       [
+        10.123,
+        44.623
+       ],
+       [
+        10.286,
+        44.685
+       ],
+       [
+        10.455,
+        44.786
+       ],
+       [
+        10.576,
+        44.838
+       ],
+       [
+        10.637,
+        44.769
+       ],
+       [
+        10.693,
+        44.641
+       ],
+       [
+        10.777,
+        44.54
+       ],
+       [
+        10.882,
+        44.471
+       ],
+       [
+        11.0,
+        44.414
+       ],
+       [
+        11.127,
+        44.373
+       ],
+       [
+        11.256,
+        44.362
+       ],
+       [
+        11.382,
+        44.376
+       ],
+       [
+        11.504,
+        44.399
+       ],
+       [
+        11.626,
+        44.419
+       ],
+       [
+        11.748,
+        44.438
+       ],
+       [
+        11.866,
+        44.464
+       ],
+       [
+        11.977,
+        44.498
+       ],
+       [
+        12.088,
+        44.531
+       ],
+       [
+        12.21,
+        44.553
+       ],
+       [
+        12.351,
+        44.562
+       ],
+       [
+        12.501,
+        44.569
+       ],
+       [
+        12.645,
+        44.589
+       ],
+       [
+        12.772,
+        44.624
+       ],
+       [
+        12.886,
+        44.67
+       ],
+       [
+        12.997,
+        44.719
+       ],
+       [
+        13.105,
+        44.771
+       ],
+       [
+        13.197,
+        44.831
+       ],
+       [
+        13.259,
+        44.903
+       ],
+       [
+        13.291,
+        44.983
+       ],
+       [
+        13.316,
+        45.063
+       ],
+       [
+        13.361,
+        45.135
+       ],
+       [
+        13.438,
+        45.199
+       ],
+       [
+        13.535,
+        45.261
+       ],
+       [
+        13.628,
+        45.328
+       ],
+       [
+        13.702,
+        45.4
+       ],
+       [
+        13.756,
+        45.477
+       ],
+       [
+        13.802,
+        45.556
+       ],
+       [
+        13.848,
+        45.637
+       ],
+       [
+        13.894,
+        45.72
+       ]
+      ]
+     ],
+     [
+      [
+       [
+        13.137,
+        44.42
+       ],
+       [
+        13.11,
+        44.463
+       ],
+       [
+        13.01,
+        44.468
+       ],
+       [
+        12.95,
+        44.494
+       ],
+       [
+        12.863,
+        44.49
+       ],
+       [
+        12.79,
+        44.463
+       ],
+       [
+        12.817,
+        44.42
+       ],
+       [
+        12.833,
+        44.388
+       ],
+       [
+        12.85,
+        44.338
+       ],
+       [
+        12.95,
+        44.344
+       ],
+       [
+        13.023,
+        44.36
+       ],
+       [
+        13.067,
+        44.388
+       ],
+       [
+        13.137,
+        44.42
+       ]
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Lago Serpe",
+    "kind": "lake"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       10.854,
+       46.35
+      ],
+      [
+       10.867,
+       46.421
+      ],
+      [
+       10.754,
+       46.469
+      ],
+      [
+       10.608,
+       46.468
+      ],
+      [
+       10.501,
+       46.45
+      ],
+      [
+       10.4,
+       46.438
+      ],
+      [
+       10.296,
+       46.407
+      ],
+      [
+       10.246,
+       46.35
+      ],
+      [
+       10.273,
+       46.288
+      ],
+      [
+       10.358,
+       46.238
+      ],
+      [
+       10.484,
+       46.216
+      ],
+      [
+       10.607,
+       46.234
+      ],
+      [
+       10.688,
+       46.269
+      ],
+      [
+       10.765,
+       46.302
+      ],
+      [
+       10.854,
+       46.35
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Fiume Tessa",
+    "kind": "river"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      10.62,
+      46.22
+     ],
+     [
+      10.68,
+      46.02
+     ],
+     [
+      10.6,
+      45.84
+     ],
+     [
+      10.72,
+      45.64
+     ],
+     [
+      10.66,
+      45.42
+     ],
+     [
+      10.74,
+      45.2
+     ],
+     [
+      10.62,
+      44.98
+     ],
+     [
+      10.286,
+      44.685
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Aurel",
+    "kind": "place",
+    "population": 812000,
+    "capital": true
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     11.18,
+     45.62
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "San Orso",
+    "kind": "place",
+    "population": 64000,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     11.33,
+     45.71
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Ferrano",
+    "kind": "place",
+    "population": 41000,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     11.05,
+     45.49
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Colvento",
+    "kind": "place",
+    "population": 18500,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     11.3,
+     45.55
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Porto Vela",
+    "kind": "place",
+    "population": 348000,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     12.95,
+     45.08
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Castrano",
+    "kind": "place",
+    "population": 291000,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     9.05,
+     45.95
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Belmira",
+    "kind": "place",
+    "population": 256000,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     12.55,
+     46.62
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Sorvento",
+    "kind": "place",
+    "population": 132000,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     9.62,
+     45.12
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Lunara",
+    "kind": "place",
+    "population": 88000,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     10.18,
+     46.72
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Montecal",
+    "kind": "place",
+    "population": 97500,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     11.92,
+     46.18
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Rivalta",
+    "kind": "place",
+    "population": 51000,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     10.74,
+     45.3
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Valdena",
+    "kind": "place",
+    "population": 176000,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     12.18,
+     45.4
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Tessaro",
+    "kind": "place",
+    "population": 23000,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     9.48,
+     46.4
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Marivel",
+    "kind": "place",
+    "population": 12400,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     13.42,
+     45.78
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Olmedo",
+    "kind": "place",
+    "population": 9800,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     11.62,
+     46.92
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Pietrasca",
+    "kind": "place",
+    "population": 31500,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     10.02,
+     45.62
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Grazzano",
+    "kind": "place",
+    "population": 27800,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     12.62,
+     45.05
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Brunella",
+    "kind": "place",
+    "population": 49990,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     12.78,
+     45.18
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Cervina",
+    "kind": "place",
+    "population": 15200,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     8.62,
+     45.58
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Lido Sera",
+    "kind": "place",
+    "population": 7400,
+    "capital": false
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     11.55,
+     44.62
+    ]
+   }
+  }
+ ]
+}

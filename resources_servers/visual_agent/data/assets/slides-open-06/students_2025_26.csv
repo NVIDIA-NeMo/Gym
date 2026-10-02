@@ -1,0 +1,148 @@
+student_id,school,grade,sessions_attended,fall_score,spring_score
+RB-0001,Maple Street,3,69,450,497
+RB-0002,Cedar Hill,4,45,504,540
+RB-0003,Cedar Hill,2,53,367,411
+RB-0004,Lincoln Park,2,35,352,387
+RB-0005,Lincoln Park,4,61,474,511
+RB-0006,Riverside,2,36,409,449
+RB-0007,Riverside,3,47,391,425
+RB-0008,Riverside,2,60,341,371
+RB-0009,Maple Street,4,44,470,510
+RB-0010,Maple Street,2,72,364,416
+RB-0011,Cedar Hill,2,53,351,408
+RB-0012,Lincoln Park,4,59,441,497
+RB-0013,Lincoln Park,4,55,528,561
+RB-0014,Riverside,3,30,410,430
+RB-0015,Maple Street,3,20,414,430
+RB-0016,Maple Street,3,50,426,449
+RB-0017,Maple Street,4,49,420,470
+RB-0018,Lincoln Park,2,63,367,406
+RB-0019,Maple Street,2,49,329,365
+RB-0020,Riverside,2,29,396,405
+RB-0021,Maple Street,3,43,406,446
+RB-0022,Maple Street,2,56,399,441
+RB-0023,Lincoln Park,3,57,402,435
+RB-0024,Maple Street,2,36,417,443
+RB-0025,Riverside,4,51,450,494
+RB-0026,Riverside,3,44,423,469
+RB-0027,Cedar Hill,2,62,358,412
+RB-0028,Cedar Hill,2,46,410,461
+RB-0029,Lincoln Park,3,29,335,352
+RB-0030,Maple Street,2,40,390,421
+RB-0031,Cedar Hill,4,37,508,549
+RB-0032,Maple Street,2,37,355,387
+RB-0033,Riverside,2,41,396,415
+RB-0034,Cedar Hill,2,49,389,446
+RB-0035,Cedar Hill,3,46,430,476
+RB-0036,Riverside,2,47,389,423
+RB-0037,Lincoln Park,2,41,357,386
+RB-0038,Cedar Hill,4,50,437,477
+RB-0039,Riverside,3,39,413,454
+RB-0040,Cedar Hill,2,65,309,368
+RB-0041,Maple Street,3,48,440,493
+RB-0042,Cedar Hill,4,41,488,526
+RB-0043,Lincoln Park,2,50,386,430
+RB-0044,Riverside,2,42,397,428
+RB-0045,Cedar Hill,2,72,375,411
+RB-0046,Cedar Hill,4,42,448,477
+RB-0047,Lincoln Park,4,50,427,471
+RB-0048,Cedar Hill,2,68,374,436
+RB-0049,Riverside,3,40,463,482
+RB-0050,Riverside,4,54,444,468
+RB-0051,Maple Street,2,55,374,414
+RB-0052,Riverside,3,15,383,411
+RB-0053,Maple Street,4,67,508,557
+RB-0054,Cedar Hill,4,68,459,521
+RB-0055,Lincoln Park,2,58,365,400
+RB-0056,Cedar Hill,4,63,501,550
+RB-0057,Cedar Hill,3,45,506,553
+RB-0058,Cedar Hill,3,55,437,477
+RB-0059,Maple Street,3,47,387,420
+RB-0060,Lincoln Park,4,39,488,525
+RB-0061,Riverside,2,38,373,398
+RB-0062,Cedar Hill,4,54,517,563
+RB-0063,Cedar Hill,2,45,403,436
+RB-0064,Maple Street,2,38,391,427
+RB-0065,Riverside,3,46,425,453
+RB-0066,Riverside,3,51,424,465
+RB-0067,Maple Street,2,50,348,390
+RB-0068,Maple Street,3,38,452,481
+RB-0069,Maple Street,2,41,401,433
+RB-0070,Riverside,2,41,391,410
+RB-0071,Cedar Hill,4,40,490,535
+RB-0072,Cedar Hill,2,60,364,436
+RB-0073,Lincoln Park,3,38,416,429
+RB-0074,Lincoln Park,2,69,378,422
+RB-0075,Maple Street,2,63,376,425
+RB-0076,Cedar Hill,4,45,450,490
+RB-0077,Lincoln Park,4,59,480,516
+RB-0078,Cedar Hill,3,61,342,396
+RB-0079,Lincoln Park,3,28,416,444
+RB-0080,Maple Street,4,70,428,481
+RB-0081,Cedar Hill,3,72,448,505
+RB-0082,Lincoln Park,4,55,447,491
+RB-0083,Lincoln Park,2,46,377,411
+RB-0084,Lincoln Park,3,40,403,440
+RB-0085,Lincoln Park,4,50,448,478
+RB-0086,Maple Street,2,70,370,421
+RB-0087,Lincoln Park,4,55,477,518
+RB-0088,Cedar Hill,2,58,305,357
+RB-0089,Cedar Hill,4,68,440,497
+RB-0090,Maple Street,2,54,361,399
+RB-0091,Cedar Hill,4,72,477,545
+RB-0092,Maple Street,4,63,429,471
+RB-0093,Maple Street,2,47,386,420
+RB-0094,Maple Street,4,52,497,543
+RB-0095,Riverside,4,55,474,511
+RB-0096,Cedar Hill,2,72,353,406
+RB-0097,Riverside,3,51,425,461
+RB-0098,Maple Street,3,45,415,448
+RB-0099,Riverside,2,38,369,393
+RB-0100,Lincoln Park,3,29,446,474
+RB-0101,Riverside,4,30,451,472
+RB-0102,Riverside,2,27,358,371
+RB-0103,Maple Street,2,41,381,428
+RB-0104,Riverside,3,44,403,433
+RB-0105,Cedar Hill,4,68,428,479
+RB-0106,Riverside,4,40,427,460
+RB-0107,Cedar Hill,4,50,467,491
+RB-0108,Maple Street,3,58,450,484
+RB-0109,Cedar Hill,2,40,382,414
+RB-0110,Riverside,3,52,442,480
+RB-0111,Maple Street,3,72,428,483
+RB-0112,Lincoln Park,2,56,349,393
+RB-0113,Maple Street,4,58,507,542
+RB-0114,Maple Street,2,40,370,417
+RB-0115,Lincoln Park,3,39,383,408
+RB-0116,Lincoln Park,4,42,464,483
+RB-0117,Cedar Hill,4,70,456,532
+RB-0118,Lincoln Park,2,24,333,352
+RB-0119,Maple Street,3,54,407,450
+RB-0120,Riverside,2,49,399,437
+RB-0121,Riverside,2,54,404,443
+RB-0122,Lincoln Park,2,58,382,419
+RB-0123,Cedar Hill,3,72,396,452
+RB-0124,Lincoln Park,3,36,445,480
+RB-0125,Riverside,4,53,444,481
+RB-0126,Lincoln Park,2,51,342,375
+RB-0127,Cedar Hill,3,53,378,421
+RB-0128,Riverside,4,45,493,535
+RB-0129,Riverside,3,56,433,464
+RB-0130,Cedar Hill,2,56,370,419
+RB-0131,Cedar Hill,2,50,346,402
+RB-0132,Cedar Hill,4,72,442,491
+RB-0133,Lincoln Park,4,41,447,472
+RB-0134,Cedar Hill,4,72,393,444
+RB-0135,Maple Street,3,67,367,416
+RB-0136,Riverside,3,48,416,445
+RB-0137,Riverside,3,37,388,416
+RB-0138,Riverside,2,30,345,355
+RB-0139,Maple Street,2,47,363,391
+RB-0140,Cedar Hill,2,52,395,447
+RB-0141,Riverside,3,38,422,444
+RB-0142,Maple Street,2,32,360,378
+RB-0143,Lincoln Park,2,64,338,381
+RB-0144,Maple Street,4,48,470,531
+RB-0145,Lincoln Park,4,41,439,470
+RB-0146,Lincoln Park,4,34,449,473
+RB-0147,Cedar Hill,4,38,473,502

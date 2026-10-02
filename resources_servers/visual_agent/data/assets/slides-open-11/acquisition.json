@@ -1,0 +1,19 @@
+{
+  "data_cutoff": "2026-09-30",
+  "note": "Subscribers are billed monthly on their start date; a subscriber has paid every month from start_month through last_paid_month. last_paid_month 2026-09 means still paying at the cutoff.",
+  "app_store_fee": 0.15,
+  "acquisition_spend_usd_oct2025_sep2026": {
+    "Organic": 34100,
+    "Paid social": 78600,
+    "Referral": 21000
+  },
+  "promo": {
+    "code": "SPRING40",
+    "months": [
+      "2026-03",
+      "2026-04"
+    ],
+    "monthly_price_usd": 9.99,
+    "list_price_usd": 12.99
+  }
+}

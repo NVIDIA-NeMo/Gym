@@ -1,0 +1,1174 @@
+[
+ {
+  "task_id": "figma-open-05",
+  "category": "figma",
+  "mode": "open_ended",
+  "title": "Design a team calendar week view with time-positioned events and an event popover as a layered Figma-ready SVG",
+  "prompt": "Design the week view of Tempo, a team calendar app, as one layered SVG file. The canvas is 1440 by 1024 (viewBox 0 0 1440 1024) with a white background rect. It will be imported into Figma, so organize it like a designer's file: every <g> gets a readable id that becomes its layer name (use ' / ' for hierarchy, never ids like g12), components are nested groups, and all copy stays live <text> (no outlined text). Use plain vectors only: no <image>, foreignObject, <script>, CSS animation or external references. Use Inter for all text and the brand color #2563EB.\n\nTop-level groups, in this order: 'Top bar', 'Sidebar', 'Week grid', 'Event detail'.\n- Top bar (0, 0, 1440 by 64, with a bottom border): the Tempo logo, a 'Today' button, previous and next chevron buttons, the title 'Sep 21 – 27, 2026', a Day / Week / Month segmented control with Week active, a search field and an avatar.\n- Sidebar (x 0 to 280 below the top bar, with a right border): a 'Create' button; a group 'Mini calendar' with the title 'September 2026', the weekday row M T W T F S S and exactly 30 groups 'Day / 1' to 'Day / 30' on a 7-column grid of 32 by 32 cells whose first column is Monday (September 1, 2026 is a Tuesday); the row 21 to 27 gets a light brand highlight and 'Day / 24' (today) a filled #2563EB circle with white text; then 'My calendars' with groups 'Calendar / Product' (#2563EB), 'Calendar / Design' (#9333EA), 'Calendar / Customers' (#EA580C) and 'Calendar / Personal' (#16A34A), each a 16 by 16 rounded checkbox in its color plus its label.\n- Week grid: a 48-wide time gutter at x 304, then seven day columns exactly 152 wide starting at x 352 (Mon 21 at 352, Tue 22 at 504, … Sun 27 at 1264), with vertical dividers. Column headers between y 80 and 136 read 'MON 21' … 'SUN 27' (small weekday, large date; today's date in a filled brand circle). Hour lines for 8 AM to 6 PM lie at y = 144 + 72 × (hour − 8), labelled '8 AM' … '6 PM' in the gutter.\n- Events: each is a group 'Event / <title>' holding a rect with rx 6 filled with its calendar color at fill-opacity 0.16, a 4-wide solid left bar in that color, the title (12, semibold) and the time range (11, regular), with the text inside the rect. The rect sits at x = column x + 4, width 144, y = 144 + 72 × (start − 8) and height 72 × duration − 2 (hours). Two overlapping events share the column side by side, each 70 wide with a 4 gap. Mon: Sprint planning 9:00–10:00 AM (Product), Design review 1:00–2:30 PM (Design). Tue: Customer call: Brightwater 10:00–11:00 AM (Customers), Dentist 3:00–4:00 PM (Personal). Wed: Standup 9:30–10:00 AM (Product), Roadmap workshop 11:00 AM–12:30 PM (Product), Interview: Sr. designer 11:30 AM–12:30 PM (Design). Thu: Standup 9:30–10:00 AM (Product), Onboarding: Kite Travel 2:00–3:00 PM (Customers), Yoga 5:00–6:00 PM (Personal). Fri: Design critique 10:00 AM–12:00 PM (Design), Demo day 4:00–5:00 PM (Product). Sat: Farmers market 10:00–11:30 AM (Personal).\n- A group 'Now line' marks 1:20 PM today: a 2px #EF4444 line spanning only the Thursday column and a 10px circle at its left end.\n- 'Onboarding: Kite Travel' is selected (2px #2563EB outline). 'Event detail' is a 320-wide popover card with a soft shadow placed beside that event without covering it: the title, 'Thursday, Sep 24 · 2:00 – 3:00 PM', a Customers color dot and label, 'Location: Zoom', a 'Guests' list of three people with initial avatars, and 'Join call' (brand) and 'Edit' buttons.",
+  "artifact": {
+   "kind": "svg",
+   "entry": "design.svg"
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Reading the SVG source: the root viewBox is 0 0 1440 1024 with a white background rect; the four top-level groups 'Top bar', 'Sidebar', 'Week grid' and 'Event detail' appear in that order with readable nested ids (no g12-style ids); all copy is live <text> in Inter; there is no <image>, foreignObject or <script>."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The mini calendar is correct: exactly thirty 'Day / N' groups on a 7-column grid of 32px cells under 'M T W T F S S', 'Day / 1' in the Tuesday column, 21 to 27 on one highlighted row, and 'Day / 24' in a filled #2563EB circle with white text."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The grid geometry is exact: a 48-wide gutter at x 304 and seven 152-wide columns starting at x 352, 504, 656, 808, 960, 1112 and 1264, headers 'MON 21' to 'SUN 27' with 24 in a brand circle, and hour lines labelled 8 AM to 6 PM at y 144, 216, 288 … 864."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Event rects follow the formula: thirteen 'Event / …' groups, and spot checks hold within 1px, e.g. Design review at x 356, y 504, 144 by 106; Wednesday Standup at x 660, y 252, height 34; Design critique at y 288, height 142; Farmers market at x 1116, y 288, height 106; Yoga at y 792, height 70."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Overlap and colors: Roadmap workshop and Interview: Sr. designer sit side by side at x 660 and x 734, each 70 wide; every event uses its calendar color for the 4-wide left bar and the 0.16-opacity fill; the four 'Calendar / …' items use #2563EB, #9333EA, #EA580C and #16A34A."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The 'Now line' is a 2px #EF4444 line at y 528 that spans only the Thursday column (x 808 to 960) with a 10px circle at its left end."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Selection and popover: 'Onboarding: Kite Travel' (x 812, y 576, 144 by 70) has a 2px #2563EB outline, and the 320-wide 'Event detail' card with a shadow sits beside it without covering it and shows the title, 'Thursday, Sep 24 · 2:00 – 3:00 PM', Customers, 'Location: Zoom', three guests with initial avatars, 'Join call' and 'Edit'."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The top bar and sidebar are complete: Tempo logo, Today, two chevrons, 'Sep 21 – 27, 2026', Day / Week / Month with Week active, search and avatar; the Create button, 'September 2026' and 'My calendars' with four checkboxes and labels."
+   },
+   {
+    "id": "R9",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "When rendered, every event title and time stays inside its rect (wrapped or shortened when narrow), labels do not collide, and nothing runs outside the canvas or its column."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "It looks like a calendar a product team would ship: clear hierarchy between chrome, grid and events, consistent padding and radii, light gridlines, and tinted events that stay readable."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-open-06",
+  "category": "figma",
+  "mode": "open_ended",
+  "title": "Design light and dark themes of a podcast player screen from one token table as a layered Figma-ready SVG",
+  "prompt": "Design the Now playing screen of Pulse, a podcast app, in a light and a dark theme driven by one token table, as one layered SVG file. The canvas is 1160 by 1000 (viewBox 0 0 1160 1000) with a #E9ECF1 background rect. It will be imported into Figma, so organize it like a designer's file: every <g> gets a readable id that becomes its layer name (use ' / ' for hierarchy, never ids like g12), components are nested groups, and all copy stays live <text> (no outlined text). Use plain vectors only: no <image>, foreignObject, <script>, CSS animation or external references. Use Inter for all text.\n\nTokens (name: light / dark): bg #FFFFFF / #0B0D12; surface #F2F4F7 / #1A1D24; text-primary #101828 / #F5F7FA; text-secondary #667085 / #98A2B3; border #E4E7EC / #2B303B; accent #7C3AED / #A78BFA; on-accent #FFFFFF / #0B0D12; accent-subtle #F4EBFF / #2E2350.\n\nTop-level groups, in this order:\n- 'Tokens': a column starting at x 40, y 120 with the title 'Tokens' and eight groups 'Token / <name>', each with a 40 by 40 light swatch and a 40 by 40 dark swatch (rx 8, 1px #D0D5DD stroke) filled with its two values, the token name, and both hex values in uppercase.\n- 'Light / Now playing' at x 340, y 120 and 'Dark / Now playing' at x 755, y 120: 375 by 812 frames, each starting with a bg rect in its theme's bg, clipped to the frame, with a 14px label 'Light' or 'Dark' 24px above.\n\nMirroring: both frames contain the same layers in the same order at the same relative positions and sizes, and every id in the dark frame is the light id with 'Light' replaced by 'Dark' (e.g. 'Light / Now playing / Controls / Play' and 'Dark / Now playing / Controls / Play'). Only colors differ.\nToken discipline: apart from the two 'Artwork' groups and the frame labels, every fill and stroke inside a frame must be exactly one of that theme's eight token values (fill='none' is fine), used by role: the screen background is bg; cards and the progress track are surface; titles and times are text-primary; meta text and inactive icons are text-secondary; dividers are border; the play button is accent with an on-accent icon; the progress fill and knob are accent; chips are accent-subtle with accent text. The artwork is identical vector art in both frames.\nScreen content, all positions relative to the frame: a status bar with '9:41'; a header with a down chevron, the centered title 'Now playing' and a ⋯ button; 'Artwork', an illustrated podcast cover 311 by 311 with rx 24 at x 32, y 112; the episode title 'The Quiet Power of Routines' (22 bold) and 'Field Notes · Ep. 142'; a 'Progress' group with a 311-wide track at x 32, a fill of exactly 40% of it (124.4) ending in a knob, '18:24' under its left end and '-27:36' under its right end; 'Controls' with 'Button / Rewind 15', 'Button / Play' (a 72 circle centered at x 187.5) and 'Button / Forward 30' at equal distances on either side; a chips row '1.25×', 'Sleep 30 min' and 'Queue'; and an 'Up next' card (surface, rx 16, 311 wide) with a small cover, 'Up next', 'Ep. 143 · Designing for Calm' and '38 min'.",
+  "artifact": {
+   "kind": "svg",
+   "entry": "design.svg"
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Reading the SVG source: viewBox 0 0 1160 1000 with a #E9ECF1 background; the top-level groups 'Tokens', 'Light / Now playing' and 'Dark / Now playing' in that order; both frames are 375x812 at (340, 120) and (755, 120), start with a #FFFFFF and a #0B0D12 rect respectively, are clipped and labelled; live <text> in Inter and no <image>, foreignObject or <script>."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The frames mirror each other: the dark frame has the same descendant ids with 'Light' replaced by 'Dark', in the same order, and at least ten spot-checked elements (artwork, progress track and fill, play button, chips, Up next card, texts) have identical relative positions and sizes."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Token discipline holds: scanning every fill and stroke outside the 'Artwork' groups and frame labels, the light frame uses only #FFFFFF, #F2F4F7, #101828, #667085, #E4E7EC, #7C3AED, #FFFFFF and #F4EBFF, and the dark frame only #0B0D12, #1A1D24, #F5F7FA, #98A2B3, #2B303B, #A78BFA, #0B0D12 and #2E2350 (no stray colors such as #000000 or other grays)."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Roles are mapped correctly in both themes: bg background, surface cards and track, text-primary titles and times, text-secondary meta and inactive icons, border dividers, an accent play button with an on-accent icon, an accent progress fill and knob, and accent-subtle chips with accent text."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The 'Tokens' column has eight 'Token / <name>' groups, each with a 40x40 rx 8 light and dark swatch filled with the table values, the token name and both hex values in uppercase matching the table."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Content is exact in both frames: '9:41', 'Now playing', 'The Quiet Power of Routines', 'Field Notes · Ep. 142', '18:24', '-27:36', '1.25×', 'Sleep 30 min', 'Queue', 'Up next', 'Ep. 143 · Designing for Calm' and '38 min', and the progress fill is 124.4 wide (40% of the 311 track, within 1px)."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Geometry is exact: the artwork is 311x311 with rx 24 at (32, 112), the play button is a 72 circle centered at x 187.5 with Rewind 15 and Forward 30 at equal distances, and the progress track and Up next card are 311 wide at x 32."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The artwork is a recognizable illustrated podcast cover built from vector shapes (not a flat rect or a single glyph) and is identical markup in both frames."
+   },
+   {
+    "id": "R9",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "When rendered, both frames keep 32px side margins, nothing overlaps, is clipped or runs outside its frame, and all text is clearly readable against its background in both themes."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Both themes look polished and native: the dark theme feels designed rather than merely inverted, the hierarchy is clear, and the purple accent is used sparingly and consistently."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-open-07",
+  "category": "figma",
+  "mode": "open_ended",
+  "title": "Design a data-driven chart component kit with exact bar, line and donut geometry as a layered Figma-ready SVG",
+  "prompt": "Create the chart components page of Quanta, our analytics design system, as one layered SVG file whose geometry is computed from data. The canvas is 1440 by 1120 (viewBox 0 0 1440 1120) with a #F8FAFC background rect. It will be imported into Figma, so organize it like a designer's file: every <g> gets a readable id that becomes its layer name (use ' / ' for hierarchy, never ids like g12), components are nested groups, and all copy stays live <text> (no outlined text). Use plain vectors only: no <image>, foreignObject, <script>, CSS animation or external references. Use Inter. Colors: indigo #4F46E5, sky #0EA5E9, amber #F59E0B, pink #EC4899, bar base #C7D2FE, text #0F172A, muted #64748B, grid #E2E8F0; each chart sits on a white card with rx 16 and a 1px #E2E8F0 stroke.\n\nTop-level groups, in this order: 'Header', 'KPI tiles', 'Bar chart', 'Line chart', 'Donut chart', 'Legend and tooltip'.\n- Header: 'Quanta charts' (32 bold) and 'Data-driven components · v1.4'.\n- KPI tiles: four groups 'KPI / Total revenue', 'KPI / Avg. monthly revenue', 'KPI / WAU growth' and 'KPI / Top channel', each a card with a label and a value you compute from the data below: the sum of the twelve monthly revenues in $k, their mean in $k with one decimal, the growth from W1 to W8 as a signed percent with one decimal, and the largest channel with its share.\n- Bar chart: the card title 'Monthly revenue 2026 ($k)' and twelve groups 'Bar / Jan' … 'Bar / Dec' with the values 42, 38, 51, 47, 56, 61, 58, 64, 70, 66, 73, 81. Each bar is a rect 40 wide whose height is exactly value × 3, all bottoms on one baseline, 24 apart, in the bar base color except the maximum month in indigo, with its value above and the month under it. Six labelled gridlines for 0, 20, 40, 60, 80 and 100 sit at 60px steps above the baseline.\n- Line chart: the card title 'Weekly active users (k)' and a group 'Series / WAU' with one path or polyline through eight points W1 … W8 with the values 12.4, 13.1, 12.8, 14.6, 15.2, 16.9, 16.1, 18.3, spaced 64 apart horizontally, at y = plot bottom − (value − 10) × 20 (10 on the bottom, 20 at 200 above it); a 4-radius circle in a group 'Point / W1' … 'Point / W8' at every point; a light indigo area under the line; gridlines at 10, 12.5, 15, 17.5 and 20 with labels; W1 … W8 under the points; and the label '18.3k' at the last point.\n- Donut chart: the card title 'Traffic by channel' and four groups 'Segment / Organic' 42%, 'Segment / Paid' 23%, 'Segment / Referral' 20% and 'Segment / Email' 15% in indigo, sky, amber and pink, drawn as arcs (paths or stroke-dasharray circles) of radius 90 and stroke width 28 that start at 12 o'clock and run clockwise in that order, each arc's length proportional to its share, with '128.4k' and 'visits' in the center.\n- Legend and tooltip: four groups 'Legend / Organic' … 'Legend / Email' (an 8px dot in the segment color, the channel name and its share) placed beside the donut, and a group 'Tooltip / W6' (a #0F172A card with rx 8 and a pointer) showing 'W6' and '16.9k' directly above the W6 point of the line chart.",
+  "artifact": {
+   "kind": "svg",
+   "entry": "design.svg"
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Reading the SVG source: viewBox 0 0 1440 1120 with a #F8FAFC background rect, the six top-level groups 'Header', 'KPI tiles', 'Bar chart', 'Line chart', 'Donut chart' and 'Legend and tooltip' in that order, the named sub-groups ('Bar / Jan', 'Point / W1', 'Segment / Organic', …), live <text> in Inter, and no <image>, foreignObject or <script>."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Bars are exact: twelve 'Bar / <month>' groups whose rect heights are 126, 114, 153, 141, 168, 183, 174, 192, 210, 198, 219 and 243 (within 1), on one shared baseline, 40 wide and 24 apart, Dec in #4F46E5 and the others #C7D2FE, each with its value and month label."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The bar chart has six gridlines 60px apart from the baseline (0) to 300 above it (100), labelled 0, 20, 40, 60, 80, 100, in #E2E8F0."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The line is exact: eight points 64 apart whose heights above the plot bottom are 48, 62, 56, 92, 104, 138, 122 and 166 (within 1), one path or polyline through them, a 4-radius circle in each 'Point / W…' group, a light indigo area beneath, gridlines 10 to 20, and the label '18.3k' at W8."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The donut is exact: four arcs of radius 90 and stroke width 28 in #4F46E5, #0EA5E9, #F59E0B and #EC4899 starting at 12 o'clock and running clockwise as Organic, Paid, Referral, Email, with arc lengths proportional to 42/23/20/15 (about 237.5, 130.1, 113.1 and 84.8 of a 565.5 circumference, within 2%), and '128.4k' / 'visits' in the center."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The KPI values are computed correctly: '$707k' total revenue, '$58.9k' average monthly revenue, '+47.6%' WAU growth and 'Organic 42%' as the top channel."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Legend and tooltip: four legend items with dots in the matching segment colors and the shares 42%, 23%, 20%, 15%, and a dark #0F172A 'Tooltip / W6' card reading 'W6' and '16.9k' whose pointer tip is within 12px directly above the W6 point."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every chart and KPI sits on a white rx 16 card with a 1px #E2E8F0 stroke and consistent inner padding, and only the listed palette colors are used (no other hues)."
+   },
+   {
+    "id": "R9",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "When rendered, the cards align on a clear grid, no labels collide or overlap marks, nothing is clipped or runs outside its card or the canvas."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "The page looks like documentation from a mature data-viz design system: restrained color, clear typographic hierarchy, crisp marks and generous, consistent spacing."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-open-08",
+  "category": "figma",
+  "mode": "open_ended",
+  "title": "Design a three-screen ride-hailing booking flow with a shared map and computed fares as a layered Figma-ready SVG",
+  "prompt": "Design the booking flow of Comet, a ride-hailing app, as three screens in one layered SVG file. The canvas is 1360 by 1000 (viewBox 0 0 1360 1000) with a #EEF1F5 background rect and three 390 by 844 screens at y 100 and x 60, 485 and 910: top-level groups '01 Set destination', '02 Choose ride' and '03 Driver on the way' in that order, each clipped to a 390 by 844 rounded rect (rx 32) and labelled in 14px #667085 text 24px above. It will be imported into Figma, so organize it like a designer's file: every <g> gets a readable id that becomes its layer name (use ' / ' for hierarchy, never ids like g12), components are nested groups, and all copy stays live <text> (no outlined text). Use plain vectors only: no <image>, foreignObject, <script>, CSS animation or external references. Use Inter, brand #00A676 and ink #111827. All coordinates below are relative to the screen's top-left corner.\n\nShared on every screen:\n- 'Status bar': 390 by 44 with '9:41'.\n- 'Map': the same map on all three screens (identical geometry): a #E8EEF3 base, at least six white street rects (horizontal and vertical), a green park, a blue river shape and the street labels 'Mission St' and 'Valencia St'.\n- 'Pin / Pickup' (a brand circle with a white center) centered at (88, 300) on all three screens; 'Pin / Dropoff' (an ink pin) centered at (300, 132) on 02 and 03.\n- 'Route' on 02 and 03: one polyline or path with round joins and caps, a 5-wide brand stroke, through exactly (88, 300), (88, 228), (208, 228), (208, 132), (300, 132).\n- 'Sheet': a white bottom sheet with 24 top corner radii, a 36 by 4 grabber and 20 side padding; its top is at y 460 on 01, 404 on 02 and 484 on 03.\n\nFares: fare = base + per-km rate × 8.4 km + per-minute rate × 19 min, rounded to the cent. Comet X: $2.50 base, $1.10/km, $0.30/min, 4 seats, 3 min away. Comet XL: $3.50, $1.65/km, $0.40/min, 6 seats, 6 min away. Comet Green (electric): $2.50, $1.20/km, $0.30/min, 4 seats, 4 min away. Show the computed fares.\n\nScreens:\n- 01 Set destination: 'Good evening, Ana', a 'Where to?' search field, 'Pickup · 1418 Mission St', and 'Recent' with exactly three place rows (icon, name, address, distance): 'Ferry Building' 8.4 km, 'SFO Terminal 2' 21.7 km and 'Dolores Park' 1.9 km.\n- 02 Choose ride: 'Choose a ride', 'Ferry Building · 8.4 km · 19 min', three groups 'Ride / Comet X', 'Ride / Comet XL' and 'Ride / Comet Green', each with a vector car illustration, name, seats, ETA and fare; Comet X is selected (2px brand border and a check); a payment row 'Visa •••• 4242'; and 'Button / Primary', 350 by 52 at x 20 with rx 14 in brand, reading 'Confirm Comet X · <fare>'.\n- 03 Driver on the way: a group 'Car' (a top-down car) on the route near the pickup, 'Driver arriving in 3 min', the driver 'Luis M.' with an initial avatar and '★ 4.92', 'Toyota Prius · Blue', the plate '7KXR 204' in a plate-styled box, three buttons 'Message', 'Call' and 'Share trip', a trip row 'Ferry Building · 8.4 km · 19 min · <fare>', and a red 'Cancel ride' text button.",
+  "artifact": {
+   "kind": "svg",
+   "entry": "design.svg"
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Reading the SVG source: viewBox 0 0 1360 1000 with a #EEF1F5 background; the top-level groups '01 Set destination', '02 Choose ride' and '03 Driver on the way' in order at x 60, 485 and 910 (y 100), each clipped to a 390x844 rx 32 rect with a label above; live <text> in Inter and no <image>, foreignObject or <script>."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The 'Map' group is identical on all three screens (same children and relative geometry), with a #E8EEF3 base, at least six street rects, a park, a river and the labels 'Mission St' and 'Valencia St', and it never spills outside a screen."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Route and pins are exact: on 02 and 03 'Route' is a single polyline or path through exactly (88, 300), (88, 228), (208, 228), (208, 132), (300, 132) relative to the screen, with a 5-wide #00A676 stroke and round joins; 'Pin / Pickup' is centered at (88, 300) on all three screens and 'Pin / Dropoff' at (300, 132) on 02 and 03."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Fares are computed correctly: Comet X $17.44, Comet XL $24.96 and Comet Green $18.28, the button reads 'Confirm Comet X · $17.44', and the trip row on 03 ends with $17.44."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The sheets are consistent: white with 24 top corner radii, a 36x4 grabber and 20px side padding, with their tops at y 460, 404 and 484 on screens 01, 02 and 03."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "01 is complete: 'Good evening, Ana', 'Where to?', 'Pickup · 1418 Mission St', and exactly three Recent rows for Ferry Building (8.4 km), SFO Terminal 2 (21.7 km) and Dolores Park (1.9 km), each with an icon and address."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "02 is complete: 'Choose a ride', 'Ferry Building · 8.4 km · 19 min', three ride groups with car illustrations, seats (4, 6, 4) and ETAs (3, 6, 4 min), Comet X selected with a 2px brand border and check, 'Visa •••• 4242', and a 350x52 rx 14 brand button at x 20."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "03 is complete: a 'Car' on the route near the pickup, 'Driver arriving in 3 min', 'Luis M.' with an avatar and '★ 4.92', 'Toyota Prius · Blue', the '7KXR 204' plate box, Message, Call and Share trip buttons, the trip row and a red 'Cancel ride'."
+   },
+   {
+    "id": "R9",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "When rendered, the route and pins stay above each sheet, text fits its rows and buttons, nothing overlaps unintentionally, and nothing spills outside its screen."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "The flow looks like a polished, trustworthy mobility app: a calm, readable map, clear hierarchy in the sheets, consistent components across screens and a restrained green accent."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-09",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive flight results page with a fare calendar, filters, sorting and a trip summary from a Figma file",
+  "prompt": "Implement the Skyway flight results page (San Francisco to New York, one way) from our Figma file as a real, responsive, working page. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (Inter, the #0b63e5 blue, airline code tiles, tag pills, radii, borders, shadows) and use every string, time and price exactly. Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use semantic HTML: header with nav, an aside with a filter form (radio inputs for stops, checkboxes for airlines, toggle buttons for the departure-time chips, a range input for max price), main with the fare calendar as a group of buttons, the sort tabs as buttons with aria-pressed or role='tab', and the flights as a list of article cards rendered from one flight data array; the trip summary is an aside. On mobile the search bar collapses into the app bar, the fare calendar scrolls horizontally inside itself, the sort tabs become a segmented control, the filters open from the Filters button, cards become compact, and the trip summary becomes a bar fixed to the bottom of the viewport.\n\nBehavior:\n- Fares follow the date: each calendar price is the cheapest fare of that day, and choosing a day shifts every flight's fare by that day's price minus $189 (Thu, Oct 15 is the design). Choosing a day highlights it and updates the heading (e.g. 'Departing flights · Tue, Oct 13'), the Depart field, the 'Fares shown for …' note, the mobile app bar line, every card price, the sort tab summaries and the trip summary. ‹ and › move the selection one day back or forward within the seven days.\n- Sort tabs: Best is the design order, Cheapest sorts by fare (low to high), Fastest by duration (short to long). Each tab's second line shows the fare and duration of the flight that would come first in that order among the visible flights.\n- Filters combine with AND across groups: Stops (Any number of stops, Nonstop only, 1 stop); Airlines (unchecking hides that airline); Departure time chips that toggle, where several chips combine with OR and none means all (Morning 5:00 AM–11:59 AM, Afternoon 12:00 PM–5:59 PM, Evening 6:00 PM–11:59 PM); and Max price, a slider from $189 to $300 compared with the current fare. The count reads 'Showing N of 8 flights'. When nothing matches, show 'No flights match your filters' with a 'Reset filters' button; it and the panel's Reset restore every filter.\n- Exactly one flight is selected (United UA 1532 in the design). Select on another card marks that card Selected and updates Your trip: airline and flight number, date and times, route line, Base fare, 'Taxes & fees (12%)' (12% of the fare, rounded to the cent) and Total; the mobile bottom bar shows the same flight and total. 'Add checked bag' adds $35.00 to the total.\n- Mobile: Filters opens a full-screen sheet with the same filters, a close button and a 'Show N flights' button whose N updates live; the segmented control sorts like the tabs.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 1360
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 1360
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Click Cheapest and Fastest and read the card order, then Best. Choose Nonstop only (6 flights; Cheapest tab reads $209 · 5h 26m), then reset. Click the Afternoon chip (DL 418, AA 177, UA 2210), clear it; set the Max price range to 230 (UA 1532, B6 1024, DL 2104, AA 177); uncheck Delta and JetBlue (4 flights); choose 1 stop plus Evening for the empty state and click Reset filters. Click Tue, Oct 13 in the calendar (heading, UA 1532 $215, AA 177 $176, summary $215.00 / $25.80 / $240.80). Back on Thu, Oct 15 click Select on AA 177 (summary $189.00 / $22.68 / $211.68) and toggle Add checked bag ($246.68). Mobile: open Filters, choose Nonstop only, read 'Show 6 flights', close it; use the segmented control. For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: top nav (Skyway logo, Flights active, Hotels, Cars, Trips, 'USD $', help, avatar), the search bar (One way, From, swap, To, Depart, Travelers, Search flights), the Filters panel (Stops radios, five airlines with counts and prices, three departure-time chips, Max price slider) above the dark Track prices card, the heading and subheading, the seven-day fare calendar with Thu, Oct 15 selected and Tue, Oct 13 in green, the three sort tabs, 'Showing 8 of 8 flights', eight flight cards and the Your trip summary card."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: app bar with back button, 'SFO → JFK' and 'Thu, Oct 15 · 1 adult · One way', the calendar strip cut off at the right edge, the Best / Cheapest / Fastest segmented control, the Filters pill and count, eight compact cards (times, price, route and duration, stops, divider, airline row with tag) and the bottom bar with 'United UA 1532', '$255.36 total' and Continue; no filter sidebar or trip card."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: Inter, #0b63e5 blue for the active nav item, selected day, active tab, Selected and Search buttons, colored airline code tiles, green 'Nonstop' and amber '1 stop · …' text, the tag pills (Best, Red-eye, Only 3 seats left, Cheapest), red '+1' marks, 12-14px radii with light borders on a #f3f6fa page."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Data matches exactly: all eight flights with airline, flight number, times, '+1' marks, durations, stops and fares (e.g. 'Delta DL 2104', '8:30 AM – 6:05 PM', '6h 35m', '1 stop · MSP', '$199'), the seven calendar prices $214, $176, $198, $189, $231, $205, $222, the tab summaries '$228 · 5h 35m', '$189 · 8h 38m', '$209 · 5h 26m', and the trip summary $228.00, $27.36, $255.36."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: one page with media queries and flex/grid layout, header/nav, main and aside landmarks, the filters as a form with radio inputs, checkboxes and a range input, and the flight cards rendered from one data array (not absolutely positioned boxes)."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Sorting works: Cheapest orders AA 177 ($189), DL 2104, B6 1024, UA 1532, DL 418, B6 916, AS 24, UA 2210 ($274); Fastest orders B6 1024 (5h 26m), AS 24, UA 1532, B6 916, DL 418, UA 2210, DL 2104, AA 177 (8h 38m); Best restores the design order; the active tab is highlighted."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Filters work and combine: Nonstop only shows 6 flights with 'Showing 6 of 8 flights' and the Cheapest tab reading '$209 · 5h 26m'; the Afternoon chip alone shows DL 418, AA 177 and UA 2210; Max price $230 leaves UA 1532, B6 1024, DL 2104 and AA 177; unchecking Delta and JetBlue leaves 4 flights."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "1 stop plus the Evening chip shows 'No flights match your filters' with a Reset filters button that restores all eight flights and 'Showing 8 of 8 flights'."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The fare calendar works: choosing Tue, Oct 13 highlights it, changes the heading to 'Departing flights · Tue, Oct 13', shows UA 1532 at $215 and AA 177 at $176, and Your trip reads $215.00, $25.80 and Total $240.80."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Selection works: Select on American AA 177 marks it Selected (UA 1532 no longer), Your trip shows 'American · AA 177', $189.00, $22.68 and Total $211.68, and Add checked bag raises the total to $246.68."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px the Filters button opens a full-screen filter sheet whose 'Show N flights' button updates live (6 after Nonstop only) and closes the sheet, the segmented control re-sorts the cards, and the bottom bar shows the selected flight and its total."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1024x768 there is no horizontal page scrolling and no overlapping or clipped text, the bottom bar stays fixed at 390px while scrolling, the calendar strip scrolls inside itself, and nothing overflows at 390px."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-10",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive music player with a playlist, playback controls and an editable queue from a Figma file",
+  "prompt": "Implement the Late Night Drive playlist screen of Resonance, our music app, from our Figma file as a real, responsive, working player. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (the dark palette, Lato, coral #ff6b4a accents, the purple header gradient, radii) and use every string and duration exactly. Draw the playlist cover and the album covers with CSS gradients and shapes as in the design (no images). Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use semantic HTML: aside with nav for the sidebar, main, a table (or a list of rows) for the tracks rendered from one track data array, an aside for the queue, a player region with real buttons that have accessible names, and a range input or role='progressbar' for the playback position. On mobile the sidebar and queue panel disappear, the cover and title stack, track rows drop the album and date columns, and a mini player and a bottom tab bar are fixed to the bottom of the viewport.\n\nBehavior (playback is simulated, no audio):\n- The design state is Neon Rivers paused at 1:24 of 3:48. The white play button in the player bar and the coral one in the header toggle play and pause and switch their icon; while playing, the elapsed time advances one second per second and the progress bar grows; at the end the next track starts.\n- Clicking a track row (or Enter on it) plays it from 0:00: the player bar, the queue's Now playing card and the mobile mini player show it, its row turns coral with the equalizer instead of its number, and 'Next from: Late Night Drive' lists the playlist tracks after it.\n- Clicking the progress bar seeks proportionally (the middle of a 3:48 track is 1:54).\n- Next plays the first song of 'Next in queue' and removes it from the queue; with an empty queue it plays the next playlist track. Previous restarts the track when more than 3 seconds have played, otherwise it plays the previous track.\n- Every track row has an 'Add to queue' button (shown on hover or focus) that appends the song to 'Next in queue'; each queued song has a × that removes it; 'Clear queue' empties it and shows 'Your queue is empty'. The queue header reads 'N songs · X min Y sec' ('1 song' for one); in the design the queue holds 'Harbor Lights' by Mira Sol (3:41) and 'Velvet Static' by Nova Park (2:58).\n- Heart buttons toggle liked songs, and 'Liked Songs' in the sidebar shows the live count (214 songs in the design).\n- 'Search in playlist' filters the rows by title or artist, case-insensitive.\n- Shuffle toggles on (coral) and off; Repeat cycles off, all, one.\n- Mobile: the mini player's queue button opens the queue as a full-screen sheet with a close button, and its play button toggles playback.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 1208
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 1208
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Click the Midnight Transit row (player bar Midnight Transit 0:00 / 4:05, coral row, Next from starts with Neon Rivers); press the player play button, wait 3 s and read the time, then pause. Click the middle of the progress bar on Neon Rivers (about 1:54). Reload; add Exit 42 to the queue (3 songs · 10 min 35 sec), remove Harbor Lights (2 songs · 6 min 54 sec), Clear queue. Reload and press Next (Harbor Lights by Mira Sol, 1 song · 2 min 58 sec). Like Midnight Transit (Liked Songs 215 songs); type kaia in Search in playlist (Neon Rivers and Golden Hour Static). Mobile: open the queue from the mini player and close it. For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: sidebar (Resonance logo, Home, Search, Your Library active, PLAYLISTS with six playlists and Late Night Drive active), the gradient header with back and forward buttons, search field and avatar, the Late Night Drive cover, 'PUBLIC PLAYLIST', the large title, description and owner line ending '12 songs, 47 min 22 sec', the action row, the twelve-row track table (#, Title, Album, Date added, duration), the queue panel (Now playing, Next in queue with two songs, Next from with nine) and the full-width player bar."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: back and more buttons over the gradient, the centered cover, title, description, owner, '12 songs, 47 min 22 sec', the action row with the coral play button on the right, twelve track rows with cover, title, artist and ⋯ (Neon Rivers coral with the equalizer), the mini player with its progress line, and the bottom tab bar with Your Library active."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: near-black #121116 page with a darker sidebar and #18171d queue panel, Lato, coral #ff6b4a play buttons, liked hearts and playing track, gradient album covers with a light sun disc and a darker lower band, the playlist cover with the striped sunset and road, a white play button in the player bar and the purple header gradient."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Data matches exactly: the twelve tracks with artist, album, date added and duration, filled hearts on Afterglow Avenue, Neon Rivers, Golden Hour Static and Rearview, '1,248 saves', the queue header '2 songs · 6 min 39 sec', and the player bar with Neon Rivers, Kaia Moon, 1:24 and 3:48 with the progress about 37% filled."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: media queries with flex/grid layout, nav/main/aside landmarks, rows rendered from one data array, real buttons with accessible names for play, previous, next, like, add to queue and remove, a range input or role='progressbar' for the position, and CSS covers (no images)."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Playing works: clicking Midnight Transit shows it in the player bar at 0:00 of 4:05, turns its row coral with the equalizer, updates Now playing and makes 'Next from' start with Neon Rivers; pressing play makes the elapsed time advance about one second per second, and pause stops it."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The queue works: adding Exit 42 gives '3 songs · 10 min 35 sec', removing Harbor Lights then gives '2 songs · 6 min 54 sec', and Clear queue shows 'Your queue is empty'."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Next and previous work: from the design, Next plays Harbor Lights by Mira Sol at 0:00 of 3:41 and the queue reads '1 song · 2 min 58 sec'; Previous after more than 3 seconds restarts the track at 0:00."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Seeking works: clicking the middle of the progress bar on Neon Rivers sets the time to about 1:54 (within 5 seconds) and moves the fill."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Likes and search work: liking Midnight Transit fills its heart and changes Liked Songs to 215 songs; typing 'kaia' in Search in playlist leaves only Neon Rivers and Golden Hour Static."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px the mini player's queue button opens a full-screen queue sheet (Now playing and Next in queue) that closes again, and the mini player's play button toggles playback."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1024x768 there is no horizontal page scrolling or overlapping text (the queue panel may collapse or narrow), the player bar stays fixed at the bottom, and nothing overflows at 390px."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-11",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive CRM contact page with an activity timeline, note logging and a deal pipeline from a Figma file",
+  "prompt": "Implement the Pipewell CRM contact page for Elena Marquez from our Figma file as a real, responsive, working page. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (Roboto, the #0e7c66 green, the dark icon rail, the stage pipeline, colored activity icons, radii, borders) and use every string and number exactly. Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use semantic HTML: nav for the icon rail, header for the top bar, main, section cards with headings, a form for the note composer with a labelled textarea, buttons for the pipeline stages (aria-current on the current one), checkboxes for the upcoming tasks, and the timeline as an ordered list grouped by date and rendered from one activity data array. On mobile the icon rail and top bar become an app bar with a back button, the header centers with three round action buttons, the pipeline becomes a five-segment bar with 'Step 3 of 5', and Activity, About and Deals become tabs.\n\nBehavior (the user is Kai Turner):\n- Timeline filter chips (All 9, Emails 3, Calls 2, Meetings 2, Notes 1) filter the timeline by type with live counts; date groups with no visible entry are hidden. The stage-change entry is an Update and shows only under All.\n- Log a note: Save note is disabled while the textarea is empty or whitespace. Saving adds a Note entry at the top of 'Today · Thu, Sep 24' (title 'Note', meta 'Kai Turner · just now', the text as its body), clears the textarea and updates the counts.\n- Deal stage: clicking a stage moves the Fleet telematics rollout deal there. Earlier stages show as done with a check and the current one is solid green. Probabilities: Lead 10%, Qualified 25%, Proposal 50%, Negotiation 75%, Closed won 100%. The header line ('$48,000 · 50% probability'), the deal row in the Deals card (stage chip and percent), Open pipeline (the total of deals not Closed won) and Weighted forecast (the sum of amount × probability of both deals) update, and an Update entry 'Deal moved from Proposal to Negotiation' (with the real stage names, meta 'Kai Turner · just now') is added at the top of Today. Clicking the current stage does nothing.\n- Upcoming: ticking a task strikes it through and lowers the Upcoming count; unticking restores it.\n- Mobile: the Activity, About and Deals tabs switch the visible panel (About shows the About and Company cards, Deals the Deals card); Log focuses the note field.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 1762
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 1762
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Click the Emails chip (three emails, empty date groups hidden), then Calls (2), then All. Type 'Sent pricing FAQ' in the note field and click Save note (new Note at the top of Today, All 10, Notes 2, field cleared); check that Save note is disabled when empty. Reload. Click Negotiation in the pipeline (75%, Deals card Negotiation · 75%, Weighted forecast $39,125, Update entry at the top); click Closed won (100%, Weighted $51,125, Open pipeline $12,500); click Qualified (25%, Weighted $15,125). Tick 'Send revised proposal with volume pricing' (struck through, Upcoming 1) and untick it. Mobile: tap About and Deals tabs. For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: dark icon rail with Contacts active, top bar (search with ⌘K, New, bell with red dot, help), breadcrumb, the header card (EM avatar, name, role, three tags, Email, Call and Log activity buttons, and the Fleet telematics rollout pipeline with Lead and Qualified done, Proposal current, '$48,000 · 50% probability'), the About, Deals and Company cards on the left, and the note composer, Upcoming card and Activity card with five filter chips and the grouped timeline on the right."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: app bar with back button, 'Contact' and ⋯, the centered avatar, name, role and tags, three round Email / Call / Log buttons, the stage card with the five-segment bar, 'Step 3 of 5', 'Proposal' and '$48,000 · 50% probability', the Activity / About / Deals tabs with Activity active, the filter chips cut at the right edge, the one-line note field with Save, and the nine timeline entries."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: Roboto, #0e7c66 green for Log activity, the current stage and links, the #101828 icon rail, done stages pale green with checks and upcoming stages gray, type icons in blue, green, violet, amber and gray circles on a vertical line, light-gray body boxes, a black active filter chip, and 14px white cards with 1px borders on #f5f6f8."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Text matches exactly: the seven About values, both deals with $48,000 and $12,500, Open pipeline $60,500 and Weighted forecast $27,125, the two upcoming tasks with 'Due Fri, Sep 25' and 'Fri, Oct 2 · 10:00 AM', and all nine timeline entries with titles, meta and bodies under 'Today · Thu, Sep 24', 'Yesterday · Wed, Sep 23', 'Mon, Sep 21' and 'Fri, Sep 18'."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: media queries with flex/grid layout, nav/header/main landmarks, a labelled textarea in a form, pipeline stages as buttons with aria-current, checkbox inputs for tasks, and the timeline as a list rendered from one activity array."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Filter chips work: Emails shows exactly 'Re: Revised pricing for 120 vehicles', 'Proposal: Fleet telematics rollout' and 'Webinar follow-up' with empty date groups hidden, Calls shows 2, and All restores all nine entries."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Logging a note works: Save note is disabled while the field is empty; saving 'Sent pricing FAQ' adds a Note entry at the top of Today with 'Kai Turner · just now', clears the field, the chips read All 10 and Notes 2, and the Notes filter shows both notes."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Moving the deal to Negotiation marks Lead, Qualified and Proposal done and Negotiation current, shows '$48,000 · 75% probability', the Deals card shows Negotiation and 75%, Weighted forecast becomes $39,125, and an Update entry 'Deal moved from Proposal to Negotiation' appears at the top of Today."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Closed won gives 100%, Weighted forecast $51,125 and Open pipeline $12,500; moving back to Qualified gives 25%, Weighted forecast $15,125 and Open pipeline $60,500."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Ticking 'Send revised proposal with volume pricing' strikes it through and changes the Upcoming count to 1; unticking restores it and the count 2."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px the About tab shows the contact details and company, the Deals tab shows both deals with the pipeline totals, Activity returns to the timeline, and the filter chips scroll horizontally inside their row."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1024x768 there is no horizontal page scrolling or overlapping text (the two columns may narrow or stack), and nothing overflows at 390px."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-12",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive hotel reservations calendar with booking details, check-in and new bookings from a Figma file",
+  "prompt": "Implement the Harborview Inn reservations screen from our Figma file as a real, responsive front-desk tool. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (Open Sans, navy #12355b, coral #e8684a, the status colors, radii, borders) and use every string and number exactly. Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use semantic HTML: nav for the icon rail, header, main, the reservations grid as a table or ARIA grid with room row headers and night column headers, booking bars as buttons whose accessible names give guest, room and dates, and dialogs for the booking details and the new booking form. Render the grid, KPIs and occupancy row from one bookings data array. On mobile the grid is replaced by a front-desk day view: a horizontally scrolling date strip, four KPI cards in a 2x2 grid, an Arrivals / Departures / In house switch with guest cards, and the next-7-nights occupancy chart, above a bottom tab bar.\n\nData rules: 12 rooms (Standard Queen 101–104 at $159, Deluxe King 201–204 at $189, Junior Suite 301–302 at $249, Family Room 303–304 at $219 per night). Each column is a night and a booking fills its check-in night through the night before check-out. Today is Tue, Oct 6, 2026. Out-of-service blocks are not guests and never count as occupied. A night's occupancy is occupied rooms ÷ 12 as a whole percent; In house tonight counts rooms occupied on Oct 6; Arrivals today counts bookings checking in on Oct 6 that are not checked in yet; Departures today counts bookings checking out on Oct 6.\n\nBehavior:\n- Clicking a booking opens its details: guest, 'Room 102 · Standard Queen', 'Oct 6 – Oct 8, 2026 · 2 nights', '$159 / night', Total (nights × rate, e.g. $318.00) and status, with 'Check in' for Confirmed or Pending bookings arriving today and 'Cancel booking' for any booking; ✕ or Escape closes it.\n- Check in turns the booking Checked in (green) and lowers Arrivals today. Cancel booking removes the bar and recalculates the occupancy row and every KPI.\n- New booking opens a form: Guest name, Room (select), Check-in (Oct 5–18) and Nights (1–14). Errors: 'Enter the guest name', and 'Room 101 is not available for those nights' (with the room number) when it overlaps a booking or block in that room. A valid booking is Confirmed, appears in the grid and updates occupancy and KPIs.\n- ‹ and › move the visible 14 nights by 7 days (e.g. 'Oct 12 – Oct 25, 2026'), keeping bars at their dates; nights with no bookings are empty and show 0%. Today returns to Oct 5 – Oct 18; the today column is marked only when visible.\n- The room type filter shows only that type's group and rooms (KPIs and occupancy stay hotel-wide).\n- List shows the guest bookings (no out-of-service blocks) as a table sorted by check-in date, then room: guest, room, check-in, nights, status, total.\n- Mobile: choosing a day in the date strip updates the KPIs and the three lists for that day; Check in on an arrival card works as on desktop.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 1048
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 1048
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Click the Mia Chen bar (Room 102 · Standard Queen, Oct 6 – Oct 8, 2026, 2 nights, $318.00), click Check in (green bar, Arrivals today 3), press Escape. Reload. New booking: empty name (error); Maya Singh, room 101, Oct 7, 1 night (not available); Maya Singh, room 203, Oct 6, 2 nights (bar on 203 Tue 6–Wed 7, In house 9, occupancy 75%, row 75% / 83% for Oct 6 / 7, Arrivals 5). Reload; open Mason Clarke and Cancel booking (In house 7, 58%, row 58%, 67%, 67%, 67% for Oct 6–9, Arrivals 3). Click › (Oct 12 – Oct 25, 2026; Noah Diaz in the second column) and Today. Pick Junior Suite in the filter; click List (26 bookings). Mobile: tap Wed 7 (In house 9, Arrivals 2: Henry Walsh, Ruby Castillo; Departures 1: Isabella Moreno), tap Tue 6 and Check in Mia Chen. For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: navy icon rail with Reservations active, the top bar (Reservations, Harborview Inn switcher, search, coral New booking), the controls row (‹, ›, Today, 'Oct 5 – Oct 18, 2026', Timeline / List, All room types, the five-status legend), four KPI cards (8 of 12 rooms, 4, 3, 67% with bar) and the grid with fourteen night columns (Tue 6 circled), four group rows with rates, twelve room rows with colored booking bars and the occupancy row."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: navy app bar with menu, 'Harborview Inn ⌄' and a coral + button, 'Front desk' and 'Tuesday, Oct 6, 2026', the date strip with Tue 6 selected, the 2x2 KPI cards, the Arrivals (4) / Departures (3) / In house (8) switch, four arrival cards with status pills and Check in buttons, the 'Occupancy · next 7 nights' chart and the bottom tab bar with Front desk active."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: Open Sans, navy #12355b for the rail, app bar and today circle, coral New booking, booking bars tinted by status with a darker left accent (green Checked in, blue Confirmed, amber Pending, gray Checked out, dark hatched Out of service), tinted today and weekend columns, and 12px cards with 1px #dde3ea borders."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Data matches exactly: all 28 bars in the right rooms and nights (e.g. Liam Carter in 101 Oct 5–7 Checked in, Victoria Lane in 301 Oct 5–10, Maintenance in 103 Oct 5–6), the '3n'-style night counts, surnames on one-night bars (Wilson, Fox, Patel), and the occupancy row 58%, 67%, 75%, 75%, 75%, 83%, 33%, 33%, 42%, 42%, 33%, 42%, 25%, 0%."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: media queries with flex/grid layout, table or grid semantics with row and column headers, booking bars as buttons with descriptive accessible names, dialogs for details and the form, and grid, KPIs and occupancy computed from one data array."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Booking details and check-in work: Mia Chen shows Room 102 · Standard Queen, Oct 6 – Oct 8, 2026, 2 nights, $159 / night and Total $318.00; Check in turns the bar green and Arrivals today becomes 3; Escape closes the details."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "A new booking for Maya Singh in room 203 from Oct 6 for 2 nights appears as a Confirmed bar over Tue 6–Wed 7, In house tonight becomes 9 of 12 and 75%, the occupancy row shows 75% for Oct 6 and 83% for Oct 7, and Arrivals today becomes 5."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Validation works: an empty guest name shows 'Enter the guest name', and room 101 from Oct 7 for 1 night shows 'Room 101 is not available for those nights'; nothing is added."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Cancelling Mason Clarke removes the bar, In house becomes 7, occupancy tonight 58%, the row shows 58%, 67%, 67%, 67% for Oct 6–9, and Arrivals today becomes 3."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Navigation, filter and list work: › shows 'Oct 12 – Oct 25, 2026' with Noah Diaz starting in the second column and 0% for Oct 19–25, Today restores the design, Junior Suite shows only rooms 301 and 302, and List shows 26 guest bookings sorted by check-in."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px choosing Wed 7 shows In house 9, Arrivals 2 (Henry Walsh, Ruby Castillo), Departures 1 (Isabella Moreno) and 75%; back on Tue 6, Check in on Mia Chen's card marks it Checked in and Arrivals becomes 3."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1024x768 there is no horizontal page scrolling or overlapping text (the grid may scroll horizontally inside its card), and nothing overflows at 390px."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-13",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive recipe page with a serving scaler, unit conversion, step tracking and timers from a Figma file",
+  "prompt": "Implement the Saltbox Kitchen recipe page for Lemon Ricotta Pancakes from our Figma file as a real, responsive, working page. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (Lato, forest green #2f5d50, mustard #d99a1e, the cream page, rounded cards and pill buttons) and use every string and quantity exactly. Draw the pancake illustration with CSS shapes or inline SVG as in the design (no images). Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use semantic HTML: header with nav, main, an article for the recipe, an Ingredients section with a list per group and a checkbox with a label per ingredient, a Method section with an ordered list of steps, and buttons for the servings stepper, the US / Metric toggle (aria-pressed or radios) and the timers. On mobile the illustration is full-bleed at the top with round Back, Save and Share buttons over it, the content sits on a rounded sheet, Ingredients, Method and Nutrition become tabs, and a 'Start cooking' bar is fixed to the bottom of the viewport.\n\nScaling rules (the design shows 4 servings): amount = base amount × servings ÷ 4. US amounts round to the nearest ⅛ and show as a whole number plus a fraction character (⅛ ¼ ⅜ ½ ⅝ ¾ ⅞), with 'cup' up to 1 and 'cups' above 1 (tbsp and tsp never change unit). Metric base amounts: flour 190 g, sugar 25 g, baking powder 8 g, salt 3 g, ricotta 245 g, milk 180 ml, butter 28 g, blueberries 300 g, maple syrup 60 ml, rounded to the nearest whole g or ml. Eggs and lemons round to the nearest whole number (halves round up), minimum 1, singular for 1 ('1 large egg', '2 lemons, zested and juiced').\n\nBehavior:\n- The servings stepper runs from 1 to 12 (− disabled at 1, + disabled at 12) and rescales every ingredient; the Serves tile follows.\n- US / Metric switches every amount and keeps the servings.\n- Ticking an ingredient strikes it through. 'Add to shopping list' adds the unticked ingredients: a toast reads 'Added N items to your shopping list' and the Shopping list button shows a badge with the running total.\n- Clicking a step's number circle toggles it done (green check, muted text); the header reads 'N of 6 steps done' and the progress bar follows (2 done in the design).\n- 'Start 5:00' counts down every second (4:59, 4:58 …) and becomes 'Pause'; pausing keeps the remaining time; at 0:00 it shows 'Done'.\n- Save recipe toggles a filled 'Saved' state.\n- Mobile: the tabs switch between Ingredients, Method and Nutrition, and Start cooking switches to Method.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 1454
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 1454
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Click + twice (6 servings) and read every quantity (2¼ cups flour, 1⅛ cups milk, ¾ tsp salt, 5 large eggs, 2 lemons, 4½ tbsp maple syrup; Serves 6), switch to Metric (285 g, 38 g, 12 g, 5 g, 368 g, 270 ml, 42 g, 450 g, 90 ml) and back to US. Click − to 2 (¾ cup flour, ⅜ cup milk, ¼ tsp salt, ½ cup ricotta, 2 large eggs, 1 lemon, 1½ tbsp maple syrup), then to 1 (− disabled). Reload; tick flour, sugar and eggs and click Add to shopping list (Added 8 items, badge 8). Click step 3's circle (3 of 6 steps done), click Start 5:00, wait 2 s, Pause. Mobile: tap Method and Nutrition, then Start cooking. For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: nav (Saltbox logo, Recipes active, Meal plans, Techniques, Shop, search, Shopping list, avatar), breadcrumb, the illustration (pancake stack, butter, syrup drips, blueberries, lemon slices, plate), three tags, the two-line title, description, '★★★★★ 4.8 (326 ratings) · 1.2k saves', author line, four meta tiles, Save recipe / Share / Print, the Ingredients card (US / Metric, Servings stepper at 4, 'Base recipe: 4', two groups, eleven rows, Add to shopping list) and the Method column (progress, six steps with two done and three timers, nutrition tiles, Chef's tip)."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: full-bleed illustration with round Back, Save and Share buttons, the rounded sheet with two tags, title, rating, author and four meta tiles, the Ingredients / Method / Nutrition tabs with Ingredients active, the Servings stepper and US / Metric toggle, the eleven ingredient rows, Add to shopping list, and the fixed bottom bar with 'Total time', '35 min' and Start cooking."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: Lato, #2f5d50 green for Save recipe, the active nav item, done steps, group labels and the US toggle, mustard stars, timer chips and Chef's tip, the cream #fbf7f1 page, white 18px-radius cards, pill buttons and bold quantities."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Text matches exactly: the eleven quantities and names at 4 servings ('1½ cups', '2 tbsp', '2 tsp', '½ tsp', '1 cup', '¾ cup', '3', '1', '2 tbsp', '2 cups', '3 tbsp'), the six step texts, 412 kcal, 16 g, 48 g and 17 g, Prep 15 min, Cook 20 min, Total 35 min, Serves 4, and the tip."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: media queries with flex/grid layout, header/nav/main and an article, ingredient checkboxes with labels in lists, an ordered list of steps, buttons for the stepper, toggle and timers, and quantities computed from one ingredient data array (not typed per state)."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Scaling up is exact: 6 servings shows 2¼ cups flour, 3 tbsp sugar, 3 tsp baking powder, ¾ tsp salt, 1½ cups ricotta, 1⅛ cups milk, 5 large eggs, 2 lemons, 3 tbsp butter, 3 cups blueberries, 4½ tbsp maple syrup, and the Serves tile shows 6."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Scaling down is exact: 2 servings shows ¾ cup flour, ½ cup ricotta, ⅜ cup milk, ¼ tsp salt, 2 large eggs, 1 lemon and 1½ tbsp maple syrup; 1 serving shows ⅜ cup flour and '1 large egg' with − disabled, and + is disabled at 12."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Metric is exact: at 6 servings it shows 285 g flour, 38 g sugar, 12 g baking powder, 5 g salt, 368 g ricotta, 270 ml milk, 42 g butter, 450 g blueberries and 90 ml maple syrup, and US restores the fractions."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The shopping list works: with flour, sugar and eggs ticked (struck through), Add to shopping list shows 'Added 8 items to your shopping list' and the Shopping list badge shows 8."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Steps and timers work: clicking step 3's circle gives '3 of 6 steps done' with the bar at half, and Start 5:00 counts down each second and Pause stops it."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px the Method tab shows the six steps, Nutrition shows the four values, and Start cooking switches to Method."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1024x768 there is no horizontal page scrolling or overlapping text, the bottom bar stays fixed while scrolling at 390px, and nothing overflows at 390px."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-14",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive online course page with live progress, a curriculum accordion and a weekly goal from a Figma file",
+  "prompt": "Implement the course page for UX Research Fundamentals on Lumen Academy from our Figma file as a real, responsive, working page. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (Inter, indigo #4f46e5, the dark indigo hero, the overlapping progress card, lesson type tags, radii, shadows) and use every string and number exactly. Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use semantic HTML: header with nav, main, tabs with role='tablist', role='tab' (aria-selected) and tab panels, the curriculum as a list of modules whose headers are buttons with aria-expanded, lesson completion as checkboxes or buttons with aria-pressed, role='progressbar' or progress elements for progress, and an aside for the sidebar cards, all rendered from one course data array. On mobile the nav becomes a back-button app bar inside the hero, the progress card sits under the hero, the tabs scroll horizontally inside their strip, module headers show the meta under the name, and 'Continue: <lesson>' is a bar fixed to the bottom of the viewport.\n\nOther modules (lesson, type, minutes): 1 Foundations: What UX research is (and isn't), Video, 8; Research questions that matter, Video, 11; Choosing a method, Reading, 6; Ethics and consent, Reading, 7; Quiz: Foundations, Quiz, 5. 2 Planning a study: Writing a research plan, Video, 12; Recruiting participants, Video, 10; Screeners that work, Reading, 8; Budget and timeline, Reading, 5; Quiz: Planning, Quiz, 5. 4 Usability testing: Moderated vs unmoderated, Video, 10; Writing tasks, Reading, 7; Running a session, Video, 14; Measuring success, Reading, 9; Quiz: Usability testing, Quiz, 6. 5 Synthesis and sharing: Affinity mapping, Video, 11; From findings to insights, Video, 9; Writing a research report, Reading, 10; Presenting to stakeholders, Video, 8; Final project, Project, 45. Modules 1 and 2 are complete and 3.1 is done (11 of 26). Today is Thursday.\n\nBehavior:\n- Module headers expand and collapse their lessons independently (module 3 is open in the design); 'Expand all' opens every module and becomes 'Collapse all'.\n- Clicking a lesson's status circle toggles it complete, and everything updates live: the module's 'N/M lessons', its progress bar and a '✓ Completed' pill when all are done; the percent complete (done ÷ 26, rounded); 'N of 26 lessons'; the time left (minutes of unfinished lessons as 'H h M min left'); the progress bars and the certificate count; the 'Up next' lesson (the first unfinished lesson in course order), the 'Next:' line and the Continue buttons; and the weekly goal, where completing a lesson adds its minutes to Thursday and to the weekly total and un-completing subtracts them. At 120 minutes the card shows 'Goal reached'.\n- 'Hide completed' hides completed lessons; an expanded module with none left shows 'All lessons completed'.\n- 'Continue learning' (and the mobile bar) expands the module of the Up next lesson and scrolls it into view.\n- Tabs switch panels: Overview lists 'What you'll learn' (Plan a study, Recruit participants, Run interviews, Test usability, Synthesize findings, Share insights); Resources lists 'Discussion guide template.pdf', 'Research plan canvas.pdf' and 'Synthesis board.fig'; Reviews shows 4.8 from 2,316 reviews with 5★ 78%, 4★ 16%, 3★ 4%, 2★ 1% and 1★ 1%.\n- Progress persists in localStorage and survives a reload.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 1236
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 1236
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Click 3.2's status circle (46%, 12 of 26 lessons, 2 h 57 min left, module 3 2/6, Up next and Next: 3.3 Asking follow-up questions, weekly 102 of 120 min), reload to confirm it persists, then complete 3.3 and 3.4 (54%, 14 of 26, 2 h 39 min left, 120 of 120 min, Goal reached) and un-complete them. Click module 4 and 5 headers and Expand all / Collapse all. Toggle Hide completed (3.1 hidden; modules 1 and 2 show All lessons completed when expanded). Click the Reviews and Overview tabs. Mobile: expand module 4, complete 3.2 and read the fixed bottom button. Clear localStorage between scenarios if needed. For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: top nav (Lumen Academy logo, My learning active, three links, search, bell with dot, avatar), the dark indigo hero (breadcrumb, title, subtitle, '4.8 (2,316 reviews)' meta row with dots, instructor), the overlapping progress card (42% complete, bar, 11 of 26 lessons, 3 h 4 min left, Continue learning, 'Next: 3.2 Opening the conversation'), tabs with Curriculum active, the Course content header with Hide completed and Expand all, five module cards with module 3 expanded, and the Weekly goal, Certificate and Instructor cards."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: the hero with back button, 'Course', ⋯, title, meta line and instructor, the progress card (42% complete, 3 h 4 min left, bar, 11 of 26 lessons), the tab strip with Curriculum active, '5 modules · 26 lessons' with Hide completed, the five module cards (module 3 expanded with six two-line lessons), the weekly goal card and the fixed 'Continue: 3.2 Opening the conversation' button."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: Inter, indigo #4f46e5 for the active tab, progress fills, Continue buttons, the current module number and the Up next pill and row tint, green completed checks and pills, amber stars and streak pill, colored type tags (Video indigo, Reading amber, Project pink, Quiz teal), 12-16px radii and the soft shadow on the progress card."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Data matches exactly: '5/5 lessons · 37 min', '5/5 lessons · 40 min', '1/6 lessons · 1 h 4 min', '0/5 lessons · 46 min', '0/5 lessons · 1 h 23 min', the six module-3 lessons with types and minutes, '5 modules · 26 lessons · 4 h 30 min total', weekly minutes 20, 35, 15, 25, 0, 0, 0 with '95 of 120 min this week' and '4-day streak', and '11/26' on the certificate."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: media queries with flex/grid layout, header/nav/main/aside, a tablist with aria-selected tabs, module header buttons with aria-expanded, lessons and totals rendered from one data array, and localStorage persistence."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Completing 3.2 updates everything: 46% complete, '12 of 26 lessons', '2 h 57 min left', module 3 '2/6 lessons', Up next and the Next line become '3.3 Asking follow-up questions', and the weekly goal reads '102 of 120 min' with a taller Thursday bar; un-completing restores 42%; the state survives a reload."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Completing 3.2, 3.3 and 3.4 gives 54% complete, '14 of 26 lessons', '2 h 39 min left' and '120 of 120 min' with 'Goal reached'."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The accordion works: module headers open and close independently with aria-expanded, module 4 shows its five lessons (e.g. '4.3 Running a session', 14 min), and Expand all opens all five modules and becomes Collapse all."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Hide completed hides 3.1 and makes modules 1 and 2 show 'All lessons completed' when expanded; turning it off restores the lessons."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Tabs work: Reviews shows 4.8, 2,316 reviews and the percentages 78%, 16%, 4%, 1%, 1%; Overview shows the six learning outcomes; Curriculum returns to the modules."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px tapping module 4 expands it, and after completing 3.2 the fixed bottom button reads 'Continue: 3.3 Asking follow-up questions'."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1024x768 there is no horizontal page scrolling or overlapping text (the sidebar may move below the curriculum), the Continue bar stays fixed while scrolling at 390px, and nothing overflows at 390px."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-15",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive smart-home dashboard with device switches, scenes, a thermostat and energy charts from a Figma file",
+  "prompt": "Implement the Hearth smart-home dashboard from our Figma file as a real, responsive, working page. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (Roboto, orange #ff7a1a accents, tinted on-state tiles, the thermostat dial, radii, borders) and use every string and number exactly. Draw the device icons and the dial with CSS shapes or inline SVG as in the design. Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use semantic HTML: aside with nav, main, section cards with headings, device switches as role='switch' buttons (or checkboxes) with aria-checked and accessible names, room filters as tabs or pressed buttons, scene buttons, − and + buttons with accessible names, and the thermostat mode as a radio group or pressed buttons. Render the tiles from one device data array. On mobile the sidebar becomes a header with logo, bell and avatar, status pills sit under the greeting, the scenes and room tabs scroll horizontally inside their rows, the thermostat card is compact, devices form two columns and a bottom tab bar is fixed to the viewport.\n\nBehavior (the indoor temperature stays 70°):\n- Switches turn devices on and off; tiles move between the orange on state ('On · 80%', 'On · Playing' …) and the white 'Off' state, and a light switched back on returns to its last brightness. '8 of 14 devices on' (and the mobile '8 of 14 on') stays live.\n- Room tabs (All rooms 14, Living room 4, Kitchen 3, Bedroom 3, Office 3, Outdoor 1) filter the tiles.\n- Thermostat: − and + change the target by 1° from 60° to 85° (disabled at the limits). Auto shows 'Heating to X°' above 70°, 'Cooling to X°' below 70° and 'Holding at 70°' at 70°. Heat shows 'Heating to X°' above 70° and otherwise 'Idle · set to X°'; Cool shows 'Cooling to X°' below 70° and otherwise 'Idle · set to X°'; Off shows 'Off' and disables − and +.\n- Scenes: Arrive home turns Ceiling lights and Porch light on at 100%, unlocks the front door and sets 72°; Movie night sets Ceiling lights to 20%, turns Floor lamp off and TV and Speaker on; Good night turns every light, the TV and the Speaker off, locks the front door and sets 66°; Away turns every light, the TV, the Speaker and every plug off, locks the front door and sets 62°. The last scene run is highlighted.\n- The front door toggles between Locked (green, button 'Unlock') and Unlocked (amber, button 'Lock'); the mobile 'Door locked' pill follows. Every lock change, scene and thermostat change adds an entry at the top of Recent activity with 'just now' (e.g. 'Front door unlocked', 'Scene: Good night').\n- Energy: Day is the design ('Energy today', 18.4 kWh, '▼ 12% vs yesterday', eight 3-hour bars). Week shows 'Energy this week', 145.4 kWh, '▲ 3% vs last week' and seven daily bars: Fri 20.1, Sat 23.4, Sun 22.8, Mon 19.6, Tue 21.3, Wed 19.8, Thu 18.4.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 1360
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 1360
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Toggle Floor lamp off (7 of 14 devices on, white Off tile) and on (On · 40%, 8). Click the Kitchen tab (3 tiles), then All rooms. Press + twice (74°, Heating to 74°), − six times (68°, Cooling to 68°), + twice (Holding at 70°); choose Cool at 74° (Idle · set to 74°); choose Off (both buttons disabled). Reload; run Good night (2 of 14 devices on, 66°, Cooling to 66°, door Locked) then Arrive home (4 of 14, 72°, Unlocked). Reload; run Movie night (Ceiling lights On · 20%, Floor lamp Off, TV On, 8 of 14). Click Unlock (Unlocked, button Lock, Recent activity 'Front door unlocked · just now'). Click Week in the energy card. Mobile: scroll the scenes row, toggle a tile and read the status pill. For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: sidebar (Hearth logo, Home active and five more items, the 18 Alder Lane card, Sam Rivera), greeting and date, the '64°F · Clear' and '8 of 14 devices on' pills with the bell, four scene cards, Devices with six room tabs and fourteen tiles in three columns, the Energy card (18.4 kWh, delta pill, Day / Week, eight labeled bars with 6p highlighted), the Thermostat card (dial with 72° and 'Heating to 72°', − and +, 'Now 70° · Humidity 41%', Heat / Cool / Auto / Off), the Security card and Recent activity."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: logo, bell and avatar, greeting and date, the three status pills, the scenes row cut at the right edge, the compact thermostat card, the room tabs cut at the right edge, fourteen tiles in two columns, the compact energy card and the fixed bottom tab bar with Home active."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: Roboto, orange #ff7a1a for on switches, icon circles and the dial knob, pale orange on-state tiles with orange text versus white off tiles, the black active room tab, the green front-door row, peach energy bars with the 6p bar in orange, 16px card radii and light borders on #eef1f6."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Data matches exactly: the fourteen devices with rooms and states (On · 80%, On · 40%, Off, On · Playing, On · 100%, Off, On · 42 min left, Off, On · Auto, Off, On · 70%, Off, Off, On · 100%), the scene descriptions, the energy values 1.2 to 0.7 under 12a to 9p, and the four activity entries with times."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: media queries with flex/grid layout, aside/nav/main, switches with role='switch' (or checkboxes) and accessible names, thermostat buttons with accessible names, and tiles rendered from one device array."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Switches and rooms work: turning Floor lamp off gives '7 of 14 devices on' and a white Off tile, turning it on again shows 'On · 40%' and 8, and the Kitchen tab shows exactly Pendant lights, Coffee maker and Dishwasher."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The thermostat follows the rules: + twice shows 74° and 'Heating to 74°', 68° shows 'Cooling to 68°', 70° shows 'Holding at 70°', the target stops at 60° and 85° with the button disabled, Cool at 74° shows 'Idle · set to 74°', and Off shows 'Off' with − and + disabled."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Scenes are exact: Good night gives '2 of 14 devices on' (only Dishwasher and Air purifier), 66° with 'Cooling to 66°' and the door Locked; Arrive home after it gives 4 of 14, 72° and the door Unlocked; Movie night from the design shows Ceiling lights 'On · 20%', Floor lamp Off and TV on with 8 of 14."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The door works: Unlock shows Unlocked in amber with a Lock button, the mobile status pill follows, and Recent activity starts with 'Front door unlocked' and 'just now'."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Energy Week shows 'Energy this week', 145.4 kWh, '▲ 3% vs last week' and seven bars Fri to Thu with the given values; Day restores the design."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px the scenes and room tabs scroll horizontally inside their rows, a tile switch updates the '8 of 14 on' pill, and the tab bar stays fixed while scrolling."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1024x768 there is no horizontal page scrolling or overlapping text (the right column may move below), and nothing overflows at 390px."
+   }
+  ]
+ },
+ {
+  "task_id": "figma-rep-16",
+  "category": "figma",
+  "mode": "replication",
+  "title": "Implement a responsive job search page with combined filters, saved searches and a job detail pane from a Figma file",
+  "prompt": "Implement the Hireloop job search page from our Figma file as a real, responsive, working page. The Figma file is design.json (Figma REST API format). Its page holds two top-level frames, Desktop (1280 wide) and Mobile (390 wide); every node has a descriptive name, an absoluteBoundingBox, fills, strokes, corner radii, effects and, for text, the characters and style. desktop.png and mobile.png are the two frames rendered. Match both frames closely (Open Sans, the navy #0c1a2b header, sky #0284c7 accents, company initial tiles, salary and type chips, radii, shadows) and use every string and number exactly. Build one responsive page: the Desktop frame from 768px up and the Mobile frame below 768px, using real responsive CSS (flexbox or grid plus media queries), not absolutely positioned boxes. Between 768px and 1280px the desktop layout must adapt without horizontal page scrolling or overlapping text. Use semantic HTML: header with nav, a search form with labelled keyword and location inputs, the saved searches as a list of buttons with separate remove buttons, the filters as real controls (a switch, selects, pressed toggle buttons for experience), main with the results as a list of article cards rendered from one job data array, and the job detail as a section with headings. On mobile the search fields stack in the header with a full-width Search jobs button, saved searches and filters scroll horizontally inside their rows, the list shows compact cards with the posted time and industry, and tapping a card opens its detail as a full-screen view with a back button.\n\nSearch rules: a job matches the keyword when every word appears in its title or industry (case-insensitive); the location 'United States' matches all jobs, 'Remote' matches the Remote (US) jobs and 'Seattle, WA' the Seattle jobs. Search jobs (or Enter) applies the fields.\n\nBehavior:\n- Filters combine with the search: Remote only; Job type (Any job type, Full-time, Contract, Part-time); Salary (Any salary, $100k+, $120k+, $150k+, where the bottom of the range must be at least that); Date posted (Any time, Past 24 hours = jobs posted hours ago, Past 3 days = up to 3d ago); Experience toggles (several combine with OR). The count reads 'N jobs'. With no results show 'No jobs match your search' and a 'Reset search' button that restores the design's search and filters.\n- Sort: Most relevant (design order), Newest, Salary: high to low (by the top of the range).\n- Clicking a card selects it (sky border) and shows it in the detail pane: title, company · location, salary, type and level chips, Apply now, Save and the posted time. Other jobs may use a short generic description under the same headings.\n- Bookmarks (on cards and the detail Save) toggle saved jobs, and the header 'Saved jobs' badge shows the live count (2 in the design).\n- Apply now becomes a disabled 'Applied ✓', the card shows an 'Applied' chip, and the applicant count goes up by one.\n- Saved searches: clicking a chip fills the keyword and location, runs the search and becomes active; × removes it. 'Save this search' adds the current keyword · location as a new active chip, or shows 'This search is already saved' when it exists.\n- Mobile: tapping a card opens its detail full screen; Back returns to the list.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 1488
+  },
+  "checks": {
+   "mobile": true
+  },
+  "assets": [
+   "design.json"
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 1488
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "interaction_hints": "Toggle Remote only (6 jobs), then off. Choose Salary $150k+ (Senior Product Designer, Lead Product Designer, Staff Product Designer), reset; Remote only + Senior (Senior Product Designer and Senior Product Designer, Mobile); Past 24 hours (the 3h, 5h and 6h jobs). Sort by Newest and Salary: high to low. Click the 'Senior product designer · Remote' chip (2 jobs) and 'Design systems · Seattle, WA' (1 job); click Save this search on it (already saved); type UX researcher and Search (empty state, Reset search). Click Staff Product Designer (detail pane). Bookmark Senior Product Designer (badge 3), click Apply now (Applied ✓, 49 applicants). Mobile: tap a card, then Back. For mobile checks run the interaction helper with --width 390 --height 844; for the intermediate-width check use --width 1024 --height 768 and eval document.documentElement.scrollWidth (must be at most 1024).",
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 1280px the page matches the Desktop frame: the navy header (Hireloop logo, Find jobs active, Companies, Salaries, Career advice, Saved jobs with badge 2, Post a job, avatar), the search band (What / Where fields, Search jobs), the saved searches row (first chip active with '3 new') with Save this search, the filter row (Remote only, Any job type, Any salary, Any time, Experience toggles, Sort: Most relevant), '10 jobs · Product designer in United States', ten job cards with the first selected, and the detail pane (chips with Easy apply, Apply now, Save, 'Posted 1d ago · 48 applicants', About the role, What you'll do, What you bring, Benefits, company card)."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "At 390px the page matches the Mobile frame: navy header with logo, bookmark badge and avatar, stacked keyword and location fields, full-width Search jobs, the saved searches and filter rows cut at the right edge, '10 jobs' with 'Sort: Most relevant ⌄', and ten compact cards with salary, type and level chips and the posted time and industry line (long titles wrap to two lines); no detail pane."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Visual style matches: Open Sans, the #0c1a2b header and #13263d search band, sky #0284c7 for Search jobs, Apply now, the active saved search and the selected card border, colored company initial tiles, green salary chips, gray type and level chips, filled sky bookmarks for saved jobs, and 12px radii with light borders on #f3f6f9."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Data matches exactly: the ten jobs with title, company, location, salary range, type, level and posted time (e.g. 'Staff Product Designer', 'Halcyon AI · Remote (US)', '$190k–$225k', 'Lead', '5d ago'), bookmarks on Lead Product Designer and Senior Product Designer, Mobile, and the detail copy for Senior Product Designer (four and four bullets, five benefits)."
+   },
+   {
+    "id": "F5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Reading the source: media queries with flex/grid layout, header/nav/main, a search form with labelled inputs, real filter controls, job cards as articles rendered from one data array, and the detail pane filled from that data."
+   },
+   {
+    "id": "F6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Filters combine correctly: Remote only gives 6 jobs; Salary $150k+ gives Senior Product Designer, Lead Product Designer and Staff Product Designer; Remote only + Senior gives Senior Product Designer and Senior Product Designer, Mobile; Past 24 hours gives the 3h, 5h and 6h jobs; the count text follows."
+   },
+   {
+    "id": "F7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Sorting works: Newest starts Product Designer, Design Systems (3h), Product Designer, Growth (5h), Product Designer (Contract) (6h) and ends with Senior Product Designer, Mobile (1w); Salary: high to low starts Staff ($225k), Lead ($200k), Senior Product Designer ($180k) and ends with Junior Product Designer ($92k)."
+   },
+   {
+    "id": "F8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Saved searches work: 'Senior product designer · Remote' fills both fields and shows 2 jobs, 'Design systems · Seattle, WA' shows only Product Designer, Design Systems, Save this search on an existing search shows 'This search is already saved', a new search adds an active chip, × removes a chip, and 'UX researcher' shows 'No jobs match your search' with Reset search restoring the 10 jobs."
+   },
+   {
+    "id": "F9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Clicking Staff Product Designer highlights its card and shows its title, 'Halcyon AI · Remote (US)', $190k–$225k, Full-time and Lead in the detail pane."
+   },
+   {
+    "id": "F10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Saving and applying work: bookmarking Senior Product Designer makes the Saved jobs badge 3 (and unbookmarking 2), and Apply now becomes a disabled 'Applied ✓' with an 'Applied' chip on the card and '49 applicants'."
+   },
+   {
+    "id": "F11",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "At 390px tapping a card opens its detail full screen with a back button that returns to the list, and the saved-search and filter rows scroll horizontally inside themselves."
+   },
+   {
+    "id": "F12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 1024x768 there is no horizontal page scrolling or overlapping text (the detail pane may narrow), and nothing overflows at 390px."
+   }
+  ]
+ }
+]

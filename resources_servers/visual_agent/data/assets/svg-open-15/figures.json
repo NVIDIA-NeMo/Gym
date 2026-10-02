@@ -1,0 +1,374 @@
+{
+ "Ursa Major": [
+  [
+   "Dubhe",
+   "Merak"
+  ],
+  [
+   "Merak",
+   "Phecda"
+  ],
+  [
+   "Phecda",
+   "Megrez"
+  ],
+  [
+   "Megrez",
+   "Dubhe"
+  ],
+  [
+   "Megrez",
+   "Alioth"
+  ],
+  [
+   "Alioth",
+   "Mizar"
+  ],
+  [
+   "Mizar",
+   "Alkaid"
+  ]
+ ],
+ "Ursa Minor": [
+  [
+   "Polaris",
+   "Yildun"
+  ],
+  [
+   "Yildun",
+   "Epsilon UMi"
+  ],
+  [
+   "Epsilon UMi",
+   "Zeta UMi"
+  ],
+  [
+   "Zeta UMi",
+   "Kochab"
+  ],
+  [
+   "Kochab",
+   "Pherkad"
+  ],
+  [
+   "Pherkad",
+   "Eta UMi"
+  ],
+  [
+   "Eta UMi",
+   "Zeta UMi"
+  ]
+ ],
+ "Cassiopeia": [
+  [
+   "Caph",
+   "Schedar"
+  ],
+  [
+   "Schedar",
+   "Navi"
+  ],
+  [
+   "Navi",
+   "Ruchbah"
+  ],
+  [
+   "Ruchbah",
+   "Segin"
+  ]
+ ],
+ "Cepheus": [
+  [
+   "Alderamin",
+   "Alfirk"
+  ],
+  [
+   "Alfirk",
+   "Errai"
+  ],
+  [
+   "Errai",
+   "Iota Cep"
+  ],
+  [
+   "Iota Cep",
+   "Zeta Cep"
+  ],
+  [
+   "Zeta Cep",
+   "Alderamin"
+  ]
+ ],
+ "Cygnus": [
+  [
+   "Deneb",
+   "Sadr"
+  ],
+  [
+   "Sadr",
+   "Albireo"
+  ],
+  [
+   "Gienah",
+   "Sadr"
+  ],
+  [
+   "Sadr",
+   "Delta Cyg"
+  ]
+ ],
+ "Lyra": [
+  [
+   "Vega",
+   "Zeta Lyr"
+  ],
+  [
+   "Zeta Lyr",
+   "Sheliak"
+  ],
+  [
+   "Sheliak",
+   "Sulafat"
+  ],
+  [
+   "Sulafat",
+   "Delta Lyr"
+  ],
+  [
+   "Delta Lyr",
+   "Zeta Lyr"
+  ]
+ ],
+ "Aquila": [
+  [
+   "Tarazed",
+   "Altair"
+  ],
+  [
+   "Altair",
+   "Alshain"
+  ]
+ ],
+ "Bootes": [
+  [
+   "Arcturus",
+   "Izar"
+  ],
+  [
+   "Izar",
+   "Delta Boo"
+  ],
+  [
+   "Delta Boo",
+   "Nekkar"
+  ],
+  [
+   "Nekkar",
+   "Seginus"
+  ],
+  [
+   "Seginus",
+   "Arcturus"
+  ],
+  [
+   "Arcturus",
+   "Muphrid"
+  ]
+ ],
+ "Leo": [
+  [
+   "Epsilon Leo",
+   "Adhafera"
+  ],
+  [
+   "Adhafera",
+   "Algieba"
+  ],
+  [
+   "Algieba",
+   "Eta Leo"
+  ],
+  [
+   "Eta Leo",
+   "Regulus"
+  ],
+  [
+   "Algieba",
+   "Zosma"
+  ],
+  [
+   "Zosma",
+   "Denebola"
+  ],
+  [
+   "Denebola",
+   "Chertan"
+  ],
+  [
+   "Chertan",
+   "Regulus"
+  ],
+  [
+   "Zosma",
+   "Chertan"
+  ]
+ ],
+ "Gemini": [
+  [
+   "Castor",
+   "Pollux"
+  ],
+  [
+   "Castor",
+   "Mebsuta"
+  ],
+  [
+   "Mebsuta",
+   "Tejat"
+  ],
+  [
+   "Pollux",
+   "Wasat"
+  ],
+  [
+   "Wasat",
+   "Alhena"
+  ]
+ ],
+ "Auriga": [
+  [
+   "Capella",
+   "Menkalinan"
+  ],
+  [
+   "Menkalinan",
+   "Theta Aur"
+  ],
+  [
+   "Theta Aur",
+   "Elnath"
+  ],
+  [
+   "Elnath",
+   "Hassaleh"
+  ],
+  [
+   "Hassaleh",
+   "Capella"
+  ]
+ ],
+ "Orion": [
+  [
+   "Betelgeuse",
+   "Meissa"
+  ],
+  [
+   "Meissa",
+   "Bellatrix"
+  ],
+  [
+   "Betelgeuse",
+   "Alnitak"
+  ],
+  [
+   "Bellatrix",
+   "Mintaka"
+  ],
+  [
+   "Mintaka",
+   "Alnilam"
+  ],
+  [
+   "Alnilam",
+   "Alnitak"
+  ],
+  [
+   "Alnitak",
+   "Saiph"
+  ],
+  [
+   "Mintaka",
+   "Rigel"
+  ]
+ ],
+ "Taurus": [
+  [
+   "Gamma Tau",
+   "Delta Tau"
+  ],
+  [
+   "Delta Tau",
+   "Ain"
+  ],
+  [
+   "Gamma Tau",
+   "Aldebaran"
+  ],
+  [
+   "Aldebaran",
+   "Zeta Tau"
+  ]
+ ],
+ "Canis Major": [
+  [
+   "Mirzam",
+   "Sirius"
+  ],
+  [
+   "Sirius",
+   "Wezen"
+  ],
+  [
+   "Wezen",
+   "Adhara"
+  ],
+  [
+   "Wezen",
+   "Aludra"
+  ]
+ ],
+ "Pegasus": [
+  [
+   "Markab",
+   "Scheat"
+  ],
+  [
+   "Scheat",
+   "Alpheratz"
+  ],
+  [
+   "Alpheratz",
+   "Algenib"
+  ],
+  [
+   "Algenib",
+   "Markab"
+  ],
+  [
+   "Markab",
+   "Enif"
+  ]
+ ],
+ "Perseus": [
+  [
+   "Gamma Per",
+   "Mirfak"
+  ],
+  [
+   "Mirfak",
+   "Delta Per"
+  ],
+  [
+   "Delta Per",
+   "Epsilon Per"
+  ],
+  [
+   "Epsilon Per",
+   "Zeta Per"
+  ],
+  [
+   "Mirfak",
+   "Algol"
+  ]
+ ]
+}

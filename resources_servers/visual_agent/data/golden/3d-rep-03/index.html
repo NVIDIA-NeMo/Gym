@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Studio materials still life</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #cfd4dc; }
+  canvas { display: block; }
+</style>
+<script type="importmap">{"imports": {"three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/"}}</script>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#cfd4dc');
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.55;
+
+const camera = new THREE.PerspectiveCamera(32, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(1.4, 4.4, 12.5);
+camera.lookAt(0.2, 1.0, -0.2);
+
+// Key light: a warm spotlight from the upper left front; cool rim from the back right.
+const key = new THREE.SpotLight('#fff1dc', 900, 60, 0.5, 0.75, 2);
+key.position.set(-9, 13, 8);
+key.target.position.set(0, 0, 0);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.near = 6;
+key.shadow.camera.far = 40;
+key.shadow.bias = -0.0003;
+key.shadow.radius = 6;
+scene.add(key, key.target);
+const rim = new THREE.DirectionalLight('#9ec3ff', 1.6);
+rim.position.set(9, 7, -8);
+scene.add(rim);
+scene.add(new THREE.HemisphereLight('#f4f6fb', '#8a8f99', 0.35));
+
+// Seamless studio sweep: a floor that curves up into a back wall.
+function sweepGeometry() {
+  const profile = [];
+  for (let z = 9; z > -3; z -= 0.5) profile.push([0, z]);
+  const R = 4.5;
+  for (let i = 0; i <= 24; i++) {
+    const a = (i / 24) * (Math.PI / 2);
+    profile.push([R - R * Math.cos(a), -3 - R * Math.sin(a)]);
+  }
+  for (let y = R + 0.5; y <= 16; y += 0.5) profile.push([y, -3 - R]);
+  const pos = [];
+  const idx = [];
+  const W = 24;
+  profile.forEach(([y, z]) => pos.push(-W, y, z, W, y, z));
+  for (let i = 0; i < profile.length - 1; i++) {
+    const a = i * 2;
+    idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+const sweep = new THREE.Mesh(sweepGeometry(), new THREE.MeshStandardMaterial({ color: '#c3c9d2', roughness: 0.92, side: THREE.DoubleSide }));
+sweep.receiveShadow = true;
+scene.add(sweep);
+
+function add(geo, mat, x, y, z) {
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y, z);
+  m.castShadow = true;
+  m.receiveShadow = true;
+  scene.add(m);
+  return m;
+}
+
+// Polished gold sphere, front left.
+add(new THREE.SphereGeometry(1.1, 64, 48), new THREE.MeshStandardMaterial({ color: '#e7b457', metalness: 1, roughness: 0.2 }), -3.5, 1.1, 0.7);
+
+// Dark plinth with a chrome torus knot standing on it, back centre.
+add(new THREE.CylinderGeometry(1.35, 1.45, 0.4, 64), new THREE.MeshStandardMaterial({ color: '#2a2c32', roughness: 0.35, metalness: 0.2 }), -0.4, 0.2, -1.8);
+const knot = add(new THREE.TorusKnotGeometry(0.85, 0.28, 220, 32, 2, 3), new THREE.MeshStandardMaterial({ color: '#e4e8ee', metalness: 1, roughness: 0.07 }), -0.4, 1.72, -1.8);
+knot.rotation.set(0.25, 0.5, 0);
+
+// Terracotta vase turned on a lathe, right.
+const vaseProfile = [
+  [0.0, 0.0], [0.62, 0.0], [0.72, 0.1], [0.9, 0.6], [0.98, 1.2], [0.9, 1.8], [0.62, 2.3],
+  [0.42, 2.6], [0.4, 2.9], [0.5, 3.1], [0.46, 3.14], [0.34, 2.95], [0.32, 2.6], [0.0, 2.6],
+].map(([r, y]) => new THREE.Vector2(r, y));
+add(new THREE.LatheGeometry(vaseProfile, 64), new THREE.MeshStandardMaterial({ color: '#c2643c', roughness: 0.88 }), 2.7, 0, -1.0);
+
+// Clear glass sphere, front centre.
+add(
+  new THREE.SphereGeometry(0.8, 64, 48),
+  new THREE.MeshPhysicalMaterial({ color: '#d7f1ec', metalness: 0, roughness: 0.06, transmission: 1, thickness: 1.4, ior: 1.5 }),
+  0.7, 0.8, 1.9
+);
+
+// Stack of three rounded blocks, front right.
+const blocks = [
+  { s: 1.2, c: '#8fd4b5', y: 0.6, r: 0.0 },
+  { s: 0.9, c: '#f3e7c8', y: 1.65, r: 0.38 },
+  { s: 0.62, c: '#ff7d68', y: 2.41, r: -0.3 },
+];
+for (const b of blocks) {
+  const m = add(new RoundedBoxGeometry(b.s, b.s, b.s, 5, 0.1), new THREE.MeshStandardMaterial({ color: b.c, roughness: 0.55 }), 3.9, b.y, 1.7);
+  m.rotation.y = b.r;
+}
+
+// Small matte-black ring lying flat in front of the gold sphere.
+const ring = add(new THREE.TorusGeometry(0.45, 0.12, 24, 64), new THREE.MeshStandardMaterial({ color: '#1c1d21', roughness: 0.6 }), -1.7, 0.12, 2.5);
+ring.rotation.x = -Math.PI / 2;
+
+function draw() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.render(scene, camera);
+}
+draw();
+window.addEventListener('resize', draw);
+</script>
+</body>
+</html>

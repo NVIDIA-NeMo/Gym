@@ -1,0 +1,136 @@
+{
+ "seller": {
+  "name": "Northlight Studio B.V.",
+  "address": [
+   "Keizersgracht 221",
+   "1016 DV Amsterdam",
+   "Netherlands"
+  ],
+  "country": "NL",
+  "vat": "NL862114587B01",
+  "kvk": "71234567",
+  "iban": "NL91 ABNA 0417 1643 00",
+  "bic": "ABNANL2A",
+  "email": "billing@northlight.studio"
+ },
+ "clients": [
+  {
+   "id": "harbour",
+   "name": "Harbour & Co B.V.",
+   "address": [
+    "Wilhelminakade 91",
+    "3072 AP Rotterdam",
+    "Netherlands"
+   ],
+   "country": "NL",
+   "vat": "NL853746291B01",
+   "terms": "Net 30"
+  },
+  {
+   "id": "sommer",
+   "name": "Bäckerei Sommer GmbH",
+   "address": [
+    "Lindenstraße 14",
+    "10969 Berlin",
+    "Germany"
+   ],
+   "country": "DE",
+   "vat": "DE811234567",
+   "terms": "Net 14"
+  },
+  {
+   "id": "maple",
+   "name": "Maple Leaf Media Inc.",
+   "address": [
+    "388 King Street West",
+    "Toronto, ON M5V 1K2",
+    "Canada"
+   ],
+   "country": "CA",
+   "vat": null,
+   "terms": "End of month + 30"
+  },
+  {
+   "id": "jansen",
+   "name": "Jansen Fotografie",
+   "address": [
+    "Oudegracht 118",
+    "3511 AX Utrecht",
+    "Netherlands"
+   ],
+   "country": "NL",
+   "vat": null,
+   "terms": "Due on receipt"
+  }
+ ],
+ "nextNumber": 41,
+ "invoices": [
+  {
+   "number": "NLS-2026-0038",
+   "client": "harbour",
+   "issued": "2026-04-02",
+   "terms": "Net 30",
+   "status": "Paid",
+   "lines": [
+    {
+     "description": "Website maintenance (Q2)",
+     "qty": 1,
+     "unit": "item",
+     "price": 1800.0,
+     "vat": 21,
+     "discount": 0
+    },
+    {
+     "description": "Hosting & monitoring",
+     "qty": 3,
+     "unit": "months",
+     "price": 45.0,
+     "vat": 21,
+     "discount": 0
+    }
+   ]
+  },
+  {
+   "number": "NLS-2026-0039",
+   "client": "sommer",
+   "issued": "2026-05-04",
+   "terms": "Net 14",
+   "status": "Sent",
+   "lines": [
+    {
+     "description": "Packaging illustration",
+     "qty": 12,
+     "unit": "hours",
+     "price": 85.0,
+     "vat": 21,
+     "discount": 0
+    },
+    {
+     "description": "Print-ready files",
+     "qty": 1,
+     "unit": "item",
+     "price": 240.0,
+     "vat": 21,
+     "discount": 0
+    }
+   ]
+  },
+  {
+   "number": "NLS-2026-0040",
+   "client": "maple",
+   "issued": "2026-05-29",
+   "terms": "End of month + 30",
+   "status": "Sent",
+   "lines": [
+    {
+     "description": "Motion graphics package",
+     "qty": 1,
+     "unit": "item",
+     "price": 3200.0,
+     "vat": 21,
+     "discount": 5
+    }
+   ]
+  }
+ ]
+}

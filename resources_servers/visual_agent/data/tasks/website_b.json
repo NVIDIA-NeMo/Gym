@@ -1,0 +1,1367 @@
+[
+ {
+  "task_id": "website-open-11",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Cabin rental site with a range calendar, booked nights and seasonal pricing",
+  "prompt": "Build the website for Larchwood Cabins, three off-grid cabins in a quiet glen in the Cairngorms. Calm and outdoorsy: pine green, birch white and a warm rust accent, rounded cards, and a simple SVG illustration of each cabin (no photos). One index.html with hash routes #/ (home), #/cabin/fernbrook, #/cabin/heron, #/cabin/stag and #/trips. The header has the logo and the links Cabins and 'Trips (N)', where N counts saved bookings.\n\nCabins: Fernbrook Bothy (sleeps 2, dogs welcome, £95 a night, cleaning £40), Heron Lodge (sleeps 4, no dogs, £140 a night, cleaning £60) and Stag Barn (sleeps 8, dogs welcome, £260 a night, cleaning £90). Home shows a card for each with 'Sleeps N', 'From £X a night' and a 'Dog friendly' badge where it applies, linking to the cabin's page.\n\nCabin page: a short description, an availability calendar and a booking panel. The calendar shows two months side by side, weeks starting on Monday, beginning with October 2026; Previous and Next move one month at a time within October 2026 to January 2027. Ignore the real current date. Nights already booked (a night is named by the date it starts): Fernbrook 16 and 17 October; Heron 9, 10, 11, 23 and 24 October; Stag 31 October, 1 November and 24 to 26 December. Booked nights look struck through and cannot be a check-in day, but a booked night's date can be the check-out day.\n\nChoosing dates: the first click sets check-in and the second sets check-out; a click on or before the check-in, or any click once both are set, starts again from that day. Highlight the range and show a line such as 'Tue 13 Oct → Fri 16 Oct · 3 nights'. A range containing a booked night shows 'Those dates include booked nights'. The minimum stay is 2 nights ('Minimum stay is 2 nights'), or 3 nights when any night falls from 20 December to 2 January ('Minimum stay over the festive period is 3 nights'). Invalid ranges cannot be reserved.\n\nPricing: each night costs the cabin rate, times 1.5 for festive nights (20 December to 2 January), plus £30 for Friday and Saturday nights. Stays of 7 nights or more get 10% off the nights. Add the cleaning fee, £25 per dog (0 to 2, only where dogs are welcome; Heron Lodge shows 'No dogs at Heron Lodge' instead of the dog control) and a visitor levy of £2 per adult per night. Guests: adults from 1 and children from 0, together at most the cabin's sleeps. The breakdown lists Nights, Long-stay discount (only when it applies, as a negative amount), Cleaning, Dogs (only with dogs), Visitor levy and Total, in pounds with two decimals and thousands separators.\n\nBooking: name ('Please enter your name'), email ('Enter a valid email address') and a Reserve button. Success shows 'Booked! Your reference is LC-HL-1310' (LC, the cabin code FB, HL or SB, and the check-in day and month as DDMM) with the total. Bookings are saved in localStorage, block their nights in that cabin's calendar, and are listed on #/trips in check-in order with a Cancel button; with none it says 'No trips yet'.\n\nAt 390px wide the calendar shows one month at a time with Previous and Next, and the booking panel sits below it.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Find how day cells are marked in the source (e.g. a data-date attribute or aria-label) and click days by selector; month headings disambiguate repeated numbers. Calendar: on #/cabin/heron screenshot the two months, eval which October days are marked booked, click Next until January and check Next is disabled, then Previous back to October. Range rules, one call each from a fresh #/cabin/heron: click 13 Oct then 16 Oct and screenshot the range line and breakdown (2 adults, the default guest count may need setting); click 6 Oct then 9 Oct (accepted); 6 Oct then 10 Oct (booked-nights message); 20 Oct then 21 Oct (minimum stay); click 10 Oct first and check it does not become the check-in; click 15 Oct then 12 Oct and check 12 Oct becomes the check-in. Long stay: Heron, 2 adults + 1 child, 15 Oct to 22 Oct. Festive: #/cabin/stag, 4 adults, 2 children, 2 dogs, 30 Dec to 2 Jan (navigate to December/January first); then 27 Dec to 29 Dec. Guests: on Heron set 3 adults and try to add 2 children; on Stag press the dog plus button 3 times. Booking and persistence in one call: Heron 13 Oct to 16 Oct with 2 adults, click Reserve with empty name, then with name Ada and email 'ada@' then ada@example.com; screenshot the confirmation; eval the header text; reload, go to #/trips, screenshot; go to #/cabin/heron and try 12 Oct to 14 Oct and 16 Oct to 18 Oct; then Cancel the trip on #/trips and screenshot. Mobile: run interact with --width 390 --height 844 on #/cabin/heron, full_page screenshots, and use the calendar's Next button.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Home shows three cabin cards with SVG illustrations: Fernbrook Bothy (Sleeps 2, From £95 a night, Dog friendly), Heron Lodge (Sleeps 4, From £140 a night, no dog badge) and Stag Barn (Sleeps 8, From £260 a night, Dog friendly), each linking to its #/cabin/ page; the header shows 'Trips (0)' and #/cabin/heron loads directly."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The Heron Lodge calendar shows October and November 2026 side by side with Monday-first weeks (1 October 2026 under Thursday), marks 9, 10, 11, 23 and 24 October as booked (struck through), and Previous/Next stay within October 2026 to January 2027."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Date selection follows the rules: 13 → 16 Oct highlights the range and shows 'Tue 13 Oct → Fri 16 Oct · 3 nights'; 6 → 9 Oct is accepted; 6 → 10 Oct shows 'Those dates include booked nights'; 20 → 21 Oct shows 'Minimum stay is 2 nights'; a booked day such as 10 Oct cannot become the check-in; clicking 12 Oct after choosing 15 Oct as check-in restarts with 12 Oct."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Heron Lodge, 2 adults, 13 → 16 Oct shows Nights £420.00, Cleaning £60.00, Visitor levy £12.00 and Total £492.00, with no discount or dog line."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Heron Lodge, 2 adults and 1 child, 15 → 22 Oct (7 nights including a Friday and a Saturday) shows Nights £1,040.00, Long-stay discount −£104.00, Cleaning £60.00, Visitor levy £28.00 and Total £1,024.00."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Stag Barn, 4 adults, 2 children and 2 dogs, 30 Dec → 2 Jan shows Nights £1,200.00, Cleaning £90.00, Dogs £50.00, Visitor levy £24.00 and Total £1,364.00; 27 → 29 Dec on Stag Barn shows 'Minimum stay over the festive period is 3 nights'."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Guest limits hold: on Heron Lodge adults plus children never exceed 4 (with 3 adults only 1 child can be added) and 'No dogs at Heron Lodge' replaces the dog control; on Stag Barn the dog count stops at 2."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Reserve with an empty name shows 'Please enter your name' and with the email 'ada@' shows 'Enter a valid email address'; a valid Heron booking for 13 → 16 Oct shows 'Booked! Your reference is LC-HL-1310' with £492.00 and the header becomes 'Trips (1)'."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The booking persists: after a reload #/trips lists Heron Lodge 13–16 Oct with £492.00; Heron's 13, 14 and 15 Oct now show as booked, so 12 → 14 Oct shows 'Those dates include booked nights' while 16 → 18 Oct is accepted; Cancel removes the trip, frees those nights and shows 'No trips yet'."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the cabin cards stack, the calendar shows a single month with working Previous/Next buttons, and the booking panel sits below it with the breakdown readable and nothing clipped."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Calm and outdoorsy in a consistent way: pine green, birch white and one rust accent, cohesive cabin illustrations, a calendar whose booked, selected and in-range days are clearly distinct, and amounts aligned in a right-hand column."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-12",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Sunday league site with computed standings, tie-breakers and a score predictor",
+  "prompt": "Build the website of the Riverside Sunday League, an amateur football league, for its Division One season. Sporty and clean: grass green and chalk white with a navy accent, heavy headings and tabular numbers. Each club has a small SVG crest (a shield with its initials in its own colors). One index.html with hash routes #/table (the default), #/fixtures and #/team/<slug> (lowercase name with hyphens, e.g. #/team/elm-park-rangers); an unknown club shows 'Team not found'.\n\nResults so far (home team first):\nRound 1, Sun 6 Sep: Ashford Albion 2–0 Foundry Town; Brookside United 0–1 Elm Park Rangers; Canal Street 2–0 Dockyard Rovers.\nRound 2, Sun 13 Sep: Elm Park Rangers 1–1 Ashford Albion; Dockyard Rovers 2–2 Foundry Town; Brookside United 2–0 Canal Street.\nRound 3, Sun 20 Sep: Ashford Albion 0–1 Dockyard Rovers; Canal Street 2–4 Elm Park Rangers; Foundry Town 2–1 Brookside United.\nRound 4, Sun 27 Sep: Canal Street 2–3 Ashford Albion; Brookside United 0–3 Dockyard Rovers; Elm Park Rangers 2–0 Foundry Town.\nRound 5, Sun 4 Oct (not played yet): Ashford Albion v Brookside United; Foundry Town v Canal Street; Dockyard Rovers v Elm Park Rangers.\n\nTable: computed from the results, with columns Pos, Club, P, W, D, L, GF, GA, GD (with a + sign when positive), Pts and Form. A win is worth 3 points and a draw 1. Rank by points, then goal difference, then goals scored, then the result of the match between the two clubs (if they have played), then alphabetically. Form shows the last three results as W, D or L pills, oldest on the left. Each row links to the club page.\n\nFixtures: the results grouped by round with their dates, and Round 5 as a predictor with two score boxes per fixture. A fixture counts as a prediction only when both boxes hold whole numbers from 0 to 20; an empty box just means no prediction, and any other entry shows 'Enter a whole number from 0 to 20' and is ignored. Counted predictions feed the table, form and club pages exactly like real results; the table then shows 'Includes N predicted results', a 'Clear predictions' button, and beside each club its movement compared with the table without predictions (▲1, ▼2 or –). Predictions persist in localStorage.\n\nClub page: crest, name, position as an ordinal (e.g. '2nd'), P, W, D, L, GD and Pts, every match with its score and a W/D/L tag, and the next fixture.\n\nAt 390px the table shows only Pos, Club, P, GD and Pts, and the predictor fits the screen.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Table: open index.html, screenshot, and eval the text of every table row in order. Predictor (find the Round 5 score inputs' selectors in the source; use type with a selector): scenario 1 in one call: on #/fixtures enter Ashford Albion 1–2 Brookside United, Foundry Town 2–2 Canal Street and Dockyard Rovers 3–0 Elm Park Rangers, go to #/table, screenshot and eval the rows. Scenario 2 on a fresh page (Clear predictions first if needed): enter only Ashford 2–2 Brookside and Dockyard 1–1 Elm Park, leave Foundry v Canal empty, check the table. Invalid: type -1, then 2.5, then 21 into one box with a valid number in the other box, press Tab and screenshot the message and the table. Persistence: after scenario 1 reload #/table and #/fixtures, then click Clear predictions and check the default table and empty boxes. Club pages: eval location.hash='#/team/dockyard-rovers' (screenshot), '#/team/nowhere', and click a table row. Mobile: run interact with --width 390 --height 844 on #/table and #/fixtures with full_page screenshots.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The default table is exactly (Pos Club P W D L GF GA GD Pts): 1 Elm Park Rangers 4 3 1 0 8 3 +5 10; 2 Dockyard Rovers 4 2 1 1 6 4 +2 7; 3 Ashford Albion 4 2 1 1 6 4 +2 7; 4 Foundry Town 4 1 1 2 4 7 −3 4; 5 Canal Street 4 1 0 3 6 9 −3 3; 6 Brookside United 4 1 0 3 3 6 −3 3 (Dockyard above Ashford on their head-to-head, Canal above Brookside on goals scored)."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Form pills read oldest to newest: Elm Park Rangers D W W, Dockyard Rovers D W W, Ashford Albion D L W, Foundry Town D W L, Canal Street L L L, Brookside United W L L, with distinct colors for W, D and L; every club has a distinct SVG crest."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "#/fixtures lists rounds 1 to 4 with their Sunday dates and the twelve given scores, and Round 5 (Sun 4 Oct) with the three unplayed fixtures and two score boxes each."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Predicting Ashford 1–2 Brookside, Foundry 2–2 Canal and Dockyard 3–0 Elm Park gives exactly: Dockyard Rovers 10 (+5) ▲1, Elm Park Rangers 10 (+2) ▼1, Ashford Albion 7 –, Brookside United 6 ▲2, Foundry Town 5 ▼1, Canal Street 4 ▼1, with 'Includes 3 predicted results' and Dockyard's form W W W."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Predicting only Ashford 2–2 Brookside and Dockyard 1–1 Elm Park gives Elm Park Rangers 11, then Ashford Albion 8 above Dockyard Rovers 8 (goals 8 to 7), then Brookside United 4 (P5) above Foundry Town 4 (P4) on goals scored, then Canal Street 3, with 'Includes 2 predicted results'."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Entering -1, 2.5 or 21 in a score box shows 'Enter a whole number from 0 to 20' and that fixture is not counted (the table stays at its previous state); a fixture with one empty box is also not counted."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Predictions survive a reload (score boxes refilled and the predicted table unchanged), and 'Clear predictions' empties the boxes and restores the default table with no movement markers or predicted-results notice."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "#/team/dockyard-rovers loads directly and shows the crest, '2nd', P 4, W 2, D 1, L 1, GD +2, Pts 7, its four matches with the right scores and tags (L, D, W, W) and the next fixture against Elm Park Rangers on Sun 4 Oct; #/team/nowhere shows 'Team not found'; table rows link to club pages."
+   },
+   {
+    "id": "R9",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the table shows only Pos, Club, P, GD and Pts (W, D, L, GF, GA and Form hidden) without horizontal overflow, and the Round 5 predictor rows fit the screen."
+   },
+   {
+    "id": "R10",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Sporty and clean: grass green, chalk white and a navy accent used consistently, heavy headings, right-aligned tabular numbers in the table, clear zebra or divider rows, and legible crests."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-13",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Recipe site with scaling, metric/US conversion and a merged shopping list",
+  "prompt": "Build Little Larder, a home-cooking recipe website with three recipes. Warm and friendly: a cream background, tomato red and herb green accents, rounded cards, and an SVG illustration of each dish (no photos). One index.html with hash routes #/ (recipes), #/recipe/<slug> (tomato-bean-soup, lemon-chicken-traybake, banana-oat-muffins) and #/list (shopping list).\n\nRecipes (amount, ingredient, aisle):\nTomato & White Bean Soup, serves 4, 35 min, Vegetarian: 30 ml olive oil (Pantry), 1 onion (Produce), 3 garlic cloves (Produce), 800 g chopped tomatoes (Pantry), 480 g cannellini beans (Pantry), 750 ml vegetable stock (Pantry), 1 tsp smoked paprika (Pantry), 100 g baby spinach (Produce).\nLemon Herb Chicken Traybake, serves 4, 40 min: 900 g chicken thighs (Meat & fish), 700 g new potatoes (Produce), 1 lemon (Produce), 4 garlic cloves (Produce), 40 ml olive oil (Pantry), 2 tsp dried oregano (Pantry), 1 red onion (Produce), 150 g Greek yogurt (Dairy).\nBanana Oat Muffins, makes 12, 50 min, Vegetarian: 3 ripe bananas (Produce), 150 g rolled oats (Pantry), 120 g plain flour (Pantry), 200 ml milk (Dairy), 2 eggs (Dairy), 50 ml honey (Pantry), 2 tsp baking powder (Pantry), 120 g Greek yogurt (Dairy).\nWrite 4 to 6 method steps for each.\n\nRecipes page: cards with time and tags, chips 'Vegetarian' and 'Under 45 min', and a search box matching recipe names and ingredients. They combine; with no match show 'No recipes match'.\n\nRecipe page: a servings stepper (1 to 12; the muffins go from 6 to 24 in steps of 6) that scales every amount, and a 'Start cooking' button that opens a step-by-step dialog with 'Step 1 of N', Back and Next buttons and ArrowLeft/ArrowRight; Escape closes it and returns focus to the button.\n\nUnits: a Metric / US switch in the header applies everywhere. Metric: grams and millilitres rounded to whole numbers. US: grams become ounces with one decimal (1 oz = 28.35 g); millilitres of 60 or more become cups rounded to the nearest quarter (1 cup = 240 ml; 'cup' up to 1, otherwise 'cups') and smaller amounts become tablespoons rounded to the nearest half (1 tbsp = 15 ml). In both systems tsp amounts and whole items are rounded to the nearest quarter and written with ¼, ½ and ¾, with the amount first (e.g. 1½ tsp smoked paprika, 4½ garlic cloves, 45 ml olive oil).\n\nShopping list: 'Add to list' adds a recipe at its current servings; adding it again replaces it. The list merges ingredients with the same name and unit across recipes, groups them under Produce, Meat & fish, Dairy and Pantry in that order, sorts them A–Z inside each group, and shows each recipe as a chip with a remove button. Each item has a checkbox that strikes it through. The header shows 'List (N)' with the number of list items. The list, the ticks and the unit choice persist in localStorage.\n\nAt 390px everything is one column and the cooking dialog fits the screen.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Filters: click the Vegetarian chip, then Under 45 min, screenshot and eval the visible recipe titles; clear them, type yogurt in the search box (find its selector), then add Vegetarian; type xyz for the empty state. Scaling: on #/recipe/tomato-bean-soup press the servings plus button twice (4 → 6), screenshot the ingredient list, switch to US, screenshot again. On #/recipe/banana-oat-muffins press plus once (12 → 18), screenshot in Metric and US, and press minus until it stops (should stop at 6). Shopping list in one fresh call: soup at 6 → Add to list; traybake: press minus twice (4 → 2) → Add to list; muffins at 12 → Add to list; go to #/list, screenshot full_page, eval the header text; switch to US and screenshot; tick two items; reload and screenshot. Then go back to the soup, set 2 servings, Add to list again, check #/list (garlic cloves 3½), and remove the traybake chip. Cook mode: click Start cooking, press ArrowRight twice and screenshot, press ArrowLeft, press Escape and eval document.activeElement.textContent. Mobile: run interact with --width 390 --height 844 on #/, a recipe and #/list with full_page screenshots; open the cooking dialog there.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The recipes page shows the three recipes with SVG dish illustrations, times (35, 40 and 50 min), serves/makes and tags; each card opens its #/recipe/<slug> route, which also loads directly, and every recipe has 4 to 6 method steps."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Filters combine: Vegetarian + Under 45 min shows only Tomato & White Bean Soup; Under 45 min alone shows the soup and the traybake; searching yogurt shows the traybake and the muffins, and with Vegetarian only the muffins; xyz shows 'No recipes match'."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The soup scaled to 6 servings in Metric shows exactly 45 ml olive oil, 1½ onion, 4½ garlic cloves, 1200 g chopped tomatoes, 720 g cannellini beans, 1125 ml vegetable stock, 1½ tsp smoked paprika and 150 g baby spinach."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The soup at 6 servings in US shows 3 tbsp olive oil, 42.3 oz chopped tomatoes, 25.4 oz cannellini beans, 4¾ cups vegetable stock and 5.3 oz baby spinach, with 1½ tsp smoked paprika and 4½ garlic cloves unchanged."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The muffin stepper moves in steps of 6 between 6 and 24; at 18 it shows 4½ ripe bananas, 225 g rolled oats, 180 g plain flour, 300 ml milk, 3 eggs, 75 ml honey, 3 tsp baking powder and 180 g Greek yogurt, and in US 1¼ cups milk and ¼ cup honey."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With the soup at 6, the traybake at 2 and the muffins at 12, #/list shows 21 items as 'List (21)' under Produce, Meat & fish, Dairy, Pantry in that order, A–Z within each, with merged amounts 6½ garlic cloves, 65 ml olive oil and 195 g Greek yogurt, plus 450 g chicken thighs, ½ lemon, 1½ onion and ½ red onion as separate lines."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The same list in US shows ¼ cup olive oil, 6.9 oz Greek yogurt, 42.3 oz chopped tomatoes, ¾ cup milk and 3½ tbsp honey."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Adding the soup again at 2 servings replaces it (garlic cloves become 3½ and olive oil 35 ml), and removing the traybake chip leaves 16 items with 1½ garlic cloves."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "After a reload the list (recipes, servings and merged amounts), the ticked items (still struck through) and the chosen unit system are all restored."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Start cooking opens a dialog showing 'Step 1 of N'; ArrowRight/Next and ArrowLeft/Back move between steps, and Escape closes it and returns focus to the Start cooking button."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the cards, ingredient list and shopping list are one column without clipping, the header controls fit, and the cooking dialog fits the screen."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Warm and friendly in a consistent way: cream ground with tomato red and herb green accents, cohesive dish illustrations, amounts visually aligned in the ingredient lists, and clear aisle headings in the shopping list."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-14",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Theatre booking site with a seat map, single-seat rule and best-available search",
+  "prompt": "Build the booking website for The Lantern Theatre's new production The Glass Orchard, a play running 12–14 November 2026. Moody and elegant: deep plum and midnight blue with warm gold accents, a serif display face (DejaVu Serif or Liberation Serif) with a clean sans for the interface, and an SVG hero artwork of a glass tree on a stage (no photos).\n\nSections: header (logo and links About, Cast, Book, Visit), a hero with the title, the dates and a 'Book tickets' button, About the play (a synopsis, running time 2 hours 10 minutes including an interval, age guidance 12+), Cast & creative (six names with roles), Book, Visit (address and access information) and a footer.\n\nPerformances: Thu 12 Nov 19:30, Fri 13 Nov 19:30, Sat 14 Nov 14:30, and Sat 14 Nov 19:30, which shows 'Sold out' and cannot be chosen. Choosing a performance clears the current selection.\n\nSeat map: the stage at the top, rows A (front) to H, seats 1 to 12 with an aisle between seats 6 and 7. Zones by color with a legend: rows A–C Premium £52, D–F Standard £38, G–H Rear £24. Sold seats: Thu 12 Nov: A4–A9, B1, B2, B6, B7, C5–C7, C10, D1, D2, D11, D12, E6, E7, G3, G4. Fri 13 Nov: all of rows A and B, C1–C8, D5–D8, E1, E2. Sat 14 Nov 14:30: none. Every seat is a button with an aria-label such as 'C4, Premium, £52' and aria-pressed when selected; sold seats are disabled. At most 8 seats can be selected ('You can select up to 8 seats').\n\nSingle-seat rule: a selection may not leave a free seat on its own, meaning a free seat with a selected seat on one side and, on the other side, a sold or selected seat, the aisle or the end of the row. Continue then shows 'Please don't leave a single seat on its own' and does not proceed.\n\nBest available: choose a number from 1 to 6 and press 'Best available' to select that many adjacent free seats in one row and one section (seats 1–6 or 7–12) that obey the single-seat rule. Try row A first, then B, and so on; within a row take the block closest to the aisle, preferring the left section on a tie. If there is none, show 'No block of N seats together'.\n\nTickets: after Continue, choose a type for each seat: Adult (zone price), Concession (zone price minus £10) or Under 26 (£15 in any zone). The summary lists the seats in row and seat order with type and price, then Tickets, Booking fee (£1.50 per ticket, at most £6.00) and Total, with two decimals. 'Confirm booking' shows 'Booking confirmed' with the performance and seats; confirmed seats become sold for that performance and the booking appears under 'Your bookings'. Both persist in localStorage.\n\nAt 390px the seat map fits the screen width (scaled down, or scrolling inside its own box) and the summary sits below it.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Seats can be clicked with selectors like [aria-label^='C4,'] (check the real aria-label format in the source); find the performance buttons, the Best available number control and the ticket-type selects in the source. Map: screenshot the Book section for Thu 12 Nov and eval the aria-labels of disabled seats. Single-seat rule on Thu, each in a fresh call: select C3 and C4, click Continue (should proceed); select C2 and C3, Continue (message, no progress); C11 alone; C11 and C12. Best available on Thu with 2, 3, 4 and 5 (eval the aria-pressed seats' labels after each); then pick Fri 13 Nov, screenshot, and run Best available with 2 and 5. Try selecting a 9th seat and clicking a sold seat. Pricing: Thu, Best available 2, Continue, all Adult → screenshot summary; change one seat to Under 26. Thu Best available 5, Continue, set types Adult, Adult, Adult, Concession, Under 26 → screenshot. Persistence in one call: Thu Best available 5, Continue, Confirm booking, screenshot, reload, choose Thu again, screenshot the map and 'Your bookings', run Best available 2 (expect C8, C9); then choose Sat 14 Nov 14:30 and check B8–B12 are free there. Mobile: run interact with --width 390 --height 844 with full_page screenshots of the Book section.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The page has the hero 'The Glass Orchard' with an SVG stage artwork and 12–14 November 2026, About the play with 2 hours 10 minutes including an interval and 12+, six cast entries with roles, a Visit section, and four performances with Sat 14 Nov 19:30 marked 'Sold out' and not selectable."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The seat map shows the stage, rows A–H with 12 seats each and a visible aisle between seats 6 and 7, zone colors with a legend (Premium £52, Standard £38, Rear £24), Thursday's listed seats as sold and disabled, and seat buttons with aria-labels in the 'C4, Premium, £52' pattern."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "On Thu 12 Nov the single-seat rule is exact: C3 + C4 continues; C2 + C3 shows 'Please don't leave a single seat on its own' and stays; C11 alone is refused the same way; C11 + C12 continues."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Best available on Thu 12 Nov selects exactly B8, B9 for 2; A1, A2, A3 for 3; C1, C2, C3, C4 for 4; and B8, B9, B10, B11, B12 for 5."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Choosing Fri 13 Nov clears the selection and shows rows A and B, C1–C8, D5–D8, E1 and E2 as sold; Best available gives C9, C10 for 2 and 'No block of 5 seats together' for 5."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "A 9th seat is refused with 'You can select up to 8 seats', sold seats cannot be selected, and aria-pressed toggles on selected seats."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Thu B8 + B9 as Adult shows Tickets £104.00, Booking fee £3.00 and Total £107.00; switching one seat to Under 26 gives Total £70.00."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Thu B8–B12 as Adult, Adult, Adult, Concession, Under 26 shows the Concession at £42.00 and the Under 26 at £15.00, Tickets £213.00, Booking fee £6.00 (capped) and Total £219.00."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "After confirming B8–B12 for Thu 12 Nov and reloading, 'Your bookings' lists it, B8–B12 are sold on Thursday but free on the Saturday matinee, and Best available 2 on Thursday now selects C8, C9."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the seat map fits the screen width (scaled or scrolling inside its own box, with no page-level overflow), seats remain tappable, and the summary sits below the map without clipping."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Moody and elegant: plum and midnight blue with gold accents used consistently, serif display type over a clean sans, and available, selected, sold and zone states that are clearly distinguishable on the map."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-15",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Fell-walking guide with Naismith times, unit switching and an elevation profile",
+  "prompt": "Build Fellwise, a guide to eight Lake District fell walks. Outdoorsy and map-like: slate blue, bracken orange and moss green on a pale paper background, contour-line decoration in SVG, and clear data typography. One index.html with hash routes #/ (walks), #/walk/<slug> (lowercase name, apostrophes removed, spaces as hyphens, e.g. #/walk/blencathra-by-halls-fell) and #/logbook.\n\nWalks (name, grade, distance, elevations in metres at 0 km, 1 km, 2 km and so on, then at the finish):\nCatbells Ridge, Moderate, 5.6 km: 90, 215, 451, 330, 180, 110, 90.\nTarn Hows Circuit, Easy, 3.2 km: 190, 215, 205, 232, 190.\nHelvellyn via Striding Edge, Hard, 12.4 km: 150, 380, 620, 860, 950, 850, 700, 520, 400, 290, 200, 160, 150, 150.\nButtermere Shore, Easy, 7.2 km: 115, 120, 118, 130, 125, 122, 119, 121, 115.\nScafell Pike from Wasdale, Hard, 9.0 km: 80, 350, 620, 890, 978, 700, 420, 200, 90, 80.\nLoughrigg Fell, Moderate, 6.8 km: 60, 180, 290, 335, 210, 150, 90, 60.\nUllswater Way, Easy, 11.0 km: 150, 175, 160, 190, 230, 200, 185, 210, 175, 160, 170, 150.\nBlencathra by Hall's Fell, Hard, 7.4 km: 230, 520, 868, 640, 450, 330, 270, 240, 230.\n\nNumbers: ascent is the sum of every rise between consecutive points. Estimated time uses Naismith's rule: distance divided by the walking speed plus one hour per 600 m of ascent, rounded up to the next 15 minutes and shown like '2 h 15 min' or '3 h 00 min' ('45 min' under an hour). The header has a Pace setting (Relaxed 4 km/h, Steady 5 km/h, Brisk 6 km/h; default Steady) and a Units switch (Metric, Imperial). Imperial shows miles with one decimal (1 km = 0.621371 mi) and feet rounded to the nearest 10 (1 m = 3.28084 ft) with thousands separators. Both settings persist in localStorage.\n\nWalks page: a card per walk with grade, distance, ascent and time; grade chips (Easy, Moderate, Hard; several at once, none means all), a sort select (Quickest first with ties going to the shorter walk, Shortest first, Least ascent, Name A–Z), and 'Showing N of 8 walks'.\n\nWalk page: distance, ascent, 'High point <n> m' and time, and an SVG elevation profile drawn from the points. Hovering the profile, or focusing it and pressing ArrowLeft/ArrowRight, moves a marker from point to point and shows a readout like '3.0 km · 330 m' (in Imperial '1.9 mi · 1,080 ft'). A 'Mark as walked' toggle adds the walk to the logbook.\n\nLogbook: the walked walks with totals for Walks, Distance, Ascent and Time (the sum of each walk's estimate at the current pace), in the current units; with none it says 'No walks logged yet'. It persists in localStorage.\n\nAt 390px the cards are one column, the header settings still fit, and the profile scales to the screen width.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Walks: with the defaults (Steady, Metric) screenshot the list and eval the card titles and times; choose each sort option with select (find the select's selector) and eval the titles in order; then set Pace to Relaxed and sort by Quickest first again. Click the Hard and Easy chips together and read 'Showing N of 8 walks'. Walk page: eval location.hash='#/walk/catbells-ridge', screenshot; focus the profile (click it or Tab to it) and press ArrowRight 3 times, screenshot the readout; switch to Imperial and screenshot; try #/walk/blencathra-by-halls-fell. Logbook in one call: mark Catbells Ridge, Ullswater Way and Blencathra by Hall's Fell as walked, go to #/logbook and screenshot (Steady, Metric); set Pace to Brisk and Units to Imperial and screenshot; reload and screenshot. Unmark all three for the empty state. Mobile: run interact with --width 390 --height 844 on #/ and a walk page with full_page screenshots.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The walks page shows eight cards with the given names and grades and computed stats; at the default Steady pace in Metric, Catbells Ridge reads 5.6 km, 361 m and 1 h 45 min, Buttermere Shore 7.2 km, 19 m and 1 h 30 min, and Helvellyn via Striding Edge 12.4 km, 800 m and 4 h 00 min."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Quickest first at Steady orders the walks Tarn Hows Circuit, Buttermere Shore, Catbells Ridge, Loughrigg Fell, Ullswater Way, Blencathra by Hall's Fell, Scafell Pike from Wasdale, Helvellyn via Striding Edge; at Relaxed Blencathra (3 h 00 min) comes before Ullswater Way (3 h 00 min, longer), Catbells shows 2 h 15 min and Scafell Pike 3 h 45 min."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Least ascent orders Buttermere Shore (19 m), Tarn Hows Circuit (52 m), Ullswater Way (130 m), Loughrigg Fell (275 m), Catbells Ridge (361 m), Blencathra by Hall's Fell (638 m), Helvellyn (800 m), Scafell Pike (898 m); Shortest first starts with Tarn Hows and ends with Helvellyn."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The Hard and Easy chips together show 'Showing 6 of 8 walks' with only Tarn Hows, Buttermere, Ullswater, Blencathra, Scafell Pike and Helvellyn, combined with the current sort."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Imperial is exact: Catbells Ridge shows 3.5 mi and 1,180 ft with 'High point 1,480 ft', Helvellyn 7.7 mi and 2,620 ft; times do not change with units."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "#/walk/catbells-ridge loads directly with 'High point 451 m' and an SVG profile whose shape matches the points (rising to the peak at 2 km, then descending); #/walk/blencathra-by-halls-fell also works."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The profile marker steps through the points with ArrowLeft/ArrowRight (or follows the mouse), and at the 3 km point the readout is '3.0 km · 330 m', or '1.9 mi · 1,080 ft' in Imperial."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With Catbells Ridge, Ullswater Way and Blencathra marked as walked, #/logbook shows Walks 3, Distance 24.0 km, Ascent 1,129 m and Time 7 h 00 min at Steady; at Brisk the time becomes 6 h 30 min, and in Imperial 14.9 mi and 3,700 ft."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Pace, units and the logbook survive a reload, and unmarking every walk shows 'No walks logged yet'."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the walk cards are one column, the Pace and Units controls fit in the header without overflow, and the elevation profile scales to the screen width with legible labels."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Map-like and consistent: slate blue, bracken orange and moss green on pale paper, subtle contour decoration, grade colors used consistently, and aligned tabular stats on the cards."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-16",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "E-bike configurator with dependent options, live SVG preview and saved builds",
+  "prompt": "Create the product page and configurator for the Arden Commuter, an electric bike from Arden Cycles. Clean and premium: white and warm gray with a deep teal accent, generous spacing, and a large SVG side view of the bike that updates live with the configuration (no photos).\n\nPage: header (logo, Bikes, Configure, 'My builds (N)'), a hero with 'Built around your commute' and a Configure button, three feature tiles, the configurator, My builds and a footer.\n\nConfigurator (the base bike costs £2,400):\nFrame: High-step (21.8 kg), Step-through (22.6 kg) or Cargo long-tail (+£900, 30.4 kg); the illustration shows the matching frame shape.\nSize: S, M (default) or L; Cargo is 'One size', and leaving Cargo returns to M. A rider height field in cm puts a 'Recommended' badge on a size: under 165 is S, 165–179 is M, 180 and over is L; outside 140–210 it shows 'Enter a height between 140 and 210 cm'.\nBattery: 400 Wh (included), 625 Wh (+£300, +0.9 kg) or Dual 1,250 Wh (+£750, +3.2 kg), which is Cargo only and is disabled with 'Cargo frame only' on the other frames.\nMotor: City 50 Nm (included) or Trail 85 Nm (+£350, +0.6 kg).\nColor: Moss, Clay, Ink or Sand matte (+£80); the illustrated frame takes the color.\nAccessories: Rear rack (£60, 1.1 kg), Child seat (£140, 2.9 kg), Front basket (£45, 0.8 kg), Mudguards (£35, 0.7 kg) and Light upgrade (£55, 0.3 kg), each drawn on the bike when chosen.\n\nRules: the child seat needs the rear rack, so choosing it adds the rack with the note 'Rear rack added for the child seat', and removing the rack removes the child seat. Cargo includes the rack ('Included', £0 and 0 kg, always on). Leaving Cargo with the Dual battery switches to 625 Wh with the note 'Battery changed to 625 Wh', and if the child seat is chosen the rack stays on as a paid option.\n\nSummary, updated live: each chosen item with its price, Total, Weight in kg with one decimal, 'Estimated range: up to N km' and a monthly price. Range is the battery Wh divided by the consumption, rounded down to a multiple of 5 km; consumption is 7.5 Wh/km with City and 9.5 Wh/km with Trail, 20% higher on Cargo. The monthly price is the total divided by 36, rounded up to the next penny, shown as '£X/month over 36 months at 0% APR'. Prices use £ with thousands separators.\n\nMy builds: 'Save build' stores the configuration in localStorage under a name (default 'Build 1', 'Build 2' and so on), at most 3 ('You can save up to 3 builds'); each saved build shows its name, total and range with Load and Delete buttons.\n\nAt 390px the illustration sits above the options, the summary follows them, and nothing overflows.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Find the option controls' selectors in the source (radios, checkboxes, the height input). Screenshot the default summary. Scenario A in one call: Step-through, 625 Wh, City, Clay, Rear rack and Mudguards → screenshot the summary and the illustration. Child seat: fresh page, tick Child seat only → screenshot (note, rack ticked, totals); untick Rear rack → screenshot. Cargo in one call: Cargo long-tail, Dual 1,250 Wh, Trail, Sand, Child seat, Light upgrade → screenshot; then choose High-step → screenshot (battery note, rack state, size options, totals). Also on High-step check the Dual option is disabled with its note. Illustration: screenshot the bike for High-step, Step-through and Cargo, and with Front basket, Mudguards and Light upgrade. Height: type 172, 180, 164 and 139 into the height field (press Tab after each) and screenshot the size row. Builds in one call: save three different builds, eval the header text, try a fourth save, reload, screenshot My builds, click Load on the second build and screenshot the summary, then Delete one. Mobile: run interact with --width 390 --height 844 with full_page screenshots.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The page has the header with 'My builds (0)', the hero 'Built around your commute' with a Configure button, three feature tiles, the configurator with a large SVG side-view bike, My builds and a footer."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The default configuration (High-step, M, 400 Wh, City, Moss, no accessories) shows Total £2,400, Weight 21.8 kg, 'Estimated range: up to 50 km' and '£66.67/month over 36 months at 0% APR'."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Step-through with 625 Wh, City, Clay, Rear rack and Mudguards shows Total £2,795, Weight 25.3 kg, 'Estimated range: up to 80 km' and £77.64/month."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The illustration follows the configuration: distinct High-step, Step-through and long-tail Cargo frame shapes, the chosen frame color, and a visible rack, child seat, basket, mudguards and lights when those are chosen."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "On the default bike, choosing Child seat also ticks Rear rack with 'Rear rack added for the child seat' and shows Total £2,600 and £72.23/month; unticking Rear rack removes the child seat and returns to £2,400."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Cargo with Dual 1,250 Wh, Trail, Sand, Child seat and Light upgrade shows the rack as 'Included' at £0, size 'One size', Total £4,675, Weight 37.4 kg, 'Estimated range: up to 105 km' and £129.87/month; on the other frames Dual 1,250 Wh is disabled with 'Cargo frame only'."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Switching that Cargo build to High-step shows 'Battery changed to 625 Wh', keeps the child seat with the rack now charged £60, returns the size to M, and shows Total £3,385, Weight 27.6 kg, 'Estimated range: up to 65 km' and £94.03/month."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Rider height 172 marks M as Recommended, 180 marks L, 164 marks S, and 139 shows 'Enter a height between 140 and 210 cm'."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Saving three builds shows 'My builds (3)' and a fourth save shows 'You can save up to 3 builds'; after a reload the builds are listed with names 'Build 1' to 'Build 3', totals and ranges; Load restores a build's options, illustration and summary, and Delete removes it."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the bike illustration sits above the options, the summary follows them, option groups wrap cleanly and nothing overflows horizontally."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Clean and premium: white and warm gray with a single deep teal accent, a well-drawn bike illustration with sensible proportions, selected options clearly highlighted, and summary prices right-aligned."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-17",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Photography course site with locked modules, scored quizzes and a certificate",
+  "prompt": "Build the course site for Light & Exposure: Photography Fundamentals from Fieldlight School, an online photography school. Calm and focused: off-white with charcoal text and a golden-hour amber accent, a left course sidebar, and an SVG diagram in every lesson (aperture blades, a shutter timeline, a histogram and so on; no photos). One index.html with hash routes #/ (course home), #/lesson/<module>-<lesson> (e.g. #/lesson/2-1), #/quiz/1, #/quiz/2 and #/certificate.\n\nSyllabus: Module 1, Exposure basics: 1-1 The exposure triangle, 1-2 Aperture and depth of field, 1-3 Shutter speed and motion, then Quiz 1. Module 2, Working with light: 2-1 Hard and soft light, 2-2 Golden hour, 2-3 Reading a histogram, then Quiz 2. Module 3, Composition: 3-1 The rule of thirds, 3-2 Leading lines, 3-3 Framing and negative space.\n\nUnlocking: Module 1 lessons are open. A quiz unlocks when all lessons of its module are complete; Module 2 unlocks when Quiz 1 is passed and Module 3 when Quiz 2 is passed. Locked items show a lock icon in the sidebar, and opening one directly shows 'This lesson is locked' (or 'This quiz is locked'). Each lesson has its text, the diagram, Previous and Next links and a 'Mark complete' button that becomes 'Completed'.\n\nQuizzes: four questions each with radio options in this order (answers marked *). Quiz 1: shallowest depth of field: f/1.8*, f/8, f/16; going from 1/250 s to 1/125 s lets in: half the light, twice the light*, four times the light; best to freeze a passing cyclist: 1/30 s, 1/125 s, 1/1000 s*; ISO 100 to ISO 400 is: 1 stop, 2 stops*, 4 stops. Quiz 2: soft light comes from a source that is: small and far away, large and close*, behind the subject; golden hour is just after sunrise and just before: noon, sunset*, midnight; a histogram piled against the right edge suggests: underexposure, overexposure*, a correct exposure; an overcast sky gives light that is: hard, soft*, strongly colored. Submitting with a question unanswered shows 'Answer all 4 questions'. The pass mark is 75%. A failed attempt shows 'You scored 2 / 4 (50%). You need 75% to pass.', marks each question right or wrong and offers 'Try again'; a pass shows 'Passed: 3 / 4 (75%)' and the quiz cannot be retaken.\n\nProgress: the sidebar and home show 'N% complete', where N is the completed lessons plus passed quizzes out of 11, rounded to a whole number. Home has a 'Continue where you left off' button that opens the first unlocked item that is not done, in syllabus order.\n\nCertificate: until everything is done it says 'Finish every lesson and pass both quizzes to get your certificate'. Then a name field produces a certificate reading 'This certifies that <name> has completed Light & Exposure: Photography Fundamentals' with 'Quiz 1: <score>% · Quiz 2: <score>%'.\n\nEverything persists in localStorage. 'Reset progress' asks 'Reset all progress?' in an in-page dialog with Reset and Cancel.\n\nAt 390px the sidebar hides behind a 'Course menu' button and the quiz fits the screen.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Use the sidebar links or set location.hash; find the radio inputs' selectors in the source (or click by option text). Locks: on a fresh page screenshot home, eval location.hash='#/lesson/2-1' and '#/quiz/1' and screenshot. Module 1 in one call: open #/lesson/1-1, click Mark complete, same for 1-2, go home and click Continue where you left off (expect 1-3), complete 1-3, read the progress (27%), open #/quiz/1; submit with only two answers (expect 'Answer all 4 questions'); answer f/1.8, half the light, 1/30 s, 2 stops and submit (2/4, 50%, fail), screenshot, eval that #/lesson/2-1 is still locked; Try again with f/1.8, twice the light, 1/125 s, 2 stops (3/4, 75%, pass), screenshot the sidebar and progress (36%). Reload and check it all persisted. Certificate in one call from a fresh page: complete all of Module 1 and pass Quiz 1 with 3/4 as above, complete 2-1 to 2-3, pass Quiz 2 with all four correct, complete 3-1 to 3-3, open #/certificate, type Ada Lovelace into the name field, screenshot. Also open #/certificate before finishing to see the locked message. Reset: click Reset progress, click Cancel (progress kept), click it again and Reset (0%, locks back). Mobile: run interact with --width 390 --height 844, open the Course menu, and take full_page screenshots of a lesson and a quiz.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Home and the sidebar list the three modules with the nine given lesson titles and the two quizzes in syllabus order, show '0% complete' at first, and mark Module 2, Module 3 and both quizzes as locked with a lock icon."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every lesson page has its title, text, an SVG diagram related to the topic, Previous/Next links, and a 'Mark complete' button that becomes 'Completed'."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Locks are enforced: #/lesson/2-1 shows 'This lesson is locked' and #/quiz/1 shows 'This quiz is locked' at first; Quiz 1 opens only after 1-1, 1-2 and 1-3 are complete, and Module 2 stays locked after a failed Quiz 1."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Progress is exact: 3 completed lessons show '27% complete', adding a passed Quiz 1 shows '36% complete', and everything done shows '100% complete'."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Quiz 1 scoring: submitting with unanswered questions shows 'Answer all 4 questions'; f/1.8, half the light, 1/30 s, 2 stops shows 'You scored 2 / 4 (50%). You need 75% to pass.' with the two wrong questions marked and a 'Try again' button."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Retrying with f/1.8, twice the light, 1/125 s, 2 stops shows 'Passed: 3 / 4 (75%)', the quiz cannot be retaken, and Module 2 unlocks (lock icons gone, #/lesson/2-1 opens)."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "'Continue where you left off' opens 1-3 after 1-1 and 1-2 are complete, and Quiz 1 once all Module 1 lessons are complete."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Before finishing, #/certificate says 'Finish every lesson and pass both quizzes to get your certificate'; after all nine lessons, Quiz 1 at 75% and Quiz 2 at 100%, entering Ada Lovelace shows 'This certifies that Ada Lovelace has completed Light & Exposure: Photography Fundamentals' with 'Quiz 1: 75% · Quiz 2: 100%'."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Progress, locks and quiz results survive a reload; 'Reset progress' opens an in-page 'Reset all progress?' dialog where Cancel keeps everything and Reset returns to '0% complete' with the locks restored."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the sidebar is hidden behind a 'Course menu' button that opens it, and lesson text, diagrams and quiz options fit the screen without overflow."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Calm and focused: off-white, charcoal and one amber accent, a comfortable reading width for lessons, clear locked, current and completed states in the sidebar, and consistent, well-drawn diagrams."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-18",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Essay magazine with tag and archive routes, related-reading ranking and saved essays",
+  "prompt": "Build Margin Notes, an online magazine of essays about type, color and interfaces. Editorial and bookish: off-white paper, black ink and one vermilion accent, headlines in a serif (DejaVu Serif or Liberation Serif) with a clean sans for the interface, and an abstract SVG cover for each essay, all different (no photos). One index.html with hash routes #/ (home, page 1), #/page/<n>, #/post/<slug>, #/tag/<tag>, #/author/<slug>, #/archive and #/saved. Slugs are lowercase with punctuation removed and spaces as hyphens (e.g. #/post/line-length-measured, #/tag/design-systems, #/author/ines-duarte).\n\nEssays (date, title, author, tags):\n14 Sep 2026, The quiet return of the serif, Ines Duarte, typography, trends.\n30 Aug 2026, Designing for dark mode without losing contrast, Tom Adeyemi, color, accessibility, interfaces.\n11 Aug 2026, A field guide to variable fonts, Ines Duarte, typography, tools.\n22 Jul 2026, Why your grid keeps breaking, Mara Lind, layout, interfaces.\n30 Jun 2026, Color systems that survive rebrands, Tom Adeyemi, color, design systems.\n2 Jun 2026, Line length, measured, Mara Lind, typography, layout, accessibility.\n18 Apr 2026, Tokens are a contract, Ines Duarte, design systems, tools.\n9 Mar 2026, The case for boring buttons, Mara Lind, interfaces, accessibility.\n15 Dec 2025, Reading type on small screens, Tom Adeyemi, typography, accessibility, interfaces.\n3 Nov 2025, What print taught me about spacing, Ines Duarte, layout, typography.\nWrite at least four paragraphs for each essay, with at least two numbered footnotes.\n\nLists: home shows the essays newest first, four per page, with 'Page 1 of 3' and Newer / Older links. Each card shows the cover, title, author, date and tag chips linking to the tag page. A tag page says '5 posts tagged typography' ('1 post tagged trends' when there is one) and lists them newest first; an author page says 'Ines Duarte · 4 posts'. The archive groups essays by year and month with counts, newest first, e.g. 'August 2026 (2)'.\n\nEssay page: title, author link, date, tags and body; a reading progress bar at the top (role='progressbar' with aria-valuenow from 0 to 100) that fills as you scroll through the essay; footnote markers that open a small popover with the note, closed by Escape or a click outside; links to the next older and next newer essay; and 'Related reading': the other essays that share the most tags with this one, at most three, ties going to the newer essay, and never an essay with no shared tag.\n\nSaving: each essay has a Save button (aria-pressed) and the header shows 'Saved (N)'. #/saved lists saved essays, most recently saved first, or 'Nothing saved yet'. Saved essays persist in localStorage.\n\nAt 390px the layout is one column, the header fits, and footnote popovers stay inside the screen.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Lists: screenshot #/ and eval the card titles; eval location.hash='#/page/2' and '#/page/3' and eval titles and the page label; check the Newer/Older links at the ends. Tags and authors: open #/tag/typography, #/tag/trends, #/tag/design-systems and #/author/ines-duarte and eval the heading text and titles; click a tag chip on a card. Archive: screenshot #/archive and eval its text. Essay: open #/post/line-length-measured, eval the 'Related reading' titles in order and the older/newer link texts; repeat for #/post/tokens-are-a-contract, #/post/reading-type-on-small-screens and the newest and oldest essays. Scroll in steps (scroll dy 800) and eval document.querySelector('[role=progressbar]').getAttribute('aria-valuenow') after each; click a footnote marker, screenshot, press Escape and screenshot. Saving in one call: save Tokens are a contract, then The quiet return of the serif, then Why your grid keeps breaking; eval the header text; open #/saved and eval the titles; reload and check again; unsave all for the empty state. Mobile: run interact with --width 390 --height 844 on #/ and an essay (open a footnote) with full_page screenshots.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Home page 1 shows The quiet return of the serif, Designing for dark mode without losing contrast, A field guide to variable fonts and Why your grid keeps breaking with distinct SVG covers, authors, dates and tag chips, plus 'Page 1 of 3'; each essay has at least four paragraphs and two footnotes."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "#/page/2 shows Color systems that survive rebrands, Line length, measured, Tokens are a contract and The case for boring buttons; #/page/3 shows only Reading type on small screens and What print taught me about spacing; Newer is absent or disabled on page 1 and Older on page 3."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Tag and author pages are exact: #/tag/typography says '5 posts tagged typography' and lists its five essays newest first; #/tag/trends says '1 post tagged trends'; #/tag/design-systems lists Color systems that survive rebrands then Tokens are a contract; #/author/ines-duarte says 'Ines Duarte · 4 posts'."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The archive shows 2026 with September (1), August (2), July (1), June (2), April (1), March (1) and 2025 with December (1), November (1), newest first, with links to the essays."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Related reading on Line length, measured is exactly Reading type on small screens, What print taught me about spacing, The quiet return of the serif, in that order; on Tokens are a contract it is only A field guide to variable fonts then Color systems that survive rebrands."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Related reading on Reading type on small screens is exactly Designing for dark mode without losing contrast, Line length, measured, The case for boring buttons; Line length, measured links to Tokens are a contract as older and Color systems that survive rebrands as newer, and the newest essay has no newer link and the oldest no older link."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Footnote markers open a popover with the note text that closes on Escape and on an outside click."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The reading progress bar has role='progressbar', starts near 0 at the top of an essay, and its aria-valuenow and visible fill increase with scrolling to about 100 at the end."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Saving Tokens are a contract, The quiet return of the serif and Why your grid keeps breaking in that order shows 'Saved (3)' and #/saved lists them as Why your grid keeps breaking, The quiet return of the serif, Tokens are a contract; this survives a reload, Save buttons reflect aria-pressed, and unsaving all shows 'Nothing saved yet'."
+   },
+   {
+    "id": "R10",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Routes load directly (e.g. #/post/line-length-measured, #/tag/design-systems, #/archive), tag chips navigate to their tag page, and the author name on an essay links to the author page."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the essay cards and body are one column with a comfortable measure, the header fits without overflow, and an opened footnote popover stays within the screen."
+   },
+   {
+    "id": "R12",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Editorial and bookish: off-white paper, black ink and one vermilion accent, a serif headline hierarchy over a clean sans, a reading measure of roughly 60-80 characters, and covers in one cohesive abstract style."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-19",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Museum site with timed-entry tickets, family pricing and a searchable floor plan",
+  "prompt": "Build the website of the Aldermoor Museum of Natural History, promoting its special exhibition Deep Time: Fossils of the Jurassic Coast. Scholarly but lively: bone white, deep forest green and ammonite gold, a serif for headings, and SVG illustrations (an ammonite, a fossil fish) instead of photos. Sections: header, hero, Tickets, Floor plan, Visit (Tuesday to Sunday 10:00–17:00, last entry 16:00, closed Mondays; address) and a footer.\n\nTickets: date buttons Tue 20 to Mon 26 October 2026, with Monday shown as 'Closed' and disabled, and hourly entry slots from 10:00 to 16:00. Each slot holds 30 visitors; the only slots already partly booked are Sat 24 Oct 11:00 (0 places left), Sat 24 Oct 12:00 (4 left), Sat 24 Oct 13:00 (12 left) and Sun 25 Oct 10:00 (2 left). A slot shows 'Full' and is disabled at 0, and 'N left' when fewer than 10 remain.\nTicket steppers: Adult £16, Concession £12, Child 5–17 £8, Under 5 free, Member free. Each Member ticket needs a membership number like AM-123456 ('Enter a membership number like AM-123456'). When there are at least 2 Adults and 2 Children, two adults and up to three children are charged as one Family ticket at £40 (one per booking). A 'Deep Time exhibition' checkbox adds £6 for every visitor except Members and Under 5s. Rules: at most 10 tickets ('You can book up to 10 tickets'); Child and Under 5 tickets need at least one Adult, Concession or Member ('Children must be with an adult'); the group must fit the slot ('Only 4 places left at 12:00'). The summary lists Family ticket, each other ticket type as 'Adult × 1' with its amount, 'Deep Time × N' and Total, with two decimals.\n'Book tickets' shows 'You're booked: Sat 24 Oct at 12:00 · 4 tickets · £64.00' (with the real values). Booked places are taken off that slot and persist in localStorage.\n\nFloor plan: an SVG plan with Ground floor / First floor buttons. Ground: Entrance Hall (Diplodocus cast, Foucault pendulum), Deep Time (Ichthyosaur skeleton, Ammonite wall), Minerals & Gems (Giant amethyst geode, Meteorite fragment), Café and Shop. First: Birds of the World (Dodo model, Hummingbird case), Mammal Hall (Woolly mammoth, Tiger diorama), Human Evolution (Lucy skeleton cast, Stone tool timeline) and Oceans (Blue whale skeleton, Giant squid specimen), which is hatched and 'Closed for refurbishment until 1 December 2026'. Rooms are buttons labeled with their names; clicking one highlights it and shows its name and objects in a side panel. A 'Find an object' search matches object names case-insensitively: one match switches to its floor, highlights the room and says 'Blue whale skeleton is in Oceans (First floor)'; several matches are listed as buttons that do the same; none says 'No object called <query>'.\n\nAt 390px the date buttons and slots wrap or scroll inside their row, the plan scales to the screen, and the summary sits below the steppers.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Find the date, slot, stepper, checkbox and search selectors in the source. Slots: click Sat 24 Oct and screenshot the slots; then Sun 25 Oct; check Mon 26 Oct is disabled. Pricing, each from a fresh page on Tue 20 Oct 10:00: 2 Adult + 2 Child + Deep Time → screenshot the summary; 3 Adult + 3 Child + 1 Under 5 + Deep Time; 1 Concession + 1 Member + 1 Child with and without Deep Time, typing AM-12345 and then AM-123456 as the membership number. Rules: only 2 Child → click Book tickets; 11 tickets in total; Sat 24 Oct 12:00 with 5 visitors. Booking and persistence in one call: Sat 24 Oct 12:00, 2 Adult + 2 Child + Deep Time, fill any required fields, click Book tickets, screenshot the confirmation, reload, click Sat 24 Oct and screenshot the slots (12:00 should be Full). Floor plan: screenshot both floors; click the Mammal Hall and Oceans rooms and screenshot the panel. Search: type blue whale, then skeleton (click the Lucy result), then unicorn, screenshotting each. Mobile: run interact with --width 390 --height 844 with full_page screenshots of Tickets and the plan.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The page has a hero for 'Deep Time: Fossils of the Jurassic Coast' with SVG fossil art, Tickets, Floor plan and a Visit section with 'Tuesday to Sunday 10:00–17:00', last entry 16:00 and closed Mondays, plus a footer."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The date buttons run Tue 20 to Mon 26 October with Monday 'Closed' and disabled; slots run 10:00 to 16:00; Sat 24 Oct shows 11:00 'Full' and disabled, 12:00 '4 left' and 13:00 without a label; Sun 25 Oct 10:00 shows '2 left'."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "2 Adult + 2 Child with Deep Time shows a Family ticket £40.00, Deep Time × 4 £24.00 and Total £64.00."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "3 Adult + 3 Child + 1 Under 5 with Deep Time shows Family ticket £40.00, Adult × 1 £16.00, Deep Time × 6 £36.00 (Under 5 free) and Total £92.00."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "1 Concession + 1 Member + 1 Child totals £20.00, or £32.00 with Deep Time (Deep Time × 2); the membership number AM-12345 shows 'Enter a membership number like AM-123456' and AM-123456 is accepted."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Rules block booking with the exact messages: only children → 'Children must be with an adult'; 11 tickets → 'You can book up to 10 tickets'; 5 visitors at Sat 24 Oct 12:00 → 'Only 4 places left at 12:00'."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Booking Sat 24 Oct 12:00 for 2 Adult + 2 Child with Deep Time shows 'You're booked: Sat 24 Oct at 12:00 · 4 tickets · £64.00', and after a reload that slot shows 'Full' and is disabled."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The SVG plan switches between Ground and First floor with the listed rooms; clicking a room highlights it and the panel shows its name and two objects; Oceans is hatched and says 'Closed for refurbishment until 1 December 2026'."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Searching blue whale switches to the First floor, highlights Oceans and says 'Blue whale skeleton is in Oceans (First floor)'; skeleton lists Ichthyosaur skeleton, Lucy skeleton cast and Blue whale skeleton, and choosing Lucy highlights Human Evolution; unicorn says 'No object called unicorn'."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the date and slot buttons wrap or scroll within their row, the floor plan scales to the screen with readable labels, and the ticket summary sits below the steppers without overflow."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Scholarly but lively: bone white, forest green and ammonite gold used consistently, serif headings, cohesive SVG fossil art, and a floor plan with clear room labels and a distinct highlight state."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-20",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Ferry operator site with a connection-aware journey planner and fares",
+  "prompt": "Build the website for Skerry Line, the ferry operator linking the mainland harbour of Port Ardan with the islands of Inchmore, Tarra and Selk. Maritime and clear: navy and sea-glass green with a signal orange accent, a stylized SVG route map of the islands, and highly legible timetables. One index.html with hash routes #/plan (the default), #/timetable and #/fares.\n\nCrossings: Port Ardan–Inchmore 40 min, Inchmore–Tarra 25 min, Port Ardan–Selk 1 h 10 min. There are no other links, so Tarra is reached through Inchmore and Selk through Port Ardan.\nDepartures (Mon–Sat / Sunday):\nPort Ardan → Inchmore: 07:00, 09:30, 12:00, 15:00, 18:00 / 09:30, 15:00.\nInchmore → Port Ardan: 08:00, 10:30, 13:15, 16:00, 19:00 / 11:00, 16:30.\nInchmore → Tarra: 08:00, 10:30, 12:50, 16:10 / 10:20, 16:10.\nTarra → Inchmore: 08:40, 11:15, 13:30, 17:00 / 11:15, 17:00.\nPort Ardan → Selk: 08:15, 14:45 / none.\nSelk → Port Ardan: 10:00, 16:30 / none.\nA dismissible alert banner (the dismissal persists in localStorage) reads 'Saturday: the 10:30 Inchmore → Tarra sailing is cancelled for harbour works.' The planner skips that sailing on Saturdays and the timetable marks it.\n\nJourney planner: From and To selects with a swap button (the same port twice shows 'Choose two different ports'), a day of the week (Monday to Sunday), a 'Depart after' time, and steppers for Adults, Children (5–15), Cars and Bikes. A change needs at least 15 minutes between arriving and the next departure; for each departure from the origin, catch the earliest valid connection at every change; when two journeys arrive at the same time, keep only the one that leaves later. Show up to three journeys in order of arrival, each with its departure and arrival times, total duration like '1 h 25 min', every leg, and changes like 'Change at Inchmore · 20 min'. With no journey, show a message like 'No sailings after 08:00 on Sunday' with the chosen time and day.\n\nFares per crossing: Adult £9.50, Child £4.75, under 5 free, Car £28.00, Bike £2.00. A journey costs the per-crossing fare times its number of crossings, and a Return option costs twice the single minus 10%. Show the fare on each journey with two decimals. The last search (ports, day, time, passengers and return) is restored after a reload.\n\nTimetable page: a tab per route direction with Mon–Sat and Sunday columns. Fares page: the fare table and the return rule.\n\nAt 390px the planner fields stack, journeys become cards, and the timetable scrolls inside its own box if needed.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Find the planner controls' selectors in the source (selects for ports and day, the time input, steppers, return checkbox, submit button if any). Planner, one call per scenario (1 adult unless stated): Tuesday Port Ardan → Tarra after 09:00, screenshot and eval the result cards' text; same for Saturday and Sunday; Tuesday Tarra → Port Ardan after 11:00; Tuesday Selk → Tarra after 08:00; Tuesday Tarra → Selk after 07:00; Sunday Selk → Port Ardan after 08:00. Fares: Tuesday Port Ardan → Tarra after 09:00 with 2 adults, 1 child and 1 car, single then Return; Port Ardan → Inchmore with 1 adult and 1 bike. Swap: click the swap button and screenshot; choose the same port twice. Persistence: run a search, reload, screenshot; dismiss the alert, reload, check it stays hidden. Timetable: open #/timetable, click through the tabs and screenshot; open #/fares. Mobile: run interact with --width 390 --height 844 with full_page screenshots of #/plan (after a search) and #/timetable.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The site has a header with Plan, Timetable and Fares links, the alert 'Saturday: the 10:30 Inchmore → Tarra sailing is cancelled for harbour works.', and an SVG route map with Port Ardan, Inchmore, Tarra and Selk and the three routes labeled with 40 min, 25 min and 1 h 10 min; #/timetable and #/fares load directly."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The timetable shows every given departure for all six directions in Mon–Sat and Sunday columns, no Sunday Selk sailings, and a mark on the Saturday 10:30 Inchmore → Tarra sailing; the fares page lists the five fares and the return rule."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Tuesday, Port Ardan → Tarra after 09:00 shows exactly two journeys: 09:30 → 10:55 (1 h 25 min, 'Change at Inchmore · 20 min') and 15:00 → 16:35 (1 h 35 min, 'Change at Inchmore · 30 min'), each £19.00 for one adult; there is no 12:00 journey."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The same search on Saturday shows 09:30 → 13:15 (3 h 45 min, change at Inchmore 2 h 40 min) and 15:00 → 16:35; on Sunday it shows only 15:00 → 16:35."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Tuesday, Tarra → Port Ardan after 11:00 shows 11:15 → 13:55, 13:30 → 16:40 and 17:00 → 19:40 in that order, each with its change at Inchmore."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Tuesday, Selk → Tarra after 08:00 shows one journey 10:00 → 16:35 (6 h 35 min) via Port Ardan 12:00 and Inchmore 16:10 with 'Change at Port Ardan · 50 min' and 'Change at Inchmore · 3 h 30 min'; Tarra → Selk after 07:00 shows only 11:15 → 15:55; Sunday Selk → Port Ardan after 08:00 shows 'No sailings after 08:00 on Sunday'."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Fares are exact: Port Ardan → Tarra for 2 adults, 1 child and 1 car costs £103.50 single and £186.30 return; Port Ardan → Inchmore for 1 adult and 1 bike costs £11.50."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The swap button exchanges From and To and updates the results, and choosing the same port twice shows 'Choose two different ports' instead of journeys."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "After a reload the last search (ports, day, time, passengers, return) and its results are restored, and a dismissed alert stays hidden."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the planner fields stack, journey cards fit with legs and fares readable, the route map scales, and the timetable scrolls inside its own container without page overflow."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Maritime and clear: navy, sea-glass green and a signal orange accent used consistently, a tidy route map, tabular times aligned in columns, and journey cards with a clear time, duration and fare hierarchy."
+   }
+  ]
+ },
+ {
+  "task_id": "website-rep-06",
+  "category": "website",
+  "mode": "replication",
+  "title": "Recreate a responsive API status page with 90-day uptime bars",
+  "prompt": "Recreate the attached public status page of Switchyard, a communications API company, as a real HTML/CSS page. From top to bottom: a white header with a blue logo tile, the wordmark, a Status pill, four links and a dark 'Subscribe to updates' button; the 'System status' title with a monospace Updated stamp; an active-incident banner with a dark amber head over a pale body holding the latest update; a pale blue scheduled-maintenance card with the time window and two affected-component chips on the right; Components, one card with a scale row, five uppercase group headers and eleven component rows, each with its status, 90 daily uptime bars (green, amber for a partial outage, red for a major outage, gray for no data) and an uptime percentage, closed by a legend; System metrics, an API response time line chart (p50 over a light area, p95, a dashed target line, hourly data labeled every four hours) next to three stacked stat cards; Past incidents, seven days of incidents with severity tags and timelines of updates, beside a sidebar of three cards; and a two-row footer. On mobile the header keeps only the logo, the pill and a short Subscribe button, the banner and maintenance card stack their parts, every component row shows only the last 30 bars under a '30 days ago' scale, the chart and stat cards stack, incident timestamps move under their text, the sidebar follows the incidents, and the footer stacks. Text is Inter; timestamps, axis labels and code are DejaVu Sans Mono. Draw the logo, icons and chart with inline SVG or CSS and the bars with CSS. Match the layout, sizes, spacing, colors, typography and every piece of text as closely as you can in both layouts.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 800
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "golden": {
+   "entry": "index.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Desktop structure matches desktop.png: header, title row with the Updated stamp on the right, the amber incident banner, the blue maintenance card, 'Components' with one full-width card, 'System metrics' with the chart card on the left and a 320px column of three stat cards, 'Past incidents' with the incident card on the left and a 320px sidebar of three cards whose top aligns with the incident card, and the white footer, on a centered column about 1088px wide at roughly the same vertical positions and total page height."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Mobile structure matches mobile.png at 390px: the header shows only the logo, the 'Status' pill and a 'Subscribe' button (no links, no 'to updates'); the Updated stamp sits under the subtitle; the 'Identified' pill drops under the banner title; the maintenance window moves under its text; each component row has the name and status on the left, the percentage on the right and a full-width strip of exactly 30 bars below, under a scale reading '30 days ago' and 'Today'; the chart card and the three stat cards stack; incident timestamps sit under their update text; the sidebar cards follow the incidents; the footer stacks; nothing overflows horizontally."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The header and banner match: a blue rounded logo tile with a white track and a light-blue branching curve, 'Switchyard', a 'Status' pill, the links Docs, API reference, Support and 'switchyard.io ↗', a dark 'Subscribe to updates' button with a bell; 'System status' with 'Live and historical availability of the Switchyard SMS, voice, email and webhook APIs.' and 'Updated Sep 24, 2026 · 14:40 UTC'; a dark amber banner head with a warning triangle, 'ACTIVE INCIDENT · MINOR', 'Degraded performance: SMS delivery to UK numbers' and a translucent 'Identified' pill, over a pale body starting 'Identified — A carrier partner is intermittently rejecting traffic to UK mobile numbers.' and the brown monospace line 'Posted Sep 24, 2026 · 14:32 UTC · Affects SMS · United Kingdom'."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The maintenance card matches: pale blue with a thick blue left border, a blue wrench tile, 'SCHEDULED MAINTENANCE', 'Voice media server upgrade in the EU region', the sentence beginning 'Calls in progress will not be dropped.', and on the right 'Tue, Sep 29, 2026', a bold monospace '02:00–04:00 UTC' and the chips 'Inbound calls & IVR' and 'Outbound calls'."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The component list matches: 'Daily uptime for the past 90 days · 99.96% overall'; a gray scale row 'Component', '90 days ago', a dashed rule, 'Today', 'Uptime'; groups CORE PLATFORM (REST API 99.99%, Dashboard 99.97%, Authentication 100.00%), MESSAGING with '4 components · 1 degraded' and an amber 'Degraded performance' (SMS · United States 99.98%, SMS · United Kingdom 99.71% marked 'Degraded performance' in amber, SMS · European Union 99.95%, MMS 99.93%), VOICE (Outbound calls 99.99%, Inbound calls & IVR 99.96%), EMAIL (Transactional email 99.94%) and WEBHOOKS (Event delivery 99.90%); every other status is a green 'Operational' with a dot."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The uptime bars match: 90 equal rounded bars per row, mostly green, with the colored days in the same places: MMS starts with 10 gray bars; SMS · United Kingdom has two adjacent amber bars near the middle, a red bar 13 bars from the end and an amber last (today) bar; Transactional email has a red 6th bar; Event delivery has an amber bar followed by a red one about a quarter in and a red bar 4th from the end; Dashboard has an amber and a red bar; Authentication is all green; the legend reads 'No downtime', 'Partial outage or degraded', 'Major outage' and 'No data'."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The chart matches: 'API response time', 'REST API · all regions · 1-hour buckets', legend p50 118 ms (blue) and p95 286 ms (violet); a y-axis 0 to 400 in steps of 100 with 'ms'; x labels 14:00, 18:00, 22:00, 02:00, 06:00, 10:00, 14:00; a dashed amber line labeled 'p95 target 350 ms'; a violet p95 line from about 248 dipping to about 218 and peaking at 338 at 06:00; a blue p50 line between about 100 and 150 over a pale blue area; dots on the last values; and the footer 'Peak p95 338 ms at 06:00', 'Lowest p50 101 ms at 18:00' and 'Requests 92.6M'."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The stat cards match: 'Webhook delivery rate' 99.982% with '1,204,388 of 1,204,605 events on the first try' and a green bar; 'SMS delivered within 5 s' 97.4% with an amber '▼ 1.2 pts' pill and 'vs 7-day average of 98.6% · UK traffic rerouted'; 'Messages processed today' 48.2M with a blue, violet and cyan segmented bar and the legend SMS 31.6M, Email 14.9M and MMS 1.7M."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Past incidents matches: 'Last 7 days', dates Sep 24, 2026 down to Sep 18, 2026 with 'No incidents reported.' beside Sep 23, 22, 20 and 18; amber 'Degraded SMS delivery to UK numbers' (MINOR: Identified 14:32, Investigating 13:58) on Sep 24; on Sep 21 amber 'Slow transactional email sends' (MINOR: Resolved 16:20, Investigating 15:41) and red 'Webhook event delivery delays' (MAJOR: Resolved 10:52, Monitoring 10:05, Investigating 09:12); on Sep 19 amber 'Elevated SMS latency in the EU' (MINOR: Resolved 18:09, Investigating 17:31); updates hang on a gray line with a blue ring on the newest, bold labels, the same sentences and right-aligned monospace times such as 'Sep 21, 10:52 UTC'; the card ends with '← Incident history' and 'Uptime report for August →'."
+   },
+   {
+    "id": "F10",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The sidebar, footer, typography and colors match: 'Get notified' with Email, Text message, Webhook and RSS & Atom rows (gray icon tiles, subtitles, chevrons), 'Status API' with a near-black code block starting 'GET /api/v2/summary.json', 'Need help?' with an outlined 'Contact support'; the footer 'Communications APIs for SMS, voice and email', links switchyard.io, Docs, Support, Privacy, Terms, '© 2026 Switchyard Communications, Inc.' and 'All times UTC · Powered by Switchyard Status'; Inter text with DejaVu Sans Mono timestamps and axis labels, a #f5f6f8 page, white cards with 12px radii and light gray borders, blue #3b5bdb accents, green #17b26a, amber #fdb022 and red #f04438 bars."
+   },
+   {
+    "id": "F11",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Everything is real HTML text, with inline SVG or CSS for the logo, icons, chart and bars (no raster images), and both layouts come from one index.html via media queries."
+   }
+  ]
+ },
+ {
+  "task_id": "website-rep-07",
+  "category": "website",
+  "mode": "replication",
+  "title": "Recreate a responsive football match centre page",
+  "prompt": "Recreate the attached match centre page from the Coastal League website as a real HTML/CSS page, for the Matchday 27 game Northgate Rovers 3–1 Harbour Athletic. From top to bottom on desktop: a navy header (wave logo, COASTAL LEAGUE wordmark, seven links with Results active, a season select and a gold Sign in button); a white Matchday 27 results strip with six score cells; a dark navy scoreboard with a crimson shield crest and a blue anchor crest, the huge score, a gold FULL TIME pill, the scorers under each team and a four-part info bar; a tab row with Summary active; a full-width Match timeline card with a horizontal 0'–90' track, home events above it and away events below; a two-column area with Key stats (nine two-sided bar rows) and Line-ups (both teams on one landscape pitch with numbered dots, surnames, colored rating pills and event marks, then substitutes and managers) on the left, and Player of the match, Match report, Head-to-head and Next fixtures cards on the right; a full-width League table with zone bars, both clubs' rows highlighted and W/D/L form pills; and a navy footer. On mobile the header keeps only the logo and a menu button, the results strip and the tabs scroll sideways, the scoreboard puts each crest above its team name, the timeline becomes a vertical event list with the running score, the pitch turns portrait with Northgate at the bottom, all cards form one column, and the table keeps only Pos, Club, P, GD and Pts. Everything is set in Roboto. Draw the logo, crests, icons, pitch and bars with inline SVG or CSS. Match the layout, sizes, spacing, colors, typography and every piece of text as closely as you can in both layouts.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 800
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "golden": {
+   "entry": "index.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Desktop structure matches desktop.png: navy header, Matchday 27 results strip, dark scoreboard with a four-part info bar, tab row, full-width 'Match timeline' card, then a 744px left column (Key stats above Line-ups) beside a 384px right column (Player of the match, Match report, Head-to-head, Next fixtures), a full-width 'League table' card and a navy footer, on a centered column about 1152px wide at roughly the same vertical positions and total page height; Roboto throughout on a #eef1f5 page with white 14px-radius cards and navy #0b1d3a, crimson #d7263d, blue #1e88e5 and gold #f5b400 accents."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Mobile structure matches mobile.png at 390px: the header shows only the logo, the wordmark and a bordered menu button; the results strip and the tab row are cut off at the right edge without widening the page; the scoreboard shows each crest above its team name with the score between them, the scorers in two columns below a divider and the info bar as a 2x2 grid without icons; every card is full width in one column in the order timeline, Key stats, Line-ups, Player of the match, Match report, Head-to-head, Next fixtures, League table; the footer shows the brand on top and the link columns two per row."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Header, strip and scoreboard text: links Fixtures, Results (white with a gold underline), Table, Stats, Clubs, News and Video, 'Season 2025/26' and a gold 'Sign in'; the strip 'MATCHDAY 27' / '14–15 March' with NOR 3 HAR 1 (tinted, gold top edge), KIN 2 RED 0, CAS 1 POR 1, SAL 0 WES 2, EAS 1 BRA 3 and GLE 2 MAR 2, each marked FT with colored team squares; 'COASTAL LEAGUE · MATCHDAY 27', 'Saturday 14 March 2026 · Kick-off 15:00', Northgate Rovers '2nd · 58 pts', a huge 3 – 1, 'FULL TIME', 'Half-time 1–1' and Harbour Athletic '6th · 42 pts'."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Crests, scorers, info bar and tabs: a crimson shield crest with a gold star, a white chevron and NR, and a round navy-rimmed blue crest with a white anchor; Mensah 12', Carver 58' (pen) and Whitlock 81' with ball icons under the home side, Delgado 34' with a ball and Novak 84' with a red card under the away side; the info bar VENUE Millbrook Park, Northgate · ATTENDANCE 18,432 · REFEREE Daniel Hartley · WEATHER 9°C · Light rain with gold line icons; tabs Summary (active, navy underline), Line-ups, Statistics, Commentary, Report and Head-to-head."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Desktop timeline: legend Goal, Yellow card, Red card, Substitution; NOR events above a gray track on red stems (Mensah 12' goal, Brandt 41' yellow, Carver (pen) 58' goal, Whitlock 66' substitution, Rowe 74' substitution, Whitlock 81' goal, Ibsen 88' substitution) and HAR events below on blue stems (Moreau 27' yellow, Delgado 34' goal, Kessler 52' yellow, Mbeki, Laine 60' substitution, Novak 70' yellow, Costa 76' substitution, Novak 84' red), each at its minute's position, a navy '1–1' chip at HT, and axis labels 0', 15', 30', HT, 60', 75', 90' and FT."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Mobile timeline list: rows in minute order from 12' Kofi Mensah 'Goal · Northgate Rovers' to 88' Lars Ibsen 'On for Kofi Mensah', home rows left-aligned with a red left edge and away rows mirrored (minute on the right) with a blue right edge, navy score chips 1–0, 1–1, 2–1 and 3–1 on the goal rows, and gray 'HALF-TIME 1–1' and 'FULL TIME 3–1' dividers."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Key stats ('Full match data', both club names with small crests): Possession 58% / 42%, Expected goals (xG) 2.41 / 0.87, Shots 17 / 9, Shots on target 7 / 3, Corners 8 / 4, Passes 562 / 398, Pass accuracy 87% / 79%, Fouls 11 / 15 and Yellow cards 1 / 3, with the leading value bold and, under each label, a red bar growing left and a blue bar growing right from the center in proportion to the two values, the trailing side in a pale tint."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Line-ups: 'Northgate Rovers 4-3-3' and '4-2-3-1 Harbour Athletic' over a striped green pitch with white markings; red home dots (black goalkeeper) and blue away dots (amber goalkeeper) in those formations with shirt numbers, surnames and rating pills (Mensah 8.9 and Carver 8.1 dark green, Delgado 7.5 light green, Varga 6.2 amber, Moreau 5.9 and Novak 5.4 red) plus small ball, card and red down-arrow marks; below, the substitutes 19 Jamie Whitlock (66', goal 81'), 14 Owen Rowe 74', 22 Lars Ibsen 88' and 17 Themba Mbeki 60', 14 Eero Laine 60', 20 Nuno Costa 76' with green up arrows, the two 'Unused' lines and 'Manager Elena Marsh' / 'Manager Marco Bellini'; on mobile the pitch is portrait with Northgate attacking upward from the bottom."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Sidebar cards: 'PLAYER OF THE MATCH' on navy with a red KM avatar ringed in gold, Kofi Mensah, '#9 · Forward · Northgate Rovers', a green 8.9 RATING badge, 1 Goals, 1 Assists, 5 Shots, 7/11 Duels won and 'Fan vote 64% of 12,806 votes' with a gold bar; 'MATCH REPORT' with 'Mensah and Whitlock send Rovers past ten-man Athletic' and 'By Callum Reyes · 14 Mar 2026, 17:12'; Head-to-head 3 Rovers wins, 1 Draw, 1 Athletic win over a red/gray/blue bar and five meetings from 2 Nov 2025 Harbour 1–2 Northgate to 28 Oct 2023 Harbour 1–3 Northgate; Next fixtures (Matchday 28) from SAT 21 MAR 15:00 Westmere City v Northgate Rovers to SUN 22 MAR 16:00 Redcliff Albion v Castleford Town."
+   },
+   {
+    "id": "F10",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "League table and footer: 'LEAGUE TABLE' / 'After Matchday 27' with columns Pos, Club, P, W, D, L, GF, GA, GD, Pts and Form and exactly the eight rows from 1 Kingsbridge United 27 19 5 3 58 22 +36 62 to 8 Saltmarsh FC 27 10 8 9 35 34 +1 38, Northgate Rovers (2nd, 58) on a pink row and Harbour Athletic (6th, 42) on a pale blue row, green zone bars on rows 1–4 and a violet one on row 5, colored club squares and W/D/L pills, and the legend Champions Cup, Continental Shield, 'Top 8 of 16 clubs', 'Full table ›'; the navy footer has the logo, the blurb 'Sixteen clubs, one coastline. …', columns Competition, Clubs and About, and '© 2026 Coastal League Ltd. All rights reserved.' with Privacy, Terms and Cookies."
+   },
+   {
+    "id": "F11",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Everything is real HTML text (the league table is real table or grid markup) with inline SVG or CSS for the logo, crests, icons, timeline, stat bars and pitch (no raster images), and both layouts come from one index.html via media queries."
+   }
+  ]
+ },
+ {
+  "task_id": "website-rep-08",
+  "category": "website",
+  "mode": "replication",
+  "title": "Recreate a responsive weather forecast page with a radar map",
+  "prompt": "Recreate the attached Brightsky weather forecast page for Bergen, Norway as a real HTML/CSS page. It is responsive: one index.html whose media queries reproduce both the desktop and the mobile target. From top to bottom on desktop: a white header with the logo, five nav links with Today active, a search box and a °C / °F switch; the location row with Bergen, the update time and six city chips; a dark slate current-conditions card (the big temperature, a cloud-and-rain icon, the condition, three flag pills and four stats) beside a yellow heavy-rain warning and a Today in Bergen card; an Hourly forecast card with 24 hours of icons, a temperature line with a label on every point, precipitation bars with their millimetres and the chance of rain; a 10-day forecast list with low–high range bars on one shared 4°–16° scale next to eight detail tiles (air-quality gauge, UV scale, wind compass, humidity droplet, pressure dial, visibility bars, daylight arc and moon phase); a Precipitation radar card with a stylized coastline map, a rain band, map controls, a time scrubber and a legend, next to Next 60 minutes and Nearby stations cards; and a dark navy footer. On mobile the nav links give way to a menu button and the search box takes its own row, everything stacks into one column, the hourly chart shows only the next 12 hours, the detail tiles form a two-column grid with their graphics under the text, and the footer links sit in three columns. The font is Open Sans. Draw the logo, icons, charts, gauges and the map with inline SVG or CSS. Match the layout, sizes, spacing, colors, typography and every piece of text as closely as you can in both layouts.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 800
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "golden": {
+   "entry": "index.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Desktop structure matches desktop.png: header, location row, a hero row (the dark current-conditions card on the left, a 360px column with the warning and 'Today in Bergen' cards on the right), the full-width 'Hourly forecast' card, a row with the 460px 10-day card and a 2x4 grid of detail tiles, a row with the radar card and a 372px column holding 'Next 60 minutes' and 'Nearby stations', and the navy footer, on a centered column about 1152px wide at roughly the same vertical positions and total page height."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Mobile structure matches mobile.png at 390px: the header keeps the logo, the °C / °F switch and a bordered menu button with the search box on its own full-width row; the city chips wrap onto two rows; the hero stacks with the condition under the temperature, the three pills stacked and the stats in a 2x2 grid; all cards form one column; the hourly chart shows 12 hours (Now to 01); the tiles form a two-column grid with each graphic below its text; the footer brand sits above three link columns; nothing overflows horizontally."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Header and location row match: a blue rounded-square logo with a sun and cloud and 'Brightsky', nav Today (highlighted pill), Hourly, 10-day, Radar and Maps, 'Search city or postcode' with a '/' key, °C active in dark navy next to °F; a blue pin, 'Bergen', 'Vestland, Norway', 'Updated 14:20 CEST', and chips Bergen 11° (dark), Oslo 14°, Stavanger 12°, Trondheim 9°, Tromsø 6° and a dashed '+ Add'."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The hero row matches: a slate gradient card with 'Now · Thursday 24 September' in uppercase, a green 'Live' dot, a huge light '11°', the cloud-and-rain icon, 'Moderate rain', 'Feels like 8°', 'High 13° · Low 8°', the summary sentence, pills '2° colder than yesterday', 'Rain until about 20:00' and 'Drier on Sunday', and stats Wind 24 km/h SW (Gusts 41 km/h), Humidity 91% (Dew point 10°), Rain today 14.2 mm (4.7 mm so far) and Pressure 1004 hPa (Falling); beside it the amber 'Yellow warning' / 'Heavy rain' card with 'Thu 12:00 – Fri 06:00' and 'View warning ›', and 'Today in Bergen' with Morning 85% 10°, Afternoon 95% 12°, Evening 65% 9° and Overnight 15% 7°."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The hourly chart matches: the subtitle 'Thursday 14:00 – Friday 13:00 · 12.5 mm expected' and a three-item legend; columns Now, 15:00 to 23:00, a bold 'Fri' at midnight after a dashed divider, then 01:00 to 13:00, each with a weather icon; an amber line with white markers labeled 11°, 11°, 10°, 10°, 10°, 9° and so on, dipping to 7° at 04:00–06:00 and ending at 12°, 12°; blue precipitation bars labeled 1.2, 1.8, 2.4, 1.6, 0.9 and so on, with flat gray stubs for 00:00–05:00; and the chance of rain from 90% to 20% along the bottom, blue from 50% up and gray below."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The 10-day list matches: a header row Day, Rain and a 4° / 10° / 16° scale; rows Today 95% 8°–13° (with a ringed dot at 11°), Fri 25 70% 7°–12°, Sat 26 30% 8°–14°, Sun 27 10% 6°–15°, Mon 28 0% 5°–16°, Tue 29 20% 7°–14°, Wed 30 80% 9°–12°, Thu 1 90% 8°–11°, Fri 2 60% 6°–10° and Sat 3 25% 4°–11°, each with its icon and a blue-to-orange gradient bar placed on the shared scale."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The detail tiles match: Air quality 28 'Good' with PM2.5 6 µg/m³ and NO2 12 µg/m³ and a five-color semicircle gauge; UV index 1 'Low' with a gradient 0 to 11+ scale; Wind 24 km/h, From SW (225°), gusts up to 41 km/h, with a compass arrow pointing northeast; Humidity 91%, dew point 10°, a blue droplet filled almost to the top; Pressure 1004 hPa with a red 'Falling' 3 hPa in 3 h and a Low/High dial; Visibility 6 km with three of five bars filled; Daylight 12h 02m, Sunrise 07:14, Sunset 19:16 and a dashed arc with the sun past midday; Moon 94%, Waxing gibbous, Full moon Sat 26 with a gibbous moon drawing."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The radar card matches: 'Precipitation radar', 'Rain band moving northeast at 35 km/h' and a Radar / Satellite / Temperature switch; a map with pale blue sea, gray-green land with fjords and islands, white roads with green E39 and E16 shields, the labels NORTH SEA, Knarvik, Askøy, Sotra, Osterøy, Bergen (bold), Os, Voss and Norheimsund, and a soft southwest-to-northeast band grading from green through yellow and orange to a red core near Bergen; a north arrow, zoom buttons, a 20 km scale and a dark '14:20 · Now' chip; below it a play button, a track from 13:00 to 15:30 filled up to 'Now', and the legend Light, Moderate, Heavy, Extreme with '0.5 · 2.5 · 8 · 30+ mm/h'."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The side cards and footer match: 'Next 60 minutes' with 'Moderate rain for the next hour, heaviest around 14:50.' and twelve bars rising to a dark-blue peak and falling again, gridlines 2, 4 and 6 mm/h and the times Now, 14:40, 15:00 and 15:15; 'Nearby stations' (Observed 14:10) with Florida, Bergen 11.2° 1.4 mm 22 km/h, Flesland airport 10.8° 1.1 mm 31 km/h, Askøy 11.0° 1.6 mm 26 km/h, Os 11.5° 0.9 mm 18 km/h and Voss 8.4° 0.6 mm 12 km/h; and a navy footer with the logo, the blurb, the columns Forecasts, Tools and Company, '© 2026 Brightsky Weather AS' and 'Forecast model Brightsky Nordic 2.5 km · Updated 14:20 CEST'."
+   },
+   {
+    "id": "F10",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and color match: Open Sans throughout with the same size and weight hierarchy (a light-weight hero temperature, bold card titles, small uppercase letter-spaced labels); a #eef2f7 page, white cards with 1px #dde4ed borders and 16px radii, a #2c3e55 to #5a6e86 slate hero, navy #0f1e33 text and footer, blue #1d6fe0 / #3b82f6 accents, and amber #f59e0b for the temperature line and the warning."
+   },
+   {
+    "id": "F11",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Everything is real HTML text with inline SVG or CSS for the logo, icons, charts, gauges and map (no raster images), and both layouts come from one index.html via media queries."
+   }
+  ]
+ },
+ {
+  "task_id": "website-rep-09",
+  "category": "website",
+  "mode": "replication",
+  "title": "Recreate a responsive headphone product page with comparison and reviews",
+  "prompt": "Recreate the attached product page for the Halden H7 Wireless, over-ear headphones sold by Halden Audio, as a real HTML/CSS page with both its desktop and its mobile layout. From top to bottom on desktop: a dark announcement bar; a white header with a round logo, the Halden AUDIO wordmark, five links with Headphones underlined in copper, a pill search field and account and bag icons; a breadcrumb; the product hero with four thumbnails beside a large warm stage showing the headphones with its pills and buttons, and the buy box (serif name, rating, price with the old price struck through, payment line, colour swatches, a delivery / pick-up selector, stock line, Add to cart with a wishlist button and trust badges); four feature tiles; a Technical specifications card beside a Compare the H-series table with the H7 column tinted; Customer reviews with a summary card (average, star histogram, feature meters) next to filter chips and three review cards; four accessory cards; a dark help card beside a five-question FAQ with the first question open; and a dark footer. On mobile the header keeps the logo, search, bag and menu icons; dots under the stage replace the thumbnails; everything stacks in one column; the feature tiles and accessories form 2x2 grids; the comparison drops the H5 column; the review sort and colour notes are hidden; and the footer links sit in three columns. The product name, section headings and big numbers use Liberation Serif and everything else uses Lato. Draw the headphones, logo, icons, stars, check marks and accessories with inline SVG. Match the layout, sizes, spacing, colors, typography and every piece of text as closely as you can in both layouts.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 800
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "golden": {
+   "entry": "index.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Desktop structure matches desktop.png: announcement bar, header, breadcrumb, a hero with an 88px thumbnail column and a 560px stage on the left and the buy box on the right, 'Built for long listening' with four tiles in one row, two equal cards (specifications | comparison), reviews with a narrow summary card left of the chips and three stacked review cards, four accessory cards in a row, a dark help card beside the FAQ list, and a dark four-column footer, on a centered column about 1184px wide at roughly the same vertical positions and total page height."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Mobile structure matches mobile.png at 390px: the announcement keeps only 'Free 2-day shipping on orders over $99'; the header shows only the logo, a search icon, the bag with 2 and a menu icon; the stage is full width with four dots (the first elongated) and no thumbnails; the buy box follows with its three trust badges stacked; the feature tiles are a 2x2 grid with the icon above the value; the cards and review summary stack; the comparison shows only H7 and H9 Studio; review cards put the stars and date on one line above the title with no colour note; accessories are 2x2; the help card sits above the FAQ; the footer links are in three columns; nothing overflows horizontally."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The header and gallery match: the round dark logo with copper ear cups, 'Halden' in serif with spaced 'AUDIO', links Headphones (copper underline), Earbuds, Speakers, Accessories and Journal, 'Search products', a bag badge '2'; the breadcrumb Home / Headphones / Over-ear / Halden H7 Wireless; thumbnails of the graphite headphones (outlined), a close-up of the round cup, a sand pair and a cobalt pair; and a stage drawing of graphite headphones seen from the front (arched headband with a stitched inner cushion, silver sliders and yokes, two cups seen edge-on with copper trim, a soft floor shadow) with the 'New colour: Cobalt' pill, a zoom button, the dark '360° view' pill and '1 / 4'."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The buy box matches: copper 'OVER-EAR · WIRELESS', 'Halden H7 Wireless', 'Adaptive noise-cancelling headphones with a 60-hour battery', 4.6 stars with '1,284 reviews' and '86 answered questions', '$279.00' with '$349.00' struck through and 'Save $70', 'or 4 interest-free payments of $69.75 · Learn more', 'Colour: Graphite' and '4 colours' over graphite (ringed), sand, moss and cobalt swatches, the selected 'Free delivery' row (Arrives Thu, Oct 1 – Fri, Oct 2, Free) and 'Pick up at Halden SoHo' (Ready in 2 hours · 3 left in stock, Free), 'In stock and ready to ship', a dark 'Add to cart · $279.00' button with a round heart button, and '2-year warranty', '45-day free returns' and 'Recycled packaging'."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The tiles read 60 h 'Battery with ANC on', 8 mics 'Adaptive noise cancelling', 254 g 'Featherweight frame' and LDAC 'Hi-Res wireless audio' with copper icon squares and gray detail lines, and the specifications card ('Model H7-W · Firmware 3.2', 'Spec sheet (PDF)') lists exactly Driver, Frequency response 4 Hz – 40 kHz, Impedance 32 Ω, Battery life 60 h with ANC · 80 h without, Charging, Bluetooth 5.4 multipoint (2 devices), Codecs SBC, AAC, aptX Adaptive, LDAC, Microphones 8, Weight 254 g and In the box, with gray labels and bold values."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The comparison table matches: columns H5 $179, H7 $279 under a copper 'THIS MODEL' tag in a tinted rounded column, and H9 Studio $449; rows Battery life 40 h / 60 h / 50 h, Noise cancelling Standard / Adaptive / Adaptive Pro, Spatial audio, LDAC Hi-Res and Wear detection with a dash for H5 and green checks otherwise, Multipoint checked for all three, Weight 238 g / 254 g / 312 g and Case Soft pouch / Hard case / Hard case, plus 'Compare all' in the card header."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The review summary matches: a large serif 4.6 with partial stars and 'Based on 1,284 reviews', amber histogram bars for 5 to 1 stars with counts 960, 214, 58, 27 and 25 and lengths in that proportion, 'RATED BY FEATURE' meters in a 2x2 grid (Comfort 4.7, Sound quality 4.8, Battery life 4.9, Noise cancelling 4.5) drawn as five dark segments, and '94% of reviewers recommend the H7' in a gray box."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The review list matches: 'Show all 1,284 reviews' and an outlined 'Write a review' in the header, chips 'All reviews' (dark), '5 stars (960)', 'Verified only' and 'Mentions comfort' with 'Sort: Most helpful', and three cards: 'Quiet flights, finally' (5 stars, Sep 14, 2026, Priya S., Graphite, Helpful (48)), 'Great sound, the app needs work' (4 stars, Sep 2, 2026, Marcus T., Sand, Helpful (21)) and 'Battery that lasts all week' (5 stars, Aug 27, 2026, Elin K., Moss, Helpful (17)), each with a colored initials avatar and a green 'Verified buyer' badge."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The lower sections match: accessory cards with SVG drawings of a hard case, a braided cable, two ear cushions and a stand, priced H-Series Hard Case $39.00, USB-C to 3.5 mm Cable $19.00, Memory-Foam Ear Cushions $29.00 and Aluminium Headphone Stand $59.00 with outlined Add pills that have a plus icon; the dark 'Questions, answered' card with a beige 'Chat with an expert' button and 'Mon–Sat, 9 am – 7 pm ET'; five FAQ rows with round plus buttons, the first open with a dark minus and its answer; and the footer with SHOP, SUPPORT and COMPANY columns, the 'Email address' / 'Subscribe' field and '© 2026 Halden Audio AS. All rights reserved.'"
+   },
+   {
+    "id": "F10",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and color match: Liberation Serif bold for the product name, section and card headings and big numbers, Lato elsewhere with a 900-weight price; a warm #faf8f5 page, near-black #1d1f22 text and buttons, copper #b8703f accents with pale copper #f6e3d3 fills, green #2f7d4f stock and checks, amber #e0a526 stars, and white cards with thin warm #e8e3dc borders and about 18px radii."
+   },
+   {
+    "id": "F11",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Everything is real HTML text (the specifications and comparison are real table markup) with inline SVG or CSS for the logo, headphones, icons, stars, checks and accessories and no raster images, and both layouts come from one index.html via media queries."
+   }
+  ]
+ },
+ {
+  "task_id": "website-rep-10",
+  "category": "website",
+  "mode": "replication",
+  "title": "Recreate a poster-style music festival page with a stage timetable",
+  "prompt": "Recreate the attached home page of Tidelines Festival 2026, a three-day coastal festival at Saltmarsh Park, North Bay, as a real HTML/CSS page at 1280px wide. Bold and poster-like: warm sand with navy, coral, teal, amber and violet accents. From top to bottom: a header with a round sun-and-waves logo mark, the TIDELINES wordmark with a small coral 2026, six nav links with Lineup underlined, a monospace date and a coral Buy tickets pill; a rounded navy hero with a pill, the huge heavy headline TIDELINES over FESTIVAL 2026, dates and place, two pill buttons, and on the right a layered sunset illustration (a striped sun, birds, a lighthouse, two dunes, three rows of waves, a round coral badge and a white chip); The lineup as three day cards (Saturday in navy), each with two large uppercase headliners, a bold tier of four names, a lighter tier of six and a more-artists line; the Saturday timetable: day tabs and a grid of four stage columns against an hourly axis from 14:00 to 01:00, where every set is a tinted block positioned and sized by its start and end time and the two headliners are solid blocks; Find your way, an illustrated site map (lagoon, sea, pier, camping, paths, ten numbered markers, a compass and a scale bar) with a legend, beside three info cards; four ticket cards (a sold-out Early Bird, a navy Best value Weekend Pass, Weekend + Camping and Day Ticket); a four-question FAQ; and a navy footer with link columns and a newsletter field. Type is Inter in heavy weights, with DejaVu Sans Mono for eyebrows, times and small labels. Draw the logo, illustration, map and icons with inline SVG. Match the layout, sizes, spacing, colors, typography and every piece of text as closely as you can.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "reference_images": [
+   "reference.png"
+  ],
+  "golden": {
+   "entry": "index.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The layout matches the target: header, a 420px rounded navy hero with the illustration filling its right half, three equal lineup cards, a full-width timetable card, a Find your way row (wide map card on the left, three stacked info cards on the right), four equal ticket cards, the FAQ (heading column plus a 2x2 grid) and a full-width navy footer, all on a centered column about 1152px wide at roughly the same vertical positions and total page height (about 3,400px)."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The header and hero text match: the round logo mark, 'TIDELINES' with a small coral '2026', links Lineup (coral underline), Timetable, Map, Tickets, Info and FAQ, '17–19 JUL · NORTH BAY' in monospace and a coral 'Buy tickets' pill; in the hero the pill '3 DAYS · 4 STAGES · 62 ARTISTS', a huge sand-colored 'TIDELINES', a letter-spaced coral 'FESTIVAL 2026', '17–19 July' over 'FRI – SUN' and 'Saltmarsh Park' over 'NORTH BAY COAST' separated by a vertical rule, a coral 'Buy tickets' and an outlined 'See the lineup' button."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The hero illustration matches: a navy-to-plum-to-orange sunset sky with small stars, a large amber sun cut by four horizontal stripes that thicken downward, three small navy birds, a coral-and-white striped lighthouse on the dunes, two sand dunes, three rows of scalloped teal waves getting darker toward the bottom, a round coral badge 'NEW IN 2026 / THE PIER / STAGE' with a dashed inner ring at the top right, and a white chip 'Sat 18 · Solenne closes the Main Stage' with a coral dot."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The lineup matches: the eyebrow 01 · WHO'S PLAYING, 'The lineup' and the right-aligned 'Sixty-two artists, three days, four stages by the water.'; cards FRIDAY 17 JULY (teal rule), SATURDAY 18 JULY (navy card, coral rule) and SUNDAY 19 JULY (amber rule) with the headliners MARLOW BAY / THE KESTRELS, SOLENNE / GLASS ATLAS and ORCA SUMMER / DELPHINE, three coral stars, the bold four-name tier and gray six-name tier on two lines each exactly as in the target (e.g. 'Rook & Wren · Midnight Ferry' / 'Tamsin Lowe · Night Swim' with coral dots), and '+ 8 MORE ARTISTS', '+ 9 MORE ARTISTS', '+ 9 MORE ARTISTS'."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The timetable frame matches: the eyebrow 02 · WHEN AND WHERE, 'Saturday timetable', 'Gates open 12:00 · last music 01:00' and tabs Fri 17, Sat 18 (dark, selected) and Sun 19; a card with stage headers Main Stage 'big nights' (coral square), Lagoon 'indie & folk' (teal), Dune Tent 'electronic' (amber) and The Pier 'DJs till late' (violet), monospace hour labels 14:00 to 01:00 on evenly spaced dashed lines, vertical column rules, and the footnote 'All times BST. Set times can change: check the Tidelines app on the day.' with a Set / Headliner legend."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "All 19 sets sit in the right column at the right height and length for their times: Main Stage Bex Arno 14:00–15:00, Coastline Choir 15:45–16:45, Tamsin Lowe 17:30–18:30, Rook & Wren 19:15–20:30 and SOLENNE 21:30–23:00; Lagoon Fenn 14:30–15:30, Kaia Moon 16:15–17:15, Lio Sandoval 18:00–19:00, Midnight Ferry 19:45–21:00 and GLASS ATLAS 22:15–23:45; Dune Tent The Driftwoods 15:00–16:00, Harbor Static 16:45–17:45, Wavelength Duo 18:30–19:30, Night Swim 20:15–21:45 and Kite Theory 23:15–01:00; The Pier Tern Club 14:00–16:00, Low Orbit 16:30–18:30, Moss Parade 19:00–21:00 and Low Tide Sound System 21:30–00:30. Regular sets are pale tints with a left border in the stage color; SOLENNE (solid coral) and GLASS ATLAS (solid teal) have large white names and a HEADLINER tag."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The Find your way row matches: the eyebrow 03 · PLAN YOUR WEEKEND, 'Find your way', 'Between the lagoon and the sea, ten minutes from North Bay.'; a sand map with a pale-teal lagoon labeled THE LAGOON, the sea along the bottom labeled NORTH BAY, a wooden pier, a green CAMPING area with eight teal tents, round green trees, white dashed paths, markers 1 (coral), 2 (teal), 3 (amber), 4 (violet) and 5–10 (navy), a north compass and a '0 / 200 m' scale bar; a legend in two rows of five (1 Main Stage, 2 Lagoon, 3 Dune Tent, 4 The Pier, 5 Food court, 6 Campsites, 7 Main gate, 8 Shuttle stop, 9 First aid, 10 Water refill); and the cards Getting here ('SHUTTLES 11:00–02:00'), Camping ('OPENS THU 16 JULY 16:00') and Accessibility ('ACCESS@TIDELINES.FM') with coral, teal and violet icon tiles and their sentences."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and color match: Inter with 900-weight headlines, headliners and prices, DejaVu Sans Mono for eyebrows, dates, hour labels, set times and ticket names; a sand #f7f0e3 page, navy #13294b hero and featured cards, coral #ef5a3c, teal #1a9b8e, amber #f2a93b and violet #6d5bd0 accents, cream #fffaf1 cards with 1px #e3d7c2 borders and about 22px radii, and fully rounded pills and buttons."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The tickets match: the eyebrow 04 · GET IN, 'Tickets' and 'Prices include booking fees. Under-12s go free with a paying adult.'; a grayed EARLY BIRD card with £169 struck through, a SOLD OUT badge, 'Weekend · released in October' and a disabled 'Sold out' button; a navy WEEKEND PASS card £189 with a coral BEST VALUE badge, 'Fri–Sun · per person', amber checks and a coral 'Buy weekend pass'; WEEKEND + CAMPING £249 'Thu–Mon · per person' with 'Buy with camping'; DAY TICKET £79 'Friday, Saturday or Sunday' with 'Choose a day'; each card lists its three checked features (e.g. 'Re-entry until 22:00 daily', 'Four nights by the dunes', 'Upgrade on site')."
+   },
+   {
+    "id": "F10",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The FAQ and footer match: the eyebrow 05 · GOOD TO KNOW with 'Questions, answered' left of a 2x2 grid under dark rules (Can I leave and come back in?, Is the festival cashless?, What can I bring in?, Are children welcome?) with their answers; a navy footer with the logo and 'Three days of music, sea swims and long evenings on the North Bay coast.', amber monospace headings FESTIVAL, HELP, COMPANY and NEWSLETTER with four links each, a 'you@example.com' field joined to a coral 'Sign up', '© 2026 Tidelines Festival Ltd · Saltmarsh Park, North Bay' and 'Privacy · Terms · Cookies'."
+   },
+   {
+    "id": "F11",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Everything is real HTML text (lineup, set blocks, legend, tickets) with inline SVG or CSS for the logo, the hero illustration, the map, the icons and the check marks; there are no raster images, embedded screenshots or external resources."
+   }
+  ]
+ }
+]

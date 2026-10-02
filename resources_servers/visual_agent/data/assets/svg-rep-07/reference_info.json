@@ -1,0 +1,13 @@
+{
+ "references": {
+  "reference.png": {
+   "distinct_coarse_colors": 59,
+   "dominant_color_fraction": 0.5298,
+   "gray_std": 47.696,
+   "height": 1000,
+   "width": 700
+  }
+ },
+ "self_check_blank": false,
+ "self_similarity": 1.0
+}

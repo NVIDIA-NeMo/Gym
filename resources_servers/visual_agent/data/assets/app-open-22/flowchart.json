@@ -1,0 +1,157 @@
+{
+  "name": "Order fulfilment",
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "start",
+      "label": "Order received",
+      "x": 60,
+      "y": 40
+    },
+    {
+      "id": "n2",
+      "type": "process",
+      "label": "Check payment",
+      "x": 60,
+      "y": 120
+    },
+    {
+      "id": "n3",
+      "type": "decision",
+      "label": "Payment OK?",
+      "x": 60,
+      "y": 220
+    },
+    {
+      "id": "n4",
+      "type": "process",
+      "label": "Check stock",
+      "x": 60,
+      "y": 340
+    },
+    {
+      "id": "n5",
+      "type": "decision",
+      "label": "In stock?",
+      "x": 60,
+      "y": 440
+    },
+    {
+      "id": "n6",
+      "type": "process",
+      "label": "Ship order",
+      "x": 60,
+      "y": 560
+    },
+    {
+      "id": "n7",
+      "type": "end",
+      "label": "Done",
+      "x": 320,
+      "y": 580
+    },
+    {
+      "id": "n8",
+      "type": "process",
+      "label": "Refund",
+      "x": 560,
+      "y": 120
+    },
+    {
+      "id": "n9",
+      "type": "process",
+      "label": "Notify customer",
+      "x": 320,
+      "y": 240
+    },
+    {
+      "id": "n10",
+      "type": "process",
+      "label": "Backorder",
+      "x": 560,
+      "y": 460
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": "n1",
+      "fromPort": "bottom",
+      "to": "n2",
+      "toPort": "top",
+      "label": ""
+    },
+    {
+      "id": "e2",
+      "from": "n2",
+      "fromPort": "bottom",
+      "to": "n3",
+      "toPort": "top",
+      "label": ""
+    },
+    {
+      "id": "e3",
+      "from": "n3",
+      "fromPort": "bottom",
+      "to": "n4",
+      "toPort": "top",
+      "label": "Yes"
+    },
+    {
+      "id": "e4",
+      "from": "n3",
+      "fromPort": "right",
+      "to": "n9",
+      "toPort": "left",
+      "label": "No"
+    },
+    {
+      "id": "e5",
+      "from": "n4",
+      "fromPort": "bottom",
+      "to": "n5",
+      "toPort": "top",
+      "label": ""
+    },
+    {
+      "id": "e6",
+      "from": "n5",
+      "fromPort": "bottom",
+      "to": "n6",
+      "toPort": "top",
+      "label": "Yes"
+    },
+    {
+      "id": "e7",
+      "from": "n5",
+      "fromPort": "right",
+      "to": "n10",
+      "toPort": "left",
+      "label": ""
+    },
+    {
+      "id": "e8",
+      "from": "n6",
+      "fromPort": "right",
+      "to": "n7",
+      "toPort": "left",
+      "label": ""
+    },
+    {
+      "id": "e9",
+      "from": "n9",
+      "fromPort": "bottom",
+      "to": "n7",
+      "toPort": "top",
+      "label": ""
+    },
+    {
+      "id": "e10",
+      "from": "n8",
+      "fromPort": "bottom",
+      "to": "n9",
+      "toPort": "right",
+      "label": ""
+    }
+  ]
+}

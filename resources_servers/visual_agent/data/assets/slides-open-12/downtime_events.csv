@@ -1,0 +1,351 @@
+date,line,shift,reason,minutes
+2026-02-02,L1,A,Quality hold,20
+2026-02-02,L1,B,Jam,13
+2026-02-02,L1,B,Changeover,30
+2026-02-02,L1,B,Label misfeed,7
+2026-02-02,L2,A,Changeover,27
+2026-02-02,L2,B,Changeover,41
+2026-02-02,L2,B,Changeover,28
+2026-02-02,L2,B,Changeover,35
+2026-02-02,L2,B,Changeover,45
+2026-02-02,L3,A,Material shortage,21
+2026-02-02,L3,A,Jam,8
+2026-02-02,L3,B,Changeover,55
+2026-02-02,L3,B,Quality hold,28
+2026-02-02,L3,B,Quality hold,38
+2026-02-02,L4,A,Quality hold,35
+2026-02-02,L4,A,Material shortage,40
+2026-02-02,L4,B,Material shortage,40
+2026-02-02,L4,B,Electrical fault,42
+2026-02-03,L1,A,Changeover,53
+2026-02-03,L1,A,Changeover,49
+2026-02-03,L1,B,Jam,9
+2026-02-03,L2,A,Changeover,47
+2026-02-03,L2,A,Changeover,38
+2026-02-03,L2,B,Jam,6
+2026-02-03,L2,B,Changeover,45
+2026-02-03,L2,B,Electrical fault,20
+2026-02-03,L3,A,Changeover,33
+2026-02-03,L3,B,Label misfeed,3
+2026-02-03,L3,B,Jam,8
+2026-02-03,L4,A,Material shortage,40
+2026-02-03,L4,A,Material shortage,24
+2026-02-03,L4,B,Jam,11
+2026-02-04,L1,A,Changeover,39
+2026-02-04,L1,A,Jam,9
+2026-02-04,L1,A,Cleaning overrun,12
+2026-02-04,L1,B,Changeover,48
+2026-02-04,L1,B,Material shortage,41
+2026-02-04,L2,A,Jam,10
+2026-02-04,L2,A,Material shortage,45
+2026-02-04,L2,A,Jam,6
+2026-02-04,L2,B,Jam,9
+2026-02-04,L2,B,Sensor fault,13
+2026-02-04,L2,B,Changeover,25
+2026-02-04,L2,B,Changeover,54
+2026-02-04,L3,A,Material shortage,35
+2026-02-04,L3,B,Material shortage,22
+2026-02-04,L4,A,Changeover,47
+2026-02-04,L4,A,Jam,6
+2026-02-04,L4,A,Changeover,42
+2026-02-04,L4,B,Material shortage,31
+2026-02-04,L4,B,Changeover,53
+2026-02-05,L1,A,Label misfeed,4
+2026-02-05,L1,A,Jam,13
+2026-02-05,L1,A,Cleaning overrun,19
+2026-02-05,L1,B,Changeover,25
+2026-02-05,L2,A,Label misfeed,9
+2026-02-05,L2,A,Material shortage,23
+2026-02-05,L2,A,Cleaning overrun,21
+2026-02-05,L2,A,Changeover,33
+2026-02-05,L2,B,Label misfeed,5
+2026-02-05,L2,B,Material shortage,20
+2026-02-05,L2,B,Jam,8
+2026-02-05,L2,B,Jam,11
+2026-02-05,L3,A,Material shortage,27
+2026-02-05,L4,A,Cleaning overrun,15
+2026-02-05,L4,A,Material shortage,26
+2026-02-05,L4,B,Changeover,33
+2026-02-05,L4,B,Material shortage,37
+2026-02-05,L4,B,Material shortage,15
+2026-02-06,L1,A,Jam,14
+2026-02-06,L1,A,Jam,14
+2026-02-06,L1,A,Cleaning overrun,20
+2026-02-06,L1,B,Electrical fault,23
+2026-02-06,L1,B,Jam,14
+2026-02-06,L2,A,Changeover,26
+2026-02-06,L2,A,Label misfeed,10
+2026-02-06,L2,B,Changeover,28
+2026-02-06,L2,B,Changeover,33
+2026-02-06,L2,B,Changeover,32
+2026-02-06,L3,A,Changeover,49
+2026-02-06,L3,A,Quality hold,25
+2026-02-06,L3,B,Sensor fault,11
+2026-02-06,L3,B,Material shortage,42
+2026-02-06,L4,A,Changeover,48
+2026-02-06,L4,A,Material shortage,17
+2026-02-06,L4,B,Label misfeed,9
+2026-02-06,L4,B,Material shortage,16
+2026-02-06,L4,B,Material shortage,44
+2026-02-09,L1,A,Changeover,37
+2026-02-09,L1,A,Changeover,41
+2026-02-09,L1,B,Changeover,53
+2026-02-09,L1,B,Jam,7
+2026-02-09,L2,A,Changeover,42
+2026-02-09,L2,A,Changeover,31
+2026-02-09,L2,B,Changeover,29
+2026-02-09,L2,B,Changeover,32
+2026-02-09,L2,B,Changeover,49
+2026-02-09,L2,B,Jam,10
+2026-02-09,L3,A,Material shortage,32
+2026-02-09,L3,A,Material shortage,33
+2026-02-09,L3,B,Material shortage,30
+2026-02-09,L3,B,Quality hold,36
+2026-02-09,L4,A,Electrical fault,53
+2026-02-09,L4,A,Cleaning overrun,24
+2026-02-09,L4,B,Jam,8
+2026-02-09,L4,B,Jam,14
+2026-02-09,L4,B,Jam,6
+2026-02-09,L4,B,Jam,4
+2026-02-10,L1,B,Jam,12
+2026-02-10,L1,B,Quality hold,30
+2026-02-10,L2,A,Changeover,45
+2026-02-10,L2,B,Changeover,41
+2026-02-10,L2,B,Changeover,33
+2026-02-10,L2,B,Changeover,26
+2026-02-10,L2,B,Label misfeed,8
+2026-02-10,L2,B,Jam,10
+2026-02-10,L3,A,Label misfeed,5
+2026-02-10,L3,A,Changeover,30
+2026-02-10,L3,A,Jam,14
+2026-02-10,L3,B,Jam,5
+2026-02-10,L3,B,Changeover,37
+2026-02-10,L4,A,Electrical fault,60
+2026-02-10,L4,A,Sensor fault,9
+2026-02-10,L4,A,Jam,4
+2026-02-10,L4,B,Quality hold,24
+2026-02-10,L4,B,Material shortage,17
+2026-02-10,L4,B,Quality hold,15
+2026-02-11,L1,A,Jam,12
+2026-02-11,L1,A,Label misfeed,6
+2026-02-11,L1,A,Jam,9
+2026-02-11,L1,B,Changeover,48
+2026-02-11,L1,B,Material shortage,24
+2026-02-11,L1,B,Material shortage,16
+2026-02-11,L2,A,Material shortage,45
+2026-02-11,L2,A,Changeover,35
+2026-02-11,L2,A,Cleaning overrun,15
+2026-02-11,L2,B,Material shortage,44
+2026-02-11,L2,B,Changeover,41
+2026-02-11,L3,A,Changeover,30
+2026-02-11,L3,A,Changeover,33
+2026-02-11,L3,B,Sensor fault,17
+2026-02-11,L3,B,Sensor fault,14
+2026-02-11,L4,A,Changeover,30
+2026-02-11,L4,B,Quality hold,38
+2026-02-11,L4,B,Sensor fault,9
+2026-02-12,L1,A,Label misfeed,10
+2026-02-12,L2,A,Changeover,51
+2026-02-12,L2,B,Jam,9
+2026-02-12,L2,B,Jam,9
+2026-02-12,L2,B,Changeover,53
+2026-02-12,L3,A,Label misfeed,9
+2026-02-12,L3,A,Jam,10
+2026-02-12,L3,A,Quality hold,16
+2026-02-12,L3,B,Quality hold,36
+2026-02-12,L3,B,Label misfeed,3
+2026-02-12,L3,B,Material shortage,38
+2026-02-12,L4,A,Label misfeed,3
+2026-02-12,L4,B,Sensor fault,7
+2026-02-12,L4,B,Electrical fault,61
+2026-02-12,L4,B,Material shortage,35
+2026-02-13,L1,A,Jam,5
+2026-02-13,L1,A,Changeover,48
+2026-02-13,L1,B,Cleaning overrun,12
+2026-02-13,L1,B,Label misfeed,5
+2026-02-13,L1,B,Sensor fault,14
+2026-02-13,L2,A,Changeover,32
+2026-02-13,L2,A,Material shortage,35
+2026-02-13,L2,A,Electrical fault,23
+2026-02-13,L2,B,Jam,9
+2026-02-13,L2,B,Label misfeed,6
+2026-02-13,L2,B,Label misfeed,8
+2026-02-13,L3,A,Material shortage,37
+2026-02-13,L3,A,Material shortage,16
+2026-02-13,L3,B,Cleaning overrun,11
+2026-02-13,L4,A,Material shortage,28
+2026-02-13,L4,A,Material shortage,28
+2026-02-13,L4,B,Electrical fault,43
+2026-02-13,L4,B,Electrical fault,56
+2026-02-16,L1,A,Cleaning overrun,24
+2026-02-16,L1,A,Label misfeed,9
+2026-02-16,L1,B,Label misfeed,9
+2026-02-16,L1,B,Label misfeed,5
+2026-02-16,L2,A,Label misfeed,5
+2026-02-16,L2,A,Changeover,41
+2026-02-16,L2,A,Jam,14
+2026-02-16,L2,A,Material shortage,30
+2026-02-16,L2,B,Cleaning overrun,18
+2026-02-16,L2,B,Jam,10
+2026-02-16,L3,A,Changeover,47
+2026-02-16,L3,B,Jam,9
+2026-02-16,L3,B,Sensor fault,13
+2026-02-16,L4,A,Electrical fault,38
+2026-02-16,L4,A,Material shortage,43
+2026-02-16,L4,A,Material shortage,43
+2026-02-16,L4,B,Electrical fault,27
+2026-02-16,L4,B,Material shortage,39
+2026-02-17,L1,A,Jam,13
+2026-02-17,L1,A,Sensor fault,13
+2026-02-17,L1,B,Label misfeed,8
+2026-02-17,L1,B,Label misfeed,10
+2026-02-17,L2,A,Electrical fault,66
+2026-02-17,L2,A,Label misfeed,6
+2026-02-17,L2,A,Changeover,44
+2026-02-17,L2,A,Changeover,55
+2026-02-17,L2,B,Changeover,46
+2026-02-17,L2,B,Label misfeed,10
+2026-02-17,L2,B,Sensor fault,6
+2026-02-17,L3,A,Changeover,39
+2026-02-17,L3,A,Electrical fault,24
+2026-02-17,L3,A,Quality hold,25
+2026-02-17,L3,B,Changeover,32
+2026-02-17,L3,B,Cleaning overrun,17
+2026-02-17,L4,A,Material shortage,42
+2026-02-17,L4,A,Changeover,25
+2026-02-17,L4,B,Changeover,31
+2026-02-17,L4,B,Material shortage,19
+2026-02-17,L4,B,Electrical fault,50
+2026-02-17,L4,B,Material shortage,40
+2026-02-18,L1,A,Label misfeed,3
+2026-02-18,L1,B,Cleaning overrun,19
+2026-02-18,L1,B,Changeover,50
+2026-02-18,L2,A,Sensor fault,11
+2026-02-18,L2,A,Changeover,33
+2026-02-18,L2,A,Changeover,49
+2026-02-18,L2,A,Changeover,25
+2026-02-18,L2,B,Changeover,31
+2026-02-18,L3,A,Electrical fault,69
+2026-02-18,L3,A,Jam,6
+2026-02-18,L3,B,Changeover,33
+2026-02-18,L4,A,Quality hold,17
+2026-02-18,L4,A,Electrical fault,40
+2026-02-18,L4,A,Material shortage,33
+2026-02-18,L4,B,Material shortage,39
+2026-02-18,L4,B,Changeover,34
+2026-02-18,L4,B,Material shortage,18
+2026-02-19,L1,A,Label misfeed,5
+2026-02-19,L1,B,Material shortage,34
+2026-02-19,L2,A,Sensor fault,15
+2026-02-19,L2,A,Jam,14
+2026-02-19,L2,B,Jam,13
+2026-02-19,L2,B,Changeover,44
+2026-02-19,L3,A,Jam,6
+2026-02-19,L3,A,Electrical fault,68
+2026-02-19,L3,B,Jam,13
+2026-02-19,L3,B,Label misfeed,8
+2026-02-19,L4,A,Material shortage,32
+2026-02-19,L4,B,Material shortage,42
+2026-02-19,L4,B,Changeover,41
+2026-02-20,L1,A,Electrical fault,53
+2026-02-20,L1,A,Jam,10
+2026-02-20,L1,A,Jam,8
+2026-02-20,L1,B,Cleaning overrun,16
+2026-02-20,L1,B,Jam,4
+2026-02-20,L1,B,Label misfeed,8
+2026-02-20,L2,A,Cleaning overrun,11
+2026-02-20,L2,A,Changeover,33
+2026-02-20,L2,B,Changeover,53
+2026-02-20,L2,B,Changeover,26
+2026-02-20,L2,B,Jam,8
+2026-02-20,L2,B,Changeover,30
+2026-02-20,L3,A,Jam,5
+2026-02-20,L3,A,Cleaning overrun,22
+2026-02-20,L3,B,Material shortage,28
+2026-02-20,L3,B,Changeover,27
+2026-02-20,L4,A,Material shortage,29
+2026-02-20,L4,A,Changeover,37
+2026-02-20,L4,B,Changeover,38
+2026-02-23,L1,B,Material shortage,33
+2026-02-23,L1,B,Quality hold,26
+2026-02-23,L1,B,Label misfeed,6
+2026-02-23,L1,B,Changeover,39
+2026-02-23,L2,A,Material shortage,40
+2026-02-23,L2,A,Changeover,34
+2026-02-23,L2,B,Changeover,25
+2026-02-23,L2,B,Cleaning overrun,20
+2026-02-23,L3,A,Changeover,55
+2026-02-23,L3,B,Quality hold,28
+2026-02-23,L4,A,Material shortage,18
+2026-02-23,L4,A,Changeover,27
+2026-02-23,L4,B,Changeover,55
+2026-02-23,L4,B,Electrical fault,22
+2026-02-23,L4,B,Changeover,41
+2026-02-24,L1,A,Label misfeed,8
+2026-02-24,L1,B,Label misfeed,4
+2026-02-24,L1,B,Changeover,25
+2026-02-24,L1,B,Label misfeed,4
+2026-02-24,L2,A,Changeover,29
+2026-02-24,L2,A,Cleaning overrun,20
+2026-02-24,L2,A,Changeover,33
+2026-02-24,L2,B,Jam,5
+2026-02-24,L2,B,Jam,4
+2026-02-24,L3,A,Material shortage,30
+2026-02-24,L3,A,Changeover,36
+2026-02-24,L3,B,Material shortage,42
+2026-02-24,L3,B,Jam,6
+2026-02-24,L4,A,Electrical fault,50
+2026-02-24,L4,B,Material shortage,23
+2026-02-24,L4,B,Material shortage,31
+2026-02-24,L4,B,Label misfeed,10
+2026-02-25,L1,A,Jam,7
+2026-02-25,L1,A,Quality hold,39
+2026-02-25,L1,A,Electrical fault,64
+2026-02-25,L1,B,Sensor fault,14
+2026-02-25,L1,B,Cleaning overrun,16
+2026-02-25,L2,A,Changeover,49
+2026-02-25,L2,A,Material shortage,38
+2026-02-25,L2,A,Cleaning overrun,11
+2026-02-25,L2,B,Cleaning overrun,18
+2026-02-25,L2,B,Changeover,30
+2026-02-25,L2,B,Quality hold,16
+2026-02-25,L2,B,Changeover,34
+2026-02-25,L3,A,Electrical fault,39
+2026-02-25,L3,A,Material shortage,26
+2026-02-25,L3,B,Jam,5
+2026-02-25,L3,B,Jam,11
+2026-02-25,L4,A,Electrical fault,31
+2026-02-25,L4,B,Electrical fault,43
+2026-02-25,L4,B,Changeover,37
+2026-02-26,L1,A,Changeover,29
+2026-02-26,L1,A,Jam,9
+2026-02-26,L1,B,Changeover,52
+2026-02-26,L1,B,Jam,13
+2026-02-26,L2,A,Changeover,52
+2026-02-26,L2,B,Changeover,54
+2026-02-26,L2,B,Cleaning overrun,19
+2026-02-26,L2,B,Changeover,33
+2026-02-26,L2,B,Changeover,35
+2026-02-26,L3,A,Quality hold,39
+2026-02-26,L3,A,Changeover,37
+2026-02-26,L3,B,Material shortage,15
+2026-02-26,L3,B,Material shortage,28
+2026-02-26,L3,B,Quality hold,23
+2026-02-26,L4,A,Changeover,49
+2026-02-26,L4,A,Quality hold,22
+2026-02-26,L4,B,Electrical fault,34
+2026-02-26,L4,B,Electrical fault,35
+2026-02-27,L1,B,Label misfeed,7
+2026-02-27,L1,B,Sensor fault,15
+2026-02-27,L2,A,Changeover,30
+2026-02-27,L2,B,Changeover,48
+2026-02-27,L2,B,Cleaning overrun,16
+2026-02-27,L2,B,Jam,8
+2026-02-27,L3,A,Quality hold,35
+2026-02-27,L3,A,Electrical fault,28
+2026-02-27,L3,B,Quality hold,28
+2026-02-27,L3,B,Jam,9
+2026-02-27,L4,A,Material shortage,40
+2026-02-27,L4,A,Changeover,52
+2026-02-27,L4,B,Changeover,52
+2026-02-27,L4,B,Electrical fault,32

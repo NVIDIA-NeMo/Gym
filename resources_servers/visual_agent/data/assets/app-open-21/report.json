@@ -1,0 +1,210 @@
+{
+ "id": "nwa-ar-2025",
+ "title": "Northwind Water Authority · 2025 Annual Report",
+ "pages": [
+  {
+   "blocks": [
+    {
+     "type": "h1",
+     "text": "2025 Annual Report"
+    },
+    {
+     "type": "p",
+     "text": "Northwind Water Authority serves 412,000 residents and 9,800 businesses across the Harbor, Millbrook and Eastfield districts. This report covers the fiscal year from 1 July 2024 to 30 June 2025 and was approved by the Board of Directors on 18 September 2025."
+    },
+    {
+     "type": "h2",
+     "text": "Letter from the Chair"
+    },
+    {
+     "type": "p",
+     "text": "It was a year of steady delivery. We treated and delivered 41.6 billion liters of drinking water, met every state and federal quality standard, and kept the average residential bill below the regional median for the seventh year in a row."
+    },
+    {
+     "type": "p",
+     "text": "Water is our only product, and reliability is our promise. When the February cold snap burst mains across Millbrook, crews restored service to every affected street within 36 hours. I thank them, and I thank our customers for their patience."
+    },
+    {
+     "type": "p",
+     "text": "Looking ahead, the Board has approved a separate reserve for drought resilience so that future rate decisions are not rushed by a single dry season."
+    },
+    {
+     "type": "p",
+     "text": "— Dana Whitfield, Chair of the Board"
+    }
+   ]
+  },
+  {
+   "blocks": [
+    {
+     "type": "h1",
+     "text": "Operations"
+    },
+    {
+     "type": "h2",
+     "text": "Water supply"
+    },
+    {
+     "type": "p",
+     "text": "Our supply comes from the Cedar Lake reservoir (68%), the Millbrook wellfield (24%) and a purchased connection with the Coastal Water District (8%). Reservoir storage peaked at 94% in April and never fell below 61%."
+    },
+    {
+     "type": "p",
+     "text": "Groundwater levels in the Millbrook wellfield recovered for a third straight year after pumping limits introduced in 2022. The wellfield now operates at a sustainable rate of 21 million liters per day."
+    },
+    {
+     "type": "h2",
+     "text": "Treatment"
+    },
+    {
+     "type": "p",
+     "text": "The Cedar Lake treatment plant processed an average of 114 million liters per day. Finished water turbidity averaged 0.04 NTU, well below the 0.3 NTU limit, and all 3,870 bacteriological samples were negative."
+    },
+    {
+     "type": "p",
+     "text": "Ultraviolet disinfection, commissioned in March, adds a second barrier against chlorine-resistant organisms. It is rated for the plant's full design flow of 180 million liters per day."
+    }
+   ]
+  },
+  {
+   "blocks": [
+    {
+     "type": "h2",
+     "text": "Distribution network"
+    },
+    {
+     "type": "p",
+     "text": "We operate 2,140 kilometers of mains, 31 storage tanks and 18 pump stations. Crews replaced 26.4 kilometers of aging cast-iron main, ahead of the 24-kilometer target, and renewed 1,950 customer service lines."
+    },
+    {
+     "type": "p",
+     "text": "Non-revenue water fell to 11.2% of supply, down from 12.9%, as acoustic leak detection located 312 hidden leaks. Each percentage point is worth about 700 million liters a year, enough water for 5,000 homes."
+    },
+    {
+     "type": "p",
+     "text": "Main breaks rose to 214 from 187, driven by the February freeze; excluding those eleven days, the break rate was the lowest on record at 8.1 per 100 kilometers."
+    },
+    {
+     "type": "h2",
+     "text": "Metering"
+    },
+    {
+     "type": "p",
+     "text": "Smart meters now cover 78% of connections. Hourly reads let customers see their water use the next morning and let us flag continuous flow that usually points to a leak inside the property."
+    }
+   ]
+  },
+  {
+   "blocks": [
+    {
+     "type": "h1",
+     "text": "Finance"
+    },
+    {
+     "type": "h2",
+     "text": "Revenue and rates"
+    },
+    {
+     "type": "p",
+     "text": "Operating revenue was $186.4 million, up 4.1%. Water sales provided 91% of revenue; connection fees, rentals and interest made up the rest. The Board approved a 3.5% rate increase for 2025, below the 4.2% rise in construction costs."
+    },
+    {
+     "type": "p",
+     "text": "Rates remain tiered: the first 10 cubic meters each month are billed at the lifeline rate, and higher tiers carry a conservation rate. The customer assistance program lowered bills for 6,420 households."
+    },
+    {
+     "type": "h2",
+     "text": "Capital program"
+    },
+    {
+     "type": "p",
+     "text": "Capital spending reached $97.2 million, 96% of budget. The largest projects were the ultraviolet disinfection system ($21.8 million), main replacement ($34.5 million) and the Eastfield tank rehabilitation ($9.6 million)."
+    },
+    {
+     "type": "p",
+     "text": "Debt service coverage was 2.1 times, above the 1.5 times required by our bond covenants, and Moody's affirmed our Aa2 rating in May."
+    }
+   ]
+  },
+  {
+   "blocks": [
+    {
+     "type": "h1",
+     "text": "Customers and Community"
+    },
+    {
+     "type": "h2",
+     "text": "Customer service"
+    },
+    {
+     "type": "p",
+     "text": "The contact center answered 148,300 calls with an average wait of 52 seconds, and 71% of billing questions were resolved on the first call. Online accounts grew to 164,000, and paperless billing reached 58% of customers."
+    },
+    {
+     "type": "p",
+     "text": "Customer satisfaction reached 87%, the highest in the survey's ten-year history. Complaints about water pressure fell by a third after the Harbor pressure zone was separated into two smaller zones."
+    },
+    {
+     "type": "h2",
+     "text": "Education and outreach"
+    },
+    {
+     "type": "p",
+     "text": "Staff visited 96 classrooms and hosted 2,300 visitors at the Cedar Lake open days. The Water Wise rebate program funded 1,140 efficient toilets and 380 smart irrigation controllers."
+    }
+   ]
+  },
+  {
+   "blocks": [
+    {
+     "type": "h1",
+     "text": "Sustainability"
+    },
+    {
+     "type": "h2",
+     "text": "Energy and emissions"
+    },
+    {
+     "type": "p",
+     "text": "Pumping and treatment used 61.3 gigawatt hours of electricity, 5% less than last year, as new high-efficiency pumps came online at the Harbor and Eastfield stations. Solar arrays at four sites generate 14% of our demand."
+    },
+    {
+     "type": "p",
+     "text": "Scope 1 and 2 emissions were 9,870 tonnes of CO2 equivalent, down 22% from the 2019 baseline. We are on track for a 50% reduction by 2030."
+    },
+    {
+     "type": "h2",
+     "text": "Watershed protection"
+    },
+    {
+     "type": "p",
+     "text": "We acquired 410 hectares of forest above Cedar Lake and planted 38,000 native trees along its tributaries. Protecting the watershed is the cheapest way to keep raw water clean and treatment costs low."
+    }
+   ]
+  },
+  {
+   "blocks": [
+    {
+     "type": "h1",
+     "text": "Outlook for 2026"
+    },
+    {
+     "type": "p",
+     "text": "Next year we will begin the Millbrook transmission main, extend smart metering to every connection, and publish a drought plan with clear triggers for each stage of water restrictions."
+    },
+    {
+     "type": "p",
+     "text": "We expect to propose a rate increase of 3.8% for 2026, with the lifeline rate held flat. Every rate proposal will again be reviewed at public hearings in each district before the Board votes."
+    },
+    {
+     "type": "h2",
+     "text": "Board of Directors"
+    },
+    {
+     "type": "p",
+     "text": "Dana Whitfield (Chair), Luis Ortega (Vice Chair), Priya Raman, Tom Beckett, Grace Mensah, Ahmed Karim and Helen Zhou. General Manager: Robert Kline."
+    }
+   ]
+  }
+ ]
+}

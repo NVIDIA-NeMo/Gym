@@ -1,0 +1,1350 @@
+[
+ {
+  "task_id": "website-open-01",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Hash-routed coffee roaster site with a subscription price builder",
+  "prompt": "Build a small multi-page website for Ember & Oak, a small-batch coffee roaster that sells a bean subscription. It should feel warm, premium and hand-crafted. Deliver one index.html that uses hash routing with four routes: #/ (Home), #/beans, #/subscribe and #/faq.\n\nRouting: the header nav (Home, Beans, Subscribe, FAQ) marks the current route with aria-current='page' and a visible active style. document.title is 'Ember & Oak · Small-batch coffee' on Home and '<Page> · Ember & Oak' elsewhere (for example 'Beans · Ember & Oak'). Only the current view is shown, the browser Back button returns to the previous route, opening index.html without a hash shows Home, and any unknown hash such as #/shop shows a 'Page not found' view with a 'Back to home' link.\n\nHome: the headline 'Coffee worth waking up for', a 'Build your subscription' button that goes to #/subscribe, and three steps illustrated with inline SVG.\n\nBeans: six coffee cards with name, origin, roast, tasting notes and price per 250g bag: Kiambu AA (Kenya, Light, $19), Huila Pink Bourbon (Colombia, Light, $21), Yirgacheffe Kochere (Ethiopia, Light, $18), Cerrado Natural (Brazil, Medium, $15), Antigua Pastoral (Guatemala, Medium, $16) and Sumatra Mandheling (Indonesia, Dark, $17). Add roast filter buttons All, Light, Medium and Dark, a sort select (Price: low to high, Price: high to low, Name A–Z) that combines with the filter, and a line such as 'Showing 3 of 6 coffees'.\n\nSubscribe: a plan builder with bag size (250g or 1kg), bags per delivery (a stepper from 1 to 4 that cannot go outside that range) and frequency (Every week, Every 2 weeks, Every month); the default is 250g, 1 bag, Every month. Subscription bags are the roaster's choice at a flat price: $16 per 250g bag and $54 per 1kg bag. Weekly gets 10% off, every 2 weeks 5% off, monthly no discount. Shipping is $5.00 per delivery, or Free when the discounted per-delivery subtotal is $40.00 or more. A live summary shows Subtotal (before discount), Discount, Shipping, Per delivery (discounted subtotal plus shipping) and Per month (per delivery × 4, 2 or 1 deliveries), always in dollars with two decimals; the default shows $21.00 per delivery and $21.00 per month. Save the builder choices in localStorage and restore them after a reload.\n\nFAQ: five questions in an accessible accordion: each question is a button with aria-expanded, and clicking one toggles only its own answer.\n\nAt 390px wide the nav collapses into a menu button that opens the four links, and the bean cards and the builder fit the screen.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Routes: in one interact call use eval to set location.hash to '#/beans', '#/subscribe', '#/faq' and '#/shop' (wait 300 ms after each) and eval document.title plus document.querySelector('[aria-current=page]')?.textContent each time; then eval history.back() and check the previous view returns; also click the nav links themselves. Deep link: eval location.hash='#/faq', then reload and screenshot. Beans: click text=Light, then use select on the sort control (find its selector in the source) with 'Price: high to low', screenshot; then All with 'Price: low to high' and 'Name A–Z'. Subscribe: click the size, stepper and frequency controls to reach each rubric scenario and screenshot the summary; press minus at 1 bag and plus at 4 bags to check clamping. Persistence: in one call choose 1kg, 3 bags, Every 2 weeks, reload (re-open #/subscribe if needed), screenshot. FAQ: click two questions and eval their aria-expanded values. Mobile: run interact with --width 390 --height 844 and take full_page screenshots. Click the menu button there.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The nav has Home, Beans, Subscribe and FAQ; the current route's link has aria-current='page' and a visible active style, and document.title is exactly 'Ember & Oak · Small-batch coffee' on Home, 'Beans · Ember & Oak', 'Subscribe · Ember & Oak' and 'FAQ · Ember & Oak' on the other routes."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Routing works: nav clicks switch views and the hash without a full reload, only one view is visible at a time, history.back() returns to the previous view, and loading index.html#/faq directly shows the FAQ."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "An unknown hash such as #/shop shows a 'Page not found' view whose 'Back to home' link returns to Home; index.html without a hash shows Home."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Home shows the headline 'Coffee worth waking up for', three SVG-illustrated steps, and a 'Build your subscription' button that navigates to #/subscribe."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Beans filter and sort combine: Light shows exactly Kiambu AA, Huila Pink Bourbon and Yirgacheffe Kochere with 'Showing 3 of 6 coffees', and with 'Price: high to low' they are ordered $21, $19, $18; All with 'Price: low to high' runs from Cerrado Natural $15 to Huila Pink Bourbon $21; 'Name A–Z' starts with Antigua Pastoral and ends with Yirgacheffe Kochere."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The builder math is exact: the default shows Per delivery $21.00 and Per month $21.00; 250g, 2 bags, Every 2 weeks shows Subtotal $32.00, Discount $1.60, Shipping $5.00, Per delivery $35.40, Per month $70.80; 1kg, 1 bag, Every week shows Discount $5.40, Shipping Free, Per delivery $48.60, Per month $194.40."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "250g, 2 bags, Every week shows Per delivery $33.80 and Per month $135.20, and the bag stepper cannot go below 1 or above 4."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "After choosing 1kg, 3 bags and Every 2 weeks and reloading, the builder restores those choices and shows Per delivery $153.90 and Per month $307.80."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The FAQ has five questions rendered as buttons whose aria-expanded flips between true and false; clicking one opens or closes only its own answer."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the nav is a menu button that reveals the four links, the bean cards stack in one column, and the builder controls and summary fit without clipping or overlap."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "It looks like a premium roaster: a warm, consistent palette, a clear type hierarchy, even spacing between sections, and summary amounts aligned in a column."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-02",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Accessible illustrator portfolio with deep-linked keyboard lightbox",
+  "prompt": "Build a portfolio website for Mira Okafor, an independent illustrator who makes bold, colorful editorial and picture-book art. Playful but curated, like a gallery wall: a warm off-white background, one or two saturated accents and generous whitespace. There are no photos: every artwork is an original small illustration drawn with inline SVG, each clearly different from the others.\n\nWork: exactly 12 artworks in this order, each tile labeled with its title and category: Paper Moon (Picture Books), The Night Market (Editorial), Fox in the Snow (Picture Books), Rising Rents (Editorial), Loop Coffee Co. (Brand), The Last Lighthouse (Picture Books), Election Night (Editorial), Seedling Studio (Brand), Deep Water (Editorial), Grandma's Garden (Picture Books), Pulse Running Club (Brand) and Heatwave (Editorial).\n\nFilters: buttons 'All (12)', 'Editorial (5)', 'Picture Books (4)' and 'Brand (3)'; the active one has aria-pressed='true'. Filtering sets the URL hash to #/work, #/work/editorial, #/work/picture-books or #/work/brand, and loading the page with one of those hashes applies that filter.\n\nLightbox: every tile is a real button with aria-label 'Open <title>'. It opens a dialog (role='dialog', aria-modal='true', aria-labelledby pointing at the title) with a larger version of the same art, the title, the category, a one-line caption and a counter such as '2 / 5' that counts within the current filter. ArrowRight and ArrowLeft go to the next and previous artwork within the current filter and wrap around. Escape or the × button closes it and returns focus to the tile that opened it, and Tab only cycles through the dialog's controls while it is open. Opening an artwork sets the hash to #/art/<slug> (lowercase title, apostrophes and periods removed, spaces as hyphens, e.g. #/art/grandmas-garden, #/art/loop-coffee-co); closing restores the filter's hash; loading an #/art/ hash directly opens that artwork with the counter out of 12.\n\nAbout: a short bio, an SVG self-portrait and a list of clients.\n\nContact: the heading 'Have a project in mind?', the email hello@miraokafor.art as a mailto link, and a form with name, email, message and Send. On submit show messages under the fields: 'Please enter your name', 'Please enter a valid email' and 'Message must be at least 20 characters'; set aria-invalid='true' on each invalid field and move focus to the first one. A valid submission replaces the form with 'Thanks, <name>! I will reply within two working days.'\n\nEvery interactive element shows a clearly visible focus ring when reached with the keyboard. At 390px the gallery shows one or two columns, the filter buttons wrap, and the lightbox fits the screen.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Filters: click text=Editorial (5), screenshot, and eval location.hash plus [...document.querySelectorAll('[aria-pressed=true]')].map(e=>e.textContent). Lightbox, all in one call: click text=Editorial (5); click [aria-label='Open Rising Rents']; screenshot; eval location.hash; press ArrowRight 4 times with a screenshot after each; press ArrowLeft; press Tab 8 times then eval !!document.activeElement.closest('[role=dialog]'); press Escape; eval document.activeElement.getAttribute('aria-label') and location.hash. Under All, open Paper Moon and press ArrowLeft. Eval the dialog's role, aria-modal and the text of its aria-labelledby target. Deep links: eval location.hash='#/art/grandmas-garden', reload, screenshot; same with '#/work/brand'. Contact: click Send with empty fields, screenshot, eval the aria-invalid attributes and document.activeElement.name; then type name Ada, email ada@example.com and a 25-character message and submit. Focus rings: press Tab 5 times from the top and screenshot. Mobile: run interact with --width 390 --height 844 and take full_page screenshots. Open one artwork there too.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The gallery has the 12 titles in the requested order with their categories, each a distinct SVG illustration (not emoji, blank shapes or placeholder text), and the filters read 'All (12)', 'Editorial (5)', 'Picture Books (4)' and 'Brand (3)'."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Editorial shows exactly The Night Market, Rising Rents, Election Night, Deep Water and Heatwave and Brand shows exactly Loop Coffee Co., Seedling Studio and Pulse Running Club; only the active filter has aria-pressed='true'; the hash becomes #/work/editorial or #/work/brand; loading index.html#/work/brand shows the three brand pieces with Brand pressed."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Each tile is a button with aria-label 'Open <title>', and the lightbox has role='dialog', aria-modal='true' and aria-labelledby pointing at an element containing the artwork title."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With Editorial active, opening Rising Rents shows a larger version of the same artwork with its title, 'Editorial', a caption and the counter '2 / 5', and the hash becomes #/art/rising-rents."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "ArrowRight from Rising Rents goes Election Night 3 / 5, Deep Water 4 / 5, Heatwave 5 / 5, then wraps to The Night Market 1 / 5, and ArrowLeft goes back to Heatwave 5 / 5; under All, ArrowLeft from Paper Moon shows Heatwave 12 / 12."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Escape and the × button both close the dialog; after Escape the focused element is the 'Open Rising Rents' tile and the hash is #/work/editorial again; while open, 8 Tab presses keep focus inside the dialog."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Loading index.html#/art/grandmas-garden opens Grandma's Garden directly with the counter '10 / 12'."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Submitting the empty form shows 'Please enter your name', 'Please enter a valid email' and 'Message must be at least 20 characters' under the fields, sets aria-invalid='true' on all three and focuses the name field; a valid submission for Ada shows 'Thanks, Ada! I will reply within two working days.'"
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Tabbing through the page shows a clearly visible focus ring on filter buttons, tiles and form controls (not the default hidden outline)."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the gallery has one or two columns, the filter buttons wrap without overflow, and the open lightbox fits the screen with its art, text, counter and close button visible."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "It reads as a curated illustrator portfolio: warm off-white ground, a restrained set of saturated accents, artworks in one consistent style, even grid gaps, and a clear heading hierarchy."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-03",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "SaaS pricing page with currency, annual discount and seat math",
+  "prompt": "Create the pricing page for Lumetric, a B2B product-analytics platform. Dark navy theme with one electric accent color and crisp, high-contrast type.\n\nLayout: a nav (SVG logo mark with the Lumetric wordmark, links Product, Pricing and Docs, and a 'Book a demo' button), the heading 'Pricing that scales with your team', the billing controls, three plan cards (Starter, Growth highlighted as 'Most popular', Enterprise), a Growth seat calculator, a feature comparison table, a four-question FAQ and a footer.\n\nBilling controls: a Monthly / Annual switch labeled 'Save 20%' and a currency select with USD, EUR and GBP. Base monthly prices in USD: Starter 49 and Growth 199; Enterprise always shows 'Custom'. Rates: 1 USD = 0.92 EUR = 0.79 GBP. Price rule: start from the USD monthly price, take 20% off if Annual, convert, then round to the nearest whole unit. Show the symbol before the number with thousands separators ($, €, £) followed by '/mo'. Under each price show 'Billed monthly', or with Annual 'Billed annually: <symbol><rounded monthly × 12>' (for example Starter in USD with Annual: $39/mo, billed annually $468).\n\nSeat calculator for Growth: Growth includes 5 seats and each extra seat adds 12 USD per month; the discount, conversion and rounding rules apply to the whole monthly total. A range slider (1–50) and a number input stay in sync, and typed values outside 1–50 clamp to the nearest limit. Show 'Includes 5 seats + <n> extra', the monthly total and the yearly total (rounded monthly × 12), updated live with the billing switch and currency.\n\nSave the billing period, currency and seats in localStorage and restore them after a reload.\n\nComparison table: 12 feature rows in three groups (Analytics, Collaboration, Security) with a check, a dash or a short value per plan. Exactly 4 of the 12 rows are identical for all three plans. The header row stays visible (sticky) while you scroll through the table, and a 'Show differences only' toggle hides the 4 identical rows and shows them again when turned off.\n\nOn a 390px phone the plan cards stack, the calculator fits, and the comparison table scrolls inside its own container without widening the page.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Pricing: screenshot the cards, click the Annual side of the switch, screenshot; select EUR and then GBP in the currency select (find its selector in the source) in both Monthly and Annual, screenshotting each. Calculator: set the range input with type (its selector, text '12'), switch to Annual and EUR, screenshot; type 60 and then 0 into the number input and press Tab after each to check clamping; set 3 seats in Monthly USD; set 50 seats in Monthly GBP. Persistence: in one call set Annual, GBP and 20 seats, reload, screenshot (expect £240 per month and £2,880 per year). Table: scroll through the table and screenshot to confirm the sticky header; click 'Show differences only' and eval the number of visible feature rows, then turn it off and count again. Mobile: run interact with --width 390 --height 844 and take full_page screenshots.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The nav, the heading 'Pricing that scales with your team', three plan cards with Growth marked 'Most popular', the calculator, the comparison table, a four-question FAQ and a footer are present in that order; Enterprise shows 'Custom' in every state."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "In USD, Monthly shows Starter $49/mo and Growth $199/mo with 'Billed monthly'; Annual shows $39/mo and $159/mo with 'Billed annually: $468' and 'Billed annually: $1,908'; switching back restores the monthly values."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Currency conversion is exact: EUR Monthly €45 and €183, EUR Annual €36 and €146 (billed €432 and €1,752), GBP Monthly £39 and £157, GBP Annual £31 and £126 (billed £372 and £1,512)."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The seat calculator is exact: 12 seats with Annual and EUR shows 'Includes 5 seats + 7 extra', €208 per month and €2,496 per year; 50 seats with Monthly and GBP shows £584 per month and £7,008 per year."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The slider and number input stay in sync; typing 60 becomes 50 and typing 0 becomes 1; 3 seats in Monthly USD shows 'Includes 5 seats + 0 extra' with $199 per month and $2,388 per year."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "After choosing Annual, GBP and 20 seats and reloading, all three are restored and the calculator shows £240 per month and £2,880 per year, with the plan cards in GBP Annual (£31 and £126)."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The comparison table has 12 feature rows under Analytics, Collaboration and Security; 'Show differences only' leaves exactly 8 rows and turning it off shows all 12 again."
+   },
+   {
+    "id": "R8",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The comparison table's header row with the plan names stays visible while scrolling through the table's rows."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The FAQ has four questions that expand and collapse individually when clicked."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the plan cards stack in one column, the calculator fits the screen, and the comparison table scrolls inside its own container with no page-level horizontal overflow."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "A credible enterprise look: one dark navy palette with a single accent used sparingly, body text contrast of at least 4.5:1, prices set in aligned tabular figures, and consistent card spacing and radii."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-04",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Three-step donation flow with fee, match and card validation",
+  "prompt": "Design a donation page for Tidewater Project, a nonprofit that removes plastic from coastlines, for its campaign Clear the Current. Bright and hopeful: ocean blues, teal and a warm sand accent, with SVG wave dividers between sections.\n\nPage: a header with an SVG logo and a 'Donate' link to the form; a hero with the headline 'Clear the Current' and an SVG ocean illustration; a campaign bar reading '$412,800 raised of $500,000' with the percentage to one decimal (82.6%) and a matching progress bar; a three-step donation form; a footer.\n\nStep 1, Amount: buttons $25, $50, $100 and $250, a custom whole-dollar amount (5 to 10,000; otherwise show 'Enter an amount between $5 and $10,000' and block Next), a One-time / Monthly switch and a checkbox 'Cover the 3% processing fee'. Gifts are matched 1:1 by the Blue Current Fund up to $500 per donor, and every dollar of gift plus match (fee excluded) removes 2 lb of plastic. A live summary shows Gift, Fee (3% of the gift rounded to the cent, $0.00 when unchecked), Total today, 'Matched: +$<match>' and 'Removes <n> lb of plastic' with thousands separators (e.g. 3,500 lb).\n\nStep 2, Details: first name ('Enter your first name'), last name ('Enter your last name'), email ('Enter a valid email address'), country (United States, Canada, United Kingdom) and postal code: the US needs exactly 5 digits ('ZIP code must be 5 digits'), Canada needs letter-digit-letter digit-letter-digit with an optional space ('Enter a postal code like K1A 0B1'), the UK just must not be empty ('Enter a postcode').\n\nStep 3, Payment: card number (spaces allowed) with 16 digits that passes the Luhn check ('Card number is invalid'), expiry as MM/YY with a month from 01 to 12 ('Enter a valid expiry date'), and a CVC of exactly 3 digits ('CVC must be 3 digits'). The submit button reads 'Donate $<total>', or 'Donate $<total>/month' for monthly gifts.\n\nBehavior: a step indicator (Amount, Details, Payment) marks the current step with aria-current='step'; Back and Next keep every value; errors appear under their fields, invalid fields get aria-invalid='true', and an aria-live region says 'Please fix <n> fields' with the exact count. On success show 'Thank you, <first name>!' with a receipt (gift, fee, total, one-time or monthly, matched amount), and the campaign bar adds the gift plus the match (a $250 gift gives $413,300 raised and 82.7%). All money shows two decimals except in the campaign bar.\n\nAt 390px everything stacks and the form fits the screen.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Step 1: click text=$50 and screenshot the summary; click text=$100, check the fee checkbox, screenshot; type 1250 into the custom amount field (find its selector), screenshot; then 33, then 4 and 10001 and click Next after each invalid one. Step 2 (one call that first completes step 1): click Next with empty fields, screenshot, eval the aria-live region's text and the aria-invalid attributes; enter ZIP 1234 for the United States; select Canada and try 12345 then k1a0b1; select United Kingdom with an empty postcode. Step 3: try card 4242 4242 4242 4241, expiry 13/29 and CVC 12, then 4242 4242 4242 4242, 12/29, 123. Use Back from step 3 to step 1 and screenshot to confirm values are kept. Full success scenario in one call: $250 + fee, One-time, Ana Silva, ana@example.com, United States, 94105, the valid card; screenshot the receipt and the campaign bar. Repeat once with Monthly to read the button label. Eval document.querySelector('[aria-current=step]') textContent on each step. Mobile: run interact with --width 390 --height 844 and take full_page screenshots.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The page has the header with an SVG logo and a Donate link, the hero 'Clear the Current' with an SVG ocean illustration, wave dividers, the campaign bar '$412,800 raised of $500,000' showing 82.6% with a bar about 83% full, the form and a footer."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With $50 and no fee the summary shows Gift $50.00, Fee $0.00, Total today $50.00, 'Matched: +$50.00' and 'Removes 200 lb of plastic'; with $100 and the fee checked it shows Fee $3.00, Total today $103.00, 'Matched: +$100.00' and 'Removes 400 lb of plastic'."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Custom 1250 with the fee shows Fee $37.50, Total today $1,287.50, 'Matched: +$500.00' and 'Removes 3,500 lb of plastic'; custom 33 with the fee shows Fee $0.99, Total today $33.99 and 132 lb; 4 and 10001 show 'Enter an amount between $5 and $10,000' and Next does not advance."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Choosing Monthly makes the step 3 button read 'Donate $<total>/month' (e.g. 'Donate $257.50/month' for $250 with the fee) and the receipt says monthly."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Step 2 validation is exact: Next with every field empty shows 'Enter your first name', 'Enter your last name', 'Enter a valid email address' and 'ZIP code must be 5 digits' and the live region says 'Please fix 4 fields'; US 1234 is rejected; Canada rejects 12345 with 'Enter a postal code like K1A 0B1' but accepts k1a0b1; the UK with an empty postcode shows 'Enter a postcode'."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Invalid fields carry aria-invalid='true' (removed once fixed), and aria-current='step' moves from Amount to Details to Payment as the user advances."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Step 3 rejects 4242 4242 4242 4241 with 'Card number is invalid', 13/29 with 'Enter a valid expiry date' and CVC 12 with 'CVC must be 3 digits', and accepts 4242 4242 4242 4242, 12/29 and 123."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Back and Next keep every value: returning from step 3 to step 1 still shows the chosen amount, frequency and fee checkbox, and step 2 still holds the typed details."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "A $250 one-time gift with the fee from Ana shows 'Thank you, Ana!' with Gift $250.00, Fee $7.50, Total $257.50, One-time and Matched $250.00, and the campaign bar updates to $413,300 raised and 82.7%."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the hero, campaign bar and all three form steps fit the screen in one column with full-width amount buttons and no clipped or overlapping text."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Bright and hopeful in a consistent way: ocean blues and teal with a sand accent, smooth SVG wave dividers, a clear hierarchy in the form, and error text that is readable and clearly tied to its field."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-05",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Conference site with time-zone schedule and conflict-aware agenda",
+  "prompt": "Build the website for Edgecase 2026, a frontend engineering conference in Lisbon on 14–16 October 2026. Bold and energetic: oversized type, a black and off-white base with electric lime and violet accents, and visible grid lines.\n\nSections: a sticky nav (logo, Speakers, Schedule, Venue, Tickets and a 'My agenda (N)' link to #/agenda); a hero with the headline 'Build for the edge cases', 14–16 October 2026 and Lisbon; Speakers (8 cards with CSS or SVG avatars); Schedule; Venue (Lisbon Tech Hub, an address and an SVG map); Tickets (Early Bird €299 marked Sold out with a disabled button, Standard €449, Team (5+) €399 per person); footer.\n\nSchedule (Lisbon local time, start–end, title, speaker, track):\nDay 1 · Wed 14 Oct: 09:00–12:00 Building a design token pipeline (Ana Ferreira, Design Systems); 09:00–12:00 Profiling React in production (Tom Becker, Performance); 13:30–16:30 Accessible forms from scratch (Priya Nair, Accessibility); 13:30–16:30 Edge rendering deep dive (Kenji Mori, Performance); 18:00–20:00 Welcome drinks (Community).\nDay 2 · Thu 15 Oct: 09:30–10:15 Keynote: The web at the edge (Marta Silva, Performance); 10:15–11:00 Container queries in the wild (Sam Okoro, Design Systems); 10:30–11:00 Screen readers are users too (Hana Kim, Accessibility); 11:15–12:00 Shipping less JavaScript (Diego Ramos, Performance); 14:00–14:45 Tokens across ten brands (Ana Ferreira, Design Systems); 18:30–19:15 Lightning talks (Community).\nDay 3 · Fri 16 Oct: 07:30–08:15 Morning run along the Tagus (Community); 09:30–10:15 Motion without nausea (Hana Kim, Accessibility); 10:30–11:15 INP in the real world (Tom Becker, Performance); 11:30–12:15 Design systems at scale (Lucas Meyer, Design Systems); 16:00–16:45 Closing keynote: Edge cases are the main case (Priya Nair, Accessibility); 20:00–23:00 Closing party (Community).\n\nSchedule UI: day tabs following the WAI-ARIA tabs pattern (role='tab', aria-selected, ArrowLeft/ArrowRight move between tabs), track chips (All, Performance, Design Systems, Accessibility, Community) that combine with the day, and a labeled time-zone select: Lisbon (default), UTC, New York, San Francisco, Tokyo. Use these fixed offsets for the conference dates, not the visitor's zone: Lisbon UTC+1, UTC+0, New York UTC−4, San Francisco UTC−7, Tokyo UTC+9. Show start–end in 24-hour HH:MM in the chosen zone, and when a converted start falls on a different calendar day than the session's Lisbon date, add '+1 day' or '−1 day' next to the time. Sessions stay under their Lisbon day tab.\n\nAgenda: every session has a star button (aria-pressed, aria-label 'Add <title> to my agenda') and the nav count updates. #/agenda lists the starred sessions in chronological order, grouped by Lisbon day, in the chosen time zone; with nothing starred it says 'Your agenda is empty'. Two starred sessions conflict when their times overlap (an end time equal to a start time is not a conflict); both are marked 'Conflicts with <other title>'. Starred sessions and the time zone persist in localStorage.\n\nAt 390px the schedule stacks, the tabs and chips wrap or scroll, and nothing overflows the page.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Schedule: click each day tab and screenshot; focus a tab and press ArrowRight/ArrowLeft, eval document.activeElement.textContent and aria-selected. Day 2 + chip Accessibility, screenshot. Time zones: use select on the time-zone control (find its selector) with New York, UTC, Tokyo and San Francisco, screenshotting Day 2 and Day 3 each time. Agenda in one call: star (via [aria-label='Add <title> to my agenda']) Closing keynote, Morning run along the Tagus, Keynote: The web at the edge and Profiling React in production in that order, eval location.hash='#/agenda', screenshot; then star Container queries in the wild and Screen readers are users too, screenshot the agenda, unstar Screen readers and screenshot. Persistence: in one call star two sessions, pick San Francisco, reload, screenshot the nav count and #/agenda. Also open #/agenda on a fresh page for the empty state. Mobile: run interact with --width 390 --height 844 and take full_page screenshots.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The sticky nav shows Speakers, Schedule, Venue, Tickets and 'My agenda (0)'; the hero shows 'Build for the edge cases', 14–16 October 2026 and Lisbon; there are 8 speaker cards with drawn avatars, a Lisbon Tech Hub venue with an SVG map, and tickets Early Bird €299 (Sold out, disabled), Standard €449 and Team (5+) €399 per person."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "In Lisbon time the three tabs list exactly the given sessions with their start–end times, speakers and color-coded track tags."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Only the selected day's sessions are visible, the selected tab has aria-selected='true', ArrowRight/ArrowLeft move between tabs, and Day 2 with the Accessibility chip shows only 'Screen readers are users too'."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Time-zone conversion is exact: New York shows the Day 2 keynote at 04:30–05:15, UTC shows it at 08:30–09:15, Tokyo shows Lightning talks at 02:30–03:15 and Closing party at 04:00–07:00 both with '+1 day', and San Francisco shows Morning run along the Tagus at 23:30–00:15 with '−1 day'."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Star buttons toggle aria-pressed and update 'My agenda (N)'; after starring Closing keynote, Morning run, the Day 2 keynote and Profiling React in that order, #/agenda lists Profiling React (Wed 14), the Day 2 keynote (Thu 15), Morning run and Closing keynote (Fri 16) in that order."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Conflicts are exact: the Day 2 keynote plus Container queries in the wild show no conflict; adding Screen readers are users too marks Container queries and Screen readers with 'Conflicts with' naming each other while the keynote stays unflagged; unstarring Screen readers clears the marks."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "After a reload the starred sessions, the nav count and the chosen time zone are restored, and #/agenda in San Francisco shows Morning run along the Tagus at 23:30 with '−1 day'."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Loading index.html#/agenda with nothing starred shows 'Your agenda is empty'."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Star buttons carry aria-label 'Add <title> to my agenda', and the time-zone select has an associated visible label."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px sessions stack in one column with times, titles and tags readable, the tabs and chips wrap or scroll inside the screen, and nothing overflows the page."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Bold and consistent: oversized headline type, black and off-white base with lime and violet used consistently for tracks and states, visible grid lines, and tight, even spacing."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-06",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Bilingual restaurant site with combined menu filters and rule-based booking",
+  "prompt": "Make a website for Osteria Lume, a small neighborhood Italian restaurant known for handmade pasta and a wood-fired oven. Elegant and intimate: deep olive green and cream, a serif for headings (DejaVu Serif or Liberation Serif) with a clean sans for body text, and thin decorative dividers.\n\nSections: header (wordmark 'Osteria Lume', links Menu, About, Visit, Reserve and an EN / IT language switch), hero ('Handmade pasta, wood-fired evenings' with a 'Reserve a table' button and a CSS or SVG illustration), Menu, About, Visit (address, opening hours for all seven days with Monday closed, phone), Reserve, footer.\n\nLanguage: the EN / IT switch translates the whole interface (nav, headings, buttons, labels, chips, counts and messages; dish names stay Italian and dish descriptions stay English), sets the html lang attribute to 'en' or 'it', and persists in localStorage. Use at least these translations: Menu → Menù, About → Chi siamo, Visit → Dove siamo, Reserve → Prenota, Reserve a table → Prenota un tavolo, Vegetarian → Vegetariano, Gluten-free → Senza glutine, Hide nuts → Senza frutta a guscio, Request table → Richiedi tavolo, No dishes match your filters → Nessun piatto corrisponde ai filtri, Showing X of 16 dishes → X di 16 piatti.\n\nMenu (name, price, tags: V vegetarian, GF gluten-free, N contains nuts; write a one-line description for each):\nAntipasti: Burrata e pomodori $16 V GF; Carpaccio di manzo $18 GF; Arancini al tartufo $14 V; Insalata di finocchi e noci $13 V GF N.\nPrimi: Cacio e pepe $19 V; Pappardelle al ragù $24; Trofie al pesto $21 V N; Risotto ai funghi $23 V GF.\nSecondi: Pollo alla diavola $29 GF; Branzino al forno $34 GF; Melanzane alla parmigiana $22 V; Bistecca con salsa verde $42 GF.\nDolci: Tiramisù $11 V; Panna cotta ai frutti di bosco $10 V GF; Torta caprese alle mandorle $12 V GF N; Cannoli al pistacchio $11 V N.\nControls: category tabs (All, Antipasti, Primi, Secondi, Dolci), chips Vegetarian, Gluten-free and Hide nuts, and a search box matching names and descriptions case-insensitively. Everything combines; show 'Showing X of 16 dishes'; when nothing matches show 'No dishes match your filters' with a 'Clear filters' button.\n\nReserve: date buttons for Tue 13 to Sun 18 October 2026 (closed Mondays), party size 1–8, and time slots every 30 minutes from 17:30 to 21:30. Unavailable slots are disabled and labeled: fully booked on Fri 16 at 19:00 and 19:30 and on Sat 17 at 19:00, 19:30 and 20:00 ('Full'); on Sunday the last seating is 20:00 ('Closed' after it); parties of 7 or 8 can only sit at 17:30, 18:00 or 21:30 ('Large party'). Show 'N times available' for the chosen date and party size, and clear the chosen time if it becomes unavailable. Fields: name ('Please enter your name'), phone with 9 to 15 digits ignoring spaces, + and - ('Enter a valid phone number'), and a time ('Choose a time'). Success replaces the form with 'Table for 4 on Friday 16 October at 20:00' (in Italian: 'Tavolo per 4 venerdì 16 ottobre alle 20:00').\n\nAt 390px the menu is one column and the tabs, chips and time slots wrap neatly.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Language: click the IT control, screenshot the header, menu controls and reserve form, eval document.documentElement.lang, reload in the same call and eval it again; switch back to EN. Menu: click Vegetarian and Gluten-free, screenshot, then Hide nuts, screenshot; then Primi with Vegetarian and Hide nuts; type DIAVOLA in the search box (find its selector); try Secondi + Vegetarian + Gluten-free for the empty state and click Clear filters. Reserve: click the Fri 16 date with party 2 and screenshot the slots; Sat 17 with party 2 and party 8; Sun 18 with party 7; pick Sat 17 20:30 for 2 people and then change the party size to 8, screenshot. Submit empty to see the messages; try phone '12 34 56' and '+351 912-345-678'. Success scenario in one call: Fri 16, party 4, 20:00, name Luca, phone 912345678; repeat with IT selected to read the Italian confirmation. Mobile: run interact with --width 390 --height 844 and take full_page screenshots.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The sections appear in order with the wordmark 'Osteria Lume', the hero line 'Handmade pasta, wood-fired evenings', a 'Reserve a table' button, and a Visit section with an address, a phone number and hours for all seven days with Monday closed."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The IT switch shows Menù, Chi siamo, Dove siamo, Prenota, Prenota un tavolo, Vegetariano, Senza glutine, Senza frutta a guscio and Richiedi tavolo, sets document.documentElement.lang to 'it', and survives a reload; EN restores the English labels and lang 'en'."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The menu lists the 16 dishes under the right categories with the exact names and prices, and V, GF and nut markers on exactly the dishes tagged in the brief."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Filters combine exactly: Vegetarian + Gluten-free shows 'Showing 5 of 16 dishes'; adding Hide nuts leaves only Burrata e pomodori, Risotto ai funghi and Panna cotta ai frutti di bosco ('Showing 3 of 16 dishes', or '3 di 16 piatti' in Italian); Primi + Vegetarian + Hide nuts shows only Cacio e pepe and Risotto ai funghi."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Searching DIAVOLA shows only Pollo alla diavola; Secondi + Vegetarian + Gluten-free shows 'No dishes match your filters' (Italian: 'Nessun piatto corrisponde ai filtri') and 'Clear filters' brings back all 16 dishes."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Availability is exact: Fri 16 for 2 marks 19:00 and 19:30 'Full' with '7 times available'; Sat 17 for 2 shows '6 times available'; Sat 17 for 8 offers only 17:30, 18:00 and 21:30 ('3 times available'); Sun 18 for 7 shows '2 times available' with the slots after 20:00 marked 'Closed'."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Choosing Sat 17 at 20:30 for 2 and then changing the party size to 8 clears the selected time."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Submitting empty shows 'Please enter your name', 'Enter a valid phone number' and 'Choose a time'; a complete booking for 4 on Fri 16 at 20:00 shows 'Table for 4 on Friday 16 October at 20:00', and in Italian 'Tavolo per 4 venerdì 16 ottobre alle 20:00'."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The phone rule counts digits only: '12 34 56' is rejected and '+351 912-345-678' is accepted."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the dishes are one column, and the category tabs, chips, date buttons and time slots wrap neatly inside the screen with no overflow."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Elegant and consistent: olive and cream palette, serif headings over a clean sans, refined thin dividers, a readable price column, and unavailable slots that are clearly distinguishable from available ones."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-07",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Multi-page docs site with full-text search, scroll-spy and dark mode",
+  "prompt": "Build a small documentation site for Tern, an open-source job-queue library for Node.js, as one index.html with hash routing. Clean light theme with neutral grays and one teal accent, code in DejaVu Sans Mono, plus a dark theme.\n\nPages (route, title): #/introduction Introduction, #/installation Installation, #/quickstart Quickstart, #/queues Queues, #/workers Workers, #/retries Retries, #/scheduling Scheduling, #/api/queue Queue, #/api/worker Worker. The left sidebar groups them as Getting started (Introduction, Installation, Quickstart), Core concepts (Queues, Workers, Retries, Scheduling) and API reference (Queue, Worker). An empty hash opens Introduction and an unknown route shows 'Page not found'. The current page's sidebar link has aria-current='page', document.title is '<Title> — Tern docs', and each page ends with Previous and Next links that follow the sidebar order (no Previous on Introduction, no Next on Worker).\n\nContent: every page has at least three h2 sections of real prose and at least one code block. Retries explains exponential backoff and contains the line backoff: { type: 'exponential', delay: 1000 } in a code block; Scheduling explains cron schedules and contains repeat: { cron: '0 9 * * 1' }; Quickstart has the sections Install, Create a queue, Add a worker and Run it.\n\nSearch: a search box in the top bar (pressing / anywhere outside a text field focuses it) searches the titles and full text of all pages through an index built from the page content, and shows a results dropdown where each result has the page title and a short snippet with the matched text wrapped in <mark>. ArrowDown and ArrowUp move a visible highlight through the results, Enter opens the highlighted page, and Escape closes the dropdown. A query with no matches shows 'No results for <query>'.\n\nOn this page: a right-hand list of the current page's h2 sections that highlights the section in view while scrolling and scrolls to a section when clicked.\n\nCode blocks: syntax highlighting and a Copy button that copies the code and shows 'Copied!' for about two seconds. Installation and Quickstart show package-manager tabs npm / pnpm / yarn with 'npm install tern', 'pnpm add tern' and 'yarn add tern'; choosing one switches every tabbed block on every page and is remembered in localStorage.\n\nTheme: a toggle button with aria-label 'Toggle dark mode' sets data-theme='dark' on the html element (light by default), restyles the whole site including code, and persists in localStorage.\n\nAt 390px the sidebar and the On this page list collapse behind a menu button, and code blocks scroll horizontally inside their box instead of widening the page.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Routing: eval location.hash to '#/retries', then eval document.title, the aria-current link text and the Previous/Next link texts; repeat for '#/introduction', '#/api/worker', '#/nope' and an empty hash; click a sidebar link and use eval history.back(). Content: eval the text of the code blocks on #/retries and #/scheduling and count the h2 elements on every route. Search in one call: press / (after clicking the page body), type backoff, screenshot, eval the result titles and whether snippets contain <mark>; press ArrowDown, screenshot, press Enter, eval location.hash; type zzqx and screenshot; press Escape. Scroll-spy: on #/quickstart scroll by 400 px steps and screenshot each time; click an On this page link. Copy: click a Copy button and screenshot immediately and after 2.5 s. Tabs: on #/installation click pnpm, go to #/quickstart, screenshot, reload, screenshot. Theme: click [aria-label='Toggle dark mode'], screenshot, eval document.documentElement.dataset.theme, reload, eval again. Mobile: run interact with --width 390 --height 844 and take full_page screenshots.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The sidebar shows the three groups with exactly the nine requested links; an empty hash shows Introduction and #/nope shows 'Page not found'."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Routing works: sidebar links switch pages and the hash without a reload, the current link has aria-current='page', document.title reads e.g. 'Retries — Tern docs', history.back() returns to the previous page, and Retries shows Previous: Workers and Next: Scheduling while Introduction has no Previous and Worker has no Next."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every page has at least three h2 sections and a code block; Retries contains backoff: { type: 'exponential', delay: 1000 }, Scheduling contains repeat: { cron: '0 9 * * 1' }, and Quickstart has Install, Create a queue, Add a worker and Run it."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Typing backoff lists Retries (and only pages whose text contains backoff) with snippets where the match is wrapped in <mark>; zzqx shows 'No results for zzqx'."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Keyboard search works: / focuses the box, ArrowDown visibly highlights the first result, Enter navigates to that page (for backoff, #/retries), and Escape closes the dropdown."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The On this page list matches the page's h2s, its highlighted entry changes as the article scrolls, and clicking an entry scrolls to that section."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Clicking Copy changes the label to 'Copied!' and it reverts after about two seconds; code blocks show several token colors."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Choosing pnpm on Installation makes the Quickstart install block show 'pnpm add tern' too, and after a reload pnpm is still selected."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The 'Toggle dark mode' button sets data-theme='dark' on the html element and turns the page, sidebar and code blocks dark with readable text; the choice survives a reload, and toggling again returns to light."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the sidebar and On this page list are behind a menu button that opens them, and long code lines scroll inside their block with no page-level horizontal overflow."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "It reads like professional developer docs: an article width of roughly 60-80 characters per line, a clear heading hierarchy, consistent spacing, a restrained gray palette with one teal accent, and well-styled code blocks in both themes."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-08",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Travel catalog with URL-synced filters, pagination and trip comparison",
+  "prompt": "Create the Destinations page for Northbound Journeys, a small-group adventure travel company. Sun-washed and editorial: warm sand background, terracotta and deep teal accents, large rounded cards. Each card has its own landscape illustration drawn with inline SVG.\n\nTrips in recommended order (name, country, region, days, price from, difficulty): 1 Fjords & Glaciers, Norway, Europe, 9, $3,450, Moderate; 2 Dolomites Hut to Hut, Italy, Europe, 8, $2,890, Challenging; 3 Atlas Mountains Trek, Morocco, Africa, 7, $1,640, Moderate; 4 Serengeti Walking Safari, Tanzania, Africa, 10, $4,980, Easy; 5 Annapurna Circuit, Nepal, Asia, 16, $2,760, Challenging; 6 Kyoto to Kumano Kodo, Japan, Asia, 11, $4,320, Moderate; 7 Patagonia W Trek, Chile, Americas, 9, $3,180, Challenging; 8 Sacred Valley & Inca Trail, Peru, Americas, 10, $2,950, Moderate; 9 Yukon River Canoe, Canada, Americas, 12, $3,870, Moderate; 10 Great Ocean Walk, Australia, Oceania, 8, $2,340, Easy; 11 Milford Track, New Zealand, Oceania, 6, $2,190, Moderate; 12 Iceland Ring Road Hikes, Iceland, Europe, 7, $2,580, Easy; 13 Jordan Trail to Petra, Jordan, Asia, 8, $2,070, Challenging; 14 Madeira Levadas, Portugal, Europe, 6, $1,480, Easy.\n\nFilters: region chips (All, Europe, Asia, Africa, Americas, Oceania; several regions can be active at once and All clears them), difficulty checkboxes (Easy, Moderate, Challenging), a max-price slider from $1,000 to $5,000 in $100 steps (default $5,000) that shows its value, a duration select (Any, Up to 7 days, 8–10 days, 11+ days), and a search on trip name and country. Sort: Recommended, Price: low to high, Price: high to low, Duration: shortest first (ties by lower price). Show 6 trips per page with Previous, page numbers and Next (Previous disabled on the first page, Next on the last) and a line 'Showing 1–6 of 14 trips'. Any filter or sort change returns to page 1. With no matches show 'No trips match these filters' and a 'Reset filters' button.\n\nURL state: mirror the whole state in the hash as #/trips?<params>, omitting defaults, with exactly these parameters: region (comma-separated lowercase, e.g. europe,asia), difficulty (e.g. easy,moderate), max (e.g. 3000), days (short, medium or long), q (search text), sort (price-asc, price-desc or duration) and page (2 and up). Loading such a URL restores the controls and results.\n\nWishlist: a heart button on each card (aria-pressed, aria-label 'Save <trip name>') updates a 'Wishlist (N)' counter in the header, persisted in localStorage.\n\nCompare: a Compare checkbox on each card, at most 3 trips; trying a fourth shows 'You can compare up to 3 trips' and leaves it unchecked. A tray lists the chosen trips with a 'Compare (N)' button that opens a table with rows Region, Days, Price from, Price per day (rounded to whole dollars) and Difficulty, with the lowest price per day highlighted.\n\nAt 390px the grid is one column, the filters collapse behind a 'Filters' button, and nothing overflows.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Filters in one call: click the Europe and Asia chips, screenshot, eval location.hash and the result line; set the max-price slider with type (its selector, text '3000'), choose 'Price: low to high' with select, screenshot and eval the visible card titles in order. Duration: reset, choose 'Duration: shortest first', eval the titles on page 1, click Next twice, eval the result line. Also try Easy + 8–10 days, search peru, and Challenging with max 2000 (empty state, then Reset filters). URL restore: in one call eval location.hash='#/trips?region=europe,asia&max=3000&sort=price-asc', reload, screenshot and eval the titles. Page reset: go to page 2 and then click a region chip. Wishlist: click two hearts, eval the header text, reload, eval again. Compare: tick Fjords & Glaciers, Atlas Mountains Trek and Kyoto to Kumano Kodo, then a fourth trip, screenshot; click the Compare button and screenshot the table. Mobile: run interact with --width 390 --height 844 and take full_page screenshots.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Fourteen trip cards carry the exact names, countries, days, prices and difficulties, each with a distinct SVG landscape, a heart button and a Compare checkbox, and the header shows 'Wishlist (0)'."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Pagination shows 6 cards per page with 'Showing 1–6 of 14 trips' on page 1 and 'Showing 13–14 of 14 trips' on page 3; Previous is disabled on page 1 and Next on page 3."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Europe + Asia shows 'Showing 1–6 of 7 trips'; adding max $3,000 and 'Price: low to high' shows exactly Madeira Levadas, Jordan Trail to Petra, Iceland Ring Road Hikes, Annapurna Circuit and Dolomites Hut to Hut in that order."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "'Duration: shortest first' breaks ties by price: page 1 is Madeira Levadas, Milford Track, Atlas Mountains Trek, Iceland Ring Road Hikes, Jordan Trail to Petra, Great Ocean Walk, and page 3 is Yukon River Canoe then Annapurna Circuit."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Easy + 8–10 days shows only Serengeti Walking Safari and Great Ocean Walk; searching peru shows only Sacred Valley & Inca Trail; Challenging with max $2,000 shows 'No trips match these filters' and Reset filters restores all 14."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The hash mirrors the state (e.g. #/trips?region=europe,asia&max=3000&sort=price-asc), and loading that URL on a fresh page restores the chips, slider, sort and the same five results."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Changing a filter or the sort while on page 2 or 3 returns to page 1."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Heart buttons toggle aria-pressed and the 'Wishlist (N)' count, and the saved trips and count survive a reload."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Comparing Fjords & Glaciers, Atlas Mountains Trek and Kyoto to Kumano Kodo shows prices per day $383, $234 and $393 with Atlas highlighted as lowest; a fourth selection shows 'You can compare up to 3 trips' and is not added."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the cards are one column, the filters sit behind a 'Filters' button that opens them, and the compare tray and table fit without page overflow."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Sun-washed and editorial: warm sand base with terracotta and teal accents used consistently, landscape illustrations in one cohesive style, large rounded cards with even gaps, and clear hierarchy on each card."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-09",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Stationery shop with product routes, cart rules and promo codes",
+  "prompt": "Build an online shop for Fieldnote Supply, a small stationery brand, as one index.html with hash routes #/shop, #/product/<id> and #/cart (#/shop is the default). Calm and paper-like: off-white, ink navy and one warm accent. Draw every product with inline SVG.\n\nCatalog (id, name, category, price): n1 Dot Grid Notebook A5, Notebooks, $18.00; n2 Lined Notebook A5, Notebooks, $16.00; n3 Pocket Memo 3-pack, Notebooks, $12.50; n4 Linen Journal, Notebooks, $34.00; p1 Brass Rollerball, Pens, $42.00; p2 Fineliner Set of 6, Pens, $15.00; p3 Fountain Pen Starter, Pens, $28.00; d1 Walnut Desk Tray, Desk, $39.00; d2 Leather Mouse Pad, Desk, $26.00; d3 Washi Tape Trio, Desk, $9.50.\n\nShop: category tabs (All, Notebooks, Pens, Desk) and a sort select (Featured, Price: low to high, Price: high to low). Each card links to its product page. Product page: a larger illustration, description, a quantity stepper from 1 to 10 and Add to cart. Adding a product that is already in the cart increases its quantity (never above 10). The header shows 'Cart (N)' where N is the total quantity.\n\nCart: line items with quantity steppers (1–10) and Remove buttons, a promo-code field, and an order summary with Subtotal, Discount, Shipping, Tax and Total, using these rules:\n- Subtotal is the sum of price × quantity.\n- One promo code at a time, case-insensitive; applying a new code replaces the old one. PAPER10: 10% off the subtotal, only when the subtotal is at least $50.00, otherwise show 'PAPER10 needs a subtotal of $50.00 or more' and apply nothing. NOTEBOOK3: list every notebook unit (category Notebooks, counting quantities) from most to least expensive; every third unit in that list is free. FREESHIP: free shipping. Any other code shows 'That code is not valid'.\n- Shipping is $6.95, or Free when the subtotal after discount is $75.00 or more or FREESHIP is applied.\n- Tax is 8% of the subtotal after discount (shipping is not taxed), rounded to the cent.\n- Total = subtotal after discount + shipping + tax.\nShow the discount as a negative amount with the code name, every amount with two decimals, and 'Free' for free shipping. Put the summary in an aria-live='polite' region and give every icon-only button an aria-label (for example 'Increase quantity of Brass Rollerball'). The cart and the applied code persist in localStorage. An empty cart shows 'Your cart is empty' with a link back to the shop.\n\nAt 390px the product grid is two columns or one, and the cart lines and summary stack.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Build each cart scenario in one interact call from a fresh page: eval location.hash='#/product/n1', set the quantity with the stepper, click Add to cart, repeat for the other products, eval location.hash='#/cart', type the promo code (find the input's selector), click Apply, screenshot the summary. Scenarios: 2× n1 + 1× p3 without a code and with PAPER10; 1× n4 + 2× n1 + 1× n3 + 2× n2 with NOTEBOOK3; 1× p1 + 1× d1 with no code and with PAPER10; 2× d3 + 1× p2 with PAPER10, then FREESHIP, then SAVE50, then paper10 in lowercase. Check the header 'Cart (N)' after adding the same product twice. Steppers: press plus past 10 and minus below 1; remove every line for the empty state. Persistence: after applying a code, reload on #/cart and screenshot. Eval aria-labels of icon-only buttons and the aria-live attribute of the summary. Mobile: run interact with --width 390 --height 844 and take full_page screenshots.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The shop lists the ten products with exact names and prices and distinct SVG illustrations; category tabs and the price sort work, and each card opens #/product/<id>."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "#/product/p1 loads directly; Add to cart with quantity 2 and then again with 1 gives one Brass Rollerball line with quantity 3 and 'Cart (3)' in the header."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "2× Dot Grid Notebook + 1× Fountain Pen Starter shows Subtotal $64.00, Shipping $6.95, Tax $5.12, Total $76.07; with PAPER10 it shows a discount of −$6.40, Tax $4.61 and Total $69.16."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "1× Linen Journal + 2× Dot Grid Notebook + 1× Pocket Memo + 2× Lined Notebook with NOTEBOOK3 shows Subtotal $114.50, discount −$30.50, Shipping Free, Tax $6.72 and Total $90.72."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "1× Brass Rollerball + 1× Walnut Desk Tray shows Shipping Free, Tax $6.48 and Total $87.48 without a code, and with PAPER10 a discount of −$8.10, Shipping $6.95, Tax $5.83 and Total $85.68."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "2× Washi Tape Trio + 1× Fineliner Set with PAPER10 shows 'PAPER10 needs a subtotal of $50.00 or more' and Total $43.67; FREESHIP then gives Shipping Free and Total $36.72; SAVE50 shows 'That code is not valid'; lowercase paper10 is accepted when eligible."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Quantity steppers stay within 1–10, Remove deletes a line and updates the totals and header count, and removing everything shows 'Your cart is empty' with a link back to the shop."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "After a reload on #/cart the same lines, quantities, applied code and totals are shown."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Icon-only buttons have descriptive aria-labels such as 'Increase quantity of Brass Rollerball', and the order summary sits in an element with aria-live='polite'."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the product grid is one or two columns, product pages fit, and the cart lines and summary stack without clipping or overflow."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Calm and paper-like in a consistent way: off-white with ink navy and one warm accent, cohesive product illustrations, right-aligned amounts in the summary, and even spacing."
+   }
+  ]
+ },
+ {
+  "task_id": "website-open-10",
+  "category": "website",
+  "mode": "open_ended",
+  "title": "Savings landing page with compound-interest calculator and accessible forms",
+  "prompt": "Build a landing page for Kestrel, a digital bank launching a high-yield savings account at 4.25% APY. Trustworthy and modern: deep green and cream with one bright accent, generous whitespace and tabular numbers.\n\nSections: nav (SVG logo, links Savings, Rates, FAQ and a 'Join the waitlist' button), a hero with the headline 'Your savings, finally earning' and 4.25% APY shown prominently, a savings calculator, a rate comparison, a waitlist signup, an FAQ and a footer.\n\nCalculator: Initial deposit ($0 to $1,000,000, default 10,000), Monthly deposit ($0 to $10,000, default 500), Years (a 1–30 slider, default 5) and APY (0 to 10, default 4.25). Model: monthly rate r = (1 + APY/100)^(1/12) − 1; each month first add the monthly deposit, then add interest of balance × r; round only for display. Show Final balance, Total deposited (initial + monthly × months) and Interest earned (the difference) formatted like $12,345.67. Add an SVG bar chart with one bar per year for the end-of-year balance, each bar split into deposits and interest, with a tooltip on hover or keyboard focus reading 'Year <n>: <end-of-year balance>' (e.g. 'Year 2: $12,345.67'). An empty or out-of-range value shows 'Enter an amount between $0 and $1,000,000' (initial) or 'Enter an amount between $0 and $10,000' (monthly) under the field, and the three results show '—'.\n\nRates: a table with columns Bank, APY, Monthly fee and 'Interest on $10,000 after 1 year' (= $10,000 × APY, two decimals). Rows: Kestrel 4.25% $0; Online Bank B 3.80% $0; Credit Union C 2.15% $2; National average 0.41% —; Big Bank A 0.01% $5. Clicking a column header sorts by it, clicking again reverses, and the header carries aria-sort ascending or descending; Kestrel's row stays highlighted.\n\nWaitlist: first name, email, password, confirm password, an optional referral code and a terms checkbox. The password rules are a live checklist that ticks each rule as it becomes true: at least 12 characters, an uppercase letter, a number, a symbol. Errors under the fields: 'Enter your first name', 'Enter a valid email address', 'Password does not meet all rules', 'Passwords do not match', 'Referral codes look like KES-1234' (KES- plus 4 digits, case-sensitive) and 'Please accept the terms'. Success replaces the form with 'You are on the list, <first name>! Your position is #1,284.'\n\nFAQ: five questions following the WAI-ARIA accordion pattern: headers are buttons with aria-expanded and aria-controls; Enter or Space toggles; ArrowDown and ArrowUp move focus to the next or previous header (wrapping), and Home and End jump to the first and last.\n\nAt 390px everything stacks, the chart scales down, and the rates table scrolls inside its container.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "checks": {
+   "mobile": true
+  },
+  "interaction_hints": "Calculator: screenshot the defaults; then in separate calls type values into the inputs (find their selectors; use type with a selector for the slider): 25000 / 0 / 10 years / 4.25; 1000 / 100 / 1 year / 0; 5000 / 250 / 3 years / 5; initial 2000000 and monthly 20000 for the error states. Chart: with defaults, hover the third bar (or focus it with Tab) and screenshot the tooltip; set 10 years and count the bars with eval. Rates: click the APY header twice, eval the row order and aria-sort after each click. Waitlist: type a password one rule at a time and screenshot the checklist; submit with mismatched passwords, referral kes-1234 and terms unchecked; then a valid submission for Maya with Str0ng!Password1. FAQ: focus the first header and press ArrowDown, ArrowUp (wrap), End and Home, eval document.activeElement.textContent after each, press Enter and eval aria-expanded. Mobile: run interact with --width 390 --height 844 and take full_page screenshots.",
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The nav, the hero 'Your savings, finally earning' with 4.25% APY, the calculator, rates, waitlist, FAQ and footer are all present in order."
+   },
+   {
+    "id": "R2",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "With the defaults (10,000, 500, 5 years, 4.25) the calculator shows Final balance $45,721.26, Total deposited $40,000.00 and Interest earned $5,721.26."
+   },
+   {
+    "id": "R3",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "25,000 / 0 / 10 years / 4.25 gives $37,905.36 with $12,905.36 interest; 1,000 / 100 / 1 year / 0 gives $2,200.00 with $0.00 interest; 5,000 / 250 / 3 years / 5 gives $15,499.86, $14,000.00 deposited and $1,499.86 interest."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "An initial deposit of 2000000 shows 'Enter an amount between $0 and $1,000,000' and a monthly deposit of 20000 shows 'Enter an amount between $0 and $10,000', with '—' in the three results."
+   },
+   {
+    "id": "R5",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The chart has one bar per year (5 by default, 10 after choosing 10 years), each split into deposits and interest and growing each year; the tooltip for year 3 with the defaults reads 'Year 3: $30,535.28'."
+   },
+   {
+    "id": "R6",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "The rates table shows $425.00, $380.00, $215.00, $41.00 and $1.00 in the last column; clicking APY sorts ascending then descending with the matching aria-sort, and Kestrel stays highlighted."
+   },
+   {
+    "id": "R7",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "The password checklist ticks each rule live; mismatched passwords show 'Passwords do not match', kes-1234 shows 'Referral codes look like KES-1234', and an unchecked box shows 'Please accept the terms'."
+   },
+   {
+    "id": "R8",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "A valid submission for Maya replaces the form with 'You are on the list, Maya! Your position is #1,284.'"
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "FAQ keyboard support: ArrowDown and ArrowUp move focus between headers and wrap, Home and End jump to the first and last, Enter and Space toggle, and aria-expanded matches the open state."
+   },
+   {
+    "id": "R10",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "At 390px the sections stack, the calculator inputs and chart fit the screen, and the rates table scrolls inside its own container with no page-level overflow."
+   },
+   {
+    "id": "R11",
+    "type": "aesthetic",
+    "weight": 1,
+    "criterion": "Trustworthy and modern: deep green and cream with one accent used sparingly, tabular right-aligned figures, text contrast of at least 4.5:1, and consistent spacing and radii."
+   }
+  ]
+ },
+ {
+  "task_id": "website-rep-01",
+  "category": "website",
+  "mode": "replication",
+  "title": "Recreate a responsive reforestation impact report",
+  "prompt": "Recreate the attached Canopy Fund 2025 impact report page as a real HTML/CSS page. This is a responsive target: the same index.html is rendered full-page at 1280x800 (desktop.png) and at 390x844 (mobile.png) and both renders are compared with their targets, so build one page whose media queries reproduce both layouts. Canopy Fund is a reforestation charity. From top to bottom: a navigation bar with a round leaf logo, five links with Impact underlined, EN and a dark green Donate pill (on mobile the links and EN give way to a menu button); a two-column hero with an amber 2025 IMPACT REPORT pill, a large serif headline, a paragraph, two pill buttons and a layered hills-and-trees illustration carrying two label chips; a white card with four KPIs; Growth and carbon, with a cumulative line chart (eight labeled points from 2018 to 2025 and a callout on the last one) next to a spending donut with a legend; Projects by region, a six-region table with inline survival bars, status pills and a total row (on mobile the Projects, Hectares and Status columns and the bars are hidden); a dark green testimonial band with two stat tiles; a four-step Milestones timeline (vertical on mobile); and a four-column footer. Headings and big numbers use DejaVu Serif and everything else uses Inter. Draw the logo, the illustration and both charts with inline SVG. Match the layout, sizes, spacing, colors, typography and every piece of text as closely as you can in both layouts.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 800
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "golden": {
+   "entry": "index.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Desktop structure matches desktop.png: navigation, two-column hero (text left, illustration right), KPI card, 'Growth and carbon' with the line chart card wider than the donut card, 'Projects by region' table, dark quote band, 'Milestones' timeline with four steps in one row and a four-column footer, in that order, on a centered column about 1152px wide and at roughly the same vertical positions and total page height."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Mobile structure matches mobile.png at 390px: the nav shows only the logo, a Donate pill and a bordered menu button; the hero stacks with full-width stacked buttons above the illustration; the KPIs form a 2x2 grid; the two chart cards stack; the table drops the Projects, Hectares and Status columns and the survival bars; the quote tiles sit side by side; the timeline is vertical with dots on a left line; the footer uses two columns; nothing overflows horizontally."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The hero matches: amber pill '2025 IMPACT REPORT' with a dot, the serif headline 'Four million trees, and the forests they became.', the paragraph, a dark 'Download the full report' pill and an outlined 'Explore projects' pill, and an illustration with a warm sky, an orange sun, three layered green hills with triangular trees, a white chip 'Site 214 · Nyeri, Kenya' and a dark chip '97% survival since 2023'."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The KPI card shows 4.2M 'trees planted in 2025' (+18% vs 2024), 18,400 'hectares under restoration' (+2,950 ha), 312 'partner communities' (+41 new) and 96% 'two-year survival rate' (Target 90%), with large serif numbers, green change pills and thin dividers between columns."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The line chart matches: y-axis 0 to 200 in steps of 50, x labels 2018 to 2025, a green line over a fading green area, white-filled markers labeled 12, 19, 31, 48, 70, 96 and 131, an amber final marker with a dark '168 kt' callout, and the legend Measured / 2025 beside the title 'Carbon captured, cumulative'."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The donut matches: four segments starting at the top and running clockwise (dark green 58%, light green 21%, amber 12%, gray 9%) around '$24.6M' and 'raised in 2025', with the legend Planting & saplings, Community stewards, Monitoring & science and Operations and their percentages."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The table matches cell by cell: the six regions from East Africa highlands (64, 5,820, 1,310,000, 97%) to Central America dry forest (23, 1,040, 200,000, 96%), a Total row with 242, 18,400, 4,200,000 and 96%, uppercase gray headers, green 'On track' pills, an amber 'Monitoring' pill for Borneo lowlands and a red 'At risk' pill and coral bar for the Sahel restoration belt."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The quote band matches: a rounded dark green band with an amber quote mark, the italic serif quote beginning 'We used to walk two hours for firewood.', an amber 'AW' avatar with Amina Wanjiru and 'Community steward, Nyeri County', and two translucent tiles '1,860 local stewards employed' and '41% of nurseries led by women'."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The timeline and footer match: steps 2019 'Our first 100,000 trees', 2021 'Satellite monitoring goes live', 2023 'The Sahel belt partnership' and 2025 '4.2 million trees in one year' (last dot amber, the others hollow green rings on a gray line), the footer logo and blurb, the columns Organization, Reports and Contact, and '© 2026 Canopy Fund. Registered charity 1187342.'"
+   },
+   {
+    "id": "F10",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and color match: DejaVu Serif for headings, KPI and chart numbers, Inter for the rest, with the same size hierarchy; cream #f6f4ee page, dark green #0e3b2c, green #1f6b4a, amber #e8a33d and pale amber #fbecd2, white cards with thin borders and 20-28px radii."
+   },
+   {
+    "id": "F11",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Everything is built from real HTML text (the table is real table or grid markup) and inline SVG or CSS for the logo, illustration and charts, with no raster images, and both layouts come from one index.html via media queries."
+   }
+  ]
+ },
+ {
+  "task_id": "website-rep-02",
+  "category": "website",
+  "mode": "replication",
+  "title": "Recreate a responsive business newspaper front page",
+  "prompt": "Recreate the attached front page of The Northern Ledger, a Canadian business newspaper, as a real HTML/CSS page. This is a responsive target: the same index.html is rendered full-page at 1280x800 (desktop.png) and at 390x844 (mobile.png) and both renders are compared with their targets, so build one page whose media queries reproduce both layouts. From top to bottom on desktop: a utility bar (date, Today’s Paper, Toronto Edition, a red Subscribe for $1/week button and Log in); a masthead with search and menu icons on the left, the centered serif title and tagline, and the weather on the right; a section nav between a thin rule and a double rule, with Business in red; a seven-cell market ticker; a three-column news grid (three stories on the left, the lead story with a port-at-dusk illustration in the middle, and a Markets at a glance sidebar with an intraday chart, a Top movers table and a newsletter box on the right) separated by vertical rules; a Business row of four stories with small illustrated thumbnails; a bottom row with Opinion, a Housing starts bar chart and a numbered Most read list; and a black five-column footer. On mobile the page becomes one column: the lead story comes first, the section nav becomes a single scrollable line, the ticker becomes a two-column grid, and the Business stories become rows with the thumbnail on the left. Headlines, summaries and the masthead use Liberation Serif; the interface text uses Roboto. Draw the illustrations, icons and charts with inline SVG. Match the layout, sizes, spacing, colors, typography and every piece of text as closely as you can in both layouts.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 800
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "golden": {
+   "entry": "index.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Desktop structure matches desktop.png: utility bar, three-part masthead, section nav between a thin rule and a double rule, seven-cell ticker, a three-column news grid (about 272px | fluid | 296px) divided by vertical rules, a 'Business' row of four equal stories, a three-column bottom row (Opinion, The data, Most read) and a full-width black footer, in that order, at roughly the same positions and total page height."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Mobile structure matches mobile.png at 390px: the utility bar keeps only Subscribe and Log in, the masthead shows only the centered title and tagline, the section nav is one left-aligned line without page overflow, the ticker is a 2-column grid of six cells (USD/CAD hidden), the lead story comes first followed by the three side stories and the markets box, Business stories are rows with a 120px thumbnail on the left, the bottom sections stack, and the footer uses two columns."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The masthead matches: large bold serif 'The Northern Ledger', the letter-spaced uppercase tagline 'Business, markets and the economy since 1894', search and menu icons with 'Sections' on the left, 'Toronto 14°C' and 'Cloudy, high 17°' with a sun-and-cloud icon on the right, and the section links World to Podcasts with Business in bold red."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The ticker shows exactly S&P 500 5,812.40 ▲ 0.62%, Nasdaq 18,904.11 ▲ 1.04%, Dow 42,318.77 ▼ 0.18%, S&P/TSX 24,105.30 ▲ 0.41%, 10-yr yield 3.87% ▼ 0.04, Brent crude $71.26 ▼ 1.35% and USD/CAD 1.3642 ▲ 0.12%, with rises in green and falls in red on a light warm-gray strip with dividers."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The lead story matches: an illustration with a dusk gradient sky, a pale sun, a faint skyline, two dark cranes and a ship stacked with red, blue, amber, green and gray containers over dark water with reflections; the caption; a red TRADE kicker; the serif headline 'Ports race to automate as a new Atlantic trade corridor opens'; the dek about $2.4 billion; a red LIVE badge with 'By Priya Raman and Tomás Ferreira · Updated 11:42 a.m. ET'; and two related links below a rule."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The left column has three stories separated by rules with red kickers Banking, Energy and Retail, the headlines 'Bank of Canada signals a pause after four straight cuts', 'Oil slides as OPEC+ weighs faster output hikes' and 'Grocers bet on smaller stores in the suburbs', summaries under the first two, and bylines Daniel Osei, Hannah Leclerc and Marcus Webb."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The sidebar matches: 'Markets at a glance' under a heavy black rule, 5,812.40 with green '▲ 35.84 (0.62%)', a green intraday line with a fading area above a dashed previous-close line, y labels 5,780 / 5,800 / 5,820 and times 9:30 to 4:00, a Top movers table (SHOP $148.20 +6.8%, CNR $161.05 +3.1%, SU $51.37 −2.9%, BNS $74.66 −1.4%), and a gray 'The Morning Ledger' box with a black 'Sign up free' button."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The Business row has four stories with distinct SVG thumbnails (teal battery with a lightning bolt, navy falling bars with an amber line, golden wheat fields with a sun, pale sky with a plane on a dashed route), kickers Autos, Housing, Agriculture and Aviation, and their headlines and bylines."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The bottom row matches: Opinion with EK (red), JM (navy) and SH (green) initials avatars and italic serif headlines; 'Housing starts by province, August' with horizontal bars Ontario 78.4 (red) and Quebec 51.2, B.C. 46.9, Alberta 44.1, Prairies 14.6 (navy) plus the source line; and 'Most read' with five entries numbered 1 to 5 in large red serif numerals."
+   },
+   {
+    "id": "F10",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and color match: Liberation Serif for the masthead, headlines and summaries, Roboto for kickers, meta and UI text, with the same size hierarchy; white page, near-black text, red #b3261e accent, thin warm-gray rules; and a black footer with the serif name, the columns News, Opinion, Services and Company, and '© 2026 The Northern Ledger Media Inc. All rights reserved.'"
+   },
+   {
+    "id": "F11",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The page is real HTML text with inline SVG or CSS for every illustration, icon and chart (no raster images), and both layouts come from one index.html via media queries."
+   }
+  ]
+ },
+ {
+  "task_id": "website-rep-03",
+  "category": "website",
+  "mode": "replication",
+  "title": "Recreate a responsive dark developer-platform landing page",
+  "prompt": "Recreate the attached landing page for Tessera, a serverless Postgres product with read replicas at the edge, as a real HTML/CSS page. This is a responsive target: the same index.html is rendered full-page at 1280x800 (desktop.png) and at 390x844 (mobile.png) and both renders are compared with their targets, so build one page whose media queries reproduce both layouts. On a near-black background, from top to bottom: a navigation bar (four-square logo, five links, a GitHub star count, Sign in and a white Start building button; on mobile only the logo, the button and a menu button remain); a centered hero with a New announcement pill, a huge headline whose last words are a violet-to-cyan gradient, a paragraph, a gradient button and an npm install pill; an editor window with numbered, syntax-highlighted TypeScript next to a per-region latency panel; a row of six customer wordmarks; a Platform section with six feature cards; a How it works architecture diagram (on mobile a separate vertical version of the diagram); a Benchmarks section with a horizontal bar chart card and three stat cards; and a five-column footer. Text is Inter and code is DejaVu Sans Mono. Build the diagram and icons with inline SVG and the bars with CSS or SVG. Match the layout, sizes, spacing, colors, typography and every piece of text and code as closely as you can in both layouts.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "reference_viewports": [
+   {
+    "width": 1280,
+    "height": 800
+   },
+   {
+    "width": 390,
+    "height": 844
+   }
+  ],
+  "reference_images": [
+   "desktop.png",
+   "mobile.png"
+  ],
+  "golden": {
+   "entry": "index.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Desktop structure matches desktop.png: nav, centered hero, a 1040px editor window (code left, 300px latency panel right), wordmark row, 'Platform' with a 3x2 grid of feature cards, 'How it works' diagram card, 'Benchmarks' with the bar card on the left and three stacked stat cards on the right, and a five-column footer, in that order, at roughly the same positions and total page height."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Mobile structure matches mobile.png at 390px: the nav keeps only the logo, 'Start building' and a bordered menu button; the headline wraps at about 40px; the two hero actions stack full width; the editor window is one column with the latency panel below the code; wordmarks form a 3x2 grid; features are one column; the diagram is the vertical version; the bar labels column narrows; the three stat cards sit in one row; and the footer uses two columns."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The nav and hero match: a logo of four rounded squares (two gradient, two white), links Product, Docs, Pricing, Changelog and Blog, a '18.4k' star pill, Sign in, a white 'Start building' button; a pill with a violet 'New' badge and 'Read replicas in 34 regions →'; the headline 'The database that lives next to your users' with 'next to your users' in a violet-to-cyan gradient; the paragraph; a gradient 'Start for free' button and a monospace '$ npm i @tessera/client' pill with a copy icon."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The editor window matches: red, amber and green dots, the tabs handler.ts (active, violet underline) and schema.sql, and eleven numbered lines of exactly the same code (import { connect } from '@tessera/client' through return Response.json(user) // served in 4 ms) with pink keywords, green strings, cyan function names and a gray comment; the side panel shows 'Read latency · p50', a green 'All regions healthy' line and fra1 3 ms, iad1 4 ms, hnd1 5 ms, syd1 6 ms and gru1 7 ms with growing gradient bars."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The wordmark row reads 'Trusted by 9,000+ engineering teams' above six gray wordmarks in distinct styles: northwind (heavy), acme/corp (monospace), Lumen (italic serif), HALCYON (spaced capitals), parcel. (violet dot) and oxide (light)."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The Platform section has the violet eyebrow, the headline 'Everything Postgres does, closer to the user', the lede, and six bordered cards with violet line icons in dark tiles: Global read replicas, Scale to zero, Branch every pull request, Row-level security, Query insights and Point-in-time restore, each with its sentence."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The diagram matches under 'Writes go home. Reads stay local.': Your app → Edge router → three replica boxes (fra1 · Frankfurt, iad1 · Virginia, hnd1 · Tokyo, each 'read replica' with a green dot) with a 'reads' chip; a gradient-bordered Primary box 'us-east · Postgres 17' with a violet 'writes' chip; dashed violet 'async replication' arrows from the primary to the replicas; and a violet path from the router to the primary labeled 'writes, 1 round trip to the primary'."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The benchmark matches: 'Fastest reads, by a wide margin', a card 'p99 read latency (ms)' with '1 KB rows · 10,000 requests per second · 6 regions', bars Tessera 8 (gradient, bold label), Serverless KV 23, Regional Postgres 41 and Global SQL 64 (gray) with their values, faint vertical gridlines and an axis 0 / 20 / 40 / 60; and stat cards with gradient numbers 99.999% (uptime SLA on Scale), 34 (regions on 6 continents) and 4 ms (median read worldwide)."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The footer matches: the logo with 'Serverless Postgres with read replicas at the edge.', the columns Product (Replicas, Branching, Insights, Pricing), Developers (Docs, API, CLI, Status), Company (About, Blog, Careers) and Legal (Privacy, Terms, DPA), '© 2026 Tessera Labs, Inc.' on the left and a green-dot 'All systems operational' on the right."
+   },
+   {
+    "id": "F10",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and color match: Inter with extra-bold, tightly tracked headlines, DejaVu Sans Mono for code and the npm pill, a #0a0c10 page, #0f1217 cards with #1c2129 borders and 14-16px radii, gray #9aa3b2 body text, and violet #a78bfa to cyan #22d3ee accents."
+   },
+   {
+    "id": "F11",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Everything is real HTML text and code with inline SVG for the logo, icons and both diagrams and CSS or SVG for the bars (no raster images), and both layouts come from one index.html via media queries."
+   }
+  ]
+ },
+ {
+  "task_id": "website-rep-04",
+  "category": "website",
+  "mode": "replication",
+  "title": "Recreate a dense quarterly revenue report dashboard",
+  "prompt": "Recreate the attached Q3 2026 revenue review, a report page in the analytics tool Ledgerly, as a real HTML/CSS page at 1280px wide (the whole page is compared, top to bottom). From top to bottom: a white top bar with the Ledgerly logo, the breadcrumb Reports / Finance / Q3 2026 revenue review, three overlapping initials avatars, a Share button and a dark Export PDF button; the title, subtitle and three filter chips; five KPI cards with change pills and sparklines; a Monthly revenue by channel stacked column chart (twelve months split into Wholesale, Retail and Online, a total above every column, the Q3 columns highlighted and the earlier ones faded) next to a Revenue by region list with bars; a Customer retention by cohort heatmap (a staircase of percentages in a blue scale) next to a Checkout funnel; a Top products table with SKUs, category chips, 8-week trend sparklines and stock status; three note cards; and a footer line. The font is Open Sans, with SKUs in DejaVu Sans Mono. Draw the charts with inline SVG or CSS, and use real table markup for the heatmap and the products. Match the layout, sizes, spacing, colors, typography and every number as closely as you can.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "reference_images": [
+   "reference.png"
+  ],
+  "golden": {
+   "entry": "index.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The layout matches the target: top bar, title row, five equal KPI cards, a row with the wide stacked chart card and a 372px region card, a row with the heatmap card and a 420px funnel card, a full-width products table card, three note cards and the footer line, with 16px gaps and the same card heights and total page height."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The top bar and title match: blue bar-chart logo and 'Ledgerly', the breadcrumb with 'Q3 2026 revenue review' in bold, MR / JL / AK avatars in violet, teal and orange, an outlined Share and a dark Export PDF button; the title 'Q3 2026 revenue review', the subtitle 'Northwind Outfitters · July 1 – September 30, 2026 · Prepared by Finance', and chips 'Region: All regions', 'Channel: All' and 'Compare: Q2 2026'."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The KPI cards show exactly Net revenue $18.42M ▲ 15.6%, Gross margin 46.8% ▲ 1.9 pts, Orders 241,380 ▲ 8.3%, Avg. order value $76.31 ▲ 4.0% and Refund rate 3.1% ▼ 0.4 pts, every change in a green pill with 'vs Q2 2026', each with a sparkline (blue, and green for the refund rate)."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The stacked chart matches: y-axis $0M to $8M in steps of 2, months Oct to Sep with 2025 and 2026 under Oct and Jan, stacks of amber Wholesale at the bottom, teal Retail and blue Online on top, totals 5.02, 5.44, 7.28, 4.44, 4.58, 4.91, 5.09, 5.31, 5.53, 5.86, 6.10 and 6.46 above the columns, the first nine columns faded, and the last three on a pale blue band labeled 'Q3 2026'."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The region card lists North America $8.91M +14.2%, Western Europe $4.37M +18.9%, UK & Ireland $2.12M +9.4%, Asia Pacific $1.86M +22.7%, Latin America $0.71M −3.2% (red pill) and Other $0.45M +5.1%, each with a blue bar proportional to its value, and a Total of $18.42M."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The heatmap matches: cohorts Feb 2026 to Sep 2026 with customer counts 18,240 to 27,480, columns M0 to M7, a staircase of values (Feb row 100%, 38%, 31%, 27%, 25%, 23%, 22%, 21% down to Sep with only 100%), empty cells in pale gray, darker blue with white text for higher values, and a 0% to 100% gradient scale below."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The funnel matches: Sessions 3,124,500, Product views 1,462,300 (46.8%), Add to cart 412,700 (28.2%), Checkout 268,450 (65.0%) and Orders 241,380 (89.9%) with blue gradient bars shrinking in proportion, and the box 'Overall conversion 7.73% · up from 7.41% in Q2'."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The products table matches row by row, from NW-2041 Ridgeline 2P Tent (Camping, 9,820, $2,356,800, 44.1%) to NW-0788 Drift Sleeping Pad (Camping, 11,090, $554,500, 45.7%), with green, gray or red trend sparklines, green In stock, amber Low stock (NW-1177, NW-3012) and red Backorder (NW-0912) statuses, and a Revenue / Units / Margin switch with Revenue selected."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The note cards are headed Highlights, Watch list and Methodology with their sentences, and the footer reads 'Generated October 2, 2026 at 09:14 · Data through September 30, 2026' on the left and 'Ledgerly · Page 1 of 1' on the right."
+   },
+   {
+    "id": "F10",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and color match: Open Sans with the same size and weight hierarchy, a #f4f6f9 page, white cards with 14px radii and #e3e8ef borders, blue #2563eb, teal #14b8a6 and amber #f59e0b series colors, navy #0f172a text, and monospace SKUs."
+   },
+   {
+    "id": "F11",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "The charts and sparklines are inline SVG or CSS (no raster images or chart screenshots), the heatmap and products are real table or grid markup, and all text is real HTML text."
+   }
+  ]
+ },
+ {
+  "task_id": "website-rep-05",
+  "category": "website",
+  "mode": "replication",
+  "title": "Recreate a property listing page with a vector floor plan",
+  "prompt": "Recreate the attached property listing page from Harbor & Pine, a real-estate site, as a real HTML/CSS page at 1280px wide (the whole page is compared, top to bottom). There are no photos: the gallery is three flat vector illustrations (the front of a sage-green craftsman house, a navy kitchen and a cedar backyard deck) with dark labels and a View all 24 views button. Below the gallery is a two-column layout. On the left: a For sale pill, the price, an estimated payment link, the address, bed/bath/area facts, an eight-cell key facts grid, About this home, a Floor plan drawn in SVG (rooms with names and dimensions, windows, the front door swing, a deck and a compass) with a Main floor / Upper floor / Basement switch, a Price history line chart with three labeled events above a table, and a Nearby schools table with colored rating circles. On the right: a tour card (agent, four day tiles, three time slots, two buttons), a Monthly payment card with a donut chart, and a Neighborhood card with an SVG street map and three scores. Then four Similar homes cards with small house illustrations and a dark green footer. The font is Lato in several weights. Match the layout, sizes, spacing, colors, typography and every piece of text as closely as you can.",
+  "artifact": {
+   "kind": "html",
+   "entry": "index.html"
+  },
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "reference_images": [
+   "reference.png"
+  ],
+  "golden": {
+   "entry": "index.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The layout matches the target: nav, breadcrumb bar, a 432px gallery (large panel plus two stacked 372px panels), a two-column body (main column and a 380px sidebar of three cards), a four-card Similar homes row and a dark footer, at the same positions, widths and total page height."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The nav and breadcrumb bar match: a teal tree logo with 'Harbor' bold and '& Pine' light, links Buy (teal), Rent, Sell, Mortgage and Agents, 'Saved (3)' with a heart, Sign in and a teal 'List your home' button; 'Portland, OR › Buckman › 1847 SE Alder St' with Share and a red-heart Saved button."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The gallery matches: the craftsman house (sage walls, charcoal gable roofs, white porch columns, orange front door, steps, path, trees and white fences on a lawn under a pale sky with a sun), the navy kitchen (upper and lower cabinets, window with a plant, two amber pendants, island) and the backyard (cedar fence, tree, string lights, deck, two teal chairs, table), labeled 'Front · Illustrated tour', 'Kitchen' and 'Backyard', plus a white 'View all 24 views' button."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The summary matches: a teal 'For sale · Active' pill, '$1,125,000' in extra-heavy type, an underlined teal 'Est. $6,675/mo', '1847 SE Alder St, Portland, OR 97214', '4 beds 3 baths 2,460 sq ft 0.14 acre lot', and the key facts Single family, 1926, renovated 2021, Radiant floor, Heat pump, 2-car garage, None, $457 and 12 in a bordered 4x2 grid."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The floor plan matches: Living room 18′ × 14′, Dining 12′ × 12′, a tinted Kitchen 14′ × 12′ with a counter and island, Pantry, Mud, Entry 8′ × 12′, Powder, Coat, Stairs with treads and an arrow, Family room 17′ × 14′ and Office 15′ × 14′ in the same arrangement, a thick outer wall with light-blue windows, an orange door swing labeled 'Front door', a dashed 'Deck' on the right and a north compass, with 'Main floor' selected in the switch."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The price history matches: y labels $500K to $1100K, years 2016 to 2026 every two years, a teal line over a pale area with markers labeled 'Sold $612K', 'Sold $905K' and 'Listed $1.125M', and the table Sep 12, 2026 Listed for sale $1,125,000 +24.3%, Jun 3, 2021 Sold $905,000 +47.9%, Apr 18, 2016 Sold $612,000 —."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Nearby schools lists 8 (green) Buckman Elementary K–5 0.4 mi, 7 (amber) Hosford Middle School 6–8 0.9 mi and 9 (green) Grant High School 9–12 2.1 mi, with rating circles in the first column."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The tour card matches: an 'NK' avatar, Nora Kim, 'Listing agent · Harbor & Pine Realty', '★★★★★ 4.9 (132 reviews)', day tiles FRI 25, SAT 26 (teal outline, selected), SUN 27 and MON 28 Sep, times 10:00 AM, 11:30 AM (filled teal) and 2:00 PM, a filled 'Request a tour' and an outlined 'Contact agent'."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "The payment and neighborhood cards match: 'Monthly payment' with '20% down ($225,000) · 6.25% · 30-year fixed', a teal/amber/gray donut around '$6,675' 'per month', the legend Principal & interest $5,541, Property tax $984, Home insurance $150, HOA fees $0, 'Loan amount $900,000'; and a map with green Laurelhurst Park, white streets, a yellow E Burnside St, the street labels, blue School and brown Café dots, a red pin, and the scores 92 Walk Score, 64 Transit and 97 Bike."
+   },
+   {
+    "id": "F10",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Similar homes shows four cards with distinct small house illustrations: $1,049,000 (New tag), $1,190,000, $985,000 (Price cut tag) and $1,275,000 with their bed/bath/area lines and SE addresses, plus 'See all 18 ›'; the dark green footer has the brand, five links and '© 2026 Harbor & Pine Realty · OR license 201204482'."
+   },
+   {
+    "id": "F11",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and color match: Lato with 900-weight price, headings and numbers, 300 for '& Pine', teal #0f766e accents, #0f172a headings, slate body text, 1px #e5e9ef borders and 12-14px radii; all illustrations, the plan, charts and map are inline SVG or CSS with no raster images."
+   }
+  ]
+ }
+]

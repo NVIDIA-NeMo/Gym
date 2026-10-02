@@ -1,0 +1,31 @@
+# Verifier calibration for the visual agent benchmark (see judge_calibration.py): artifacts of known
+# quality (goldens, strong rollouts and controlled degradations of them) are graded through the
+# normal /verify pipeline by the replay agent, twice each. Build the cases first:
+#   python benchmarks/visual_agent/judge_calibration.py build --anchor-rollouts results/<strong run>.jsonl
+config_paths:
+- resources_servers/visual_agent/configs/visual_agent.yaml
+- responses_api_agents/visual_replay_agent/configs/visual_replay_agent.yaml
+
+visual_agent_resources_server:
+  resources_servers:
+    visual_agent:
+      allowed_agents: [opencode_visual_sandboxed_agent, visual_replay_agent]
+      judge:
+        timeout_s: 2700
+      # Each artifact is graded on its own; groupwise would compare the two repeats of one case.
+      groupwise:
+        enabled: false
+
+visual_agent_visual_replay_agent:
+  _inherit_from: visual_replay_agent
+  responses_api_agents:
+    visual_replay_agent:
+      resources_server:
+        type: resources_servers
+        name: visual_agent_resources_server
+      datasets:
+        - name: visual_agent_judge_calibration
+          type: benchmark
+          jsonl_fpath: benchmarks/visual_agent/data/calibration.jsonl
+          prepare_script: benchmarks/visual_agent/judge_calibration.py
+          num_repeats: 2

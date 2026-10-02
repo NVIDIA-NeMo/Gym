@@ -1,0 +1,12 @@
+# Nemotron 3.5 Super (VL/omni checkpoints) as the visual agent policy. Sampling comes from the
+# preset's GYM_MODEL_PARAMS (temperature 1.0, top_p 0.95) and policy_model_override.yaml (no
+# output cap); the chat template defaults to thinking on. Pair with external_judge_override.yaml.
+visual_agent_opencode_visual_sandboxed_agent:
+  responses_api_agents:
+    opencode_visual_sandboxed_agent:
+      # --max-model-len of the preset; compaction keeps long iterate-and-preview sessions alive.
+      opencode_max_context_window: 262144
+      opencode_config:
+        compaction:
+          auto: true
+          reserved: 20000

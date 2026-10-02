@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Halvorsen &amp; Co. | Northwind Semiconductors initiation</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { background: #CBD5E1; }
+body { font-family: 'Inter', sans-serif; color: #0E1B2C; -webkit-font-smoothing: antialiased; }
+.slide { position: relative; width: 1280px; height: 720px; overflow: hidden; background: #fff; margin: 0 0 16px 0; }
+.slide > * { position: absolute; }
+.panel { left: 0; top: 0; width: 392px; height: 720px; background: #0E1B2C; color: #fff; }
+.panel > * { position: absolute; }
+.brand { left: 40px; top: 40px; font-size: 13px; font-weight: 800; letter-spacing: 0.2em; }
+.brandsub { left: 40px; top: 62px; font-size: 12px; color: #93A4B8; }
+.lbl { left: 40px; font-size: 11px; font-weight: 700; letter-spacing: 0.14em; color: #93A4B8; }
+.rating { left: 40px; top: 136px; font-size: 30px; line-height: 36px; font-weight: 800; letter-spacing: 0.02em; color: #34D399; }
+.cell .lbl2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #93A4B8; }
+.cell .val { margin-top: 4px; font-size: 24px; line-height: 30px; font-weight: 700; }
+.cell .val.up { color: #34D399; }
+.kdt { left: 40px; top: 366px; width: 312px; }
+.kd { display: flex; justify-content: space-between; height: 30px; align-items: center; border-bottom: 1px solid #22344B; font-size: 13px; }
+.kd span { color: #C9D4E0; }
+.kd b { font-weight: 600; }
+.analyst { left: 40px; top: 606px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #93A4B8; }
+.analyst b { font-size: 14px; color: #fff; }
+.eyebrow { font-size: 12px; font-weight: 700; letter-spacing: 0.16em; color: #0E7C86; }
+h1.cover { left: 440px; top: 76px; width: 776px; font-family: 'DejaVu Serif', serif; font-size: 34px; line-height: 42px; font-weight: 700; letter-spacing: -0.01em; }
+.lede { left: 440px; top: 172px; width: 740px; font-size: 16px; line-height: 24px; color: #5B6B7C; }
+.sect { font-size: 11px; font-weight: 800; letter-spacing: 0.16em; color: #0E1B2C; }
+.s1 .sect { width: 776px; padding-bottom: 8px; border-bottom: 1px solid #D9E1E8; }
+.th { left: 440px; width: 776px; display: flex; gap: 16px; }
+.th .num { flex: none; width: 26px; height: 26px; border-radius: 13px; background: #0E7C86; color: #fff; font-size: 13px; font-weight: 800; display: flex; align-items: center; justify-content: center; margin-top: 1px; }
+.th .tt { font-size: 14px; line-height: 21px; color: #5B6B7C; }
+.th .tt b { font-size: 15px; color: #0E1B2C; }
+.charthead { left: 440px; top: 496px; width: 776px; display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; color: #5B6B7C; }
+.charthead .src { font-weight: 400; color: #8A99A8; }
+.sparkbox { left: 440px; top: 518px; }
+.spark text { font-family: 'Inter', sans-serif; }
+.disc { top: 684px; font-size: 11px; color: #8A99A8; }
+.pg { right: 64px; top: 684px; font-size: 11px; font-weight: 700; color: #5B6B7C; }
+.topbar { left: 0; top: 0; width: 1280px; height: 6px; background: #0E1B2C; }
+h2.t2 { left: 64px; top: 66px; width: 1152px; white-space: nowrap; font-family: 'DejaVu Serif', serif; font-size: 30px; line-height: 38px; font-weight: 700; letter-spacing: -0.01em; }
+.callout { right: 64px; top: 40px; width: 250px; padding: 12px 16px; background: #E8F3F4; border-left: 4px solid #0E7C86; }
+.callout .cl { font-size: 11px; font-weight: 700; letter-spacing: 0.12em; color: #0E7C86; text-transform: uppercase; }
+.callout .cv { font-size: 28px; line-height: 34px; font-weight: 800; }
+.callout .cs { font-size: 12px; color: #5B6B7C; }
+.callout .cs b { color: #1F9D6B; }
+table.fin { left: 64px; top: 146px; width: 1152px; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+table.fin th, table.fin td { height: 30px; padding: 0 14px; border-bottom: 1px solid #E6ECF1; text-align: right; white-space: nowrap; }
+table.fin th { text-align: left; font-weight: 600; width: 262px; }
+table.fin td { width: 140px; }
+table.fin td.cg { width: 190px; color: #5B6B7C; }
+table.fin td.est { background: #EEF6F7; }
+table.fin thead th, table.fin thead td { height: 40px; font-size: 12px; font-weight: 800; letter-spacing: 0.04em; color: #5B6B7C; border-bottom: 2px solid #0E1B2C; }
+table.fin thead td.est { color: #0E7C86; }
+table.fin tr.grp td { height: 26px; text-align: left; font-size: 11px; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase; color: #0E7C86; background: #F7F9FB; }
+table.fin tr.cons th, table.fin tr.cons td { font-style: italic; color: #8A99A8; font-weight: 400; }
+.neg { color: #C2412D; }
+.foot { left: 64px; top: 650px; width: 1000px; font-size: 11px; color: #8A99A8; }
+.brandfoot { left: 64px; top: 684px; font-size: 11px; font-weight: 800; letter-spacing: 0.12em; color: #0E1B2C; }
+.legend3 { left: 64px; top: 124px; display: flex; gap: 22px; font-size: 13px; color: #5B6B7C; }
+.legend3 span { display: flex; align-items: center; gap: 7px; }
+.legend3 i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+.legend3 i.ln { width: 20px; height: 3px; border-radius: 2px; background: #E07A2E; }
+.combo { left: 40px; top: 164px; }
+.combo text { font-family: 'Inter', sans-serif; }
+.side { left: 876px; top: 130px; width: 340px; }
+.side .sect { padding-bottom: 8px; border-bottom: 1px solid #D9E1E8; }
+.donut { margin: 18px 0 8px 70px; width: 200px; height: 200px; }
+.donut text { font-family: 'Inter', sans-serif; }
+.mx { display: flex; align-items: center; gap: 10px; height: 34px; border-bottom: 1px solid #EEF2F5; font-size: 14px; }
+.mx i { width: 12px; height: 12px; border-radius: 2px; }
+.mx span { flex: 1; }
+.mx b { width: 44px; text-align: right; }
+.mx em { width: 70px; text-align: right; font-style: normal; color: #5B6B7C; font-size: 13px; }
+.note { margin-top: 16px; padding: 12px 14px; background: #F7F9FB; border-left: 3px solid #E07A2E; font-size: 13px; line-height: 19px; color: #5B6B7C; }
+.note b { color: #0E1B2C; }
+.sub4 { left: 64px; top: 124px; font-size: 13px; font-weight: 600; color: #5B6B7C; }
+.football { left: 64px; top: 160px; }
+.football text { font-family: 'Inter', sans-serif; }
+.sensbox { left: 820px; top: 126px; width: 396px; }
+.sensbox .sect { padding-bottom: 8px; border-bottom: 1px solid #D9E1E8; margin-bottom: 12px; }
+table.sens { border-collapse: separate; border-spacing: 3px; font-size: 14px; font-variant-numeric: tabular-nums; }
+table.sens th, table.sens td { width: 62px; height: 38px; text-align: center; font-weight: 600; }
+table.sens thead td { font-size: 12px; font-weight: 800; color: #5B6B7C; }
+table.sens th { font-size: 12px; font-weight: 800; color: #5B6B7C; width: 70px; }
+table.sens th.corner { font-size: 10px; letter-spacing: 0.02em; white-space: nowrap; width: 70px; }
+table.sens td.lo { background: #FBE4E0; color: #C2412D; }
+table.sens td.mid { background: #F1F4F7; }
+table.sens td.hi { background: #DDF2E8; color: #166A49; }
+table.sens td.base { outline: 2.5px solid #0E1B2C; outline-offset: -2.5px; font-weight: 800; }
+.sleg { margin-top: 12px; display: flex; gap: 14px; font-size: 12px; color: #5B6B7C; }
+.sleg span { display: flex; align-items: center; gap: 6px; }
+.sleg i.k { width: 14px; height: 14px; display: inline-block; border-radius: 2px; }
+.sleg i.lo { background: #FBE4E0; }
+.sleg i.hi { background: #DDF2E8; }
+.sleg i.base { background: #fff; outline: 2px solid #0E1B2C; outline-offset: -2px; }
+</style>
+</head>
+<body>
+
+<section class="slide s1">
+  <div class="panel">
+    <div class="brand">HALVORSEN &amp; CO.</div>
+    <div class="brandsub">Equity Research · Semiconductors</div>
+    <div class="lbl" style="top:118px">RATING</div>
+    <div class="rating">OUTPERFORM</div>
+    <div class="cell" style="left:40px;top:196px"><div class="lbl2">Price target</div><div class="val">$148.00</div></div>
+    <div class="cell" style="left:212px;top:196px"><div class="lbl2">Last price</div><div class="val">$112.40</div></div>
+    <div class="cell" style="left:40px;top:262px"><div class="lbl2">Upside</div><div class="val up">+31.7%</div></div>
+    <div class="cell" style="left:212px;top:262px"><div class="lbl2">Horizon</div><div class="val">12 months</div></div>
+    <div class="lbl" style="top:346px">KEY DATA</div>
+    <div class="kdt"><div class="kd"><span>Ticker</span><b>NWSC · NASDAQ</b></div><div class="kd"><span>Market cap</span><b>$38.6B</b></div><div class="kd"><span>Enterprise value</span><b>$36.1B</b></div><div class="kd"><span>52-week range</span><b>$78.15 – $126.90</b></div><div class="kd"><span>Shares outstanding</span><b>343.4M</b></div><div class="kd"><span>Dividend yield</span><b>0.6%</b></div><div class="kd"><span>Avg. daily volume</span><b>4.2M</b></div></div>
+    <div class="analyst"><b>Ingrid Solberg, CFA</b><span>isolberg@halvorsen.co · +1 212 555 0143</span><span>24 September 2026</span></div>
+  </div>
+  <div class="eyebrow" style="left:440px;top:52px">INITIATION OF COVERAGE</div>
+  <h1 class="cover">Northwind Semiconductors: power efficiency is the moat</h1>
+  <p class="lede">We initiate at Outperform with a $148 price target (31.7% upside) as data-center design wins lift margins through FY2028.</p>
+  <div class="sect" style="left:440px;top:238px">INVESTMENT THESIS</div>
+  <div class="th" style="top:266px"><div class="num">1</div><div class="tt"><b>Design wins are locked in.</b> Seven hyperscale sockets won in FY2026 ramp through FY2028, lifting data center to 58% of sales.</div></div><div class="th" style="top:340px"><div class="num">2</div><div class="tt"><b>Margins have room to run.</b> Mix shift and the 3 nm transition add 440 bp of gross margin by FY2028E; we sit 6% above consensus EPS.</div></div><div class="th" style="top:414px"><div class="num">3</div><div class="tt"><b>Valuation is undemanding.</b> 17.3x FY2027E EPS against 22x for peers, despite faster growth and a net cash balance sheet.</div></div>
+  <div class="charthead"><span>Share price, last 12 months (USD)</span><span class="src">Source: FactSet, 23 Sep 2026</span></div>
+  <div class="sparkbox">
+<svg class="spark" width="776" height="150" viewBox="0 0 776 150" xmlns="http://www.w3.org/2000/svg">
+  <defs><linearGradient id="pfill" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#0E7C86" stop-opacity="0.22"/><stop offset="1" stop-color="#0E7C86" stop-opacity="0.02"/>
+  </linearGradient></defs>
+  <g font-size="11" fill="#8A99A8"><line x1="44" y1="104.8" x2="704" y2="104.8" stroke="#E6ECF1"/><text x="36" y="108.8" text-anchor="end">80</text><line x1="44" y1="78.2" x2="704" y2="78.2" stroke="#E6ECF1"/><text x="36" y="82.2" text-anchor="end">100</text><line x1="44" y1="51.8" x2="704" y2="51.8" stroke="#E6ECF1"/><text x="36" y="55.8" text-anchor="end">120</text><line x1="44" y1="25.2" x2="704" y2="25.2" stroke="#E6ECF1"/><text x="36" y="29.2" text-anchor="end">140</text><text x="71.5" y="140" text-anchor="middle">Oct</text><text x="126.5" y="140" text-anchor="middle">Nov</text><text x="181.5" y="140" text-anchor="middle">Dec</text><text x="236.5" y="140" text-anchor="middle">Jan</text><text x="291.5" y="140" text-anchor="middle">Feb</text><text x="346.5" y="140" text-anchor="middle">Mar</text><text x="401.5" y="140" text-anchor="middle">Apr</text><text x="456.5" y="140" text-anchor="middle">May</text><text x="511.5" y="140" text-anchor="middle">Jun</text><text x="566.5" y="140" text-anchor="middle">Jul</text><text x="621.5" y="140" text-anchor="middle">Aug</text><text x="676.5" y="140" text-anchor="middle">Sep</text></g>
+  <line x1="44" y1="118" x2="704" y2="118" stroke="#B8C4CF"/>
+  <line x1="44" y1="14.7" x2="704" y2="14.7" stroke="#E07A2E" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="712" y="18.7" font-size="12" font-weight="700" fill="#E07A2E">PT $148</text>
+  <path d="M44.0,118 L44.0,100.9 L50.4,98.5 L56.8,96.1 L63.2,93.9 L69.6,89.8 L76.0,90.4 L82.4,93.7 L88.9,99.0 L95.3,100.1 L101.7,99.9 L108.1,103.1 L114.5,103.1 L120.9,101.2 L127.3,99.9 L133.7,99.2 L140.1,102.1 L146.5,100.0 L152.9,105.3 L159.3,103.3 L165.7,100.2 L172.2,107.2 L178.6,102.4 L185.0,103.9 L191.4,99.2 L197.8,98.2 L204.2,96.1 L210.6,96.6 L217.0,96.6 L223.4,100.9 L229.8,99.0 L236.2,97.8 L242.6,99.8 L249.0,98.0 L255.5,97.7 L261.9,97.6 L268.3,99.8 L274.7,101.0 L281.1,96.9 L287.5,97.7 L293.9,96.8 L300.3,102.0 L306.7,103.5 L313.1,104.3 L319.5,99.8 L325.9,98.1 L332.3,99.6 L338.8,99.9 L345.2,103.7 L351.6,104.2 L358.0,100.7 L364.4,97.2 L370.8,96.3 L377.2,95.5 L383.6,92.7 L390.0,93.2 L396.4,89.2 L402.8,84.8 L409.2,82.6 L415.7,81.8 L422.1,79.5 L428.5,74.9 L434.9,75.6 L441.3,76.4 L447.7,70.2 L454.1,68.8 L460.5,65.7 L466.9,63.2 L473.3,58.9 L479.7,58.0 L486.1,57.3 L492.5,56.1 L499.0,52.5 L505.4,53.4 L511.8,51.4 L518.2,49.8 L524.6,50.6 L531.0,54.2 L537.4,52.1 L543.8,52.1 L550.2,48.1 L556.6,48.8 L563.0,51.0 L569.4,48.5 L575.8,47.0 L582.3,48.0 L588.7,42.6 L595.1,42.9 L601.5,43.7 L607.9,47.7 L614.3,51.0 L620.7,51.6 L627.1,56.9 L633.5,55.6 L639.9,59.4 L646.3,54.2 L652.7,54.8 L659.1,60.6 L665.6,57.2 L672.0,61.7 L678.4,62.6 L684.8,63.8 L691.2,63.8 L697.6,60.9 L704.0,61.8 L704.0,118 Z" fill="url(#pfill)"/>
+  <polyline points="44.0,100.9 50.4,98.5 56.8,96.1 63.2,93.9 69.6,89.8 76.0,90.4 82.4,93.7 88.9,99.0 95.3,100.1 101.7,99.9 108.1,103.1 114.5,103.1 120.9,101.2 127.3,99.9 133.7,99.2 140.1,102.1 146.5,100.0 152.9,105.3 159.3,103.3 165.7,100.2 172.2,107.2 178.6,102.4 185.0,103.9 191.4,99.2 197.8,98.2 204.2,96.1 210.6,96.6 217.0,96.6 223.4,100.9 229.8,99.0 236.2,97.8 242.6,99.8 249.0,98.0 255.5,97.7 261.9,97.6 268.3,99.8 274.7,101.0 281.1,96.9 287.5,97.7 293.9,96.8 300.3,102.0 306.7,103.5 313.1,104.3 319.5,99.8 325.9,98.1 332.3,99.6 338.8,99.9 345.2,103.7 351.6,104.2 358.0,100.7 364.4,97.2 370.8,96.3 377.2,95.5 383.6,92.7 390.0,93.2 396.4,89.2 402.8,84.8 409.2,82.6 415.7,81.8 422.1,79.5 428.5,74.9 434.9,75.6 441.3,76.4 447.7,70.2 454.1,68.8 460.5,65.7 466.9,63.2 473.3,58.9 479.7,58.0 486.1,57.3 492.5,56.1 499.0,52.5 505.4,53.4 511.8,51.4 518.2,49.8 524.6,50.6 531.0,54.2 537.4,52.1 543.8,52.1 550.2,48.1 556.6,48.8 563.0,51.0 569.4,48.5 575.8,47.0 582.3,48.0 588.7,42.6 595.1,42.9 601.5,43.7 607.9,47.7 614.3,51.0 620.7,51.6 627.1,56.9 633.5,55.6 639.9,59.4 646.3,54.2 652.7,54.8 659.1,60.6 665.6,57.2 672.0,61.7 678.4,62.6 684.8,63.8 691.2,63.8 697.6,60.9 704.0,61.8" fill="none" stroke="#0E7C86" stroke-width="2" stroke-linejoin="round"/>
+  <circle cx="588.7" cy="42.6" r="4" fill="#0E1B2C"/>
+  <text x="588.7" y="33.6" font-size="11" font-weight="600" fill="#0E1B2C" text-anchor="middle">52w high $126.90</text>
+  <circle cx="172.2" cy="107.2" r="4" fill="#0E1B2C"/>
+  <text x="180.2" y="111.2" font-size="11" font-weight="600" fill="#0E1B2C">52w low $78.15</text>
+  <circle cx="704.0" cy="61.8" r="4.5" fill="#fff" stroke="#0E7C86" stroke-width="2.5"/>
+  <text x="712" y="65.8" font-size="12" font-weight="700" fill="#0E7C86">$112.40</text>
+</svg></div>
+  <div class="disc" style="left:440px">See important disclosures and analyst certification at the end of this report.</div>
+  <div class="pg">1</div>
+</section>
+
+<section class="slide s2">
+  <div class="topbar"></div>
+  <div class="eyebrow" style="left:64px;top:44px">FINANCIAL SUMMARY</div>
+  <h2 class="t2">We are 6% above consensus on FY2027E EPS</h2>
+  <div class="callout"><div class="cl">FY2027E EPS</div><div class="cv">$6.51</div><div class="cs">vs consensus $6.14 · <b>+6.0%</b></div></div>
+  <table class="fin">
+    <thead><tr><th>Fiscal year ending June</th><td>FY2024A</td><td>FY2025A</td><td class="est">FY2026E</td><td class="est">FY2027E</td><td class="est">FY2028E</td><td class="cg">CAGR / Δ 25A–28E</td></tr></thead>
+    <tbody><tr class="grp"><td colspan="7">Income statement</td></tr><tr><th>Revenue ($M)</th><td class="">6,412</td><td class="">7,388</td><td class="est">8,905</td><td class="est">10,760</td><td class="est">12,610</td><td class="cg">19.5%</td></tr><tr><th>Revenue growth</th><td class="">11.2%</td><td class="">15.2%</td><td class="est">20.5%</td><td class="est">20.8%</td><td class="est">17.2%</td><td class="cg">–</td></tr><tr><th>Gross margin</th><td class="">54.1%</td><td class="">55.8%</td><td class="est">57.9%</td><td class="est">59.4%</td><td class="est">60.2%</td><td class="cg">+4.4 pts</td></tr><tr><th>EBITDA ($M)</th><td class="">1,988</td><td class="">2,436</td><td class="est">3,172</td><td class="est">4,010</td><td class="est">4,860</td><td class="cg">25.9%</td></tr><tr><th>EBITDA margin</th><td class="">31.0%</td><td class="">33.0%</td><td class="est">35.6%</td><td class="est">37.3%</td><td class="est">38.5%</td><td class="cg">+5.5 pts</td></tr><tr><th>EPS ($)</th><td class="">3.12</td><td class="">3.86</td><td class="est">5.04</td><td class="est">6.51</td><td class="est">7.94</td><td class="cg">27.2%</td></tr><tr class="cons"><th>Consensus EPS ($)</th><td class="">–</td><td class="">–</td><td class="est">4.92</td><td class="est">6.14</td><td class="est">7.38</td><td class="cg">–</td></tr><tr class="grp"><td colspan="7">Cash flow and balance sheet</td></tr><tr><th>Free cash flow ($M)</th><td class="">1,102</td><td class="">1,395</td><td class="est">1,826</td><td class="est">2,390</td><td class="est">2,955</td><td class="cg">28.4%</td></tr><tr><th>Net cash ($M)</th><td class=""><span class="neg">(412)</span></td><td class="">380</td><td class="est">1,610</td><td class="est">3,420</td><td class="est">5,680</td><td class="cg">–</td></tr><tr class="grp"><td colspan="7">Valuation at $112.40</td></tr><tr><th>P/E (x)</th><td class="">36.0</td><td class="">29.1</td><td class="est">22.3</td><td class="est">17.3</td><td class="est">14.2</td><td class="cg">–</td></tr><tr><th>EV/EBITDA (x)</th><td class="">18.2</td><td class="">14.8</td><td class="est">11.4</td><td class="est">9.0</td><td class="est">7.4</td><td class="cg">–</td></tr></tbody>
+  </table>
+  <div class="foot">Source: company filings, Halvorsen &amp; Co. estimates. Consensus as of 20 Sep 2026. Shaded columns are estimates; negative values in parentheses.</div>
+  <div class="brandfoot">HALVORSEN &amp; CO. · Northwind Semiconductors</div>
+  <div class="pg">2</div>
+</section>
+
+<section class="slide s3">
+  <div class="topbar"></div>
+  <div class="eyebrow" style="left:64px;top:44px">SEGMENTS</div>
+  <h2 class="t2">Data center doubles its share of revenue by FY2028E</h2>
+  <div class="legend3">
+    <span><i style="background:#0E1B2C"></i>Data center</span><span><i style="background:#0E7C86"></i>Automotive</span>
+    <span><i style="background:#9DB4C0"></i>Industrial</span><span><i class="ln"></i>EBITDA margin (right)</span>
+  </div>
+  <div class="combo">
+<svg width="780" height="450" viewBox="0 0 780 450" xmlns="http://www.w3.org/2000/svg">
+  <rect x="425.7" y="12" width="274.3" height="388" fill="#F3F7F9"/><text x="562.9" y="25" text-anchor="middle" font-size="11" font-weight="700" fill="#5B6B7C" letter-spacing="1.2">ESTIMATES</text>
+  <g font-size="12" fill="#8A99A8"><line x1="60" y1="400.0" x2="700" y2="400.0" stroke="#B8C4CF"/><text x="50" y="404.0" text-anchor="end">0</text><text x="710" y="404.0">0%</text><line x1="60" y1="326.0" x2="700" y2="326.0" stroke="#E6ECF1"/><text x="50" y="330.0" text-anchor="end">4</text><text x="710" y="330.0">10%</text><line x1="60" y1="252.0" x2="700" y2="252.0" stroke="#E6ECF1"/><text x="50" y="256.0" text-anchor="end">8</text><text x="710" y="256.0">20%</text><line x1="60" y1="178.0" x2="700" y2="178.0" stroke="#E6ECF1"/><text x="50" y="182.0" text-anchor="end">12</text><text x="710" y="182.0">30%</text><line x1="60" y1="104.0" x2="700" y2="104.0" stroke="#E6ECF1"/><text x="50" y="108.0" text-anchor="end">16</text><text x="710" y="108.0">40%</text><line x1="60" y1="30.0" x2="700" y2="30.0" stroke="#E6ECF1"/><text x="50" y="34.0" text-anchor="end">20</text><text x="710" y="34.0">50%</text></g>
+  <text x="14" y="215" font-size="12" fill="#5B6B7C" transform="rotate(-90 14 215)" text-anchor="middle">Revenue ($B)</text>
+  <text x="768" y="215" font-size="12" fill="#E07A2E" transform="rotate(90 768 215)" text-anchor="middle">EBITDA margin</text>
+  <rect x="79.7" y="377.6" width="52" height="22.4" fill="#0E1B2C"/><rect x="79.7" y="352.8" width="52" height="24.8" fill="#0E7C86"/><rect x="79.7" y="306.6" width="52" height="46.2" fill="#9DB4C0"/><text x="105.7" y="298.6" text-anchor="middle" font-size="13" font-weight="700" fill="#0E1B2C">5.05</text><text x="105.7" y="422" text-anchor="middle" font-size="13" fill="#5B6B7C">FY22A</text><rect x="171.1" y="371.9" width="52" height="28.1" fill="#0E1B2C"/><rect x="171.1" y="343.2" width="52" height="28.7" fill="#0E7C86"/><rect x="171.1" y="293.3" width="52" height="49.9" fill="#9DB4C0"/><text x="197.1" y="285.3" text-anchor="middle" font-size="13" font-weight="700" fill="#0E1B2C">5.77</text><text x="197.1" y="422" text-anchor="middle" font-size="13" fill="#5B6B7C">FY23A</text><rect x="262.6" y="363.4" width="52" height="36.6" fill="#0E1B2C"/><rect x="262.6" y="331.7" width="52" height="31.6" fill="#0E7C86"/><rect x="262.6" y="281.4" width="52" height="50.3" fill="#9DB4C0"/><text x="288.6" y="273.4" text-anchor="middle" font-size="13" font-weight="700" fill="#0E1B2C">6.41</text><text x="288.6" y="422" text-anchor="middle" font-size="13" fill="#5B6B7C">FY24A</text><rect x="354.0" y="349.9" width="52" height="50.1" fill="#0E1B2C"/><rect x="354.0" y="314.3" width="52" height="35.5" fill="#0E7C86"/><rect x="354.0" y="263.3" width="52" height="51.1" fill="#9DB4C0"/><text x="380.0" y="255.3" text-anchor="middle" font-size="13" font-weight="700" fill="#0E1B2C">7.39</text><text x="380.0" y="422" text-anchor="middle" font-size="13" fill="#5B6B7C">FY25A</text><rect x="445.4" y="327.1" width="52" height="72.9" fill="#56657A"/><rect x="445.4" y="287.9" width="52" height="39.2" fill="#63AEB5"/><rect x="445.4" y="235.2" width="52" height="52.7" fill="#CAD7DE"/><text x="471.4" y="227.2" text-anchor="middle" font-size="13" font-weight="700" fill="#0E1B2C">8.91</text><text x="471.4" y="422" text-anchor="middle" font-size="13" fill="#5B6B7C" font-weight="700">FY26E</text><rect x="536.9" y="299.0" width="52" height="101.0" fill="#56657A"/><rect x="536.9" y="255.5" width="52" height="43.5" fill="#63AEB5"/><rect x="536.9" y="200.9" width="52" height="54.6" fill="#CAD7DE"/><text x="562.9" y="192.9" text-anchor="middle" font-size="13" font-weight="700" fill="#0E1B2C">10.76</text><text x="562.9" y="422" text-anchor="middle" font-size="13" fill="#5B6B7C" font-weight="700">FY27E</text><rect x="628.3" y="264.8" width="52" height="135.2" fill="#56657A"/><rect x="628.3" y="218.1" width="52" height="46.6" fill="#63AEB5"/><rect x="628.3" y="166.7" width="52" height="51.4" fill="#CAD7DE"/><text x="654.3" y="158.7" text-anchor="middle" font-size="13" font-weight="700" fill="#0E1B2C">12.61</text><text x="654.3" y="422" text-anchor="middle" font-size="13" fill="#5B6B7C" font-weight="700">FY28E</text>
+  <polyline points="105.7,197.2 197.1,183.9 288.6,170.6 380.0,155.8 471.4,136.6 562.9,124.0 654.3,115.1" fill="none" stroke="#E07A2E" stroke-width="2.5"/>
+  <circle cx="105.7" cy="197.2" r="4.5" fill="#fff" stroke="#E07A2E" stroke-width="2.5"/><text x="105.7" y="186.2" text-anchor="middle" font-size="12" font-weight="700" fill="#E07A2E">27.4%</text><circle cx="197.1" cy="183.9" r="4.5" fill="#fff" stroke="#E07A2E" stroke-width="2.5"/><text x="197.1" y="172.9" text-anchor="middle" font-size="12" font-weight="700" fill="#E07A2E">29.2%</text><circle cx="288.6" cy="170.6" r="4.5" fill="#fff" stroke="#E07A2E" stroke-width="2.5"/><text x="288.6" y="159.6" text-anchor="middle" font-size="12" font-weight="700" fill="#E07A2E">31.0%</text><circle cx="380.0" cy="155.8" r="4.5" fill="#fff" stroke="#E07A2E" stroke-width="2.5"/><text x="380.0" y="144.8" text-anchor="middle" font-size="12" font-weight="700" fill="#E07A2E">33.0%</text><circle cx="471.4" cy="136.6" r="4.5" fill="#fff" stroke="#E07A2E" stroke-width="2.5"/><text x="471.4" y="125.6" text-anchor="middle" font-size="12" font-weight="700" fill="#E07A2E">35.6%</text><circle cx="562.9" cy="124.0" r="4.5" fill="#fff" stroke="#E07A2E" stroke-width="2.5"/><text x="562.9" y="113.0" text-anchor="middle" font-size="12" font-weight="700" fill="#E07A2E">37.3%</text><circle cx="654.3" cy="115.1" r="4.5" fill="#fff" stroke="#E07A2E" stroke-width="2.5"/><text x="654.3" y="104.1" text-anchor="middle" font-size="12" font-weight="700" fill="#E07A2E">38.5%</text>
+</svg></div>
+  <div class="side">
+    <div class="sect" style="position:static">REVENUE MIX, FY2028E</div>
+    <div class="donut"><svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg"><path d="M100.00,16.00 A84,84 0 1 1 59.67,173.69 L74.07,147.37 A54,54 0 1 0 100.00,46.00 Z" fill="#0E1B2C" stroke="#fff" stroke-width="2"/><path d="M59.67,173.69 A84,84 0 0 1 17.44,84.50 L46.93,90.03 A54,54 0 0 0 74.07,147.37 Z" fill="#0E7C86" stroke="#fff" stroke-width="2"/><path d="M17.44,84.50 A84,84 0 0 1 100.00,16.00 L100.00,46.00 A54,54 0 0 0 46.93,90.03 Z" fill="#9DB4C0" stroke="#fff" stroke-width="2"/>
+  <text x="100" y="98" text-anchor="middle" font-size="22" font-weight="800" fill="#0E1B2C">$12.6B</text>
+  <text x="100" y="118" text-anchor="middle" font-size="11" fill="#5B6B7C" letter-spacing="1">FY2028E</text></svg></div>
+    <div class="mixrows"><div class="mx"><i style="background:#0E1B2C"></i><span>Data center</span><b>58%</b><em>$7.31B</em></div><div class="mx"><i style="background:#0E7C86"></i><span>Automotive</span><b>20%</b><em>$2.52B</em></div><div class="mx"><i style="background:#9DB4C0"></i><span>Industrial</span><b>22%</b><em>$2.78B</em></div></div>
+    <div class="note"><b>Mix drives margin.</b> Each point of data-center mix adds about 18 bp of EBITDA margin in our model.</div>
+  </div>
+  <div class="foot">Source: company filings, Halvorsen &amp; Co. estimates. Bars show revenue by segment; lighter bars are estimates.</div>
+  <div class="brandfoot">HALVORSEN &amp; CO. · Northwind Semiconductors</div>
+  <div class="pg">3</div>
+</section>
+
+<section class="slide s4">
+  <div class="topbar"></div>
+  <div class="eyebrow" style="left:64px;top:44px">VALUATION</div>
+  <h2 class="t2">Four methods bracket our $148 target</h2>
+  <div class="sub4">Implied value per share (USD)</div>
+  <div class="football"><svg width="700" height="456" viewBox="0 0 700 456" xmlns="http://www.w3.org/2000/svg"><g font-size="12" fill="#8A99A8"><line x1="210.0" y1="34" x2="210.0" y2="424" stroke="#E6ECF1"/><text x="210.0" y="446" text-anchor="middle">$60</text><line x1="274.3" y1="34" x2="274.3" y2="424" stroke="#E6ECF1"/><text x="274.3" y="446" text-anchor="middle">$80</text><line x1="338.6" y1="34" x2="338.6" y2="424" stroke="#E6ECF1"/><text x="338.6" y="446" text-anchor="middle">$100</text><line x1="402.9" y1="34" x2="402.9" y2="424" stroke="#E6ECF1"/><text x="402.9" y="446" text-anchor="middle">$120</text><line x1="467.1" y1="34" x2="467.1" y2="424" stroke="#E6ECF1"/><text x="467.1" y="446" text-anchor="middle">$140</text><line x1="531.4" y1="34" x2="531.4" y2="424" stroke="#E6ECF1"/><text x="531.4" y="446" text-anchor="middle">$160</text><line x1="595.7" y1="34" x2="595.7" y2="424" stroke="#E6ECF1"/><text x="595.7" y="446" text-anchor="middle">$180</text><line x1="660.0" y1="34" x2="660.0" y2="424" stroke="#E6ECF1"/><text x="660.0" y="446" text-anchor="middle">$200</text><line x1="378.4" y1="26" x2="378.4" y2="424" stroke="#0E1B2C" stroke-width="1.5" stroke-dasharray="4 4"/><text x="378.4" y="18" text-anchor="middle" font-size="12" font-weight="700" fill="#0E1B2C">Last $112.40</text><line x1="492.9" y1="26" x2="492.9" y2="424" stroke="#E07A2E" stroke-width="2.5"/><text x="492.9" y="18" text-anchor="middle" font-size="12" font-weight="700" fill="#E07A2E">PT $148</text><text x="0" y="71" font-size="14" font-weight="600" fill="#0E1B2C">52-week trading range</text><rect x="268.3" y="50" width="156.7" height="32" rx="3" fill="#9DB4C0"/><text x="275.3" y="71" font-size="12" font-weight="700" fill="#0E1B2C">$78.15</text><text x="418.0" y="71" text-anchor="end" font-size="12" font-weight="700" fill="#0E1B2C">$126.90</text><text x="0" y="147" font-size="14" font-weight="600" fill="#0E1B2C">DCF, WACC 9.0–10.0%</text><rect x="457.5" y="126" width="77.1" height="32" rx="3" fill="#0E7C86"/><text x="464.5" y="147" font-size="12" font-weight="700" fill="#fff">$137</text><text x="527.6" y="147" text-anchor="end" font-size="12" font-weight="700" fill="#fff">$161</text><text x="0" y="223" font-size="14" font-weight="600" fill="#0E1B2C">EV/EBITDA 10–13x FY27E</text><rect x="406.1" y="202" width="115.7" height="32" rx="3" fill="#0E7C86"/><text x="413.1" y="223" font-size="12" font-weight="700" fill="#fff">$121</text><text x="514.8" y="223" text-anchor="end" font-size="12" font-weight="700" fill="#fff">$157</text><text x="0" y="299" font-size="14" font-weight="600" fill="#0E1B2C">P/E 18–24x FY27E</text><rect x="393.2" y="278" width="125.4" height="32" rx="3" fill="#0E7C86"/><text x="400.2" y="299" font-size="12" font-weight="700" fill="#fff">$117</text><text x="511.6" y="299" text-anchor="end" font-size="12" font-weight="700" fill="#fff">$156</text><text x="0" y="375" font-size="14" font-weight="600" fill="#0E1B2C">Street price targets</text><rect x="322.5" y="354" width="208.9" height="32" rx="3" fill="#9DB4C0"/><text x="329.5" y="375" font-size="12" font-weight="700" fill="#0E1B2C">$95</text><text x="524.4" y="375" text-anchor="end" font-size="12" font-weight="700" fill="#0E1B2C">$160</text></g></svg></div>
+  <div class="sensbox">
+    <div class="sect" style="position:static">DCF SENSITIVITY ($ PER SHARE)</div>
+    <table class="sens"><thead><tr><th class="corner">WACC \ g</th><td>2.0%</td><td>2.5%</td><td>3.0%</td><td>3.5%</td><td>4.0%</td></tr></thead><tbody><tr><th>8.5%</th><td class="hi">148</td><td class="hi">161</td><td class="hi">177</td><td class="hi">195</td><td class="hi">218</td></tr><tr><th>9.0%</th><td class="mid">137</td><td class="hi">148</td><td class="hi">161</td><td class="hi">177</td><td class="hi">195</td></tr><tr><th>9.5%</th><td class="mid">127</td><td class="mid">137</td><td class="hi base">148</td><td class="hi">161</td><td class="hi">177</td></tr><tr><th>10.0%</th><td class="mid">118</td><td class="mid">127</td><td class="mid">137</td><td class="hi">148</td><td class="hi">161</td></tr><tr><th>10.5%</th><td class="lo">111</td><td class="mid">118</td><td class="mid">127</td><td class="mid">137</td><td class="hi">148</td></tr></tbody></table>
+    <div class="sleg"><span><i class="k lo"></i>Below last price</span><span><i class="k hi"></i>At or above target</span><span><i class="k base"></i>Base case</span></div>
+    <div class="note"><b>Base case:</b> WACC 9.5%, terminal growth 3.0%, FY2027E EBITDA $4,010M, net cash $1,610M.</div>
+  </div>
+  <div class="foot">Source: Halvorsen &amp; Co. estimates, FactSet. Multiples applied to FY2027E; DCF range uses 3.0% terminal growth.</div>
+  <div class="brandfoot">HALVORSEN &amp; CO. · Northwind Semiconductors</div>
+  <div class="pg">4</div>
+</section>
+</body>
+</html>

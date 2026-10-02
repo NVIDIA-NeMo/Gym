@@ -1,0 +1,15 @@
+route,name,tier,weekday_boardings_2019,weekday_boardings_2026,peak_headway_min,weekday_revenue_hours
+1,Riverfront,Frequent,7800,6778,10,300.9
+2,Central Ave,Frequent,9200,7789,8,358.4
+4,University,Frequent,6900,5778,10,261.5
+7,Eastgate,Frequent,5600,5832,12,216.2
+10,Northside,Local,2900,2339,20,161.9
+12,Mill Road,Local,2100,1620,30,108.7
+15,Harbor Heights,Local,3300,2384,15,232.0
+18,Westbrook,Local,1800,1266,30,103.0
+21,Lakeview,Local,2500,1725,20,155.6
+24,Airport Connector,Local,1600,1220,30,117.5
+30,Southfield,Local,2200,1666,20,150.6
+50X,Pine Ridge Express,Express,1400,686,30,179.2
+52X,Commuter North Express,Express,1100,512,40,125.3
+55X,Valley Express,Express,900,454,45,112.3

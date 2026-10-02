@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" width="1200" height="760">
+<defs>
+ <linearGradient id="g-compute" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4f8cff" stop-opacity="0.85"/><stop offset="1" stop-color="#4f8cff" stop-opacity="0.35"/></linearGradient>
+ <linearGradient id="g-storage" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#22c3a6" stop-opacity="0.85"/><stop offset="1" stop-color="#22c3a6" stop-opacity="0.35"/></linearGradient>
+ <linearGradient id="g-networking" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f5b544" stop-opacity="0.85"/><stop offset="1" stop-color="#f5b544" stop-opacity="0.35"/></linearGradient>
+ <linearGradient id="g-ai" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e25fd0" stop-opacity="0.85"/><stop offset="1" stop-color="#e25fd0" stop-opacity="0.35"/></linearGradient>
+ <pattern id="hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="8" height="8" fill="none"/><line x1="0" y1="0" x2="0" y2="8" stroke="#ffffff" stroke-opacity="0.22" stroke-width="3"/></pattern>
+ <linearGradient id="card" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#16203a"/><stop offset="1" stop-color="#111a2e"/></linearGradient>
+ <clipPath id="plotClip"><rect x="90" y="150" width="680" height="440"/></clipPath>
+</defs>
+<rect width="1200" height="760" fill="#0b1220"/>
+<g id="header" font-family="Inter, sans-serif">
+ <rect x="30" y="28" width="40" height="40" rx="10" fill="#4f8cff"/><path d="M40 58 L50 38 L60 58 Z" fill="#0b1220"/>
+ <text x="86" y="46" font-size="22" font-weight="700" fill="#e6ebf5">Atlas Cloud — Revenue by product line</text>
+ <text x="86" y="68" font-size="14" fill="#8a96b0">Quarterly revenue, $M · FY2023–FY2026 (FY2026 is a forecast)</text>
+ <rect x="1010" y="32" width="160" height="34" rx="17" fill="#16203a" stroke="#26324f"/><circle cx="1032" cy="49" r="5" fill="#22c3a6"/><text x="1046" y="54" font-size="13" font-weight="600" fill="#c9d3e6">Live · Sep 2026</text>
+</g>
+<rect x="30" y="96" width="780" height="634" rx="16" fill="url(#card)" stroke="#1f2a44"/>
+<g id="legend" font-family="Inter, sans-serif" font-size="13" fill="#c9d3e6">
+ <rect x="60" y="120" width="12" height="12" rx="3" fill="#4f8cff"/><text x="78" y="131">Compute</text>
+ <rect x="147.2" y="120" width="12" height="12" rx="3" fill="#22c3a6"/><text x="165.2" y="131">Storage</text>
+ <rect x="234.39999999999998" y="120" width="12" height="12" rx="3" fill="#f5b544"/><text x="252.39999999999998" y="131">Networking</text>
+ <rect x="344.4" y="120" width="12" height="12" rx="3" fill="#e25fd0"/><text x="362.4" y="131">AI Services</text>
+ <rect x="600" y="118" width="26" height="16" rx="3" fill="url(#hatch)" stroke="#8a96b0" stroke-opacity="0.6"/><text x="634" y="131">Forecast</text>
+</g>
+<g id="grid" font-family="Inter, sans-serif" font-size="12" fill="#6f7b95">
+ <line x1="90" y1="590" x2="770" y2="590" stroke="#33405e" stroke-width="1.5"/><text x="78" y="594" text-anchor="end">0</text>
+ <line x1="90" y1="523.3" x2="770" y2="523.3" stroke="#1f2a44" stroke-width="1" stroke-dasharray="3 5"/><text x="78" y="527.3" text-anchor="end">20</text>
+ <line x1="90" y1="456.7" x2="770" y2="456.7" stroke="#1f2a44" stroke-width="1" stroke-dasharray="3 5"/><text x="78" y="460.7" text-anchor="end">40</text>
+ <line x1="90" y1="390" x2="770" y2="390" stroke="#1f2a44" stroke-width="1" stroke-dasharray="3 5"/><text x="78" y="394" text-anchor="end">60</text>
+ <line x1="90" y1="323.3" x2="770" y2="323.3" stroke="#1f2a44" stroke-width="1" stroke-dasharray="3 5"/><text x="78" y="327.3" text-anchor="end">80</text>
+ <line x1="90" y1="256.7" x2="770" y2="256.7" stroke="#1f2a44" stroke-width="1" stroke-dasharray="3 5"/><text x="78" y="260.7" text-anchor="end">100</text>
+ <line x1="90" y1="190" x2="770" y2="190" stroke="#1f2a44" stroke-width="1" stroke-dasharray="3 5"/><text x="78" y="194" text-anchor="end">120</text>
+ <text x="90" y="612" text-anchor="middle">Q1 ’23</text>
+ <text x="135.3" y="612" text-anchor="middle">Q2 ’23</text>
+ <text x="180.7" y="612" text-anchor="middle">Q3 ’23</text>
+ <text x="226" y="612" text-anchor="middle">Q4 ’23</text>
+ <text x="271.3" y="612" text-anchor="middle">Q1 ’24</text>
+ <text x="316.7" y="612" text-anchor="middle">Q2 ’24</text>
+ <text x="362" y="612" text-anchor="middle">Q3 ’24</text>
+ <text x="407.3" y="612" text-anchor="middle">Q4 ’24</text>
+ <text x="452.7" y="612" text-anchor="middle">Q1 ’25</text>
+ <text x="498" y="612" text-anchor="middle">Q2 ’25</text>
+ <text x="543.3" y="612" text-anchor="middle">Q3 ’25</text>
+ <text x="588.7" y="612" text-anchor="middle">Q4 ’25</text>
+ <text x="634" y="612" text-anchor="middle">Q1 ’26</text>
+ <text x="679.3" y="612" text-anchor="middle">Q2 ’26</text>
+ <text x="724.7" y="612" text-anchor="middle">Q3 ’26</text>
+ <text x="770" y="612" text-anchor="middle">Q4 ’26</text>
+ <text x="38" y="390.0" transform="rotate(-90 38 390.0)" text-anchor="middle" font-size="12" fill="#8a96b0">Revenue, $M</text>
+ <text x="158" y="634" text-anchor="middle" font-size="12" font-weight="600" fill="#a9b4ca">FY2023</text>
+ <text x="339.3" y="634" text-anchor="middle" font-size="12" font-weight="600" fill="#a9b4ca">FY2024</text>
+ <line x1="248.7" y1="620" x2="248.7" y2="638" stroke="#33405e"/>
+ <text x="520.7" y="634" text-anchor="middle" font-size="12" font-weight="600" fill="#a9b4ca">FY2025</text>
+ <line x1="430" y1="620" x2="430" y2="638" stroke="#33405e"/>
+ <text x="702" y="634" text-anchor="middle" font-size="12" font-weight="600" fill="#a9b4ca">FY2026</text>
+ <line x1="611.3" y1="620" x2="611.3" y2="638" stroke="#33405e"/>
+</g>
+<g id="areas" clip-path="url(#plotClip)">
+ <path d="M90 496.7 L135.3 493.3 L180.7 486.7 L226 483.3 L271.3 480 L316.7 473.3 L362 470 L407.3 463.3 L452.7 460 L498 453.3 L543.3 450 L588.7 443.3 L634 440 L679.3 433.3 L724.7 430 L770 423.3 L770 590 L724.7 590 L679.3 590 L634 590 L588.7 590 L543.3 590 L498 590 L452.7 590 L407.3 590 L362 590 L316.7 590 L271.3 590 L226 590 L180.7 590 L135.3 590 L90 590 Z" fill="url(#g-compute)"/>
+ <polyline points="90,496.7 135.3,493.3 180.7,486.7 226,483.3 271.3,480 316.7,473.3 362,470 407.3,463.3 452.7,460 498,453.3 543.3,450 588.7,443.3 634,440 679.3,433.3 724.7,430 770,423.3" fill="none" stroke="#4f8cff" stroke-width="2.5" stroke-linejoin="round"/>
+ <path d="M90 450 L135.3 445 L180.7 436.7 L226 430 L271.3 425 L316.7 416.7 L362 410 L407.3 401.7 L452.7 396.7 L498 386.7 L543.3 381.7 L588.7 373.3 L634 366.7 L679.3 358.3 L724.7 353.3 L770 343.3 L770 423.3 L724.7 430 L679.3 433.3 L634 440 L588.7 443.3 L543.3 450 L498 453.3 L452.7 460 L407.3 463.3 L362 470 L316.7 473.3 L271.3 480 L226 483.3 L180.7 486.7 L135.3 493.3 L90 496.7 Z" fill="url(#g-storage)"/>
+ <polyline points="90,450 135.3,445 180.7,436.7 226,430 271.3,425 316.7,416.7 362,410 407.3,401.7 452.7,396.7 498,386.7 543.3,381.7 588.7,373.3 634,366.7 679.3,358.3 724.7,353.3 770,343.3" fill="none" stroke="#22c3a6" stroke-width="2.5" stroke-linejoin="round"/>
+ <path d="M90 423.3 L135.3 418.3 L180.7 408.3 L226 400 L271.3 395 L316.7 385 L362 376.7 L407.3 368.3 L452.7 361.7 L498 350 L543.3 345 L588.7 335 L634 326.7 L679.3 318.3 L724.7 311.7 L770 300 L770 343.3 L724.7 353.3 L679.3 358.3 L634 366.7 L588.7 373.3 L543.3 381.7 L498 386.7 L452.7 396.7 L407.3 401.7 L362 410 L316.7 416.7 L271.3 425 L226 430 L180.7 436.7 L135.3 445 L90 450 Z" fill="url(#g-networking)"/>
+ <polyline points="90,423.3 135.3,418.3 180.7,408.3 226,400 271.3,395 316.7,385 362,376.7 407.3,368.3 452.7,361.7 498,350 543.3,345 588.7,335 634,326.7 679.3,318.3 724.7,311.7 770,300" fill="none" stroke="#f5b544" stroke-width="2.5" stroke-linejoin="round"/>
+ <path d="M90 420 L135.3 413.3 L180.7 401.7 L226 390 L271.3 381.7 L316.7 366.7 L362 353.3 L407.3 338.3 L452.7 325 L498 306.7 L543.3 293.3 L588.7 275 L634 260 L679.3 243.3 L724.7 228.3 L770 206.7 L770 300 L724.7 311.7 L679.3 318.3 L634 326.7 L588.7 335 L543.3 345 L498 350 L452.7 361.7 L407.3 368.3 L362 376.7 L316.7 385 L271.3 395 L226 400 L180.7 408.3 L135.3 418.3 L90 423.3 Z" fill="url(#g-ai)"/>
+ <polyline points="90,420 135.3,413.3 180.7,401.7 226,390 271.3,381.7 316.7,366.7 362,353.3 407.3,338.3 452.7,325 498,306.7 543.3,293.3 588.7,275 634,260 679.3,243.3 724.7,228.3 770,206.7" fill="none" stroke="#e25fd0" stroke-width="2.5" stroke-linejoin="round"/>
+</g>
+<g id="forecast"><rect x="611.3" y="190" width="158.7" height="400" fill="url(#hatch)"/>
+ <line x1="611.3" y1="176" x2="611.3" y2="590" stroke="#c9d3e6" stroke-width="1.5" stroke-dasharray="6 4"/>
+ <rect x="619.3" y="164" width="76" height="22" rx="11" fill="#26324f"/><text x="657.3" y="179" font-family="Inter, sans-serif" font-size="12" font-weight="600" fill="#e6ebf5" text-anchor="middle">Forecast</text></g>
+<g id="totals" font-family="Inter, sans-serif" font-size="11" font-weight="600" fill="#e6ebf5" text-anchor="middle">
+ <circle cx="90" cy="420" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="90" y="410">51</text>
+ <circle cx="135.3" cy="413.3" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="135.3" y="403.3">53</text>
+ <circle cx="180.7" cy="401.7" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="180.7" y="391.7">56.5</text>
+ <circle cx="226" cy="390" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="226" y="380">60</text>
+ <circle cx="271.3" cy="381.7" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="271.3" y="371.7">62.5</text>
+ <circle cx="316.7" cy="366.7" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="316.7" y="356.7">67</text>
+ <circle cx="362" cy="353.3" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="362" y="343.3">71</text>
+ <circle cx="407.3" cy="338.3" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="407.3" y="328.3">75.5</text>
+ <circle cx="452.7" cy="325" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="452.7" y="315">79.5</text>
+ <circle cx="498" cy="306.7" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="498" y="296.7">85</text>
+ <circle cx="543.3" cy="293.3" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="543.3" y="283.3">89</text>
+ <circle cx="588.7" cy="275" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="588.7" y="265">94.5</text>
+ <circle cx="634" cy="260" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="634" y="250">99</text>
+ <circle cx="679.3" cy="243.3" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="679.3" y="233.3">104</text>
+ <circle cx="724.7" cy="228.3" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="724.7" y="218.3">108.5</text>
+ <circle cx="770" cy="206.7" r="3.5" fill="#0b1220" stroke="#e6ebf5" stroke-width="1.5"/><text x="770" y="196.7">115</text>
+</g>
+<g id="annotation" font-family="Inter, sans-serif"><path d="M362 329.3 L362 283.3 L302 283.3" fill="none" stroke="#e25fd0" stroke-width="1.5"/>
+ <rect x="130" y="261.3" width="172" height="44" rx="8" fill="#1d1630" stroke="#e25fd0" stroke-opacity="0.7"/>
+ <text x="142" y="279.3" font-size="12" font-weight="700" fill="#f3b8ea">Atlas Edge launch</text><text x="142" y="295.3" font-size="11" fill="#b9a6c9">AI Services ×2 in 4 quarters</text></g>
+<g id="kpis" font-family="Inter, sans-serif">
+ <rect x="830" y="96" width="340" height="104" rx="16" fill="url(#card)" stroke="#1f2a44"/>
+ <text x="852" y="126" font-size="13" fill="#8a96b0">FY2025 revenue</text>
+ <text x="852" y="166" font-size="32" font-weight="700" fill="#e6ebf5">$348M</text>
+ <text x="852" y="188" font-size="12" fill="#6f7b95">vs $276M in FY2024</text>
+ <polyline points="1040,170 1056,165.2 1072,161 1088,156.2 1104,151.9 1120,146.1 1136,141.8 1152,136" fill="none" stroke="#4f8cff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="1152" cy="136" r="4" fill="#4f8cff"/>
+ <rect x="830" y="214" width="340" height="104" rx="16" fill="url(#card)" stroke="#1f2a44"/>
+ <text x="852" y="244" font-size="13" fill="#8a96b0">Year-over-year growth</text>
+ <text x="852" y="284" font-size="32" font-weight="700" fill="#e6ebf5">+26.1%</text>
+ <text x="852" y="306" font-size="12" fill="#6f7b95">FY2025 vs FY2024</text>
+ <polyline points="1040,254 1056,256.1 1072,265.4 1088,266.6 1104,270.5 1120,283.9 1136,286.7 1152,288" fill="none" stroke="#22c3a6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="1152" cy="288" r="4" fill="#22c3a6"/>
+ <rect x="830" y="332" width="340" height="104" rx="16" fill="url(#card)" stroke="#1f2a44"/>
+ <text x="852" y="362" font-size="13" fill="#8a96b0">Net revenue retention</text>
+ <text x="852" y="402" font-size="32" font-weight="700" fill="#e6ebf5">118%</text>
+ <text x="852" y="424" font-size="12" fill="#6f7b95">trailing 12 months</text>
+ <polyline points="1040,406 1056,400.3 1072,389 1088,394.7 1104,383.3 1120,377.7 1136,377.7 1152,372" fill="none" stroke="#f5b544" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="1152" cy="372" r="4" fill="#f5b544"/>
+</g>
+<g id="mix" font-family="Inter, sans-serif">
+ <rect x="830" y="450" width="340" height="280" rx="16" fill="url(#card)" stroke="#1f2a44"/>
+ <text x="852" y="480" font-size="15" font-weight="700" fill="#e6ebf5">FY2025 revenue mix</text>
+ <path d="M936.1 522 A78 78 0 0 1 947.3 677 L942.9 649.4 A50 50 0 0 0 935.7 550 Z" fill="#4f8cff"/>
+ <path d="M945.1 677.3 A78 78 0 0 1 859.9 621.2 L886.9 613.6 A50 50 0 0 0 941.5 649.6 Z" fill="#22c3a6"/>
+ <path d="M859.4 619.1 A78 78 0 0 1 867.3 561.3 L891.6 575.2 A50 50 0 0 0 886.5 612.3 Z" fill="#f5b544"/>
+ <path d="M868.4 559.5 A78 78 0 0 1 933.9 522 L934.3 550 A50 50 0 0 0 892.3 574 Z" fill="#e25fd0"/>
+ <text x="935" y="598" font-size="20" font-weight="700" fill="#e6ebf5" text-anchor="middle">$348M</text><text x="935" y="616" font-size="11" fill="#8a96b0" text-anchor="middle">FY2025</text>
+ <rect x="1036" y="530" width="10" height="10" rx="2" fill="#4f8cff"/><text x="1052" y="540" font-size="12" fill="#c9d3e6">Compute</text><text x="1052" y="556" font-size="12" font-weight="700" fill="#e6ebf5">47.7%</text>
+ <rect x="1036" y="572" width="10" height="10" rx="2" fill="#22c3a6"/><text x="1052" y="582" font-size="12" fill="#c9d3e6">Storage</text><text x="1052" y="598" font-size="12" font-weight="700" fill="#e6ebf5">23.1%</text>
+ <rect x="1036" y="614" width="10" height="10" rx="2" fill="#f5b544"/><text x="1052" y="624" font-size="12" fill="#c9d3e6">Networking</text><text x="1052" y="640" font-size="12" font-weight="700" fill="#e6ebf5">12.6%</text>
+ <rect x="1036" y="656" width="10" height="10" rx="2" fill="#e25fd0"/><text x="1052" y="666" font-size="12" fill="#c9d3e6">AI Services</text><text x="1052" y="682" font-size="12" font-weight="700" fill="#e6ebf5">16.5%</text>
+</g>
+</svg>

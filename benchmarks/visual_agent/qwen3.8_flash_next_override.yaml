@@ -1,0 +1,42 @@
+# Qwen3.8-Flash-Next as both the policy and the agentic judge of the visual agent benchmark.
+# Sampling for the policy comes from benchmarks/nemotron_3.5_super/policy_model_override.yaml
+# (temperature 1.0, top_p 0.95, no output cap). The judge is a second model-server entry on the
+# same endpoint with a lower temperature for steadier grading.
+config_paths:
+- benchmarks/nemotron_3.5_super/policy_model_override.yaml
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      # The chat template defaults to thinking on; pin it so a template change cannot flip it.
+      chat_template_kwargs:
+        enable_thinking: true
+      extra_body:
+        skip_special_tokens: false
+
+judge_model:
+  _copy: policy_model
+  responses_api_models:
+    vllm_model:
+      sampling_overrides:
+        temperature: 0.6
+        top_p: 0.95
+
+visual_agent_resources_server:
+  resources_servers:
+    visual_agent:
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge:
+        max_context_window: 262144
+
+visual_agent_opencode_visual_sandboxed_agent:
+  responses_api_agents:
+    opencode_visual_sandboxed_agent:
+      # The model's native context; compaction keeps long iterate-and-preview sessions alive.
+      opencode_max_context_window: 262144
+      opencode_config:
+        compaction:
+          auto: true
+          reserved: 20000

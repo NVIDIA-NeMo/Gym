@@ -1,0 +1,65 @@
+[
+ {
+  "id": "A1",
+  "arrive_s": 0.5,
+  "priority": 3,
+  "duration_s": 4.0,
+  "text": "Harbor Bridge reopens to cyclists at noon"
+ },
+ {
+  "id": "A2",
+  "arrive_s": 1.5,
+  "priority": 3,
+  "duration_s": 3.0,
+  "text": "Library extends weekend hours"
+ },
+ {
+  "id": "A3",
+  "arrive_s": 2.0,
+  "priority": 2,
+  "duration_s": 3.0,
+  "text": "Strong winds expected on the coast after 6 pm"
+ },
+ {
+  "id": "A4",
+  "arrive_s": 2.6,
+  "priority": 1,
+  "duration_s": 2.5,
+  "text": "Flash flood warning: River Lane closed"
+ },
+ {
+  "id": "A5",
+  "arrive_s": 3.5,
+  "priority": 3,
+  "duration_s": 2.0,
+  "text": "Farmers market moves to Pier 4"
+ },
+ {
+  "id": "A6",
+  "arrive_s": 6.0,
+  "priority": 2,
+  "duration_s": 2.5,
+  "text": "Metro Line 2 delays of 15 minutes"
+ },
+ {
+  "id": "A7",
+  "arrive_s": 7.3,
+  "priority": 1,
+  "duration_s": 1.5,
+  "text": "Shelter in place lifted for Eastgate"
+ },
+ {
+  "id": "A8",
+  "arrive_s": 9.0,
+  "priority": 3,
+  "duration_s": 2.0,
+  "text": "Free museum entry this Sunday"
+ },
+ {
+  "id": "A9",
+  "arrive_s": 13.0,
+  "priority": 2,
+  "duration_s": 2.0,
+  "text": "Airport parking lot B is full"
+ }
+]

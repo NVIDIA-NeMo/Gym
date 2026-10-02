@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Q3 2026 revenue review · Ledgerly</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:#f4f6f9}
+body{font-family:'Open Sans',sans-serif;color:#0f172a;-webkit-font-smoothing:antialiased}
+.top{height:64px;background:#ffffff;border-bottom:1px solid #e3e8ef;display:flex;align-items:center;padding:0 32px}
+.logo{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:700;letter-spacing:-0.01em}
+.crumb{margin-left:36px;display:flex;align-items:center;gap:10px;font-size:14px;color:#64748b}
+.crumb b{color:#0f172a;font-weight:600}
+.crumb i{font-style:normal;color:#cbd5e1}
+.tr{margin-left:auto;display:flex;align-items:center;gap:12px}
+.avs{display:flex}
+.avs span{width:32px;height:32px;border-radius:50%;border:2px solid #ffffff;margin-left:-8px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#ffffff}
+.btn{height:36px;padding:0 14px;border-radius:8px;display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600}
+.ghost{border:1px solid #d6dde6;color:#334155;background:#ffffff}
+.dark{background:#0f172a;color:#ffffff}
+main{padding:28px 32px 36px}
+.head{display:flex;align-items:flex-end;justify-content:space-between}
+.head h1{font-size:28px;line-height:1.2;font-weight:700;letter-spacing:-0.01em}
+.head p{margin-top:6px;font-size:14px;color:#64748b}
+.chips{display:flex;gap:10px}
+.chip{height:34px;padding:0 12px;border-radius:8px;border:1px solid #d6dde6;background:#ffffff;display:flex;align-items:center;gap:6px;font-size:13px;color:#475569}
+.chip b{color:#0f172a;font-weight:600}
+.card{background:#ffffff;border:1px solid #e3e8ef;border-radius:14px}
+.kpis{margin-top:22px;display:grid;grid-template-columns:repeat(5,1fr);gap:16px}
+.kpi{padding:16px 18px 12px;position:relative}
+.kl{font-size:13px;font-weight:600;color:#64748b}
+.kv{margin-top:6px;font-size:26px;font-weight:700;letter-spacing:-0.02em}
+.kd{margin-top:6px;display:flex;align-items:center;gap:8px;font-size:12px;color:#94a3b8}
+.chg{height:20px;padding:0 7px;border-radius:6px;display:inline-flex;align-items:center;font-size:12px;font-weight:700}
+.up,.good{background:#dcfce7;color:#15803d}
+.dn{background:#fee2e2;color:#b91c1c}
+.kpi .spk{display:block;margin-top:10px}
+.row{margin-top:16px;display:grid;gap:16px}
+.r1{grid-template-columns:1fr 372px}
+.r2{grid-template-columns:1fr 420px}
+.pad{padding:20px 22px}
+.ch{display:flex;align-items:flex-start;justify-content:space-between}
+.ch h2{font-size:16px;font-weight:700}
+.ch small{display:block;margin-top:3px;font-size:13px;color:#64748b}
+.leg{display:flex;gap:16px;font-size:13px;color:#475569}
+.leg span{display:flex;align-items:center;gap:6px}
+.leg i{width:10px;height:10px;border-radius:3px}
+.bars{display:block;width:100%;height:auto;margin-top:10px;font-family:'Open Sans',sans-serif}
+.rg{margin-top:16px}
+.rr{display:flex;align-items:center;gap:10px;font-size:14px}
+.rn{color:#334155}
+.rr b{margin-left:auto;font-weight:700}
+.rr .chg{width:62px;justify-content:center}
+.rt{margin-top:7px;height:8px;border-radius:8px;background:#eef1f5}
+.rt i{display:block;height:100%;border-radius:8px;background:#2563eb}
+.tot{margin-top:18px;padding-top:14px;border-top:1px solid #eef1f5;display:flex;justify-content:space-between;font-size:14px;color:#64748b}
+.tot b{color:#0f172a}
+.heat{margin-top:14px;width:100%;border-collapse:separate;border-spacing:4px;font-size:12px}
+.heat th{font-weight:600;color:#64748b;text-align:center;padding:4px 0}
+.heat thead th:first-child,.heat tbody th{text-align:left;color:#334155;padding-right:6px;white-space:nowrap}
+.heat td span{display:flex;height:30px;border-radius:5px;align-items:center;justify-content:center;font-weight:600}
+.heat td span.na{background:#f6f8fb}
+.heat .sz{text-align:right;color:#64748b;padding-right:10px}
+.scale{margin-top:10px;display:flex;align-items:center;justify-content:flex-end;gap:8px;font-size:12px;color:#64748b}
+.scale i{width:160px;height:8px;border-radius:8px;background:linear-gradient(90deg,#dbeafe,#93c5fd,#2563eb,#1e3a8a)}
+.fr{margin-top:16px;display:grid;grid-template-columns:122px 1fr 58px;align-items:center;gap:12px}
+.fl b{display:block;font-size:13px;font-weight:600;color:#334155}
+.fl span{font-size:13px;color:#64748b}
+.ft{height:30px;border-radius:6px;background:#f1f4f8;overflow:hidden}
+.ft i{display:block;height:100%;border-radius:6px;background:linear-gradient(90deg,#1d4ed8,#60a5fa)}
+.fc{text-align:right;font-size:12px;color:#94a3b8}
+.fc em{font-style:normal;font-weight:700;color:#1d4ed8}
+.conv{margin-top:18px;padding:12px 14px;border-radius:10px;background:#eef4ff;font-size:13px;color:#1e3a8a}
+.conv b{font-weight:700}
+.tbl{margin-top:16px;overflow:hidden}
+.tbl .ch{padding:18px 22px 14px}
+.tabs{display:flex;gap:4px;padding:3px;border-radius:9px;background:#f1f4f8;font-size:13px;font-weight:600;color:#64748b}
+.tabs span{padding:5px 12px;border-radius:7px}
+.tabs .on{background:#ffffff;color:#0f172a;box-shadow:0 1px 2px rgba(15,23,42,0.12)}
+table.p{width:100%;border-collapse:collapse;font-size:14px}
+table.p th{height:40px;padding:0 16px;background:#f8fafc;border-top:1px solid #e3e8ef;border-bottom:1px solid #e3e8ef;text-align:left;font-size:12px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;color:#64748b}
+table.p td{height:50px;padding:0 16px;border-bottom:1px solid #eef1f5;color:#334155}
+table.p tr:last-child td{border-bottom:0}
+table.p .r{text-align:right}
+table.p .b{font-weight:700;color:#0f172a}
+.sku{font-family:'DejaVu Sans Mono',monospace;font-size:12px;color:#64748b}
+.pn{font-weight:600;color:#0f172a}
+.cat{padding:3px 9px;border-radius:6px;background:#f1f4f8;font-size:12px;font-weight:600;color:#475569}
+.st{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700}
+.st:before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor}
+.st.ok{color:#15803d}.st.low{color:#b45309}.st.bo{color:#b91c1c}
+.notes{margin-top:16px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
+.note{padding:16px 18px}
+.note h3{font-size:13px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:#64748b}
+.note p{margin-top:8px;font-size:13px;line-height:1.55;color:#334155}
+.foot{margin-top:20px;display:flex;justify-content:space-between;font-size:12px;color:#94a3b8}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="logo"><svg width="28" height="28" viewBox="0 0 28 28"><rect width="28" height="28" rx="8" fill="#2563eb"/><rect x="7" y="14" width="3.5" height="7" rx="1.5" fill="#ffffff"/><rect x="12.3" y="10" width="3.5" height="11" rx="1.5" fill="#ffffff"/><rect x="17.6" y="6" width="3.5" height="15" rx="1.5" fill="#bfdbfe"/></svg>Ledgerly</div>
+  <nav class="crumb"><span>Reports</span><i>/</i><span>Finance</span><i>/</i><b>Q3 2026 revenue review</b></nav>
+  <div class="tr">
+    <div class="avs"><span style="background:#7c3aed">MR</span><span style="background:#0d9488">JL</span><span style="background:#ea580c">AK</span></div>
+    <span class="btn ghost"><svg width="14" height="14" viewBox="0 0 14 14"><circle cx="11" cy="3" r="2" fill="none" stroke="#334155" stroke-width="1.5"/><circle cx="3" cy="7" r="2" fill="none" stroke="#334155" stroke-width="1.5"/><circle cx="11" cy="11" r="2" fill="none" stroke="#334155" stroke-width="1.5"/><path d="M4.8 6l4.4-2M4.8 8l4.4 2" stroke="#334155" stroke-width="1.5"/></svg>Share</span>
+    <span class="btn dark"><svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 1v8M3.5 5.5L7 9l3.5-3.5M1.5 12.5h11" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Export PDF</span>
+  </div>
+</header>
+<main>
+  <div class="head">
+    <div><h1>Q3 2026 revenue review</h1><p>Northwind Outfitters · July 1 – September 30, 2026 · Prepared by Finance</p></div>
+    <div class="chips"><span class="chip">Region: <b>All regions</b> ▾</span><span class="chip">Channel: <b>All</b> ▾</span><span class="chip">Compare: <b>Q2 2026</b> ▾</span></div>
+  </div>
+  <section class="kpis"><div class="card kpi"><div class="kl">Net revenue</div><div class="kv">$18.42M</div><div class="kd"><span class="chg up">▲ 15.6%</span><span>vs Q2 2026</span></div><svg class="spk" viewBox="0 0 112 36" width="112" height="36"><path d="M2.0,36 L2.0,27.3 L11.8,23.1 L21.6,5.0 L31.5,33.0 L41.3,31.6 L51.1,28.4 L60.9,26.6 L70.7,24.4 L80.5,22.3 L90.4,19.0 L100.2,16.6 L110.0,13.1 L110.0,36Z" fill="#2563eb" opacity="0.12"/><polyline points="2.0,27.3 11.8,23.1 21.6,5.0 31.5,33.0 41.3,31.6 51.1,28.4 60.9,26.6 70.7,24.4 80.5,22.3 90.4,19.0 100.2,16.6 110.0,13.1" fill="none" stroke="#2563eb" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="110.0" cy="13.1" r="3" fill="#2563eb"/></svg></div><div class="card kpi"><div class="kl">Gross margin</div><div class="kv">46.8%</div><div class="kd"><span class="chg up">▲ 1.9 pts</span><span>vs Q2 2026</span></div><svg class="spk" viewBox="0 0 112 36" width="112" height="36"><path d="M2.0,36 L2.0,26.7 L11.8,23.9 L21.6,33.0 L31.5,21.8 L41.3,20.4 L51.1,19.0 L60.9,19.7 L70.7,16.2 L80.5,14.1 L90.4,11.3 L100.2,7.1 L110.0,5.0 L110.0,36Z" fill="#2563eb" opacity="0.12"/><polyline points="2.0,26.7 11.8,23.9 21.6,33.0 31.5,21.8 41.3,20.4 51.1,19.0 60.9,19.7 70.7,16.2 80.5,14.1 90.4,11.3 100.2,7.1 110.0,5.0" fill="none" stroke="#2563eb" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="110.0" cy="5.0" r="3" fill="#2563eb"/></svg></div><div class="card kpi"><div class="kl">Orders</div><div class="kv">241,380</div><div class="kd"><span class="chg up">▲ 8.3%</span><span>vs Q2 2026</span></div><svg class="spk" viewBox="0 0 112 36" width="112" height="36"><path d="M2.0,36 L2.0,26.9 L11.8,23.2 L21.6,5.0 L31.5,33.0 L41.3,31.5 L51.1,29.2 L60.9,26.2 L70.7,23.9 L80.5,22.4 L90.4,18.6 L100.2,16.4 L110.0,13.3 L110.0,36Z" fill="#2563eb" opacity="0.12"/><polyline points="2.0,26.9 11.8,23.2 21.6,5.0 31.5,33.0 41.3,31.5 51.1,29.2 60.9,26.2 70.7,23.9 80.5,22.4 90.4,18.6 100.2,16.4 110.0,13.3" fill="none" stroke="#2563eb" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="110.0" cy="13.3" r="3" fill="#2563eb"/></svg></div><div class="card kpi"><div class="kl">Avg. order value</div><div class="kv">$76.31</div><div class="kd"><span class="chg up">▲ 4.0%</span><span>vs Q2 2026</span></div><svg class="spk" viewBox="0 0 112 36" width="112" height="36"><path d="M2.0,36 L2.0,30.4 L11.8,26.7 L21.6,15.6 L31.5,33.0 L41.3,30.9 L51.1,26.1 L60.9,25.1 L70.7,23.5 L80.5,21.4 L90.4,15.6 L100.2,10.8 L110.0,5.0 L110.0,36Z" fill="#2563eb" opacity="0.12"/><polyline points="2.0,30.4 11.8,26.7 21.6,15.6 31.5,33.0 41.3,30.9 51.1,26.1 60.9,25.1 70.7,23.5 80.5,21.4 90.4,15.6 100.2,10.8 110.0,5.0" fill="none" stroke="#2563eb" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="110.0" cy="5.0" r="3" fill="#2563eb"/></svg></div><div class="card kpi"><div class="kl">Refund rate</div><div class="kv">3.1%</div><div class="kd"><span class="chg good">▼ 0.4 pts</span><span>vs Q2 2026</span></div><svg class="spk" viewBox="0 0 112 36" width="112" height="36"><path d="M2.0,36 L2.0,11.0 L11.8,13.0 L21.6,5.0 L31.5,15.0 L41.3,17.0 L51.1,19.0 L60.9,21.0 L70.7,23.0 L80.5,23.0 L90.4,27.0 L100.2,31.0 L110.0,33.0 L110.0,36Z" fill="#16a34a" opacity="0.12"/><polyline points="2.0,11.0 11.8,13.0 21.6,5.0 31.5,15.0 41.3,17.0 51.1,19.0 60.9,21.0 70.7,23.0 80.5,23.0 90.4,27.0 100.2,31.0 110.0,33.0" fill="none" stroke="#16a34a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="110.0" cy="33.0" r="3" fill="#16a34a"/></svg></div></section>
+  <section class="row r1">
+    <div class="card pad">
+      <div class="ch"><div><h2>Monthly revenue by channel</h2><small>USD millions, October 2025 – September 2026</small></div>
+        <div class="leg"><span><i style="background:#2563eb"></i>Online</span><span><i style="background:#14b8a6"></i>Retail</span><span><i style="background:#f59e0b"></i>Wholesale</span></div></div>
+      <svg class="bars" viewBox="0 0 760 300" font-family="Open Sans">
+[5.02, 5.44, 7.28, 4.44, 4.58, 4.91, 5.09, 5.31, 5.53, 5.86, 6.1, 6.46] Q3 18.42 Q2 15.93 growth 0.15630885122410554
+Q3 online 9.89 retail 5.71 wh 2.82
+<rect x="578.0" y="4" width="174.0" height="258" rx="8" fill="#eef4ff"/>
+<text x="665.0" y="18" text-anchor="middle" font-size="11" font-weight="700" fill="#2563eb">Q3 2026</text>
+<line x1="56" y1="262.0" x2="752" y2="262.0" stroke="#cbd5e1"/>
+<text x="46" y="266.0" text-anchor="end" font-size="11" fill="#94a3b8">$0M</text>
+<line x1="56" y1="202.0" x2="752" y2="202.0" stroke="#eef1f5"/>
+<text x="46" y="206.0" text-anchor="end" font-size="11" fill="#94a3b8">$2M</text>
+<line x1="56" y1="142.0" x2="752" y2="142.0" stroke="#eef1f5"/>
+<text x="46" y="146.0" text-anchor="end" font-size="11" fill="#94a3b8">$4M</text>
+<line x1="56" y1="82.0" x2="752" y2="82.0" stroke="#eef1f5"/>
+<text x="46" y="86.0" text-anchor="end" font-size="11" fill="#94a3b8">$6M</text>
+<line x1="56" y1="22.0" x2="752" y2="22.0" stroke="#eef1f5"/>
+<text x="46" y="26.0" text-anchor="end" font-size="11" fill="#94a3b8">$8M</text>
+<g opacity="0.45"><rect x="69.0" y="238.3" width="32" height="23.7" fill="#f59e0b"/><rect x="69.0" y="189.7" width="32" height="48.6" fill="#14b8a6"/><rect x="69.0" y="111.4" width="32" height="78.3" fill="#2563eb"/></g>
+<text x="85.0" y="105.4" text-anchor="middle" font-size="11" font-weight="600" fill="#64748b">5.02</text>
+<text x="85.0" y="280" text-anchor="middle" font-size="11" fill="#64748b">Oct</text>
+<g opacity="0.45"><rect x="127.0" y="237.7" width="32" height="24.3" fill="#f59e0b"/><rect x="127.0" y="185.2" width="32" height="52.5" fill="#14b8a6"/><rect x="127.0" y="98.8" width="32" height="86.4" fill="#2563eb"/></g>
+<text x="143.0" y="92.8" text-anchor="middle" font-size="11" font-weight="600" fill="#64748b">5.44</text>
+<text x="143.0" y="280" text-anchor="middle" font-size="11" fill="#64748b">Nov</text>
+<g opacity="0.45"><rect x="185.0" y="235.0" width="32" height="27.0" fill="#f59e0b"/><rect x="185.0" y="161.2" width="32" height="73.8" fill="#14b8a6"/><rect x="185.0" y="43.6" width="32" height="117.6" fill="#2563eb"/></g>
+<text x="201.0" y="37.6" text-anchor="middle" font-size="11" font-weight="600" fill="#64748b">7.28</text>
+<text x="201.0" y="280" text-anchor="middle" font-size="11" fill="#64748b">Dec</text>
+<g opacity="0.45"><rect x="243.0" y="241.3" width="32" height="20.7" fill="#f59e0b"/><rect x="243.0" y="199.0" width="32" height="42.3" fill="#14b8a6"/><rect x="243.0" y="128.8" width="32" height="70.2" fill="#2563eb"/></g>
+<text x="259.0" y="122.8" text-anchor="middle" font-size="11" font-weight="600" fill="#64748b">4.44</text>
+<text x="259.0" y="280" text-anchor="middle" font-size="11" fill="#64748b">Jan</text>
+<g opacity="0.45"><rect x="301.0" y="240.4" width="32" height="21.6" fill="#f59e0b"/><rect x="301.0" y="196.9" width="32" height="43.5" fill="#14b8a6"/><rect x="301.0" y="124.6" width="32" height="72.3" fill="#2563eb"/></g>
+<text x="317.0" y="118.6" text-anchor="middle" font-size="11" font-weight="600" fill="#64748b">4.58</text>
+<text x="317.0" y="280" text-anchor="middle" font-size="11" fill="#64748b">Feb</text>
+<g opacity="0.45"><rect x="359.0" y="239.5" width="32" height="22.5" fill="#f59e0b"/><rect x="359.0" y="193.6" width="32" height="45.9" fill="#14b8a6"/><rect x="359.0" y="114.7" width="32" height="78.9" fill="#2563eb"/></g>
+<text x="375.0" y="108.7" text-anchor="middle" font-size="11" font-weight="600" fill="#64748b">4.91</text>
+<text x="375.0" y="280" text-anchor="middle" font-size="11" fill="#64748b">Mar</text>
+<g opacity="0.45"><rect x="417.0" y="238.6" width="32" height="23.4" fill="#f59e0b"/><rect x="417.0" y="190.9" width="32" height="47.7" fill="#14b8a6"/><rect x="417.0" y="109.3" width="32" height="81.6" fill="#2563eb"/></g>
+<text x="433.0" y="103.3" text-anchor="middle" font-size="11" font-weight="600" fill="#64748b">5.09</text>
+<text x="433.0" y="280" text-anchor="middle" font-size="11" fill="#64748b">Apr</text>
+<g opacity="0.45"><rect x="475.0" y="237.7" width="32" height="24.3" fill="#f59e0b"/><rect x="475.0" y="188.2" width="32" height="49.5" fill="#14b8a6"/><rect x="475.0" y="102.7" width="32" height="85.5" fill="#2563eb"/></g>
+<text x="491.0" y="96.7" text-anchor="middle" font-size="11" font-weight="600" fill="#64748b">5.31</text>
+<text x="491.0" y="280" text-anchor="middle" font-size="11" fill="#64748b">May</text>
+<g opacity="0.45"><rect x="533.0" y="236.8" width="32" height="25.2" fill="#f59e0b"/><rect x="533.0" y="185.2" width="32" height="51.6" fill="#14b8a6"/><rect x="533.0" y="96.1" width="32" height="89.1" fill="#2563eb"/></g>
+<text x="549.0" y="90.1" text-anchor="middle" font-size="11" font-weight="600" fill="#64748b">5.53</text>
+<text x="549.0" y="280" text-anchor="middle" font-size="11" fill="#64748b">Jun</text>
+<g><rect x="591.0" y="235.6" width="32" height="26.4" fill="#f59e0b"/><rect x="591.0" y="180.4" width="32" height="55.2" fill="#14b8a6"/><rect x="591.0" y="86.2" width="32" height="94.2" fill="#2563eb"/></g>
+<text x="607.0" y="80.2" text-anchor="middle" font-size="11" font-weight="700" fill="#0f172a">5.86</text>
+<text x="607.0" y="280" text-anchor="middle" font-size="11" fill="#64748b">Jul</text>
+<g><rect x="649.0" y="234.1" width="32" height="27.9" fill="#f59e0b"/><rect x="649.0" y="177.1" width="32" height="57.0" fill="#14b8a6"/><rect x="649.0" y="79.0" width="32" height="98.1" fill="#2563eb"/></g>
+<text x="665.0" y="73.0" text-anchor="middle" font-size="11" font-weight="700" fill="#0f172a">6.10</text>
+<text x="665.0" y="280" text-anchor="middle" font-size="11" fill="#64748b">Aug</text>
+<g><rect x="707.0" y="231.7" width="32" height="30.3" fill="#f59e0b"/><rect x="707.0" y="172.6" width="32" height="59.1" fill="#14b8a6"/><rect x="707.0" y="68.2" width="32" height="104.4" fill="#2563eb"/></g>
+<text x="723.0" y="62.2" text-anchor="middle" font-size="11" font-weight="700" fill="#0f172a">6.46</text>
+<text x="723.0" y="280" text-anchor="middle" font-size="11" fill="#64748b">Sep</text>
+<text x="85.0" y="295" text-anchor="middle" font-size="10" fill="#94a3b8">2025</text>
+<text x="259.0" y="295" text-anchor="middle" font-size="10" fill="#94a3b8">2026</text>
+
+      </svg>
+    </div>
+    <div class="card pad">
+      <div class="ch"><div><h2>Revenue by region</h2><small>Q3 2026 vs Q2 2026</small></div></div>
+      <div class="rg"><div class="rr"><span class="rn">North America</span><b>$8.91M</b><span class="chg up">+14.2%</span></div><div class="rt"><i style="width:100.0%"></i></div></div><div class="rg"><div class="rr"><span class="rn">Western Europe</span><b>$4.37M</b><span class="chg up">+18.9%</span></div><div class="rt"><i style="width:49.0%"></i></div></div><div class="rg"><div class="rr"><span class="rn">UK &amp; Ireland</span><b>$2.12M</b><span class="chg up">+9.4%</span></div><div class="rt"><i style="width:23.8%"></i></div></div><div class="rg"><div class="rr"><span class="rn">Asia Pacific</span><b>$1.86M</b><span class="chg up">+22.7%</span></div><div class="rt"><i style="width:20.9%"></i></div></div><div class="rg"><div class="rr"><span class="rn">Latin America</span><b>$0.71M</b><span class="chg dn">−3.2%</span></div><div class="rt"><i style="width:8.0%"></i></div></div><div class="rg"><div class="rr"><span class="rn">Other</span><b>$0.45M</b><span class="chg up">+5.1%</span></div><div class="rt"><i style="width:5.1%"></i></div></div>
+      <div class="tot"><span>Total</span><b>$18.42M</b></div>
+    </div>
+  </section>
+  <section class="row r2">
+    <div class="card pad">
+      <div class="ch"><div><h2>Customer retention by cohort</h2><small>Share of first-time buyers who ordered again, by months since first purchase</small></div></div>
+      <table class="heat"><thead><tr><th>Cohort</th><th class="sz">Customers</th><th>M0</th><th>M1</th><th>M2</th><th>M3</th><th>M4</th><th>M5</th><th>M6</th><th>M7</th></tr></thead><tbody><tr><th>Feb 2026</th><td class="sz">18,240</td><td><span style="background:#1e3a8a;color:#ffffff">100%</span></td><td><span style="background:#3b82f6;color:#ffffff">38%</span></td><td><span style="background:#93c5fd;color:#1e3a8a">31%</span></td><td><span style="background:#bfdbfe;color:#1e3a8a">27%</span></td><td><span style="background:#bfdbfe;color:#1e3a8a">25%</span></td><td><span style="background:#dbeafe;color:#1e3a8a">23%</span></td><td><span style="background:#dbeafe;color:#1e3a8a">22%</span></td><td><span style="background:#dbeafe;color:#1e3a8a">21%</span></td></tr><tr><th>Mar 2026</th><td class="sz">19,105</td><td><span style="background:#1e3a8a;color:#ffffff">100%</span></td><td><span style="background:#2563eb;color:#ffffff">40%</span></td><td><span style="background:#93c5fd;color:#1e3a8a">32%</span></td><td><span style="background:#bfdbfe;color:#1e3a8a">28%</span></td><td><span style="background:#bfdbfe;color:#1e3a8a">26%</span></td><td><span style="background:#dbeafe;color:#1e3a8a">24%</span></td><td><span style="background:#dbeafe;color:#1e3a8a">23%</span></td><td><span class="na"></span></td></tr><tr><th>Apr 2026</th><td class="sz">20,380</td><td><span style="background:#1e3a8a;color:#ffffff">100%</span></td><td><span style="background:#2563eb;color:#ffffff">41%</span></td><td><span style="background:#93c5fd;color:#1e3a8a">33%</span></td><td><span style="background:#bfdbfe;color:#1e3a8a">29%</span></td><td><span style="background:#bfdbfe;color:#1e3a8a">27%</span></td><td><span style="background:#bfdbfe;color:#1e3a8a">25%</span></td><td><span class="na"></span></td><td><span class="na"></span></td></tr><tr><th>May 2026</th><td class="sz">21,760</td><td><span style="background:#1e3a8a;color:#ffffff">100%</span></td><td><span style="background:#2563eb;color:#ffffff">43%</span></td><td><span style="background:#3b82f6;color:#ffffff">35%</span></td><td><span style="background:#93c5fd;color:#1e3a8a">30%</span></td><td><span style="background:#bfdbfe;color:#1e3a8a">28%</span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td></tr><tr><th>Jun 2026</th><td class="sz">22,410</td><td><span style="background:#1e3a8a;color:#ffffff">100%</span></td><td><span style="background:#2563eb;color:#ffffff">44%</span></td><td><span style="background:#3b82f6;color:#ffffff">36%</span></td><td><span style="background:#93c5fd;color:#1e3a8a">31%</span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td></tr><tr><th>Jul 2026</th><td class="sz">24,930</td><td><span style="background:#1e3a8a;color:#ffffff">100%</span></td><td><span style="background:#1d4ed8;color:#ffffff">46%</span></td><td><span style="background:#3b82f6;color:#ffffff">37%</span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td></tr><tr><th>Aug 2026</th><td class="sz">26,115</td><td><span style="background:#1e3a8a;color:#ffffff">100%</span></td><td><span style="background:#1d4ed8;color:#ffffff">47%</span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td></tr><tr><th>Sep 2026</th><td class="sz">27,480</td><td><span style="background:#1e3a8a;color:#ffffff">100%</span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td><td><span class="na"></span></td></tr></tbody></table>
+      <div class="scale"><span>0%</span><i></i><span>100%</span></div>
+    </div>
+    <div class="card pad">
+      <div class="ch"><div><h2>Checkout funnel</h2><small>Q3 2026, all channels online</small></div></div>
+      <div class="fr"><div class="fl"><b>Sessions</b><span>3,124,500</span></div><div class="ft"><i style="width:100.00%"></i></div><div class="fc"><span>—</span></div></div><div class="fr"><div class="fl"><b>Product views</b><span>1,462,300</span></div><div class="ft"><i style="width:46.80%"></i></div><div class="fc"><em>46.8%</em></div></div><div class="fr"><div class="fl"><b>Add to cart</b><span>412,700</span></div><div class="ft"><i style="width:13.21%"></i></div><div class="fc"><em>28.2%</em></div></div><div class="fr"><div class="fl"><b>Checkout</b><span>268,450</span></div><div class="ft"><i style="width:8.59%"></i></div><div class="fc"><em>65.0%</em></div></div><div class="fr"><div class="fl"><b>Orders</b><span>241,380</span></div><div class="ft"><i style="width:7.73%"></i></div><div class="fc"><em>89.9%</em></div></div>
+      <div class="conv">Overall conversion <b>7.73%</b> · up from 7.41% in Q2</div>
+    </div>
+  </section>
+  <section class="card tbl">
+    <div class="ch"><div><h2>Top products</h2><small>Ranked by Q3 revenue</small></div><div class="tabs"><span class="on">Revenue</span><span>Units</span><span>Margin</span></div></div>
+    <table class="p">
+      <thead><tr><th>SKU</th><th>Product</th><th>Category</th><th class="r">Units</th><th class="r">Revenue</th><th class="r">Margin</th><th>8-week trend</th><th>Stock</th></tr></thead>
+      <tbody><tr><td class="sku">NW-2041</td><td class="pn">Ridgeline 2P Tent</td><td><span class="cat">Camping</span></td><td class="r">9,820</td><td class="r b">$2,356,800</td><td class="r">44.1%</td><td><svg class="spk" viewBox="0 0 84 24" width="84" height="24"><polyline points="2.0,18.7 13.4,16.4 24.9,16.4 36.3,14.1 47.7,11.9 59.1,11.9 70.6,9.6 82.0,7.3" fill="none" stroke="#16a34a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="82.0" cy="7.3" r="3" fill="#16a34a"/></svg></td><td><span class="st ok">In stock</span></td></tr><tr><td class="sku">NW-1177</td><td class="pn">Summit Down Jacket</td><td><span class="cat">Apparel</span></td><td class="r">12,460</td><td class="r b">$2,118,200</td><td class="r">52.3%</td><td><svg class="spk" viewBox="0 0 84 24" width="84" height="24"><polyline points="2.0,21.0 13.4,21.0 24.9,18.7 36.3,18.7 47.7,16.4 59.1,11.9 70.6,9.6 82.0,5.0" fill="none" stroke="#16a34a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="82.0" cy="5.0" r="3" fill="#16a34a"/></svg></td><td><span class="st low">Low stock</span></td></tr><tr><td class="sku">NW-3308</td><td class="pn">Trailhead 28L Pack</td><td><span class="cat">Packs</span></td><td class="r">17,930</td><td class="r b">$1,613,700</td><td class="r">47.8%</td><td><svg class="spk" viewBox="0 0 84 24" width="84" height="24"><polyline points="2.0,13.2 13.4,12.5 24.9,13.0 36.3,12.3 47.7,12.8 59.1,12.1 70.6,12.5 82.0,12.3" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="82.0" cy="12.3" r="3" fill="#64748b"/></svg></td><td><span class="st ok">In stock</span></td></tr><tr><td class="sku">NW-0912</td><td class="pn">Alpine GTX Boot</td><td><span class="cat">Footwear</span></td><td class="r">8,740</td><td class="r b">$1,485,800</td><td class="r">41.6%</td><td><svg class="spk" viewBox="0 0 84 24" width="84" height="24"><polyline points="2.0,18.7 13.4,18.7 24.9,16.4 36.3,16.4 47.7,14.1 59.1,14.1 70.6,11.9 82.0,9.6" fill="none" stroke="#16a34a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="82.0" cy="9.6" r="3" fill="#16a34a"/></svg></td><td><span class="st bo">Backorder</span></td></tr><tr><td class="sku">NW-2210</td><td class="pn">Ember Camp Stove</td><td><span class="cat">Camping</span></td><td class="r">14,250</td><td class="r b">$997,500</td><td class="r">38.9%</td><td><svg class="spk" viewBox="0 0 84 24" width="84" height="24"><polyline points="2.0,7.3 13.4,9.6 24.9,9.6 36.3,11.9 47.7,11.9 59.1,14.1 70.6,14.1 82.0,16.4" fill="none" stroke="#dc2626" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="82.0" cy="16.4" r="3" fill="#dc2626"/></svg></td><td><span class="st ok">In stock</span></td></tr><tr><td class="sku">NW-1450</td><td class="pn">Merino Base Layer</td><td><span class="cat">Apparel</span></td><td class="r">21,380</td><td class="r b">$962,100</td><td class="r">58.4%</td><td><svg class="spk" viewBox="0 0 84 24" width="84" height="24"><polyline points="2.0,18.7 13.4,18.7 24.9,16.4 36.3,16.4 47.7,16.4 59.1,14.1 70.6,11.9 82.0,11.9" fill="none" stroke="#16a34a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="82.0" cy="11.9" r="3" fill="#16a34a"/></svg></td><td><span class="st ok">In stock</span></td></tr><tr><td class="sku">NW-3012</td><td class="pn">Cascade Water Filter</td><td><span class="cat">Gear</span></td><td class="r">19,600</td><td class="r b">$686,000</td><td class="r">49.2%</td><td><svg class="spk" viewBox="0 0 84 24" width="84" height="24"><polyline points="2.0,12.8 13.4,13.0 24.9,12.3 36.3,12.8 47.7,13.2 59.1,12.5 70.6,13.0 82.0,13.2" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="82.0" cy="13.2" r="3" fill="#64748b"/></svg></td><td><span class="st low">Low stock</span></td></tr><tr><td class="sku">NW-0788</td><td class="pn">Drift Sleeping Pad</td><td><span class="cat">Camping</span></td><td class="r">11,090</td><td class="r b">$554,500</td><td class="r">45.7%</td><td><svg class="spk" viewBox="0 0 84 24" width="84" height="24"><polyline points="2.0,9.6 13.4,9.6 24.9,11.9 36.3,11.9 47.7,14.1 59.1,14.1 70.6,16.4 82.0,16.4" fill="none" stroke="#dc2626" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="82.0" cy="16.4" r="3" fill="#dc2626"/></svg></td><td><span class="st ok">In stock</span></td></tr></tbody>
+    </table>
+  </section>
+  <section class="notes">
+    <div class="card note"><h3>Highlights</h3><p>Online grew 15.8% on the quarter and now makes up 53.7% of revenue. Asia Pacific was the fastest-growing region.</p></div>
+    <div class="card note"><h3>Watch list</h3><p>Summit Down Jacket and Cascade Water Filter will sell out before November without a reorder. Alpine GTX Boot is on backorder.</p></div>
+    <div class="card note"><h3>Methodology</h3><p>Net revenue excludes tax, shipping and refunds. Cohorts count customers by the month of their first order.</p></div>
+  </section>
+  <div class="foot"><span>Generated October 2, 2026 at 09:14 · Data through September 30, 2026</span><span>Ledgerly · Page 1 of 1</span></div>
+</main>
+</body>
+</html>

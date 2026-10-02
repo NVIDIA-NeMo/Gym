@@ -1,0 +1,1099 @@
+[
+ {
+  "task_id": "slides-open-09",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "Hotel revenue review deck with restated prior year and comp-set indices",
+  "prompt": "Build the 2025 revenue review for Calloway Hotels, a group of five city hotels, presented by VP Revenue Strategy Elena Marchetti to the ownership board on 12 February 2026. Every figure must come from your own analysis of hotel_monthly.csv (rooms available, rooms sold and room revenue per hotel and month for 2024 and 2025, with 2024 as originally reported), compset_2025.csv (the same three measures for each hotel's competitive set in 2025) and restatements_2024.json (three corrections to the 2024 figures).\n\nDefinitions: occupancy = rooms sold / rooms available; ADR = room revenue / rooms sold; RevPAR = room revenue / rooms available. Any group of hotels or months is aggregated by summing rooms and revenue first, never by averaging ratios. Every 2024 comparison uses the restated 2024 figures. MPI, ARI and RGI are the hotel's occupancy, ADR and RevPAR divided by its competitive set's, times 100. Split the RevPAR change into an occupancy effect = (2025 occupancy - 2024 occupancy) × 2024 ADR and a rate effect = (2025 ADR - 2024 ADR) × 2025 occupancy. Show occupancy and growth rates with one decimal, ADR and RevPAR in dollars and cents, indices with one decimal.\n\nExactly 12 slides, titled:\n1. 'Calloway Hotels 2025 Revenue Review' (presenter, audience, date)\n2. 'Portfolio scorecard': KPI tiles for 2025 occupancy, ADR, RevPAR, RevPAR growth versus restated 2024 and total room revenue ($M, two decimals)\n3. 'Occupancy and rate by month': portfolio occupancy as 12 bars on a left axis from 0 to 100% and ADR as a line on a right axis that starts at $0, both axes titled, the month with the highest RevPAR annotated with its RevPAR\n4. 'RevPAR by hotel': dumbbell chart of restated 2024 and 2025 RevPAR for each hotel, hotels sorted by 2025 RevPAR from highest at the top, YoY % beside each row\n5. 'What moved RevPAR': waterfall from restated 2024 RevPAR through the occupancy effect and the rate effect to 2025 RevPAR\n6. 'Fair share vs the competitive set': table of each hotel's 2025 MPI, ARI and RGI; cells at or above 100.0 tinted green, below 100.0 tinted red\n7. 'RGI by month': heatmap of monthly RGI, five hotel rows by 12 month columns, value in every cell, on a diverging color scale centered on 100 with a legend\n8. 'Restating 2024': the three corrections, then 2024 portfolio occupancy, ADR and RevPAR as reported next to restated\n9. 'Seasonality by hotel': five small multiples of monthly RevPAR, restated 2024 dashed and 2025 solid, all panels sharing one y-axis scale\n10. 'Pricing actions for 2026': three actions\n11. '2026 targets': portfolio RevPAR target = 2025 RevPAR grown 4.5%, plus two more targets\n12. 'Appendix: definitions'\n\nStyle: quiet luxury. Ivory slides (#FBF8F3), charcoal text (#23292E), brass accent (#A67C3D); titles in DejaVu Serif, everything else in Lato. Fixed hotel colors on every chart: Harbourside #1D4E89, Old Town #A67C3D, Airport #6B7280, Riverside #2E8B57, Midtown #8E3B46. Slides 2-12 share a master: a 6px brass rule across the very top edge, an h2 in DejaVu Serif 700 at 34px whose left edge is 72px from the slide edge at the same top on every slide, and a footer with 'Calloway Hotels · Owners' Board · Confidential' on the left and 'n / 12' on the right. Draw charts as inline SVG; no text under 12px.\n\nPresenter mode: only slide 1 is visible on load; ArrowRight and Space go forward, ArrowLeft back, Home and End jump to the ends; the URL hash is #/n and opening slides.html#/n starts on slide n. Slide 10 builds: on arrival it shows only its title, each forward key reveals the next action, and only after the third action does the next forward key move to slide 11. Every slide has 1-3 sentences of speaker notes in a hidden aside with class notes, and N toggles a panel showing the current slide's notes. The slide 5 notes must give the occupancy effect in dollars; the slide 7 notes must name the hotel and month with the lowest RGI.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "hotel_monthly.csv",
+   "compset_2025.csv",
+   "restatements_2024.json"
+  ],
+  "slides_spec": {
+   "min_slides": 12,
+   "max_slides": 12
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 12 slides in this order: 'Calloway Hotels 2025 Revenue Review', 'Portfolio scorecard', 'Occupancy and rate by month', 'RevPAR by hotel', 'What moved RevPAR', 'Fair share vs the competitive set', 'RGI by month', 'Restating 2024', 'Seasonality by hotel', 'Pricing actions for 2026', '2026 targets', 'Appendix: definitions'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 2 shows exactly: occupancy 76.8%, ADR $219.91, RevPAR $168.79, RevPAR growth 7.4% (computed against restated 2024 RevPAR $157.16; the as-reported comparison 7.1% is wrong) and room revenue $67.77M."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 3 has 12 occupancy bars on a titled left axis running 0-100% (e.g. Jan 71.3%, Jul 84.6%) and an ADR line on a titled right dollar axis starting at $0 (e.g. Jan $199.45); Jul is annotated as the peak RevPAR month with $201.91."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 4 is a dumbbell chart (two dots joined by a line per hotel) with hotels ordered top to bottom Old Town (2024 $212.77 → 2025 $231.29, +8.7%), Harbourside (2024 $199.86 → 2025 $217.16, +8.7%), Midtown (2024 $154.94 → 2025 $163.13, +5.3%), Riverside (2024 $132.85 → 2025 $141.66, +6.6%), Airport (2024 $110.22 → 2025 $119.53, +8.4%), with a legend or labels for the two years."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 5's waterfall reads $157.16 (2024 restated), +$5.30 occupancy effect, +$6.34 rate effect and $168.79 (2025), with the two steps floating at the running total and the end bars starting at zero."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 6's table shows (MPI, ARI, RGI) Harbourside 101.5, 101.8, 103.3; Old Town 105.0, 105.6, 110.8; Airport 98.2, 98.0, 96.3; Riverside 99.7, 99.4, 99.1; Midtown 101.1, 100.7, 101.7; every value of 100.0 or more is tinted green and every value below 100.0 red."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 7 is a 5 × 12 heatmap with a value in every cell, a legend centered on 100, the lowest cell Airport Nov at 92.5 in the strongest below-100 color and the highest cell Old Town Feb at 113.7; Airport is below 100 in 12 of 12 months."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 8 lists the three corrections (Old Town June, Airport September, Riverside November) and shows 2024 as reported vs restated: occupancy 74.6% vs 74.2%, ADR $211.37 vs $211.66, RevPAR $157.68 vs $157.16; slide 11 gives a 2026 RevPAR target of $176.39."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 9 has five small multiples, one per hotel in its fixed color, each with a dashed 2024 line and a solid 2025 line over 12 months; all five panels use the identical y-axis range (same gridline values), so Old Town's and Harbourside's summer peaks are visibly higher than Airport's flat line."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; ArrowRight three times shows only slide 4 with hash #/4; opening slides.html#/10 shows slide 10 with its title and no actions; three ArrowRight presses reveal the actions one at a time while staying on slide 10; the fourth shows slide 11; End shows slide 12 and Home slide 1; N shows the current slide's notes and N again hides them. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-12 the h2 computes to DejaVu Serif, weight 700, 34px, left edge 72px (±2px) from the slide edge and the same top on every slide; each has the 6px brass top rule and the footer 'Calloway Hotels · Owners' Board · Confidential' with the correct 'n / 12'; the ivory background is used throughout."
+   },
+   {
+    "id": "R12",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every .slide contains a non-empty hidden aside.notes; the slide 5 notes give the occupancy effect (+$5.30) and the slide 7 notes name Airport in November; hotel colors are identical on slides 4, 7 and 9, nothing overlaps or is clipped and no chart text is under 12px."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-open-10",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "A/B test readout deck with confidence intervals, SRM check and a forest plot",
+  "prompt": "Build the readout deck for experiment EXP-2291, the one-page checkout test at Brightcart, a grocery delivery app. Product analytics lead Sofia Lindqvist presents it to the product leadership team on 8 October 2026 and asks for a ship decision. Analyze daily_results.csv (per day, variant, platform and user type: checkout sessions, orders and revenue) and experiment.json (design, allocation, alpha and guardrails).\n\nMethod: the unit is the checkout session. Conversion p = orders / sessions per arm. The difference d = p_treatment - p_control has a 95% CI of d ± 1.96 × sqrt(p_c(1 - p_c)/n_c + p_t(1 - p_t)/n_t); relative lift = d / p_control and its CI is the CI of d divided by p_control. The p-value is two-sided from the pooled z-test z = d / sqrt(p̄(1 - p̄)(1/n_c + 1/n_t)), p̄ being the pooled rate. The sample ratio check is a chi-square test of the two arms' sessions against the planned 50/50 split (1 degree of freedom). Each arm's own 95% CI is p ± 1.96 × sqrt(p(1 - p)/n). The cumulative lift on day k uses all data from day 1 to day k. AOV = revenue / orders; revenue per session = revenue / sessions. Rates in percent with two decimals, lifts with one, p-values with three.\n\nExactly 11 slides, titled:\n1. 'One-Page Checkout: Experiment Readout' (experiment ID, presenter, date)\n2. 'The decision': a one-sentence ship recommendation and tiles for control and treatment conversion, relative lift with its 95% CI, and the p-value\n3. 'Experiment design': diagram of checkout sessions split 50/50 into control and treatment boxes (each describing its checkout), dates, primary metric and both guardrails\n4. 'Sample ratio check': sessions per arm, expected per arm, the chi-square statistic, its p-value and a pass or fail badge\n5. 'Conversion by arm': two bars with 95% CI error bars and value labels on a y-axis that starts at 0%\n6. 'Lift over time': cumulative relative lift for the 28 days as a line with a shaded 95% CI band and a zero line, the first day from which the lower bound stays above zero annotated\n7. 'Lift by segment': forest plot of relative lift with 95% CI for iOS, Android, Web, New and Returning sorted by lift, largest at the top, plus the overall result as a diamond at the bottom; a vertical zero line; segments whose CI includes zero drawn with hollow markers\n8. 'Guardrails': AOV and revenue per session for both arms with the change and a pass or fail badge against each guardrail in experiment.json\n9. 'Platform detail': table of iOS, Android and Web with sessions, conversion per arm, relative lift, 95% CI and p-value\n10. 'Rollout plan': timeline 10% (13 Oct) → 50% (20 Oct) → 100% (27 Oct) with a kill-switch criterion\n11. 'Appendix: statistical method'\n\nDesign system: define the palette as CSS custom properties on :root named --bg (#FFFFFF), --ink (#111827), --muted (#6B7280), --control (#94A3B8) and --treatment (#7C3AED), and use them for every themed color. Inter only. Slides 2-11: an h2 in Inter 700 at 32px whose left edge is 64px from the slide edge at the same top on every slide, a small pill at the top right reading 'EXP-2291', and a footer with 'Brightcart · Product Analytics' on the left and 'n / 11' on the right. Charts as inline SVG with titled axes; no text under 12px.\n\nPresenter mode: only slide 1 is visible on load; ArrowRight, ArrowLeft, Home and End navigate; the URL hash is #n and opening slides.html#n starts on slide n. T toggles a dark theme by setting data-theme='dark' on the html element, which overrides only --bg to #0F172A, --ink to #F1F5F9 and --muted to #CBD5E1; the choice persists across reloads. Every slide has speaker notes in a hidden aside with class notes, and N toggles a notes panel. The slide 4 notes must give the SRM p-value; the slide 7 notes must name the segments whose CI includes zero.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "daily_results.csv",
+   "experiment.json"
+  ],
+  "slides_spec": {
+   "min_slides": 11,
+   "max_slides": 11
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 11 slides in this order: 'One-Page Checkout: Experiment Readout', 'The decision', 'Experiment design', 'Sample ratio check', 'Conversion by arm', 'Lift over time', 'Lift by segment', 'Guardrails', 'Platform detail', 'Rollout plan', 'Appendix: statistical method'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 2 shows exactly: control conversion 28.95%, treatment 30.03%, relative lift +3.7% with 95% CI 0.9% to 6.6%, and p = 0.011, with a recommendation to ship."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 4 shows control 23,510 and treatment 23,555 sessions against an expected 23,532.5 each, chi-square 0.04, p-value 0.836 and a pass badge (no sample ratio mismatch)."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 5 has two bars labeled 28.95% (control, gray-blue) and 30.03% (treatment, purple) on a y-axis that starts at 0%, each with an error bar of about ±0.58 percentage points."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 6 plots 28 daily points of cumulative relative lift (starting near -3.7% on 1 Sep and ending at 3.7% on 28 Sep) with a shaded CI band that narrows over time and a zero line, and annotates 13 Sep (day 13) as the first day from which the lower bound stays above zero."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 7 is a forest plot with rows top to bottom iOS, Returning, New, Android, Web then Overall, reading (lift [95% CI]) iOS 7.6% [3.3%, 11.9%], Returning 4.2% [0.9%, 7.5%], New 2.2% [-3.3%, 7.8%], Android 1.8% [-3.1%, 6.7%], Web -0.9% [-6.9%, 5.1%], Overall 3.7% [0.9%, 6.6%] as a diamond; a vertical zero line; hollow markers exactly for Android, Web and New."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 8 shows AOV $86.18 vs $84.51 (-1.9%, pass against the 2% limit) and revenue per session $24.95 vs $25.38 (+1.7%, pass)."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 9's table shows (sessions control / treatment, conversion control → treatment, lift, p) iOS 9,406 / 9,446, 31.12% → 33.49%, +7.6%, p = 0.001 (or < 0.001); Android 8,207 / 8,264, 28.24% → 28.75%, +1.8%, p = 0.471; Web 5,897 / 5,845, 26.49% → 26.24%, -0.9%, p = 0.765; slide 3 is a drawn split diagram naming both checkouts and both guardrails."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; ArrowRight twice shows only slide 3 with hash #3; End shows slide 11 and Home slide 1; opening slides.html#7 starts on slide 7; N shows the current slide's notes and N again hides them. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Theme toggle: pressing T sets data-theme='dark' on the html element and getComputedStyle(document.documentElement) then gives --bg #0F172A, --ink #F1F5F9 and --muted #CBD5E1 while --control and --treatment keep #94A3B8 and #7C3AED, and the slides visibly turn dark with light text; after reload the dark theme is still active; T again removes it and restores the light theme (--bg #FFFFFF)."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-11 the h2 computes to Inter, weight 700, 32px, left edge 64px (±2px) from the slide edge and the same top everywhere; each has the 'EXP-2291' pill at the top right and the footer 'Brightcart · Product Analytics' with the correct 'n / 11'; control is the same gray-blue and treatment the same purple on slides 5, 6, 7 and 8."
+   },
+   {
+    "id": "R12",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every .slide contains a non-empty hidden aside.notes; the slide 4 notes give the SRM p-value 0.836 and the slide 7 notes name Android, Web and New; nothing overlaps or is clipped and chart text is at least 12px."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-open-11",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "Subscription cohort retention deck with triangle heatmap, layer cake and payback",
+  "prompt": "Build a retention deep dive for Lexio, a language-learning app with a monthly subscription, presented by head of growth Marcus Obi at the leadership offsite on 14 October 2026. Work from subscriptions.csv (one row per subscriber who started between October 2025 and September 2026: start month, acquisition channel, promo code, monthly price and last paid month) and acquisition.json (data cutoff, app store fee, acquisition spend by channel and the spring promo).\n\nDefinitions: month 0 is the start month; a subscriber is retained in month k if last_paid_month is at least k months after start_month. A cohort's month-k retention = retained in month k / cohort size. Pooled month-k retention sums retained subscribers and cohort sizes over every cohort observed through month k (never average percentages). Net revenue = price × (1 - app store fee) for each month paid. Cumulative net revenue per starting subscriber through month k = net revenue collected in months 0 to k / subscribers, over cohorts observed through month k; 6-month LTV is its value at month 5. CAC = channel spend / channel subscribers. Payback month = the first k where cumulative net revenue per starting subscriber reaches CAC. Paying subscribers at the cutoff have last_paid_month 2026-09; MRR is the sum of their monthly prices. Retention with one decimal (whole percents in the heatmap), dollars with two decimals.\n\nExactly 11 slides, titled:\n1. 'Lexio Retention Deep Dive' (presenter, event, date)\n2. 'Headline numbers': tiles for paying subscribers at the cutoff, MRR, and pooled month-1, month-3 and month-6 retention\n3. 'Every cohort, month by month': triangle heatmap, one row per cohort (labeled with its size) and columns M0 to M11, whole percent in every observed cell, a sequential color legend, and the highest month-3 cell outlined\n4. 'The layer cake': stacked area of paying subscribers in each calendar month from October 2025 to September 2026, one layer per cohort with the oldest at the bottom, the September total labeled\n5. 'Retention curves by channel': pooled retention M0 to M6 for each channel, M6 value labeled at each line's end\n6. 'Unit economics by channel': table of subscribers, spend, CAC, month-3 retention, 6-month LTV and LTV/CAC (two decimals, below 1.00 in red)\n7. 'Payback': cumulative net revenue per starting subscriber by channel for M0 to M10 with each channel's CAC as a dashed line in its color and the payback month marked\n8. 'Did the spring promo work?': for March-April 2026 starters, promo vs full price: month-1 and month-3 retention as grouped bars, plus net revenue per starting subscriber over months 0-3\n9. 'When subscribers leave': bar chart of churned subscribers by number of payments made (1 to 11) with the one-payment share called out\n10. 'Q4 retention bets': three initiatives, each with a target\n11. 'Appendix: definitions'\n\nStyle: white slides, ink #1C1B3A, coral accent #FF6B4A, Roboto only. Fixed channel colors: Organic #2563EB, Paid social #F59E0B, Referral #10B981. Slides 2-11: an 8px coral strip down the left edge, an h2 in Roboto 700 at 30px whose left edge is 56px from the slide edge at the same top on every slide, and a footer with 'Lexio · Growth' on the left and 'n / 11' on the right. A 4px coral progress bar along the bottom edge of every slide fills n/11 of the width. Charts as inline SVG with titled axes; no text under 12px.\n\nPresenter mode: only slide 1 is visible on load; ArrowRight/ArrowLeft move one slide, Home/End jump, typing a slide number then Enter jumps to it, and the hash is #slide-n (opening slides.html#slide-n starts there). P toggles a presenter view overlay with the current slide's notes, the title of the next slide and an elapsed timer in mm:ss that starts at 00:00 when the deck loads. Store each slide's speaker notes in a hidden aside with class notes. The slide 6 notes must name the channel with the lowest LTV/CAC; the slide 9 notes must give the one-payment share.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "subscriptions.csv",
+   "acquisition.json"
+  ],
+  "slides_spec": {
+   "min_slides": 11,
+   "max_slides": 11
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 11 slides in this order: 'Lexio Retention Deep Dive', 'Headline numbers', 'Every cohort, month by month', 'The layer cake', 'Retention curves by channel', 'Unit economics by channel', 'Payback', 'Did the spring promo work?', 'When subscribers leave', 'Q4 retention bets', 'Appendix: definitions'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 2 shows exactly: 2,386 paying subscribers, MRR $30,685.14, pooled retention M1 69.5%, M3 51.3% and M6 32.4%."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 3 is a triangle heatmap with 12 cohort rows (Oct 2025 n = 415 with 12 cells down to Sep 2026 n = 586 with only M0), whole percents in every observed cell (e.g. Oct 2025: M1 71%, M3 52%, M11 20%), empty unobserved cells, a color legend, and the Jun 2026 M3 cell (56%) outlined."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 4 is a stacked area chart over the 12 calendar months with one layer per cohort (a new layer appears each month, oldest at the bottom) and totals rising from 415 in Oct 2025 to 2,386 in Sep 2026, the September total labeled."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 5 has three lines in the channel colors over M0-M6 starting at 100%, with end labels Organic 36.5%, Paid social 21.3%, Referral 44.4% (Referral highest, Paid social lowest)."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 6's table shows (subscribers, spend, CAC, M3, 6-month LTV, LTV/CAC) Organic 2,445, $34,100, $13.95, 54.5%, $40.52, 2.91; Paid social 1,957, $78,600, $40.16, 42.3%, $33.30, 0.83; Referral 995, $21,000, $21.11, 61.0%, $43.34, 2.05; only LTV/CAC values below 1.00 are red."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 7 plots three rising cumulative lines over M0-M10 with dashed CAC lines in the matching colors, and marks the payback months Organic M1, Paid social M8, Referral M2 where each line first reaches its CAC."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 8 compares promo (491 subscribers) and full price (439) March-April starters: M1 61.9% vs 71.1%, M3 38.7% vs 51.7%, and months 0-3 net revenue per starting subscriber $21.19 vs $31.41."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 9 has 11 bars for 1-11 payments (1,468 churned after one payment, 414 after two, falling to 16 after eleven) with the one-payment share 48.8% of 3,011 churned subscribers called out; the slide 6 notes name Paid social and the slide 9 notes give 48.8%."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; ArrowRight twice shows only slide 3 with hash #slide-3; typing 9 then Enter shows slide 9; End and Home show slides 11 and 1; opening slides.html#slide-6 starts on slide 6. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R11",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "P opens a presenter overlay that shows the current slide's notes (every .slide has a non-empty hidden aside.notes), the next slide's title (e.g. 'The layer cake' while on slide 3) and a mm:ss timer that advances (about 00:03 after a 3-second wait); P again closes it."
+   },
+   {
+    "id": "R12",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-11 the h2 computes to Roboto, weight 700, 30px, left edge 56px (±2px) from the slide edge and the same top everywhere, with the 8px coral left strip and the footer 'Lexio · Growth' with the correct 'n / 11'; the bottom progress bar's width is n/11 of 1280px (e.g. about 582px on slide 5); channel colors match on slides 5, 6 and 7; nothing overlaps or is clipped and chart text is at least 12px."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-open-12",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "Plant OEE review deck with loss waterfall, Pareto and X-bar/R control chart",
+  "prompt": "Prepare the February 2026 performance review of Norvik Packaging's Hartwell plant (four bottling lines, two shifts), presented by plant manager Jonas Berg to the operations leadership team on 10 March 2026. Analyze shifts_feb2026.csv (per day, line and shift: planned minutes, downtime minutes, total and good units), downtime_events.csv (every stop with its reason and minutes), fill_weight_l3.csv (25 hourly subgroups of five fill weights from Line 3 on 24 February) and lines.json (ideal rates, targets and control-chart constants).\n\nDefinitions, all time-based so any group of shifts or lines aggregates by summing minutes first: run time = planned - downtime; net run time = total units / ideal rate; fully productive time = good units / ideal rate. Availability = run / planned, performance = net run / run, quality = fully productive / net run, OEE = fully productive / planned (= A × P × Q). Losses: downtime = planned - run, speed loss = run - net run, quality loss = net run - fully productive. Control chart: X̿ = mean of the subgroup means, R̄ = mean of the subgroup ranges, X̄ limits X̿ ± A2·R̄, R chart upper limit D4·R̄. A point is out of control if its mean is outside the X̄ limits, if it is one of 7 or more consecutive means on the same side of X̿ (flag every point in such a run), or if its range is above the R limit. Percentages one decimal, hours one decimal, grams two decimals.\n\nExactly 11 slides, titled:\n1. 'Hartwell Plant Review · February 2026' (presenter, audience, date)\n2. 'Plant at a glance': tiles for plant OEE, availability, performance, quality and good units\n3. 'OEE by line': bars sorted from highest OEE, availability, performance and quality printed under each bar, a dashed 85% world-class line and a solid 70% target line\n4. 'Where the time went': waterfall in hours from planned time through downtime, speed loss and quality loss to fully productive time\n5. 'Downtime Pareto': bars of downtime minutes by reason sorted descending, a cumulative % line on a right axis from 0 to 100%, a dashed 80% line, and the reasons needed to pass 80% highlighted\n6. 'Shift A vs shift B': OEE per line for each shift as grouped bars, the line with the largest gap annotated with the gap in points\n7. 'Fill weight control · Line 3': X̄ chart above R chart sharing the subgroup axis 1-25, center lines and limits labeled with their values, out-of-control points in red\n8. 'Line scorecard': table of line, planned hours, availability, performance, quality, OEE and top downtime reason with its minutes; OEE below 70% in red\n9. 'Line 2 changeover plan': current vs target changeover as two horizontal stacked bars (current: clean 14, tooling swap 18, adjust 12, first-off check 8 minutes; target: 8, 10, 6, 6)\n10. 'Actions and owners': three actions, each with an owner and a date\n11. 'Appendix: definitions and control rules'\n\nStyle: light gray slides (#F4F5F7), slate text (#1F2933), safety-yellow accent (#F5B700), Open Sans only. Fixed line colors: L1 #1F6FEB, L2 #F5B700, L3 #2DA44E, L4 #8250DF. Slides 2-11 have a 64px slate (#1F2933) band across the top holding the h2 in white Open Sans 700 at 26px whose left edge is 40px from the slide edge, and a footer with 'Norvik Packaging · Hartwell' on the left and 'n / 11' on the right. Charts as inline SVG with titled axes; no text under 12px.\n\nPresenter mode: only slide 1 is visible on load; ArrowRight/ArrowLeft/PageDown/PageUp navigate, Home/End jump, the hash is #n and opening slides.html#n starts on slide n. ? opens an overlay listing every keyboard shortcut and Escape closes it. When printed, every slide appears on its own page, with no overlay, panel or navigation chrome. Each slide has speaker notes in a hidden aside with class notes; N toggles a notes panel. The slide 5 notes must name the top downtime reason and its minutes; the slide 7 notes must list the out-of-control subgroups.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "shifts_feb2026.csv",
+   "downtime_events.csv",
+   "fill_weight_l3.csv",
+   "lines.json"
+  ],
+  "slides_spec": {
+   "min_slides": 11,
+   "max_slides": 11
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 11 slides in this order: 'Hartwell Plant Review · February 2026', 'Plant at a glance', 'OEE by line', 'Where the time went', 'Downtime Pareto', 'Shift A vs shift B', 'Fill weight control · Line 3', 'Line scorecard', 'Line 2 changeover plan', 'Actions and owners', 'Appendix: definitions and control rules'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 2 shows exactly: plant OEE 74.0%, availability 87.2%, performance 86.2%, quality 98.4% and 5,743,017 good units."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 3 has four bars in the line colors ordered L3 80.9%, L1 79.5%, L2 69.6%, L4 66.0% with A / P / Q under each (e.g. L4 84.7% / 80.1% / 97.3%), a dashed 85% line and a solid 70% line on a y-axis starting at 0."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 4's waterfall reads 1,200.0 h planned, -153.4 downtime, -144.0 speed loss, -14.5 quality loss and 888.1 h fully productive, with floating steps."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 5's Pareto has 8 bars in descending order Changeover 4,084, Material shortage 1,939, Electrical fault 1,194, Quality hold 639, Jam 536, Cleaning overrun 396, Label misfeed 235, Sensor fault 181 minutes, a cumulative line reaching 100% on a 0-100% right axis, a dashed 80% line, and exactly Changeover, Material shortage, Electrical fault and Quality hold highlighted."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 6 shows shift A and shift B OEE for each line (L1 80.9% / 78.2%; L2 71.1% / 68.0%; L3 80.6% / 81.2%; L4 68.0% / 64.0%) and annotates L4 with a gap of 4.1 points."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 7 has an X̄ chart with center 500.35 g, UCL 501.85 and LCL 498.85 over 25 subgroups and an R chart below with center 2.60 and UCL 5.50; subgroups 6, 13, 14, 15, 16, 17, 18, 19 and 20 are red (subgroup 18 above the UCL, 13-20 a run on one side, 6 range above the R limit) and no others."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 8's table shows (planned h, A, P, Q, OEE, top reason) L1 300.0, 91.2%, 88.2%, 98.8%, 79.5%, Changeover 666 min; L2 300.0, 83.5%, 84.9%, 98.2%, 69.6%, Changeover 2,073 min; L3 300.0, 89.4%, 91.4%, 99.1%, 80.9%, Changeover 573 min; L4 300.0, 84.7%, 80.1%, 97.3%, 66.0%, Material shortage 969 min; only OEE values below 70% are red. Slide 9 shows two stacked bars totaling 52 and 30 minutes with the four labeled steps."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; PageDown three times shows only slide 4 with hash #4; PageUp returns to slide 3; End and Home show slides 11 and 1; opening slides.html#7 starts on slide 7; N toggles the current slide's notes; ? shows a shortcut overlay and Escape closes it. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 1,
+    "criterion": "Print layout: with media set to print (interact action media: print, then screenshot full_page and eval), all 11 slides are displayed one after another (each with page-break-after or break-after: page) and the notes panel, overlay and any navigation chrome are hidden."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-11 a 64px slate band spans the top, the h2 inside it computes to Open Sans, weight 700, 26px, white, left edge 40px (±2px) from the slide edge at the same top everywhere, and the footer reads 'Norvik Packaging · Hartwell' with the correct 'n / 11'; line colors are identical on slides 3, 6 and 8."
+   },
+   {
+    "id": "R12",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every .slide contains a non-empty hidden aside.notes; the slide 5 notes name Changeover (4,084 minutes) and the slide 7 notes list subgroups 6, 13, 14, 15, 16, 17, 18, 19 and 20; nothing overlaps or is clipped and chart text is at least 12px."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-open-13",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "Loss reserve review deck with a chain-ladder triangle, tail sensitivity and combined ratios",
+  "prompt": "Create the year-end loss reserve review for Harrowgate Mutual's commercial auto liability book, presented by chief actuary Imogen Clarke to the audit committee on 24 February 2026 (valuation date 31 December 2025). Use paid_triangle.csv (cumulative paid losses in $K by accident year 2019-2025 and development age 12-84 months), reserving_inputs.json (earned premium by accident year, the selected tail factor and two alternatives, the carried reserve and the plan loss ratio) and lines_cy2025.csv (calendar-year 2025 premium, losses, LAE and expenses for five lines).\n\nMethod: the age-to-age factor from age a to the next age is volume-weighted: the sum of paid at the next age divided by the sum of paid at age a, over accident years that have both. Also show the simple average of the individual ratios for comparison, but select the volume-weighted factors. The CDF at an age is the product of the selected factors from that age onward times the tail factor; percent paid = 1 / CDF. Ultimate = latest paid × CDF at its latest age; indicated unpaid = ultimate - paid; ultimate loss ratio = ultimate / earned premium. Loss, LAE and expense ratios divide by earned premium; combined ratio is their sum. Factors with three decimals, $K amounts whole with thousands separators, ratios one decimal.\n\nExactly 12 slides, titled:\n1. 'Commercial Auto Loss Reserve Review' (presenter, committee, date, valuation date)\n2. 'Summary': tiles for paid to date, indicated ultimate, indicated unpaid, carried reserve and the carried minus indicated difference with its % of indicated\n3. 'Paid loss triangle': the 7 × 7 triangle as a table with the latest diagonal highlighted\n4. 'Development factors': rows for simple average, volume-weighted (selected, bold), CDF and percent paid for each age column plus the tail\n5. 'Payment pattern': percent of ultimate paid at ages 12 to 84 as a line with labeled markers on a 0-100% axis\n6. 'Ultimate by accident year': stacked bars of paid and unpaid per accident year, ultimate labeled on top\n7. 'Ultimate loss ratios': accident-year line with a dashed plan line, the years above plan labeled with their ratios\n8. 'Carried vs indicated': the two reserves as horizontal bars with the difference labeled in $K and %\n9. 'Combined ratio by line (CY2025)': stacked horizontal bars of loss, LAE and expense ratio sorted by combined ratio (lowest at the top), a 100% reference line, combined ratios printed at the bar ends and lines above 100% in red text\n10. 'Tail sensitivity': ultimate and unpaid for tails 1.000, 1.015 and 1.030 with the change versus the selected tail\n11. 'Recommendations': three\n12. 'Appendix: method'\n\nStyle: formal and precise. White slides, navy text (#0A2540), teal accent (#0E7C86), deficiency red (#C0392B); Lato for text and DejaVu Sans Mono for every number in tables. Slides 2-12 share a master: an h2 in Lato 900 at 30px whose left edge is 64px from the slide edge at the same top everywhere, a 1px navy rule under the title area, 'Valuation date 31 Dec 2025' at the top right, and a footer with 'Harrowgate Mutual · Actuarial · Privileged and confidential' on the left and 'Page n of 12' on the right. Charts as inline SVG with titled axes; no text under 12px.\n\nPresenter mode: only slide 1 is visible on load; ArrowRight/ArrowLeft/Space navigate, Home/End jump, the hash is #/n and opening slides.html#/n starts on slide n. M toggles a contents sidebar listing all 12 titles with the current one highlighted; clicking a title opens that slide and closes the sidebar. Each slide has speaker notes in a hidden aside with class notes; N toggles a notes panel. The slide 4 notes must give the total unpaid you would get with the simple-average factors; the slide 8 notes must say whether the carried reserve is deficient or redundant.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "paid_triangle.csv",
+   "reserving_inputs.json",
+   "lines_cy2025.csv"
+  ],
+  "slides_spec": {
+   "min_slides": 12,
+   "max_slides": 12
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 12 slides in this order: 'Commercial Auto Loss Reserve Review', 'Summary', 'Paid loss triangle', 'Development factors', 'Payment pattern', 'Ultimate by accident year', 'Ultimate loss ratios', 'Carried vs indicated', 'Combined ratio by line (CY2025)', 'Tail sensitivity', 'Recommendations', 'Appendix: method'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 2 shows exactly: paid to date 173,555, indicated ultimate 252,340, indicated unpaid 78,785, carried 75,500 and a difference of -3,285 (-4.2% of indicated, a deficiency) in $K."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 3's table has accident-year rows 2019-2025 and age columns 12-84 with the triangle shape (2019 has 7 values, 2025 one), e.g. 2019 row 7,107, 13,423, 18,310, 20,793, 23,027, 24,211, 25,079, and the latest diagonal (25,079, 26,151, 29,322, 31,106, 28,778, 21,332, 11,787) highlighted."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 4 shows volume-weighted factors 1.888, 1.357, 1.175, 1.107, 1.065, 1.036 (12-24 to 72-84) in bold as selected, simple averages 1.892, 1.355, 1.174, 1.107, 1.064, 1.036, the 1.015 tail, CDFs 3.731, 1.976, 1.456, 1.239, 1.119, 1.051, 1.015 (ages 12-84) and percent paid 26.8%, 50.6%, 68.7%, 80.7%, 89.3%, 95.1%, 98.5%."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 5 is a line rising through 7 labeled markers from 26.8% at 12 months to 98.5% at 84 months on a titled 0-100% axis."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 6 has 7 stacked bars (paid below, unpaid above) with ultimates 2019 25,455, 2020 27,495, 2021 32,825, 2022 38,541, 2023 41,898, 2024 42,150, 2025 43,976; 2025's unpaid part (32,189) is the largest segment of its bar."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 7 plots ultimate loss ratios 2019 61.5%, 2020 60.6%, 2021 67.7%, 2022 73.3%, 2023 75.8%, 2024 70.1%, 2025 68.4% with a dashed 68.0% plan line, and labels exactly 2022, 2023, 2024 and 2025 as above plan."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 8 shows carried 75,500 vs indicated 78,785 with the difference -3,285 (-4.2%); slide 10 shows unpaid 75,056 (tail 1.000, -3,729), 78,785 (1.015, selected) and 82,514 (1.030, +3,729)."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 9 has five stacked bars ordered top to bottom Inland Marine 85.1%, Commercial Property 91.3%, Workers' Compensation 96.7%, General Liability 105.3%, Commercial Auto 115.3% (e.g. Commercial Auto loss 73.6% + LAE 11.9% + expense 29.8%), a 100% line, and red combined-ratio text exactly for General Liability and Commercial Auto."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; ArrowRight twice shows only slide 3 with hash #/3; Space advances to slide 4; End and Home show slides 12 and 1; opening slides.html#/9 starts on slide 9; M opens a sidebar with all 12 titles and the current one highlighted, clicking 'Tail sensitivity' shows slide 10 and closes the sidebar; N toggles the current slide's notes. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-12 the h2 computes to Lato, weight 900, 30px, left edge 64px (±2px) from the slide edge and the same top everywhere, with the navy rule, 'Valuation date 31 Dec 2025' at the top right and the footer 'Harrowgate Mutual · Actuarial · Privileged and confidential' with the correct 'Page n of 12'; numbers in the slide 3, 4 and 10 tables compute to DejaVu Sans Mono."
+   },
+   {
+    "id": "R12",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every .slide contains a non-empty hidden aside.notes; the slide 4 notes give a simple-average total unpaid of 78,652 and the slide 8 notes call the carried reserve deficient; nothing overlaps or is clipped and chart and table text is at least 12px."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-open-14",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "Workforce report deck with attrition, age pyramid, salary box plots and a redaction mode",
+  "prompt": "Build Fenwick Labs' 2025 workforce report, presented by chief people officer Amara Nwosu to the board's people and compensation committee on 22 January 2026. Work from employees.csv (everyone employed at any point since 2008 who was on staff on 31 December 2024 or joined in 2025: name, department, level L1-L6, gender, birth year, hire and exit dates, exit type, regretted flag and base salary) and recruiting_2025.json (the 2025 hiring funnel and days to fill per requisition).\n\nDefinitions: someone is on staff on a date if hire_date is on or before it and exit_date is blank or after it. Average headcount = mean of the 12 month-end headcounts of 2025. Attrition = 2025 exits / average headcount (also voluntary-only and regretted-only); a department's attrition uses its own exits and average headcount. Age = 2025 - birth year; tenure = days from hire to exit / 365.25. Quartiles use linear interpolation between the sorted values (Excel QUARTILE.INC). Pay gap = (median man's salary - median woman's) / median man's, among people on staff on 31 December 2025, overall and within each level. Percentages one decimal, salaries in $K one decimal.\n\nExactly 12 slides, titled:\n1. 'Workforce Report 2025' (presenter, committee, date)\n2. 'The year in numbers': tiles for headcount at year end with the change from 31 Dec 2024, hires, attrition, voluntary attrition and regretted attrition\n3. 'Hires, exits and headcount': hires per month as bars above a zero line, exits per month as bars below it, and month-end headcount as a line on a right axis\n4. 'Attrition by department': horizontal bars sorted from highest attrition, a dashed company-average line, departments above average in the accent color and the rest gray\n5. 'Age profile': population pyramid of year-end staff, women to the left and men to the right, five age bands (under 25, 25-34, 35-44, 45-54, 55+) with the youngest at the bottom and counts on the bars\n6. 'Women by level': share of women at each level L1-L6 as bars with a dashed 50% line and the share printed on each bar\n7. 'Pay ranges by level': box plots of year-end base salary for each level (min, Q1, median, Q3, max) on a shared $K axis\n8. 'Pay gap': the overall gap as a large figure plus a table of median salary for women and men and the gap for each level, gaps above 5.0% flagged\n9. 'Hiring funnel': the five stages as a funnel with counts and stage-to-stage conversion, and the median days to fill\n10. 'Priorities for 2026': three priorities with a measurable target each\n11. 'Appendix: regretted leavers': table of every regretted leaver in exit-date order with name, department, level, tenure in years (one decimal) and exit month\n12. 'Appendix: definitions'\n\nStyle: white slides, ink #1F2433, indigo accent #4338CA, gray #9CA3AF; Women #0D9488 and Men #F59E0B on every chart. Inter only. Slides 2-12: an uppercase 12px indigo kicker naming the section (OVERVIEW 2-3, RETENTION 4, PEOPLE 5-6, PAY 7-8, HIRING 9, PLAN 10, APPENDIX 11-12) above an h2 in Inter 800 at 32px whose left edge is 80px from the slide edge at the same top everywhere, and a footer with 'Fenwick Labs · People Analytics · Board confidential' on the left and 'n / 12' on the right. Charts as inline SVG with titled axes; no text under 12px.\n\nPresenter mode: only slide 1 is visible on load; ArrowRight/ArrowLeft navigate, Home/End jump, the hash is #n and opening slides.html#n starts on slide n. The deck opens in redacted mode: slide 11 shows each leaver's initials only (e.g. 'A. O.' for Amara Okafor) and pressing R toggles full names on and off. Each slide has speaker notes in a hidden aside with class notes; N toggles a notes panel. The slide 4 notes must give the company average; the slide 8 notes must name the level with the largest gap.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "employees.csv",
+   "recruiting_2025.json"
+  ],
+  "slides_spec": {
+   "min_slides": 12,
+   "max_slides": 12
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 12 slides in this order: 'Workforce Report 2025', 'The year in numbers', 'Hires, exits and headcount', 'Attrition by department', 'Age profile', 'Women by level', 'Pay ranges by level', 'Pay gap', 'Hiring funnel', 'Priorities for 2026', 'Appendix: regretted leavers', 'Appendix: definitions'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 2 shows exactly: year-end headcount 546 (+20 from 526), 90 hires, attrition 13.0%, voluntary 10.8% and regretted 2.4% (all over an average headcount of 536.7, not the year-end or starting headcount)."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 3 has 12 hire bars above a zero line (6, 7, 6, 12, 4, 11, 9, 5, 8, 13, 6, 3), 12 exit bars below it (5, 9, 2, 7, 7, 5, 8, 5, 7, 5, 4, 6) and a month-end headcount line from 527 (Jan) to 546 (Dec) on a titled right axis."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 4's bars read, top to bottom, Manufacturing 24.5%, Commercial 19.9%, G&A 10.6%, Quality 8.9%, Research 8.0%, Clinical 6.7%, with a dashed company-average line at 13.0%; exactly Manufacturing and Commercial are in the indigo accent."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 5 is a population pyramid with women (teal) extending left and men (amber) right from a central axis, bands bottom to top Under 25, 25-34, 35-44, 45-54, 55+, with counts (women / men) Under 25 24 / 9, 25-34 127 / 127, 35-44 83 / 88, 45-54 31 / 39, 55+ 6 / 12."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 6 shows women's shares L1 59.1%, L2 53.0%, L3 45.6%, L4 42.9%, L5 35.3%, L6 22.2% with a dashed 50% line."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 7 has six box plots (whiskers to min and max, box Q1-Q3, median line) on one $K axis matching (min / Q1 / median / Q3 / max) L1 60.7 / 65.7 / 71.8 / 77.3 / 82.1; L2 76.3 / 85.3 / 91.0 / 97.8 / 105.4; L3 97.5 / 108.5 / 118.5 / 125.4 / 135.1; L4 121.5 / 134.1 / 148.4 / 160.7 / 171.9; L5 162.3 / 176.8 / 191.6 / 205.5 / 221.8; L6 225.4 / 241.8 / 256.5 / 278.3 / 302.5 (±0.2)."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 8 shows an overall gap of 11.4% (median woman $92.7K vs man $104.6K) and within-level gaps L1 2.2%, L2 -1.2%, L3 6.8%, L4 13.6%, L5 12.2%, L6 4.0%, flagging exactly L3, L4 and L5; the slide 8 notes name L4."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 9 is a narrowing funnel with 9,840, 2,410, 806, 163 and 128 and conversions 24.5%, 33.4%, 20.2%, 78.5%, plus median days to fill 64; slide 11 lists all 13 regretted leavers in exit-date order starting with Manufacturing L2 (exit Feb 2025, tenure 4.0 years)."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; ArrowRight three times shows only slide 4 with hash #4; End and Home show slides 12 and 1; opening slides.html#11 starts on slide 11; there the table shows initials only (e.g. 'R. A.' for Ruth Adeyemi) and no full names; R reveals full names such as 'Ruth Adeyemi', R again hides them; N toggles the current slide's notes. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-12 the h2 computes to Inter, weight 800, 32px, left edge 80px (±2px) from the slide edge and the same top everywhere, with the correct uppercase indigo kicker (OVERVIEW 2-3, RETENTION 4, PEOPLE 5-6, PAY 7-8, HIRING 9, PLAN 10, APPENDIX 11-12) and the footer 'Fenwick Labs · People Analytics · Board confidential' with the correct 'n / 12'."
+   },
+   {
+    "id": "R12",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every .slide contains a non-empty hidden aside.notes and the slide 4 notes give 13.0%; women are teal and men amber on slides 5 and 8; nothing overlaps or is clipped, the leaver table fits its slide and chart text is at least 12px."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-open-15",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "Flu season surveillance deck with epidemic threshold, age-adjusted rates and a tile map",
+  "prompt": "Prepare the 2025-26 influenza season report of Marlow County Public Health, presented by county epidemiologist Dr. Helena Voss to the Board of Health on 21 May 2026. Analyze flu_weekly.csv (lab-confirmed cases and hospitalizations per ISO week, district and age group, weeks 2025-W40 to 2026-W20), population.csv (population per district and age group) and surveillance_reference.json (standard population weights, baseline weekly rates from earlier seasons, adult vaccination coverage and tile-map positions).\n\nDefinitions: rates are per 100,000 population. The epidemic threshold = mean + 2 × sample standard deviation of the baseline rates. Season onset is the first week of the first pair of consecutive weeks with the county case rate above the threshold. A district's crude hospitalization rate = its hospitalizations / its population; its age-adjusted rate = Σ over age groups of standard weight × the district's age-specific hospitalization rate. Rates one decimal, the threshold and Pearson r two decimals.\n\nExactly 12 slides, titled:\n1. 'Influenza Season Report 2025-26' (presenter, board, date)\n2. 'Season at a glance': tiles for confirmed cases, hospitalizations, the peak week with its county case rate, and the number of weeks above the threshold\n3. 'Epidemic curve': weekly cases as 33 stacked bars by age group with a legend\n4. 'Weekly rate vs threshold': county weekly case rate as a line, the threshold as a dashed labeled line, weeks above it shaded, onset and peak annotated\n5. 'Hospitalization by age': season hospitalization rate for each age group as bars, the county rate as a dashed reference line\n6. 'Crude vs age-adjusted': both rates for each district as a dumbbell, sorted by age-adjusted rate from highest at the top\n7. 'District map': the six districts as equal square tiles at their grid positions (col, row from the top left), filled by age-adjusted rate on a five-step sequential scale with a legend, name and rate in each tile\n8. 'Vaccination and severity': scatter of adult vaccination coverage (x) vs age-adjusted hospitalization rate (y), points labeled by district, least-squares line and Pearson r\n9. 'Cases by district': six small multiples of the weekly district case rate on one shared y-axis scale, each panel's peak labeled\n10. 'Season timeline': clinics open 6 Oct 2025, onset week, peak week and the last week above the threshold on a horizontal timeline\n11. 'Recommendations for 2026-27': three\n12. 'Appendix: methods' (including the standard weights)\n\nStyle: white slides, navy text #102A43, alert red #D64545, Open Sans only. Fixed age-group colors: 0-4 #F9C74F, 5-17 #F8961E, 18-49 #90BE6D, 50-64 #43AA8B, 65+ #277DA1. Slides 2-12: 'MARLOW COUNTY PUBLIC HEALTH' in 12px capitals at the top left, 'Season 2025-26' at the top right, an h2 in Open Sans 700 at 30px whose left edge is 60px from the slide edge at the same top everywhere, and a footer with 'Board of Health · 21 May 2026' on the left and 'n / 12' on the right. Charts as inline SVG with titled axes; no text under 12px.\n\nPresenter mode: only slide 1 is visible on load; ArrowRight/ArrowLeft/PageDown/PageUp navigate, Home/End jump, the hash is #n and opening slides.html#n starts on slide n. For accessibility, D on slides 5, 6 and 8 swaps the chart for a table of the values it plots, and D again brings the chart back. Each slide has speaker notes in a hidden aside with class notes; N toggles a notes panel. The slide 4 notes must give the threshold value; the slide 6 notes must name the district with the highest crude rate and explain why its adjusted rank differs.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "flu_weekly.csv",
+   "population.csv",
+   "surveillance_reference.json"
+  ],
+  "slides_spec": {
+   "min_slides": 12,
+   "max_slides": 12
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 12 slides in this order: 'Influenza Season Report 2025-26', 'Season at a glance', 'Epidemic curve', 'Weekly rate vs threshold', 'Hospitalization by age', 'Crude vs age-adjusted', 'District map', 'Vaccination and severity', 'Cases by district', 'Season timeline', 'Recommendations for 2026-27', 'Appendix: methods'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 2 shows exactly: 15,121 confirmed cases, 632 hospitalizations, peak week 2026-W02 (week of 5 Jan 2026) at 297.7 per 100,000, and 21 weeks above the threshold."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 4 plots 33 weekly county rates with a dashed threshold line labeled 27.80 per 100,000, the 21 weeks above it (2025-W46 to 2026-W14) shaded, onset annotated at 2025-W46 and the peak at 2026-W02 (297.7)."
+   },
+   {
+    "id": "R4",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 3 has 33 bars stacked by the five age groups in their fixed colors; slide 5 shows age-specific hospitalization rates 0-4 224.8, 5-17 54.1, 18-49 53.7, 50-64 114.0, 65+ 410.1 per 100,000 with a dashed county line at 131.7."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 6 is a dumbbell with districts ordered top to bottom Southport (crude 142.3, adjusted 173.9), Riverside East (crude 128.2, adjusted 137.9), Northgate (crude 122.8, adjusted 126.1), Old Harbor (crude 167.2, adjusted 123.5), Millbrook (crude 111.8, adjusted 116.0), Cedar Falls (crude 121.1, adjusted 111.2); Old Harbor has the highest crude rate but ranks 4 of 6 after adjustment."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 7 shows six equal square tiles laid out as the grid positions give (row 0: Northgate in column 2; row 1: Old Harbor, Millbrook, Riverside East in columns 0, 1, 3; row 2: Southport and Cedar Falls in columns 1 and 2), each with its name and adjusted rate, darker for higher rates, with a five-step legend; Southport is the darkest tile and Cedar Falls the lightest."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 8 plots six labeled points (e.g. Southport at 41.6% and 173.9, Old Harbor at 61.8% and 123.5) with titled axes, a downward least-squares line and Pearson r = -0.87."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 9 has six panels whose y-axes are identical (same maximum and gridlines), each peak labeled (Northgate W03 339.1, Riverside East W03 329.5, Old Harbor W05 337.5, Millbrook W03 288.2, Cedar Falls W05 319.3, Southport W52 353.8); slide 10's timeline shows clinics on 6 Oct 2025, onset 2025-W46, peak 2026-W02 and last week above threshold 2026-W14 in order."
+   },
+   {
+    "id": "R9",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; PageDown three times shows only slide 4 with hash #4; ArrowLeft returns to slide 3; End and Home show slides 12 and 1; opening slides.html#8 starts on slide 8; N toggles the current slide's notes. Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "On slide 6, pressing D replaces the dumbbell with a table listing all six districts with their crude and adjusted rates (e.g. Southport 142.3 and 173.9) and D again restores the chart; D does the same on slides 5 and 8 (tables of the five age rates and the six coverage/rate pairs)."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-12 the h2 computes to Open Sans, weight 700, 30px, left edge 60px (±2px) from the slide edge and the same top everywhere, with 'MARLOW COUNTY PUBLIC HEALTH' top left, 'Season 2025-26' top right and the footer 'Board of Health · 21 May 2026' with the correct 'n / 12'; age-group colors match on slides 3 and 5."
+   },
+   {
+    "id": "R12",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every .slide contains a non-empty hidden aside.notes; the slide 4 notes give the threshold 27.80 and the slide 6 notes name Old Harbor and attribute its lower adjusted rank to its older population; nothing overlaps or is clipped and chart text is at least 12px."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-open-16",
+  "category": "slides",
+  "mode": "open_ended",
+  "title": "Restaurant menu engineering deck with a classified menu matrix, treemap and prime cost",
+  "prompt": "Create the Q2 2026 menu and margin review for Olive & Ember, a four-location Mediterranean grill, presented by COO Dario Lentini and executive chef Mina Farouk to the owners on 5 August 2026. Analyze menu_items.csv (20 dishes with category, menu price and plate cost), item_sales_q2_2026.csv (quantity sold per location, month and dish) and locations_q2_2026.json (seats, opening hours, days open, beverage revenue and cost, labor cost, prime cost target).\n\nDefinitions: food revenue = Σ quantity × price; food cost = Σ quantity × plate cost; revenue = food + beverage revenue. Food cost % = food cost / food revenue; prime cost % = (food cost + beverage cost + labor) / revenue; RevPASH = revenue / (seats × open hours per day × days open). Menu engineering uses all four locations together: contribution margin (CM) = price - plate cost; an item is popular if its menu mix (its share of all items sold) is at least 70% × 1/20 = 3.5%, and profitable if its CM is at least the quantity-weighted average CM. Stars are popular and profitable, Plowhorses popular only, Puzzles profitable only, Dogs neither. Percentages one decimal (menu mix two), dollars with cents, revenue in $K one decimal.\n\nExactly 11 slides, titled:\n1. 'Q2 2026 Menu and Margin Review' (both presenters, date)\n2. 'Quarter in numbers': tiles for group revenue, food cost %, prime cost % against the 62% target and RevPASH\n3. 'Food revenue by location': grouped bars, three months per location, value labels in $K\n4. 'Menu engineering matrix': scatter of menu mix % (x) vs CM (y) for all 20 dishes, dashed lines at the popularity threshold and the average CM, the four quadrants labeled, points colored by class; hovering over a point shows a tooltip with the dish, quantity sold, CM and class, and clicking a class in the legend fades the other classes until clicked again\n5. 'Every dish, classified': table of all 20 dishes sorted by total CM (quantity × CM) with category, quantity, mix, CM, total CM and a class pill\n6. 'Where the margin comes from': treemap of total CM with one block per category subdivided by dish, areas proportional to total CM, each category's share labeled\n7. 'Location scorecard': table of seats, revenue, food cost %, labor %, prime cost % and RevPASH per location; prime cost above 62% in red\n8. 'Prime cost by location': stacked bars of food and beverage cost % plus labor %, locations sorted from lowest prime cost, a dashed 62% line\n9. 'Two menu moves': raise every Plowhorse by $1.50 at unchanged volume (list them and the added quarterly CM) and drop every Dog (list them and the quarterly CM at risk)\n10. 'Q3 actions': three actions with owners\n11. 'Appendix: definitions'\n\nStyle: warm cream slides (#FFF8F0), charcoal text (#2B2B2B), olive (#6B7A2A) and ember orange (#E4572E); titles in DejaVu Serif, everything else in Roboto. Fixed class colors: Star #E4B83B, Plowhorse #6B7A2A, Puzzle #7B5EA7, Dog #A3A3A3. Slides 2-11: a 40 × 4px ember bar above an h2 in DejaVu Serif 700 at 34px whose left edge is 70px from the slide edge at the same top everywhere, and a footer with 'Olive & Ember · Owners' review · Q2 2026' on the left and, on the right, previous and next buttons around the counter 'n / 11'. Charts as inline SVG with titled axes; no text under 12px.\n\nPresenter mode: only slide 1 is visible on load; ArrowRight/ArrowLeft and the footer buttons navigate, Home/End jump, the hash is #slide/n and opening slides.html#slide/n starts on slide n. Each slide has speaker notes in a hidden aside with class notes; N toggles a notes panel. The slide 4 notes must name every Star; the slide 7 notes must name the location with the highest RevPASH.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "assets": [
+   "menu_items.csv",
+   "item_sales_q2_2026.csv",
+   "locations_q2_2026.json"
+  ],
+  "slides_spec": {
+   "min_slides": 11,
+   "max_slides": 11
+  },
+  "rubric": [
+   {
+    "id": "R1",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "The deck has exactly 11 slides in this order: 'Q2 2026 Menu and Margin Review', 'Quarter in numbers', 'Food revenue by location', 'Menu engineering matrix', 'Every dish, classified', 'Where the margin comes from', 'Location scorecard', 'Prime cost by location', 'Two menu moves', 'Q3 actions', 'Appendix: definitions'."
+   },
+   {
+    "id": "R2",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 2 shows exactly: revenue $3,027.4K, food cost 31.4%, prime cost 61.3% (marked as below the 62% target) and RevPASH $7.46."
+   },
+   {
+    "id": "R3",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 4 plots 20 labeled points with a vertical dashed line at 3.5% mix and a horizontal dashed line at the $15.24 average CM, quadrants labeled Stars (top right), Plowhorses (bottom right), Puzzles (top left) and Dogs (bottom left), and points colored so that the Stars are exactly Lamb kofta, Chicken shish, Ribeye 12 oz, Whole branzino, Mixed grill for two and Moussaka."
+   },
+   {
+    "id": "R4",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "On slide 4 hovering over the Falafel bowl point shows a tooltip with 'Plowhorse', 8,046 sold and CM $14.90; clicking 'Dogs' in the legend leaves only the Dog points at full opacity (Muhammara, Orange blossom panna cotta and Olive oil cake) and clicking it again restores all points. Use hover/click and screenshot actions with the interaction helper."
+   },
+   {
+    "id": "R5",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 5's table lists all 20 dishes in descending total CM starting Mixed grill for two (4,453, 4.32%, $43.50, $193,705.50, Star), Chicken shish (11,161, 10.84%, $16.90, $188,620.90, Star), Lamb kofta (9,248, 8.98%, $17.60, $162,764.80, Star) and ending with Olive oil cake (Dog); the classes are Plowhorses Hummus trio, Grilled halloumi, Crispy calamari, Fattoush salad, Falafel bowl, Baklava and Pistachio kunafa; Puzzles Halloumi skewers, Chicken tagine, Seafood orzo and Braised short rib; Dogs Muhammara, Orange blossom panna cotta and Olive oil cake."
+   },
+   {
+    "id": "R6",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 6 is a treemap with four category blocks sized by total CM and labeled with shares Grill 49.1%, Mains 25.6%, Mezze 18.7%, Desserts 6.6%, each subdivided into its dishes."
+   },
+   {
+    "id": "R7",
+    "type": "instruction",
+    "weight": 2,
+    "criterion": "Slide 7's table shows (revenue $K, food cost %, labor %, prime cost %, RevPASH) Harbor Street 845.9, 31.4%, 30.7%, 60.1%, $8.80; Midtown 979.4, 31.3%, 32.4%, 62.4%, $7.23; Westfield 472.4, 31.4%, 34.8%, 65.0%, $7.39; Lakeside 729.7, 31.4%, 29.6%, 58.9%, $6.63; only prime cost values above 62% are red."
+   },
+   {
+    "id": "R8",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 8 has four stacked bars ordered Lakeside (29.3% + 29.6% = 58.9%), Harbor Street (29.4% + 30.7% = 60.1%), Midtown (30.0% + 32.4% = 62.4%), Westfield (30.1% + 34.8% = 65.0%) with a dashed 62% line; slide 3 shows April-June food revenue per location (e.g. Lakeside $160.9K, $178.9K, $191.1K)."
+   },
+   {
+    "id": "R9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Slide 9 lists the Plowhorses with an added quarterly CM of $69,099.00 (1.50 × 46,066 units) and the Dogs with $51,145.30 of quarterly CM at risk; the slide 4 notes name Lamb kofta, Chicken shish, Ribeye 12 oz, Whole branzino, Mixed grill for two and Moussaka and the slide 7 notes name Harbor Street."
+   },
+   {
+    "id": "R10",
+    "type": "interaction",
+    "weight": 2,
+    "criterion": "Navigation works: only slide 1 visible on load; ArrowRight twice shows only slide 3 with hash #slide/3; clicking the footer's next button shows slide 4 and the previous button returns to 3; End and Home show slides 11 and 1; opening slides.html#slide/7 starts on slide 7; N toggles the current slide's notes (every .slide has a non-empty hidden aside.notes). Check with python3 /grader/tools/vtools.py interact --artifact-dir /grader/artifact --entry slides.html --width 1280 --height 720 --out /grader/interact/nav --actions '<JSON>' (use eval to read location.hash and which .slide is visible)."
+   },
+   {
+    "id": "R11",
+    "type": "layout",
+    "weight": 2,
+    "criterion": "On slides 2-11 the h2 computes to DejaVu Serif, weight 700, 34px, left edge 70px (±2px) from the slide edge and the same top everywhere, with the 40 × 4px ember bar above it and the footer 'Olive & Ember · Owners' review · Q2 2026' plus the buttons and the correct 'n / 11'; class colors match on slides 4 and 5."
+   },
+   {
+    "id": "R12",
+    "type": "layout",
+    "weight": 1,
+    "criterion": "The 20-row table on slide 5 fits inside its slide without clipping, treemap labels stay inside their blocks, nothing overlaps or is clipped elsewhere, and chart text is at least 12px."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-rep-05",
+  "category": "slides",
+  "mode": "replication",
+  "title": "Recreate a three-slide football match analysis deck",
+  "prompt": "Recreate the three attached slides from Ashford Rovers' performance analysis pack on their 2-1 win over Kestrel City as one HTML deck with three slides, in order. The style is set entirely in Roboto on an off-white background: a near-black top band with the department name and the match line, crimson for Rovers and sky blue for City, a striped grass-green pitch with white markings, and a thin footer rule with the page number.\n\nSlide 1 is the match summary: a white scoreboard card with shield crests, the score, the scorers and an xG pill; below it nine mirrored stat rows with crimson and blue bars; on the right an xG race chart in a card (cumulative step lines by minute with goal markers, a dashed half-time line and end values) and a takeaway note. Slide 2 is a full-pitch shot map for both teams with circles sized by xG and styled by outcome, a caption line under the pitch, a key with size references and a best-chances table. Slide 3 is a passing network on a vertical pitch (nodes sized by touches, lines weighted by passes), a how-to-read column with the formation and three stats, a table of top pass combinations with bars, a most-touches bar list and a callout.\n\nDraw everything with HTML, CSS and inline SVG and match positions, sizes, colors, text and numbers as closely as you can.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "slides_spec": {
+   "min_slides": 3,
+   "max_slides": 3
+  },
+  "reference_images": [
+   "slide_1.png",
+   "slide_2.png",
+   "slide_3.png"
+  ],
+  "golden": {
+   "entry": "slides.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 1's left half matches: a white scoreboard card with a crimson 'AR' and a blue 'KC' shield crest, 'Ashford Rovers' and 'Kestrel City', a large '2 – 1', the scorers 'Okoye 23' · Varga 67'' and 'Mendes 51'', and an 'xG 1.84 – 0.97' pill; below it nine rows in order Possession 58%/42%, Shots 16/9, Shots on target 7/3, Expected goals 1.84/0.97, Passes 512/371, Pass accuracy 86%/79%, Final-third entries 54/31, Corners 7/4, PPDA 8.9/13.4, each with a crimson bar growing left and a blue bar growing right from a shared center, in proportion to the pair."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 1's xG race matches: a white card titled 'xG RACE' with a legend, a crimson step line rising to 1.84 and a blue step line to 0.97 over minutes 0'-90' on a 0.0-2.0 axis, goal markers labeled 'Okoye 23'' (above), 'Varga 67'' (to its left) and 'Mendes 51'' (below), a dashed 'HT' line at 45', end labels 1.84 and 0.97, and the crimson-bordered 'Takeaway.' note under the card."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 2's pitch matches: a full horizontal pitch with alternating green stripes and white markings (halfway line, center circle, both penalty and six-yard boxes, penalty arcs, goals), 'ROVERS ATTACK →' at the top right and '← CITY ATTACK' at the top left, 16 crimson shots in the right half and 9 blue shots in the left half at matching spots and sizes, the two crimson goals ringed in yellow close to the right goal and the yellow-ringed blue goal near the left goal."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 2's shot styles and caption match: goals filled with a yellow ring, saved shots filled, blocked shots white with a colored ring and off-target shots hollow rings; under the pitch 'Rovers 16 shots · 11 in the box · 7 on target · 1.84 xG' on the left and 'City 9 shots · 5 in the box · 3 on target · 0.97 xG' on the right."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 2's right column matches: 'KEY' with the four outcome symbols (Goal, Saved, Blocked, Off target) and size circles 0.05, 0.15 and 0.40 captioned 'Circle area = xG', then 'BEST CHANCES' with rows 23' J. Okoye 0.38 Goal, 51' R. Mendes 0.34 Goal, 67' D. Varga 0.29 Goal, 41' J. Okoye 0.16 Saved, 73' T. Brandt 0.14 Saved, 71' S. Osei 0.13 Off target, each with a team-colored dot."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 3's network matches: a vertical striped pitch at the left with 'ATTACK ↑', eleven crimson numbered nodes at matching positions (1 Hale at the bottom, 5 Petrov and 4 Lund, 3 Carvalho and 2 Mbeki wide, 6 Osei central and largest, 10 Ruiz and 8 Varga, 11 Kane and 7 Adeyemi high and wide, 9 Okoye at the top) with names under them, joined by white lines whose thickness follows pass counts (thickest Lund-Osei and Petrov-Osei)."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 3's middle column matches: 'HOW TO READ' with the two explanatory sentences, a large crimson '4-3-3', 'Average shape in possession: 2-3-5', and three ruled stat rows: 48 progressive passes, 9 switches of play, 41% long balls completed (9 of 22)."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 3's right column matches: 'TOP PASS COMBINATIONS' with Lund → Osei 24, Petrov → Osei 21, Osei → Varga 19, Osei → Ruiz 17, Lund → Petrov 16 and Mbeki → Adeyemi 15 and proportional crimson bars; 'MOST TOUCHES' with gray bars Osei 104, Varga 92, Lund 88, Petrov 84, Ruiz 79; and the crimson-bordered callout about Osei receiving 41 passes."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The shared chrome matches on all slides: the near-black top band with a crimson square, 'ASHFORD ROVERS · PERFORMANCE ANALYSIS' and 'MD14 · vs Kestrel City · 22 Nov 2026', the exact headlines and subtitles, and the footer 'Internal · coaching staff only' with '1 / 3', '2 / 3' and '3 / 3'."
+   },
+   {
+    "id": "F10",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and colors match: Roboto everywhere with bold headlines and letter-spaced small-caps labels, crimson and sky blue used consistently for the two teams, the off-white background with white cards and the same greens on both pitches."
+   },
+   {
+    "id": "F11",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every slide is built from live HTML text and SVG or CSS shapes; no image of the targets (or any raster image) is embedded, traced or used as a background."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-rep-06",
+  "category": "slides",
+  "mode": "replication",
+  "title": "Recreate a four-slide central bank policy report deck",
+  "prompt": "Recreate the four attached slides from the Bank of Arden's November 2026 Monetary Policy Report as one HTML deck with four slides, in order. The style is institutional: white slides with a thin navy bar along the top edge, Open Sans throughout, navy headlines, a maroon kicker and chart numbers, teal as the second accent, a light rule under each headline, a chart label line, a gray sources note, and a footer with the Bank's ring logo and the page number.\n\nSlide 1 is a CPI fan chart: the outturn line from 2022, a shaded projection period with 30%, 60% and 90% maroon bands and a dashed central path, a dashed 2% target line and labeled peak and latest points, a legend below, and on the right three numbered key judgements and two KPI boxes. Slide 2 is a dot plot of committee members' Bank Rate projections for three years and the longer run with median bars and a dashed market path, beside a median-projection table and a note box. Slide 3 is a government bond yield curve with three dated curves, three stat blocks under it and a diverging bar chart of changes by maturity. Slide 4 is a projections table with outturn and previous-report figures, a policy decision text, a balance-of-risks diverging bar chart and the nine-member vote.\n\nDraw everything with HTML, CSS and inline SVG and match positions, sizes, colors, text and numbers as closely as you can.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "slides_spec": {
+   "min_slides": 4,
+   "max_slides": 4
+  },
+  "reference_images": [
+   "slide_1.png",
+   "slide_2.png",
+   "slide_3.png",
+   "slide_4.png"
+  ],
+  "golden": {
+   "entry": "slides.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 1's fan chart matches: a black outturn line from 2022 peaking at 7.4% ('Peak 7.4% (2022 Q3)'), dipping to about 2.6% in 2024 and ending at 'Latest 3.4%' in 2026 Q3, a gray shaded 'PROJECTION' region from 2026 Q4 to 2029 with three nested maroon bands that widen with the horizon (the outer band reaching about 4.7% and -0.4% by 2029) around a dashed central path falling to about 1.9%, a dashed navy '2% target' line, a -1 to 8 axis with titles and year labels 2022-2029."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 1's legend and side panel match: legend items 30%, 60%, 90% of the probability distribution, Outturn and Central projection; 'KEY JUDGEMENTS' with three navy numbered items ('Energy prices fall out of the annual rate', 'Wage growth eases to 3½%', 'A margin of slack opens up') and their descriptions, and two maroon-topped boxes '3.4%' (CPI, September 2026) and '2.0%' (projected, 2028 Q4)."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 2's dot plot matches: columns 2026, 2027, 2028 and a gray-shaded Longer run on a 2.00-4.25 axis, nine navy dots per column at the same levels (2026: six at 3.75 and three at 3.50; 2027: 3.50, two at 3.25, four at 3.00, 2.75, 2.50; and so on), maroon median bars labeled 3.75, 3.00, 2.75 and 2.75, and a dashed teal market path with hollow diamonds at about 3.62, 3.18 and 3.05."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 2's right side matches: 'MEDIAN PROJECTION' table with November / August / Market columns (2026 3.75% / 3.75% / 3.62%, 2027 3.00% / 3.25% / 3.18%, 2028 2.75% / 3.00% / 3.05%, Longer run 2.75% / 3.00% / –) and the navy-bordered 'Current Bank Rate 3.75%' note."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 3's yield chart matches: maturities 3m to 30y on a 3.00-4.75 axis, a solid navy '28 Oct 2026' curve with hollow markers dipping to 'trough 3.27% at 3y' and ending at '4.26%', a dashed teal '3 months earlier' curve and a dotted gray '1 year earlier' curve starting near 4.62%, with the legend below and three navy-topped stats '+95 bp', '-27 bp' and '4.26%' with their captions."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 3's change chart matches: 'CHANGE SINCE JULY, BP' with horizontal bars from a vertical zero line: maroon to the left for 3m -15, 6m -18, 1y -23, 2y -27, 3y -24, 5y -17, 7y -11, 10y -6 and teal to the right for 20y +3 and 30y +6, value labels at the bar ends and 'lower yields' / 'higher yields' captions."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 4's table matches: 'Table 1.A' with columns 2025 outturn (gray shaded) and 2026-2029, rows GDP growth, Unemployment rate, CPI inflation, Core CPI inflation and Bank Rate (Q4) with bold values and bracketed August figures (e.g. CPI 2.8 | 3.3 (3.1) | 2.5 (2.4) | 2.0 (2.1) | 1.9 (2.0); Bank Rate 4.25 | 3.75 (3.75) | 3.05 (3.25) | 3.00 (3.00) | 3.00 (3.00)), and the 'POLICY DECISION' text below it."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 4's right column matches: 'BALANCE OF RISKS TO THE CPI PROJECTION' with six rows (Energy prices, Wage growth, Fiscal policy to the maroon upside; Global demand, Housing market, Exchange rate to the teal downside) of the same lengths on gray and pink half panels with the two direction captions, and 'MPC VOTE, 4 NOVEMBER 2026' with six teal and three maroon circles and the legend 'Hold at 3.75% · 6' / 'Cut to 3.50% · 3'."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The shared chrome matches on all four slides: the navy top bar, 'MONETARY POLICY REPORT · NOVEMBER 2026' kicker, 'Section n' at the top right, the exact headlines, chart labels 'Chart 1.1', 'Chart 1.2', 'Chart 1.3' and 'Table 1.A' with their titles, the sources notes, and the footer rule with the ring logo, 'Bank of Arden' and page numbers 1-4."
+   },
+   {
+    "id": "F10",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and colors match: Open Sans with bold navy headlines, letter-spaced gray section labels over navy rules, maroon for inflation and cuts, teal for market and downside, and white slides with light gray gridlines."
+   },
+   {
+    "id": "F11",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every slide is built from live HTML text and SVG or CSS shapes; no image of the targets (or any raster image) is embedded, traced or used as a background."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-rep-07",
+  "category": "slides",
+  "mode": "replication",
+  "title": "Recreate a three-slide startup Series B pitch deck",
+  "prompt": "Recreate the three attached slides (pages 2-4) from Tessellate's Series B pitch deck as one HTML deck with three slides, in order. The style is a modern startup deck in Inter: heavy tight headlines, a hexagon logo with the 'tessellate' wordmark at the top left, a letter-spaced 'SERIES B · CONFIDENTIAL' label at the top right, a coral numbered kicker above each headline, purple and lavender as the main colors with coral highlights, and a page number at the bottom right.\n\nSlide 1 is on a deep indigo-to-purple diagonal gradient: a large white headline, a lede paragraph, three ruled stat rows with coral figures, nested TAM, SAM and SOM circles on the right, and a sources line. Slide 2 is white: a quarterly ARR bar chart in a rounded card (lavender, purple and a coral final bar, value labels, a dashed growth arrow and a pill), four lavender KPI cards and a grid of eight customer wordmarks. Slide 3 is white: a 2×2 positioning map with competitor bubbles and a highlighted Tessellate bubble, and a feature comparison table with a coral Tessellate column, full, partial and none symbols, a price row and a legend.\n\nDraw everything with HTML, CSS and inline SVG and match positions, sizes, colors, text and numbers as closely as you can.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "slides_spec": {
+   "min_slides": 3,
+   "max_slides": 3
+  },
+  "reference_images": [
+   "slide_1.png",
+   "slide_2.png",
+   "slide_3.png"
+  ],
+  "golden": {
+   "entry": "slides.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 1's left side matches: the white hexagon logo and 'tessellate', the coral '01 · MARKET' kicker, the three-line white headline 'Carbon accounting is a $48B market still run on spreadsheets', the lavender-gray lede about 52,000 companies, and three rows separated by thin rules with coral '74%', '3.1×' and '$19K' and their white descriptions, all on the indigo-to-purple diagonal gradient."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 1's circles match: three bottom-aligned nested circles on the right, the large translucent purple TAM circle ('TAM', '$48B', 'Global carbon and ESG reporting software'), the brighter SAM circle ('$11.2B', 'Mid-market companies in the US and EU') and the solid coral SOM circle ('$1.4B', 'Reachable by 2030'), with the sources line at the bottom left and '02' at the bottom right."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 2's chart matches: a rounded bordered card titled 'Annual recurring revenue by quarter, $M' with 11 bars Q1 24-Q3 26 labeled 0.4, 0.6, 0.9, 1.3, 1.8, 2.3, 3.1, 3.9, 5.2, 7.1 and 9.8 on a 0-10 axis, the first eight lavender, Q1 26 and Q2 26 purple and Q3 26 coral, and a dashed coral curved arrow from Q1 25 to the last bar with a '5.4× in 18 mo' pill."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 2's right side matches: four lavender cards in a 2×2 grid with purple figures '138%' Net revenue retention, '81%' Gross margin, '412' Customers, 61 over $50K and '11 mo' CAC payback, then 'TRUSTED BY' and eight bordered wordmark tiles (NORTHWIND, Helix Foods, ORBITAL, brightpath, KESTREL, Meridian Co., atlas&co, VANTA) in the same styles; the headline reads 'ARR grew 5.4× in 18 months, with best-in-class retention'."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 3's map matches: a light square with dashed midlines, the top-right quadrant tinted lavender and labeled 'AUTOMATED PLATFORM', gray bubbles Emitrack (top left), Sustainly and Carbonly (center left), 'Spreadsheets + consultants' (bottom left, two lines), GreenLedger and ERP add-ons (bottom right), the coral 'Tessellate' bubble with a pale halo in the top-right corner, and the axis titles 'Point solution → Full platform' and 'Manual → Automated'."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 3's table matches: columns Tessellate (coral header, pale coral column), GreenLedger, Emitrack and Carbonly; rows Automated data ingestion (240+ connectors), Scope 3 supplier engine, Audit trail and assurance, CSRD and SEC templates, Real-time dashboards and Carbon removals marketplace with the same coral check, half-filled purple and gray dash symbols in each cell, a price row $19K / $42K / $15K / $9K, and the Full / Partial / None legend."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The shared chrome matches: logo at the top left, 'SERIES B · CONFIDENTIAL' at the top right, coral kickers '01 · MARKET', '02 · TRACTION' and '03 · COMPETITION', the exact headlines, and page numbers 02, 03 and 04."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and colors match: Inter with extra-bold, tightly tracked headlines and figures, deep indigo and purple, lavender cards and coral highlights used in the same roles, rounded corners on cards and tiles."
+   },
+   {
+    "id": "F9",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every slide is built from live HTML text and SVG or CSS shapes; no image of the targets (or any raster image) is embedded, traced or used as a background."
+   }
+  ]
+ },
+ {
+  "task_id": "slides-rep-08",
+  "category": "slides",
+  "mode": "replication",
+  "title": "Recreate a three-slide oncology trial results presentation",
+  "prompt": "Recreate the three attached slides from the LUMEN-2 phase 3 late-breaking presentation at the World Lung Congress as one HTML deck with three slides, in order. The style is a scientific congress deck in Lato: a navy top band with the study name and congress, an orange accent bar beside each heavy navy headline, a gray subtitle, teal for the experimental arm and gray for the control, and a footer with the presenter line and the slide number.\n\nSlide 1 is a Kaplan-Meier chart of progression-free survival (two step curves with censor ticks, dashed median lines with labels, a hazard-ratio box and a number-at-risk table below the axis) beside a legend, a summary table and a note. Slide 2 is a waterfall plot of best change in tumor size for 44 patients colored by best response, with dashed +20% and -30% lines and a row of prior-immunotherapy markers, a response table and a duration-of-response figure. Slide 3 is a swimmer plot of 18 responders with response, progression and ongoing markers, and an adverse-event table with inline bars and a note.\n\nDraw everything with HTML, CSS and inline SVG and match positions, sizes, colors, text and numbers as closely as you can.",
+  "artifact": {
+   "kind": "slides",
+   "entry": "slides.html"
+  },
+  "slides_spec": {
+   "min_slides": 3,
+   "max_slides": 3
+  },
+  "reference_images": [
+   "slide_1.png",
+   "slide_2.png",
+   "slide_3.png"
+  ],
+  "golden": {
+   "entry": "slides.html"
+  },
+  "rubric": [
+   {
+    "id": "F1",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 1's chart matches: a teal step curve staying above a gray one from 100% at month 0 to month 24 on a 0-100 axis with ticks every 3 months, small vertical censor ticks on both curves, dashed drop lines at 50% labeled '8.0 mo' (teal) and '4.1 mo' (gray), the gray curve reaching 0 near month 21, the teal curve ending near 15%, and the bordered box 'HR 0.52 (95% CI 0.41–0.66)' / 'Stratified log-rank p < 0.001' at the top right."
+   },
+   {
+    "id": "F2",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 1's number-at-risk table matches: 'No. at risk' with teal 'Ziravotinib' 206, 153, 113, 80, 55, 36, 17, 8, 6 and gray 'Docetaxel' 203, 122, 67, 31, 15, 7, 4, 0, 0 aligned under months 0-24."
+   },
+   {
+    "id": "F3",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 1's right side matches: the legend (Ziravotinib 160 mg QD (n = 206), Docetaxel 75 mg/m² Q3W (n = 203), Censored), a table with Events 144 (70%) / 182 (90%), Median PFS 8.0 (large teal) / 4.1 (large gray), 95% CI 7.1–9.3 / 3.6–4.8, 12-month PFS rate 38% / 11% and Hazard ratio 0.52 (0.41–0.66), and the teal-bordered 'Consistent benefit' note."
+   },
+   {
+    "id": "F4",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 2's waterfall matches: 44 bars sorted from +38 down to -100 on a +40 to -100 axis: 5 red progressive-disease bars (38, 31, 27, 24, 21), 18 gray stable-disease bars (18 down to -28), 19 teal partial responses (-31 to -88) and 2 navy complete responses at -100, a dashed red '+20% progression' line, a dashed teal '−30% partial response' line, and orange 'Prior IO' squares under the same patients as the target."
+   },
+   {
+    "id": "F5",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 2's right side and legend match: 'Best overall response' table with teal-highlighted Objective response rate 47.7% 21 / 44 and Disease control rate 88.6% 39 / 44 rows and Complete response 4.5% 2, Partial response 43.2% 19, Stable disease 40.9% 18, Progressive disease 11.4% 5; the orange-topped '11.2 months' median duration of response block; and the five-item legend under the chart."
+   },
+   {
+    "id": "F6",
+    "type": "fidelity",
+    "weight": 2,
+    "criterion": "Slide 3's swimmer plot matches: 18 rows labeled 101 to 220, bars on a 0-28 month axis sorted longest first (26.1 months for 101 down to about 6.3 for 220), 101 and 122 navy (CR) and the rest teal (PR), white triangles for first response near months 1-4, red squares at progression on exactly eight rows (115, 136, 150, 164, 178, 192, 206 and 220) and orange arrowheads after the bars of the other ten (ongoing), with the CR / PR / First response / Progression / Ongoing legend."
+   },
+   {
+    "id": "F7",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Slide 3's right side matches: an adverse-event table with rows Diarrhea 48 / 6, Rash 41 / 3, Paronychia 22 / 1, Stomatitis 19 / 2, ALT increased 15 / 4, Fatigue 14 / 1, Neutropenia 9 / 3 (any grade / grade ≥ 3, the latter in teal), a light teal any-grade bar with a darker grade ≥ 3 bar in each row, and the orange-bordered note starting '4.9%'."
+   },
+   {
+    "id": "F8",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "The shared chrome matches: the navy band with orange 'LUMEN-2' then '· Phase 3 · Abstract LBA9012' and 'World Lung Congress 2026 · Vienna' at the right, the orange accent bar, the exact headlines and subtitles, and the footer 'Presented by Dr. Anika Rao · Data cut-off 14 May 2026' with slide numbers 1-3."
+   },
+   {
+    "id": "F9",
+    "type": "fidelity",
+    "weight": 1,
+    "criterion": "Typography and colors match: Lato with black-weight navy headlines and table headers, teal for ziravotinib and responses, gray for docetaxel and stable disease, red for progression and orange accents, on white with light gray rules."
+   },
+   {
+    "id": "F10",
+    "type": "instruction",
+    "weight": 1,
+    "criterion": "Every slide is built from live HTML text and SVG or CSS shapes; no image of the targets (or any raster image) is embedded, traced or used as a background."
+   }
+  ]
+ }
+]

@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Switchyard Status</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html{background:#f5f6f8}
+body{font-family:Inter,sans-serif;color:#101828;font-size:14px;line-height:1.5;background:#f5f6f8;-webkit-font-smoothing:antialiased}
+.mono{font-family:'DejaVu Sans Mono',monospace}
+a{color:inherit;text-decoration:none}
+.wrap{width:1088px;margin:0 auto}
+/* header */
+.top{background:#fff;border-bottom:1px solid #e4e7ec}
+.top-in{height:68px;display:flex;align-items:center;gap:32px}
+.brand{display:flex;align-items:center;gap:10px}
+.wordmark{font-size:19px;font-weight:700;letter-spacing:-0.02em;color:#101828}
+.brand-sub{font-size:12px;font-weight:600;color:#3b5bdb;background:#eef2ff;border:1px solid #c7d2fe;border-radius:999px;padding:2px 10px}
+.links{display:flex;gap:26px;margin-left:auto;font-size:14px;color:#475467;font-weight:500}
+.btn-sub{display:inline-flex;align-items:center;gap:8px;background:#101828;color:#fff;font-weight:600;font-size:14px;padding:9px 16px;border-radius:8px}
+.btn-sub svg{width:16px;height:16px}
+/* intro */
+.intro{display:flex;align-items:flex-end;justify-content:space-between;padding:32px 0 18px}
+.intro h1{font-size:30px;line-height:38px;font-weight:700;letter-spacing:-0.02em}
+.intro p{color:#475467;margin-top:4px;font-size:15px}
+.updated{font-size:12px;color:#667085;background:#fff;border:1px solid #e4e7ec;border-radius:8px;padding:6px 10px;white-space:nowrap}
+/* banner */
+.ib{border-radius:12px;overflow:hidden;border:1px solid #fec84b;background:#fff}
+.ib-head{background:#dc6803;color:#fff;display:flex;align-items:center;gap:14px;padding:16px 24px}
+.ib-head svg{width:28px;height:28px;flex:none}
+.ib-kicker{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;opacity:.9}
+.ib-head h2{font-size:18px;line-height:26px;font-weight:700}
+.ib-pill{margin-left:auto;background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.45);border-radius:999px;font-size:12px;font-weight:600;padding:4px 12px;white-space:nowrap}
+.ib-body{padding:16px 24px 18px;background:#fffcf5}
+.ib-body p{color:#344054;font-size:14px}
+.ib-body .ts{margin-top:8px;font-size:12px;color:#93370d}
+/* maintenance */
+.mt{margin-top:16px;display:flex;gap:16px;align-items:center;background:#eff4ff;border:1px solid #c7d7fe;border-left:4px solid #3b5bdb;border-radius:12px;padding:16px 24px}
+.mt-ic{width:40px;height:40px;border-radius:10px;background:#3b5bdb;display:grid;place-items:center;flex:none}
+.mt-ic svg{width:22px;height:22px}
+.mt-main{flex:1}
+.mt-k{font-size:12px;font-weight:600;color:#3b5bdb;text-transform:uppercase;letter-spacing:.06em}
+.mt-main h3{font-size:16px;font-weight:700;line-height:24px}
+.mt-main p{font-size:13px;color:#475467;margin-top:2px;max-width:560px}
+.mt-when{text-align:right;flex:none}
+.mt-when .d{font-size:12px;color:#475467}
+.mt-when .t{font-size:15px;font-weight:700;color:#1d2939;margin-top:2px}
+.chips{display:flex;gap:6px;margin-top:8px;justify-content:flex-end}
+.chips span{font-size:12px;background:#fff;border:1px solid #c7d7fe;color:#2d3fa0;border-radius:6px;padding:2px 8px;white-space:nowrap}
+/* sections */
+.block{margin-top:36px}
+.sec-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px}
+.sec-head h2{font-size:20px;font-weight:700;letter-spacing:-0.01em}
+.sec-meta{font-size:13px;color:#667085}
+.card{background:#fff;border:1px solid #e4e7ec;border-radius:12px;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+/* components */
+.comp{overflow:hidden}
+.scale,.row{display:grid;grid-template-columns:232px 1fr 84px;gap:24px;align-items:center;padding:0 24px}
+.scale{height:40px;background:#f9fafb;border-bottom:1px solid #e4e7ec;font-size:12px;color:#667085;font-weight:500}
+.scale .rng{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.scale .rng hr{flex:1;border:0;border-top:1px dashed #d0d5dd}
+.scale .d30{display:none}
+.scale .uh{text-align:right}
+.grp{display:flex;align-items:center;gap:12px;padding:10px 24px;background:#fcfcfd;border-bottom:1px solid #eaecf0;border-top:1px solid #eaecf0}
+.grp.first{border-top:0}
+.grp-name{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#344054}
+.grp-meta{font-size:12px;color:#98a2b3}
+.grp .st{margin-left:auto}
+.row{padding-top:9px;padding-bottom:9px;border-bottom:1px solid #f2f4f7}
+.nm{font-size:14px;font-weight:600;line-height:20px}
+.st{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:500;line-height:18px}
+.st .dot{width:8px;height:8px;border-radius:50%}
+.st.ok{color:#067647}.st.ok .dot{background:#17b26a}
+.st.warn{color:#b54708}.st.warn .dot{background:#f79009}
+.bars{display:flex;gap:2px;height:28px}
+.bars i{flex:1;border-radius:2px;background:#17b26a}
+.bars i.a{background:#fdb022}
+.bars i.r{background:#f04438}
+.bars i.n{background:#d0d5dd}
+.up{text-align:right;line-height:18px}
+.up b{display:block;font-size:14px;font-weight:700;font-variant-numeric:tabular-nums}
+.up span{font-size:11.5px;color:#98a2b3}
+.legend{display:flex;gap:22px;padding:12px 24px;font-size:12px;color:#475467;background:#f9fafb}
+.legend span{display:inline-flex;align-items:center;gap:7px}
+.legend i{width:10px;height:10px;border-radius:2px;display:inline-block}
+/* metrics */
+.metrics{display:grid;grid-template-columns:1fr 320px;gap:20px}
+.chart{padding:20px 24px 18px}
+.cc-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:30px}
+.cc-head h3{font-size:16px;font-weight:700}
+.cc-head p{font-size:12.5px;color:#667085}
+.leg{display:flex;gap:18px;font-size:13px;color:#475467}
+.leg span{display:inline-flex;align-items:center;gap:7px}
+.leg i{width:14px;height:3px;border-radius:2px;display:inline-block}
+.leg b{color:#101828;font-weight:700}
+.plot{position:relative;height:232px;margin-left:40px;margin-right:6px}
+.plot-svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.gl{stroke:#eaecf0;stroke-width:1;vector-effect:non-scaling-stroke}
+.tgt{stroke:#f79009;stroke-width:1.5;stroke-dasharray:6 5;vector-effect:non-scaling-stroke}
+.area{fill:#dbe4ff;opacity:.55}
+.l50{fill:none;stroke:#3b5bdb;stroke-width:2.5;vector-effect:non-scaling-stroke;stroke-linejoin:round}
+.l95{fill:none;stroke:#9e77ed;stroke-width:2;vector-effect:non-scaling-stroke;stroke-linejoin:round}
+.yl span{position:absolute;left:-40px;width:32px;text-align:right;transform:translateY(-50%);font-size:11px;color:#98a2b3;font-family:'DejaVu Sans Mono',monospace}
+.xl{position:absolute;left:0;right:0;top:100%;margin-top:8px;display:flex;justify-content:space-between;font-size:11px;color:#98a2b3;font-family:'DejaVu Sans Mono',monospace}
+.xl span{width:0;display:flex;justify-content:center;white-space:nowrap}
+.tgt-l{position:absolute;right:0;top:12.5%;transform:translateY(-120%);font-size:11px;font-weight:600;color:#b54708;background:#fff;padding:0 4px}
+.dotv{position:absolute;left:100%;width:10px;height:10px;border-radius:50%;border:2px solid #fff;transform:translate(-50%,-50%);box-shadow:0 0 0 1px rgba(16,24,40,.08)}
+.ms{font-size:11px;color:#98a2b3;position:absolute;left:-40px;top:-22px}
+.chart-foot{margin-top:34px;padding-top:12px;border-top:1px solid #f2f4f7;display:flex;gap:28px;font-size:12.5px;color:#475467}
+.chart-foot b{color:#101828}
+.stats{display:flex;flex-direction:column;gap:14px}
+.stat{padding:16px 20px}
+.stat .lb{font-size:13px;color:#475467;font-weight:500}
+.stat .big{font-size:26px;font-weight:700;letter-spacing:-0.02em;line-height:34px;margin-top:2px;font-variant-numeric:tabular-nums}
+.stat .sub{font-size:12px;color:#667085;margin-top:2px}
+.prog{height:6px;border-radius:3px;background:#eaecf0;margin-top:10px;overflow:hidden}
+.prog i{display:block;height:100%;width:99.4%;background:#17b26a;border-radius:3px}
+.delta{display:inline-flex;align-items:center;font-size:12px;font-weight:600;color:#b54708;background:#fffaeb;border:1px solid #fedf89;border-radius:999px;padding:1px 8px;margin-left:8px;vertical-align:middle;letter-spacing:0}
+.stack{display:flex;height:8px;border-radius:4px;overflow:hidden;margin-top:10px;gap:2px}
+.stack i{display:block;height:100%}
+.sl{display:flex;gap:12px;margin-top:8px;font-size:11.5px;color:#475467}
+.sl span{display:inline-flex;align-items:center;gap:5px}
+.sl i{width:8px;height:8px;border-radius:2px;display:inline-block}
+/* bottom */
+.bottom{display:grid;grid-template-columns:1fr 320px;column-gap:20px;align-items:start}
+.bottom>.sec-head{grid-column:1;grid-row:1}
+.bottom>.hist{grid-column:1;grid-row:2}
+.bottom>.side{grid-column:2;grid-row:2}
+.hist{padding:4px 24px 8px}
+.day{padding:15px 0;border-bottom:1px solid #f2f4f7}
+.day:last-child{border-bottom:0}
+.day-h{font-size:14px;font-weight:700;color:#101828}
+.none{font-size:13px;color:#98a2b3;margin-top:4px}
+.day.empty{display:flex;align-items:baseline;gap:14px;padding:13px 0}
+.day.empty .none{margin-top:0}
+.inc{margin-top:10px}
+.inc-t{display:flex;align-items:center;gap:10px}
+.inc-title{font-size:15px;font-weight:600}
+.inc-t.minor .inc-title{color:#b54708}
+.inc-t.major .inc-title{color:#d92d20}
+.sev{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;border-radius:4px;padding:1px 6px}
+.sev.minor{background:#fffaeb;color:#b54708;border:1px solid #fedf89}
+.sev.major{background:#fef3f2;color:#d92d20;border:1px solid #fecdca}
+.upd{list-style:none;margin-top:8px;border-left:2px solid #eaecf0;margin-left:4px}
+.upd li{position:relative;padding:0 0 8px 16px;display:flex;gap:18px;align-items:baseline}
+.upd li p{flex:1}
+.upd li:last-child{padding-bottom:0}
+.upd li::before{content:'';position:absolute;left:-6px;top:6px;width:10px;height:10px;border-radius:50%;background:#fff;border:2px solid #d0d5dd}
+.upd li:first-child::before{border-color:#3b5bdb}
+.upd p{font-size:13px;color:#344054;line-height:19px}
+.upd .ts{font-size:11.5px;color:#98a2b3;white-space:nowrap}
+.hist-foot{display:flex;justify-content:space-between;padding:14px 0 10px;border-top:1px solid #f2f4f7;font-size:13px;font-weight:600;color:#3b5bdb}
+.side{display:flex;flex-direction:column;gap:16px}
+.sc{padding:18px 20px}
+.sc h3{font-size:15px;font-weight:700}
+.sc>p{font-size:13px;color:#475467;margin-top:2px}
+.ch{list-style:none;margin-top:12px}
+.ch li{display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid #f2f4f7}
+.ch li:first-child{border-top:0}
+.ch .ic{width:32px;height:32px;border-radius:8px;background:#f2f4f7;display:grid;place-items:center;flex:none}
+.ch .ic svg{width:16px;height:16px}
+.ch .tx{flex:1;line-height:18px}
+.ch .tx b{font-size:13.5px;font-weight:600;display:block}
+.ch .tx span{font-size:12px;color:#667085}
+.ch .ar{color:#98a2b3;font-size:16px}
+.code{margin-top:12px;background:#0c111d;border-radius:8px;padding:12px 14px;font-size:11.5px;line-height:18px;color:#cfd4dc}
+.code .k{color:#9fb4ff}.code .s{color:#75e0a7}.code .c{color:#667085}.code .m{color:#fdb022}
+.btn2{display:inline-block;margin-top:12px;border:1px solid #d0d5dd;border-radius:8px;padding:8px 14px;font-weight:600;font-size:13.5px;color:#344054;background:#fff}
+/* footer */
+.foot{margin-top:40px;background:#fff;border-top:1px solid #e4e7ec}
+.foot-in{display:flex;align-items:center;justify-content:space-between;padding:24px 0 18px}
+.foot-brand{display:flex;align-items:center;gap:10px}
+.foot-brand .logo{width:26px;height:26px}
+.foot-brand b{font-size:15px}
+.foot-brand span{font-size:13px;color:#667085}
+.foot-links{display:flex;gap:22px;font-size:13.5px;color:#475467;font-weight:500}
+.foot-bot{display:flex;justify-content:space-between;padding:14px 0 26px;border-top:1px solid #f2f4f7;font-size:12px;color:#98a2b3}
+
+@media (max-width:640px){
+  .wrap{width:auto;margin:0 16px}
+  .top-in{height:60px;gap:12px}
+  .links{display:none}
+  .btn-sub{margin-left:auto;padding:8px 12px;font-size:13px}
+  .btn-sub .long{display:none}
+  .wordmark{font-size:17px}
+  .intro{display:block;padding:24px 0 16px}
+  .intro h1{font-size:24px;line-height:32px}
+  .intro p{font-size:14px}
+  .updated{display:inline-block;margin-top:10px}
+  .ib-head{padding:14px 16px;align-items:flex-start;flex-wrap:wrap;gap:10px}
+  .ib-head h2{font-size:16px;line-height:23px}
+  .ib-head>div{flex:1 1 250px;min-width:0}
+  .ib-pill{margin-left:38px}
+  .ib-body{padding:14px 16px}
+  .mt{flex-wrap:wrap;padding:14px 16px;align-items:flex-start}
+  .mt-main{flex:1 1 200px}
+  .mt-when{text-align:left;width:100%;padding-left:56px}
+  .chips{justify-content:flex-start;flex-wrap:wrap}
+  .block{margin-top:32px}
+  .sec-head{display:block}
+  .sec-meta{margin-top:2px}
+  .scale,.row{grid-template-columns:1fr auto;gap:8px 12px;padding:0 16px}
+  .scale{height:36px;grid-template-columns:1fr}
+  .scale .lbl,.scale .uh{display:none}
+  .scale .d90{display:none}
+  .scale .d30{display:inline}
+  .row{padding-top:12px;padding-bottom:14px}
+  .bars{grid-column:1/-1;grid-row:2;height:28px}
+  .bars i:nth-child(-n+60){display:none}
+  .up b{display:inline;font-size:13px}
+  .up span{display:none}
+  .grp{padding:10px 16px;flex-wrap:wrap;gap:4px 10px}
+  .grp-meta{display:none}
+  .legend{flex-wrap:wrap;gap:8px 16px;padding:12px 16px}
+  .metrics,.bottom{grid-template-columns:1fr}
+  .bottom>.side{grid-column:1;grid-row:3;margin-top:16px}
+  .upd li{display:block}
+  .inc-t{display:block}
+  .inc-t .sev{display:inline-block;margin-left:8px;vertical-align:2px}
+  .upd .ts{margin-top:1px}
+  .day.empty{display:block;padding:15px 0}
+  .day.empty .none{margin-top:4px}
+  .chart{padding:16px}
+  .cc-head{display:block}
+  .leg{margin-top:10px}
+  .plot{height:180px;margin-left:34px}
+  .yl span{left:-34px;width:28px}
+  .ms{left:-34px}
+  .xl span:nth-child(even){visibility:hidden}
+  .chart-foot{flex-wrap:wrap;gap:6px 18px}
+  .hist{padding:4px 16px 8px}
+  .foot-in{display:block}
+  .foot-brand{flex-wrap:wrap;row-gap:6px}
+  .foot-brand span{width:100%}
+  .foot-links{margin-top:14px;flex-wrap:wrap;gap:10px 18px}
+  .foot-bot{display:block}
+  .foot-bot div+div{margin-top:4px}
+}
+</style>
+</head>
+<body>
+<header class="top"><div class="wrap top-in">
+ <a class="brand" href="#"><svg class="logo" viewBox="0 0 32 32" width="32" height="32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#3b5bdb"/><path d="M6 21h20" stroke="#fff" stroke-width="2.6" stroke-linecap="round" fill="none"/><path d="M6 21h5c4 0 6-10 10-10h5" stroke="#9fb4ff" stroke-width="2.6" stroke-linecap="round" fill="none"/><circle cx="11" cy="21" r="2.6" fill="#fff"/></svg><span class="wordmark">Switchyard</span><span class="brand-sub">Status</span></a>
+ <nav class="links"><a href="#">Docs</a><a href="#">API reference</a><a href="#">Support</a><a href="#">switchyard.io ↗</a></nav>
+ <a class="btn-sub" href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg><span>Subscribe<span class="long"> to updates</span></span></a>
+</div></header>
+
+<main>
+<section class="wrap intro">
+ <div><h1>System status</h1><p>Live and historical availability of the Switchyard SMS, voice, email and webhook APIs.</p></div>
+ <div class="updated mono">Updated Sep 24, 2026 · 14:40 UTC</div>
+</section>
+
+<section class="wrap">
+ <div class="ib">
+  <div class="ib-head"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg><div><div class="ib-kicker">Active incident · Minor</div><h2>Degraded performance: SMS delivery to UK numbers</h2></div><span class="ib-pill">Identified</span></div>
+  <div class="ib-body"><p><b>Identified</b> — A carrier partner is intermittently rejecting traffic to UK mobile numbers. We are rerouting messages through a secondary carrier; some messages may arrive late.</p>
+  <div class="mono ts">Posted Sep 24, 2026 · 14:32 UTC · Affects SMS · United Kingdom</div></div>
+ </div>
+ <div class="mt">
+  <div class="mt-ic"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.8-3.8a6 6 0 0 1-7.9 7.9l-6.9 6.9a2.1 2.1 0 0 1-3-3l6.9-6.9a6 6 0 0 1 7.9-7.9l-3.8 3.8z"/></svg></div>
+  <div class="mt-main"><div class="mt-k">Scheduled maintenance</div><h3>Voice media server upgrade in the EU region</h3><p>Calls in progress will not be dropped. New inbound calls to EU numbers may take up to 3 seconds longer to connect.</p></div>
+  <div class="mt-when"><div class="d mono">Tue, Sep 29, 2026</div><div class="t mono">02:00–04:00 UTC</div><div class="chips"><span>Inbound calls &amp; IVR</span><span>Outbound calls</span></div></div>
+ </div>
+</section>
+
+<section class="wrap block">
+ <div class="sec-head"><h2>Components</h2><div class="sec-meta">Daily uptime for the past 90 days · 99.96% overall</div></div>
+ <div class="card comp">
+  <div class="scale"><span class="lbl">Component</span><span class="rng"><span class="d90">90 days ago</span><span class="d30">30 days ago</span><hr><span>Today</span></span><span class="uh">Uptime</span></div>
+<div class="grp first"><div class="grp-name">Core platform</div><div class="grp-meta">3 components</div><span class="st ok"><span class="dot"></span>Operational</span></div>
+<div class="row"><div class="c-name"><div class="nm">REST API</div><span class="st ok"><span class="dot"></span>Operational</span></div><div class="bars"><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i></div><div class="up"><b>99.99%</b><span>uptime</span></div></div>
+<div class="row"><div class="c-name"><div class="nm">Dashboard</div><span class="st ok"><span class="dot"></span>Operational</span></div><div class="bars"><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="r"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i></div><div class="up"><b>99.97%</b><span>uptime</span></div></div>
+<div class="row"><div class="c-name"><div class="nm">Authentication</div><span class="st ok"><span class="dot"></span>Operational</span></div><div class="bars"><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i></div><div class="up"><b>100.00%</b><span>uptime</span></div></div>
+<div class="grp"><div class="grp-name">Messaging</div><div class="grp-meta">4 components · 1 degraded</div><span class="st warn"><span class="dot"></span>Degraded performance</span></div>
+<div class="row"><div class="c-name"><div class="nm">SMS · United States</div><span class="st ok"><span class="dot"></span>Operational</span></div><div class="bars"><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i></div><div class="up"><b>99.98%</b><span>uptime</span></div></div>
+<div class="row"><div class="c-name"><div class="nm">SMS · United Kingdom</div><span class="st warn"><span class="dot"></span>Degraded performance</span></div><div class="bars"><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="a"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="r"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i></div><div class="up"><b>99.71%</b><span>uptime</span></div></div>
+<div class="row"><div class="c-name"><div class="nm">SMS · European Union</div><span class="st ok"><span class="dot"></span>Operational</span></div><div class="bars"><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i></div><div class="up"><b>99.95%</b><span>uptime</span></div></div>
+<div class="row"><div class="c-name"><div class="nm">MMS</div><span class="st ok"><span class="dot"></span>Operational</span></div><div class="bars"><i class="n"></i><i class="n"></i><i class="n"></i><i class="n"></i><i class="n"></i><i class="n"></i><i class="n"></i><i class="n"></i><i class="n"></i><i class="n"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="r"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i></div><div class="up"><b>99.93%</b><span>uptime</span></div></div>
+<div class="grp"><div class="grp-name">Voice</div><div class="grp-meta">2 components</div><span class="st ok"><span class="dot"></span>Operational</span></div>
+<div class="row"><div class="c-name"><div class="nm">Outbound calls</div><span class="st ok"><span class="dot"></span>Operational</span></div><div class="bars"><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i></div><div class="up"><b>99.99%</b><span>uptime</span></div></div>
+<div class="row"><div class="c-name"><div class="nm">Inbound calls & IVR</div><span class="st ok"><span class="dot"></span>Operational</span></div><div class="bars"><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i></div><div class="up"><b>99.96%</b><span>uptime</span></div></div>
+<div class="grp"><div class="grp-name">Email</div><div class="grp-meta">1 component</div><span class="st ok"><span class="dot"></span>Operational</span></div>
+<div class="row"><div class="c-name"><div class="nm">Transactional email</div><span class="st ok"><span class="dot"></span>Operational</span></div><div class="bars"><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="r"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="g"></i><i class="g"></i><i class="g"></i></div><div class="up"><b>99.94%</b><span>uptime</span></div></div>
+<div class="grp"><div class="grp-name">Webhooks</div><div class="grp-meta">1 component</div><span class="st ok"><span class="dot"></span>Operational</span></div>
+<div class="row"><div class="c-name"><div class="nm">Event delivery</div><span class="st ok"><span class="dot"></span>Operational</span></div><div class="bars"><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i class="r"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="r"></i><i class="g"></i><i class="g"></i><i class="g"></i></div><div class="up"><b>99.90%</b><span>uptime</span></div></div>
+  <div class="legend"><span><i style="background:#17b26a"></i>No downtime</span><span><i style="background:#fdb022"></i>Partial outage or degraded</span><span><i style="background:#f04438"></i>Major outage</span><span><i style="background:#d0d5dd"></i>No data</span></div>
+ </div>
+</section>
+
+<section class="wrap block">
+ <div class="sec-head"><h2>System metrics</h2><div class="sec-meta">Last 24 hours · all times UTC</div></div>
+ <div class="metrics">
+  <div class="card chart">
+   <div class="cc-head"><div><h3>API response time</h3><p>REST API · all regions · 1-hour buckets</p></div>
+    <div class="leg"><span><i style="background:#3b5bdb"></i>p50 <b>118 ms</b></span><span><i style="background:#9e77ed"></i>p95 <b>286 ms</b></span></div></div>
+   <div class="plot">
+    <span class="ms">ms</span>
+    <div class="yl"><span style="top:0%">400</span><span style="top:25%">300</span><span style="top:50%">200</span><span style="top:75%">100</span><span style="top:100%">0</span></div>
+    <svg class="plot-svg" viewBox="0 0 240 100" preserveAspectRatio="none" aria-hidden="true"><line x1="0" x2="240" y1="0" y2="0" class="gl"/><line x1="0" x2="240" y1="25" y2="25" class="gl"/><line x1="0" x2="240" y1="50" y2="50" class="gl"/><line x1="0" x2="240" y1="75" y2="75" class="gl"/><line x1="0" x2="240" y1="100" y2="100" class="gl"/><line x1="0" x2="240" y1="12.5" y2="12.5" class="tgt"/><polygon class="area" points="0,100 0,72 10,73 20,73.75 30,74.25 40,74.75 50,74 60,72.5 70,69.75 80,66.5 90,64.5 100,65.5 110,67.25 120,68.25 130,67.75 140,66 150,64 160,62.25 170,65.25 180,68 190,69.5 200,70.75 210,71.5 220,71 230,69.75 240,70.5 240,100"/><polyline class="l95" points="0,38 10,41 20,42.75 30,44.75 40,45.5 50,43.5 60,39.75 70,33 80,24.75 90,18.25 100,22 110,26 120,29 130,27.75 140,23.75 150,17.25 160,15.5 170,20.5 180,27.25 190,31 200,33.75 210,35.25 220,32.25 230,26.5 240,28.5"/><polyline class="l50" points="0,72 10,73 20,73.75 30,74.25 40,74.75 50,74 60,72.5 70,69.75 80,66.5 90,64.5 100,65.5 110,67.25 120,68.25 130,67.75 140,66 150,64 160,62.25 170,65.25 180,68 190,69.5 200,70.75 210,71.5 220,71 230,69.75 240,70.5"/></svg>
+    <span class="tgt-l">p95 target 350 ms</span>
+    <span class="dotv" style="top:28.5%;background:#9e77ed"></span>
+    <span class="dotv" style="top:70.5%;background:#3b5bdb"></span>
+    <div class="xl"><span>14:00</span><span>18:00</span><span>22:00</span><span>02:00</span><span>06:00</span><span>10:00</span><span>14:00</span></div>
+   </div>
+   <div class="chart-foot"><span>Peak p95 <b>338 ms</b> at 06:00</span><span>Lowest p50 <b>101 ms</b> at 18:00</span><span>Requests <b>92.6M</b></span></div>
+  </div>
+  <div class="stats">
+   <div class="card stat"><div class="lb">Webhook delivery rate</div><div class="big">99.982%</div><div class="sub">1,204,388 of 1,204,605 events on the first try</div><div class="prog"><i></i></div></div>
+   <div class="card stat"><div class="lb">SMS delivered within 5 s</div><div class="big">97.4%<span class="delta">▼ 1.2 pts</span></div><div class="sub">vs 7-day average of 98.6% · UK traffic rerouted</div></div>
+   <div class="card stat"><div class="lb">Messages processed today</div><div class="big">48.2M</div>
+    <div class="stack"><i style="width:65.6%;background:#3b5bdb"></i><i style="width:30.9%;background:#9e77ed"></i><i style="width:3.5%;background:#36bffa"></i></div>
+    <div class="sl"><span><i style="background:#3b5bdb"></i>SMS 31.6M</span><span><i style="background:#9e77ed"></i>Email 14.9M</span><span><i style="background:#36bffa"></i>MMS 1.7M</span></div></div>
+  </div>
+ </div>
+</section>
+
+<section class="wrap block">
+ <div class="bottom">
+   <div class="sec-head"><h2>Past incidents</h2><div class="sec-meta">Last 7 days</div></div>
+   <div class="card hist">
+<div class="day"><h3 class="day-h">Sep 24, 2026</h3>
+<div class="inc"><div class="inc-t minor"><span class="inc-title">Degraded SMS delivery to UK numbers</span><span class="sev minor">Minor</span></div><ol class="upd">
+<li><p><b>Identified</b> — A carrier partner is intermittently rejecting traffic to UK mobile numbers. We are rerouting messages through a secondary carrier; some messages may arrive late.</p><div class="mono ts">Sep 24, 14:32 UTC</div></li>
+<li><p><b>Investigating</b> — We are seeing elevated delivery failures for SMS sent to +44 numbers.</p><div class="mono ts">Sep 24, 13:58 UTC</div></li>
+</ol></div>
+</div>
+<div class="day empty"><h3 class="day-h">Sep 23, 2026</h3>
+<p class="none">No incidents reported.</p>
+</div>
+<div class="day empty"><h3 class="day-h">Sep 22, 2026</h3>
+<p class="none">No incidents reported.</p>
+</div>
+<div class="day"><h3 class="day-h">Sep 21, 2026</h3>
+<div class="inc"><div class="inc-t minor"><span class="inc-title">Slow transactional email sends</span><span class="sev minor">Minor</span></div><ol class="upd">
+<li><p><b>Resolved</b> — Send latency returned to normal after a database failover.</p><div class="mono ts">Sep 21, 16:20 UTC</div></li>
+<li><p><b>Investigating</b> — Calls to /v2/email/send are taking longer than usual.</p><div class="mono ts">Sep 21, 15:41 UTC</div></li>
+</ol></div>
+<div class="inc"><div class="inc-t major"><span class="inc-title">Webhook event delivery delays</span><span class="sev major">Major</span></div><ol class="upd">
+<li><p><b>Resolved</b> — The queue backlog drained at 10:47 UTC and every delayed event was delivered in order.</p><div class="mono ts">Sep 21, 10:52 UTC</div></li>
+<li><p><b>Monitoring</b> — A fix has been deployed and delivery latency is returning to normal.</p><div class="mono ts">Sep 21, 10:05 UTC</div></li>
+<li><p><b>Investigating</b> — Webhook events are being delivered with delays of up to 25 minutes.</p><div class="mono ts">Sep 21, 09:12 UTC</div></li>
+</ol></div>
+</div>
+<div class="day empty"><h3 class="day-h">Sep 20, 2026</h3>
+<p class="none">No incidents reported.</p>
+</div>
+<div class="day"><h3 class="day-h">Sep 19, 2026</h3>
+<div class="inc"><div class="inc-t minor"><span class="inc-title">Elevated SMS latency in the EU</span><span class="sev minor">Minor</span></div><ol class="upd">
+<li><p><b>Resolved</b> — Latency returned to normal after we scaled the EU routing tier.</p><div class="mono ts">Sep 19, 18:09 UTC</div></li>
+<li><p><b>Investigating</b> — Messages to EU numbers are taking up to 40 seconds to be handed to carriers.</p><div class="mono ts">Sep 19, 17:31 UTC</div></li>
+</ol></div>
+</div>
+<div class="day empty"><h3 class="day-h">Sep 18, 2026</h3>
+<p class="none">No incidents reported.</p>
+</div>
+    <div class="hist-foot"><span>← Incident history</span><span>Uptime report for August →</span></div>
+   </div>
+  <aside class="side">
+   <div class="card sc"><h3>Get notified</h3><p>Choose how you hear about incidents and maintenance.</p>
+    <ul class="ch">
+     <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#475467" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg></span><span class="tx"><b>Email</b><span>Incidents and maintenance</span></span><span class="ar">›</span></li>
+     <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#475467" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span><span class="tx"><b>Text message</b><span>Major outages only</span></span><span class="ar">›</span></li>
+     <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#475467" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg></span><span class="tx"><b>Webhook</b><span>JSON on every update</span></span><span class="ar">›</span></li>
+     <li><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#475467" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/></svg></span><span class="tx"><b>RSS &amp; Atom</b><span>For feed readers</span></span><span class="ar">›</span></li>
+    </ul></div>
+   <div class="card sc"><h3>Status API</h3><p>Poll the current status from your own tools.</p>
+    <div class="code mono"><span class="k">GET</span> /api/v2/summary.json<br><span class="c">// 200 OK</span><br>{ <span class="s">"indicator"</span>: <span class="m">"minor"</span>,<br>&nbsp;&nbsp;<span class="s">"degraded"</span>: <span class="m">1</span>,<br>&nbsp;&nbsp;<span class="s">"components"</span>: <span class="m">11</span> }</div></div>
+   <div class="card sc"><h3>Need help?</h3><p>Our support team is on call 24/7 for accounts on the Scale plan.</p><a class="btn2" href="#">Contact support</a></div>
+  </aside>
+ </div>
+</section>
+</main>
+
+<footer class="foot"><div class="wrap">
+ <div class="foot-in"><div class="foot-brand"><svg class="logo" viewBox="0 0 32 32" width="32" height="32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#3b5bdb"/><path d="M6 21h20" stroke="#fff" stroke-width="2.6" stroke-linecap="round" fill="none"/><path d="M6 21h5c4 0 6-10 10-10h5" stroke="#9fb4ff" stroke-width="2.6" stroke-linecap="round" fill="none"/><circle cx="11" cy="21" r="2.6" fill="#fff"/></svg><b>Switchyard</b><span>Communications APIs for SMS, voice and email</span></div>
+  <nav class="foot-links"><a href="#">switchyard.io</a><a href="#">Docs</a><a href="#">Support</a><a href="#">Privacy</a><a href="#">Terms</a></nav></div>
+ <div class="foot-bot"><div>© 2026 Switchyard Communications, Inc.</div><div class="mono">All times UTC · Powered by Switchyard Status</div></div>
+</div></footer>
+</body>
+</html>

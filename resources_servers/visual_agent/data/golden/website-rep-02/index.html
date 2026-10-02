@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Northern Ledger · Business, markets and the economy</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:#ffffff}
+body{font-family:'Roboto',sans-serif;color:#141414;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+.wrap{max-width:1280px;margin:0 auto;padding:0 48px}
+.serif{font-family:'Liberation Serif',serif}
+.kick{font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#b3261e}
+.meta{font-size:13px;color:#6e6a63}
+
+/* utility */
+.util{height:44px;display:flex;align-items:center;justify-content:space-between;font-size:13px;color:#4a4740;border-bottom:1px solid #ebe8e2}
+.util .l{display:flex;gap:18px;align-items:center}
+.util .l b{font-weight:700;color:#141414}
+.util .r{display:flex;gap:16px;align-items:center}
+.sub{height:30px;padding:0 14px;border-radius:4px;background:#b3261e;color:#ffffff;font-weight:700;font-size:12px;letter-spacing:0.04em;text-transform:uppercase;display:flex;align-items:center}
+.login{font-weight:500}
+
+/* masthead */
+.mast{display:grid;grid-template-columns:220px 1fr 220px;align-items:center;padding:22px 0 16px}
+.mast .side{display:flex;align-items:center;gap:10px;font-size:13px;color:#4a4740}
+.mast .side.right{justify-content:flex-end;text-align:right}
+.mast .side b{display:block;font-size:14px;color:#141414}
+.logo{text-align:center}
+.logo h1{font-family:'Liberation Serif',serif;font-size:62px;line-height:1;font-weight:700;letter-spacing:-0.01em}
+.logo p{margin-top:8px;font-size:11px;font-weight:500;letter-spacing:0.18em;text-transform:uppercase;color:#6e6a63}
+.secnav{border-top:1px solid #141414;border-bottom:3px double #141414;height:46px;display:flex;align-items:center;justify-content:center;gap:30px;font-size:14px;font-weight:500;color:#2b2925;scrollbar-width:none}
+.secnav::-webkit-scrollbar{display:none}
+.secnav a{white-space:nowrap}
+.secnav a.on{color:#b3261e;font-weight:700}
+
+/* ticker */
+.tick{margin-top:14px;display:grid;grid-template-columns:repeat(7,1fr);background:#f5f3ef;border-radius:6px}
+.tick div{padding:10px 14px;font-size:12px;line-height:1.35;color:#4a4740}
+.tick div+div{border-left:1px solid #e3dfd8}
+.tick b{display:block;font-size:14px;color:#141414;font-weight:700}
+.up{color:#0a7d3b;font-weight:700}
+.dn{color:#c0392b;font-weight:700}
+
+/* top grid */
+.top{margin-top:24px;display:grid;grid-template-columns:272px 1fr 296px}
+.col-l{padding-right:28px}
+.col-c{padding:0 28px;border-left:1px solid #e3dfd8;border-right:1px solid #e3dfd8}
+.col-r{padding-left:28px}
+.story{padding-bottom:18px}
+.story+.story{padding-top:18px;border-top:1px solid #e3dfd8}
+.story h3{margin-top:6px;font-family:'Liberation Serif',serif;font-size:23px;line-height:1.15;font-weight:700}
+.story p{margin-top:8px;font-family:'Liberation Serif',serif;font-size:16px;line-height:1.45;color:#3a3833}
+.story .meta{margin-top:8px}
+.lead-art{display:block;width:100%;height:auto;border-radius:2px}
+.cap{margin-top:6px;font-size:12px;color:#6e6a63}
+.lead h2{margin-top:14px;font-family:'Liberation Serif',serif;font-size:40px;line-height:1.08;font-weight:700;letter-spacing:-0.01em}
+.lead .dek{margin-top:10px;font-family:'Liberation Serif',serif;font-size:19px;line-height:1.45;color:#3a3833}
+.lead .by{margin-top:12px;display:flex;align-items:center;gap:10px}
+.live{height:22px;padding:0 8px;border-radius:3px;background:#b3261e;color:#ffffff;font-size:11px;font-weight:700;letter-spacing:0.06em;display:inline-flex;align-items:center;gap:6px}
+.live:before{content:"";width:6px;height:6px;border-radius:50%;background:#ffffff}
+.related{margin-top:16px;padding-top:14px;border-top:1px solid #e3dfd8;display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.related a{font-family:'Liberation Serif',serif;font-size:16px;line-height:1.3;font-weight:700}
+
+.box{border-top:3px solid #141414;padding-top:10px}
+.box h4{font-size:13px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase}
+.idx{margin-top:10px;display:flex;align-items:baseline;justify-content:space-between}
+.idx b{font-size:22px;font-weight:700}
+.idx span{font-size:14px}
+.spark{display:block;width:100%;height:auto;margin-top:6px}
+.mv{margin-top:10px;width:100%;border-collapse:collapse;font-size:13px}
+.mv th{text-align:left;font-size:11px;font-weight:500;color:#6e6a63;text-transform:uppercase;letter-spacing:0.06em;padding:6px 0;border-bottom:1px solid #e3dfd8}
+.mv td{padding:8px 0;border-bottom:1px solid #efece6}
+.mv td:nth-child(n+2),.mv th:nth-child(n+2){text-align:right}
+.mv td b{font-weight:700}
+.nl{margin-top:22px;padding:16px;background:#f5f3ef;border-radius:6px}
+.nl h5{font-family:'Liberation Serif',serif;font-size:19px;font-weight:700}
+.nl p{margin-top:6px;font-size:13px;line-height:1.45;color:#4a4740}
+.nl span{margin-top:12px;height:34px;border-radius:4px;background:#141414;color:#ffffff;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center}
+
+/* section rows */
+.sech{margin-top:36px;display:flex;align-items:center;gap:14px;border-top:3px solid #141414;padding-top:10px}
+.sech h3{font-size:15px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase}
+.sech a{margin-left:auto;font-size:13px;font-weight:500;color:#b3261e}
+.biz{margin-top:16px;display:grid;grid-template-columns:repeat(4,1fr);gap:28px}
+.biz .th{display:block;width:100%;height:auto;border-radius:2px}
+.biz h4{margin-top:10px;font-family:'Liberation Serif',serif;font-size:19px;line-height:1.2;font-weight:700}
+.biz .meta{margin-top:6px}
+.biz .kick{margin-top:14px}
+
+.low{margin-top:36px;display:grid;grid-template-columns:1.25fr 1fr 0.85fr;gap:36px}
+.op{display:flex;gap:14px;padding:14px 0;border-bottom:1px solid #e3dfd8}
+.op:first-of-type{padding-top:4px}
+.av{flex:none;width:52px;height:52px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;color:#ffffff}
+.op h4{font-family:'Liberation Serif',serif;font-style:italic;font-size:20px;line-height:1.2;font-weight:700}
+.op .meta{margin-top:5px}
+.op .meta b{color:#141414;font-weight:700}
+.chart-t{margin-top:4px;font-family:'Liberation Serif',serif;font-size:19px;font-weight:700;line-height:1.25}
+.chart-s{margin-top:4px;font-size:12px;color:#6e6a63}
+.bars{display:block;width:100%;height:auto;margin-top:12px}
+.src{margin-top:8px;font-size:11px;color:#8a867e}
+.mr{list-style:none;counter-reset:mr}
+.mr li{display:flex;gap:14px;padding:12px 0;border-bottom:1px solid #e3dfd8;font-family:'Liberation Serif',serif;font-size:17px;line-height:1.25;font-weight:700}
+.mr li:before{counter-increment:mr;content:counter(mr);font-family:'Liberation Serif',serif;font-size:30px;line-height:0.9;font-weight:700;color:#b3261e;width:20px;flex:none}
+
+/* footer */
+.foot{margin-top:44px;background:#141414;color:#c9c5bd}
+.foot .wrap{padding-top:36px;padding-bottom:28px}
+.fg{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr 1fr;gap:32px}
+.fg .fl{font-family:'Liberation Serif',serif;font-size:28px;font-weight:700;color:#ffffff;line-height:1.05}
+.fg p{margin-top:10px;font-size:13px;line-height:1.5;color:#9b978f}
+.fg h6{font-size:12px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#ffffff}
+.fg ul{list-style:none;margin-top:12px;display:grid;gap:8px;font-size:13px}
+.copy{margin-top:28px;padding-top:18px;border-top:1px solid #333029;display:flex;justify-content:space-between;font-size:12px;color:#8a867e}
+
+@media (max-width:760px){
+  .wrap{padding:0 16px}
+  .util .l{display:none}
+  .util{justify-content:flex-end}
+  .mast{grid-template-columns:1fr;padding:18px 0 12px}
+  .mast .side{display:none}
+  .logo h1{font-size:36px}
+  .logo p{font-size:9px;letter-spacing:0.14em}
+  .secnav{justify-content:flex-start;gap:22px;overflow-x:auto;padding:0 2px;height:42px;font-size:13px}
+  .tick{grid-template-columns:1fr 1fr}
+  .tick div+div{border-left:0}
+  .tick div:nth-child(2n){border-left:1px solid #e3dfd8}
+  .tick div:nth-child(n+3){border-top:1px solid #e3dfd8}
+  .tick div:nth-child(7){display:none}
+  .top{grid-template-columns:1fr;margin-top:18px}
+  .col-c{order:-1;padding:0 0 20px;border:0;border-bottom:1px solid #e3dfd8}
+  .col-l{padding:18px 0 0}
+  .col-r{padding:10px 0 0}
+  .lead h2{font-size:30px}
+  .lead .dek{font-size:17px}
+  .related{grid-template-columns:1fr;gap:10px}
+  .story h3{font-size:21px}
+  .biz{grid-template-columns:1fr;gap:0}
+  .biz article{display:grid;grid-template-columns:120px 1fr;gap:14px;padding:14px 0;border-bottom:1px solid #e3dfd8}
+  .biz h4{margin-top:4px;font-size:17px}
+  .biz .kick{margin-top:0}
+  .low{grid-template-columns:1fr;gap:28px}
+  .fg{grid-template-columns:1fr 1fr;gap:24px}
+  .fg .fb{grid-column:1 / -1}
+  .copy{flex-direction:column;gap:6px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="util">
+    <div class="l"><b>Thursday, September 24, 2026</b><span>Today’s Paper</span><span>Toronto Edition</span></div>
+    <div class="r"><a class="sub" href="#">Subscribe for $1/week</a><a class="login" href="#">Log in</a></div>
+  </div>
+
+  <header class="mast">
+    <div class="side">
+      <svg width="20" height="20" viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="6" fill="none" stroke="#141414" stroke-width="2"/><path d="M13 13l5 5" stroke="#141414" stroke-width="2" stroke-linecap="round"/></svg>
+      <svg width="20" height="16" viewBox="0 0 20 16"><path d="M1 2h18M1 8h18M1 14h18" stroke="#141414" stroke-width="2" stroke-linecap="round"/></svg>
+      <span>Sections</span>
+    </div>
+    <div class="logo"><h1>The Northern Ledger</h1><p>Business, markets and the economy since 1894</p></div>
+    <div class="side right">
+      <div><b>Toronto 14°C</b><span>Cloudy, high 17°</span></div>
+      <svg width="34" height="24" viewBox="0 0 34 24"><circle cx="12" cy="9" r="6" fill="#f2b632"/><path d="M9 22h18a6 6 0 0 0 0-12 8 8 0 0 0-15 2 5 5 0 0 0-3 10z" fill="#c9ced6"/></svg>
+    </div>
+  </header>
+
+  <nav class="secnav"><a href="#">World</a><a class="on" href="#">Business</a><a href="#">Markets</a><a href="#">Technology</a><a href="#">Climate</a><a href="#">Real Estate</a><a href="#">Opinion</a><a href="#">Culture</a><a href="#">Podcasts</a></nav>
+
+  <div class="tick">
+    <div>S&amp;P 500<b>5,812.40</b><span class="up">▲ 0.62%</span></div>
+    <div>Nasdaq<b>18,904.11</b><span class="up">▲ 1.04%</span></div>
+    <div>Dow<b>42,318.77</b><span class="dn">▼ 0.18%</span></div>
+    <div>S&amp;P/TSX<b>24,105.30</b><span class="up">▲ 0.41%</span></div>
+    <div>10-yr yield<b>3.87%</b><span class="dn">▼ 0.04</span></div>
+    <div>Brent crude<b>$71.26</b><span class="dn">▼ 1.35%</span></div>
+    <div>USD/CAD<b>1.3642</b><span class="up">▲ 0.12%</span></div>
+  </div>
+
+  <section class="top">
+    <div class="col-l">
+      <article class="story">
+        <div class="kick">Banking</div>
+        <h3>Bank of Canada signals a pause after four straight cuts</h3>
+        <p>Governor says inflation is back near target, but warns that housing could reignite price pressure.</p>
+        <div class="meta">By Daniel Osei · 5 min read</div>
+      </article>
+      <article class="story">
+        <div class="kick">Energy</div>
+        <h3>Oil slides as OPEC+ weighs faster output hikes</h3>
+        <p>Brent falls for a third session as traders price in a supply surplus next spring.</p>
+        <div class="meta">By Hannah Leclerc · 4 min read</div>
+      </article>
+      <article class="story">
+        <div class="kick">Retail</div>
+        <h3>Grocers bet on smaller stores in the suburbs</h3>
+        <div class="meta">By Marcus Webb · 3 min read</div>
+      </article>
+    </div>
+
+    <div class="col-c lead">
+      <svg class="lead-art" viewBox="0 0 640 360" aria-label="Illustration of a container port at dusk">
+        <defs>
+          <linearGradient id="dusk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2b3a55"/><stop offset="0.55" stop-color="#d9826a"/><stop offset="1" stop-color="#f3c98b"/></linearGradient>
+          <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#34506b"/><stop offset="1" stop-color="#1c2c3e"/></linearGradient>
+        </defs>
+        <rect width="640" height="360" fill="url(#dusk)"/>
+        <circle cx="470" cy="218" r="40" fill="#fbe2b0"/>
+        <g fill="#6b5a6e" opacity="0.7"><rect x="20" y="196" width="26" height="44"/><rect x="50" y="178" width="18" height="62"/><rect x="72" y="204" width="30" height="36"/><rect x="106" y="188" width="16" height="52"/><rect x="560" y="200" width="22" height="40"/><rect x="586" y="186" width="30" height="54"/></g>
+        <rect y="240" width="640" height="120" fill="url(#sea)"/>
+        <g stroke="#f3c98b" stroke-width="2" opacity="0.5"><path d="M430 262h80M444 278h52M422 296h96M452 314h36"/></g>
+        <g stroke="#1b2432" stroke-width="5" fill="none" stroke-linecap="square">
+          <path d="M150 240V92h118M150 110l40-18M246 92v52M196 92v18"/>
+          <path d="M330 240V70h136M330 88l44-18M442 70v70M384 70v18"/>
+        </g>
+        <g stroke="#1b2432" stroke-width="2"><path d="M246 144v26M442 140v30"/></g>
+        <path d="M120 250h420l-26 38H150z" fill="#1b2432"/>
+        <rect x="150" y="252" width="360" height="6" fill="#b3261e"/>
+        <g>
+          <rect x="170" y="214" width="46" height="18" fill="#c0392b"/><rect x="218" y="214" width="46" height="18" fill="#1f6f8b"/><rect x="266" y="214" width="46" height="18" fill="#e2a03f"/><rect x="314" y="214" width="46" height="18" fill="#2e7d4f"/><rect x="362" y="214" width="46" height="18" fill="#7a8b99"/><rect x="410" y="214" width="46" height="18" fill="#c0392b"/><rect x="458" y="214" width="46" height="18" fill="#1f6f8b"/>
+          <rect x="170" y="232" width="46" height="18" fill="#e2a03f"/><rect x="218" y="232" width="46" height="18" fill="#2e7d4f"/><rect x="266" y="232" width="46" height="18" fill="#c0392b"/><rect x="314" y="232" width="46" height="18" fill="#1f6f8b"/><rect x="362" y="232" width="46" height="18" fill="#e2a03f"/><rect x="410" y="232" width="46" height="18" fill="#7a8b99"/><rect x="458" y="232" width="46" height="18" fill="#2e7d4f"/>
+          <rect x="218" y="196" width="46" height="18" fill="#7a8b99"/><rect x="266" y="196" width="46" height="18" fill="#1f6f8b"/><rect x="362" y="196" width="46" height="18" fill="#c0392b"/><rect x="410" y="196" width="46" height="18" fill="#e2a03f"/>
+          <rect x="228" y="170" width="36" height="16" fill="#e2a03f"/>
+        </g>
+        <path d="M506 214h22v36h-22z" fill="#1b2432"/><rect x="510" y="220" width="14" height="6" fill="#f3c98b"/>
+      </svg>
+      <div class="cap">Automated cranes at the Port of Halifax container terminal. Illustration by Leah Sato for The Ledger</div>
+      <div class="kick" style="margin-top:14px">Trade</div>
+      <h2>Ports race to automate as a new Atlantic trade corridor opens</h2>
+      <p class="dek">Halifax and Saint John are spending $2.4 billion on robotic cranes and rail links, betting that shippers will reroute cargo away from congested U.S. hubs.</p>
+      <div class="by"><span class="live">LIVE</span><span class="meta">By Priya Raman and Tomás Ferreira · Updated 11:42 a.m. ET</span></div>
+      <div class="related">
+        <a href="#">What the corridor means for rail freight rates</a>
+        <a href="#">Dockworkers’ union wins job guarantees in new deal</a>
+      </div>
+    </div>
+
+    <aside class="col-r">
+      <div class="box">
+        <h4>Markets at a glance</h4>
+        <div class="idx"><b>5,812.40</b><span class="up">▲ 35.84 (0.62%)</span></div>
+        <div class="meta">S&amp;P 500 · intraday</div>
+        <svg class="spark" viewBox="0 0 280 132" aria-label="S&amp;P 500 intraday chart">
+          <defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0a7d3b" stop-opacity="0.22"/><stop offset="1" stop-color="#0a7d3b" stop-opacity="0"/></linearGradient></defs>
+          <g stroke="#ece9e3" stroke-width="1"><line x1="0" y1="22.7" x2="280" y2="22.7"/><line x1="0" y1="57.6" x2="280" y2="57.6"/><line x1="0" y1="92.5" x2="280" y2="92.5"/></g>
+          <line x1="0" y1="99" x2="280" y2="99" stroke="#8a867e" stroke-width="1" stroke-dasharray="3 3"/>
+          <path d="M8,99.2 L18.2,90.8 L28.3,93.6 L38.5,77 L48.6,67.6 L58.8,74.9 L68.9,80.9 L79.1,70.2 L89.2,58.5 L99.4,52.2 L109.5,60.4 L119.7,66.4 L129.8,54.7 L140,46.8 L150.2,50.7 L160.3,40.5 L170.5,45.2 L180.6,36.9 L190.8,30.9 L200.9,36.7 L211.1,42.6 L221.2,34.2 L231.4,25.9 L241.5,29.5 L251.7,38.6 L261.8,32 L272,36 L272,110 L8,110Z" fill="url(#sg)"/>
+          <polyline points="8,99.2 18.2,90.8 28.3,93.6 38.5,77 48.6,67.6 58.8,74.9 68.9,80.9 79.1,70.2 89.2,58.5 99.4,52.2 109.5,60.4 119.7,66.4 129.8,54.7 140,46.8 150.2,50.7 160.3,40.5 170.5,45.2 180.6,36.9 190.8,30.9 200.9,36.7 211.1,42.6 221.2,34.2 231.4,25.9 241.5,29.5 251.7,38.6 261.8,32 272,36" fill="none" stroke="#0a7d3b" stroke-width="2" stroke-linejoin="round"/>
+          <circle cx="272" cy="36" r="3.5" fill="#0a7d3b"/>
+          <g font-family="Roboto" font-size="10" fill="#8a867e" text-anchor="end"><text x="280" y="18">5,820</text><text x="280" y="53">5,800</text><text x="280" y="88">5,780</text></g>
+          <g font-family="Roboto" font-size="10" fill="#8a867e" text-anchor="middle"><text x="12" y="126">9:30</text><text x="78" y="126">11:00</text><text x="140" y="126">12:30</text><text x="206" y="126">2:00</text><text x="268" y="126">4:00</text></g>
+        </svg>
+        <table class="mv">
+          <thead><tr><th>Top movers</th><th>Price</th><th>Change</th></tr></thead>
+          <tbody>
+            <tr><td><b>SHOP</b> Shopify</td><td>$148.20</td><td class="up">+6.8%</td></tr>
+            <tr><td><b>CNR</b> CN Rail</td><td>$161.05</td><td class="up">+3.1%</td></tr>
+            <tr><td><b>SU</b> Suncor</td><td>$51.37</td><td class="dn">−2.9%</td></tr>
+            <tr><td><b>BNS</b> Scotiabank</td><td>$74.66</td><td class="dn">−1.4%</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="nl">
+        <h5>The Morning Ledger</h5>
+        <p>Five stories and the numbers that matter, in your inbox by 6 a.m.</p>
+        <span>Sign up free</span>
+      </div>
+    </aside>
+  </section>
+
+  <div class="sech"><h3>Business</h3><a href="#">More in Business ›</a></div>
+  <section class="biz">
+    <article>
+      <svg class="th" viewBox="0 0 240 150"><rect width="240" height="150" fill="#1f6f8b"/><rect x="60" y="40" width="112" height="70" rx="8" fill="#e8f1f4"/><rect x="172" y="62" width="10" height="26" rx="2" fill="#e8f1f4"/><rect x="70" y="50" width="22" height="50" rx="3" fill="#2e7d4f"/><rect x="96" y="50" width="22" height="50" rx="3" fill="#2e7d4f"/><rect x="122" y="50" width="22" height="50" rx="3" fill="#2e7d4f"/><path d="M120 22l-14 30h12l-6 24 22-34h-13l7-20z" fill="#f2b632"/></svg>
+      <div><div class="kick">Autos</div><h4>Ontario’s battery plants hit a hiring wall</h4><div class="meta">By Ruth Adeyemi</div></div>
+    </article>
+    <article>
+      <svg class="th" viewBox="0 0 240 150"><rect width="240" height="150" fill="#22314a"/><rect x="36" y="44" width="28" height="80" fill="#8fa6c7"/><rect x="76" y="60" width="28" height="64" fill="#8fa6c7"/><rect x="116" y="74" width="28" height="50" fill="#8fa6c7"/><rect x="156" y="88" width="28" height="36" fill="#8fa6c7"/><path d="M30 36 L90 52 L130 70 L200 84" fill="none" stroke="#f2b632" stroke-width="4" stroke-linecap="round"/><circle cx="200" cy="84" r="6" fill="#f2b632"/></svg>
+      <div><div class="kick">Housing</div><h4>Mortgage renewals are about to get cheaper</h4><div class="meta">By Chloé Martin</div></div>
+    </article>
+    <article>
+      <svg class="th" viewBox="0 0 240 150"><rect width="240" height="150" fill="#f3d27a"/><circle cx="182" cy="42" r="20" fill="#fbecc0"/><path d="M0 92 C60 74 140 76 240 88 L240 150 L0 150Z" fill="#d9a441"/><path d="M0 112 C70 96 150 100 240 110 L240 150 L0 150Z" fill="#b9822c"/><g stroke="#8a5a1a" stroke-width="2"><path d="M20 150 L60 104M60 150 L96 106M100 150 L132 108M140 150 L168 110M180 150 L204 112M220 150 L236 114"/></g></svg>
+      <div><div class="kick">Agriculture</div><h4>A record wheat crop meets a glutted world market</h4><div class="meta">By Sam Whitford</div></div>
+    </article>
+    <article>
+      <svg class="th" viewBox="0 0 240 150"><rect width="240" height="150" fill="#9cc6e4"/><circle cx="54" cy="46" r="14" fill="#ffffff" opacity="0.8"/><circle cx="72" cy="42" r="18" fill="#ffffff" opacity="0.8"/><path d="M20 120 Q110 40 220 60" fill="none" stroke="#ffffff" stroke-width="3" stroke-dasharray="6 8"/><path d="M150 78 l46 -10 l8 4 l-20 10 l10 14 l-8 2 l-14 -12 l-24 6z" fill="#22314a"/></svg>
+      <div><div class="kick">Aviation</div><h4>Porter adds 14 routes as it takes on the big two</h4><div class="meta">By Leo Tran</div></div>
+    </article>
+  </section>
+
+  <section class="low">
+    <div>
+      <div class="sech" style="margin-top:0"><h3>Opinion</h3></div>
+      <div class="op"><span class="av" style="background:#b3261e">EK</span><div><h4>Ottawa’s housing plan is building the wrong homes</h4><div class="meta"><b>Elena Kowalski</b> · Columnist</div></div></div>
+      <div class="op"><span class="av" style="background:#22314a">JM</span><div><h4>Rate cuts won’t fix a productivity problem</h4><div class="meta"><b>James Mbeki</b> · Economics editor</div></div></div>
+      <div class="op"><span class="av" style="background:#2e7d4f">SH</span><div><h4>Let the ports compete. Consumers will win.</h4><div class="meta"><b>Sofia Hart</b> · Guest essay</div></div></div>
+    </div>
+    <div>
+      <div class="sech" style="margin-top:0"><h3>The data</h3></div>
+      <div class="chart-t">Housing starts by province, August</div>
+      <div class="chart-s">Thousands of units, seasonally adjusted annual rate</div>
+      <svg class="bars" viewBox="0 0 340 200" aria-label="Bar chart of housing starts">
+        <g font-family="Roboto" font-size="12" fill="#3a3833"><text x="0" y="24">Ontario</text><text x="0" y="62">Quebec</text><text x="0" y="100">B.C.</text><text x="0" y="138">Alberta</text><text x="0" y="176">Prairies</text></g>
+        <rect x="70" y="10" width="216" height="20" fill="#b3261e"/>
+        <rect x="70" y="48" width="141" height="20" fill="#22314a"/>
+        <rect x="70" y="86" width="129" height="20" fill="#22314a"/>
+        <rect x="70" y="124" width="121" height="20" fill="#22314a"/>
+        <rect x="70" y="162" width="40" height="20" fill="#22314a"/>
+        <g font-family="Roboto" font-size="12" font-weight="700" fill="#141414"><text x="292" y="24">78.4</text><text x="217" y="62">51.2</text><text x="205" y="100">46.9</text><text x="197" y="138">44.1</text><text x="116" y="176">14.6</text></g>
+        <line x1="70" y1="4" x2="70" y2="190" stroke="#8a867e" stroke-width="1"/>
+      </svg>
+      <div class="src">Source: CMHC · Chart: The Northern Ledger</div>
+    </div>
+    <div>
+      <div class="sech" style="margin-top:0"><h3>Most read</h3></div>
+      <ol class="mr">
+        <li>The quiet collapse of the office-condo market</li>
+        <li>Why your grocery bill fell for the first time since 2020</li>
+        <li>Inside the bidding war for Canada’s last copper mine</li>
+        <li>How a Moncton startup won a NATO contract</li>
+        <li>Five dividend stocks our readers own the most</li>
+      </ol>
+    </div>
+  </section>
+</div>
+
+<footer class="foot">
+  <div class="wrap">
+    <div class="fg">
+      <div class="fb"><div class="fl">The Northern Ledger</div><p>Independent business journalism from Toronto, Montreal, Calgary and Vancouver.</p></div>
+      <div><h6>News</h6><ul><li>World</li><li>Business</li><li>Markets</li><li>Climate</li></ul></div>
+      <div><h6>Opinion</h6><ul><li>Columnists</li><li>Editorials</li><li>Letters</li></ul></div>
+      <div><h6>Services</h6><ul><li>Subscribe</li><li>Newsletters</li><li>E-paper</li><li>Help</li></ul></div>
+      <div><h6>Company</h6><ul><li>About us</li><li>Careers</li><li>Advertise</li></ul></div>
+    </div>
+    <div class="copy"><span>© 2026 The Northern Ledger Media Inc. All rights reserved.</span><span>Privacy · Terms · Accessibility</span></div>
+  </div>
+</footer>
+</body>
+</html>

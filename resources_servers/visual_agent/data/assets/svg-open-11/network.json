@@ -1,0 +1,226 @@
+{
+ "network": "Kestrel City Rail",
+ "stations": [
+  {
+   "id": "millbrook",
+   "name": "Millbrook",
+   "gx": 3,
+   "gy": 9
+  },
+  {
+   "id": "canal-street",
+   "name": "Canal Street",
+   "gx": 9,
+   "gy": 12
+  },
+  {
+   "id": "brookside",
+   "name": "Brookside",
+   "gx": 14,
+   "gy": 16
+  },
+  {
+   "id": "riverside",
+   "name": "Riverside",
+   "gx": 14,
+   "gy": 8
+  },
+  {
+   "id": "abbotsford",
+   "name": "Abbotsford",
+   "gx": 10,
+   "gy": 2,
+   "closed": true
+  },
+  {
+   "id": "docklands",
+   "name": "Docklands",
+   "gx": 17,
+   "gy": 8
+  },
+  {
+   "id": "southmead",
+   "name": "Southmead",
+   "gx": 6,
+   "gy": 13
+  },
+  {
+   "id": "university",
+   "name": "University",
+   "gx": 11,
+   "gy": 6
+  },
+  {
+   "id": "crown-heights",
+   "name": "Crown Heights",
+   "gx": 10,
+   "gy": 0
+  },
+  {
+   "id": "market-square",
+   "name": "Market Square",
+   "gx": 8,
+   "gy": 8
+  },
+  {
+   "id": "airport",
+   "name": "Airport",
+   "gx": 21,
+   "gy": 3
+  },
+  {
+   "id": "beacon-hill",
+   "name": "Beacon Hill",
+   "gx": 7,
+   "gy": 5
+  },
+  {
+   "id": "kilnworth",
+   "name": "Kilnworth",
+   "gx": 3,
+   "gy": 13
+  },
+  {
+   "id": "old-town",
+   "name": "Old Town",
+   "gx": 11,
+   "gy": 10
+  },
+  {
+   "id": "southbank",
+   "name": "Southbank",
+   "gx": 12,
+   "gy": 12
+  },
+  {
+   "id": "westgate",
+   "name": "Westgate",
+   "gx": 0,
+   "gy": 9
+  },
+  {
+   "id": "tanner-row",
+   "name": "Tanner Row",
+   "gx": 6,
+   "gy": 8
+  },
+  {
+   "id": "fairview",
+   "name": "Fairview",
+   "gx": 12,
+   "gy": 14
+  },
+  {
+   "id": "northgate",
+   "name": "Northgate",
+   "gx": 10,
+   "gy": 4
+  },
+  {
+   "id": "central",
+   "name": "Central",
+   "gx": 11,
+   "gy": 8
+  },
+  {
+   "id": "elm-park",
+   "name": "Elm Park",
+   "gx": 2,
+   "gy": 2
+  },
+  {
+   "id": "hollins-green",
+   "name": "Hollins Green",
+   "gx": 4,
+   "gy": 4
+  },
+  {
+   "id": "harbour-point",
+   "name": "Harbour Point",
+   "gx": 20,
+   "gy": 10
+  }
+ ],
+ "lines": [
+  {
+   "id": "crown",
+   "name": "Crown Line",
+   "color": "#1f5fae",
+   "stations": [
+    "crown-heights",
+    "abbotsford",
+    "northgate",
+    "university",
+    "central",
+    "old-town",
+    "southbank",
+    "fairview",
+    "brookside"
+   ]
+  },
+  {
+   "id": "harbour",
+   "name": "Harbour Line",
+   "color": "#d7263d",
+   "stations": [
+    "westgate",
+    "millbrook",
+    "tanner-row",
+    "market-square",
+    "central",
+    "riverside",
+    "docklands",
+    "harbour-point"
+   ]
+  },
+  {
+   "id": "garden",
+   "name": "Garden Line",
+   "color": "#2e9e4f",
+   "stations": [
+    "elm-park",
+    "hollins-green",
+    "beacon-hill",
+    "university",
+    "central",
+    "old-town",
+    "canal-street",
+    "southmead",
+    "kilnworth"
+   ]
+  },
+  {
+   "id": "airport",
+   "name": "Airport Express",
+   "color": "#f28c28",
+   "stations": [
+    "market-square",
+    "central",
+    "riverside",
+    "docklands",
+    "airport"
+   ]
+  }
+ ],
+ "river": {
+  "name": "River Kess",
+  "points": [
+   [
+    0,
+    10.5
+   ],
+   [
+    8.5,
+    10.5
+   ],
+   [
+    10.5,
+    12.5
+   ],
+   [
+    21.5,
+    12.5
+   ]
+  ]
+ }
+}
