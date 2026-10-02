@@ -22,8 +22,12 @@ Reward: +1 win, 0 draw, -1 loss.
 
 import random
 import re
-from typing import Optional
+from typing import ClassVar, Optional
 
+from fastapi import HTTPException
+from pydantic import JsonValue
+
+from nemo_gym._checkpoint.resources import ResourcesCheckpointMode
 from nemo_gym.openai_utils import NeMoGymResponse
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 
@@ -50,6 +54,28 @@ def _fmt(hand: list[str]) -> str:
 
 class BlackjackEnv(GymnasiumServer):
     ray_enabled = False
+    # The rest of a game depends only on the two hands and the session's generator, which are all exported.
+    checkpoint_mode: ClassVar[ResourcesCheckpointMode] = "exported"
+
+    def export_env_state(self, state: dict) -> JsonValue:
+        version, internal_state, gauss_next = state["rng"].getstate()
+        return {
+            "player": list(state["player"]),
+            "dealer": list(state["dealer"]),
+            "rng_state": [version, list(internal_state), gauss_next],
+        }
+
+    def restore_env_state(self, state: JsonValue) -> dict:
+        try:
+            player, dealer = state["player"], state["dealer"]
+            if not all(isinstance(hand, list) and set(hand) <= set(_RANKS) for hand in (player, dealer)):
+                raise ValueError("hands must be lists of card ranks")
+            version, internal_state, gauss_next = state["rng_state"]
+            rng = random.Random()
+            rng.setstate((version, tuple(internal_state), gauss_next))
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"invalid blackjack session state: {error}") from error
+        return {"player": list(player), "dealer": list(dealer), "rng": rng}
 
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
         rng = random.Random()
@@ -66,7 +92,10 @@ class BlackjackEnv(GymnasiumServer):
     async def step(
         self, action: NeMoGymResponse, metadata: dict, session_id: Optional[str] = None
     ) -> tuple[Optional[str], float, bool, bool, dict]:
-        state = self.session_state.get(session_id, {})
+        if session_id not in self.session_state:
+            # Never dealt, or released, for example by a checkpoint retire: there is no game to continue.
+            raise HTTPException(status_code=404, detail="no Blackjack game for this session; call /reset first")
+        state = self.session_state[session_id]
         player = state.get("player", [])
         dealer = state.get("dealer", [])
         rng = state.get("rng") or random.Random()
