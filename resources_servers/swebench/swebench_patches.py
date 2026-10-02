@@ -185,9 +185,11 @@ async def run_instance(
         #     container, "/bin/bash /eval.sh", timeout
         # )
         #
-        # Modified code:
+        # Modified code. 2>&1: the eval script marks the test section with `set -x` trace lines (stderr) while
+        # the tests print to stdout; providers that return the two streams separately (E2B) would otherwise put
+        # every test result outside the markers, and the log parser would score a passing run as failed.
         test_output, timed_out, total_runtime = await container.exec_run_with_timeout(
-            "/bin/bash /eval.sh", timeout=timeout
+            "/bin/bash /eval.sh 2>&1", timeout=timeout
         )
         test_output_path = log_dir / LOG_TEST_OUTPUT
         logger.info(f"Test runtime: {total_runtime:_.2f} seconds")
