@@ -20,7 +20,9 @@ Prepare closes admission for data routes and is ready once no request is in flig
 ``restart_only`` session is live.
 """
 
+import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any, Literal, Optional, Protocol
 
 from pydantic import JsonValue
@@ -101,6 +103,8 @@ class ResourcesParticipant(CheckpointParticipant):
         # server declared replayable does not change checkpointed state.
         self.replayable_paths = {_SESSION_START} | ({"/verify"} if verify_mode == "replay" else set())
         self.accepting = True
+        self._open = asyncio.Event()
+        self._open.set()
         self.inflight = 0
         self._sessions: dict[str, EpisodeId] = {}
         self._retired_sessions: set[str] = set()
@@ -116,6 +120,10 @@ class ResourcesParticipant(CheckpointParticipant):
         if not self.accepting and path not in self.replayable_paths:
             raise ResourcesAdmissionClosedError("resources admission is closed for a checkpoint")
 
+    async def wait_open(self) -> None:
+        """Return once admission is open: after resume, or when a lease expires."""
+        await self._open.wait()
+
     def seeded(self, session_id: str, episode_id: EpisodeId) -> None:
         if self.mode != "stateless":
             self._sessions[session_id] = episode_id
@@ -128,9 +136,11 @@ class ResourcesParticipant(CheckpointParticipant):
 
     async def close_admission(self, request: CheckpointRequest) -> None:
         self.accepting = False
+        self._open.clear()
 
     async def open_admission(self) -> None:
         self.accepting = True
+        self._open.set()
         self._seeded_while_closed.clear()
 
     def readiness(self) -> PrepareReport:
@@ -196,11 +206,29 @@ class ResourcesParticipant(CheckpointParticipant):
 
 
 class ResourcesCheckpointMiddleware:
-    """Pure ASGI middleware inside the session middleware, so ``scope["session"]`` is populated."""
+    """Pure ASGI middleware inside the session middleware, so ``scope["session"]`` is populated.
 
-    def __init__(self, app: Any, participant: ResourcesParticipant) -> None:
+    A tool call over MCP is one POST to the MCP endpoint that names its session with a signed token instead of
+    the cookie. The middleware admits, fences, and counts that request as a whole, so direct MCP dispatch inside
+    it loses nothing. While a checkpoint is open, an MCP call waits for resume instead of being refused: MCP
+    clients are third-party agent harnesses that would show a refusal to the model as a tool error. A waiting
+    call is not in flight, so it never holds up prepare.
+    """
+
+    #: Read by MCP auto-exposure: this middleware does its job on the MCP request as a whole.
+    applies_to_mcp_requests = True
+
+    def __init__(
+        self,
+        app: Any,
+        participant: ResourcesParticipant,
+        mcp_session_id: Optional[Callable[[dict[str, Any]], Optional[str]]] = None,
+        mcp_path: str = "/mcp",
+    ) -> None:
         self.app = app
         self.participant = participant
+        self.mcp_session_id = mcp_session_id
+        self.mcp_path = mcp_path
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         path = scope.get("path", "")
@@ -208,6 +236,10 @@ class ResourcesCheckpointMiddleware:
             await self.app(scope, receive, send)
             return
         session_id = (scope.get("session") or {}).get(SESSION_ID_KEY)
+        if self.mcp_session_id is not None and (path == self.mcp_path or path.startswith(self.mcp_path + "/")):
+            session_id = self.mcp_session_id(scope) or session_id
+            while not self.participant.accepting:
+                await self.participant.wait_open()
         try:
             self.participant.admit(session_id, path)
         except ControlError as error:
