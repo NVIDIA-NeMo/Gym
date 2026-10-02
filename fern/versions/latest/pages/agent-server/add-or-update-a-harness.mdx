@@ -94,6 +94,29 @@ Serialize close requests, retain successful receipts for a documented bounded re
 
 ## 5. Validate each supported pairing
 
+### Observability
+
+Use [Harness Conformance](/main/observability/harness-conformance) to validate trajectory evidence. Follow the [runner guide](https://github.com/NVIDIA-NeMo/Gym/blob/main/scripts/harness_conformance/README.md) to register a new harness and install its dependencies. Run the probes in a fresh output directory (Pi shown):
+
+```bash
+python scripts/run_harness_conformance.py \
+    --harness pi --output results/pi-conformance
+```
+
+The runner uses scripted model replies and real local tools, then runs the evidence checker automatically. Review `conformance_report.md`, fix missing or inconsistent evidence, and rerun. The P0 gate requires all applicable TE-1–TE-7 plus TE-8 or TE-9 per rollout.
+
+Also check saved rollouts from each target sandbox pairing:
+
+```bash
+python scripts/inspect_harness_conformance.py \
+    --bundle results/my-harness/rollouts.jsonl \
+    --output results/my-harness/evidence
+```
+
+Record evidence conformance and sandbox lifecycle validation separately; the local probes do not exercise remote sandbox setup or cleanup.
+
+### Runtime and compatibility
+
 - Test setup failures, request mapping, unsupported controls, isolation, retries, cancellation, close races, and cleanup failures. Use real Linux processes for detached-child cleanup.
 - Run a real model/task smoke with tools and verification. Confirm sandbox execution, agent close before verification, and owner cleanup afterward. Inspect failures, traces, artifacts, and grading coverage.
 - Demonstrate a second compatible pairing through composition alone. Record versions and unsupported combinations.
