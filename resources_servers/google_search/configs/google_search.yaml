@@ -31,3 +31,11 @@ google_search_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/google_search/data/example.jsonl
+
+google_search_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: google_search_simple_agent

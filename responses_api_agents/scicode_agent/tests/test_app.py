@@ -54,8 +54,10 @@ def _config():
     )
 
 
-def _agent():
-    return ScicodeAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+def _agent(observability_enabled=False):
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = {"observability_enabled": observability_enabled}
+    return ScicodeAgent(config=_config(), server_client=server_client)
 
 
 def _model_json(code: str) -> dict:
@@ -92,7 +94,7 @@ class _FakeRequest:
     cookies: dict = {}
 
 
-def _run_request(problem_id="1", n_steps=2):
+def _run_request(problem_id="1", n_steps=2, **extra):
     sub_steps = [
         {
             "step_number": f"{problem_id}.{i + 1}",
@@ -110,6 +112,7 @@ def _run_request(problem_id="1", n_steps=2):
         sub_steps=sub_steps,
         required_dependencies="import numpy as np",
         uuid=problem_id,
+        **extra,
     )
 
 
@@ -181,6 +184,39 @@ class TestApp:
         assert isinstance(request_json, dict)
         assert request_json["temperature"] == 0.25
         assert request_json["input"][0]["content"] == "hi"
+
+    @pytest.mark.asyncio
+    async def test_responses_propagates_rollout_path_to_model(self):
+        agent = _agent(observability_enabled=True)
+        agent.server_client.post = AsyncMock(return_value=_Resp(_model_json("x = 1")))
+        request = _FakeRequest()
+        request.path_params = {"rollout_id": "4-2"}
+        with patch.object(app, "raise_for_status", AsyncMock()):
+            await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+        assert agent.server_client.post.await_args.kwargs["url_path"] == "/ng-rollout/4-2/v1/responses"
+
+    @pytest.mark.asyncio
+    async def test_run_correlates_every_substep_with_complete_request_payload(self):
+        agent = _agent(observability_enabled=True)
+        captured = []
+
+        def _post(server_name, url_path, json, cookies):
+            if url_path.endswith("/v1/responses"):
+                captured.append((url_path, json))
+                return _Resp(_model_json("x = 1"))
+            return _Resp({"reward": 1.0})
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        body = _run_request(problem_id="1", n_steps=3, _ng_task_index=4, _ng_rollout_index=2)
+        with patch.object(app, "raise_for_status", AsyncMock()):
+            await agent.run(_FakeRequest(), body)
+
+        assert len(captured) == 3
+        for url_path, request_json in captured:
+            assert url_path == "/ng-rollout/4-2/v1/responses"
+            assert request_json["input"]
+            assert request_json["tools"] == []
+            assert request_json["model"] == "policy_model"
 
     @pytest.mark.asyncio
     async def test_run_builds_solutions_and_calls_verify(self):
@@ -490,6 +526,8 @@ class TestTokenAccounting:
         assert body.model_dump() == original
         assert result.key_metrics["token_usage_complete"] is not missing_usage
         assert result.key_metrics["generation_coverage"] == 1.0
+        assert all("subtask_accuracy" in repeat for repeat in result.repeat_level_metrics)
+        assert "mean_across_repeats/subtask_accuracy" in result.agent_metrics
         for section in (result.agent_metrics, result.key_metrics):
             assert all(value is not None and not isinstance(value, str) for value in section.values())
         if missing_usage:
