@@ -345,7 +345,6 @@ def _server_launch_command(
     global_config_dict: DictConfig,
     server_name: str,
     entrypoint_fpath: Path,
-    escaped_config_dict_yaml_str: str,
 ) -> str:
     """Shell command that sets up a server's venv and starts its entrypoint with that venv's own interpreter.
 
@@ -355,9 +354,7 @@ def _server_launch_command(
     """
     venv_python_fpath = get_venv_path(dir_path, global_config_dict) / "bin" / "python"
     return f"""{setup_env_command(dir_path, global_config_dict, server_name)} \\
-    && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
-    {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(server_name)} \\
-    {shlex.quote(str(venv_python_fpath))} {shlex.quote(str(entrypoint_fpath))}"""
+    && {shlex.quote(str(venv_python_fpath))} {shlex.quote(str(entrypoint_fpath))}"""
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -467,7 +464,7 @@ class RunHelper:  # pragma: no cover
         initialize_ray()
 
         # Assume Nemo Gym Run is for a single agent.
-        escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))
+        config_dict_yaml_str = OmegaConf.to_yaml(global_config_dict)
 
         # We always run the head server in this `run` command.
         self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
@@ -505,11 +502,13 @@ class RunHelper:  # pragma: no cover
 
             # Name the venv in the logs: the server runs that venv's interpreter (see _server_launch_command).
             print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
-            command = _server_launch_command(
-                dir_path, global_config_dict, top_level_path, entrypoint_fpath, escaped_config_dict_yaml_str
-            )
+            command = _server_launch_command(dir_path, global_config_dict, top_level_path, entrypoint_fpath)
 
-            process = run_command(command, dir_path, server_name=top_level_path)
+            extra_env = {
+                NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config_dict_yaml_str,
+                NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: top_level_path,
+            }
+            process = run_command(command, dir_path, server_name=top_level_path, extra_env=extra_env)
             self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv
