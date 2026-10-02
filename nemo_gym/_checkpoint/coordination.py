@@ -13,12 +13,14 @@ The participant order is a Gym invariant:
   admission and cuts in-flight generations, so agents waiting on it reach a boundary. Resources servers
   go last because agents and environments call them until they park.
 - ``resume`` runs the stages in reverse, so no server is released before the servers it calls.
-- ``commit``, ``restore``, and ``retire`` fan out to every participant at once.
+- ``commit`` and ``restore`` fan out to every participant at once.
+- ``retire`` runs callers before callees: environment servers, then agents, then policy model and
+  resources servers together. Each stops the attempts' work before it replies.
 
 What the controller still owns:
 
 - Which rollouts to continue. A prepare that misses its deadline returns its blockers; the controller
-  either retires them and calls ``prepare`` again, or calls ``resume`` to abort.
+  calls ``resume`` to abort, then retires them and calls ``prepare`` again.
 - Rollouts that finish before the checkpoint. No episode finishes while Gym is prepared, but a ``/run``
   reply can already be on the wire. Before it builds the checkpoint's rollout set, the controller waits
   for every outstanding ``/run`` whose episode is not in the committed ``episode_ids``.
@@ -47,6 +49,9 @@ LOGGER = logging.getLogger(__name__)
 
 ParticipantKind = Literal["environment", "model", "agent", "resources"]
 PREPARE_ORDER: tuple[ParticipantKind, ...] = ("environment", "model", "agent", "resources")
+# Retire stops callers before the servers they call: environment servers call agents and resources servers,
+# agents call the policy model and resources servers.
+RETIRE_ORDER: tuple[tuple[ParticipantKind, ...], ...] = (("environment",), ("agent",), ("model", "resources"))
 _SERVER_TYPES = ("environment_servers", "responses_api_models", "responses_api_agents", "resources_servers")
 
 
@@ -156,14 +161,21 @@ async def renew(participants: Participants, checkpoint_id: str, *, deadline_ts: 
 async def retire(
     participants: Participants, checkpoint_id: str, episode_ids: Iterable[EpisodeId], *, deadline_ts: float
 ) -> None:
-    """Discard these attempts everywhere; their rollouts restart from input."""
+    """Stop these attempts everywhere and free their state; their rollouts restart from input.
+
+    Refused while a checkpoint is open: resume first.
+    """
     body = {
         "checkpoint_id": checkpoint_id,
         "deadline_ts": deadline_ts,
         "episode_ids": [episode_id.model_dump(mode="json") for episode_id in episode_ids],
     }
     if body["episode_ids"]:
-        await _fan_out(participants, participants.members, "retire", body, deadline_ts)
+        # Callers before callees: once a server stops the attempts, nothing upstream can still call it for them.
+        for kinds in RETIRE_ORDER:
+            members = [member for member in participants.members if member.kind in kinds]
+            if members:
+                await _fan_out(participants, members, "retire", body, deadline_ts)
 
 
 async def commit(
@@ -178,7 +190,7 @@ async def commit(
 
     ``episode_ids`` must name every episode the controller continues: each episode in flight, and each episode
     restored earlier whose replacement has not started yet, named by that replacement attempt. Restored state of
-    an episode the scope leaves out is released after the write, and its attempt is retired.
+    an episode the scope leaves out is retired after the write.
     """
     body = {
         "checkpoint_id": checkpoint_id,
@@ -215,8 +227,8 @@ async def restore(
     except CoordinationError:
         LOGGER.warning("checkpoint %s restore failed; discarding the restored state everywhere", checkpoint_id)
         cleanup_deadline = max(deadline_ts, time.time() + 30)
-        # Retiring the replacement attempts drops their restored state and fences them, so nothing can
-        # continue from a partial restore.
+        # Retiring the replacement attempts frees their restored state, so nothing can continue from a
+        # partial restore.
         await retire(participants, checkpoint_id, [next_attempt(e) for e in episode_ids], deadline_ts=cleanup_deadline)
         await resume(participants, checkpoint_id, deadline_ts=cleanup_deadline)
         raise
