@@ -370,6 +370,7 @@ Do not put rollout-specific mutable data in an unkeyed server attribute.
 - **Seed/verify protocol**: remove custom state in `verify()`, preferably in a `finally` block. `SimpleResourcesServer` does not automatically clear custom state.
 - **Gymnasium protocol**: when `step()` returns `terminated=True` or `truncated=True`, `GymnasiumServer` calls `close_session()` and removes the entry from `self.session_state`.
 - **Heavyweight state**: override `close_session()`, release the external resource, and call `await super().close_session(session_id)`.
+- **Environment Server sessions**: an Environment Server seeds with a `ResourcesSeedSessionRequest` and closes through `/close_session`. `SimpleResourcesServer` answers both with no-op defaults, so a server without per-rollout state needs no changes. A server with state overrides `seed_session()` and `close_resources_session()`, which is named differently from the Gymnasium `close_session()` helper.
 
 ```python
 async def close_session(self, session_id):

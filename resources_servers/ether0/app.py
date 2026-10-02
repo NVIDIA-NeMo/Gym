@@ -52,6 +52,7 @@ class Ether0VerifyResponse(BaseVerifyResponse):
 
 
 class Ether0ResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: BaseResourcesServerConfig
 
     async def verify(self, body: Ether0VerifyRequest) -> Ether0VerifyResponse:
