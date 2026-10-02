@@ -54,6 +54,7 @@ from nemo_gym._checkpoint.control import (
 )
 from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError
 from nemo_gym._checkpoint.workers import (
+    MESSAGE_TIMEOUT_SECONDS,
     CoordinatedParticipant,
     WorkerCoordinator,
     WorkerLink,
@@ -122,6 +123,14 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
             replacement = next_attempt(record.episode_id)
             if replacement.rollout_id == episode_id.rollout_id and replacement.attempt <= episode_id.attempt:
                 del self.restored[key]
+
+    async def restored_pending(self) -> list[EpisodeId]:
+        """Restored records no worker has claimed, and restored sessions no worker has used yet."""
+        pending = {next_attempt(record.episode_id) for record in self.restored.values()}
+        replies = await self.broadcast("restored_pending", {}, timeout=MESSAGE_TIMEOUT_SECONDS)
+        for reply in replies.values():
+            pending.update(EpisodeId.model_validate(episode_id) for episode_id in reply["episode_ids"])
+        return sorted(pending, key=lambda episode_id: episode_id.capture_key)
 
     def handle_now(self, worker_id: int, kind: str, body: dict[str, Any]) -> Optional[dict[str, Any]]:
         if kind != "claim":
@@ -329,6 +338,9 @@ class ParticipantWorkerLink(WorkerLink):
             placements.clear()
             placements.update(body["placements"])
             return {}
+        if kind == "restored_pending":
+            pending = await self.participant.restored_pending()
+            return {"episode_ids": [episode_id.model_dump(mode="json") for episode_id in pending]}
         return await super().handle(kind, body)
 
     async def claim(self, key: str) -> Optional[dict[str, Any]]:

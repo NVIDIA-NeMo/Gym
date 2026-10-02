@@ -636,3 +636,45 @@ async def test_sessions_of_a_single_process_server_restore_onto_several_workers(
     # Every worker's router knows where each of them is.
     assert tables[0] == tables[1]
     assert set(tables[0]) == {record["session_id"] for record in exported}
+
+
+async def test_a_commit_that_no_longer_continues_a_restored_episode_releases_it(
+    socket_dir: str, tmp_path: Path
+) -> None:
+    async with restored_environment(socket_dir, tmp_path) as deployment:
+        await commit(deployment, tmp_path / "ckpt2", [], checkpoint_id="c2")
+        await deployment.controller.resume(CheckpointRequest(**control("c2")))
+        worker = deployment.links[0].participant
+        # Released: a later /run for attempt 1 finds nothing to claim and starts from its input.
+        await worker.claim(EpisodeId(rollout_id="r", attempt=1))
+        worker.begin(EpisodeId(rollout_id="r", attempt=1), TASK, None)
+
+        assert deployment.participant.restored == {}
+        assert worker.continuation(EpisodeId(rollout_id="r", attempt=1)) is None
+
+
+async def test_a_commit_that_no_longer_continues_a_restored_agent_session_releases_it_on_its_worker(
+    socket_dir: str, tmp_path: Path
+) -> None:
+    async with coordinated(socket_dir, agent_worker) as before:
+        first, second = before.links
+        first.participant.open_session("kept", EpisodeId(rollout_id="k"))
+        second.participant.open_session("dropped", EpisodeId(rollout_id="d"))
+        await commit(before, tmp_path / "ckpt", ["k", "d"])
+        await before.controller.resume(CheckpointRequest(**control()))
+
+    async with coordinated(socket_dir, agent_worker) as after:
+        await restore(after, tmp_path / "ckpt", [{"rollout_id": "k"}, {"rollout_id": "d"}])
+        await after.controller.prepare(CheckpointRequest(**control("c2")))
+        # The controller continues only rollout k, as its replacement attempt.
+        await after.controller.commit(
+            CommitRequest(
+                **control(
+                    "c2", checkpoint_dir=str(tmp_path / "ckpt2"), episode_ids=[{"rollout_id": "k", "attempt": 1}]
+                )
+            )
+        )
+        await after.controller.resume(CheckpointRequest(**control("c2")))
+        held = sorted(key for link in after.links for key in ("kept", "dropped") if link.participant.has_session(key))
+
+    assert held == ["kept"]
