@@ -26,3 +26,14 @@ scale_swe_claude_code_sandboxed_agent:
           # AweAI-Team/Scale-SWE has no declared license on the Hub (no license tag, empty card
           # data) -- TBD rather than guessing one of the enum's real licenses.
           license: TBD
+
+# Rollout collection reaches an agent through its environment server. Named after the agent, not
+# the environment: scale_swe_opencode.yaml's scale_swe_environment_server fronts the OpenCode
+# agent, and a run loads both.
+scale_swe_claude_code_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: scale_swe_claude_code_sandboxed_agent

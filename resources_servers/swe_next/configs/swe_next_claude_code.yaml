@@ -24,3 +24,14 @@ swe_next_claude_code_sandboxed_agent:
           jsonl_fpath: resources_servers/swe_next/data/swe_next_training.jsonl
           num_repeats: 1
           license: MIT
+
+# Rollout collection reaches an agent through its environment server. Named after the agent, not
+# the environment: swe_next_opencode.yaml's swe_next_environment_server fronts the OpenCode
+# agent, and a run loads both.
+swe_next_claude_code_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swe_next_claude_code_sandboxed_agent
