@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import logging
 import shutil
 import subprocess
 import sys
@@ -16,9 +15,8 @@ from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs
 
 @pytest.mark.parametrize("source", ["extra_body", "metadata"])
 @pytest.mark.parametrize("thinking", [False, True])
-@pytest.mark.parametrize("configured", [False, True, None])
 @pytest.mark.parametrize("preserve_history", [False, True])
-def test_thinking_is_owned_by_model_server(caplog, source, thinking, configured, preserve_history):
+def test_thinking_is_owned_by_model_server(source, thinking, preserve_history):
     template = {"enable_thinking": thinking, "other_template_setting": "kept"}
     original = {
         "model": "policy",
@@ -27,10 +25,7 @@ def test_thinking_is_owned_by_model_server(caplog, source, thinking, configured,
     }
     original[source]["chat_template_kwargs"] = json.dumps(template) if source == "metadata" else template
     before = deepcopy(original)
-    with caplog.at_level(logging.WARNING):
-        result = _model_api_kwargs(
-            original, preserve_reasoning_history=preserve_history, model_enable_thinking=configured
-        )
+    result = _model_api_kwargs(original, preserve_reasoning_history=preserve_history)
     assert original == before
     assert result["model"] == "policy"
     assert result["extra_body"] == {"other_provider_setting": 42}
@@ -39,21 +34,13 @@ def test_thinking_is_owned_by_model_server(caplog, source, thinking, configured,
     if preserve_history:
         expected["truncate_history_thinking"] = False
     assert json.loads(result["metadata"]["chat_template_kwargs"]) == expected
-    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
-    assert len(warnings) == int(configured is None or thinking != configured)
-    if warnings:
-        assert f"enable_thinking={thinking}" in warnings[0].message
-        if configured is not None:
-            assert f"Model Server enable_thinking={configured}" in warnings[0].message
 
 
 @pytest.mark.parametrize("preserve_history", [False, True])
-def test_absent_thinking_does_not_inject_a_default_or_warn(caplog, preserve_history):
-    with caplog.at_level(logging.WARNING):
-        result = _model_api_kwargs({}, preserve_reasoning_history=preserve_history, model_enable_thinking=False)
+def test_absent_thinking_does_not_inject_a_default(preserve_history):
+    result = _model_api_kwargs({}, preserve_reasoning_history=preserve_history)
     expected = {"metadata": {"chat_template_kwargs": json.dumps({"truncate_history_thinking": False})}}
     assert result == (expected if preserve_history else {})
-    assert not caplog.records
 
 
 def test_template_settings_merge_without_mutating_hermes_input():
@@ -62,7 +49,7 @@ def test_template_settings_merge_without_mutating_hermes_input():
         "extra_body": {"chat_template_kwargs": {"from_extra_body": 2, "shared": "new"}},
     }
     before = deepcopy(original)
-    result = _model_api_kwargs(original, preserve_reasoning_history=False, model_enable_thinking=None)
+    result = _model_api_kwargs(original, preserve_reasoning_history=False)
     assert "extra_body" not in result
     assert json.loads(result["metadata"]["chat_template_kwargs"]) == {
         "from_metadata": 1,

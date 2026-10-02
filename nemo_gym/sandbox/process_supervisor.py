@@ -85,8 +85,9 @@ def _supervise(
             return receipt  # The finally block confirms that no worker was launched.
         if sys.platform != "linux":
             raise RuntimeError("Sandbox process supervision requires Linux")
-        # Survive provider process-group cancellation to reap the worker and write its receipt.
-        # Exec launchers may already make us group leader; setsid would fail in that case.
+        # Leave the provider group when possible. An exec launcher may already make us
+        # its group leader, so setsid cannot protect us from that group's SIGKILL.
+        # Callers must confirm cleanup before cancelling provider exec, in either case.
         if os.getpgrp() != os.getpid():
             os.setsid()
         if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
@@ -97,7 +98,7 @@ def _supervise(
         while process.poll() is None and not stopping and time.monotonic() < deadline:
             time.sleep(0.05)
         if process.poll() is None:
-            receipt["timed_out"] = True
+            receipt["timed_out"] = not stopping
             # Let the worker checkpoint before the bounded hard cleanup.
             process.send_signal(signal.SIGTERM)
             try:

@@ -104,8 +104,6 @@ async def test_seed_state_is_not_visible_before_setup_finishes(agent):
     state = AgentSessionState(request=seed)
 
     async def initialize(body):
-        # Also protect existing adapters that still retain state directly during setup.
-        agent._session_records[body.agent_session_id].state = state
         entered.set()
         await release.wait()
         return state
@@ -121,6 +119,14 @@ async def test_seed_state_is_not_visible_before_setup_finishes(agent):
         release.set()
         await task
     assert agent._require_agent_session(seed.agent_session_id) is state
+
+
+async def test_ready_session_lookup_does_not_depend_on_bookkeeping_lock(agent):
+    seed = _seed()
+    await agent.seed_agent_session(SimpleNamespace(session={}), seed)
+    state = agent._require_agent_session(seed.agent_session_id)
+    async with agent._locked_agent_session(seed.agent_session_id):
+        assert agent._require_agent_session(seed.agent_session_id) is state
 
 
 async def test_failed_close_retains_state_and_can_retry(agent):

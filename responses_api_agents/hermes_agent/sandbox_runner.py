@@ -105,27 +105,27 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
         return _model_api_kwargs(
             original_build_api_kwargs(api_messages),
             preserve_reasoning_history=payload["chat_template_kwargs_enabled"],
-            model_enable_thinking=payload.get("model_enable_thinking"),
         )
 
     agent._build_api_kwargs = build_api_kwargs
     result = None
     error = None
-    timed_out = False
+    stop_reason = None
     runtime = {"hostname": os.uname().nodename, "pid": os.getpid(), "python": sys.executable}
 
     def progress() -> dict[str, Any]:
         return {
             "completed": False,
             "interrupted": True,
-            "stop_reason": "wall_time",
+            "stop_reason": stop_reason,
             "messages": getattr(agent, "_session_messages", [])
             or [*payload["history"], {"role": "user", "content": payload["user_message"]}],
         }
 
     def interrupt(*_: object) -> None:
-        nonlocal timed_out
-        timed_out = True
+        nonlocal stop_reason
+        # Close publishes this marker before signalling the supervisor. A deadline does not.
+        stop_reason = "cancelled" if (session_dir / "runner.stop").exists() else "wall_time"
         # Save first: a blocked tool or API call may not unwind before the hard cleanup.
         if output_path is not None:
             partial = progress()
@@ -133,7 +133,7 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
                 output_path,
                 {"result": partial, "observations": observer.finish(partial, None), "runtime": runtime},
             )
-        agent.interrupt("sandbox timeout")
+        agent.interrupt("sandbox cancellation" if stop_reason == "cancelled" else "sandbox timeout")
 
     previous_handler = signal.signal(signal.SIGTERM, interrupt)
     try:
@@ -144,7 +144,7 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
             task_id=payload["agent_session_id"],
         )
     except BaseException as exception:
-        if timed_out:
+        if stop_reason is not None:
             result = progress()
         else:
             error = exception
@@ -152,8 +152,8 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
             raise
     finally:
         signal.signal(signal.SIGTERM, previous_handler)
-    if timed_out and not result.get("failed"):
-        result = {**result, "completed": False, "interrupted": True, "stop_reason": "wall_time"}
+    if stop_reason is not None and not result.get("failed"):
+        result = {**result, "completed": False, "interrupted": True, "stop_reason": stop_reason}
     return {
         "observations": observer.finish(result, error),
         "result": result,

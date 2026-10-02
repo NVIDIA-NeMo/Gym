@@ -47,7 +47,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict, get_global_config_dict
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -603,15 +603,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
     def _model_name(self) -> str:
         return self.config.model or str(self.config.model_server.name)
 
-    def _model_enable_thinking(self) -> bool | None:
-        """Read the resolved model config only to diagnose conflicting Hermes overrides."""
-        global_config = self.server_client.global_config_dict
-        if self.config.model_server.name not in global_config:
-            return None
-        model_config = get_first_server_config_dict(global_config, self.config.model_server.name)
-        value = (model_config.get("chat_template_kwargs") or {}).get("enable_thinking")
-        return value if isinstance(value, bool) else None
-
     @staticmethod
     async def _upload_json(sandbox: AsyncSandbox, remote_path: str, payload: dict[str, Any]) -> None:
         with tempfile.TemporaryDirectory(prefix="hermes_sandbox_upload_") as directory:
@@ -744,7 +735,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             **params,
             "max_turns": self.config.max_turns,
             "model": self._model_name(),
-            "model_enable_thinking": self._model_enable_thinking(),
             # The sandbox reaches the Model Server directly; the rollout prefix keeps its calls correlated.
             "model_base_url": self.resolve_model_base_url(
                 self.config.model_server.name, state.request.episode_id.capture_key
@@ -1002,13 +992,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
             save_trajectories=False,
         )
         _original_build_api_kwargs = agent._build_api_kwargs
-        model_enable_thinking = self._model_enable_thinking()
 
         def _patched_build_api_kwargs(api_messages: list[dict[str, Any]]) -> dict[str, Any]:
             return _model_api_kwargs(
                 _original_build_api_kwargs(api_messages),
                 preserve_reasoning_history=self.config.chat_template_kwargs_enabled,
-                model_enable_thinking=model_enable_thinking,
             )
 
         agent._build_api_kwargs = _patched_build_api_kwargs

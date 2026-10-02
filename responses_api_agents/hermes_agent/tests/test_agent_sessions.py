@@ -694,7 +694,6 @@ async def test_native_prompt_and_limits_reach_runner(agent, state, overrides, tm
     assert int((tmp_path / "runner.pid").read_text()) == process.pid
     payload = agent._upload_json.await_args.args[2]
     assert payload["user_message"] == "Fix the bug"
-    assert payload["model_enable_thinking"] is False
     assert payload["history"] == []
     assert payload["system_message"] == "Configured instruction\n\nRequest instruction"
     assert payload["max_tokens"] == 500

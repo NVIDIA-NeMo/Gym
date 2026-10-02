@@ -93,7 +93,7 @@ def test_supervisor_reaps_detached_tools_and_preserves_term_grace(tmp_path: Path
         receipt = json.loads((tmp_path / "cleanup.json").read_text())
         assert receipt["cleanup_confirmed"] is True
         assert receipt["error"] is None
-        assert receipt["timed_out"] is (ending in ("timeout", "cancel", "grace"))
+        assert receipt["timed_out"] is (ending in ("timeout", "grace"))
         assert receipt["return_code"] == {"normal": 0, "crash": 7, "grace": 0}.get(ending, -signal.SIGKILL)
         if ending == "grace":
             assert (tmp_path / "checkpoint").read_text() == "saved before kill"
@@ -225,7 +225,7 @@ finally:
         check=True,
     )
     summary = json.loads(completed.stdout)
-    assert summary["timed_out"] is True
+    assert summary["timed_out"] is False
     assert summary["cleanup_confirmed"] is True
     assert summary["child_alive"] is False
 

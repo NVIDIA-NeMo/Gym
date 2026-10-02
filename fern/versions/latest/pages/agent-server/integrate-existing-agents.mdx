@@ -23,6 +23,11 @@ The base handles seed retries and close receipts. In `responses()`, use
 A borrowed task sandbox remains owned by the Resources Server: disconnect from it after
 stopping the harness; do not destroy it. Verification starts only after agent close succeeds.
 
+When using the shared process supervisor, confirm its cleanup receipt before cancelling the
+provider's exec request. Cancellation can kill the provider's entire process group, including
+the supervisor when it is already the group leader (as with the local provider).
+`setsid()` alone does not guarantee cleanup; the close ordering does.
+
 ## Tools in Agent vs. Resources Server
 
 Existing agents may come with predefined tools, allowing you to leverage them directly and use the Resources server to supplement with any additional external tools. When building a new environment, prefer defining tools in the Resources server rather than the Agent server. This separation of concerns allows different agents to share the same Resources server without duplicating tool logic.

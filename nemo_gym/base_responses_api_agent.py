@@ -214,7 +214,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     def _require_agent_session(self, agent_session_id: str) -> AgentSessionState:
         record = self._session_records.get(agent_session_id)
-        if record is None or record.state is None or record.closing or record.lock.locked():
+        if record is None or record.state is None or record.closing:
             raise HTTPException(409, "Unknown or closing agent_session_id")
         return record.state
 
@@ -286,11 +286,6 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     record.state = error.state
                     record.closing = True
                     raise error.error from None
-                except BaseException:
-                    # An adapter may retain a partially initialized handle when cleanup fails.
-                    # It must remain closable, but never eligible for execution or reseeding.
-                    record.closing = record.state is not None
-                    raise
             elif record.state.request != body:
                 raise HTTPException(409, "agent_session_id is already bound to another seed request")
             request.session["agent_session_id"] = body.agent_session_id

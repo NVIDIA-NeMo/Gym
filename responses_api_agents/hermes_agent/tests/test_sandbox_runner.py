@@ -224,7 +224,7 @@ def test_required_mcp_server_that_does_not_connect_fails_before_the_model(tmp_pa
 @pytest.mark.parametrize("execution", ["sandbox", "local"])
 @pytest.mark.parametrize("conflicting_override", [False, True])
 def test_iteration_limit_summary_reaches_the_model_server(
-    tmp_path, restore_process_globals, monkeypatch, caplog, template_enabled, execution, conflicting_override
+    tmp_path, restore_process_globals, monkeypatch, template_enabled, execution, conflicting_override
 ) -> None:
     if conflicting_override:
         original = AIAgent._build_api_kwargs
@@ -250,9 +250,7 @@ def test_iteration_limit_summary_reaches_the_model_server(
     with _ModelServer(answers) as model_server:
         if execution == "sandbox":
             output = _run(
-                _payload(
-                    model_server.base_url, chat_template_kwargs_enabled=template_enabled, model_enable_thinking=False
-                ),
+                _payload(model_server.base_url, chat_template_kwargs_enabled=template_enabled),
                 tmp_path,
             )
             assert output["result"]["final_response"] == "summary of the work"
@@ -292,8 +290,6 @@ def test_iteration_limit_summary_reaches_the_model_server(
             assert output.output[-1].content[0].text == "summary of the work"
 
     assert len(model_server.requests) == 2
-    if conflicting_override:
-        assert "conflicts with Model Server enable_thinking=False" in caplog.text
     assert all(not request.get("stream") for request in model_server.requests)
     first = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(model_server.requests[0])
     assert all("chat_template_kwargs" not in body for body in model_server.requests)
@@ -344,7 +340,8 @@ def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globa
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
 @pytest.mark.parametrize("cooperative", [True, False])
-def test_worker_deadline_checkpoints_partial_work_before_hard_cleanup(tmp_path, cooperative):
+@pytest.mark.parametrize("ending", ["deadline", "close"])
+def test_worker_stop_checkpoints_partial_work_before_hard_cleanup(tmp_path, cooperative, ending):
     from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
     from responses_api_agents.hermes_agent import sandbox_runner
 
@@ -378,15 +375,17 @@ sys.modules['run_agent'] = module
 import sandbox_runner
 raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])))
 """
-    completed = subprocess.run(
+    process = subprocess.Popen(
         [
             sys.executable,
             "-I",
             process_supervisor.__file__,
             "--timeout",
-            "2",
+            "2" if ending == "deadline" else "10",
             "--cleanup-timeout",
             "0.5",
+            "--stop-file",
+            str(tmp_path / "runner.stop"),
             "--receipt",
             str(tmp_path / "cleanup.json"),
             "--",
@@ -400,17 +399,33 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
             str(cooperative),
         ],
         cwd=tmp_path,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         errors="replace",
-        timeout=10,
     )
-    assert completed.returncode == 0, completed.stderr
+    try:
+        if ending == "close":
+            deadline = time.monotonic() + 5
+            while not (tmp_path / "model.patch").exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert (tmp_path / "model.patch").exists()
+            (tmp_path / "runner.stop").touch()
+            process.terminate()
+        _, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, stderr
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=5)
     receipt = json.loads((tmp_path / "cleanup.json").read_text())
-    assert receipt["timed_out"] is True
+    assert receipt["timed_out"] is (ending == "deadline")
     assert receipt["cleanup_confirmed"] is True
     output = json.loads(output_path.read_text())
-    assert (tmp_path / "interrupted").read_text() == "sandbox timeout"
+    reason = "wall_time" if ending == "deadline" else "cancelled"
+    assert (tmp_path / "interrupted").read_text() == (
+        "sandbox timeout" if ending == "deadline" else "sandbox cancellation"
+    )
     assert (tmp_path / "model.patch").read_bytes() == b"partial patch\n"
     response = HermesAgent._response_from_result(
         None,
@@ -421,7 +436,7 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
     )
     assert response.status == "incomplete"
     assert response.error is None
-    assert response.metadata["stop_reason"] == "wall_time"
+    assert response.metadata["stop_reason"] == reason
     assert response.output[0].content[0].text == "Partial work"
     assert response.output[0].generation_token_ids == [2]
     assert output["observations"]["invocations"][0]["status"] == "incomplete"

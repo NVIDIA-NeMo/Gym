@@ -71,3 +71,5 @@ gym eval run --no-serve \
 - Use `num_workers: 1`.
 - Use a Linux sandbox that can reach the Gym Model Server.
 - This integration is evaluation-only, not suitable for producing RL training data.
+- The sandbox runner records `stop_reason=wall_time` for its deadline and
+  `stop_reason=cancelled` for a close-requested stop, checkpointing available partial work before exit.
