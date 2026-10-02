@@ -65,3 +65,11 @@ toolsandbox_agent:
         jsonl_fpath: resources_servers/toolsandbox/data/test_toolsandbox.jsonl
         # See note above: CC-BY-NC 4.0 upstream, marked TBD pending an enum value.
         license: TBD
+
+toolsandbox_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: toolsandbox_agent

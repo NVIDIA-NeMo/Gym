@@ -34,3 +34,11 @@ false_statement_judge_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/false_statement_judge/data/example.jsonl
+
+false_statement_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: false_statement_judge_simple_agent

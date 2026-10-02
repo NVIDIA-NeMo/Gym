@@ -15,7 +15,10 @@ from desktop_env.desktop_env import DesktopEnv
 from desktop_env.desktop_env_pointer import DesktopEnv as PointerDesktopEnv
 from desktop_env.providers.docker.manager import DockerVMManager
 
-from responses_api_agents.osworld_agent.sandbox_provider import GymSandboxDesktopProvider
+from responses_api_agents.osworld_agent.sandbox_provider import (
+    GymSandboxDesktopProvider,
+    _resolve_pool_vm_path,
+)
 
 
 _FACTORY_LOCK = threading.RLock()
@@ -40,14 +43,25 @@ class _SandboxProviderInjectionMixin:
         sandbox_require_kvm: bool = True,
         sandbox_ready_timeout_s: float = 600.0,
         sandbox_ready_poll_s: float = 2.0,
+        sandbox_vnc_guest_port: int | None = None,
         **kwargs: Any,
     ) -> None:
+        had_path_to_vm = "path_to_vm" in kwargs
+        resolved_path_to_vm = _resolve_pool_vm_path(sandbox_provider, kwargs.get("path_to_vm"))
+        if had_path_to_vm or resolved_path_to_vm is not None:
+            # OSWorld's docker-compatible constructor asks DockerVMManager for
+            # a local qcow2 whenever path_to_vm is absent. OpenSandbox Pool
+            # allocation owns the guest image server-side and ignores this
+            # value, so a descriptive sentinel avoids an unnecessary 11 GB
+            # image download in a cold worker.
+            kwargs["path_to_vm"] = resolved_path_to_vm
         provider = GymSandboxDesktopProvider(
             sandbox_provider,
             sandbox_spec,
             require_kvm=sandbox_require_kvm,
             ready_timeout_s=sandbox_ready_timeout_s,
             ready_poll_s=sandbox_ready_poll_s,
+            vnc_guest_port=sandbox_vnc_guest_port,
         )
         manager = DockerVMManager()
         requested_provider = str(kwargs.get("provider_name", "docker")).lower().strip()
