@@ -37,6 +37,8 @@ sandbox:
     exec:
       default_timeout_s: 180
       concurrency: 32
+      session_concurrency: 32
+      session_start_timeout_s: 10
       # exec_shell auto-detects bash (conda/SWE-bench commands use `source`, which sh/dash lacks)
       # and falls back to sh. Pin it (e.g. /bin/sh or /bin/bash) to skip the per-create probe.
       # exec_shell: /bin/bash
