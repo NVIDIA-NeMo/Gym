@@ -12,6 +12,8 @@ biomnibench_da:
       datasets:
         - name: biomnibench_da
           type: benchmark
+          ## FIXME: Use this once Gym resolves dataset interpolations before converting paths.
+          # jsonl_fpath: ${prepare_script_args.output_dir}/gym.jsonl
           jsonl_fpath: benchmarks/biomnibench_da/data/gym.jsonl
           prepare_script: benchmarks/biomnibench_da/harbor/adapter.py
           prepare_dependencies:
@@ -23,7 +25,8 @@ biomnibench_da:
 
       harbor_max_retries: 3
 
-      harbor_jobs_dir: benchmarks/biomnibench_da/logs
+      ## TIP: Auto-resolves to a sibling harbor folder.
+      harbor_jobs_dir: ${output_jsonl_fpath}
 
       harbor_dataset:
         path: ${prepare_script_args.output_dir}
