@@ -34,6 +34,7 @@ import pytest
 from checkpoint_deployment import (
     CAPTURE_CONTROL_TOKEN,
     COUNTER_SCRIPT,
+    TOKEN,
     Deployment,
     counter_row,
     weather_episode,
@@ -570,3 +571,39 @@ async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int) 
     assert finished.isdisjoint(exported)
     assert finished | set(exported) == set(rollout_ids)
     assert rewards == [1.0] * len(exported)
+
+
+async def test_a_retired_episode_stops_everywhere_and_leaves_nothing_behind(deploy, tmp_path: Path) -> None:
+    deployment = deploy("native", token_capture=True)
+    # The episode's first model call is answered; the second is held, so the episode is mid-flight.
+    deployment.backend("/_ctl/hold", {"after_calls": 1})
+    async with httpx.AsyncClient(base_url=deployment.url("environment"), timeout=120) as http:
+        run = asyncio.create_task(http.post("/run", json=weather_episode("gone-1")))
+        await wait_until(lambda: len(deployment.backend_calls()) == 2)
+        participants = await deployment.participants()
+
+        await coordination.retire(participants, "retire", [EpisodeId(rollout_id="gone-1")], deadline_ts=deadline())
+
+        calls_at_retire = len(deployment.backend_calls())
+        await wait_until(run.done, timeout=10)
+        # Nothing of the attempt is left to answer the held call, or to make another one.
+        deployment.backend("/_ctl/release", {})
+        await asyncio.sleep(1)
+        headers = {"authorization": f"Bearer {TOKEN}"}
+        statuses = {
+            name: httpx.get(f"{deployment.url(name)}/ng-control/v1/checkpoint/status", headers=headers).json()
+            for name in ("environment", "agent", "resources", "policy_model")
+        }
+        manifest = httpx.get(
+            f"{deployment.url('policy_model')}/training-token-capture/control/rollouts/gone-1/manifest",
+            headers={"authorization": f"Bearer {CAPTURE_CONTROL_TOKEN}"},
+        ).json()
+
+    assert len(deployment.backend_calls()) == calls_at_retire
+    assert {name: status["retiring"] for name, status in statuses.items()} == dict.fromkeys(statuses, 0)
+    assert statuses["environment"]["report"]["counts"]["episodes"] == 0
+    assert statuses["agent"]["report"]["counts"]["sessions"] == 0
+    assert statuses["resources"]["report"]["counts"]["sessions"] == 0
+    assert statuses["policy_model"]["report"]["counts"]["inflight"] == 0
+    # The checkpoint retire also retired the attempt's capture ledger.
+    assert manifest["records"] == []
