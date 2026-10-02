@@ -257,13 +257,28 @@ The bounded canonical failure record stays separate from those diagnostics. Othe
 as `_ng_failure_response` for inspection, including any synthetic failure text a producer supplied. This field is
 diagnostic evidence only: it is neither a scored response nor an eligible saved answer for judge-only recovery.
 
-For a legacy `judge_failed` or `judge_invalid` result that includes the actual generated response, the sidecar preserves it outside
-the canonical failure record, without a reward. Diagnostic token and trajectory evidence is retained too.
-Judge-only recovery from these journal-backed runs is a separate follow-up: this PR resumes unfinished tasks
-from their inputs. The existing `gym eval reverify` workflow remains available for legacy files and exported
-selected-result projections. A selected-result projection contains completed answers, not failed answers for
-`--judge-failed-only` recovery. Reverification rejects journal-backed inputs and outputs before changing them, so it cannot
-silently reuse an older answer or append results without recording attempts.
+For a legacy `judge_failed` or `judge_invalid` result that includes the actual generated response, the sidecar also preserves that
+`response` outside the canonical failure record, without a reward. This keeps `gym eval reverify --judge-failed-only`
+working: it submits the saved response to the verifier again without rerunning inference. A structured failure that
+never included a response cannot reconstruct one: reverification reports and skips it while continuing rows with saved
+responses. Resume collection to rerun generation for that work. Other producer responses remain diagnostic evidence only.
+
+With `--judge-failed-only --append` and the original rollout file as both input and output, reverification records new
+attempts in the same journal before sending verifier requests. Recovered results then participate in the same selection
+rules as collection and aggregation. Terminal failures and exhausted attempt budgets are respected. Full reverification
+uses a separate output file so that changed scores cannot overwrite the original run's history.
+
+If a judge retry was interrupted before saving an outcome, judge-only recovery skips that attempt and looks back to
+the newest recorded outcome. It reuses an answer only when that outcome is a nonterminal judge failure with a saved
+response. It does not search past a newer agent failure, omitted outcome, or judge failure without a response to reuse
+an older answer. Such rows are reported and skipped; judge-only recovery never automatically reruns the agent.
+To generate another answer, resume rollout collection separately, subject to the run's retry budget and terminal state.
+
+Judge failures with a saved answer retain that answer for reverification. When training-token capture is enabled,
+Gym also attempts to reconstruct its recorded token IDs before writing the failure sidecar. This diagnostic evidence
+does not turn the failure into a scored training sample, and its capture source is not retired by failure persistence.
+Legacy reverification outputs without a manifest or journal retain their original line-reading behavior; a neighboring
+materialized-input file alone does not opt them into strict journal validation.
 
 Aggregation resolves source file symlinks before locating their companion history, and deduplicates aliases of the
 same rollout file. Health and reverification apply the same history protections through aliases. For a merged output
