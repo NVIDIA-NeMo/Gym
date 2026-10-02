@@ -345,10 +345,10 @@ async def test_every_downstream_call_carries_the_attempt_rollout_id() -> None:
     assert client.rollout_ids == ["rollout-a2"] * len(client.calls)
 
 
-def test_dependency_failure_messages_are_bounded() -> None:
+def test_dependency_failure_reasons_are_bounded() -> None:
     environment_server, _ = _environment_server()
-    error = environment_server._failure(stage="agent", message="x" * 3000, terminal=False)
-    assert len(error.failure.message) == 2000
+    error = environment_server._failure(stage="agent", failure_reason="x" * 3000, terminal=False)
+    assert len(error.failure.failure_reason) == 2000
 
 
 def test_retry_requires_a_transient_dependency_error() -> None:
