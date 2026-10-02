@@ -97,7 +97,33 @@ def episode(agent):
     )
 
 
-def test_http_close_retry_and_stale_activation_never_fall_back(agent, state):
+async def test_unbound_compatibility_run_fails_before_calling_resources(agent):
+    agent.config.resources_server = None
+    agent.server_client.post = AsyncMock()
+    with pytest.raises(HTTPException, match="/run requires resources_server") as error:
+        await agent.run(
+            SimpleNamespace(session={}, cookies={}),
+            HermesAgentRunRequest(responses_create_params={"input": "task"}),
+        )
+    assert error.value.status_code == 422
+    agent.server_client.post.assert_not_awaited()
+
+
+async def test_unbound_direct_responses_remains_available(agent):
+    agent.config.resources_server = None
+    result = episode(agent)
+    agent._create_response = AsyncMock(return_value=result.response)
+    response = await agent.responses(
+        SimpleNamespace(session={}, path_params={}), NeMoGymResponseCreateParamsNonStreaming(input="task")
+    )
+    assert response == result.response
+    agent._create_response.assert_awaited_once()
+
+
+@pytest.mark.parametrize("bind_resources", [True, False])
+def test_http_close_retry_and_stale_activation_never_fall_back(agent, state, bind_resources):
+    if not bind_resources:
+        agent.config.resources_server = None
     agent._initialize_agent_session_state = AsyncMock(return_value=state)
     agent._run_sandbox_episode = AsyncMock(return_value=episode(agent))
     agent._create_response = AsyncMock(side_effect=AssertionError("host fallback"))
