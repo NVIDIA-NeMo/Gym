@@ -47,6 +47,9 @@ LOGGER = logging.getLogger(__name__)
 
 ParticipantKind = Literal["environment", "model", "agent", "resources"]
 PREPARE_ORDER: tuple[ParticipantKind, ...] = ("environment", "model", "agent", "resources")
+# Retire stops callers before the servers they call: environment servers call agents and resources servers,
+# agents call the policy model and resources servers.
+RETIRE_ORDER: tuple[tuple[ParticipantKind, ...], ...] = (("environment",), ("agent",), ("model", "resources"))
 _SERVER_TYPES = ("environment_servers", "responses_api_models", "responses_api_agents", "resources_servers")
 
 
@@ -156,14 +159,21 @@ async def renew(participants: Participants, checkpoint_id: str, *, deadline_ts: 
 async def retire(
     participants: Participants, checkpoint_id: str, episode_ids: Iterable[EpisodeId], *, deadline_ts: float
 ) -> None:
-    """Discard these attempts everywhere; their rollouts restart from input."""
+    """Stop these attempts everywhere and free their state; their rollouts restart from input.
+
+    Refused while a checkpoint is open: resume first.
+    """
     body = {
         "checkpoint_id": checkpoint_id,
         "deadline_ts": deadline_ts,
         "episode_ids": [episode_id.model_dump(mode="json") for episode_id in episode_ids],
     }
     if body["episode_ids"]:
-        await _fan_out(participants, participants.members, "retire", body, deadline_ts)
+        # Callers before callees: once a server stops the attempts, nothing upstream can still call it for them.
+        for kinds in RETIRE_ORDER:
+            members = [member for member in participants.members if member.kind in kinds]
+            if members:
+                await _fan_out(participants, members, "retire", body, deadline_ts)
 
 
 async def commit(

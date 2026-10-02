@@ -34,7 +34,9 @@ import hmac
 import logging
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable, Iterable, Iterator
+from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Optional
@@ -61,6 +63,8 @@ LOGGER = logging.getLogger(__name__)
 
 CHECKPOINT_ROUTE_PREFIX = "/ng-control/v1/checkpoint"
 CHECKPOINT_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+# A stale controller retries within moments; this many resumed checkpoint IDs are plenty to refuse it.
+_RETIRED_IDS_KEPT = 64
 
 
 class CheckpointPhase(str, Enum):
@@ -170,35 +174,39 @@ class PrepareReport(BaseModel):
 
 
 class AttemptFence:
-    """Reject requests from attempts that a retire or restore replaced.
+    """Refuse requests from attempts while a retire stops them.
 
-    Only the lowest live attempt per rollout is kept, so fencing survives any number of restores and
-    stays one integer per rollout that a checkpoint operation touched.
+    A retire stops an attempt's running work and frees its state before it returns, so afterwards nothing Gym
+    runs can send another request for that attempt, and the fence forgets it. It holds only retires in progress.
     """
 
     def __init__(self) -> None:
-        self._min_attempt: dict[str, int] = {}
+        self._stopping: dict[str, list[int]] = {}
 
     def check(self, episode_id: EpisodeId) -> None:
-        minimum = self._min_attempt.get(episode_id.rollout_id, 0)
-        if episode_id.attempt < minimum:
-            raise StaleAttemptError(
-                f"rollout {episode_id.rollout_id!r} attempt {episode_id.attempt} was replaced by attempt {minimum}"
-            )
+        for attempt in self._stopping.get(episode_id.rollout_id, ()):
+            if episode_id.attempt <= attempt:
+                raise StaleAttemptError(
+                    f"rollout {episode_id.rollout_id!r} attempt {episode_id.attempt} is being retired"
+                )
 
-    def retire(self, episode_id: EpisodeId) -> None:
-        """Fence ``episode_id`` and every earlier attempt of its rollout."""
-        rollout_id = episode_id.rollout_id
-        self._min_attempt[rollout_id] = max(self._min_attempt.get(rollout_id, 0), episode_id.attempt + 1)
+    @contextmanager
+    def stopping(self, episode_ids: Iterable[EpisodeId]) -> Iterator[None]:
+        """Refuse ``episode_ids`` and their earlier attempts for the length of the block."""
+        marked = list(episode_ids)
+        for episode_id in marked:
+            self._stopping.setdefault(episode_id.rollout_id, []).append(episode_id.attempt)
+        try:
+            yield
+        finally:
+            for episode_id in marked:
+                attempts = self._stopping[episode_id.rollout_id]
+                attempts.remove(episode_id.attempt)
+                if not attempts:
+                    del self._stopping[episode_id.rollout_id]
 
-    def minimums(self) -> dict[str, int]:
-        """The lowest live attempt of every fenced rollout, for copying the fence to another process."""
-        return dict(self._min_attempt)
-
-    def raise_to(self, minimums: dict[str, int]) -> None:
-        """Apply another fence's minimums; a fence only ever rises."""
-        for rollout_id, minimum in minimums.items():
-            self._min_attempt[rollout_id] = max(self._min_attempt.get(rollout_id, 0), minimum)
+    def __len__(self) -> int:
+        return len(self._stopping)
 
 
 class CheckpointParticipant(ABC):
@@ -242,7 +250,8 @@ class CheckpointParticipant(ABC):
 
     @abstractmethod
     async def retire(self, episode_id: EpisodeId) -> None:
-        """Discard the state of ``episode_id`` and earlier attempts, live or restored."""
+        """Stop the running work of ``episode_id`` and earlier attempts, wait until it has stopped, then free
+        their state, live or restored. Return only once nothing of them remains."""
 
     @abstractmethod
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
@@ -294,7 +303,8 @@ class ParticipantController:
         self.checkpoint_id: Optional[str] = None
         self._lease_expires_at: Optional[float] = None
         self._lease_task: Optional[asyncio.Task] = None
-        self._retired_ids: set[str] = set()
+        # Recently resumed checkpoint IDs, so a delayed request of a stale controller cannot reopen one.
+        self._retired_ids: OrderedDict[str, None] = OrderedDict()
         self._results: dict[tuple[str, str], dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
@@ -305,6 +315,8 @@ class ParticipantController:
             "phase": self.phase.value,
             "checkpoint_id": self.checkpoint_id,
             "lease_expires_at": self._lease_expires_at,
+            # Attempts a retire is stopping right now; nothing about an attempt outlives its retire.
+            "retiring": len(self.participant.attempts),
             "report": self.participant.readiness().model_dump(),
             **self.participant.status_extra(),
         }
@@ -398,22 +410,27 @@ class ParticipantController:
             await self.participant.wait_changed(min(remaining, 1.0))
 
     async def retire(self, request: RetireRequest) -> dict[str, Any]:
-        """Discard attempts during a checkpoint, after a restore, or when idle.
+        """Stop these attempts' running work and free their state, then reply.
 
-        Outside a checkpoint the controller uses this to drop restored state it will not continue.
+        Allowed when idle, and after a restore, where nothing is running yet. While a checkpoint is open it is
+        refused: stopping an episode waits for its final cleanup, whose calls wait for resume. A controller with
+        a straggler resumes first. The attempts are refused while they stop; afterwards nothing remains of them.
         """
         async with self._lock:
+            if self.phase not in (CheckpointPhase.IDLE, CheckpointPhase.RESTORED):
+                raise InvalidPhaseError(f"cannot retire in phase {self.phase.value}; resume first")
             if self.checkpoint_id is not None and self.checkpoint_id != request.checkpoint_id:
                 raise CheckpointConflictError(f"checkpoint {self.checkpoint_id!r} is active")
-            if self.phase == CheckpointPhase.COMMITTED:
-                raise InvalidPhaseError("cannot retire after commit; resume first")
             if self.phase != CheckpointPhase.IDLE:
                 self._renew(request)
-            for episode_id in request.episode_ids:
-                self.participant.attempts.retire(episode_id)
-                await self.participant.retire(episode_id)
+            with self.participant.attempts.stopping(request.episode_ids):
+                await _within(request, self._stop(request.episode_ids))
         await self.participant.notify()
         return {"retired": [episode_id.capture_key for episode_id in request.episode_ids]}
+
+    async def _stop(self, episode_ids: list[EpisodeId]) -> None:
+        for episode_id in episode_ids:
+            await self.participant.retire(episode_id)
 
     async def _release_unscoped(self, episode_ids: Optional[list[EpisodeId]]) -> None:
         """Retire restored episodes the commit's scope leaves out: the scope is everything the controller continues."""
@@ -422,7 +439,6 @@ class ParticipantController:
         scope = set(episode_ids)
         for episode_id in await self.participant.restored_pending():
             if episode_id not in scope:
-                self.participant.attempts.retire(episode_id)
                 await self.participant.retire(episode_id)
 
     async def commit(self, request: CommitRequest) -> dict[str, Any]:
@@ -481,8 +497,6 @@ class ParticipantController:
             except BaseException:
                 await self.participant.open_admission()
                 raise
-            for record in records:
-                self.participant.attempts.retire(record.episode_id)
             self.checkpoint_id = request.checkpoint_id
             self.phase = CheckpointPhase.RESTORED
             self._renew(request)
@@ -501,16 +515,21 @@ class ParticipantController:
             if self.phase == CheckpointPhase.IDLE and self.checkpoint_id is None:
                 # A prepare that stopped at an earlier stage never reached this participant. Fence the
                 # ID anyway so a delayed prepare for the aborted checkpoint cannot close admission.
-                self._retired_ids.add(request.checkpoint_id)
+                self._remember_retired(request.checkpoint_id)
                 return {"phase": CheckpointPhase.IDLE.value, "idempotent": True}
             self._admit(request.checkpoint_id, set(CheckpointPhase) - {CheckpointPhase.IDLE})
             await self._reopen(retire_id=request.checkpoint_id)
             return {"phase": self.phase.value, "idempotent": False}
 
+    def _remember_retired(self, checkpoint_id: str) -> None:
+        self._retired_ids[checkpoint_id] = None
+        while len(self._retired_ids) > _RETIRED_IDS_KEPT:
+            self._retired_ids.popitem(last=False)
+
     async def _reopen(self, *, retire_id: Optional[str] = None) -> None:
         await self.participant.open_admission()
         if retire_id is not None:
-            self._retired_ids.add(retire_id)
+            self._remember_retired(retire_id)
             self._results = {key: value for key, value in self._results.items() if key[0] != retire_id}
         self.phase = CheckpointPhase.IDLE
         self.checkpoint_id = None

@@ -20,7 +20,6 @@ from nemo_gym._checkpoint.control import (
     next_attempt,
 )
 from nemo_gym._checkpoint.coordination import CoordinationError
-from nemo_gym._checkpoint.errors import StaleAttemptError
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
 
@@ -52,6 +51,8 @@ class Recorder(CheckpointParticipant):
         return PrepareReport(ready=not self.blockers, blockers=self.blockers)
 
     async def retire(self, episode_id: EpisodeId) -> None:
+        self.events.append(f"retire {self.name}")
+
         def covered(key: str) -> bool:
             other = EpisodeId.from_capture_key(key)
             return other.rollout_id == episode_id.rollout_id and other.attempt <= episode_id.attempt
@@ -173,8 +174,12 @@ async def test_prepare_stops_at_an_unready_stage_until_the_controller_retires_it
 
     missed = await coordination.prepare(participants, "c1", deadline_ts=deadline(0.2))
     later_stage_untouched = "close res" not in events
-    await coordination.retire(participants, "c1", [EpisodeId(rollout_id="r", attempt=1)], deadline_ts=deadline())
-    prepared = await coordination.prepare(participants, "c1", deadline_ts=deadline())
+    # A straggler is retired after the checkpoint is abandoned, never while it is open.
+    with pytest.raises(CoordinationError, match="invalid_phase"):
+        await coordination.retire(participants, "c1", [EpisodeId(rollout_id="r", attempt=1)], deadline_ts=deadline())
+    await coordination.resume(participants, "c1", deadline_ts=deadline())
+    await coordination.retire(participants, "retire", [EpisodeId(rollout_id="r", attempt=1)], deadline_ts=deadline())
+    prepared = await coordination.prepare(participants, "c2", deadline_ts=deadline())
 
     assert not missed.prepared
     assert missed.blockers() == {"agent": ["r-a1"]}
@@ -234,10 +239,8 @@ async def test_restore_is_all_or_nothing(tmp_path: Path) -> None:
         "agent": set(),
         "res": set(),
     }
-    for recorder in recorders.values():
-        with pytest.raises(StaleAttemptError):
-            recorder.attempts.check(EpisodeId(rollout_id="r", attempt=1))
-        recorder.attempts.check(EpisodeId(rollout_id="r", attempt=2))
+    # The retire stopped and freed the attempt, so nothing about it remains to refuse later requests.
+    assert all(len(recorder.attempts) == 0 for recorder in recorders.values())
 
 
 async def test_renew_extends_every_participants_lease() -> None:
@@ -260,3 +263,14 @@ async def _leases(client: "InProcessClient", participants: coordination.Particip
         )
         leases[member.server_name] = orjson.loads(await response.read())["lease_expires_at"]
     return leases
+
+
+async def test_retire_stops_callers_before_the_servers_they_call() -> None:
+    client, _, events = deployment(*FULL)
+    participants = await coordination.discover(client, auth_token=TOKEN)
+
+    await coordination.retire(participants, "retire", [EpisodeId(rollout_id="r")], deadline_ts=deadline())
+
+    retires = [event for event in events if event.startswith("retire ")]
+    assert retires[:2] == ["retire env", "retire agent"]
+    assert sorted(retires[2:]) == ["retire policy", "retire res"]
