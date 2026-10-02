@@ -1484,7 +1484,13 @@ def test_fingerprint_ignores_non_assistant_turns():
 
 @pytest.mark.parametrize("fingerprint", [assistant_fingerprint, conversation_digest])
 def test_fingerprint_preserves_namespaced_tool_identity(fingerprint):
-    call = {"type": "function_call", "call_id": "call-1", "name": "weather", "arguments": '{"city":"Paris"}'}
+    """Keep a namespaced tool name distinct wherever the name is part of a call's identity.
+
+    The assistant fingerprint uses the name only for a call without a call id; a call with
+    one is named by its id, which the harness echoes even when it rewrites the name.
+    """
+    call_id = "" if fingerprint is assistant_fingerprint else "call-1"
+    call = {"type": "function_call", "call_id": call_id, "name": "weather", "arguments": '{"city":"Paris"}'}
     served = {**call, "namespace": "functions"}
     backend = {**call, "name": "functions__weather"}
     assert fingerprint([served]) == fingerprint([backend])
@@ -2065,15 +2071,19 @@ def test_fingerprint_agrees_across_all_three_dialects():
 
 
 def test_responses_tool_calls_are_distinguished():
-    """Distinguish Responses turns with different tool arguments."""
+    """Distinguish Responses turns with different tool calls.
 
-    def turn(cmd):
+    Served calls are told apart by their call ids; a call without an id by its arguments.
+    """
+
+    def turn(cmd, call_id):
         return [
             {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "checking"}]},
-            {"type": "function_call", "name": "Bash", "arguments": '{"cmd":"%s"}' % cmd, "call_id": "c1"},
+            {"type": "function_call", "name": "Bash", "arguments": '{"cmd":"%s"}' % cmd, "call_id": call_id},
         ]
 
-    assert assistant_fingerprint(turn("ls")) != assistant_fingerprint(turn("rm -rf /"))
+    assert assistant_fingerprint(turn("ls", "c1")) != assistant_fingerprint(turn("rm -rf /", "c2"))
+    assert assistant_fingerprint(turn("ls", "")) != assistant_fingerprint(turn("rm -rf /", ""))
 
 
 def test_tool_call_identity_changes_the_fingerprint():
