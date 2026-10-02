@@ -24,7 +24,7 @@ from pathlib import Path
 from platform import python_version
 from random import randint
 from socket import gethostbyname, gethostname, socket
-from typing import ClassVar, List, Optional, Tuple, Type
+from typing import ClassVar, Dict, List, Optional, Tuple, Type
 
 import hydra
 import rich
@@ -55,6 +55,8 @@ from nemo_gym.config_types import (
 
 
 _GLOBAL_CONFIG_DICT = None
+# Servers whose port the last parse picked itself (not set in the config); see `reassign_auto_assigned_ports`.
+_AUTO_ASSIGNED_PORT_SERVERS: List[str] = []
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME = "NEMO_GYM_CONFIG_PATH"
 CONFIG_PATHS_KEY_NAME = "config_paths"
@@ -109,6 +111,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PORT_RANGE_LOW_KEY_NAME,
     PORT_RANGE_HIGH_KEY_NAME,
     DRY_RUN_KEY_NAME,
+    SERVER_STARTUP_ATTEMPTS_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
@@ -331,6 +334,8 @@ Duplicate config paths:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
 
         disallowed_ports = initial_disallowed_ports.copy() if initial_disallowed_ports is not None else []
+        # Servers whose port we pick, so a failed startup can re-pick them (see `reassign_auto_assigned_ports`).
+        auto_assigned_port_servers: List[str] = []
 
         for server_instance_config in server_instance_configs:
             run_server_config_dict = server_instance_config.get_inner_run_server_config_dict()
@@ -366,10 +371,13 @@ Duplicate config paths:
                     )
                     run_server_config_dict["port"] = port
                     disallowed_ports.append(port)  # Disallow newly allocated port.
+                    auto_assigned_port_servers.append(server_instance_config.name)
                 else:
                     # Port already exists, add it to the disallowed list.
                     disallowed_ports.append(run_server_config_dict["port"])
 
+        global _AUTO_ASSIGNED_PORT_SERVERS
+        _AUTO_ASSIGNED_PORT_SERVERS = auto_assigned_port_servers
         return disallowed_ports
 
     def collect_missing_value_paths(self, config: DictConfig) -> List[str]:
@@ -678,6 +686,12 @@ Found global config dict yaml:
             port_range_high=port_range_high,
         )
 
+        startup_attempts = global_config_dict.get(SERVER_STARTUP_ATTEMPTS_KEY_NAME, DEFAULT_SERVER_STARTUP_ATTEMPTS)
+        if isinstance(startup_attempts, bool) or not isinstance(startup_attempts, int) or startup_attempts < 1:
+            raise ConfigError(
+                f"`{SERVER_STARTUP_ATTEMPTS_KEY_NAME}` must be an integer >= 1, got {startup_attempts!r}"
+            )
+
         with open_dict(global_config_dict):
             # Populate head server defaults
             if not global_config_dict.get(HEAD_SERVER_KEY_NAME):
@@ -842,6 +856,32 @@ def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path:
     server_config_dict = list(server_config_dict.values())[0]
 
     return server_config_dict
+
+
+def reassign_auto_assigned_ports(global_config_dict: DictConfig) -> Dict[str, Tuple[int, int]]:
+    """Pick a new port for every server whose port Gym picked itself, in place. Returns {server: (old, new)}.
+
+    A port is picked at parse time but bound only when its server gets there, so another process can take it in
+    between. The old ports stay disallowed so a port that was just taken is not picked again.
+    """
+    disallowed_ports = list(global_config_dict.get(DISALLOWED_PORTS_KEY_NAME) or [])
+    reassigned: Dict[str, Tuple[int, int]] = {}
+    with open_dict(global_config_dict):
+        for server_name in _AUTO_ASSIGNED_PORT_SERVERS:
+            if server_name not in global_config_dict:
+                continue
+            server_config_dict = get_first_server_config_dict(global_config_dict, server_name)
+            old_port = server_config_dict["port"]
+            new_port = _find_open_port_using_range(
+                disallowed_ports=disallowed_ports,
+                port_range_low=global_config_dict[PORT_RANGE_LOW_KEY_NAME],
+                port_range_high=global_config_dict[PORT_RANGE_HIGH_KEY_NAME],
+            )
+            server_config_dict["port"] = new_port
+            disallowed_ports.append(new_port)
+            reassigned[server_name] = (old_port, new_port)
+        global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
+    return reassigned
 
 
 def find_open_port(
