@@ -1,0 +1,34 @@
+# AgentEnv / E2B variant of sandbox_utils.yaml. Select it with SANDBOX_UTILS_YAML=<this file> for
+# sbatch_external_vllm.sh (it pulls in the E2B provider config below), together with:
+#   --config <template map yaml>  (sandbox.e2b.create.template_map: task image -> E2B template)
+#   E2B_API_KEY / E2B_API_URL / E2B_SANDBOX_URL (and SSL_CERT_FILE for a self-signed gateway cert).
+# E2B sandboxes have no host mounts, so the opencode installer and binary are baked into every
+# template at /opt/opencode (the same objects the OpenSandbox runs mount from /mnt/s3-data).
+config_paths:
+- nemo_gym/sandbox/providers/e2b/configs/e2b.yaml
+
+sandbox:
+  e2b:
+    operations:
+      # A burst of creates against a single gateway sees transient 5xx; ride them out.
+      retries: 6
+      retry_delay_s: 3.0
+      retry_max_delay_s: 30.0
+
+swebench_verified_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      remote_opencode_install_script_path: /opt/opencode/install.sh
+      remote_opencode_binary_path: /opt/opencode/opencode-linux-x64
+
+swebench_multilingual_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      remote_opencode_install_script_path: /opt/opencode/install.sh
+      remote_opencode_binary_path: /opt/opencode/opencode-linux-x64
+
+terminal_bench_2_1_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      remote_opencode_install_script_path: /opt/opencode/install.sh
+      remote_opencode_binary_path: /opt/opencode/opencode-linux-x64

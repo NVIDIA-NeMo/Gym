@@ -382,6 +382,12 @@ class TestTemplateResolution:
         handle = await provider.create(_spec(image="ghcr.io/acme/task:1.0"))
         assert handle.raw.create_kwargs["template"] == "acme-task"
 
+    async def test_opensandbox_resource_requests_are_ignored(self) -> None:
+        provider = E2BProvider(create={"template_map": {"ghcr.io/acme/task:1.0": "acme-task"}})
+        spec = _spec(image="ghcr.io/acme/task:1.0", provider_options={"resource_requests": {"cpu": 0.5}})
+        handle = await provider.create(spec)
+        assert handle.raw.create_kwargs["template"] == "acme-task"
+
     async def test_image_used_directly_when_already_an_alias(self) -> None:
         provider = E2BProvider()
         handle = await provider.create(_spec(image="build-cython-ext__c9fba49d4bd3"))

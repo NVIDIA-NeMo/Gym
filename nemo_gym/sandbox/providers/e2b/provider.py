@@ -294,7 +294,9 @@ class E2BProvider:
         options = spec.provider_options or {}
         if not isinstance(options, Mapping):
             raise TypeError("E2B provider_options must be a mapping")
-        unknown = set(options) - {"template"}
+        # resource_requests (OpenSandbox scheduling requests, set by shared benchmark configs) has no E2B
+        # meaning: resources are fixed when the template is built, so it is ignored rather than rejected.
+        unknown = set(options) - {"template", "resource_requests"}
         if unknown:
             raise ValueError(f"Unknown E2B provider option(s): {', '.join(sorted(unknown))}. Supported: template")
         option = options.get("template")
