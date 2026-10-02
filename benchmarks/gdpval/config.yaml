@@ -32,9 +32,35 @@
 # otherwise behaves exactly like the standard single-pass collection.
 rollout_collection_driver: resources_servers.gdpval.multistage_orchestrator:run_rollout_collection
 
-# Judge model — proxy to the NVIDIA inference API. A single proxy server fronts
-# every frontier judge (Gemini, GPT, Claude); the panel members below select
-# among them by model id, so one server is enough.
+# GDPVal's failure contract, off by default in shared rollout collection and
+# reverification: on resume, retry timeouts that older Stirrup builds stamped
+# terminal, and retry rows whose judge response was invalid instead of scoring
+# them as zero. The driver above applies it when these keys are unset, and a
+# multistage run refuses an explicit false. These keys also apply it where the
+# driver does not run (`gym eval run --no-serve`, `gym eval reverify`).
+retry_terminal_timeouts: true
+retry_invalid_judge_responses: true
+
+# Judge endpoints throttle in bursts (429/502/503). Retries and timeouts stack:
+# - Each judge proxy below retries upstream 404/408/429/500/502/503/504/520
+#   responses 0.5 s apart, up to max_http_attempts (Gym's default is 3). 1800
+#   rides out roughly 15 minutes of throttling per request. A persistent error in
+#   that set (e.g. a 404 for an unknown model route) also retries for the whole
+#   window; a spent quota or invalid key (by error code) stops immediately.
+# - The GDPVal server waits GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS per judge call:
+#   300 s in comparison mode and 1800 s in rubric mode. A comparison call that
+#   times out is not retried (its reference matchup is dropped), and time spent
+#   queued behind a proxy's max_concurrent_requests counts toward it.
+# - GDPVal retries a call whose error names throttling or a 502/503/504: 5
+#   attempts with 5-60 s backoff in comparison mode, 6 with doubling backoff
+#   from 2 s for the text and visual rubric. The structured rubric makes
+#   rubric_structured_formatting_retries (3) attempts per trial, shared with
+#   unparseable replies, with backoff doubling from 5 s, and also retries an
+#   error whose message contains "timeout".
+# Lower the window per proxy with, e.g.,
+# ++gdpval_gpt55_judge_model.responses_api_models.openai_model.max_http_attempts=60
+
+# Preserve the configurable single-judge endpoint for existing overlays.
 gdpval_judge_model:
   responses_api_models:
     openai_model:
@@ -42,6 +68,43 @@ gdpval_judge_model:
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
       openai_model: ${oc.env:JUDGE_MODEL_NAME,gcp/google/gemini-3.1-pro-preview}
+      max_http_attempts: 1800
+
+# Each OpenAI proxy fixes the upstream model ID, so panel members use separate
+# proxies even when they share one OpenAI-compatible endpoint (JUDGE_BASE_URL).
+gdpval_gpt55_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
+      openai_model: ${oc.env:JUDGE_GPT_MODEL,openai/openai/gpt-5.5}
+      max_http_attempts: 1800
+
+gdpval_gemini31_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:JUDGE_GEMINI_API_KEY,${oc.env:JUDGE_API_KEY,dummy}}
+      openai_model: ${oc.env:JUDGE_GEMINI_MODEL,gcp/google/gemini-3.1-pro-preview}
+      max_http_attempts: 1800
+      extra_body: {reasoning_effort: high}
+      max_concurrent_requests: ${oc.env:GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS,2}
+
+gdpval_claude48_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
+      openai_model: ${oc.env:JUDGE_CLAUDE_MODEL,aws/anthropic/bedrock-claude-opus-4-8}
+      max_http_attempts: 1800
+      # `timeout` / `request_timeout` are gateway-side keys (LiteLLM-style) that
+      # let one adaptive-thinking Claude call run up to 900 s at the default
+      # JUDGE_BASE_URL gateway. They are sent in every request body; remove them
+      # if your endpoint rejects unknown fields.
+      extra_body: {thinking: {type: adaptive}, output_config: {effort: high}, timeout: 900, request_timeout: 900}
 
 # GDPVal resources server (rubric scoring by default; switch to comparison via override).
 gdpval_resources_server:
@@ -62,6 +125,13 @@ gdpval_resources_server:
       num_comparison_trials: 4
       preconvert_office_to_pdf: true
       preconvert_max_concurrent: 1
+      # Per-file page cap for rasterized PDFs. In comparison mode an
+      # images_and_text judge renders up to max(judge_pdf_max_pages,
+      # judge_max_images_per_request) pages per file and is excluded from any
+      # matchup whose pages and images exceed judge_max_images_per_request
+      # (default 450). A native_pdf_overflow_images judge rasterizes overflow
+      # documents up to judge_pdf_max_pages.
+      judge_pdf_max_pages: 1000
       judge_model_server:
         type: responses_api_models
         name: gdpval_judge_model
@@ -69,26 +139,50 @@ gdpval_resources_server:
       # Multi-judge panel (applies to every judge mode — rubric text/visual/
       # structured and pairwise comparison, including multi-stage ELO): a panel
       # of frontier judges, one sampled per comparison/scoring call. This is the
-      # default. All three route through the single gdpval_judge_model proxy and
-      # differ only by model id + reasoning knobs; set a per-member model_server
-      # to point at distinct endpoints. To fall back to a single judge, override
+      # default. Each member routes through its own fixed-model proxy.
+      # The per-member transport fields (media_mode, max_native_pdf_*, image and
+      # request byte caps, raster_dpi_tiers, max_video_files) apply to comparison
+      # mode only. Rubric mode sends every member the server-level
+      # judge_media_mode (native_pdf by default) with no per-member preflight.
+      # To fall back to a single judge, override
       # ++gdpval_resources_server.resources_servers.gdpval.judge_panel=null
       # (the lone judge then comes from judge_model_server above).
       judge_panel:
         - name: gpt-5.5
-          # Served via NVIDIA inference on the OpenAI /v1/chat/completions route.
+          # Served through the OpenAI-compatible judge endpoint.
           model: ${oc.env:JUDGE_GPT_MODEL,openai/openai/gpt-5.5}
+          model_server: {type: responses_api_models, name: gdpval_gpt55_judge_model}
+          media_mode: images_and_text
           create_params_overrides: { reasoning_effort: medium }
+          raster_dpi_tiers: [144, 120, 108, 96, 90, 84, 81, 80, 72]
+          max_total_image_base64_bytes: 12000000
+          max_serialized_request_bytes: 30000000
         - name: gemini-3.1-pro
           model: ${oc.env:JUDGE_GEMINI_MODEL,gcp/google/gemini-3.1-pro-preview}
+          model_server: {type: responses_api_models, name: gdpval_gemini31_judge_model}
+          media_mode: native_pdf_overflow_images
           create_params_overrides: { extra_body: { reasoning_effort: high } }
-          # Handles audio/video natively — tasks with those files route here.
-          handles_audio_video: true
+          # Reads audio AND video natively — tasks with those files route here.
+          handles_audio: true
+          handles_video: true
+          max_video_files: 10
+          max_native_pdf_pages: 1000
+          max_native_pdf_bytes: 50000000
+          max_native_pdf_bytes_per_document: 50000000
+          max_serialized_request_bytes: 495000000
         - name: claude-opus-4.8
-          # Served via NVIDIA inference (Bedrock). The proxy exposes it on the
-          # Anthropic /v1/messages route; extra_body.thinking enables reasoning.
+          # Served through the OpenAI-compatible judge endpoint; the proxy
+          # exposes it on the Anthropic /v1/messages route. extra_body.thinking
+          # (adaptive, high effort) enables reasoning; temperature is dropped.
           model: ${oc.env:JUDGE_CLAUDE_MODEL,aws/anthropic/bedrock-claude-opus-4-8}
-          create_params_overrides: { extra_body: { thinking: { type: enabled } } }
+          model_server: {type: responses_api_models, name: gdpval_claude48_judge_model}
+          media_mode: native_pdf
+          create_params_overrides: {temperature: null, extra_body: {thinking: {type: adaptive}, output_config: {effort: high}}}
+          max_native_pdf_pages: 100
+          max_native_pdf_documents: 5
+          max_native_pdf_bytes: 25165824
+          max_image_base64_bytes: 5242880
+          max_serialized_request_bytes: 440401920
       # Seed for reproducible per-call judge sampling (null = seed only on task
       # identity, still stable per task).
       judge_sampling_seed: ${oc.env:JUDGE_SAMPLING_SEED,null}
@@ -102,6 +196,20 @@ gdpval_stirrup_agent:
       agent_max_turns: 250
       concurrency: 32
       temperature: 1.0
+      # GDPVal tasks routinely need multi-thousand-token scripts. A 1,024-token
+      # completion cannot form a useful tool call and can create a sticky
+      # code_exec({}) loop after long reasoning turns.
+      context_window_tokens: 262144
+      min_completion_tokens: 8192
+      # Reject the observed near-empty compaction outputs that erase progress
+      # on long GDPVal sessions. Generic Stirrup agents accept any non-empty
+      # summary for backward compatibility.
+      min_compaction_summary_words: 50
+      # After a turn spends its whole completion budget without a usable tool
+      # call, run the next turn with thinking disabled plus a transient
+      # instruction that is not recorded in the trajectory. Generic Stirrup
+      # agents leave this off so their rollouts stay unsteered.
+      truncation_recovery: true
       system_prompt_template: ${oc.env:SYSTEM_PROMPT_TEMPLATE,null}
       user_prompt_template: ${oc.env:USER_PROMPT_TEMPLATE,null}
       gdpval_container_path: ${oc.env:GDPVAL_CONTAINER_PATH,null}

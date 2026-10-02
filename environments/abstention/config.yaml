@@ -10,7 +10,7 @@ abstention:
       entrypoint: app.py
       domain: rlhf
       verified: false
-      description: Train models to abstain when unsure using three-tier reward on HotPotQA with LLM judge
+      description: Train models to abstain when unsure using three-tier reward on Nemotron-RL-QA-Abstention-v1 with LLM judge
       value: Improve calibration by rewarding abstention over incorrect answers
 
       # LLM judge model server
@@ -44,14 +44,14 @@ abstention_simple_agent:
         type: responses_api_models
         name: policy_model
       datasets:
-        - name: hotpotqa_train
+        - name: nemotron_qa_abstention_train
           type: train
-          jsonl_fpath: environments/abstention/data/hotpotqa_train.jsonl
-          license: Creative Commons Attribution-ShareAlike 4.0 International
-        - name: hotpotqa_val
-          type: validation
-          jsonl_fpath: environments/abstention/data/hotpotqa_val.jsonl
-          license: Creative Commons Attribution-ShareAlike 4.0 International
+          jsonl_fpath: environments/abstention/data/nemotron_qa_abstention_train.jsonl
+          source:
+            type: huggingface
+            repo_id: nvidia/Nemotron-RL-QA-Abstention-v1
+            artifact_fpath: data/train.jsonl
+          license: Creative Commons Attribution 4.0 International
         - name: example
           type: example
           jsonl_fpath: environments/abstention/data/example.jsonl

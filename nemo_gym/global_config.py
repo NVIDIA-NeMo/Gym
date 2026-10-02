@@ -16,7 +16,7 @@ import logging
 import re
 import sys
 from argparse import ArgumentParser
-from collections import defaultdict
+from collections import Counter, defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
@@ -27,7 +27,7 @@ from pathlib import Path
 from platform import python_version
 from random import randint
 from socket import gethostbyname, gethostname, socket
-from typing import ClassVar, Dict, List, Optional, Set, Tuple, Type
+from typing import Any, ClassVar, Dict, Iterable, List, Mapping, Optional, Set, Tuple, Type
 
 import hydra
 import rich
@@ -92,9 +92,11 @@ PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
 UVICORN_TIMEOUT_WORKER_HEALTHCHECK = "uvicorn_timeout_worker_healthcheck"
+SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME = "server_spinup_timeout_seconds"
 MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
 ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
+UV_LOCK_TIMEOUT_KEY_NAME = "uv_lock_timeout_seconds"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 RESULTS_DIR_KEY_NAME = "results_dir"
 CACHE_DIR_KEY_NAME = "cache_dir"
@@ -123,7 +125,6 @@ ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME = "NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING"
 ENVIRONMENT_SERVER_NAME_KEY_NAME = "environment_server_name"
 ENVIRONMENT_SERVER_ROUTES_KEY_NAME = "environment_server_routes"
 ENVIRONMENT_ROUTING_MODE_KEY_NAME = "environment_routing_mode"
-TASKSETS_KEY_NAME = "tasksets"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -141,9 +142,11 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PORT_RANGE_LOW_KEY_NAME,
     PORT_RANGE_HIGH_KEY_NAME,
     DRY_RUN_KEY_NAME,
+    SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     ALLOW_OPENAI_VERSION_SKEW_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
+    UV_LOCK_TIMEOUT_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
     CACHE_DIR_KEY_NAME,
@@ -164,7 +167,6 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ENVIRONMENT_SERVER_NAME_KEY_NAME,
     ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
     ENVIRONMENT_ROUTING_MODE_KEY_NAME,
-    TASKSETS_KEY_NAME,
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
@@ -203,6 +205,8 @@ ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
+# Stamped by rollout collection on every record: the Environment Server that ran the rollout.
+ENVIRONMENT_SERVER_STAMP_KEY_NAME = "_ng_environment_server"
 # The config instance that declares the row's dataset (a resources server normally; the agent
 # itself for self-contained environments). Stamped into derived artifacts at collate/load time;
 # resolved to an agent at dispatch time. See the dataset-decoupling RFC.
@@ -232,6 +236,66 @@ def get_hf_token() -> Optional[str]:  # pragma: no cover
 # OmegaConf new resolvers
 OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}}")
 OmegaConf.register_new_resolver("copy", lambda a: f"${{copy:{a}}}")
+
+
+def rollout_run_key(row: Mapping[str, Any]) -> Optional[str]:
+    """Identify what ran a rollout, for grouping: its Environment Server.
+
+    Records written before rollout collection stamped the Environment Server fall back to their agent.
+    """
+    server = row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+    if server is not None:
+        return server
+    return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+
+
+def label_runs(agent_by_key: Mapping[str, Optional[str]]) -> Dict[str, str]:
+    """Label each run key by its agent's name when that name identifies exactly one run, else by the key.
+
+    A run with one Environment Server per agent keeps its agent's name, so existing labels do not change.
+    Every run of an agent that several Environment Servers front is labelled by its own Environment Server.
+    A label that would still repeat, because one server's name equals another run's agent name, also falls back
+    to the key. The result depends only on the mapping, not on its order, and every label is unique.
+    """
+    keys_by_agent: Dict[str, set] = defaultdict(set)
+    for key, agent_name in agent_by_key.items():
+        if agent_name is not None:
+            keys_by_agent[agent_name].add(key)
+    labels = {
+        key: agent_name if agent_name is not None and len(keys_by_agent[agent_name]) == 1 else key
+        for key, agent_name in agent_by_key.items()
+    }
+    while True:
+        counts = Counter(labels.values())
+        clashing = [key for key, label in labels.items() if counts[label] > 1 and label != key]
+        if not clashing:
+            return labels
+        for key in clashing:
+            labels[key] = key
+
+
+def rollout_run_labels(rows: Iterable[Mapping[str, Any]]) -> Dict[str, str]:
+    """Label each ``rollout_run_key`` for reports, the same way rollout collection labels aggregate metrics.
+
+    See ``label_runs``. A row without an ``agent_ref`` is labelled by its Environment Server.
+    """
+    agent_by_key: Dict[str, Optional[str]] = {}
+    for row in rows:
+        key = rollout_run_key(row)
+        if key is not None and key not in agent_by_key:
+            agent_by_key[key] = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+    return label_runs(agent_by_key)
+
+
+def rollout_agent_label(row: Mapping[str, Any]) -> Optional[str]:
+    """Name the agent that acted in one rollout, for per-rollout output such as trajectories and debug lines.
+
+    Rows without an ``agent_ref``, such as episode rows, use their Environment Server.
+    """
+    agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+    if agent_name is not None:
+        return agent_name
+    return row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -1389,6 +1453,10 @@ Found global config dict yaml:
 
             global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
 
+            # Bound server startup independently of model-endpoint readiness. Multi-worker
+            # supervisors can otherwise replace a deterministically failing worker forever.
+            global_config_dict.setdefault(SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME, 600)
+
             # How long `gym env start` waits for the model endpoints named in the config to accept
             # a connection. Generous because vLLM can take minutes to load weights; 0 skips it.
             global_config_dict.setdefault(MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME, 600)
@@ -1416,6 +1484,20 @@ Found global config dict yaml:
             # Runtime subprocesses inherit the configured cache directory.
             if not parse_config.offline:
                 environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+            # Every server installs into that one shared cache, and they all start at once, so
+            # exactly one holds uv's distribution-cache lock while the rest wait out its cold
+            # resolve and download. uv's own default is 300s, which is shorter than a cold install
+            # of a large dependency set - the waiters then abort and the run dies during spinup.
+            # An explicit key wins, then a UV_LOCK_TIMEOUT the user already exported, then 1800.
+            # A null key exports nothing, so the inherited environment (or uv's default) applies.
+            exported_uv_lock_timeout = environ.get("UV_LOCK_TIMEOUT", "").strip()
+            global_config_dict.setdefault(
+                UV_LOCK_TIMEOUT_KEY_NAME,
+                int(exported_uv_lock_timeout) if exported_uv_lock_timeout.isdecimal() else 1800,
+            )
+            uv_lock_timeout = global_config_dict[UV_LOCK_TIMEOUT_KEY_NAME]
+            if not parse_config.offline and uv_lock_timeout is not None:
+                environ["UV_LOCK_TIMEOUT"] = str(uv_lock_timeout)
             # By default, build the directories in their individual folders using the root repository
             # e.g. WORKING_DIR/responses_api_models/my_server
             # Deliberately anchored at WORKING_DIR rather than the cache root: venv

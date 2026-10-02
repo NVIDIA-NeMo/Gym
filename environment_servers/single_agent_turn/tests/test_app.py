@@ -18,7 +18,11 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServerConfig,
     _is_retryable_dependency_error,
 )
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.base_resources_server import (
+    BaseVerifyRequest,
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+)
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
@@ -202,6 +206,14 @@ async def test_single_agent_turn_with_direct_resources_tools() -> None:
         "/verify",
         "/close_session",
     ]
+    # /verify gets the Resources Server's own flat body, the one an Agent's /run sends, under the session cookie.
+    verify_call = client.calls[4][2]
+    verify_body = BaseVerifyRequest.model_validate(verify_call["json"])
+    assert verify_call["json"]["instance_id"] == "task"
+    assert verify_body.responses_create_params.input == "task"
+    assert verify_body.response.id == "response"
+    assert not {"episode_id", "task_id", "verification_input"} & verify_call["json"].keys()
+    assert verify_call["cookies"] == {"session": "updated-cookie"}
     resources_seed_body = ResourcesSeedSessionRequest.model_validate(client.calls[0][2]["json"])
     create_body = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
     agent_close_body = AgentCloseSessionRequest.model_validate(client.calls[3][2]["json"])

@@ -26,12 +26,18 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym.base_resources_server import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+)
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.swebench_pro.app import (
     SWEBenchProInstanceRequest,
     SWEBenchProResourcesServer,
     SWEBenchProResourcesServerConfig,
     SWEBenchProSeedSessionRequest,
+    SWEBenchProVerifyRequest,
     _attempt_budget,
     _budget_spent,
 )
@@ -206,6 +212,7 @@ async def test_seed_session_applies_shared_anti_cheat_setup(monkeypatch: MonkeyP
     assert sandbox.exec.await_args_list[0].kwargs["timeout_s"] == 600
     assert response.sandbox_handle == "sandbox-id"
     assert server._session_id_to_sandbox["session"] is sandbox
+    assert "session" not in server._session_id_to_identity
 
 
 @pytest.mark.asyncio
@@ -225,6 +232,211 @@ async def test_seed_session_can_skip_anti_cheat_setup(monkeypatch: MonkeyPatch) 
     sandbox.upload.assert_not_awaited()
     # anti-cheat is skipped, but the container is still normalized and snapshotted
     assert sandbox.exec.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_episode_seed_returns_direct_access_and_resources_close_owns_stop(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    server = make_server(golden=False, apply_anti_cheating=False)
+    sandbox = SimpleNamespace(
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        exec=AsyncMock(),
+        serialize=AsyncMock(return_value={"sandbox_id": "sandbox-id"}),
+        stop=AsyncMock(),
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.resolve_provider_config",
+        lambda name, config: {"opensandbox": {}},
+    )
+    monkeypatch.setattr("resources_servers.swebench_pro.app.get_global_config_dict", lambda: {})
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+    task_data = request_body()
+    task_data.pop("responses_create_params")
+    task_data.pop("response")
+
+    response = await server.seed_session(
+        request,
+        ResourcesSeedSessionRequest(
+            resources_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
+            task_data=task_data,
+        ),
+    )
+
+    assert response.resources_session_id == "session"
+    assert response.sandbox_access.connection.provider_config_ref == server.config.sandbox_provider
+    assert response.sandbox_access.connection.descriptor == {"sandbox_id": "sandbox-id"}
+    assert server._session_id_to_identity["session"] == (
+        EpisodeId(rollout_id="rollout"),
+        TaskId(taskset="swebench_pro", task_id="instance_example"),
+    )
+    repeated = await server.seed_session(
+        request,
+        ResourcesSeedSessionRequest(
+            resources_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
+            task_data=task_data,
+        ),
+    )
+    assert repeated.resources_session_id == "session"
+    server._create_sandbox.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+    with pytest.raises(ValueError, match="episode_id does not match"):
+        await server.close_resources_session(
+            request,
+            ResourcesCloseSessionRequest(
+                resources_session_id="session",
+                episode_id=EpisodeId(rollout_id="different"),
+            ).model_dump(mode="json"),
+        )
+    sandbox.stop.assert_not_awaited()
+
+    await server.close_resources_session(
+        request,
+        ResourcesCloseSessionRequest(
+            resources_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+        ).model_dump(mode="json"),
+    )
+    sandbox.stop.assert_awaited_once()
+    await server.close_resources_session(
+        request,
+        ResourcesCloseSessionRequest(
+            resources_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+        ).model_dump(mode="json"),
+    )
+    sandbox.stop.assert_awaited_once()
+    with pytest.raises(ValueError, match="episode_id does not match the closed resources session"):
+        await server.close_resources_session(
+            request,
+            ResourcesCloseSessionRequest(
+                resources_session_id="session",
+                episode_id=EpisodeId(rollout_id="different"),
+            ).model_dump(mode="json"),
+        )
+    with pytest.raises(ValueError, match="already closed"):
+        await server.seed_session(
+            request,
+            ResourcesSeedSessionRequest(
+                resources_session_id="session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
+                task_data=task_data,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_episode_seed_rolls_back_sandbox_when_handoff_fails(monkeypatch: MonkeyPatch) -> None:
+    server = make_server(golden=False, apply_anti_cheating=False)
+    sandbox = SimpleNamespace(
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        exec=AsyncMock(),
+        serialize=AsyncMock(side_effect=RuntimeError("cannot serialize")),
+        stop=AsyncMock(),
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.resolve_provider_config",
+        lambda name, config: {"opensandbox": {}},
+    )
+    monkeypatch.setattr("resources_servers.swebench_pro.app.get_global_config_dict", lambda: {})
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+    task_data = request_body()
+    task_data.pop("responses_create_params")
+    task_data.pop("response")
+
+    with pytest.raises(RuntimeError, match="cannot serialize"):
+        await server.seed_session(
+            request,
+            ResourcesSeedSessionRequest(
+                resources_session_id="session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
+                task_data=task_data,
+            ),
+        )
+
+    sandbox.stop.assert_awaited_once()
+    assert "session" not in server._session_id_to_sandbox
+    assert "session" not in server._session_id_to_identity
+
+
+@pytest.mark.asyncio
+async def test_episode_close_retains_state_when_sandbox_stop_fails() -> None:
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("stop failed")))
+    identity = (
+        EpisodeId(rollout_id="rollout"),
+        TaskId(taskset="swebench_pro", task_id="instance_example"),
+    )
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_identity["session"] = identity
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await server.close_resources_session(
+            request,
+            ResourcesCloseSessionRequest(
+                resources_session_id="session",
+                episode_id=identity[0],
+            ).model_dump(mode="json"),
+        )
+
+    assert server._session_id_to_sandbox["session"] is sandbox
+    assert server._session_id_to_identity["session"] == identity
+
+
+@pytest.mark.asyncio
+async def test_repeated_verify_of_a_typed_session_fails_after_task_sandbox_is_consumed(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    server = make_server(golden=False, apply_anti_cheating=False)
+    task = SWEBenchProInstanceRequest.model_validate(request_body())
+    identity = (
+        EpisodeId(rollout_id="rollout"),
+        TaskId(taskset="swebench_pro", task_id=task.instance_id),
+    )
+    task_sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="agent patch", stderr="")),
+        stop=AsyncMock(),
+    )
+    verification_sandbox = SimpleNamespace(stop=AsyncMock())
+    server._session_id_to_identity["session"] = identity
+    server._session_id_to_sandbox["session"] = task_sandbox
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=verification_sandbox))
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.run_verification",
+        AsyncMock(
+            return_value=VerificationResult(
+                completed=True,
+                resolved=True,
+                patch_applied=True,
+                test_results={
+                    "tests": [
+                        {"name": "new_test", "status": "PASSED"},
+                        {"name": "old_test", "status": "PASSED"},
+                    ]
+                },
+            )
+        ),
+    )
+    # The flat body single_agent_turn sends: the task's fields, the request, and the agent's response.
+    body = SWEBenchProVerifyRequest.model_validate(request_body())
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+
+    first = await server.verify(request, body)
+    with pytest.raises(ValueError, match="task sandbox is no longer available"):
+        await server.verify(request, body)
+
+    assert first.reward == 1.0
+    task_sandbox.stop.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -584,8 +796,8 @@ async def test_seed_returns_reconnect_descriptor_and_cleanup_releases_container(
     assert server._session_id_to_sandbox["session"] is sandbox
 
     # An agent that fails before verification must still release the benchmark's state.
-    await server.close_session(request)
-    await server.close_session(request)
+    await server.close_resources_session(request)
+    await server.close_resources_session(request)
     sandbox.stop.assert_awaited_once()
     assert server._session_id_to_sandbox == {}
     assert server._session_id_to_pristine_untracked == {}
@@ -630,5 +842,26 @@ async def test_close_session_without_session_is_a_noop() -> None:
     server = make_server(golden=False)
     sandbox = SimpleNamespace(stop=AsyncMock())
     server._session_id_to_sandbox["other"] = sandbox
-    assert await server.close_session(SimpleNamespace(session={})) == {"closed": True}
+    assert await server.close_resources_session(SimpleNamespace(session={})) == {"closed": True}
     sandbox.stop.assert_not_awaited()
+
+
+def test_close_session_accepts_cookie_and_typed_bodies_over_http() -> None:
+    server = make_server(golden=False)
+    client = TestClient(server.setup_webserver())
+
+    # Agents that seeded through /run, such as hermes_sandboxed_agent, close with an empty body.
+    cookie_close = client.post("/close_session", json={})
+    typed_close = client.post(
+        "/close_session",
+        json=ResourcesCloseSessionRequest(
+            resources_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+        ).model_dump(mode="json"),
+    )
+    malformed_close = client.post("/close_session", json={"resources_session_id": "session"})
+
+    assert (cookie_close.status_code, cookie_close.json()) == (200, {"closed": True})
+    assert typed_close.status_code == 200
+    assert typed_close.json()["resources_session_id"] == "session"
+    assert malformed_close.status_code == 422
