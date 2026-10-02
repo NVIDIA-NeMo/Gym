@@ -83,6 +83,16 @@ class TokenCaptureFrozenError(RuntimeError):
     """
 
 
+class TokenCaptureRetiredError(TokenCaptureFrozenError):
+    """Reject a write that arrived after its rollout's capture was retired.
+
+    A retired rollout stays fenced until it is deleted, and every later writer sees it as frozen,
+    so callers handle this exactly like ``TokenCaptureFrozenError``: drop the late record and do
+    not mark the rollout incomplete. Typical sources are an abandoned attempt that keeps running
+    and a duplicate execution of a finished rollout.
+    """
+
+
 @dataclass(frozen=True)
 class TokenCaptureSnapshot:
     """An immutable view of one rollout's frozen capture records."""
@@ -307,6 +317,24 @@ class TokenSource(Protocol):
 
         Return ``False`` if state changed after the snapshot.
         Transports without delete return ``True`` and own retention.
+        """
+        ...
+
+    async def retire(self, rollout_ids: Sequence[str]) -> dict:
+        """Remove rollouts' records and keep a fence, whatever their state.
+
+        This is ``drop`` without the snapshot check, for rollouts the consumer is done with but won't
+        drop as a consumed snapshot, such as masked or failed captures and abandoned attempts. Later
+        writes for a retired rollout must fail with ``TokenCaptureRetiredError``. Retiring again is a
+        no-op. The result validates as ``staging.records.RolloutRemoval``.
+        """
+        ...
+
+    async def delete(self, rollout_ids: Sequence[str]) -> dict:
+        """Remove rollouts' records and fences.
+
+        Delete retired rollouts once nothing of those attempts can still write, or a rollout ID before
+        reusing it. Deleting again is a no-op. The result validates as ``staging.records.RolloutRemoval``.
         """
         ...
 
