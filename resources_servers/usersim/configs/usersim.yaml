@@ -1,0 +1,145 @@
+environment_routing_mode: taskset
+environment_server_routes:
+  "usersim:example": usersim_environment
+
+assistant_policy_base_url: ${policy_base_url}
+assistant_policy_api_key: ${policy_api_key}
+assistant_policy_model_name: ${policy_model_name}
+
+user_policy_base_url: ${policy_base_url}
+user_policy_api_key: ${policy_api_key}
+user_policy_model_name: ${policy_model_name}
+
+tool_simulation_base_url: ${policy_base_url}
+tool_simulation_api_key: ${policy_api_key}
+tool_simulation_model_name: ${policy_model_name}
+
+assistant_policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${assistant_policy_base_url}
+      api_key: ${assistant_policy_api_key}
+      model: ${assistant_policy_model_name}
+      return_token_id_information: false
+
+user_policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${user_policy_base_url}
+      api_key: ${user_policy_api_key}
+      model: ${user_policy_model_name}
+      return_token_id_information: false
+
+tool_simulation_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${tool_simulation_base_url}
+      api_key: ${tool_simulation_api_key}
+      model: ${tool_simulation_model_name}
+      return_token_id_information: false
+
+usersim_resources:
+  resources_servers:
+    usersim:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Deterministic NeMo UserSim persona and general-probe initialization.
+      personas_cache_dir: ~/.cache/nemo-gym/usersim/personas
+      personas_dataset_version: 0.0.2
+      usersim_revision: 44c39daf481a23a87742c3c456852aca910653ce  # pragma: allowlist secret
+      tool_simulation_model:
+        type: responses_api_models
+        name: tool_simulation_model
+      probe_scorer_model:
+        type: responses_api_models
+        name: tool_simulation_model
+      personas_locales:
+      - en_US
+      probe_mix:
+        general_open_ended: 0.5
+        general_educational: 0.5
+      probe_themes:
+        general_open_ended:
+        - topic: local food and dining
+          goal: Seek a practical recommendation about local food and dining.
+        - topic: travel planning
+          goal: Ask for practical advice about planning a trip.
+        general_educational:
+        - topic: local ecology
+          goal: Learn about local ecology by asking focused follow-up questions.
+        - topic: personal finance fundamentals
+          goal: Learn the fundamentals of personal finance through clear explanations.
+
+usersim_user:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: user_policy_model
+      resources_server:
+        type: resources_servers
+        name: usersim_resources
+      max_steps: 2
+
+usersim_assistant:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: assistant_policy_model
+      resources_server:
+        type: resources_servers
+        name: usersim_resources
+      max_steps: 10
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/usersim/data/example.jsonl
+          license: Apache 2.0
+
+usersim_environment:
+  environment_servers:
+    usersim:
+      entrypoint: app.py
+      user_agent:
+        type: responses_api_agents
+        name: usersim_user
+      assistant_agent:
+        type: responses_api_agents
+        name: usersim_assistant
+      resources_server:
+        type: resources_servers
+        name: usersim_resources
+      judge_model:
+        type: responses_api_models
+        name: tool_simulation_model
+      summary_model:
+        type: responses_api_models
+        name: tool_simulation_model
+      api_response_model:
+        type: responses_api_models
+        name: tool_simulation_model
+      resources_tool_transports:
+        - direct_http
+      max_turns: 6
+      default_episode_timeout_seconds: 1800
+      cleanup_timeout_seconds: 180
+      protocol_config:
+        max_query_attempts: 3
+        max_assistant_attempts: 1
+        enforce_user_language: true
+        user_language_min_script_compliance: 0.6
+        user_language_min_letters: 8
+        incremental_disclosure_ratio: 0.6
+        persona_grounding_ratio: 1.0
+        context_compression: true
+        compression_window: 1
+        store_reasoning: true
+        random_seed: 42
+        verbosity: 1

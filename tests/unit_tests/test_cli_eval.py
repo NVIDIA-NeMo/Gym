@@ -21,7 +21,13 @@ import pytest
 from omegaconf import DictConfig
 
 import nemo_gym.cli.eval as cli_eval
-from nemo_gym.cli.eval import _validate_prepared_split_file_exists, _validate_split_datasets_declared
+from nemo_gym.cli.eval import (
+    _data_processor_mode_for_split,
+    _is_preparable_dataset,
+    _preparation_dataset_config,
+    _validate_prepared_split_file_exists,
+    _validate_split_datasets_declared,
+)
 from nemo_gym.config_types import ConfigError, ResponsesAPIAgentServerInstanceConfig
 
 
@@ -74,11 +80,11 @@ class TestValidateSplitDatasetsDeclared:
         with pytest.raises(ConfigError) as exc_info:
             _validate_split_datasets_declared("train", configs)
         message = str(exc_info.value)
-        # The error must name the requested split, list what is declared, and give the
-        # copy-pasteable --no-serve recipe for the example file.
+        # The error must name the requested split, list what is declared, and identify
+        # the runnable example split.
         assert "No dataset of type `train`" in message
         assert "example_agent: example (type: example)" in message
-        assert "--no-serve --input resources_servers/x/data/example.jsonl" in message
+        assert "--split example" in message
 
     def test_fails_when_no_datasets_are_declared_at_all(self) -> None:
         configs = [_make_agent_instance_config("bare_agent", [])]
@@ -168,3 +174,39 @@ class TestPrepareDependencies:
 
         with pytest.raises(ConfigError, match="prepare_dependencies for benchmark 'b'"):
             cli_eval._install_prepare_dependencies(self._benchmark(["nope"]))
+
+
+@pytest.mark.parametrize("split", ["train", "validation", "benchmark"])
+def test_standard_splits_use_train_preparation(split: str) -> None:
+    assert _data_processor_mode_for_split(split) == "train_preparation"
+
+
+def test_example_split_uses_example_validation() -> None:
+    assert _data_processor_mode_for_split("example") == "example_validation"
+
+
+@pytest.mark.parametrize(
+    ("dataset", "expected"),
+    [
+        ({"type": "benchmark"}, True),
+        ({"type": "example", "prepare_script": "prepare.py"}, True),
+        ({"type": "example"}, False),
+        ({"type": "train", "prepare_script": "prepare.py"}, False),
+    ],
+)
+def test_preparable_dataset_selection(dataset: dict, expected: bool) -> None:
+    assert _is_preparable_dataset(dataset) is expected
+
+
+def test_example_preparation_does_not_change_runtime_dataset_type() -> None:
+    dataset = {
+        "name": "example",
+        "type": "example",
+        "jsonl_fpath": "example.jsonl",
+        "prepare_script": "prepare.py",
+    }
+
+    preparation_config = _preparation_dataset_config(dataset)
+
+    assert dataset["type"] == "example"
+    assert preparation_config.type == "benchmark"

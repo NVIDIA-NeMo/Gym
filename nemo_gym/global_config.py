@@ -1080,9 +1080,19 @@ the check."""
             if not isinstance(servers, DictConfig):
                 continue
             for server in servers.values():
-                reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
-                if isinstance(reference, DictConfig):
-                    with_environment_server.add(reference.get("name"))
+                if not isinstance(server, DictConfig):
+                    continue
+                standard_reference = server.get(AGENT_SERVER_REF_KEY_NAME)
+                if isinstance(standard_reference, DictConfig):
+                    with_environment_server.add(standard_reference.get("name"))
+                for key, reference in server.items():
+                    if (
+                        key != AGENT_SERVER_REF_KEY_NAME
+                        and isinstance(reference, DictConfig)
+                        and reference.get("type") == AGENT_SERVER_TYPE_KEY_NAME
+                        and reference.get("name") is not None
+                    ):
+                        with_environment_server.add(reference["name"])
 
         without_environment_server = [
             agent.name
@@ -1099,7 +1109,7 @@ the check."""
             f"""Agent instance(s) have no environment server, so rollout collection cannot reach them:
 {listing}
 
-Declare one for each, naming the agent in its `{AGENT_SERVER_REF_KEY_NAME}` reference, or run
+Declare one for each through an Environment Server Agent reference, or run
 scripts/add_legacy_agent_environment_servers.py to update your config."""
         )
 
