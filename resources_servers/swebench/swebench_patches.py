@@ -350,7 +350,9 @@ fi""")
         await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
 
         # This init.d is necessary for some Java tests to properly pull from the maven mirror
-        await sandbox.upload(init_gradle_path, "~/.gradle/init.d/maven_central_mirror.gradle")
+        # Absolute path: upload targets are not shell-expanded, and E2B writes a literal "~/..." elsewhere.
+        # SWE-bench images run as root, so this is the ~/.gradle created by the mkdir above.
+        await sandbox.upload(init_gradle_path, "/root/.gradle/init.d/maven_central_mirror.gradle")
 
     # tokio-rs__tokio-4384 otherwise resolves getrandom 0.4.3, which
     # requires Cargo 1.85 while its image provides Cargo 1.81.
