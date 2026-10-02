@@ -255,6 +255,14 @@ class CheckpointParticipant(ABC):
         Implementations must not change live state unless every record is valid.
         """
 
+    async def restored_pending(self) -> list[EpisodeId]:
+        """Restored episodes whose replacement has not started here yet, as the attempts that continue them.
+
+        A commit retires the ones its scope leaves out: the controller no longer continues them, and nothing
+        else would release their restored state.
+        """
+        return []
+
     async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         """Export for a commit. Override to keep slow I/O off the event loop; the default is synchronous."""
         return self.export_records(episode_ids)
@@ -407,6 +415,16 @@ class ParticipantController:
         await self.participant.notify()
         return {"retired": [episode_id.capture_key for episode_id in request.episode_ids]}
 
+    async def _release_unscoped(self, episode_ids: Optional[list[EpisodeId]]) -> None:
+        """Retire restored episodes the commit's scope leaves out: the scope is everything the controller continues."""
+        if episode_ids is None:
+            return
+        scope = set(episode_ids)
+        for episode_id in await self.participant.restored_pending():
+            if episode_id not in scope:
+                self.participant.attempts.retire(episode_id)
+                await self.participant.retire(episode_id)
+
     async def commit(self, request: CommitRequest) -> dict[str, Any]:
         async with self._lock:
             recorded = self._results.get((request.checkpoint_id, "commit"))
@@ -430,6 +448,7 @@ class ParticipantController:
             )
             # A write that outlives the deadline fails this call; a retry returns the same manifest.
             manifest = await _within(request, write)
+            await self._release_unscoped(request.episode_ids)
             self.phase = CheckpointPhase.COMMITTED
             result = {
                 "phase": self.phase.value,
