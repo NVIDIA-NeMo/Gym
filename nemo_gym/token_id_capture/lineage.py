@@ -214,6 +214,22 @@ class LineageNode:
     chain_hash: str = ""
 
 
+def _continuation_key(request_items: list[dict], response_items: list[dict]) -> str:
+    """Return the fingerprint a later request uses to find this call, or ``""`` if none can.
+
+    A reply that adds no model-authored content (only reasoning, or an empty message)
+    leaves the fingerprint of its request unchanged. Indexed under that fingerprint it
+    would be indistinguishable from the call that produced the request's last turn, and
+    every request continuing that turn would be refused as ambiguous. Claude Code drops
+    such a reply and retries with a nudge, so the retry's parent is the earlier call.
+    A root's reply is still indexed: there, any assistant item makes a fingerprint.
+    """
+    continuation = assistant_fingerprint(list(request_items) + list(response_items))
+    if continuation == assistant_fingerprint(list(request_items)):
+        return ""
+    return continuation
+
+
 def stamp_continuation(entry: TokenEntry, request_items: list[dict]) -> TokenEntry:
     """Add compact lookup metadata before the token entry is committed."""
     entry.continuation_fingerprint = assistant_fingerprint(list(request_items) + list(entry.output_items))
@@ -370,7 +386,7 @@ class RolloutLineage:
             return
         self.total_tokens += node.cum_len
         self.by_call_id[call_id] = node
-        fingerprint = assistant_fingerprint(messages)
+        fingerprint = _continuation_key((messages or [])[: node.context_len], (messages or [])[node.context_len :])
         if fingerprint:
             self.by_fingerprint.setdefault(fingerprint, []).append(call_id)
 
@@ -866,14 +882,18 @@ class FileLineageStore(IncrementalLineageStore):
                 if record.get("fingerprint") == fingerprint
                 and record.get("fingerprint_version") == FINGERPRINT_VERSION
             ]
+        # Verify each candidate's recorded context before counting candidates, as
+        # ``RolloutLineage.resolve_node`` does: a row whose context this request does not
+        # extend is no candidate, so it must not make the one that is ambiguous.
+        records = [
+            record
+            for record in records
+            if len(request_items) >= int(record["context_len"])
+            and conversation_digest(request_items[: int(record["context_len"])]) == record["context_digest"]
+        ]
         if len(records) != 1:
             return None
         record = records[0]
-        context_len = int(record["context_len"])
-        if len(request_items) < context_len:
-            return None
-        if conversation_digest(request_items[:context_len]) != record["context_digest"]:
-            return None
         return LineageMatch(
             model_call_id=str(record["model_call_id"]),
             # Token-free custody rows omit the column; legacy rows keep it.
@@ -895,7 +915,8 @@ class FileLineageStore(IncrementalLineageStore):
         # digest, so no cumulative token array is stored.
         record = {
             "model_call_id": model_call_id,
-            "fingerprint": assistant_fingerprint(request_items + list(commit.response_items)),
+            # ``None`` when the reply added no model-authored content: such a call cannot be a parent.
+            "fingerprint": _continuation_key(request_items, list(commit.response_items)) or None,
             "context_len": len(request_items),
             "context_digest": conversation_digest(request_items),
             "digest": commit.record.cumulative_hash,
