@@ -461,18 +461,22 @@ _STREAM_BODY = {
 
 
 class _DelayedChatModel(SimpleResponsesAPIModel):
-    """Fake model server whose chat call waits, then returns a fixed completion or raises."""
+    """Fake model server whose chat call waits, then raises ``error`` (the first ``fail_times`` calls, or every
+    call when ``fail_times`` is None) or returns a fixed completion."""
 
     config: BaseResponsesAPIModelConfig
     delay_s: float = 0.0
     error: object = None
+    fail_times: object = None
+    calls: int = 0
     model_config = {"arbitrary_types_allowed": True}
 
     async def chat_completions(
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
+        object.__setattr__(self, "calls", self.calls + 1)
         await asyncio.sleep(self.delay_s)
-        if self.error is not None:
+        if self.error is not None and (self.fail_times is None or self.calls <= self.fail_times):
             raise self.error
         return _SLOW_COMPLETION
 
@@ -480,13 +484,16 @@ class _DelayedChatModel(SimpleResponsesAPIModel):
         raise NotImplementedError
 
 
-def _delayed_server(delay_s: float, error: BaseException | None = None) -> _DelayedChatModel:
+def _delayed_server(
+    delay_s: float, error: BaseException | None = None, fail_times: int | None = None
+) -> _DelayedChatModel:
     server = _DelayedChatModel(
         config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name=""),
         server_client=MagicMock(spec=ServerClient, global_config_dict={}),
     )
     object.__setattr__(server, "delay_s", delay_s)
     object.__setattr__(server, "error", error)
+    object.__setattr__(server, "fail_times", fail_times)
     return server
 
 
@@ -501,6 +508,7 @@ class TestChatStreamKeepAlive:
     def _short_timers(self, monkeypatch) -> None:
         monkeypatch.setattr(base_responses_api_model, "_SSE_KEEPALIVE_GRACE_S", 0.05)
         monkeypatch.setattr(base_responses_api_model, "_SSE_KEEPALIVE_INTERVAL_S", 0.05)
+        monkeypatch.setattr(base_responses_api_model, "_SSE_LATE_RETRY_DELAYS_S", (0.01, 0.01, 0.01))
 
     @staticmethod
     def _replay() -> str:
@@ -526,10 +534,11 @@ class TestChatStreamKeepAlive:
         assert rebuilt["choices"][0]["message"]["content"] == "slow answer"
         assert rebuilt["usage"]["total_tokens"] == 10
 
-    def test_slow_failure_is_an_in_stream_error_event(self) -> None:
+    def test_slow_failure_is_retried_then_an_in_stream_error_event(self) -> None:
         error = HTTPException(status_code=502, detail="decode worker failed")
-        client = TestClient(_delayed_server(0.2, error).setup_webserver())
-        resp = client.post("/v1/chat/completions", json=_STREAM_BODY)
+        server = _delayed_server(0.2, error)
+        resp = TestClient(server.setup_webserver()).post("/v1/chat/completions", json=_STREAM_BODY)
+        assert server.calls == 1 + len(base_responses_api_model._SSE_LATE_RETRY_DELAYS_S)
         assert resp.status_code == 200
         assert resp.text.startswith(": keep-alive\n\n")
         events = _events(resp.text)
@@ -540,6 +549,25 @@ class TestChatStreamKeepAlive:
         assert "data: [DONE]" not in resp.text
         assert _consume_terminal_sse_event(bytearray(resp.content), "chat") == "error"
 
+    def test_slow_transient_failure_is_retried_inside_the_stream(self) -> None:
+        error = HTTPException(status_code=500, detail="Decode request failed: connection timed out")
+        server = _delayed_server(0.2, error, fail_times=1)
+        resp = TestClient(server.setup_webserver()).post("/v1/chat/completions", json=_STREAM_BODY)
+        assert server.calls == 2
+        assert resp.status_code == 200
+        assert '"error"' not in resp.text
+        assert _without_comments(resp.text) == self._replay()
+
+    def test_slow_client_error_is_not_retried(self) -> None:
+        error = HTTPException(status_code=400, detail="bad request")
+        server = _delayed_server(0.2, error)
+        resp = TestClient(server.setup_webserver()).post("/v1/chat/completions", json=_STREAM_BODY)
+        assert server.calls == 1
+        events = _events(resp.text)
+        assert len(events) == 1
+        assert events[0]["error"]["code"] == 400
+        assert events[0]["error"]["type"] == "invalid_request_error"
+
     def test_fast_failure_is_still_an_http_error(self) -> None:
         error = HTTPException(status_code=400, detail="maximum context length exceeded")
         client = TestClient(_delayed_server(0.0, error).setup_webserver())
@@ -549,7 +577,7 @@ class TestChatStreamKeepAlive:
 
     async def test_closing_the_stream_cancels_the_call(self) -> None:
         call = asyncio.ensure_future(asyncio.sleep(30))
-        stream = _delayed_server(0.0)._keepalive_chat_sse(call, include_usage=False)
+        stream = _delayed_server(0.0)._keepalive_chat_sse(call, lambda: asyncio.sleep(30), include_usage=False)
         assert await stream.__anext__() == b": keep-alive\n\n"
         await stream.aclose()
         with pytest.raises(asyncio.CancelledError):
