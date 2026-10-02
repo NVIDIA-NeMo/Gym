@@ -102,3 +102,10 @@ def test_upload_and_save_round_trip(provider, tmp_path):
     saved = asyncio.run(provider.save_output_files(["sub/a.bin", "missing.txt"], out))
     assert (out / "a.bin").read_bytes() == b"\x00\xff"
     assert list(saved.failed) == ["missing.txt"]
+
+
+@pytest.mark.parametrize("domain,protocol", [("https://osb.example.com", "https"), ("osb.example.com", "http")])
+def test_execd_protocol_follows_domain_scheme(monkeypatch, domain, protocol):
+    monkeypatch.setenv("OPENSANDBOX_DOMAIN", domain)
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", "k")
+    assert opensandbox_provider._provider_config(2.0)["opensandbox"]["connection"]["protocol"] == protocol

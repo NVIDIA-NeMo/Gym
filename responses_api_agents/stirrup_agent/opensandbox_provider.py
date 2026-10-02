@@ -56,6 +56,10 @@ def _provider_config(poll_interval_s: float) -> dict:
 
     path = Path(nemo_gym.__file__).parent / _OPENSANDBOX_CONFIG
     cfg = OmegaConf.to_container(OmegaConf.load(path), resolve=True)["sandbox"]["opensandbox"]
+    # The SDK sends execd traffic (health check, commands, files) with `protocol`, not the domain's scheme.
+    scheme, sep, _ = (cfg["connection"].get("domain") or "").partition("://")
+    if sep:
+        cfg["connection"]["protocol"] = scheme
     cfg["operations"]["background_exec"] = True
     cfg["operations"]["background_poll_interval_s"] = poll_interval_s
     return {"opensandbox": cfg}
