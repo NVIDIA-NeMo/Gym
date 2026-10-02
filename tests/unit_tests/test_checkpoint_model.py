@@ -493,6 +493,9 @@ async def test_ledger_export_and_import_run_off_the_event_loop(tmp_path: Path) -
             self.threads.append(threading.get_ident())
             self.rows[rollout_id] = rows
 
+        async def retire(self, rollout_ids: list[str]) -> dict:
+            return {"removed": [], "absent": list(rollout_ids)}
+
     source = RecordingLedger()
     participant = PolicyModelParticipant(source)
     controller = ParticipantController(participant, instance_name="policy", lease_grace_seconds=60)
@@ -656,3 +659,19 @@ async def test_retiring_an_attempt_retires_the_ledgers_of_it_and_every_earlier_a
     assert not await ledger.has_rows("r") and not await ledger.has_rows("r-a1")
     assert (tmp_path / "r.lineage.retired").exists() and (tmp_path / "r-a1.lineage.retired").exists()
     assert await ledger.has_rows("r-a2")
+
+
+async def test_a_restore_retires_the_ledgers_of_the_attempts_it_continues(tmp_path: Path) -> None:
+    ledger, _, controller = await _ledger_participant(tmp_path / "ledger")
+    await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r"))
+    await controller.prepare(CheckpointRequest(**control()))
+    await controller.commit(_commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
+
+    # A crash: a fresh model server over the same capture directory restores the checkpoint.
+    restored_ledger, _, restored = await _ledger_participant(tmp_path / "ledger")
+    await restored.restore(_restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
+
+    # Attempt 0 continues as attempt 1, so attempt 0's ledger is freed and fenced against late rows.
+    assert [row["model_call_id"] for row in restored_ledger.export_rows("r-a1")] == ["c1"]
+    assert not await restored_ledger.has_rows("r")
+    assert (tmp_path / "ledger" / "r.lineage.retired").exists()
