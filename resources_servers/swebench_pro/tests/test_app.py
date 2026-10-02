@@ -157,7 +157,7 @@ def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch, tests: lis
     assert response.json()["reward"] == 0.0
     assert response.json()["test_output"] == "test run output"
     assert response.json()["evaluation_completed"] is completed
-    assert response.json()["mask_sample"] is (not completed)
+    assert response.json()["mask_sample"] is False
     assert bool(response.json()["error"]) is not completed
     verify.assert_awaited_once()
 
@@ -170,26 +170,41 @@ def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["evaluation_completed"] is False
-    assert response.json()["mask_sample"] is True
+    assert response.json()["mask_sample"] is False
     assert response.json()["reward"] == 0.0
     assert "sandbox unavailable" in response.json()["error"]
 
 
 @pytest.mark.parametrize(
-    "test_output,extraction_failed,masked",
+    "test_output,extraction_error,completed,expected_error",
     [
-        ("compilation failed: undefined symbol", False, False),
-        ("npm ERR! EAI_AGAIN registry.npmjs.org", False, True),
-        ("test run completed", True, True),
+        ("compilation failed: undefined symbol", None, True, None),
+        (
+            "npm ERR! EAI_AGAIN registry.npmjs.org",
+            None,
+            False,
+            "dependency network failure before any test results",
+        ),
+        ("test run completed", "patch download failed", True, "Failed to extract model patch: patch download failed"),
+        (
+            "test run completed",
+            "fatal: not a git repository",
+            True,
+            "Failed to extract model patch: fatal: not a git repository",
+        ),
     ],
 )
-def test_verify_masks_infrastructure_errors_not_model_compile_failures(
-    monkeypatch: MonkeyPatch, test_output: str, extraction_failed: bool, masked: bool
+def test_verify_keeps_failures_unmasked_and_reports_error(
+    monkeypatch: MonkeyPatch,
+    test_output: str,
+    extraction_error: str | None,
+    completed: bool,
+    expected_error: str | None,
 ) -> None:
     server = make_server(golden=False, inconclusive_verification_retries=0)
     extract = AsyncMock(return_value="agent patch")
-    if extraction_failed:
-        extract.side_effect = RuntimeError("patch download failed")
+    if extraction_error is not None:
+        extract.side_effect = RuntimeError(extraction_error)
     monkeypatch.setattr(server, "_extract_model_patch", extract)
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
     monkeypatch.setattr(
@@ -207,8 +222,10 @@ def test_verify_masks_infrastructure_errors_not_model_compile_failures(
     response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
     assert response.status_code == 200
     assert response.json()["reward"] == 0.0
-    assert response.json()["mask_sample"] is masked
-    assert response.json()["evaluation_completed"] is (not masked)
+    assert response.json()["mask_sample"] is False
+    assert response.json()["evaluation_completed"] is completed
+    assert response.json()["error"] == expected_error
+    assert response.json()["model_patch"] == (None if extraction_error else "agent patch")
 
 
 def test_schema_rejects_missing_evaluator_asset() -> None:
@@ -544,7 +561,8 @@ def test_native_episode_http_lifecycle_preserves_verdict_and_private_task_data(
         assert response.status_code == 200
         result = response.json()
         assert result["reward"] == float(resolved)
-        assert result["mask_sample"] is (not completed)
+        # Completion diagnostics do not change whether SWE Pro includes the sample in scoring.
+        assert result["mask_sample"] is False
         assert result["evaluation_completed"] is completed
         assert result["resolved"] is resolved
         assert result["model_patch"] == "agent patch"
