@@ -353,8 +353,8 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
         self.restored_cuts.update(await asyncio.to_thread(import_model_records, self.ledger, records))
 
     def _check_restorable(self) -> None:
-        if any(worker.report is None or worker.report.inflight for worker in self.workers.values()):
-            raise ControlError("model restore requires policy workers that are not serving generations")
+        if any(worker.report is None or worker.report.served for worker in self.workers.values()):
+            raise ControlError("model restore requires freshly started policy workers; a worker has served calls")
 
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
         return {"staging_keys": retained_staging_keys(records)}

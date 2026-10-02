@@ -136,6 +136,8 @@ class GateReport(BaseModel):
     # Both regenerate after a restore; a worker that cuts nothing shows up here instead of silently.
     cut_failed: int = 0
     cut_skipped: int = 0
+    # Whether this process has served any call since it started; restore refuses one that has.
+    served: bool = False
 
 
 class GateSnapshot(BaseModel):
@@ -282,6 +284,8 @@ class PolicyGate:
         self._reopened = asyncio.Event()
         self._reopened.set()
         self.tickets: set[_Ticket] = set()
+        # Restore expects a freshly started server: a ledger this process wrote may belong to a live episode.
+        self.served = False
 
     def admit(self, capture_key: Optional[str]) -> None:
         if capture_key is not None:
@@ -291,6 +295,7 @@ class PolicyGate:
 
     def enter(self, capture_key: str) -> _Ticket:
         ticket = _Ticket(gate=self, capture_key=capture_key, task=asyncio.current_task())
+        self.served = True
         self.tickets.add(ticket)
         return ticket
 
@@ -346,6 +351,7 @@ class PolicyGate:
             ready=not streaming,
             streaming=streaming,
             inflight=len(self.tickets),
+            served=self.served,
             held=len(self.tickets) - sum(ticket.response_started for ticket in self.tickets),
             cut=sum(ticket.cut_record is not None for ticket in undelivered),
             cut_failed=sum(ticket.cut is not None and ticket.cut_record is None for ticket in undelivered),
@@ -474,23 +480,25 @@ def import_model_records(
 ) -> dict[str, GenerationCutRecord]:
     """Install every record's rows under its next attempt; return the restored cuts by capture key.
 
-    Everything is validated before anything is written.
+    Everything is validated before anything is written. The import replaces what dead executions left for a target
+    attempt and later attempts, fences included: restoring a checkpoint again, after its replacement attempt made
+    calls and Gym crashed, continues from the checkpoint's boundary.
     """
     if records and ledger is None:
         raise ControlError("checkpoint holds capture-ledger rows but this model server has no capture ledger")
     targets = [(record, next_attempt(record.episode_id).capture_key) for record in records]
     for record, target in targets:
-        existing = ledger.export_rows(target)
-        if existing and existing != record.rows:
-            raise ControlError(f"capture ledger for {target} already holds rows from another execution")
         if len(record.generation_cuts) > 1:
             raise ControlError(f"episode {record.episode_id.capture_key} has more than one undelivered cut")
     import_many = getattr(ledger, "import_rows_many", None)
-    if import_many is not None:
-        import_many({target: record.rows for record, target in targets})
-    else:
-        for record, target in targets:
-            ledger.import_rows(target, record.rows)
+    try:
+        if import_many is not None:
+            import_many({target: record.rows for record, target in targets})
+        else:
+            for record, target in targets:
+                ledger.import_rows(target, record.rows)
+    except ValueError as error:
+        raise ControlError(f"capture ledger refused the restore: {error}") from error
     return {target: record.generation_cuts[0] for record, target in targets if record.generation_cuts}
 
 
@@ -555,13 +563,13 @@ class PolicyModelParticipant(CheckpointParticipant):
         return await asyncio.to_thread(export_model_records, self.ledger, episode_ids, snapshots, restored)
 
     def restore_records(self, records: list[CheckpointRecord]) -> None:
-        if self.gate.tickets:
-            raise ControlError("model restore requires a process that is not serving generations")
+        if self.gate.served:
+            raise ControlError("model restore requires a freshly started model server; this one has served calls")
         self._restored_cuts.update(import_model_records(self.ledger, records))
 
     async def install(self, records: list[CheckpointRecord]) -> None:
-        if self.gate.tickets:
-            raise ControlError("model restore requires a process that is not serving generations")
+        if self.gate.served:
+            raise ControlError("model restore requires a freshly started model server; this one has served calls")
         self._restored_cuts.update(await asyncio.to_thread(import_model_records, self.ledger, records))
 
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
