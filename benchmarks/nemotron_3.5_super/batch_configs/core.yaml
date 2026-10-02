@@ -73,6 +73,9 @@ hle_equivalence_llm_judge_resources_server:
             strict: true
       judge_equal_label: HLE_JUDGE_CORRECT
       judge_not_equal_label: HLE_JUDGE_INCORRECT
+      # Match the reference's extraction policy; oversized answers become empty judge input.
+      response_extract_regex: '(?s)\A(?:(.{1,8192})\Z|(?=.{8193,}\Z))'
+      msg_extraction_failure: ''
 hle_equivalence_llm_judge_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -82,11 +85,6 @@ genrm_model:
   responses_api_models:
     openai_model:
       max_concurrent_requests: 32
-omniscience_omniscience_resources_server:
-  resources_servers:
-    omniscience:
-      judge_responses_create_params:
-        max_output_tokens: 32768
 omniscience_omniscience_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -99,10 +97,6 @@ omniscience_omniscience_simple_agent:
           num_repeats: 10
 
 judge_api_key: ${nv_inference_api_key}
-lmarena_v2_benchmark_resources_server:
-  resources_servers:
-    arena:
-      max_rollout_failure_rate: 0.015
 
 ifbench_benchmark_simple_agent:
   responses_api_agents:

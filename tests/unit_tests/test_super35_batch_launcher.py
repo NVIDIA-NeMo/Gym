@@ -446,12 +446,28 @@ def test_recipes_resolve_without_local_pilot_files_or_credentials(
         hle_reference = (
             hle_reference.hle_benchmark_equivalence_llm_judge_resources_server.resources_servers.equivalence_llm_judge
         )
-        for field in ("judge_responses_create_params", "judge_equal_label", "judge_not_equal_label"):
+        for field in (
+            "judge_responses_create_params",
+            "judge_equal_label",
+            "judge_not_equal_label",
+            "response_extract_regex",
+            "msg_extraction_failure",
+        ):
             assert hle[field] == hle_reference[field]
         assert hle.judge_endpoint_max_concurrency == 32
-        assert hle.response_extract_regex is None
         assert hle_reference.judge_endpoint_max_concurrency == 64
         assert hle_reference.response_extract_regex is not None
+        omniscience = config.omniscience_omniscience_resources_server.resources_servers.omniscience
+        omniscience_reference = reference.omniscience_omniscience_resources_server.resources_servers.omniscience
+        assert omniscience.judge_responses_create_params == omniscience_reference.judge_responses_create_params
+        assert omniscience.judge_responses_create_params.max_output_tokens == 2048
+        arena = config.lmarena_v2_benchmark_resources_server.resources_servers.arena
+        arena_reference = OmegaConf.load(ROOT / "resources_servers/arena/configs/lmarena_v2.yaml")
+        assert (
+            arena.max_rollout_failure_rate
+            == arena_reference.lmarena_v2.resources_servers.arena.max_rollout_failure_rate
+        )
+        assert arena.max_rollout_failure_rate == 0.01
 
 
 @pytest.mark.parametrize("existing_defaults", [False, True])
