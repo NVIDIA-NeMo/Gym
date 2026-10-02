@@ -32,6 +32,7 @@ def test_file_store_passes_all_checks(tmp_path):
     )
     assert "begin_call_custody" in passed
     assert "lineage_visibility" in passed
+    assert {"unconditional_retirement", "delete_clears_retirement"} <= set(passed)
     assert len(passed) >= 10
 
 
@@ -43,7 +44,18 @@ class _MemoryBackend:
         self.incomplete: set[str] = set()
         self.frozen: dict[str, tuple[str, int]] = {}
         self.versions: dict[str, int] = {}
+        self.retired: set[str] = set()
         self.lineage = InMemoryLineageStore()
+
+    def remove(self, rollout_ids) -> dict:
+        removed, absent = [], []
+        for rollout_id in rollout_ids:
+            had_records = rollout_id in self.entries or rollout_id in self.incomplete
+            for records in (self.entries, self.frozen, self.versions):
+                records.pop(rollout_id, None)
+            self.incomplete.discard(rollout_id)
+            (removed if had_records else absent).append(rollout_id)
+        return {"removed": removed, "absent": absent}
 
 
 class _MemorySink:
@@ -52,6 +64,8 @@ class _MemorySink:
 
     async def put(self, entry: TokenEntry) -> None:
         backend = self.backend
+        if entry.rollout_id in backend.retired:
+            raise RuntimeError("retired")
         if entry.rollout_id in backend.frozen:
             backend.versions[entry.rollout_id] = backend.versions.get(entry.rollout_id, 0) + 1
             raise RuntimeError("frozen")
@@ -100,6 +114,14 @@ class _MemorySource:
             return False
         backend.entries.pop(rollout_id, None)
         return True
+
+    async def retire(self, rollout_ids) -> dict:
+        self.backend.retired.update(rollout_ids)
+        return self.backend.remove(rollout_ids)
+
+    async def delete(self, rollout_ids) -> dict:
+        self.backend.retired.difference_update(rollout_ids)
+        return self.backend.remove(rollout_ids)
 
     async def close(self) -> None:
         pass
