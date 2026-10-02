@@ -438,7 +438,7 @@ class TestEvalSubmitResolveOnly:
         config = SubmitConfig.model_validate(
             {"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB}
         )
-        _NoRunExecutor().persist(_record(), config, lambda path, text: written.__setitem__(path.name, text))
+        _NoRunExecutor().persist(_record(), config, lambda path, text, **_: written.__setitem__(path.name, text))
         capsys.readouterr()
 
         _eval_submit(_args(_config_file(tmp_path), resolve_only=True), overrides=[])
@@ -484,6 +484,8 @@ class TestEvalSubmitThroughTheRealCli:
 
     def _fake_executor(self, monkeypatch, record):
         class _FakeExecutor:
+            supports_resumable = False
+
             def run(self, config, *, dry_run: bool = False):
                 return record
 

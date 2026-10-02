@@ -19,4 +19,4 @@ policy_model_name: ${oc.env:E2E_MODEL}
 example_single_tool_call_simple_agent:
   responses_api_agents:
     simple_agent:
-      max_steps: 2
+      max_policy_calls: 2

@@ -1,0 +1,30 @@
+name: litmus-bench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: Pinned Litmus-Bench v0.1 test split with rendered chemistry questions
+  and exact-answer verification.
+modality: text
+licensing: CC-BY-4.0
+authors:
+- Dane
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: litmus_agent
+agent_server: simple_agent
+datasets:
+- name: litmus-bench
+  type: benchmark
+  jsonl_fpath: benchmarks/litmus-bench/data/litmus-bench_benchmark.jsonl
+  prepare_script: benchmarks/litmus-bench/prepare.py
+  num_repeats: 5
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active
