@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/math_with_judge/configs/math_with_judge.yaml
+
+num_repeats_add_seed: true
+responses_create_params:
+  max_output_tokens: 120000
+  temperature: 1.0
+  top_p: 0.95
+  metadata:
+    chat_template_kwargs: '{"enable_thinking": true}'
+    extra_body: '{"top_k": 64}'
+
+indic_aime_2026_math_with_judge_resources_server:
+  _inherit_from: math_with_judge
+
+indic_aime_2026_math_with_judge_simple_agent:
+  _inherit_from: math_with_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: indic_aime_2026_math_with_judge_resources_server
+      datasets:
+        - name: indic_aime_2026
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/aime_2026/data/aime_2026_benchmark.jsonl
+          prepare_script: benchmarks/indic/aime_2026/prepare.py
+          prompt_config: benchmarks/prompts/generic/math.yaml
+          num_repeats: 4
+          license: CC-BY-NC-SA-4.0
