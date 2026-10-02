@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the real launch scripts without Slurm jobs, installs, or model calls."""
 
+import json
 import os
 import runpy
 import shlex
@@ -13,8 +14,9 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
+from benchmarks.lmarena_v2 import prepare as lmarena_prepare
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.rollout_collection import RolloutCollectionConfig
+from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -450,6 +452,95 @@ def test_recipes_resolve_without_local_pilot_files_or_credentials(
         assert hle.response_extract_regex is None
         assert hle_reference.judge_endpoint_max_concurrency == 64
         assert hle_reference.response_extract_regex is not None
+
+
+@pytest.mark.parametrize("existing_defaults", [False, True])
+def test_lmarena_preparation_keeps_generation_defaults_on_its_rows(
+    monkeypatch, tmp_path, existing_defaults: bool
+) -> None:
+    """The prepared artifact carries LMArena's defaults without changing its prompts or scoring data."""
+    source_row = {
+        "question_id": "fixture-question",
+        "baseline_answer": "fixture-baseline",
+        "responses_create_params": {"input": [{"role": "user", "content": "fixture-prompt"}]},
+    }
+    if existing_defaults:
+        source_row["responses_create_params"].update(temperature=0.5, top_p=0.5, max_output_tokens=65536, stream=True)
+    source = tmp_path / "registry.jsonl"
+    source.write_text(json.dumps(source_row) + "\n")
+    data_dir = tmp_path / "data"
+    output = data_dir / "lmarena_v2_validation.jsonl"
+    data_dir.mkdir()
+    # Forced preparation must refresh an old cached file at the same path.
+    output.write_text(json.dumps(source_row) + "\n")
+    monkeypatch.setattr(lmarena_prepare, "DATA_DIR", data_dir)
+    monkeypatch.setattr(lmarena_prepare, "OUTPUT_FPATH", output)
+    monkeypatch.setattr(
+        lmarena_prepare, "download_jsonl_dataset", lambda config: shutil.copyfile(source, config.output_fpath)
+    )
+
+    assert lmarena_prepare.prepare() == output
+    prepared = json.loads(output.read_text())
+    assert prepared == {
+        **source_row,
+        "responses_create_params": {
+            "input": source_row["responses_create_params"]["input"],
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_output_tokens": 16384,
+            "stream": False,
+        },
+    }
+    assert json.loads(source.read_text()) == source_row
+
+
+@pytest.mark.parametrize("config_path", [BENCHMARK / "core_text.yaml", BENCHMARK / "batch_configs/core.yaml"])
+def test_core_suite_preserves_each_members_request_settings(monkeypatch, config_path: Path) -> None:
+    """Composing the suite must preserve GPQA's budget and LMArena's row-local settings."""
+    monkeypatch.chdir(ROOT)
+    parser = GlobalConfigDictParser()
+    config = parser.parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.merge(
+                GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                {"config_paths": [str(config_path)], "nv_inference_api_key": "fixture-key"},
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    gpqa_params = {"input": "fixture-gpqa", "temperature": 0.7, "top_p": 0.9, "max_output_tokens": 65536}
+    lmarena_params = {
+        "input": "fixture-arena",
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "max_output_tokens": 16384,
+        "stream": False,
+    }
+    raw_rows = [
+        {"agent_ref": {"name": "gpqa_mcqa_simple_agent"}, "responses_create_params": gpqa_params.copy()},
+        {"agent_ref": {"name": "lmarena_v2_benchmark_agent"}, "responses_create_params": lmarena_params.copy()},
+    ]
+    rows = RolloutCollectionHelper._preprocess_raw_rows(
+        [(index, json.dumps(row), row) for index, row in enumerate(raw_rows)],
+        RolloutCollectionConfig(
+            input_jsonl_fpath="unused",
+            output_jsonl_fpath="unused",
+            responses_create_params=OmegaConf.to_container(
+                OmegaConf.create(config.get("responses_create_params", {})), resolve=True
+            ),
+        ),
+    )
+
+    assert rows[0]["responses_create_params"] == gpqa_params
+    assert rows[1]["responses_create_params"] == lmarena_params
+    dataset = config.lmarena_v2_benchmark_agent.responses_api_agents.simple_agent.datasets[0]
+    assert dataset.jsonl_fpath == "benchmarks/lmarena_v2/data/lmarena_v2_validation.jsonl"
+    assert dataset.prepare_script == "benchmarks/lmarena_v2/prepare.py"
+    manifest = OmegaConf.load(ROOT / "benchmarks/lmarena_v2/manifest.yaml")
+    assert manifest.datasets[0].jsonl_fpath == dataset.jsonl_fpath
+    assert config.lmarena_v2_benchmark_agent.responses_api_agents.simple_agent.max_steps == 1
 
 
 def test_shared_model_endpoints_only_define_model_connections() -> None:
