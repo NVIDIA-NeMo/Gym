@@ -172,6 +172,59 @@ Bypassing validation means invalid servers won't start. Use this only for debugg
 
 </Warning>
 
+### Agent Without an Environment Server
+
+```
+Agents without an environment server are deprecated; generated legacy_agent relays for
+`my_agent` -> `my_agent_environment_server`. Declare them in your config
+(scripts/add_legacy_agent_environment_servers.py writes them), or set
+error_on_agent_without_environment_server=true to make this an error.
+```
+
+**When**: An agent instance has no environment server naming it in `agent_server`. Rollout
+collection reaches agents only through an environment server, so Gym generates a `legacy_agent`
+relay in front of the agent and warns. Configs written before environment servers keep running.
+
+**Fix**: Declare the environment server in your config. The migration script adds one beside every
+agent that lacks one:
+
+```bash
+python scripts/add_legacy_agent_environment_servers.py --check  # report only
+python scripts/add_legacy_agent_environment_servers.py          # write the blocks
+```
+
+For a config outside the repository, add the block by hand:
+
+```yaml
+my_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: my_agent
+```
+
+If you rename an agent with `_inherit_from`, point the existing environment server at the new name
+instead of adding a second one. Two environment servers in front of one agent make agent-routed
+rows ambiguous.
+
+#### Require Declared Environment Servers
+
+To make a missing environment server an error instead (`AgentWithoutEnvironmentServerError`):
+
+```yaml
+# In env.yaml
+error_on_agent_without_environment_server: true
+```
+
+```bash
+# Or via command line
+gym env start \
+    --config config.yaml \
+    +error_on_agent_without_environment_server=true
+```
+
 ---
 
 ## Connection Errors
