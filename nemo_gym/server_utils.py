@@ -42,7 +42,6 @@ from aiohttp import (
     ClientTimeout,
     DummyCookieJar,
     ServerDisconnectedError,
-    TCPConnector,
 )
 from aiohttp.client import _RequestOptions
 from anyio import create_task_group
@@ -80,6 +79,14 @@ from nemo_gym.global_config import (
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
+from nemo_gym.telemetry.connection_pool import (
+    QueueTimedTCPConnector,
+    build_connection_pool_connector,
+    connection_pool_capacity,
+    report_connection_pool_capacity,
+    reset_server_name,
+    set_server_name,
+)
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -87,6 +94,7 @@ logger = logging.getLogger(__name__)
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
+_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY: bool = False
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
 # Bound both the raw request prefix and its escaped representation to 4 KiB.
 _VALIDATION_ERROR_LOG_BODY_CHARS = 4096
@@ -237,8 +245,26 @@ class _PickleSafeRequestInfo(NamedTuple):
 
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
-    global_aiohttp_connector_limit: int = 100 * 1024
-    global_aiohttp_connector_limit_per_host: int = 1024
+    global_aiohttp_connector_limit: int = Field(
+        default=100 * 1024,
+        ge=0,
+        description="Per-server connection budget divided across FastAPI workers; 0 is unlimited.",
+    )
+    global_aiohttp_connector_limit_per_host: int = Field(
+        default=1024,
+        ge=0,
+        description="Per-server, per-host connection budget divided across FastAPI workers; 0 is unlimited.",
+    )
+    global_aiohttp_intended_concurrency: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Optional per-server expected concurrent HTTP requests used for capacity warnings.",
+    )
+    global_aiohttp_intended_concurrency_per_host: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Optional per-server expected concurrent HTTP requests to one host used for capacity warnings.",
+    )
 
     global_aiohttp_client_request_debug: bool = False
 
@@ -302,17 +328,21 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     )
 
     num_workers = get_nemo_gym_fastapi_num_workers()
-    client_session = ClientSession(
-        connector=TCPConnector(
-            limit=cfg.global_aiohttp_connector_limit // num_workers,
-            limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
-            keepalive_timeout=15.0,
-            socket_factory=_make_keepalive_socket_factory(
-                idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
-                interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
-                probes=cfg.global_aiohttp_tcp_keepalive_probes,
-            ),
+    capacity = connection_pool_capacity(cfg, num_workers)
+    if not is_nemo_gym_fastapi_worker():
+        report_connection_pool_capacity(cfg, capacity)
+    connector = build_connection_pool_connector(
+        limit=capacity.total,
+        limit_per_host=capacity.per_host,
+        keepalive_timeout=15.0,
+        socket_factory=_make_keepalive_socket_factory(
+            idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
+            interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
+            probes=cfg.global_aiohttp_tcp_keepalive_probes,
         ),
+    )
+    client_session = ClientSession(
+        connector=connector,
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
     )
@@ -322,6 +352,9 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
 
     global _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG = cfg.global_aiohttp_client_request_debug
+
+    global _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY
+    _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY = isinstance(connector, QueueTimedTCPConnector)
 
     return _GLOBAL_AIOHTTP_CLIENT
 
@@ -338,10 +371,11 @@ def global_aiohttp_client_exit():  # pragma: no cover
     if not is_global_aiohttp_client_setup():
         return
 
-    global _GLOBAL_AIOHTTP_CLIENT
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY
     asyncio.run(_GLOBAL_AIOHTTP_CLIENT.close())
 
     _GLOBAL_AIOHTTP_CLIENT = None
+    _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY = False
 
 
 atexit.register(global_aiohttp_client_exit)
@@ -367,6 +401,7 @@ async def request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _server_name: Optional[str] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -374,6 +409,11 @@ async def request(
     This is the only place Gym talks to another server, so it is also the only place
     trace context has to be injected: every agent -> model and agent -> resources hop goes
     through here. `CLAUDE.md` bans httpx precisely to keep it that way.
+
+    ``_server_name`` is the bounded logical destination label for pool metrics: a configured
+    ``ServerClient`` server name, ``remote_agent_service`` for the remote agent's external
+    service, or ``None`` for the fallback label ``external``. It is retained across retries
+    and redirects and is not forwarded to aiohttp.
     """
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
@@ -385,10 +425,20 @@ async def request(
     # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
     if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
         return await _traced_request(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method,
+            url,
+            _internal=_internal,
+            _max_connection_retries=_max_connection_retries,
+            _server_name=_server_name,
+            **kwargs,
         )
     return await _request_with_retries(
-        method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        method,
+        url,
+        _internal=_internal,
+        _max_connection_retries=_max_connection_retries,
+        _server_name=_server_name,
+        **kwargs,
     )
 
 
@@ -397,6 +447,7 @@ async def _traced_request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _server_name: Optional[str] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -432,7 +483,12 @@ async def _traced_request(
             safe_set_span_attributes(span, attributes)
 
         response = await _request_with_retries(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method,
+            url,
+            _internal=_internal,
+            _max_connection_retries=_max_connection_retries,
+            _server_name=_server_name,
+            **kwargs,
         )
 
         if span is not None:
@@ -481,66 +537,73 @@ async def _request_with_retries(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _server_name: Optional[str] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
-    num_tries = 1
-    retries = 0
-    retry_start = time.monotonic()
-    while True:
-        try:
-            return await client.request(method=method, url=url, **kwargs)
-        except ServerDisconnectedError:
-            global _NUM_SERVER_DISCONNECTED_ERROR
-            _NUM_SERVER_DISCONNECTED_ERROR += 1
-            retries += 1
-            if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
-                print(
-                    f"[request_retry url={url} error=ServerDisconnectedError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
-                    f"Hit {_NUM_SERVER_DISCONNECTED_ERROR} global `ServerDisconnectedError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
-                    flush=True,
-                )
+    # Initialization stays inside the client span and sets the metrics flag before it is read.
+    token = set_server_name(_server_name or "external") if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY else None
+    try:
+        num_tries = 1
+        retries = 0
+        retry_start = time.monotonic()
+        while True:
+            try:
+                return await client.request(method=method, url=url, **kwargs)
+            except ServerDisconnectedError:
+                global _NUM_SERVER_DISCONNECTED_ERROR
+                _NUM_SERVER_DISCONNECTED_ERROR += 1
+                retries += 1
+                if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
+                    print(
+                        f"[request_retry url={url} error=ServerDisconnectedError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
+                        f"Hit {_NUM_SERVER_DISCONNECTED_ERROR} global `ServerDisconnectedError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
+                        flush=True,
+                    )
 
-            # Retrying forever is wrong if the endpoint is expected to sometimes die and move.
-            if _max_connection_retries is not None and retries >= _max_connection_retries:
-                raise
+                # Retrying forever is wrong if the endpoint is expected to sometimes die and move.
+                if _max_connection_retries is not None and retries >= _max_connection_retries:
+                    raise
 
-            await asyncio.sleep(0.5)
-        except ClientOSError:
-            global _NUM_CLIENT_OS_ERROR
-            _NUM_CLIENT_OS_ERROR += 1
-            retries += 1
-            if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
-                print(
-                    f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
-                    f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
-                    flush=True,
-                )
+                await asyncio.sleep(0.5)
+            except ClientOSError:
+                global _NUM_CLIENT_OS_ERROR
+                _NUM_CLIENT_OS_ERROR += 1
+                retries += 1
+                if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
+                    print(
+                        f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
+                        f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
+                        flush=True,
+                    )
 
-            if _max_connection_retries is not None and retries >= _max_connection_retries:
-                raise
+                if _max_connection_retries is not None and retries >= _max_connection_retries:
+                    raise
 
-            await asyncio.sleep(0.5)
-        except Exception as e:
-            if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
-                print_exc()
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+                    print_exc()
 
-            if _max_connection_retries is not None and num_tries >= _max_connection_retries:
-                raise
+                if _max_connection_retries is not None and num_tries >= _max_connection_retries:
+                    raise
 
-            # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
-            if not _internal:
-                print(
-                    f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
+                # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
+                if not _internal:
+                    print(
+                        f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
 Sleeping 0.5s and retrying...
 """
-                )
-                if num_tries >= MAX_NUM_TRIES:
-                    raise e
+                    )
+                    if num_tries >= MAX_NUM_TRIES:
+                        raise e
 
-                num_tries += 1
+                    num_tries += 1
 
-            await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5)
+    finally:
+        if token is not None:
+            reset_server_name(token)
 
 
 async def raise_for_status(response: ClientResponse, content: Optional[bytes] = None) -> None:  # pragma: no cover
@@ -667,7 +730,13 @@ class ServerClient(BaseModel):
         ):
             url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
-        return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
+        return await request(
+            method=method,
+            url=f"{base_url}{url_path}",
+            _internal=True,
+            _server_name=server_name,
+            **kwargs,
+        )
 
     async def get(
         self,
@@ -1247,6 +1316,13 @@ repr(e): {repr(e)}"""
         server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()
+        connection_pool_config = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
+        pool_capacity = connection_pool_capacity(
+            connection_pool_config,
+            server.config.num_workers or 1,
+        )
+        if is_main_fastapi_proc:
+            report_connection_pool_capacity(connection_pool_config, pool_capacity, visible=True)
         server.setup_exception_middleware(app)
         # Register last so cancellation wraps the complete request stack.
         server.setup_cancellation_middleware(app)

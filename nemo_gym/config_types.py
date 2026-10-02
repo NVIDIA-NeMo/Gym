@@ -550,6 +550,10 @@ class BenchmarkDatasetConfig(BaseModel):
     prepare_script: Path
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
+    # `uv pip install` arguments the prepare script needs, installed before it is
+    # imported. Without this a benchmark whose prepare pulls something Gym does
+    # not otherwise depend on has to shell out to pip mid-prepare to get it.
+    prepare_dependencies: List[str] = Field(default_factory=list)
     agent: Optional[str] = Field(
         default=None,
         description=(
