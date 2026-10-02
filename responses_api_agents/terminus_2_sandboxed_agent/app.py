@@ -7,6 +7,7 @@ import logging
 import sys
 import tempfile
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter, time
 from traceback import format_exc
@@ -14,7 +15,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from harbor.agents.terminus_2 import Terminus2
 from harbor.llms.base import BaseLLM, ContextLengthExceededError, LLMResponse
 from harbor.models.agent.context import AgentContext
@@ -23,7 +24,14 @@ from harbor.utils.logger import logger as harbor_logger
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSeedSessionResponse,
+    BaseResponsesAPIAgentConfig,
+    SimpleResponsesAPIAgent,
+)
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
@@ -47,6 +55,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
 )
 from nemo_gym.sandbox import AsyncSandbox, create_provider
+from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
@@ -79,6 +88,18 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_timeout: float
     remote_tmux_binary_path: Optional[str]
+
+
+_AGENT_SESSION_ID_KEY = "agent_session_id"
+
+
+@dataclass
+class Terminus2SessionState:
+    """A sandbox borrowed from a resources server for one episode."""
+
+    request: AgentSeedSessionRequest
+    sandbox: AsyncSandbox
+    workdir: str | None
 
 
 class Terminus2AgentRunRequest(BaseRunRequest):
@@ -205,17 +226,18 @@ class NeMoGymLLM(BaseLLM):
                     NeMoGymEasyInputMessage(role=message.get("role", "user"), content=message.get("content", ""))
                 )
             elif message.get("role") == "assistant":
+                # Replayed items need well-formed ids: OpenAI-compatible backends reject an empty string.
                 if message.get("reasoning_content"):
                     res.append(
                         NeMoGymResponseReasoningItem(
-                            id="",
+                            id=f"rs_{uuid4().hex}",
                             summary=[NeMoGymSummary(text=message.get("reasoning_content"), type="summary_text")],
                             type="reasoning",
                         )
                     )
                 res.append(
                     NeMoGymResponseOutputMessage(
-                        id="",
+                        id=f"msg_{uuid4().hex}",
                         content=[NeMoGymResponseOutputText(annotations=[], text=message.get("content", ""))],
                     )
                 )
@@ -420,9 +442,61 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._session_sandboxes: dict[str, AsyncSandbox] = {}
+        # Episode sessions seeded by an environment server; the sandbox belongs to the resources server.
+        self._agent_sessions: dict[str, Terminus2SessionState] = {}
+        self._agent_session_locks: dict[str, asyncio.Lock] = {}
+        self._closed_agent_session_ids: set[str] = set()
 
         if not self.config.debug:
             harbor_logger.setLevel(logging.WARNING)
+
+    async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
+        """Borrow the resources server's sandbox for this episode."""
+        if self.config.num_workers not in (None, 1):
+            # Session state lives in this process; another worker would answer the next request with a 404.
+            raise HTTPException(500, "Episode sessions require num_workers=1 for terminus_2_sandboxed_agent")
+        agent_session_id = body.agent_session_id
+        request.session[_AGENT_SESSION_ID_KEY] = agent_session_id
+        lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
+        async with lock:
+            if agent_session_id in self._closed_agent_session_ids:
+                raise HTTPException(409, f"Agent session is already closed: {agent_session_id}")
+            state = self._agent_sessions.get(agent_session_id)
+            if state is not None:
+                if (state.request.episode_id, state.request.task_id) != (body.episode_id, body.task_id):
+                    raise HTTPException(409, "agent_session_id is already bound to another episode or task")
+                return AgentSeedSessionResponse(agent_session_id=agent_session_id)
+            if body.sandbox_access is None:
+                raise HTTPException(422, "Terminus 2 needs sandbox_access from the resources server")
+            connection = body.sandbox_access.connection
+            if not isinstance(connection, DirectSandboxConnection):
+                raise HTTPException(422, "Terminus 2 supports only direct sandbox connections")
+            provider = create_provider(
+                resolve_provider_config(connection.provider_config_ref, get_global_config_dict())
+            )
+            try:
+                sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+            except BaseException:
+                await provider.aclose()
+                raise
+            self._agent_sessions[agent_session_id] = Terminus2SessionState(
+                request=body, sandbox=sandbox, workdir=body.sandbox_access.workdir
+            )
+            return AgentSeedSessionResponse(agent_session_id=agent_session_id)
+
+    async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
+        agent_session_id = body.agent_session_id
+        lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
+        async with lock:
+            state = self._agent_sessions.get(agent_session_id)
+            if state is not None:
+                if state.request.episode_id != body.episode_id:
+                    raise HTTPException(409, "episode_id does not match the seeded agent session")
+                del self._agent_sessions[agent_session_id]
+                await state.sandbox.disconnect()
+            self._closed_agent_session_ids.add(agent_session_id)
+            request.session.pop(_AGENT_SESSION_ID_KEY, None)
+            return AgentCloseSessionResponse(agent_session_id=agent_session_id)
 
     async def _connect_sandbox(self, sandbox_id: str) -> AsyncSandbox:
         provider = create_provider(resolve_provider_config(self.config.sandbox_provider, get_global_config_dict()))
@@ -439,6 +513,16 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         instruction = _instruction(body.input)
         run_body = await request.json()
         rollout_id = self.rollout_id_from_run(run_body)
+        model_base_url = (
+            self.base_url_for_run(base_url=get_server_url(self.config.model_server.name), body=run_body) + "/v1"
+        )
+        if rollout_id is None:
+            # Environment servers address the agent through `/ng-rollout/<id>/v1/responses`; carry that id
+            # onto the model calls so capture correlates them with the episode.
+            path_params = getattr(request, "path_params", None) or {}
+            if path_params.get("rollout_id") is not None:
+                rollout_id = path_params["rollout_id"]
+                model_base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
         invocation_id = f"terminus2_{uuid4().hex}" if rollout_id is not None else None
         observations = None
         if invocation_id is not None:
@@ -452,9 +536,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             )
             observations = TerminusObservations(invocation_id, task_id, rollout_id, self.config.model_server)
 
-        model_base_url = (
-            self.base_url_for_run(base_url=get_server_url(self.config.model_server.name), body=run_body) + "/v1"
-        )
         llm = NeMoGymLLM(
             client=NeMoGymAsyncOpenAI(
                 base_url=model_base_url,
@@ -587,6 +668,13 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         return response, metrics
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        agent_session_id = request.session.get(_AGENT_SESSION_ID_KEY)
+        if agent_session_id is not None:
+            state = self._agent_sessions.get(agent_session_id)
+            if state is None:
+                raise HTTPException(404, f"Unknown agent_session_id: {agent_session_id}")
+            response, _ = await self._execute(request, body, state.sandbox)
+            return response
         session_key = request.session[SESSION_ID_KEY]
         sandbox = self._session_sandboxes[session_key]
         response, _ = await self._execute(request, body, sandbox)

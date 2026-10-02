@@ -143,10 +143,15 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output(reasoning
     assert second.content == "answer 2"
     assert third.content == "answer 3"
     expected_reasoning = (
-        [{"id": "", "summary": [{"text": reasoning_content, "type": "summary_text"}], "type": "reasoning"}]
+        [{"summary": [{"text": reasoning_content, "type": "summary_text"}], "type": "reasoning"}]
         if reasoning_content
         else []
     )
+    # Replayed assistant and reasoning items carry fresh well-formed ids; compare everything else.
+    for request_body in client.requests:
+        for item in request_body["input"]:
+            if item.get("type") in ("message", "reasoning") and item.get("id", "").split("_")[0] in ("msg", "rs"):
+                item.pop("id")
     assert client.requests == [
         {"model": "policy_model", "input": [{"content": "first", "role": "user", "type": "message"}]},
         {
@@ -155,7 +160,6 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output(reasoning
                 {"content": "first", "role": "user", "type": "message"},
                 *expected_reasoning,
                 {
-                    "id": "",
                     "content": [{"annotations": [], "text": "answer 1", "type": "output_text"}],
                     "role": "assistant",
                     "status": "completed",
@@ -304,3 +308,129 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         ("tmux setup", {"timeout_s": None, "cwd": None, "user": None, "env": None}),
         ("tmux run", {"timeout_s": None, "cwd": None, "user": None, "env": None}),
     ]
+
+
+def _native_config() -> Terminus2AgentConfig:
+    return Terminus2AgentConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="app.py",
+        name="terminus_2_sandboxed_agent",
+        resources_server=ResourcesServerRef(type="resources_servers", name="harbor_resources_server"),
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        max_turns=1,
+        enable_summarize=False,
+        proactive_summarization_threshold=8000,
+        tmux_pane_width=160,
+        tmux_pane_height=40,
+        model_context_limit=32_000,
+        model_output_limit=None,
+        interleaved_thinking=False,
+        llm_request_timeout=60,
+        sandbox_provider="sandbox",
+        sandbox_timeout=10,
+        remote_tmux_binary_path=None,
+    )
+
+
+def _seed_body(*, session="ag-1", rollout="r1", with_sandbox=True) -> dict:
+    body = {
+        "agent_session_id": session,
+        "episode_id": {"rollout_id": rollout, "attempt": 0},
+        "task_id": {"taskset": "tb", "task_id": "path-tracing"},
+        "tool_accesses": [],
+    }
+    if with_sandbox:
+        body["sandbox_access"] = {
+            "connection": {"kind": "direct", "provider_config_ref": "sandbox", "descriptor": {"sandbox_id": "sb-1"}},
+            "workdir": "/app",
+        }
+    return body
+
+
+class TestNativeSessions:
+    """The environment-server protocol: borrow the resources server's sandbox, run, disconnect."""
+
+    def _client(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from fastapi.testclient import TestClient
+
+        agent = Terminus2Agent(config=_native_config(), server_client=MagicMock(spec=ServerClient))
+        sandbox = SimpleNamespace(disconnect=AsyncMock(), exec=AsyncMock())
+        connect = AsyncMock(return_value=sandbox)
+        monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}})
+        monkeypatch.setattr(app_module, "resolve_provider_config", lambda ref, cfg: {"opensandbox": {}})
+        monkeypatch.setattr(app_module, "create_provider", lambda config: MagicMock())
+        monkeypatch.setattr(app_module.AsyncSandbox, "connect", connect)
+        return agent, TestClient(agent.setup_webserver()), sandbox, connect
+
+    def test_seed_connects_to_borrowed_sandbox(self, monkeypatch):
+        agent, client, sandbox, connect = self._client(monkeypatch)
+
+        response = client.post("/v1/agent_sessions", json=_seed_body())
+
+        assert response.status_code == 200, response.text
+        connect.assert_awaited_once()
+        assert connect.await_args.args[0] == {"sandbox_id": "sb-1"}
+        assert agent._agent_sessions["ag-1"].workdir == "/app"
+        # Idempotent re-seed, and a different episode cannot take the id.
+        assert client.post("/v1/agent_sessions", json=_seed_body()).status_code == 200
+        assert connect.await_count == 1
+        assert client.post("/v1/agent_sessions", json=_seed_body(rollout="other")).status_code == 409
+
+    def test_seed_refuses_multiple_workers(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        config = _native_config()
+        config.num_workers = 4
+        agent = Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
+        response = TestClient(agent.setup_webserver()).post("/v1/agent_sessions", json=_seed_body())
+        assert response.status_code == 500 and "num_workers=1" in response.json()["detail"]
+
+    def test_seed_requires_sandbox_access(self, monkeypatch):
+        _, client, _, _ = self._client(monkeypatch)
+        assert client.post("/v1/agent_sessions", json=_seed_body(with_sandbox=False)).status_code == 422
+
+    def test_responses_uses_the_session_sandbox(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        agent, client, sandbox, _ = self._client(monkeypatch)
+        assert client.post("/v1/agent_sessions", json=_seed_body()).status_code == 200
+        seen = {}
+
+        async def fake_execute(request, body, used_sandbox):
+            seen["sandbox"] = used_sandbox
+            return app_module.NeMoGymResponse(
+                id="resp",
+                created_at=0,
+                model="m",
+                object="response",
+                output=[],
+                tool_choice="auto",
+                tools=[],
+                parallel_tool_calls=False,
+            ), {}
+
+        monkeypatch.setattr(agent, "_execute", fake_execute)
+        response = client.post("/v1/responses", json={"input": [{"role": "user", "content": "do it"}]})
+        assert response.status_code == 200, response.text
+        assert seen["sandbox"] is sandbox
+        _ = AsyncMock
+
+    def test_close_disconnects_without_stopping(self, monkeypatch):
+        agent, client, sandbox, _ = self._client(monkeypatch)
+        assert client.post("/v1/agent_sessions", json=_seed_body()).status_code == 200
+        wrong = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": "ag-1", "episode_id": {"rollout_id": "other", "attempt": 0}},
+        )
+        assert wrong.status_code == 409 and not sandbox.disconnect.await_count
+        right = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": "ag-1", "episode_id": {"rollout_id": "r1", "attempt": 0}},
+        )
+        assert right.status_code == 200
+        sandbox.disconnect.assert_awaited_once()
+        assert not hasattr(sandbox, "stop") or not getattr(sandbox.stop, "await_count", 0)
+        assert client.post("/v1/agent_sessions", json=_seed_body()).status_code == 409
