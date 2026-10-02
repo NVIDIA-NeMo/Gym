@@ -536,7 +536,7 @@ def e2e_rollout_collection():  # pragma: no cover
         rh.shutdown()
 
     if health_check_enabled and collection_completed:
-        from nemo_gym.rollout_health import JournalHealthUnavailable, format_health_report, run_health_checks
+        from nemo_gym.rollout_health import format_health_report, run_health_checks
 
         try:
             health_result = run_health_checks(
@@ -544,8 +544,6 @@ def e2e_rollout_collection():  # pragma: no cover
                 workers=rollout_collection_config.health_check_workers,
                 ignored_checks=rollout_collection_config.health_check_ignored_checks,
             )
-        except JournalHealthUnavailable as error:
-            print(f"Rollout health checks skipped: {error}")
         except Exception:
             logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
         else:

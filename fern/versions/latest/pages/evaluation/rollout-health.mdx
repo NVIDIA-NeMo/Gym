@@ -22,10 +22,9 @@ metrics, model servers, or agent behavior. It writes two additional report files
 ## When Health Checks Run
 
 <Note>
-Journal-aware health reading is a separate follow-up to [evaluation resume](/main/evaluation/resume).
-For these recovery histories, automatic checks currently print a skip message and collection/scoring still complete.
-Standalone checks reject the history, including through a file symlink. Use the merged selected-result projection
-from `gym eval aggregate` to inspect the completed results, or set `+disable_health_check=true` to omit automatic checks.
+For [evaluation recovery histories](/main/evaluation/resume), health checks inspect the same selected completed
+attempts as scoring. A newer failure or interrupted attempt excludes an older success. File symlinks use the original
+run's history too. Passing a failure sidecar directly still inspects all of its saved diagnostic records.
 Legacy files without recovery history continue to support the workflows below.
 </Note>
 
