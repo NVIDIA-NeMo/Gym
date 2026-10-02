@@ -440,9 +440,7 @@ def parse_claude_code_stream(lines: Iterable[str]) -> ClaudeCodeStream:
 
     compaction_attempts.extend({"invocation_id": session_id, "outcome": "unknown"} for session_id in compacting)
     result_usage = result.get("usage") if result is not None else None
-    usage = _usage_from_messages_usage(
-        [result_usage] if isinstance(result_usage, dict) else usage_by_message.values()
-    )
+    usage = _usage_from_messages_usage([result_usage] if isinstance(result_usage, dict) else usage_by_message.values())
     return ClaudeCodeStream(
         output=output,
         usage=usage,

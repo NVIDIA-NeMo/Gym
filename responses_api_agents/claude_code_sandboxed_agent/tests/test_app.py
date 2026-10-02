@@ -563,7 +563,9 @@ class TestResponses:
         monkeypatch.setattr(app_module, "__file__", str(tmp_path / "app.py"))
 
     def _agent_with(self, sandbox: _FakeSandbox, **overrides: Any) -> ClaudeCodeSandboxedAgent:
-        agent = _agent(CAPTURE_CONFIG, auto_compact=False, remote_claude_code_binary_path="/mnt/s3/claude", **overrides)
+        agent = _agent(
+            CAPTURE_CONFIG, auto_compact=False, remote_claude_code_binary_path="/mnt/s3/claude", **overrides
+        )
         agent._sandbox_id_to_sandbox["session-1"] = sandbox
         return agent
 
@@ -632,11 +634,16 @@ class TestResponses:
         [root] = [record for record in observations.records if isinstance(record, AgentInvocation)]
         assert root.invocation_id == "7-2"
         assert not (tmp_path / "results" / "session-1" / "stream.jsonl").exists()
-        assert json.loads((tmp_path / "results" / "session-1" / "generation.json").read_text())["response"]["output"] == []
+        assert (
+            json.loads((tmp_path / "results" / "session-1" / "generation.json").read_text())["response"]["output"]
+            == []
+        )
 
     async def test_deadline_kill_leaves_no_result(self) -> None:
         # `timeout` ends the CLI with 124 before it writes its result event; the patch so far is still graded.
-        sandbox = _FakeSandbox(_stream_text(STREAM_EVENTS), None, run_result=_exec_result(return_code=124, finished=False))
+        sandbox = _FakeSandbox(
+            _stream_text(STREAM_EVENTS), None, run_result=_exec_result(return_code=124, finished=False)
+        )
         agent = self._agent_with(sandbox)
 
         response = await agent.responses(_request(observe=False), _params())
@@ -651,7 +658,11 @@ class TestResponses:
         sandbox.exec.assert_awaited_once()
 
     async def test_context_overflow_result(self) -> None:
-        sandbox = _FakeSandbox(_stream_text([*STREAM_EVENTS, OVERFLOW_EVENT]), None, run_result=_exec_result(return_code=1, finished=False))
+        sandbox = _FakeSandbox(
+            _stream_text([*STREAM_EVENTS, OVERFLOW_EVENT]),
+            None,
+            run_result=_exec_result(return_code=1, finished=False),
+        )
         agent = self._agent_with(sandbox)
 
         await agent.responses(_request(observe=False), _params())
@@ -748,8 +759,12 @@ class TestRun:
         assert agent._sandbox_id_to_sandbox == {} and agent._sandbox_id_to_run_result == {}
 
     async def test_execution_failure_reward_zero_grades_an_empty_response(self) -> None:
-        agent = _agent(CAPTURE_CONFIG, remote_claude_code_binary_path="/mnt/s3/claude", execution_failure_reward_zero=True)
-        sandbox = _FakeSandbox(_stream_text(STREAM_EVENTS), None, run_result=_exec_result(return_code=124, finished=False))
+        agent = _agent(
+            CAPTURE_CONFIG, remote_claude_code_binary_path="/mnt/s3/claude", execution_failure_reward_zero=True
+        )
+        sandbox = _FakeSandbox(
+            _stream_text(STREAM_EVENTS), None, run_result=_exec_result(return_code=124, finished=False)
+        )
         agent._start_sandbox = AsyncMock(return_value=sandbox)
         post = _server(agent, reward_for_output=lambda output: 1.0 if output else 0.0)
 
@@ -787,7 +802,12 @@ class TestRun:
 def test_agent_config_file_validates() -> None:
     config = yaml.safe_load((AGENT_DIR / "configs" / "claude_code_sandboxed_agent.yaml").read_text())
     block = config["claude_code_sandboxed_agent"]["responses_api_agents"]["claude_code_sandboxed_agent"]
-    block |= {"host": "0.0.0.0", "port": 1, "name": "x", "resources_server": {"type": "resources_servers", "name": "r"}}
+    block |= {
+        "host": "0.0.0.0",
+        "port": 1,
+        "name": "x",
+        "resources_server": {"type": "resources_servers", "name": "r"},
+    }
 
     parsed = ClaudeCodeSandboxedAgentConfig.model_validate(block)
 
