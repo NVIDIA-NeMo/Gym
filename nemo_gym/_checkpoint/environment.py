@@ -66,6 +66,10 @@ class EnvironmentParticipant(CheckpointParticipant):
             raise ControlError(str(error)) from error
         self._task_digests[key] = digest
 
+    def finishing(self, episode_id: EpisodeId) -> None:
+        """Call before the episode's final cleanup, so a retire cannot interrupt it."""
+        self.steps.finishing(episode_id.capture_key)
+
     async def end(self, episode_id: EpisodeId) -> None:
         self._task_digests.pop(episode_id.capture_key, None)
         await self.steps.end(episode_id.capture_key)
