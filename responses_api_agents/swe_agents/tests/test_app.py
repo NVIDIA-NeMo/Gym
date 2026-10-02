@@ -16,6 +16,8 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 from contextlib import ExitStack
@@ -58,6 +60,7 @@ from responses_api_agents.swe_agents.app import (
     _parse_replay_messages,
     _render_opencode_user_message,
     _resolve_opencode_workspace_path,
+    _swe_sampling_seed,
     file_lock,
     runner_ray_remote,
     update_and_read_metrics,
@@ -1048,6 +1051,64 @@ class TestOpenHandsHarnessProcessor:
             assert result.mode == "agent"
             assert "timeout" in result.command
             assert "run_infer.sh" in self._read_agent_script(config)
+
+    @pytest.mark.parametrize("seed", [None, "0", "42", str(2**63 - 1)])
+    def test_sampling_seed_export_and_capability_check(self, tmp_path, seed) -> None:
+        config = _make_instance_config(str(tmp_path))
+        if seed is not None:
+            config.body.metadata["sampling_seed"] = seed
+        processor = OpenHandsHarnessProcessor(config=config)
+        processor.get_run_command()
+        script = self._read_agent_script(config)
+        if seed is None:
+            assert "NEMO_GYM_SAMPLING_SEED" not in script
+            return
+        export = f"export NEMO_GYM_SAMPLING_SEED={seed} && "
+        assert export in script
+        assert script.index(export) < script.index("./evaluation/benchmarks/swe_bench/scripts/run_infer.sh")
+        # Execute the actual generated export/preflight with a stand-in client.
+        # Old clients must fail before run_infer can start rather than ignore the seed.
+        command = script[script.index(export) : script.index("./evaluation/benchmarks/swe_bench/scripts/run_infer.sh")]
+        command = command.replace("/openhands_setup/OpenHands/.venv/bin/python", sys.executable)
+        package = tmp_path / "openhands" / "agenthub"
+        package.mkdir(parents=True, exist_ok=True)
+        client = package / "nemo_gym_client.py"
+        for version, expected_success in [(None, False), (2, False), (1, True)]:
+            client.write_text("" if version is None else f"NEMO_GYM_SAMPLING_SEED_PROTOCOL_VERSION = {version}\n")
+            shutil.rmtree(package / "__pycache__", ignore_errors=True)
+            result = subprocess.run(
+                ["bash", "-c", command + 'printf "%s" "$NEMO_GYM_SAMPLING_SEED"'],
+                env={**os.environ, "PYTHONPATH": str(tmp_path)},
+                capture_output=True,
+                text=True,
+            )
+            assert (result.returncode == 0) == expected_success
+            assert result.stdout == (seed if expected_success else "")
+
+    @pytest.mark.parametrize("seed", ["-1", str(2**63), "1.5", "", "1; echo unsafe", " 1", "١"])
+    def test_invalid_sampling_seed(self, tmp_path, seed) -> None:
+        config = _make_instance_config(str(tmp_path))
+        config.body.metadata["sampling_seed"] = seed
+        with pytest.raises(ValueError, match="decimal integer"):
+            OpenHandsHarnessProcessor(config=config).get_run_command()
+
+    def test_sampling_seed_rejects_unsupported_framework(self, tmp_path) -> None:
+        config = _make_instance_config(str(tmp_path))
+        config.body.metadata["sampling_seed"] = "42"
+        with pytest.raises(ValueError, match="OpenHands"):
+            _swe_sampling_seed(config.body, "opencode")
+
+    @pytest.mark.parametrize("source", ["metadata", "input", "problem_info"])
+    def test_sampling_seed_rejects_partial_replay(self, tmp_path, source) -> None:
+        config = _make_instance_config(str(tmp_path))
+        config.body.metadata["sampling_seed"] = "42"
+        if source == "input":
+            config.body.input = [{"type": "function_call", "name": "tool", "arguments": "{}", "call_id": "call1"}]
+        else:
+            target = config.body.metadata if source == "metadata" else config.problem_info
+            target["replay_messages"] = '[{"role": "assistant", "content": "prior turn"}]'
+        with pytest.raises(ValueError, match="partial trajectory"):
+            OpenHandsHarnessProcessor(config=config).get_run_command()
 
     def _read_agent_script(self, config) -> str:
         # The script is written at persistent_dir / agent_script_{agent_run_id}.sh
