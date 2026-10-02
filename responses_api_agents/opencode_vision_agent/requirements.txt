@@ -1,0 +1,5 @@
+-e nemo-gym[dev] @ ../../
+pillow
+numpy
+scipy
+opencv-python-headless
