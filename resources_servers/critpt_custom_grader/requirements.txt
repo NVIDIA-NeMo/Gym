@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Host server/test harness only; protected scientific execution uses runtime/requirements.txt.
+# Editable syntax follows resources_servers/example_single_tool_call/requirements.txt.
+# ../../ is the Gym checkout when installed from this resources-server directory.
+# Gym pyproject.toml declares both dev (server test tooling) and sandbox (provider SDKs)
+# extras; its project metadata identifies the Apache Software License and LICENSE file.
+# No extra scientific host dependencies or global dependency changes are needed.
+-e nemo-gym[dev,sandbox] @ ../../
