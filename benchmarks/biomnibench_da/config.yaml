@@ -29,7 +29,7 @@ biomnibench_da:
       harbor_jobs_dir: ${output_jsonl_fpath}
 
       harbor_dataset:
-        path: ${prepare_script_args.output_dir}
+        path: ${harbor_dataset_path}
 
       harbor_environment:
         type: singularity
