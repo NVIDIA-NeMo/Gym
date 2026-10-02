@@ -37,7 +37,7 @@ import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, ClassVar, Iterable, Mapping, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Iterable, Mapping, Optional
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -109,6 +109,23 @@ _ANTHROPIC_CONVERTER = AnthropicConverter()
 _SSE_KEEPALIVE_GRACE_S = 60.0
 _SSE_KEEPALIVE_INTERVAL_S = 30.0
 _SSE_KEEPALIVE_COMMENT = b": keep-alive\n\n"
+# Once the stream is committed, a client can no longer retry an HTTP 5xx itself (OpenCode does for an
+# eager one), so a server-side or connection failure is retried here, after these waits, before it is
+# reported in the stream.
+_SSE_LATE_RETRY_DELAYS_S = (5.0, 20.0, 60.0)
+
+
+def _is_retryable_backend_failure(exc: BaseException) -> bool:
+    """Server errors (5xx), timeouts and connection failures are retried; client errors (4xx) are not."""
+    status, _ = _exception_http_details(exc)
+    if status is not None:
+        return status >= 500
+    return _classify_exception(exc) in ("timeout", "connection")
+
+
+async def _call_after(delay_s: float, invoke: Callable[[], Awaitable[Any]]) -> Any:
+    await asyncio.sleep(delay_s)
+    return await invoke()
 
 
 def _chat_sse_error(exc: BaseException) -> bytes:
@@ -354,7 +371,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             raise
         if not done:
             return StreamingResponse(
-                self._keepalive_chat_sse(call, include_usage=include_usage), media_type="text/event-stream"
+                self._keepalive_chat_sse(
+                    call, lambda: self._invoke_chat_completions(request, params), include_usage=include_usage
+                ),
+                media_type="text/event-stream",
             )
         completion = call.result()
         completion_json = completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
@@ -364,26 +384,42 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         )
 
     async def _keepalive_chat_sse(
-        self, call: "asyncio.Future[NeMoGymChatCompletion]", *, include_usage: bool
+        self,
+        call: "asyncio.Future[NeMoGymChatCompletion]",
+        invoke: Callable[[], Awaitable[NeMoGymChatCompletion]],
+        *,
+        include_usage: bool,
     ) -> AsyncIterator[bytes]:
         """Stream SSE comments while a buffered chat call runs, then the same replay as the fast path.
 
-        The stream is already committed, so a failure of the call is reported as an in-stream ``error``
-        event rather than an HTTP status. If the client goes away, the call is cancelled.
+        The stream is already committed, so the client cannot retry: a server-side or connection failure
+        of the call is retried with ``invoke`` after each of ``_SSE_LATE_RETRY_DELAYS_S``. A failure that
+        is not retryable, or the last one, is reported as an in-stream ``error`` event rather than an HTTP
+        status. If the client goes away, the running call is cancelled.
         """
+        delays = list(_SSE_LATE_RETRY_DELAYS_S)
         try:
             yield _SSE_KEEPALIVE_COMMENT
             while True:
                 done, _ = await asyncio.wait({call}, timeout=_SSE_KEEPALIVE_INTERVAL_S)
-                if done:
+                if not done:
+                    yield _SSE_KEEPALIVE_COMMENT
+                    continue
+                failure = call.exception()
+                if failure is None:
                     break
-                yield _SSE_KEEPALIVE_COMMENT
-            try:
-                completion = call.result()
-            except Exception as exc:
-                logger.warning("Chat completion failed after its SSE stream was committed.", exc_info=True)
-                yield _chat_sse_error(exc)
-                return
+                if not delays or not _is_retryable_backend_failure(failure):
+                    logger.warning("Chat completion failed after its SSE stream was committed.", exc_info=failure)
+                    yield _chat_sse_error(failure)
+                    return
+                delay_s = delays.pop(0)
+                logger.warning(
+                    "Chat completion failed after its SSE stream was committed; retrying in %.0f s.",
+                    delay_s,
+                    exc_info=failure,
+                )
+                call = asyncio.ensure_future(_call_after(delay_s, invoke))
+            completion = call.result()
             completion_json = (
                 completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
             )
