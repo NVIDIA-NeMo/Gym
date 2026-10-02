@@ -15,10 +15,10 @@
 import copy
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -59,6 +59,13 @@ logger = logging.getLogger(__name__)
 
 class IPIResourcesServerConfig(BaseResourcesServerConfig):
     pass
+
+
+class IPICheckpointState(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+    schema_version: Literal[1]
+    environment: Dict[str, JsonValue]
 
 
 class InjectionSpec(BaseModel):
@@ -109,8 +116,27 @@ class IPIVerifyResponse(BaseVerifyResponse):
 
 class IPIResourcesServer(SimpleResourcesServer):
     ray_enabled = False
+    checkpoint_mode = "exported"
     config: IPIResourcesServerConfig
     session_id_to_env: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+
+    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        return {
+            session_id: IPICheckpointState(
+                schema_version=1, environment=self.session_id_to_env[session_id]
+            ).model_dump()
+            for session_id in session_ids
+            if session_id in self.session_id_to_env
+        }
+
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        environments = {
+            session_id: IPICheckpointState.model_validate(state).environment for session_id, state in states.items()
+        }
+        self.session_id_to_env.update(environments)
+
+    async def retire_session_state(self, session_id: str) -> None:
+        self.session_id_to_env.pop(session_id, None)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
