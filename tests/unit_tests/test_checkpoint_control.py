@@ -72,6 +72,11 @@ class FakeParticipant(CheckpointParticipant):
             next_id = record.episode_id.model_copy(update={"attempt": record.episode_id.attempt + 1})
             self.executions[next_id.capture_key] = {"parked": True, "value": record.value}
 
+    async def restored_pending(self) -> list[EpisodeId]:
+        return [
+            EpisodeId.from_capture_key(key) for key, execution in self.executions.items() if execution.get("restored")
+        ]
+
     async def park(self, key: str) -> None:
         self.executions[key]["parked"] = True
         await self.notify()
@@ -515,3 +520,22 @@ def test_stored_records_keep_their_key_order(tmp_path: Path) -> None:
 
     assert json.dumps(restored["state"]) == json.dumps(state)
     assert list(restored) == list(record)
+
+
+async def test_a_commit_retires_restored_episodes_its_scope_leaves_out(tmp_path: Path) -> None:
+    participant = FakeParticipant()
+    participant.executions["kept-a1"] = {"parked": True, "value": 1, "restored": True}
+    participant.executions["dropped-a1"] = {"parked": True, "value": 2, "restored": True}
+    participant.executions["live"] = {"parked": True, "value": 3}
+    scope = [{"rollout_id": "kept", "attempt": 1}, {"rollout_id": "live"}]
+    async with make_client(participant) as client:
+        await client.post("/ng-control/v1/checkpoint/prepare", json=body())
+        await client.post(
+            "/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path), episode_ids=scope)
+        )
+        await client.post("/ng-control/v1/checkpoint/resume", json=body())
+
+    # The controller no longer continues "dropped", so its restored state is released and its attempt fenced.
+    assert set(participant.executions) == {"kept-a1", "live"}
+    with pytest.raises(StaleAttemptError):
+        participant.retiring.check(EpisodeId(rollout_id="dropped", attempt=1))

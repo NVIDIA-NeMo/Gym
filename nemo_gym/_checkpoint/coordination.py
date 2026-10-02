@@ -174,7 +174,12 @@ async def commit(
     *,
     deadline_ts: float,
 ) -> dict[str, dict[str, Any]]:
-    """Write every participant's state for the episodes the controller will continue."""
+    """Write every participant's state for the episodes the controller will continue.
+
+    ``episode_ids`` must name every episode the controller continues: each episode in flight, and each episode
+    restored earlier whose replacement has not started yet, named by that replacement attempt. Restored state of
+    an episode the scope leaves out is released after the write, and its attempt is retired.
+    """
     body = {
         "checkpoint_id": checkpoint_id,
         "deadline_ts": deadline_ts,
