@@ -220,6 +220,13 @@ class Deployment:
             add("environment", "environment_servers/legacy_agent", environment)
         return config
 
+    def set_server_workers(self, count: int) -> None:
+        """Change the worker count of the environment, agent, and resources servers for their next start."""
+        self.server_workers = count
+        for name in self.dirs:
+            if name != "policy_model":
+                next(iter(next(iter(self.config[name].values())).values()))["num_workers"] = count
+
     # -- processes ------------------------------------------------------------------------------
 
     def start_backend(self) -> None:

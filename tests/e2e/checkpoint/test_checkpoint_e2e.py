@@ -126,8 +126,12 @@ async def crash_and_restore(
     skip_kinds: tuple[str, ...] = (),
     attempt: int = 0,
     restore_id: str = "r1",
+    server_workers: Optional[int] = None,
 ) -> None:
+    """Crash, restart, and restore; ``server_workers`` restarts the servers with a different worker count."""
     deployment.crash_gym()
+    if server_workers is not None:
+        deployment.set_server_workers(server_workers)
     if not deployment.external_inference:
         deployment.backend("/_ctl/release", {})
     deployment.slow_verify_flag.unlink(missing_ok=True)
@@ -371,13 +375,20 @@ async def test_a_checkpoint_without_a_crash_parks_and_then_releases_the_episode(
 
 
 @pytest.mark.parametrize("topology", ["native", "counter"])
-@SERVER_WORKERS
+@pytest.mark.parametrize(
+    ("workers_before", "workers_after"),
+    [(1, 1), (2, 2), (1, 2), (2, 1), (2, 4)],
+    ids=["servers1to1", "servers2to2", "servers1to2", "servers2to1", "servers2to4"],
+)
 async def test_concurrent_sessions_across_workers_all_continue_after_a_crash(
-    deploy, tmp_path: Path, topology: str, server_workers: int
+    deploy, tmp_path: Path, topology: str, workers_before: int, workers_after: int
 ) -> None:
-    """Many rollouts in flight at once, their sessions spread over every worker, all continue after a crash."""
+    """Many rollouts in flight at once, their sessions spread over every worker, all continue after a crash.
+
+    The servers may restart with a different worker count than they were checkpointed with.
+    """
     count = 16
-    deployment = deploy(topology, server_workers=server_workers)
+    deployment = deploy(topology, server_workers=workers_before)
     if topology == "counter":
         deployment.backend("/_ctl/script", COUNTER_SCRIPT)
         rows = {f"many-{index}": counter_row(f"many-{index}") for index in range(count)}
@@ -394,7 +405,7 @@ async def test_concurrent_sessions_across_workers_all_continue_after_a_crash(
         await wait_until(lambda: len(deployment.backend_calls()) == 2 * count, timeout=60)
         replies = await checkpoint_replies(deployment, tmp_path / "ckpt", list(rows))
         owners = {json.loads(line)["owner"] for line in session_records(tmp_path / "ckpt", session_kind)}
-        await crash_and_restore(deployment, tmp_path / "ckpt", list(rows))
+        await crash_and_restore(deployment, tmp_path / "ckpt", list(rows), server_workers=workers_after)
         for run in runs:
             run.cancel()
         if topology == "counter":
@@ -405,7 +416,9 @@ async def test_concurrent_sessions_across_workers_all_continue_after_a_crash(
 
     rewards = [reward_of(result.json()) for result in results]
     assert replies[episode_owner]["episode_ids"] == sorted(rows)
-    assert len(owners) == server_workers
+    # With one worker, sessions carry no routing owner; with several, they come from every worker.
+    assert owners == ({None} if workers_before == 1 else set(owners) - {None})
+    assert len(owners) == workers_before
     assert rewards == [1.0] * count
     # Between them, the rollouts had one call delivered each before the crash. Every continued rollout
     # makes only the calls it still needed, so none repeats a delivered call or restarts from its input.

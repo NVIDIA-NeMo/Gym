@@ -40,7 +40,7 @@ from nemo_gym._checkpoint.resources import ResourcesParticipant
 from nemo_gym._checkpoint.workers import WorkerCoordinator
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.server_utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, ServerClient
-from nemo_gym.session_routing import install_session_routing, session_aliases
+from nemo_gym.session_routing import install_session_routing, session_aliases, session_placements
 from resources_servers.example_session_state_mgmt.app import (
     StatefulCounterResourcesServer,
     StatefulCounterResourcesServerConfig,
@@ -425,6 +425,68 @@ async def test_owners_whose_sessions_exported_nothing_are_aliased_too(socket_dir
     assert set(table.values()) == live
 
 
+class SessionStates:
+    """Resources session hooks over an in-memory map."""
+
+    def __init__(self) -> None:
+        self.states: dict[str, JsonValue] = {}
+
+    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        return {session_id: self.states[session_id] for session_id in session_ids if session_id in self.states}
+
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        self.states.update(states)
+
+    async def retire_session_state(self, session_id: str) -> None:
+        self.states.pop(session_id, None)
+
+
+def resources_worker(*, routed: bool) -> Callable[[], tuple[ResourcesParticipant, FastAPI]]:
+    def make() -> tuple[ResourcesParticipant, FastAPI]:
+        app = FastAPI()
+        if routed:
+            app.state.nemo_gym_session_owner = uuid4().hex
+        return ResourcesParticipant(SessionStates(), "exported"), app
+
+    return make
+
+
+async def test_a_session_placed_without_an_owner_stays_routable_through_later_restores(
+    socket_dir: str, tmp_path: Path
+) -> None:
+    """Placed once by session ID, a session follows its new owner, and keeps a table entry for its old cookie."""
+    async with coordinated(socket_dir, resources_worker(routed=False)) as before:
+        for index, link in enumerate(before.links):
+            link.participant.hooks.states[f"s{index}"] = index
+            link.participant.seeded(f"s{index}", EpisodeId(rollout_id=f"r{index}"))
+        await commit(before, tmp_path / "ckpt1", ["r0", "r1"])
+        await before.controller.resume(CheckpointRequest(**control()))
+
+    episode_ids = [{"rollout_id": "r0", "attempt": 1}, {"rollout_id": "r1", "attempt": 1}]
+    async with coordinated(socket_dir, resources_worker(routed=True)) as first:
+        await restore(first, tmp_path / "ckpt1", [{"rollout_id": "r0"}, {"rollout_id": "r1"}])
+        first_table = dict(session_placements(first.links[0].app))
+        await commit(first, tmp_path / "ckpt2", ["r0", "r1"], checkpoint_id="c2")
+        await first.controller.resume(CheckpointRequest(**control("c2")))
+    second_owners = {record["session_id"]: record["owner"] for record in records(tmp_path / "ckpt2", "resources")}
+
+    async with coordinated(socket_dir, resources_worker(routed=True)) as second:
+        await restore(second, tmp_path / "ckpt2", episode_ids, restore_id="r2")
+        table = dict(session_placements(second.links[0].app))
+        aliases = dict(session_aliases(second.links[0].app))
+        holders = {
+            session_id: link.routing_id for link in second.links for session_id in link.participant.hooks.states
+        }
+
+    # The first restore spread the two sessions over both workers, which then owned them.
+    assert len(set(first_table.values())) == 2
+    assert second_owners == first_table
+    # After the next restore, an old cookie without an owner and a newer one naming its owner both arrive
+    # where the session is.
+    assert table == holders
+    assert {session_id: aliases[owner] for session_id, owner in second_owners.items()} == holders
+
+
 async def test_a_retire_leaves_no_fence_on_any_worker_or_on_one_that_joins_later(socket_dir: str) -> None:
     async with coordinated(socket_dir, environment_worker) as deployment:
         await deployment.controller.retire(RetireRequest(**control(episode_ids=[{"rollout_id": "r"}])))
@@ -435,51 +497,69 @@ async def test_a_retire_leaves_no_fence_on_any_worker_or_on_one_that_joins_later
     assert fences == [0] * (len(deployment.links) + 1)
 
 
+def counter_config(num_workers: int) -> StatefulCounterResourcesServerConfig:
+    return StatefulCounterResourcesServerConfig(
+        host="",
+        port=0,
+        entrypoint="",
+        name="resources",
+        num_workers=num_workers,
+        domain="agent",
+        verified=False,
+    )
+
+
+def checkpointing_client() -> ServerClient:
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
+    return client
+
+
+@asynccontextmanager
+async def counter_workers(
+    socket_dir: str, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[tuple[WorkerCoordinator, list[StatefulCounterResourcesServer], list[FastAPI]]]:
+    """A coordinator and two counter server workers with session routing, each built as uvicorn builds one."""
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1")
+    coordinator = WorkerCoordinator(
+        CoordinatedServerParticipant(ResourcesParticipant(MagicMock(), "exported"), expected_workers=2),
+        instance_name="resources",
+        lease_grace_seconds=60,
+        socket_path=os.path.join(socket_dir, f"{uuid4().hex[:8]}.sock"),
+    )
+    server = await coordinator.serve()
+    monkeypatch.setenv(COORDINATOR_SOCKET_ENV, coordinator.socket_path)
+    routing_dir = tempfile.mkdtemp(prefix="ngr-", dir="/tmp")
+    counters, apps = [], []
+    try:
+        async with AsyncExitStack() as stack:
+            for _ in range(2):
+                counter = StatefulCounterResourcesServer(
+                    config=counter_config(2), server_client=checkpointing_client()
+                )
+                # The checkpoint link, then session routing outside every other middleware.
+                app = counter.setup_webserver()
+                key = counter.get_session_middleware_key()
+                install_session_routing(app, socket_dir=routing_dir, session_cookie=key, secret_key=key)
+                await stack.enter_async_context(app.router.lifespan_context(app))
+                counters.append(counter)
+                apps.append(app)
+            yield coordinator, counters, apps
+    finally:
+        server.close()
+        await server.wait_closed()
+        shutil.rmtree(routing_dir, ignore_errors=True)
+
+
+def http(app: FastAPI) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://worker")
+
+
 async def test_a_restored_resources_session_serves_a_request_with_its_old_cookie_on_any_worker(
     socket_dir: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Real counter servers with session routing: the old cookie reaches the worker that holds the session."""
-    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1")
-    client = MagicMock(spec=ServerClient)
-    client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
-    config = StatefulCounterResourcesServerConfig(
-        host="", port=0, entrypoint="", name="resources", num_workers=2, domain="agent", verified=False
-    )
-
-    @asynccontextmanager
-    async def counter_workers() -> AsyncIterator[tuple[WorkerCoordinator, list[StatefulCounterResourcesServer], list]]:
-        """A coordinator and two counter server workers, each built as uvicorn builds a worker."""
-        coordinator = WorkerCoordinator(
-            CoordinatedServerParticipant(ResourcesParticipant(MagicMock(), "exported"), expected_workers=2),
-            instance_name="resources",
-            lease_grace_seconds=60,
-            socket_path=os.path.join(socket_dir, f"{uuid4().hex[:8]}.sock"),
-        )
-        server = await coordinator.serve()
-        monkeypatch.setenv(COORDINATOR_SOCKET_ENV, coordinator.socket_path)
-        routing_dir = tempfile.mkdtemp(prefix="ngr-", dir="/tmp")
-        counters, apps = [], []
-        try:
-            async with AsyncExitStack() as stack:
-                for _ in range(2):
-                    counter = StatefulCounterResourcesServer(config=config, server_client=client)
-                    # The checkpoint link, then session routing outside every other middleware.
-                    app = counter.setup_webserver()
-                    key = counter.get_session_middleware_key()
-                    install_session_routing(app, socket_dir=routing_dir, session_cookie=key, secret_key=key)
-                    await stack.enter_async_context(app.router.lifespan_context(app))
-                    counters.append(counter)
-                    apps.append(app)
-                yield coordinator, counters, apps
-        finally:
-            server.close()
-            await server.wait_closed()
-            shutil.rmtree(routing_dir, ignore_errors=True)
-
-    def http(app: FastAPI) -> httpx.AsyncClient:
-        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://worker")
-
-    async with counter_workers() as (coordinator, _, apps):
+    async with counter_workers(socket_dir, monkeypatch) as (coordinator, _, apps):
         cookies = []
         for index, app in enumerate(apps):
             async with http(app) as worker:
@@ -490,7 +570,7 @@ async def test_a_restored_resources_session_serves_a_request_with_its_old_cookie
         await coordinator.controller.resume(CheckpointRequest(**control()))
     exported = records(tmp_path / "ckpt", "resources")
 
-    async with counter_workers() as (coordinator, counters, apps):
+    async with counter_workers(socket_dir, monkeypatch) as (coordinator, counters, apps):
         await restore(coordinator, tmp_path / "ckpt", [{"rollout_id": "r0"}, {"rollout_id": "r1"}])
         counts = []
         for cookie in cookies:
@@ -505,3 +585,54 @@ async def test_a_restored_resources_session_serves_a_request_with_its_old_cookie
     assert counts == [1, 1, 11, 11]
     # The two pre-crash owners went to different workers, and no request ran against a worker without the state.
     assert sorted(held) == [[1], [11]]
+
+
+async def test_sessions_of_a_single_process_server_restore_onto_several_workers(
+    socket_dir: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A checkpoint taken with one worker: its cookies name no worker, yet still reach their session's state.
+
+    The MCP token path through the same table is covered in test_session_routing.py: checkpointing and MCP
+    exposure are not combined on one server.
+    """
+    single = StatefulCounterResourcesServer(config=counter_config(1), server_client=checkpointing_client())
+    bearer = {"authorization": "Bearer t"}
+    cookies = []
+    app = single.setup_webserver()
+    for index in range(4):
+        # A client per rollout, so each seed starts its own session.
+        async with http(app) as rollout:
+            seeded = await rollout.post(f"/ng-rollout/r{index}/seed_session", json={"initial_count": 10 * index})
+            cookies.append(dict(seeded.cookies))
+    async with http(app) as server:
+        await server.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=bearer)
+        committed = await server.post(
+            "/ng-control/v1/checkpoint/commit",
+            json=control(
+                checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": f"r{i}"} for i in range(4)]
+            ),
+            headers=bearer,
+        )
+    assert committed.status_code == 200, committed.text
+    exported = records(tmp_path / "ckpt", "resources")
+
+    async with counter_workers(socket_dir, monkeypatch) as (coordinator, counters, apps):
+        await restore(coordinator, tmp_path / "ckpt", [{"rollout_id": f"r{index}"} for index in range(4)])
+        counts = []
+        for cookie in cookies:
+            for app in apps:
+                async with http(app) as worker:
+                    await worker.post("/increment_counter", json={"count": 1}, cookies=cookie)
+                    counts.append((await worker.post("/get_counter_value", cookies=cookie)).json()["count"])
+        held = [sorted(counter.session_id_to_counter.values()) for counter in counters]
+        tables = [dict(session_placements(app)) for app in apps]
+
+    assert {record["owner"] for record in exported} == {None}
+    # Each worker incremented each session once, whichever worker held it.
+    assert counts == [1, 2, 11, 12, 21, 22, 31, 32]
+    # Spread evenly, one session at a time, and no request ran against a worker without the state.
+    assert sorted(len(values) for values in held) == [2, 2]
+    assert sorted(value for values in held for value in values) == [2, 12, 22, 32]
+    # Every worker's router knows where each of them is.
+    assert tables[0] == tables[1]
+    assert set(tables[0]) == {record["session_id"] for record in exported}

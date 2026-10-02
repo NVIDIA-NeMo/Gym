@@ -38,7 +38,9 @@ A request that belongs to a worker without a session, such as an agent's call to
 A partial-rollout checkpoint restore installs the sessions of each worker that ran before a crash on one
 live worker, and sets an alias from the old worker ID to the new one (see
 ``nemo_gym._checkpoint.participant_workers``). Requests whose cookie or token names an old worker then
-reach the worker that holds its sessions now.
+reach the worker that holds its sessions now. Sessions checkpointed by a single-process server name no
+worker; a restore places each on a worker and records it in a second table, by session ID, that the router
+consults for a cookie or token without an owner.
 """
 
 import asyncio
@@ -70,6 +72,10 @@ from yarl import URL
 SESSION_SOCKET_DIR_ENV = "NEMO_GYM_SESSION_SOCKET_DIR"
 #: Session key naming the worker that created the session.
 SESSION_OWNER_KEY = "nemo_gym_worker"
+#: Session key of the session ID; ``nemo_gym.server_utils.SESSION_ID_KEY`` is defined from it.
+SESSION_ID_CLAIM = "session_id"
+#: MCP session token key of the session ID (see ``nemo_gym.mcp_auto_exposure``).
+_MCP_SESSION_ID_CLAIM = "sid"
 #: Header naming the worker a request belongs to, for a request without a session.
 SESSION_OWNER_HEADER = "x-ng-session-owner"
 #: Scope key marking a request that arrived over a worker's private socket.
@@ -116,18 +122,34 @@ def session_aliases(app: FastAPI) -> dict[str, str]:
     return app.state.nemo_gym_session_aliases
 
 
+def session_placements(app: FastAPI) -> dict[str, str]:
+    """The app's table of restored sessions that name no owner: a session ID to the worker that holds it."""
+    if not hasattr(app.state, "nemo_gym_session_placements"):
+        app.state.nemo_gym_session_placements = {}
+    return app.state.nemo_gym_session_placements
+
+
+def _cookie_claims(cookie: str, *, signer: itsdangerous.TimestampSigner) -> Any:
+    try:
+        return json.loads(b64decode(signer.unsign(cookie.encode("utf-8"), max_age=_SESSION_MAX_AGE_SECONDS)))
+    except (itsdangerous.BadSignature, ValueError):
+        return None
+
+
+def _token_claims(token: str, *, serializer: itsdangerous.URLSafeSerializer) -> Any:
+    try:
+        return serializer.loads(token)
+    except itsdangerous.BadSignature:
+        return None
+
+
 def session_owner(cookie: str, *, signer: itsdangerous.TimestampSigner) -> Optional[str]:
     """Return the worker ID stamped in a session cookie, or None if there is no valid one.
 
     Decoded exactly as Starlette's SessionMiddleware decodes it. A cookie it would reject (badly signed or
     expired) starts a fresh session, which belongs to whichever worker handles the request.
     """
-    try:
-        return _valid_owner(
-            json.loads(b64decode(signer.unsign(cookie.encode("utf-8"), max_age=_SESSION_MAX_AGE_SECONDS)))
-        )
-    except (itsdangerous.BadSignature, ValueError):
-        return None
+    return _valid_owner(_cookie_claims(cookie, signer=signer))
 
 
 def mcp_token_owner(token: str, *, serializer: itsdangerous.URLSafeSerializer) -> Optional[str]:
@@ -135,10 +157,7 @@ def mcp_token_owner(token: str, *, serializer: itsdangerous.URLSafeSerializer) -
 
     A rejected token is handled locally, where the MCP endpoint's own token check refuses it as before.
     """
-    try:
-        return _valid_owner(serializer.loads(token))
-    except itsdangerous.BadSignature:
-        return None
+    return _valid_owner(_token_claims(token, serializer=serializer))
 
 
 class SessionRoutingMiddleware:
@@ -160,6 +179,7 @@ class SessionRoutingMiddleware:
         secret_key: str,
         clients: dict[str, ClientSession],
         aliases: Optional[dict[str, str]] = None,
+        placements: Optional[dict[str, str]] = None,
         mcp_token_header: Optional[str] = None,
         mcp_token_serializer: Optional[itsdangerous.URLSafeSerializer] = None,
         mcp_path: str = "/mcp",
@@ -173,6 +193,8 @@ class SessionRoutingMiddleware:
         self.clients = clients
         # Updated in place when a checkpoint restore moves an old worker's sessions to this server's workers.
         self.aliases = aliases if aliases is not None else {}
+        # Likewise for restored sessions whose cookie or token names no owner, by session ID.
+        self.placements = placements if placements is not None else {}
         self.mcp_token_header = mcp_token_header
         self.mcp_token_serializer = mcp_token_serializer
         self.mcp_path = mcp_path
@@ -196,10 +218,19 @@ class SessionRoutingMiddleware:
         is_mcp = path == self.mcp_path or path.startswith(self.mcp_path + "/")
         # MCP tool calls name their session by the token, never by a cookie.
         if token is not None and (is_mcp or cookie is None):
-            return mcp_token_owner(token, serializer=self.mcp_token_serializer)
-        if cookie is not None:
-            return session_owner(cookie, signer=self.signer)
-        return _valid_worker_id(connection.headers.get(SESSION_OWNER_HEADER))
+            claims, session_id_claim = (
+                _token_claims(token, serializer=self.mcp_token_serializer),
+                _MCP_SESSION_ID_CLAIM,
+            )
+        elif cookie is not None:
+            claims, session_id_claim = _cookie_claims(cookie, signer=self.signer), SESSION_ID_CLAIM
+        else:
+            return _valid_worker_id(connection.headers.get(SESSION_OWNER_HEADER))
+        owner = _valid_owner(claims)
+        if owner is None and self.placements and isinstance(claims, dict):
+            session_id = claims.get(session_id_claim)
+            owner = self.placements.get(session_id) if isinstance(session_id, str) else None
+        return owner
 
     def _client(self, owner: str) -> ClientSession:
         client = self.clients.get(owner)
@@ -358,6 +389,7 @@ def install_session_routing(
         secret_key=secret_key,
         clients=clients,
         aliases=session_aliases(app),
+        placements=session_placements(app),
         mcp_token_header=mcp_token_header,
         mcp_token_serializer=mcp_token_serializer,
     )

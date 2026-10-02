@@ -17,7 +17,9 @@ coordinator is the server's participant:
     worker's router gets the alias table from old owner to new worker, so a request whose cookie or token
     names a pre-crash worker reaches the one that holds its session now. The manifest lists every owner
     a cookie may name at commit, so owners whose sessions exported nothing, such as those of a stateless
-    resources server, are aliased too. A worker that joins later gets the table when it registers.
+    resources server, are aliased too. Sessions checkpointed by a single-process server name no owner; each
+    is placed on a live worker on its own, spread evenly, and every router gets a second table from
+    session ID to worker for them. A worker that joins later gets both tables when it registers.
   - State that lives inside one request (environment episodes, legacy agent ``/run`` episodes) stays with
     the coordinator. The worker that receives the replacement attempt's ``/run`` claims it; exactly one
     claim succeeds. A record nobody has claimed is exported again by the next checkpoint.
@@ -59,7 +61,7 @@ from nemo_gym._checkpoint.workers import (
 )
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.server_utils import is_nemo_gym_fastapi_worker
-from nemo_gym.session_routing import session_aliases
+from nemo_gym.session_routing import session_aliases, session_placements
 
 
 # Set by the main process for the workers it spawns.
@@ -91,8 +93,13 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
         self.restored: dict[str, CheckpointRecord] = {}
         # Pre-crash session owner -> the live worker that holds its sessions now.
         self.aliases: dict[str, str] = {}
-        # Session owners a restoring checkpoint names, including those whose sessions exported nothing.
+        # Restored session ID -> the live worker that holds it, for sessions whose cookie may name no owner.
+        # At most one entry per restored session; entries outlive their sessions until the next restore.
+        self.placements: dict[str, str] = {}
+        # From the manifest of the checkpoint being restored: every owner a cookie may name, and the
+        # sessions that were placed without an owner and whose cookies may still name none.
         self._restoring_owners: list[str] = []
+        self._restoring_placed: set[str] = set()
 
     def merge(self, reports: list[PrepareReport]) -> PrepareReport:
         counts: Counter[str] = Counter()
@@ -105,7 +112,7 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
         )
 
     def join_state(self, worker_id: int) -> dict[str, Any]:
-        return {"restored_keys": sorted(self.restored), "aliases": self.aliases}
+        return {"restored_keys": sorted(self.restored), "aliases": self.aliases, "placements": self.placements}
 
     def open_state(self) -> dict[str, Any]:
         return {"restored_keys": sorted(self.restored)}
@@ -151,55 +158,70 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
         # A session that exported no record, such as one of a stateless resources server, still needs its
         # requests routed somewhere after a restore.
         owners = {worker.registration.get("routing_id") for worker in self.workers.values()} | set(self.aliases)
-        return {"session_owners": sorted(owner for owner in owners if owner)}
+        return {
+            "session_owners": sorted(owner for owner in owners if owner),
+            "placed_sessions": sorted(self.placements),
+        }
 
     def restore_manifest(self, manifest: dict[str, Any]) -> None:
         self._restoring_owners = list(manifest.get("session_owners") or [])
+        self._restoring_placed = set(manifest.get("placed_sessions") or [])
 
     async def install(self, records: list[CheckpointRecord]) -> None:
         if self.restored:
             raise ControlError(f"{self.kind} restore requires a server without restored state")
         held: dict[str, CheckpointRecord] = {}
-        by_owner: dict[str, list[CheckpointRecord]] = defaultdict(list)
+        # Records placed together: all the sessions of one owner, or one session that names no owner.
+        groups: dict[tuple[str, str], list[CheckpointRecord]] = defaultdict(list)
         for record in records:
             key = self.claim_key(record)
             if key is not None:
                 held[key] = record
                 continue
-            owner = getattr(record, "owner", None)
-            if owner is None:
+            owner, session_id = getattr(record, "owner", None), getattr(record, "session_id", None)
+            if owner is not None:
+                groups["owner", owner].append(record)
+            elif session_id is not None:
+                # Checkpointed without routing, by a single-process server: the cookie names no worker.
+                groups["session", session_id].append(record)
+            else:
                 raise ControlError(
-                    f"{self.kind} record of {record.episode_id.capture_key} has no session owner, so its requests "
-                    "cannot be routed to the worker that would hold it"
+                    f"{self.kind} record of {record.episode_id.capture_key} names neither a session owner nor a "
+                    "session ID, so its requests cannot be routed to the worker that would hold it"
                 )
-            by_owner[owner].append(record)
         for owner in self._restoring_owners:
-            by_owner.setdefault(owner, [])
-        placement = self._place(by_owner)
-        aliases = {owner: self.workers[worker_id].registration["routing_id"] for owner, worker_id in placement.items()}
+            groups.setdefault(("owner", owner), [])
+        workers = self._place(groups)
+        routing = {group: self.workers[worker_id].registration["routing_id"] for group, worker_id in workers.items()}
+        aliases = {name: routing_id for (kind, name), routing_id in routing.items() if kind == "owner"}
+        placements = {name: routing_id for (kind, name), routing_id in routing.items() if kind == "session"}
+        # A session placed by an earlier restore may still send a cookie without an owner: it follows its
+        # recorded owner, the worker it was placed on then.
+        for (kind, owner), placed in groups.items():
+            if kind == "owner":
+                for record in placed:
+                    if record.session_id in self._restoring_placed:
+                        placements[record.session_id] = aliases[owner]
+        installs: dict[int, list[dict[str, Any]]] = {worker_id: [] for worker_id in self.workers}
+        for group, worker_id in workers.items():
+            for record in groups[group]:
+                if group[0] == "session":
+                    # The worker that holds it now is its owner from here on, as for a session it created.
+                    record = record.model_copy(update={"owner": routing[group]})
+                installs[worker_id].append(record.to_json_record())
         # Every worker installs, even with nothing to install, so each checks that it holds no live state.
         messages = {
-            worker_id: (
-                "install",
-                {
-                    "records": [
-                        record.to_json_record()
-                        for owner, placed in placement.items()
-                        if placed == worker_id
-                        for record in by_owner[owner]
-                    ],
-                    "aliases": aliases,
-                },
-            )
-            for worker_id in self.workers
+            worker_id: ("install", {"records": placed, "aliases": aliases, "placements": placements})
+            for worker_id, placed in installs.items()
         }
         await self.call_each(messages, timeout=None)
         self.aliases.update(aliases)
+        self.placements = placements
         self.restored = held
 
-    def _place(self, by_owner: dict[str, list[CheckpointRecord]]) -> dict[str, int]:
-        """Assign each pre-crash owner to the live worker with the fewest records, then owners, so far."""
-        if not by_owner:
+    def _place(self, groups: dict[tuple[str, str], list[CheckpointRecord]]) -> dict[tuple[str, str], int]:
+        """Assign each group to the live worker with the fewest records, then groups, so far."""
+        if not groups:
             return {}
         workers = sorted(
             worker_id for worker_id, worker in self.workers.items() if worker.registration.get("routing_id")
@@ -208,10 +230,10 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
             raise ControlError(f"restoring {self.kind} sessions requires workers that route sessions to their owner")
         load = {worker_id: [0, 0] for worker_id in workers}
         placement = {}
-        for owner in sorted(by_owner, key=lambda owner: (-len(by_owner[owner]), owner)):
+        for group in sorted(groups, key=lambda group: (-len(groups[group]), group)):
             worker_id = min(workers, key=lambda worker_id: (*load[worker_id], worker_id))
-            placement[owner] = worker_id
-            load[worker_id][0] += len(by_owner[owner])
+            placement[group] = worker_id
+            load[worker_id][0] += len(groups[group])
             load[worker_id][1] += 1
         return placement
 
@@ -221,13 +243,14 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
             **super().status_extra(),
             "restored_pending": sorted(self.restored),
             "session_aliases": len(self.aliases),
+            "session_placements": len(self.placements),
         }
 
 
 class ParticipantWorkerLink(WorkerLink):
     """One worker's participant, driven by the server's coordinator.
 
-    ``app`` is the worker's app, whose session router reads the alias table this link keeps current.
+    ``app`` is the worker's app, whose session router reads the tables this link keeps current.
     """
 
     def __init__(
@@ -270,6 +293,7 @@ class ParticipantWorkerLink(WorkerLink):
     def adopt(self, state: dict[str, Any]) -> None:
         self.restored_keys = set(state["restored_keys"])
         session_aliases(self.app).update(state["aliases"])
+        session_placements(self.app).update(state["placements"])
 
     async def close_local(self, request: CheckpointRequest) -> None:
         self._accepting = False
@@ -300,6 +324,10 @@ class ParticipantWorkerLink(WorkerLink):
             records = [self.participant.record_model.model_validate(record) for record in body["records"]]
             await self.participant.install(records)
             session_aliases(self.app).update(body["aliases"])
+            # Replaced, not merged: the table covers only the sessions this restore installed.
+            placements = session_placements(self.app)
+            placements.clear()
+            placements.update(body["placements"])
             return {}
         return await super().handle(kind, body)
 

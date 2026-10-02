@@ -41,6 +41,7 @@ from nemo_gym._checkpoint.control import (
 from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, RolloutIdRequiredError, StaleAttemptError
 from nemo_gym._checkpoint.steps import Boundary, EpisodeSteps, StepMode
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.server_utils import current_session_id
 
 
 BoundarySnapshot = Callable[[], dict[str, JsonValue]]
@@ -56,6 +57,8 @@ class AgentSessionRecord(CheckpointRecord):
     episode: Optional[JsonPayload] = None
     # With several workers, the worker ID in the session's cookie (see nemo_gym.session_routing).
     owner: Optional[str] = None
+    # The session ID in the session's cookie, which routes a restored session whose cookie names no worker.
+    session_id: Optional[str] = None
 
 
 class LegacyRun:
@@ -106,6 +109,7 @@ class _Session:
     key: str
     episode_id: EpisodeId
     owner: Optional[str] = None
+    session_id: Optional[str] = None
     state: Literal["idle", "running", "at_boundary"] = "idle"
     park_requested: bool = False
     boundary: Optional[BoundarySnapshot] = None
@@ -176,7 +180,9 @@ class AgentSessionParticipant(CheckpointParticipant):
             return
         if not self.accepting:
             raise AdmissionClosedError("agent admission is closed for a checkpoint")
-        self._sessions[session_key] = _Session(key=session_key, episode_id=episode_id, owner=self.owner)
+        self._sessions[session_key] = _Session(
+            key=session_key, episode_id=episode_id, owner=self.owner, session_id=current_session_id()
+        )
 
     def has_session(self, session_key: str) -> bool:
         return session_key in self._sessions
@@ -363,6 +369,7 @@ class AgentSessionParticipant(CheckpointParticipant):
                 # A restored legacy episode whose replacement /run has not started keeps its restored step.
                 episode=legacy.get(session.key, self._restored_episodes.get(session.key)),
                 owner=session.owner,
+                session_id=session.session_id,
             )
             for session, boundary in zip(sessions, boundaries)
         ]
@@ -392,6 +399,7 @@ class AgentSessionParticipant(CheckpointParticipant):
                 key=session.session_key,
                 episode_id=session.episode_id,
                 owner=record.owner,
+                session_id=record.session_id,
                 continuation=record.boundary,
                 restored_unused=True,
             )
