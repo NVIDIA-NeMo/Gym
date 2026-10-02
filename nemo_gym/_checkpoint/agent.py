@@ -300,8 +300,11 @@ class AgentSessionParticipant(CheckpointParticipant):
                 continue
             del self._sessions[session.key]
             session.resume.set()
-            if session.task is not None and session.task is not asyncio.current_task():
-                session.task.cancel()
+            task = session.task
+            if task is not None and task is not asyncio.current_task():
+                task.cancel()
+                # The activation has stopped calling the model and tools before the session is released.
+                await asyncio.wait([task])
             self._restored_episodes.pop(session.key, None)
             await self.legacy_episodes.retire(session.key)
             await self.hooks.retire_agent_session(session.key)
@@ -423,9 +426,11 @@ class RestartOnlyAgentParticipant(CheckpointParticipant):
         for key, tasks in list(self._tasks.items()):
             other = EpisodeId.from_capture_key(key)
             if other.rollout_id == episode_id.rollout_id and other.attempt <= episode_id.attempt:
-                for task in list(tasks):
-                    if task is not asyncio.current_task():
-                        task.cancel()
+                stopping = [task for task in list(tasks) if task is not asyncio.current_task()]
+                for task in stopping:
+                    task.cancel()
+                if stopping:
+                    await asyncio.wait(stopping)
 
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         return []
