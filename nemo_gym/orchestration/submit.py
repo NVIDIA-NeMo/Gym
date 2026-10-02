@@ -14,13 +14,15 @@
 # limitations under the License.
 
 from nemo_gym.decorators import experimental
-from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
+from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
+from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.jobs import SubmissionRecord
 
 
 _EXECUTORS = {
     SlurmComputeConfig: SlurmExecutor,
+    KubernetesComputeConfig: KubernetesExecutor,
 }
 
 
