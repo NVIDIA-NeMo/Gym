@@ -545,7 +545,7 @@ class DatasetConfig(BaseModel):
 
 class BenchmarkDatasetConfig(BaseModel):
     name: str
-    type: Literal["benchmark"]
+    type: Literal["benchmark", "example"]
     jsonl_fpath: Path
     prepare_script: Path
     prompt_config: Optional[Path] = None
