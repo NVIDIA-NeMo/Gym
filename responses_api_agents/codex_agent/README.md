@@ -5,11 +5,13 @@ Runs the OpenAI Codex CLI (`codex exec`) as a NeMo Gym agent server.
 ## Configure and run
 
 [configs/codex_agent.yaml](configs/codex_agent.yaml) is the default harness definition.
-The benchmark owns task data, preparation, tools, verification, and its sandbox. Codex borrows
-that sandbox and runs its CLI and shell/file tools inside it. The Environment Server binds
-these independent components and closes Codex before verification.
+The benchmark owns task data, preparation, verification, and task sandbox settings.
+The harness owns its runtime and model/tool loop. The Environment Server binds the two
+and closes the agent before verification. Codex borrows the task sandbox and runs its CLI
+and shell/file tools inside it.
 
-For SWE-bench Pro, save this composition as `run.yaml`:
+Run from the Gym repository root with Gym and the benchmark's preparation dependencies
+installed. For SWE-bench Pro, save this composition as `run.yaml`:
 
 ```yaml
 config_paths:
@@ -27,11 +29,10 @@ single_agent_turn_legacy:
       resources_tool_transports: []
 ```
 
-Supply the `policy_model` Gym Model Server, `policy_model_name`, and sandbox provider in
-`model-provider.yaml`. Keep model sampling and per-call output limits on the Model Server.
-The default agent definition has no benchmark or dataset selection. Prepared flat rows work
-through `single_agent_turn_legacy` with the standard session lifecycle; no additional task
-materialization script or harness/benchmark preset is needed.
+Supply the `policy_model` Gym Model Server, `policy_model_name`, and `sandbox` provider in
+`model-provider.yaml`. The agent's `model` defaults to `${policy_model_name}` and remains
+overridable. The sandbox must be able to reach the Model Server. Keep model sampling and
+per-call output limits on the Model Server.
 
 ```bash
 python benchmarks/swebench/pro/prepare.py
@@ -45,9 +46,26 @@ gym eval run --no-serve \
   -o rollouts.jsonl --limit 3 --concurrency 3
 ```
 
-The collector calls EnvironmentServer `/run`, which seeds Resources and Codex, invokes
-Codex `/v1/responses`, closes Codex, verifies, then closes Resources. It does not call
-Codex's compatibility `/run`. Other compatible benchmarks use the same agent definition.
+The collector calls Environment Server `/run`: seed Resources, seed the agent, call its
+rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
+flat rows use `single_agent_turn_legacy` with this native session lifecycle; no additional
+materialization script is needed. Collection does not call the agent's compatibility `/run`.
+Pass the same configuration to startup and `--no-serve` collection; collection does not
+inherit routing settings from the running servers.
+
+### Switch harness or benchmark
+
+To change a compatible harness, replace its config import, harness-specific settings,
+the Environment Server's `agent_server.name`, and the collection command's `--agent`.
+Keep benchmark data, preparation, and verifier settings unchanged. To change a compatible
+benchmark, replace its Resources config/reference and prepared input, keeping the harness
+definition unchanged. Check tool grants, task-image/runtime support, model API, and the
+benchmark's declared `allowed_agents` before running a new pairing.
+
+Use this explicit composition for now. `--agent` selects a configured agent; it does not
+install or rebind one. The existing `--agent-type` swap and automatic benchmark-data lookup
+still depend on legacy Agent-to-Resources bindings; they are not equivalent to this workflow.
+A new pairing does not need another combined preset.
 
 ## Runtime and model requirements
 
