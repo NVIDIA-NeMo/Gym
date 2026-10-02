@@ -10,6 +10,37 @@ Use this tutorial when you want to evaluate an assistant through realistic multi
 independent, single-turn prompts. NeMo UserSim creates synthetic users with varied backgrounds and goals, while
 NeMo Gym runs their conversations with your assistant at scale and records the results for evaluation.
 
+```mermaid
+sequenceDiagram
+    participant P as UserSim sampler
+    participant E as Gym Environment Server
+    participant U as User Agent<br/>user_model
+    participant A as Assistant Agent<br/>policy_model
+    participant S as support_model
+    participant R as Resources Server
+    participant C as Gym rollout collector
+
+    P->>E: Materialized persona, scenario, tools, and provenance
+    loop Multi-turn UserSim conversation
+        E->>U: Request next User message
+        U-->>E: Simulated User message
+        E->>A: Request Assistant response with available tools
+        A-->>E: Assistant message or function calls
+        Note over E: UserSim owns conversation state<br/>and executes accepted tool calls
+        E->>S: Optional judge, summary, or tool-result request
+        S-->>E: Structured support response
+    end
+    E->>R: Completed native UserSim result
+    R->>S: Evaluate quality and run the probe scorer
+    S-->>R: Scores and explanations
+    R-->>E: Verification and Assistant reward
+    E-->>C: Conversation, tool activity, invocations, and score
+```
+
+The Environment Server drives UserSim's native conversation loop. The User and Assistant Agents supply the
+two participant messages, the support model handles structured internal calls, and the Resources Server
+verifies the completed episode before Gym saves it.
+
 By the end of this tutorial, you will:
 
 1. Materialize canonical UserSim episode inputs.
