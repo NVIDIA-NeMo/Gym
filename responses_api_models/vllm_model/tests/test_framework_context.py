@@ -315,6 +315,30 @@ def test_tool_arguments_beyond_the_64_bit_range_still_admit(monkeypatch, tmp_pat
     assert len(manifest.records) == 2 and not manifest.failures and not manifest.pending_call_ids
 
 
+def test_an_unexplained_history_rewrite_roots_a_new_segment(monkeypatch, tmp_path):
+    """A request whose items extend a stored prefix with something other than
+    user/tool observations (a harness compaction that keeps the leading
+    context, or an echo shape no candidate explains) still admits as a
+    candidate proposing the latest record; the worker decides it cannot
+    splice and roots a new segment, and the ledger ends clean with a
+    parentless second record instead of a failed call."""
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    first = assert_clean(harness.post("attempt", HISTORY))
+    rewritten = HISTORY + [
+        {"role": "assistant", "content": "summary of earlier work (compacted)"},
+        {"role": "user", "content": "continue from the summary"},
+    ]
+    assert first["output"]
+    assert_clean(harness.post("attempt", rewritten))
+    manifest = harness.manifest("attempt")
+    assert len(manifest.records) == 2 and not manifest.failures and not manifest.pending_call_ids
+    # The gateway proposed its latest record; rooting is the worker's decision.
+    assert harness.worker_calls[1][0].mode == "candidate"
+    assert harness.worker_calls[1][0].parent_call_id == manifest.records[0].model_call_id
+    # The rewrite rooted a new segment instead of chaining onto the first call.
+    assert manifest.records[1].parent_call_id is None
+
+
 @pytest.mark.parametrize("stream", [False, True])
 def test_an_engine_refusal_resolves_the_intent_as_a_failure(monkeypatch, tmp_path, stream):
     """A request the engine refuses (a context-window overflow) must leave a FAILURE
