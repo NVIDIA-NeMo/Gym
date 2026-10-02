@@ -218,3 +218,11 @@ This path is eval-only. Working inference does not establish training token-ID/l
 A tool-and-verifier smoke is required for the actual image/model configuration before review;
 unit tests alone do not establish runtime compatibility or benchmark accuracy. Process/memory/setup
 and close-latency overhead have not been benchmarked at scale.
+
+Without `sandbox_access`, configure `sandbox_provider` and `sandbox_config`
+(`SandboxSpec` fields such as `image`, `workdir`, and `ttl_s`) on the agent.
+It creates a sandbox, runs there, and destroys it on close; the default workdir is
+`/app`. A supplied access always wins, including its workdir; connection failure
+never triggers a replacement or host execution. With neither access nor a usable
+provider, setup fails. Verifiers that inspect task files must keep using a
+Resources-owned sandbox, since agent-owned sandboxes are gone before verification.

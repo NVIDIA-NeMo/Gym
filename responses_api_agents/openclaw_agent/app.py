@@ -64,7 +64,7 @@ from nemo_gym.rollout_observability import (
     AgentObservationBundle,
     ObservationGap,
 )
-from nemo_gym.sandbox import AsyncSandbox, create_provider
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
@@ -410,6 +410,8 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     max_output_tokens: Optional[int] = None
     # required: every config must pin an explicit version so runs are reproducible and cannot silently drift
     openclaw_version: str
+    sandbox_provider: str | None = None
+    sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
@@ -449,10 +451,20 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenClawSandboxSession:
-        """Install a pinned runtime in the Resources-owned sandbox using the shared session lifecycle."""
-        if body.sandbox_access is None or not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
-            raise HTTPException(422, "Native OpenClaw requires direct, Resources-owned SandboxAccess")
-        if not body.sandbox_access.workdir.startswith("/") or body.sandbox_access.workdir in ("/", "/tmp"):
+        """Install a pinned runtime in the borrowed or agent-owned session sandbox."""
+        owns_sandbox = body.sandbox_access is None
+        if owns_sandbox:
+            if not self.config.sandbox_provider:
+                raise HTTPException(422, "OpenClaw requires sandbox_access or a configured sandbox_provider")
+            spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config})
+            workdir = spec.workdir
+            provider_ref = self.config.sandbox_provider
+        else:
+            if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
+                raise HTTPException(422, "OpenClaw requires direct SandboxAccess")
+            workdir = body.sandbox_access.workdir
+            provider_ref = body.sandbox_access.connection.provider_config_ref
+        if not isinstance(workdir, str) or not workdir.startswith("/") or workdir in ("/", "/tmp"):
             raise HTTPException(422, "OpenClaw workdir must be absolute and separate from /tmp runtime storage")
         if any(access.required for access in self.effective_tool_accesses(body)):
             raise HTTPException(422, "Native OpenClaw supports its own sandbox tools, not required HTTP/MCP tools")
@@ -471,24 +483,34 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         if self.config.command != "openclaw" or self.config.extra_args or self.config.env:
             raise HTTPException(422, "Native OpenClaw does not support command, extra_args, or env overrides")
 
-        connection = body.sandbox_access.connection
-        provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
-        try:
-            sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
-        except BaseException:
-            await provider.aclose()
-            raise
+        provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
+        if owns_sandbox:
+            sandbox = AsyncSandbox(provider)
+        else:
+            try:
+                sandbox = await AsyncSandbox.connect(body.sandbox_access.connection.descriptor, provider=provider)
+            except BaseException:
+                await provider.aclose()
+                raise
         directory = f"/tmp/nemo-gym-openclaw-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-openclaw-node-22.19.0-{self.config.openclaw_version}"
-        state = OpenClawSandboxSession(body, sandbox, directory, runtime)
+        state = OpenClawSandboxSession(body, sandbox, directory, runtime, workdir=workdir, owns_sandbox=owns_sandbox)
         prepared_directory = False
         try:
+            if owns_sandbox:
+                await sandbox.start(spec)
+                # Providers need not create SandboxSpec.workdir. Never prepare a borrowed task here.
+                workspace = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
+                if workspace.return_code != 0 or workspace.error_type:
+                    raise RuntimeError(
+                        f"Cannot create OpenClaw sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
+                    )
             check_paths = shlex.join(
                 [
                     "python3",
                     "-c",
                     _SANDBOX_PATH_CHECK,
-                    body.sandbox_access.workdir,
+                    workdir,
                     "/tmp/nemo-gym-openclaw-sessions",
                     runtime,
                 ]
@@ -509,7 +531,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             installed = await sandbox.exec(
                 f"bash {shlex.quote(directory + '/' + installer)} {shlex.quote(runtime)} "
                 f"{shlex.quote(self.config.openclaw_version)}",
-                cwd=body.sandbox_access.workdir,
+                cwd=workdir,
                 timeout_s=self.config.sandbox_install_timeout_seconds,
             )
             if installed.return_code != 0 or getattr(installed, "error_type", None):
@@ -521,7 +543,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
         except BaseException as error:
             try:
-                if prepared_directory:
+                if prepared_directory or owns_sandbox:
                     await state.close(self.config.session_close_timeout_seconds)
                 else:
                     # The path check may have rejected overlap with task-owned storage.
@@ -629,7 +651,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             {
                 "agents": {
                     "defaults": {
-                        "workspace": state.request.sandbox_access.workdir,
+                        "workspace": state.workdir,
                         "skipBootstrap": True,
                         "skills": [],
                         "model": {"primary": self._effective_model()},
@@ -668,7 +690,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             "directory": state.directory,
             "command": command,
             "prompt": f"{system}\n\n{prompt}" if system else prompt,
-            "cwd": state.request.sandbox_access.workdir,
+            "cwd": state.workdir,
             "env": {
                 "HOME": f"{state.directory}/home",
                 "XDG_CACHE_HOME": f"{state.directory}/home/.cache",

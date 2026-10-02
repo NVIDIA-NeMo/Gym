@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""OpenClaw-specific borrowed-sandbox execution; Resources retains sandbox ownership."""
+"""OpenClaw execution in borrowed or agent-owned sandboxes."""
 
 import asyncio
 import json
@@ -53,6 +53,9 @@ class OpenClawSandboxSession(AgentSessionState):
     sandbox: AsyncSandbox
     directory: str
     runtime: str
+    workdir: str = field(kw_only=True)
+    owns_sandbox: bool = field(default=False, kw_only=True)
+    sandbox_stopped: bool = False
     task: asyncio.Task[NeMoGymResponse] | None = None
     exec_task: asyncio.Task[SandboxExecResult] | None = None
     result: OpenClawSandboxResult | None = None
@@ -79,7 +82,11 @@ class OpenClawSandboxSession(AgentSessionState):
 
     async def stop_runner(self, timeout: float) -> None:
         """Fence delayed launches and require a receipt before allowing verification."""
-        if not self.launch_started or (self.result is not None and self.result.cleanup_confirmed):
+        if (
+            self.sandbox_stopped
+            or not self.launch_started
+            or (self.result is not None and self.result.cleanup_confirmed)
+        ):
             return
         receipt_path = f"{self.directory}/result.json"
         try:
@@ -113,7 +120,7 @@ class OpenClawSandboxSession(AgentSessionState):
                 f"for _ in $(seq 1 {max(1, int(timeout))}); do "
                 f"[ -f {quote(receipt_path)} ] && exit 0; sleep 1; done; exit 1"
             )
-            await self.sandbox.exec(script, cwd=self.request.sandbox_access.workdir, timeout_s=timeout + 5)
+            await self.sandbox.exec(script, cwd=self.workdir, timeout_s=timeout + 5)
             try:
                 result = OpenClawSandboxResult.model_validate_json(await self.read_text("result.json"))
             except Exception as error:
@@ -124,14 +131,21 @@ class OpenClawSandboxSession(AgentSessionState):
         self.result = result
 
     async def close(self, timeout: float) -> None:
-        """Stop only OpenClaw-owned work and detach; never call sandbox.stop()."""
+        """Stop owned sandboxes; only stop harness work and disconnect borrowed ones."""
         async with self.close_lock:
             if self.closed:
                 return
             self.closing = True
             # Cancelling provider exec can kill the supervisor. Obtain its
             # descendant-cleanup receipt before cancelling the response task.
-            await self.stop_runner(timeout)
+            if self.owns_sandbox:
+                # The provider is the cleanup authority for an agent-owned sandbox.
+                # Keep the handle retryable if stop fails or times out.
+                if not self.sandbox_stopped:
+                    await asyncio.wait_for(self.sandbox.stop(), timeout=timeout)
+                    self.sandbox_stopped = True
+            else:
+                await self.stop_runner(timeout)
             if self.task is not None:
                 if not self.task.done() and not self.task.cancelling():
                     self.task.cancel()
@@ -157,6 +171,9 @@ class OpenClawSandboxSession(AgentSessionState):
                     if not self.exec_task.done():
                         raise
                     # Transport failure is not cleanup failure once the receipt is confirmed.
+            if self.owns_sandbox:
+                self.closed = True
+                return
             retired = f"{self.directory}.closed"
             result = await self.sandbox.exec(
                 f"if [ -d {quote(self.directory)} ]; then "
@@ -181,9 +198,7 @@ class OpenClawSandboxSession(AgentSessionState):
             # The runner enforces its own deadline and reaps descendants.
             # Leave extra time for cleanup and transport before provider timeout.
             self.exec_task = asyncio.create_task(
-                self.sandbox.exec(
-                    command, cwd=self.request.sandbox_access.workdir, timeout_s=timeout + close_timeout * 3 + 30
-                )
+                self.sandbox.exec(command, cwd=self.workdir, timeout_s=timeout + close_timeout * 3 + 30)
             )
             # HTTP cancellation must not propagate into provider exec before
             # the supervisor has stopped and reaped the harness descendants.
