@@ -6,8 +6,18 @@
 import re
 from typing import Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 from typing_extensions import Self
+
+from nemo_gym.failure_kinds import FailureStage, validate_failure_kind
 
 
 class EpisodeId(BaseModel):
@@ -45,12 +55,35 @@ class TaskId(BaseModel):
 
 
 class EpisodeFailure(BaseModel):
-    """Describe a handled episode failure."""
+    """Describe a failure using the same fields on the wire and in saved records.
+
+    The explanation is ``failure_reason``. Kind and stage are optional. The kind
+    identifies what happened; it does not determine terminality. A collector
+    observing a lost reply may not know the episode's stage.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    message: str = Field(max_length=2000)
+    failure_reason: str = Field(max_length=2000)
     terminal: bool = Field(description="Whether rollout collection must not attempt this episode again.")
+    failure_kind: str | None = None
+    stage: FailureStage | None = None
+
+    @field_validator("failure_kind")
+    @classmethod
+    def _validate_failure_kind(cls, value: str | None) -> str | None:
+        return validate_failure_kind(value)
+
+    # A return annotation would replace the public JSON Schema with that type.
+    @model_serializer(mode="wrap")
+    def _serialize_failure(self, handler: SerializerFunctionWrapHandler):
+        # Omit metadata when the producer cannot classify the failure.
+        # Protocol subclasses still serialize their own diagnostic fields.
+        result = handler(self)
+        for key in ("failure_kind", "stage"):
+            if result.get(key) is None:
+                result.pop(key, None)
+        return result
 
 
 TaskInputT = TypeVar("TaskInputT", bound=BaseModel)
