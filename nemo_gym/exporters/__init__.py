@@ -69,7 +69,7 @@ def setup_exporters(global_config_dict: DictConfig) -> list[BaseExporter]:
             exporter = _load_exporter_class(class_path)(global_config_dict)
             exporter.setup()
         except ImportError as e:
-            logger.warning(
+            logger.error(
                 f"Exporter {name} is configured but its SDK is not installed; continuing without it. "
                 f"Install with: pip install nemo-gym[{extra}] ({e})"
             )
