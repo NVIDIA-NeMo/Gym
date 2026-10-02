@@ -71,6 +71,11 @@ remain in `verifier_data`. Failures attributed outside the Assistant policy,
 including evaluator or scorer execution errors, are masked. Completed
 Assistant-policy failures remain unmasked.
 
+The Environment copies `reward`, `mask_sample`, `failure_kind`,
+`failure_reason`, and `reward_components` from the verifier response onto the
+top level of the persisted rollout for Gym aggregation. The nested
+`verification` object retains the full UserSim-specific evidence.
+
 ## Run
 
 Configure independent `user_model_*`, `policy_*`, and `support_model_*`

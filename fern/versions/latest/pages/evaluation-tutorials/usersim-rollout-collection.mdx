@@ -334,8 +334,9 @@ jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
        rollout_id: "\($task):\($repeat)",
        conversation_status: .usersim_result.conversation_status,
        scenario_completed: .verification.scenario_completed,
-       reward: .verification.reward,
-       mask_sample: .verification.mask_sample,
+       reward,
+       mask_sample,
+       reward_components,
        quality_scores: .verification.verifier_data.normalized_axis_scores,
        task_check: {
          name: .verification.verifier_data.native_scorer_name,
@@ -343,8 +344,8 @@ jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
        },
        judge_axes: .verification.verifier_data.assistant_eval.axes,
        grading_failure: {
-         kind: .verification.failure_kind,
-         reason: .verification.failure_reason
+         kind: .failure_kind,
+         reason: .failure_reason
        }
      }' \
   results/usersim/rollouts.jsonl
@@ -354,6 +355,9 @@ Interpret that view as follows:
 
 - `verify()` does not emit a separate `evaluated_role` field. The integration's verification contract targets
   Assistant participant behavior, and the persisted evidence is named `assistant_eval`.
+- The Environment projects `reward`, `mask_sample`, `failure_kind`, `failure_reason`, and `reward_components`
+  from the Resources verifier onto the rollout's top level. This is the standard Gym scoring contract used by
+  aggregation. The nested `verification` object retains the full UserSim-specific evidence.
 - `conversation_status: true` means UserSim finished the conversation; `scenario_completed: true` additionally
   means both participants completed and any probe-specific scorer passed.
 - `mask_sample: false` means the reward is eligible for aggregation. A masked row is retained for diagnosis
@@ -376,10 +380,10 @@ Do not treat every missing reward as poor Assistant behavior:
   `_ng_failure_class`, `_ng_failure_stage`, and `_ng_failure_message` fields identify failures before a
   completed rollout could be stored.
 - **UserSim simulation failure:** inspect `usersim_result.simulation_outcome`. Verification copies its failure
-  category and detail to `verification.failure_kind` and `verification.failure_reason`.
-- **Grading failure:** `verification.failure_kind` is `probe_scorer_error` or
-  `trajectory_evaluator_error`; details remain in `failure_reason`, `verifier_data.native_scores`, or
-  `verifier_data.assistant_eval.error`.
+  category and detail to the top-level `failure_kind` and `failure_reason`.
+- **Grading failure:** top-level `failure_kind` is `probe_scorer_error` or `trajectory_evaluator_error`;
+  details remain in `failure_reason`, `verification.verifier_data.native_scores`, or
+  `verification.verifier_data.assistant_eval.error`.
 
 ```bash
 jq '{
@@ -394,10 +398,9 @@ The key saved fields are:
 
 - `usersim_result.conversation_messages`: ordered User, Assistant, tool-call, and tool-result messages.
 - `usersim_result.conversation_status`: whether UserSim completed the conversation.
-- `verification.reward`: final Assistant reward for the conversation.
-- `verification.mask_sample`: whether to exclude the conversation from reward aggregation.
+- `reward`, `mask_sample`, and `reward_components`: Gym's top-level scoring contract.
 - `verification.verifier_data.assistant_eval`: quality ratings and judge explanations.
-- `verification.failure_kind` and `verification.failure_reason`: simulation or grading failure details.
+- `failure_kind` and `failure_reason`: top-level simulation or grading failure details.
 - `_ng_failure_*` in the failures sidecar: collection and Environment failure details.
 
 The ordered invocation ledger is the Environment Server's trajectory contract:
@@ -433,9 +436,10 @@ jq '.ng_model_call_capture, .ng_trajectory' results/usersim/rollouts.jsonl
 
 Use these layers for different questions:
 
-- `result.usersim_result`: UserSim's native conversation and outcome.
-- `result.verification`: assistant-quality reward, normalized axes, and native scorer evidence.
-- `result.invocations`: ordered, role-attributed Environment activations.
+- `reward`, `mask_sample`, and `reward_components`: Gym's standard scoring and aggregation fields.
+- `usersim_result`: UserSim's native conversation and outcome.
+- `verification`: normalized axes, judge explanations, and native scorer evidence.
+- `invocations`: ordered, role-attributed Environment activations.
 - `ng_model_call_capture`: underlying model calls, token usage, latency, and tool-call evidence.
 - `ng_trajectory`: normalized Gym observability when the participating Agent provides it.
 
