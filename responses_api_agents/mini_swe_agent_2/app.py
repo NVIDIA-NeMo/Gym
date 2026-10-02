@@ -659,6 +659,7 @@ def run_mini_swe_with_sandbox(**params: Any) -> Any:
 
 
 class MiniSWEAgent(SimpleResponsesAPIAgent):
+    ray_enabled = True
     config: MiniSWEAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)

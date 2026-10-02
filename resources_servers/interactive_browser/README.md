@@ -91,12 +91,20 @@ that never solves the task.
 
 ## Session lifetime
 
-A browser is released when the rollout is scored (`verify`) or when the same
-`session_id` is re-seeded. There is no independent episode TTL and no
-client-side cap on concurrent sessions, so:
+A browser is released when the rollout is scored (`verify`), when the same
+`session_id` is re-seeded, or when an Environment Server closes the session
+through `/close_session`. An Environment Server assigns the session id and
+registers that close before it seeds, so an episode that ends before `verify`
+still gets its browser released, and a seed that arrives after its close opens
+nothing (`tests/test_resources_sessions.py`). The server keeps browsers in
+process, so it requires `num_workers: 1`.
 
-- a rollout abandoned without either (trainer crash, client disconnect) leaves
-  its browser open until the process exits (local) or the provider reclaims it;
+There is no independent episode TTL and no client-side cap on concurrent
+sessions, so:
+
+- a rollout run through an Agent's `/run` and abandoned without `verify` or a
+  re-seed (trainer crash, client disconnect) leaves its browser open until the
+  process exits (local) or the provider reclaims it;
 - with a metered provider, size the account quota **above** the rollout
   concurrency, with headroom for sessions still being torn down.
 

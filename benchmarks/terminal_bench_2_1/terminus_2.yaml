@@ -19,3 +19,11 @@ terminal_bench_2_1_terminus_2_sandboxed_agent:
           jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
           prepare_script: benchmarks/terminal_bench_2_1/prepare.py
           num_repeats: 8
+
+terminal_bench_2_1_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: terminal_bench_2_1_terminus_2_sandboxed_agent

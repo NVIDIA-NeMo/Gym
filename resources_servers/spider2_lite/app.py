@@ -113,6 +113,7 @@ class Spider2LiteVerifyResponse(BaseVerifyResponse):
 
 
 class Spider2LiteResourcesServer(SimpleResourcesServer):
+    ray_enabled = True
     config: Spider2LiteResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:
