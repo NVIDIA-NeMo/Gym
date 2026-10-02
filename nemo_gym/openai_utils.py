@@ -1260,6 +1260,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
 
+    max_rate_limit_attempts: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Attempt limit for rate-limit statuses on non-internal clients; None uses max_http_attempts.",
+    )
+
     default_headers: Dict[str, str] = Field(
         default_factory=dict,
         description="Extra headers to include in every request.",
@@ -1281,18 +1287,22 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
         max_num_tries = self.max_http_attempts
         tries = 0
-        while tries < max_num_tries:
+        while True:
             tries += 1
             response = await request(**request_kwargs)
 
             if response.status in RETRY_ERROR_CODES:
+                is_rate_limit = response.status in RATE_LIMIT_ERROR_CODES
                 # Internal NeMo Gym servers extend max tries for retryable errors.
-                if response.status in RATE_LIMIT_ERROR_CODES and self.internal:
+                if is_rate_limit and self.internal:
                     max_num_tries += 1
+                attempt_limit = max_num_tries
+                if is_rate_limit and not self.internal and self.max_rate_limit_attempts is not None:
+                    attempt_limit = self.max_rate_limit_attempts
 
                 # Preserve the final error body for raise_for_status and avoid sleeping
                 # after the last attempt. Reading intermediate bodies releases sockets.
-                if tries >= max_num_tries:
+                if tries >= attempt_limit:
                     break
                 content_bytes = await response.content.read()
                 content = content_bytes.decode(errors="replace")
@@ -1306,7 +1316,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
                 kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error"
                 print(
-                    f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
+                    f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={attempt_limit} error_msg={content[:200]}]",
                     flush=True,
                 )
                 await sleep(0.5)

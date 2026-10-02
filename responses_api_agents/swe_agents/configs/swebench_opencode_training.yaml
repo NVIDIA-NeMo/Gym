@@ -22,6 +22,9 @@ swe_agents_train:
       swebench_tests_timeout: 900
       apptainer_memory_limit_mb: 65536
       command_exec_timeout: 300
+      # Node-local NVMe per-job scratch for all rollout artifacts (legacy 729e768a);
+      # the launcher creates the parent on every node.
+      runtime_scratch_dir: /raid/scratch/temp_swe_${oc.env:NRL_SLURM_JOB_ID}
 
       dataset_path: ???
 

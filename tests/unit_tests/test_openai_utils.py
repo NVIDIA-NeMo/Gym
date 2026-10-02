@@ -210,6 +210,52 @@ class TestOpenAIUtils:
         assert sleep.await_args_list == [call(0.5)] * (attempts - 1)
 
 
+    @pytest.mark.parametrize("status", [429, 502, 503, 504, 520])
+    async def test_rate_limit_attempts_extend_only_overload_statuses(self, monkeypatch, status):
+        overloaded = SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=b"busy")))
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[overloaded] * 7 + [success])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", max_rate_limit_attempts=10)
+
+        assert await client._request_with_retry() is success
+        assert request.await_count == 8
+        assert sleep.await_args_list == [call(0.5)] * 7
+
+    async def test_rate_limit_attempt_limit_is_terminal(self, monkeypatch):
+        replies = [
+            SimpleNamespace(status=503, content=SimpleNamespace(read=AsyncMock(return_value=b"busy"))) for _ in range(5)
+        ]
+        request = AsyncMock(side_effect=replies)
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", AsyncMock(side_effect=RuntimeError("busy")))
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", max_rate_limit_attempts=5)
+
+        with pytest.raises(RuntimeError, match="busy"):
+            await client._request_with_retry()
+        assert request.await_count == 5
+
+    @pytest.mark.parametrize("status", [404, 408, 500])
+    async def test_rate_limit_attempts_do_not_extend_other_retryable_statuses(self, monkeypatch, status):
+        failure = SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=b"err")))
+        request = AsyncMock(side_effect=[failure] * MAX_NUM_TRIES + [SimpleNamespace(status=200)])
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", AsyncMock(side_effect=RuntimeError))
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", max_rate_limit_attempts=1000)
+
+        with pytest.raises(RuntimeError):
+            await client._request_with_retry()
+        assert request.await_count == MAX_NUM_TRIES
+
+    def test_invalid_rate_limit_attempts_rejected(self):
+        with pytest.raises(ValidationError):
+            NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", max_rate_limit_attempts=0)
+
+
 class TestNeMoGymResponseCreateParamsNonStreaming:
     def test_seed_rejected_at_top_level(self) -> None:
         """seed is not part of the OpenAI Responses schema; it must be passed via metadata.extra_body."""

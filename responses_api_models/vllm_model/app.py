@@ -49,7 +49,7 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.server_utils import MAX_NUM_TRIES, SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
     current_capture_context,
 )
@@ -227,6 +227,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Connection-error retry bound applied to clients when endpoint_file is set.
     endpoint_connection_retries: Optional[int] = 8
 
+    # Attempts per request for retryable HTTP statuses (404, 408, 429, 500, 502, 503, 504, 520).
+    max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
+    # Separate attempt limit for rate-limit/overload statuses (429, 502, 503, 504, 520); None uses
+    # max_http_attempts. Older NeMo Gym retried these without limit; a large value waits out
+    # transient vLLM overload (0.5 s between attempts) instead of failing the rollout.
+    max_rate_limit_attempts: Optional[int] = Field(default=None, ge=1)
+
     # How often endpoint_file may be stat'd; otherwise the `os.stat` results is cached and reused.
     endpoint_check_interval_s: float = 10.0
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
@@ -335,6 +342,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 max_connection_retries=(
                     self.config.endpoint_connection_retries if self.config.endpoint_file else None
                 ),
+                max_http_attempts=self.config.max_http_attempts,
+                max_rate_limit_attempts=self.config.max_rate_limit_attempts,
             )
             for base_url in self.config.base_url
         ]
@@ -1583,6 +1592,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 api_key=self.config.api_key,
                 default_headers=self.config.default_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
+                max_http_attempts=self.config.max_http_attempts,
+                max_rate_limit_attempts=self.config.max_rate_limit_attempts,
             )
         ]
         # Every session re-resolves onto the new host.

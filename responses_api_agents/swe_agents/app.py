@@ -25,6 +25,7 @@ import shlex
 import shutil
 import signal
 import sys
+import tempfile
 import time
 import uuid
 from asyncio import Semaphore
@@ -46,7 +47,7 @@ from openai.types.responses.function_tool import FunctionTool
 from pydantic import BaseModel, ConfigDict, Field
 from pydot import graph_from_dot_file
 
-from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -59,7 +60,6 @@ from nemo_gym.base_responses_api_agent import (
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import (
     CACHE_DIR_KEY_NAME,
-    RESULTS_DIR_KEY_NAME,
     OmegaConf,
     get_global_config_dict,
     maybe_get_global_config_dict,
@@ -245,6 +245,32 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     openhands_should_log: bool = False
     debug: bool = False
 
+    runtime_scratch_dir: Path = Field(
+        default=Path("/tmp"),
+        description=(
+            "Node-local parent directory for ephemeral per-rollout artifacts. "
+            "The Ray worker creates a unique temporary directory here and removes it after "
+            "the response has been materialized. This path must exist on every Ray worker node."
+        ),
+    )
+
+    opencode_prompt_variant: Literal["legacy", "upstream"] = Field(
+        default="legacy",
+        description=(
+            "Opencode harness user prompt: 'legacy' = prompts/opencode_harness/user_prompt_legacy.txt, "
+            "'upstream' = prompts/opencode_harness/user_prompt.txt (adds 'Important rules to follow'). "
+            "Also applied to agent_prompt_overrides entries that point at the in-tree user_prompt.txt."
+        ),
+    )
+
+    mask_unresolved_agent_errors: bool = Field(
+        default=False,
+        description=(
+            "For max_iteration / context_window rollouts: False (legacy) masks only RESOLVED ones; "
+            "True (upstream) masks all of them. Timeouts and OOM kills are masked either way."
+        ),
+    )
+
     opencode_subagents_enabled: bool = Field(
         default=False,
         description=(
@@ -353,6 +379,7 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     problem_info: Dict[str, Any]
     body: NeMoGymResponseCreateParamsNonStreaming
     persistent_dir: Path
+    harness_runtime_dir: Path
     ray_queue_timestamp: float
     inference_params: Dict[str, Any]
     agent_run_id: str
@@ -656,11 +683,17 @@ SWEBENCH_COMMIT={swebench_commit} \\
             return setup_dir
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
+        eval_work_dir = self.config.base_mounted_dir / "harness_runtime" / "eval_harness" / "swebench"
         swebench_cmd = (
             f'date +"%s.%N" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && '
             f"{self._get_command_sleep_until_predictions_file()} && "
-            # Use pre-built SWE-bench
-            "cd /swebench_setup/SWE-bench && "
+            # Run from rollout-local scratch. The fork writes both
+            # logs/run_evaluation and its top-level aggregate report relative
+            # to CWD, so running from the shared checkout would still create a
+            # small Lustre file even if only the log directory were overmounted.
+            f"mkdir -p {eval_work_dir} && cd {eval_work_dir} && "
+            'export PYTHONPATH="/swebench_setup/SWE-bench:${PYTHONPATH:-}" && '
+            "export PYTHONDONTWRITEBYTECODE=1 && "
             # Set UV environment variables to use the mounted portable directories
             f'export UV_INSTALL_DIR="{self.config.swebench_setup_dir}/uv" && '
             f'export UV_PYTHON_INSTALL_DIR="{self.config.swebench_setup_dir}/python" && '
@@ -726,11 +759,14 @@ SWEBENCH_COMMIT={swebench_commit} \\
             return setup_dir
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
+        eval_work_dir = self.config.base_mounted_dir / "harness_runtime" / "eval_harness" / "swebench_multilingual"
         swebench_cmd = (
             f'date +"%s.%N" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && '
             f"{self._get_command_sleep_until_predictions_file()} && "
-            # Use pre-built SWE-bench
-            "cd /swebench_multilingual_setup/SWE-bench_Multilingual && "
+            # Keep all CWD-relative log and aggregate-report writes local.
+            f"mkdir -p {eval_work_dir} && cd {eval_work_dir} && "
+            'export PYTHONPATH="/swebench_multilingual_setup/SWE-bench_Multilingual:${PYTHONPATH:-}" && '
+            "export PYTHONDONTWRITEBYTECODE=1 && "
             # Set UV environment variables to use the mounted portable directories
             f'export UV_INSTALL_DIR="{self.config.swebench_multilingual_setup_dir}/uv" && '
             f'export UV_PYTHON_INSTALL_DIR="{self.config.swebench_multilingual_setup_dir}/python" && '
@@ -804,18 +840,21 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
             return setup_dir
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
+        eval_work_dir = self.config.base_mounted_dir / "harness_runtime" / "eval_harness" / "r2e_gym"
         r2e_gym_cmd = (
             f'date +"%s.%N" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath} && '
             f"{self._get_command_sleep_until_predictions_file()} && "
-            # Use mounted directory path for cd
-            "cd /r2egym_setup/R2E-Gym && "
+            f"mkdir -p {eval_work_dir} && cd {eval_work_dir} && "
+            'export PYTHONPATH="/r2egym_setup/R2E-Gym/src:${PYTHONPATH:-}" && '
+            "export PYTHONDONTWRITEBYTECODE=1 && "
             # Set UV environment variables to use the mounted portable directories
             f'export UV_INSTALL_DIR="{self.config.r2e_gym_setup_dir}/uv" && '
             f'export UV_PYTHON_INSTALL_DIR="{self.config.r2e_gym_setup_dir}/python" && '
             f'export PATH="{self.config.r2e_gym_setup_dir}/uv/bin:$PATH" && '
             # Run with clean environment to avoid venv contamination
             # Use the pre-built venv directly with its absolute path
-            f"env -u VIRTUAL_ENV {self.config.r2e_gym_setup_dir}/R2E-Gym/venv/bin/python src/r2egym/agenthub/run/run_local_evaluation.py "
+            f"env -u VIRTUAL_ENV {self.config.r2e_gym_setup_dir}/R2E-Gym/venv/bin/python "
+            "/r2egym_setup/R2E-Gym/src/r2egym/agenthub/run/run_local_evaluation.py "
             f"    --predictions_path {self.config.output_for_eval_mounted_path} "
             f"    --instance_id {self.config.instance_id} "
             f"    --timeout {self.config.swebench_tests_timeout} "
@@ -999,12 +1038,15 @@ def _load_rebench_log_parsers(rebench_repo_dir: Path):
         if p not in sys.path:
             sys.path.insert(0, p)
             added.append(p)
+    previous_dont_write_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
     try:
         spec = importlib.util.spec_from_file_location("_rebench_log_parsers", str(lp_path))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         return mod
     finally:
+        sys.dont_write_bytecode = previous_dont_write_bytecode
         for p in added:
             try:
                 sys.path.remove(p)
@@ -2143,7 +2185,7 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         )
 
         search_path = os.path.join(
-            self.config.openhands_setup_dir / "OpenHands" / eval_dir_in_openhands,
+            self.config.harness_runtime_dir / eval_dir_in_openhands,
             "**",
             "output.jsonl",
         )
@@ -2247,17 +2289,41 @@ def _redact_instance_dict_for_agent(instance_dict: Dict[str, Any]) -> Dict[str, 
     return {k: v for k, v in instance_dict.items() if k in AGENT_VISIBLE_INSTANCE_FIELDS}
 
 
-_DEFAULT_OPENCODE_USER_PROMPT_TEMPLATE = (
-    Path(__file__).parent / "prompts" / "opencode_harness" / "user_prompt.txt"
-).read_text()
+# Both opencode user-prompt texts stay in-tree; `opencode_prompt_variant` selects one.
+# "upstream" (user_prompt.txt) appends the "Important rules to follow" block from upstream
+# f9b098e5; "legacy" (user_prompt_legacy.txt) is the byte-exact pre-f9b098e5 text.
+_OPENCODE_HARNESS_PROMPTS_DIR = Path(__file__).parent / "prompts" / "opencode_harness"
+_OPENCODE_USER_PROMPT_PATHS: Dict[str, Path] = {
+    "legacy": _OPENCODE_HARNESS_PROMPTS_DIR / "user_prompt_legacy.txt",
+    "upstream": _OPENCODE_HARNESS_PROMPTS_DIR / "user_prompt.txt",
+}
+_OPENCODE_USER_PROMPT_TEMPLATES: Dict[str, str] = {
+    variant: path.read_text() for variant, path in _OPENCODE_USER_PROMPT_PATHS.items()
+}
+_DEFAULT_OPENCODE_PROMPT_VARIANT = "legacy"
+
+
+def _apply_opencode_prompt_variant(template_path: Optional[str], variant: str) -> Optional[str]:
+    """Map the canonical in-tree opencode user prompt to the selected variant's file.
+
+    Training configs reference ``prompts/opencode_harness/user_prompt.txt`` explicitly through
+    ``agent_prompt_overrides``; that path names "the built-in default prompt", so it follows
+    ``opencode_prompt_variant``. Any other override file is returned unchanged.
+    """
+    if template_path and Path(template_path).resolve() == _OPENCODE_USER_PROMPT_PATHS["upstream"].resolve():
+        return str(_OPENCODE_USER_PROMPT_PATHS[variant])
+    return template_path
 
 
 def _render_opencode_user_message(
     problem_info: Dict[str, Any],
     workspace_path: str,
     template_override_path: Optional[str] = None,
+    *,
+    prompt_variant: str = _DEFAULT_OPENCODE_PROMPT_VARIANT,
 ) -> str:
     """Render the user prompt for the opencode session."""
+    default_template = _OPENCODE_USER_PROMPT_TEMPLATES[prompt_variant]
     if template_override_path:
         try:
             template = Path(template_override_path).read_text()
@@ -2267,9 +2333,9 @@ def _render_opencode_user_message(
                 f"falling back to default template",
                 flush=True,
             )
-            template = _DEFAULT_OPENCODE_USER_PROMPT_TEMPLATE
+            template = default_template
     else:
-        template = _DEFAULT_OPENCODE_USER_PROMPT_TEMPLATE
+        template = default_template
 
     problem_statement = str(problem_info.get("problem_statement", ""))
     try:
@@ -2279,9 +2345,7 @@ def _render_opencode_user_message(
             f"[opencode] template format error ({e}); rendering with the default template instead",
             flush=True,
         )
-        return _DEFAULT_OPENCODE_USER_PROMPT_TEMPLATE.format(
-            workspace_path=workspace_path, problem_statement=problem_statement
-        )
+        return default_template.format(workspace_path=workspace_path, problem_statement=problem_statement)
 
 
 class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
@@ -2335,7 +2399,19 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
 
         # openai_model.yaml uses `openai_model`; vllm_model.yaml uses `model`.
         try:
-            model_server_cfg = get_first_server_config_dict(get_global_config_dict(), self.config.model_server_name)
+            try:
+                # Ray workers may not inherit the API server process's cached global
+                # config. Prefer the serialized copy carried by the instance config.
+                serialized_global_config = OmegaConf.create(shlex.split(self.config.ng_global_config_dict_str)[0])
+                model_server_cfg = get_first_server_config_dict(
+                    serialized_global_config,
+                    self.config.model_server_name,
+                )
+            except Exception:
+                model_server_cfg = get_first_server_config_dict(
+                    get_global_config_dict(),
+                    self.config.model_server_name,
+                )
             default_model_name = (
                 getattr(model_server_cfg, "openai_model", None) or getattr(model_server_cfg, "model", None) or ""
             )
@@ -2395,6 +2471,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             data_point,
             workspace_path,
             template_override_path=self.config.resolved_user_prompt_template,
+            prompt_variant=self.config.opencode_prompt_variant,
         )
         user_message_host_path = self.config.persistent_dir / f"user_message_{agent_run_id}.txt"
         user_message_host_path.write_text(user_message)
@@ -2634,7 +2711,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         )
 
         search_path = os.path.join(
-            self.config.opencode_setup_dir / "opencode" / eval_dir_in_opencode,
+            self.config.harness_runtime_dir / eval_dir_in_opencode,
             "**",
             "output.jsonl",
         )
@@ -2696,21 +2773,80 @@ def _classify_agent_error(err: Optional[str]) -> Optional[str]:
 
 @ray.remote(
     scheduling_strategy="SPREAD",
-    runtime_env={
-        "py_executable": sys.executable,
-    },
+    runtime_env={"py_executable": sys.executable},
     num_cpus=0.1,
 )
-def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
-    # For some reason Ray may not pick up the proper model fields if we don't rebuild the model here. Very strange.
+def runner_ray_remote(
+    wrapper_config_dict: dict[str, Any],
+    server_config_dict: dict[str, Any],
+    body_dict: dict[str, Any],
+    ray_queue_timestamp: float,
+    rollout_id: Optional[str] = None,
+    token_capture_enabled: bool = False,
+) -> dict[str, Any]:
+    """Run in node-local scratch and return the in-memory response through Ray."""
+    return _run_rollout_in_worker_scratch(
+        wrapper_config_dict,
+        server_config_dict,
+        body_dict,
+        ray_queue_timestamp,
+        rollout_id=rollout_id,
+        token_capture_enabled=token_capture_enabled,
+    )
+
+
+def _run_rollout_in_worker_scratch(
+    wrapper_config_dict: dict[str, Any],
+    server_config_dict: dict[str, Any],
+    body_dict: dict[str, Any],
+    ray_queue_timestamp: Optional[float] = None,
+    *,
+    rollout_id: Optional[str] = None,
+    token_capture_enabled: bool = False,
+) -> dict[str, Any]:
+    """Synchronous worker implementation, split out for focused cleanup tests.
+
+    Every rollout artifact (instance datasets, scripts, harness runtime state,
+    apptainer logs, completion dumps, eval reports, metrics) is written under a
+    unique ``tempfile.TemporaryDirectory`` inside ``runtime_scratch_dir`` and is
+    removed when this function returns, on success and on failure alike. The
+    returned dict is the fully materialized response — including every
+    (session, segment) trajectory in ``metadata["session_responses"]`` — so
+    nothing downstream needs to read the (deleted, node-local) scratch tree.
+    """
+    # Ray may not pick up the proper Pydantic model fields unless they are rebuilt in the worker.
+    SWEBenchWrapperConfig.model_rebuild(force=True)
+    SWEBenchWrapperServerConfig.model_rebuild(force=True)
     SWEBenchWrapperInstanceConfig.model_rebuild(force=True)
     RunOpenHandsAgent.model_rebuild(force=True)
 
-    params = SWEBenchWrapperInstanceConfig.model_validate(params_dict)
-    run_oh = RunOpenHandsAgent(config=params)
-    report_file = asyncio.run(run_oh.process_single_datapoint())
+    wrapper_config = SWEBenchWrapperConfig.model_validate(wrapper_config_dict)
+    server_config = SWEBenchWrapperServerConfig.model_validate(server_config_dict)
+    body = NeMoGymResponseCreateParamsNonStreaming.model_validate(body_dict)
 
-    return report_file
+    scratch_parent = wrapper_config.runtime_scratch_dir
+    if not scratch_parent.is_dir():
+        raise NotADirectoryError(
+            f"SWE-agent runtime_scratch_dir must already exist on every Ray worker: {scratch_parent}"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="nemo_gym_swe_", dir=scratch_parent) as scratch_dir:
+        worker_server_config = server_config.model_copy(update={"base_results_dir": Path(scratch_dir)})
+
+        # The Ray task must never construct the Pydantic server model: doing so invokes
+        # model_post_init(), which is server-only setup and requires the Gym process's
+        # global configuration. Rehydrate only the plain rollout executor from the
+        # immutable setup state prepared once by the server.
+        executor = SWERolloutExecutor.from_worker_state(
+            config=wrapper_config,
+            server_config=worker_server_config,
+        )
+
+        params, dataset_processor = executor._setup_params(body, rollout_capture=(rollout_id, token_capture_enabled))
+        if ray_queue_timestamp is not None:
+            params.ray_queue_timestamp = ray_queue_timestamp
+        response = asyncio.run(executor._run_worker_rollout(params, dataset_processor))
+        return response.model_dump(mode="json")
 
 
 def _patch_file_paths(patch_text: str) -> set:
@@ -2914,14 +3050,10 @@ class RunOpenHandsAgent(BaseModel):
         eval_dir_in_openhands = self.config.eval_dir_in_openhands
         config_file_path = self.config.openhands_config_file_path
 
-        # Read from whichever harness wrote — they both use the same in-SIF
-        # eval_dir_in_openhands path, but the host-side root differs.
-        if self.config.agent_framework == "opencode":
-            assert self.config.opencode_setup_dir is not None
-            eval_dir_on_host = Path(self.config.opencode_setup_dir) / "opencode" / eval_dir_in_openhands
-        else:
-            assert self.config.openhands_setup_dir is not None
-            eval_dir_on_host = Path(self.config.openhands_setup_dir) / "OpenHands" / eval_dir_in_openhands
+        # Both harnesses write through a bind mount backed by worker-local scratch.
+        # Keeping this out of the shared harness checkout prevents per-turn JSONs
+        # from generating metadata traffic on Lustre.
+        eval_dir_on_host = self.config.harness_runtime_dir / eval_dir_in_openhands
         trajectories_root = self.config.trajectories_root
         llm_completions_dir = trajectories_root / "llm_completions" / data_point["instance_id"]
         trajectories_root.mkdir(parents=True, exist_ok=True)
@@ -3089,9 +3221,15 @@ class RunOpenHandsAgent(BaseModel):
         log_file = open(log_file_path, "w")
 
         # start_new_session so watchdog/timeout kills can address the whole process tree
-        process = await asyncio.create_subprocess_shell(
-            apptainer_cmd, stdout=log_file, stderr=log_file, start_new_session=True
-        )
+        try:
+            process = await asyncio.create_subprocess_shell(
+                apptainer_cmd, stdout=log_file, stderr=log_file, start_new_session=True
+            )
+        except BaseException:
+            # No ActiveContainerCommand exists yet, so the outer lifecycle
+            # cleanup cannot close this handle for us.
+            log_file.close()
+            raise
 
         active_command = ActiveContainerCommand(process=process, log_file=log_file, log_file_path=log_file_path)
         if self.config.memory_watchdog_enabled:
@@ -3166,8 +3304,23 @@ class RunOpenHandsAgent(BaseModel):
             active_command.watchdog_task.cancel()
 
     async def process_single_datapoint(self) -> Optional[Path]:
+        active_commands: list[ActiveContainerCommand] = []
+        try:
+            return await self._process_single_datapoint(active_commands)
+        finally:
+            # Cover cancellations and unexpected errors between the normal
+            # agent/evaluator finish paths, so worker-scratch teardown never
+            # races a live apptainer. Cleanup is idempotent for commands that
+            # already exited and had their log handles closed.
+            for active_command in reversed(active_commands):
+                try:
+                    await self._kill_active_command(active_command)
+                except Exception as cleanup_error:
+                    print(f"Failed to clean up container command: {cleanup_error}", flush=True)
+
+    async def _process_single_datapoint(self, active_commands: list[ActiveContainerCommand]) -> Optional[Path]:
         if self.config.verify_golden_patch:
-            return await self._run_golden_patch_verification()
+            return await self._run_golden_patch_verification(active_commands)
 
         instance_id = self.config.instance_id
         if self.config.debug:
@@ -3184,11 +3337,14 @@ class RunOpenHandsAgent(BaseModel):
         openhands_active_command = await self._start_container_command(
             self.config.agent_command, self.config.agent_apptainer_command_str
         )
+        active_commands.append(openhands_active_command)
         eval_active_command = (
             None
             if self.config.skip_eval
             else await self._start_container_command(self.config.eval_command, self.config.eval_apptainer_command_str)
         )
+        if eval_active_command is not None:
+            active_commands.append(eval_active_command)
 
         try:
             out_file_in_eval = await self._finish_container_command(
@@ -3325,7 +3481,7 @@ class RunOpenHandsAgent(BaseModel):
 
         return report_file
 
-    async def _run_golden_patch_verification(self) -> Optional[Path]:
+    async def _run_golden_patch_verification(self, active_commands: list[ActiveContainerCommand]) -> Optional[Path]:
         instance_id = self.config.instance_id
         dataset_name = self.config.problem_info.get("dataset_name") or ""
         supported = (
@@ -3377,6 +3533,7 @@ class RunOpenHandsAgent(BaseModel):
         eval_active_command = await self._start_container_command(
             self.config.eval_command, self.config.eval_apptainer_command_str
         )
+        active_commands.append(eval_active_command)
         try:
             report_file = await self._finish_container_command(eval_active_command, self.config.eval_command)
         except Exception as e:
@@ -3401,14 +3558,35 @@ class RunOpenHandsAgent(BaseModel):
 ########################################
 
 
-class SWEBenchWrapper(SimpleResponsesAPIAgent):
+class SWERolloutExecutor:
+    """Worker-safe SWE rollout lifecycle with no Pydantic server initialization.
+
+    The Gym server subclass below uses the same methods, but Ray tasks construct this
+    plain executor directly from the server-prepared immutable setup state. This keeps
+    every per-rollout file on the task's node-local scratch directory without invoking
+    ``SWEBenchWrapper.model_post_init()`` in a generic Ray worker.
+    """
+
     config: SWEBenchWrapperConfig
 
-    _sem: Optional[Semaphore] = None
-    _vllm_converter: Optional[VLLMConverter] = None
-    _swe_bench_wrapper_server_config: Optional[SWEBenchWrapperServerConfig] = None
+    _sem: Optional[Semaphore]
+    _vllm_converter: Optional[VLLMConverter]
+    _swe_bench_wrapper_server_config: Optional[SWEBenchWrapperServerConfig]
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @classmethod
+    def from_worker_state(
+        cls,
+        *,
+        config: SWEBenchWrapperConfig,
+        server_config: SWEBenchWrapperServerConfig,
+    ) -> "SWERolloutExecutor":
+        executor = cls()
+        executor.config = config
+        executor._swe_bench_wrapper_server_config = server_config
+        executor._vllm_converter = VLLMConverter(return_token_id_information=True)
+        return executor
 
     ########################################
     # START Init
@@ -3416,18 +3594,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any) -> None:
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
-        # Run artifacts are written here by this server and read across the run
-        # (on multinode deployments, from other nodes); resolved from the global
-        # `results_dir` so runs can point it at a shared filesystem. The key is
-        # absent only for hand-built config dicts that bypassed the parser.
         global_config_dict = get_global_config_dict()
-        configured_results_root = global_config_dict.get(RESULTS_DIR_KEY_NAME)
-        results_root = Path(configured_results_root) if configured_results_root else RESULTS_DIR
-        base_results_dir = results_root / f"swebench_results_{run_session_id}"
-        base_results_dir.mkdir(parents=True, exist_ok=True)
-        # Rollout workers and eval containers consume this path (and the setup
-        # trees) by host path from other nodes; say where they resolved to.
-        print(f"SWE agents results root for this run: {base_results_dir}", flush=True)
+        # Normal requests replace base_results_dir with a unique worker-local
+        # directory in runner_ray_remote (see _run_rollout_in_worker_scratch), so no
+        # rollout artifact is written under the Gym results dir / repository.
+        # Merely constructing the server never creates a results directory.
+        print(
+            f"SWE agents per-rollout scratch parent (must exist on every Ray worker): "
+            f"{self.config.runtime_scratch_dir}",
+            flush=True,
+        )
         # Only set up the agent harness that's actually selected. Both share the
         # same dataset/eval setup paths.
         openhands_setup_dir, opencode_setup_dir = None, None
@@ -3442,7 +3618,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         )
         self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
             run_session_id=run_session_id,
-            base_results_dir=base_results_dir,
+            base_results_dir=self.config.runtime_scratch_dir,
             ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(global_config_dict)),
             model_server_name=self.config.model_server.name,
             model_server_base_url=f"http://{model_server_config.host}:{model_server_config.port}",
@@ -3749,6 +3925,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             params.instance_dataset_path if command.mode == "eval" else params.agent_instance_dataset_path
         )
         data_point = params.problem_info
+        dataset_name = str(data_point.get("dataset_name", ""))
+        uses_standard_swebench_harness = (
+            dataset_name not in ("nv-internal-1", "deepswe", "denovoswe", "swe-bench-ext")
+            and "SWE-rebench" not in dataset_name
+            and "R2E-Gym" not in dataset_name
+            and "SWE-bench_Multilingual" not in dataset_name
+        )
 
         # Fix localhost URLs not working sometimes
         container_commands = []
@@ -3774,12 +3957,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # parent (e.g. /root/.gradle/init.d/) is unreliable, and silently
         # losing the Gradle init script costs hundreds of failed dep fetches.
         #
-        # Gradle home is placed under /trajectories_mount (bind-mounted from
-        # persistent_dir on Lustre) rather than /root/.gradle — the writable
-        # tmpfs overlay has a size cap that the ~150MB Gradle distribution
-        # download can blow through, leaving the wrapper unable to create
-        # /root/.gradle/wrapper/dists/* (Gradle "could not create parent
-        # directory for lock file" errors).
+        # Gradle home is placed at /root/.gradle in the container's writable
+        # tmpfs overlay. It must not use /trajectories_mount: Gradle can create
+        # tens of thousands of cache files, and rollout scratch is deliberately
+        # reserved for artifacts that need to cross between agent and evaluator.
         maven_mirror_dir = Path(__file__).parent / "maven_mirror"
         mvn_settings_path = maven_mirror_dir / "settings.xml"
         gradle_init_path = maven_mirror_dir / "init.gradle"
@@ -3843,6 +4024,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             assert params.opencode_setup_dir is not None, "opencode_setup_dir not set"
             opencode_dir = f"{params.opencode_setup_dir}/opencode"
             bun_dir = f"{params.opencode_setup_dir}/bun"
+            local_eval_root = params.harness_runtime_dir / "evaluation" / "oh"
+            local_eval_root.mkdir(parents=True, exist_ok=True)
+            # Empty mount point only (idempotent, no per-rollout content): the
+            # writable eval dir is overmounted from scratch, but its destination
+            # must exist inside the read-only bundle mount on a fresh setup tree.
             (Path(opencode_dir) / "evaluation" / "oh").mkdir(parents=True, exist_ok=True)
             # opencode reads SQLite migrations from `<bundle>/../../migration`
             # (packages/opencode/src/storage/db.ts) → /opencode_setup/migration.
@@ -3850,8 +4036,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 [
                     f"--mount type=bind,src={opencode_dir},dst=/opencode_setup/opencode,ro",
                     f"--mount type=bind,src={opencode_dir},dst={opencode_dir},ro",
-                    f"--mount type=bind,src={opencode_dir}/evaluation/oh,dst=/opencode_setup/opencode/evaluation/oh",
-                    f"--mount type=bind,src={opencode_dir}/evaluation/oh,dst={opencode_dir}/evaluation/oh",
+                    f"--mount type=bind,src={local_eval_root},dst=/opencode_setup/opencode/evaluation/oh",
+                    f"--mount type=bind,src={local_eval_root},dst={opencode_dir}/evaluation/oh",
                     f"--mount type=bind,src={bun_dir},dst=/opencode_setup/bun,ro",
                     f"--mount type=bind,src={bun_dir},dst={bun_dir},ro",
                     f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
@@ -3877,17 +4063,22 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # OpenHands path (default).
             assert params.openhands_setup_dir is not None, "openhands_setup_dir not set"
             openhands_dir = f"{params.openhands_setup_dir}/OpenHands"
+            local_eval_sessions = params.harness_runtime_dir / ".eval_sessions"
+            local_logs = params.harness_runtime_dir / "logs"
+            local_eval_root = params.harness_runtime_dir / "evaluation" / "oh"
+            for local_dir in (local_eval_sessions, local_logs, local_eval_root):
+                local_dir.mkdir(parents=True, exist_ok=True)
             mount_args.extend(
                 [
                     # Read-only base mounts (parent first)
                     f"--mount type=bind,src={openhands_dir},dst=/openhands_setup/OpenHands,ro",
                     f"--mount type=bind,src={openhands_dir},dst={openhands_dir},ro",
-                    f"--mount type=bind,src={openhands_dir}/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions",
-                    f"--mount type=bind,src={openhands_dir}/.eval_sessions,dst={openhands_dir}/.eval_sessions",
-                    f"--mount type=bind,src={openhands_dir}/logs,dst=/openhands_setup/OpenHands/logs",
-                    f"--mount type=bind,src={openhands_dir}/logs,dst={openhands_dir}/logs",
-                    f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
-                    f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst={openhands_dir}/evaluation/oh",
+                    f"--mount type=bind,src={local_eval_sessions},dst=/openhands_setup/OpenHands/.eval_sessions",
+                    f"--mount type=bind,src={local_eval_sessions},dst={openhands_dir}/.eval_sessions",
+                    f"--mount type=bind,src={local_logs},dst=/openhands_setup/OpenHands/logs",
+                    f"--mount type=bind,src={local_logs},dst={openhands_dir}/logs",
+                    f"--mount type=bind,src={local_eval_root},dst=/openhands_setup/OpenHands/evaluation/oh",
+                    f"--mount type=bind,src={local_eval_root},dst={openhands_dir}/evaluation/oh",
                     # Data
                     f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
                 ]
@@ -3915,20 +4106,23 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
             mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
 
-        # Add SWE-bench setup directory mount if available (for evaluation)
-        # swe-bench-ext, nv-internal-1, and deepswe don't use the swebench harness
-        if command.mode == "eval" and data_point["dataset_name"] not in ("nv-internal-1", "swe-bench-ext", "deepswe"):
+        # Only the default SWE-bench-family processor uses this harness. It runs
+        # from worker-local scratch, so the shared code and venv can be mounted
+        # read-only while all CWD-relative logs/reports stay under
+        # /trajectories_mount.
+        if command.mode == "eval" and uses_standard_swebench_harness:
             # Mount the entire setup directory at both /swebench_setup and its original absolute path
             # This is needed because uv venv has hardcoded absolute paths
-            mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst=/swebench_setup")
-            mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst={params.swebench_setup_dir}")
+            mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst=/swebench_setup,ro")
+            mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst={params.swebench_setup_dir},ro")
 
-        if command.mode == "eval" and "SWE-bench_Multilingual" in data_point["dataset_name"]:
+        if command.mode == "eval" and "SWE-bench_Multilingual" in dataset_name:
             mount_args.append(
-                f"--mount type=bind,src={params.swebench_multilingual_setup_dir},dst=/swebench_multilingual_setup"
+                f"--mount type=bind,src={params.swebench_multilingual_setup_dir},dst=/swebench_multilingual_setup,ro"
             )
             mount_args.append(
-                f"--mount type=bind,src={params.swebench_multilingual_setup_dir},dst={params.swebench_multilingual_setup_dir}"
+                f"--mount type=bind,src={params.swebench_multilingual_setup_dir},"
+                f"dst={params.swebench_multilingual_setup_dir},ro"
             )
 
         if command.mode == "eval" and data_point["dataset_name"] == "nv-internal-1":
@@ -3946,8 +4140,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # Mount the entire setup directory at both /r2egym_setup and its original absolute path
             # This is needed because uv venv has hardcoded absolute paths in its wrappers
             # print(f"Mounting R2E-Gym setup directory from: {self.r2e_gym_setup_dir}", flush=True)
-            mount_args.append(f"--mount type=bind,src={params.r2e_gym_setup_dir},dst=/r2egym_setup")
-            mount_args.append(f"--mount type=bind,src={params.r2e_gym_setup_dir},dst={params.r2e_gym_setup_dir}")
+            mount_args.append(f"--mount type=bind,src={params.r2e_gym_setup_dir},dst=/r2egym_setup,ro")
+            mount_args.append(f"--mount type=bind,src={params.r2e_gym_setup_dir},dst={params.r2e_gym_setup_dir},ro")
 
         if command.mode == "eval" and "SWE-rebench" in data_point["dataset_name"]:
             rebench_setup_dir = params.swe_rebench_setup_dir
@@ -4038,6 +4232,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         script_path.write_text(combined_command)
         container_script_path = f"/container_scripts/{command.mode}_script.sh"
         mount_args.append(f"--mount type=bind,src={script_path},dst={container_script_path},ro")
+        if command.mode == "agent":
+            # The agent receives the rollout tree writable, but it must not be
+            # able to rewrite the already-prepared evaluator script through the
+            # /trajectories_mount alias while the evaluator is waiting.
+            mount_args.append(f"--mount type=bind,src={script_dir},dst=/trajectories_mount/container_scripts,ro")
 
         mount_str = " ".join(mount_args)
 
@@ -4077,9 +4276,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         env_args += "--env CHROME_BIN=/tmp/chrome-wrapper.sh "
         env_args += "--env CHROMIUM_BIN=/tmp/chrome-wrapper.sh "
 
-        # Launch Apptainer container and execute the script file
+        # Launch Apptainer with only the explicit bind mounts above. In
+        # particular, disable CWD (the server starts in the shared checkout),
+        # hostfs, configured bind paths, and inherited user bind variables. Set
+        # the initial directory explicitly because all harness scripts use
+        # absolute paths before performing their own `cd`.
         apptainer_cmd = (
-            f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
+            "env -u APPTAINER_BIND -u APPTAINER_BINDPATH "
+            "-u SINGULARITY_BIND -u SINGULARITY_BINDPATH "
+            "apptainer exec --writable-tmpfs --cleanenv --pid "
+            "--no-mount home,tmp,hostfs,cwd,bind-paths --pwd / "
             # --no-mount bind-paths also drops apptainer's default /etc/resolv.conf
             # bind; on clusters without a node-local resolver (e.g. AWS k8s-slurm)
             # the sandbox is left with an empty resolv.conf and no working DNS,
@@ -4102,6 +4308,40 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         if p.is_absolute():
             return str(p)
         return str(PARENT_DIR / p)
+
+    def _copy_prompt_to_runtime(
+        self,
+        source_path: Optional[str],
+        harness_runtime_dir: Path,
+        destination_name: str,
+    ) -> Optional[str]:
+        """Copy a prompt override into this rollout's worker-local scratch tree.
+
+        OpenHands needs these mounts to remain writable because its harness may
+        replace prompt contents at runtime. Giving it a per-rollout copy keeps
+        that behavior without allowing a rollout to modify the shared source
+        prompt on Lustre or race with another rollout.
+        """
+        resolved_source = self._resolve_absolute_path(source_path)
+        if resolved_source is None:
+            return None
+
+        prompt_runtime_dir = harness_runtime_dir / "prompts"
+        prompt_runtime_dir.mkdir(parents=True, exist_ok=True)
+        destination = prompt_runtime_dir / destination_name
+        # copyfile intentionally does not preserve a read-only source mode: the
+        # harness contract requires the rollout-local destination to be writable.
+        shutil.copyfile(resolved_source, destination)
+        return str(destination)
+
+    def _rollout_capture_state(self) -> Tuple[Optional[str], bool]:
+        """(rollout_id, token_capture_enabled) of the in-flight /run request.
+
+        Both come from server-process state (a request-scoped contextvar and the
+        server client's global config), so only the Gym server can answer; Ray
+        workers receive them as explicit task arguments instead.
+        """
+        raise RuntimeError("rollout capture state is only available in the SWE server process")
 
     def _maybe_build_replay_messages(self, body: NeMoGymResponseCreateParamsNonStreaming) -> Optional[str]:
         """Convert Responses-format input into a chat-completion JSON string when
@@ -4135,8 +4375,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return orjson.dumps(chat_messages).decode()
 
     def _setup_params(
-        self, body: NeMoGymResponseCreateParamsNonStreaming
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        rollout_capture: Optional[Tuple[Optional[str], bool]] = None,
     ) -> Tuple[SWEBenchWrapperInstanceConfig, BaseDatasetHarnessProcessor]:
+        """Build the per-rollout instance config and write its inputs under base_results_dir.
+
+        ``rollout_capture`` is ``(rollout_id, token_capture_enabled)``; Ray workers pass
+        the values the server resolved for this request, the server resolves them itself.
+        """
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
         instance_id = problem_info.get("instance_id", "unknown")
 
@@ -4164,10 +4411,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                         "replay_subagent_manifest": orjson.dumps(replay_subagent_manifest).decode(),
                     }
 
-        # Create persistent directory for I/O and logs in local workspace
+        # Create the per-instance I/O tree inside the Ray worker's temporary directory.
         instance_dir = f"{instance_id}_{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
         persistent_dir = self._swe_bench_wrapper_server_config.base_results_dir / instance_dir
         persistent_dir.mkdir(parents=True, exist_ok=True)
+        harness_runtime_dir = persistent_dir / "harness_runtime"
 
         agent_run_id = f"{instance_id}_{int(time.time())}_{str(uuid.uuid4())[:8]}"
 
@@ -4217,8 +4465,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         # persistent_dir is mounted here in each container
         base_mounted_dir = Path("/trajectories_mount")
-        rollout_id = current_rollout_id()
-        token_capture_enabled = self._token_id_capture_enabled()
+        rollout_id, token_capture_enabled = (
+            rollout_capture if rollout_capture is not None else self._rollout_capture_state()
+        )
         if token_capture_enabled and not rollout_id:
             raise RuntimeError(
                 "token capture is enabled but the /run request carries no rollout id; "
@@ -4239,6 +4488,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             problem_info=problem_info,
             body=body,
             persistent_dir=persistent_dir,
+            harness_runtime_dir=harness_runtime_dir,
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
             base_mounted_dir=base_mounted_dir,
             install_openhands_capture_overlay=token_capture_enabled,
@@ -4284,6 +4534,30 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             params.resolved_agent_cls = selected.agent_cls
             params.resolved_diversify_tool_names = selected.diversify_tool_names
 
+        if params.agent_framework == "opencode":
+            # The in-tree default opencode user prompt follows opencode_prompt_variant
+            # even when a config names it explicitly as an override.
+            params.resolved_user_prompt_template = _apply_opencode_prompt_variant(
+                params.resolved_user_prompt_template, params.opencode_prompt_variant
+            )
+
+        # Prompt files must remain writable for the harness, but their configured
+        # sources are shared files (usually on Lustre). Materialize independent
+        # copies inside this rollout's node-local scratch tree before building
+        # either harness command. A replay system prompt may replace the system
+        # copy later in the harness processors' get_run_command(); that replay
+        # file is also under this rollout's persistent directory.
+        params.resolved_user_prompt_template = self._copy_prompt_to_runtime(
+            params.resolved_user_prompt_template,
+            params.harness_runtime_dir,
+            "user_prompt.j2",
+        )
+        params.resolved_system_prompt_template = self._copy_prompt_to_runtime(
+            params.resolved_system_prompt_template,
+            params.harness_runtime_dir,
+            "system_prompt.j2",
+        )
+
         if params.problem_info["dataset_name"] == "nv-internal-1":
             dataset_processor = NVInternalDatasetProcessor(config=params)
         elif params.problem_info["dataset_name"] == "deepswe":
@@ -4314,26 +4588,44 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return params, dataset_processor
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        params, dataset_processor = self._setup_params(body)
-
-        with (params.eval_private_dir / "params.json").open("w") as f:
-            f.write(params.model_dump_json(indent=4))
-
         try:
-            return await self._inner_responses(params, dataset_processor)
-        except Exception as e:
-            traceback_file = params.persistent_dir / "traceback.err"
-            with traceback_file.open("w") as f:
-                f.write(format_exc())
+            return await self._inner_responses(body)
+        except Exception:
+            # No traceback artifact is written: worker scratch is intentionally
+            # removed on both success and failure.
+            print(f"Hit an exception in {self.config.name}:\n{format_exc()}", file=sys.stderr)
+            raise
 
-            print(f"Hit an exception in {self.config.name}! See {traceback_file} for more details", file=sys.stderr)
+    async def _inner_responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        # Resolve request-scoped server state here; the Ray worker cannot see it.
+        rollout_id, token_capture_enabled = self._rollout_capture_state()
+        if token_capture_enabled and not rollout_id:
+            raise RuntimeError(
+                "token capture is enabled but the /run request carries no rollout id; "
+                "the model URL cannot be prefixed and no tokens would be captured"
+            )
+        ray_queue_timestamp = time.time()
+        return NeMoGymResponse.model_validate(
+            await runner_ray_remote.remote(
+                self.config.model_dump(mode="json"),
+                self._swe_bench_wrapper_server_config.model_dump(mode="json"),
+                body.model_dump(mode="json"),
+                ray_queue_timestamp,
+                rollout_id,
+                token_capture_enabled,
+            )
+        )
 
-            raise e
-
-    async def _inner_responses(
+    async def _run_worker_rollout(
         self, params: SWEBenchWrapperInstanceConfig, dataset_processor: BaseDatasetHarnessProcessor
     ) -> NeMoGymResponse:
-        maybe_report_file = await runner_ray_remote.remote(params.model_dump())
+        """Run one rollout inside the Ray worker and materialize its full response.
+
+        Everything the server needs afterwards is returned in memory: the
+        worker's scratch tree (params.persistent_dir) is deleted as soon as this
+        returns.
+        """
+        maybe_report_file = await RunOpenHandsAgent(config=params).process_single_datapoint()
         metrics_to_update = dict()
 
         if maybe_report_file:
@@ -4373,20 +4665,25 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             metrics_to_update["repo_refs_stripped"] = refs_flag.read_text().strip() == "1"
 
         # Decide whether to mask this sample from the GRPO gradient.
-        # 1) Patch passed eval but agent did not actually submit (hit max-turns
-        #    or blew the context window) — the reward is accidental.
+        # 1) Agent did not actually submit (hit max-turns or blew the context
+        #    window). mask_unresolved_agent_errors=False (legacy default): mask
+        #    only when the patch nevertheless resolved — the reward is
+        #    accidental; an unresolved one trains with reward 0.
+        #    mask_unresolved_agent_errors=True (upstream): mask all of them.
         # 2) Final eval step timed out — reward is unreliable.
         # 3) Agent itself timed out (wall-clock) — mask regardless of resolved.
         # 4) Memory watchdog killed the agent container (OOM).
         # 5) Memory watchdog killed the eval container.
         persisted_metrics = SWEBenchMetrics.model_validate(update_and_read_metrics(params.metrics_fpath))
+        resolved_now = bool(metrics_to_update.get("resolved", False))
         agent_error_kind = persisted_metrics.agent_error_kind
         eval_timed_out = bool(persisted_metrics.eval_timed_out)
         agent_timed_out = bool(persisted_metrics.agent_timed_out)
         oom_killed = bool(persisted_metrics.oom_killed)
         eval_oom_killed = bool(persisted_metrics.eval_oom_killed)
+        agent_did_not_submit = agent_error_kind in ("max_iteration", "context_window")
         if (
-            agent_error_kind in ("max_iteration", "context_window")
+            (agent_did_not_submit and (resolved_now or params.mask_unresolved_agent_errors))
             or eval_timed_out
             or agent_timed_out
             or oom_killed
@@ -4506,10 +4803,28 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         if terminal_response_id is not None:
             metadata["terminal_response_id"] = terminal_response_id
 
+        model = params.body.model or self.config.model_server.name
+        # Every (session, segment) trajectory MUST be materialized here, not in
+        # `run()`: the completion files behind them live in worker-local scratch
+        # (base_results_dir), which is deleted the moment this response is
+        # returned — and `run()` executes in the server process, potentially on
+        # a different node. They ride to `run()` through this metadata channel.
+        metadata["session_responses"] = orjson.dumps(
+            [
+                r.model_dump(mode="json")
+                for r in self._build_segment_responses(
+                    params,
+                    model=model,
+                    parallel_tool_calls=params.body.parallel_tool_calls,
+                    tool_choice=params.body.tool_choice,
+                )
+            ]
+        ).decode()
+
         return NeMoGymResponse(
             id=f"swebench-{params.instance_id}",
             created_at=int(time.time()),
-            model=params.body.model or self.config.model_server.name,
+            model=model,
             object="response",
             output=output_items,
             parallel_tool_calls=params.body.parallel_tool_calls,
@@ -4519,22 +4834,26 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         )
 
     def _build_segment_responses(
-        self, instance_config: SWEBenchWrapperInstanceConfig, response: NeMoGymResponse
+        self,
+        params: SWEBenchWrapperInstanceConfig,
+        *,
+        model: str,
+        parallel_tool_calls: bool,
+        tool_choice: Any,
     ) -> List[NeMoGymResponse]:
         """One NeMoGymResponse per (session, segment) for `SWEBenchVerifyResponse.responses`.
 
-        `run()` has no direct handle on `params`/`trajectories_dir`, so both
-        are reconstructed from the round-tripped instance_config and every
-        (session, segment) trajectory is re-read from the completion files
-        `responses()` already consumed (rather than threading a second copy
-        of this data through `.metadata`).
+        Runs in the Ray worker (from `_run_worker_rollout`) and reads every
+        (session, segment) completion dump under this rollout's worker-local
+        trajectories dir, which is deleted once the worker returns. `run()`
+        rehydrates the result from metadata["session_responses"].
 
-        Falls back to `[response]` when no session-tagged dumps exist
-        (openhands / pre-session-tagging harnesses).
+        Returns an empty list when no session-tagged dumps exist (openhands /
+        pre-session-tagging harnesses); `run()` then falls back to `[response]`.
         """
-        trajectories_dir = instance_config.persistent_dir / "trajectories"
+        trajectories_dir = params.persistent_dir / "trajectories"
         out: List[NeMoGymResponse] = []
-        for entry in self.get_all_session_trajectories_from_completions(trajectories_dir, instance_config.instance_id):
+        for entry in self.get_all_session_trajectories_from_completions(trajectories_dir, params.instance_id):
             # prefix_message_count (stamped by _openhands_dir_copy_from_host)
             # is this GROUP'S OWN first-turn message count — the correct split
             # point. A role-based split (split_responses_input_output_items)
@@ -4558,13 +4877,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             ]
             out.append(
                 NeMoGymResponse(
-                    id=f"swebench-{instance_config.instance_id}-{entry['session_id']}-seg{entry['segment_index']}",
+                    id=f"swebench-{params.instance_id}-{entry['session_id']}-seg{entry['segment_index']}",
                     created_at=int(time.time()),
-                    model=response.model,
+                    model=model,
                     object="response",
                     output=entry_output,
-                    parallel_tool_calls=response.parallel_tool_calls,
-                    tool_choice=response.tool_choice,
+                    parallel_tool_calls=parallel_tool_calls,
+                    tool_choice=tool_choice,
                     tools=entry_tools,
                     metadata={
                         "session_id": str(entry["session_id"]),
@@ -4575,8 +4894,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 )
             )
         out.sort(key=lambda r: (r.metadata["session_id"], int(r.metadata["segment_index"])))
-        if not out:
-            out = [response]
         return out
 
     async def run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
@@ -4607,7 +4924,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             instance_config = SWEBenchWrapperInstanceConfig.model_validate_json(metadata["instance_config"])
 
-            responses = self._build_segment_responses(instance_config, response)
+            # Every on-policy-contiguous (session, segment) trajectory was
+            # materialized by the WORKER into metadata["session_responses"]
+            # (_build_segment_responses) — the completion files it was built
+            # from lived in worker-local scratch and are gone by the time this
+            # runs, so re-reading them here is not an option. An empty list
+            # (openhands / pre-session-tagging dumps) falls back to the single
+            # main response.
+            responses = [
+                NeMoGymResponse.model_validate(r) for r in orjson.loads(metadata.get("session_responses") or "[]")
+            ] or [response]
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
@@ -4622,6 +4948,27 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 subagent_trajectories=subagent_trajectories,
                 terminal_response_id=terminal_response_id,
             )
+
+
+class SWEBenchWrapper(SWERolloutExecutor, SimpleResponsesAPIAgent):
+    """Pydantic/FastAPI server wrapper; initialized only in the Gym server process."""
+
+    config: SWEBenchWrapperConfig
+
+    _sem: Optional[Semaphore] = None
+    _vllm_converter: Optional[VLLMConverter] = None
+    _swe_bench_wrapper_server_config: Optional[SWEBenchWrapperServerConfig] = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def model_post_init(self, context: Any) -> None:
+        # Keep the hook in the Pydantic subclass namespace so Pydantic registers
+        # and invokes it for the real Gym server. Ray workers instantiate only
+        # SWERolloutExecutor and therefore cannot enter this path.
+        return super().model_post_init(context)
+
+    def _rollout_capture_state(self) -> Tuple[Optional[str], bool]:
+        return current_rollout_id(), self._token_id_capture_enabled()
 
 
 if __name__ == "__main__":

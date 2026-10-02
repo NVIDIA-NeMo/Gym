@@ -37,17 +37,16 @@ The wrapper supports two agent harnesses, selected by the `agent_framework` conf
 ```
                  ┌──────────────────────────────────────────────┐
    client ──▶    │  SWEBenchWrapper  (Responses API server)     │
-   (one          │   • _setup_params: build per-instance config │
-    instance)    │     ↳ switches OpenHandsHarnessProcessor /   │
-                 │       OpenCodeHarnessProcessor on            │
-                 │       cfg.agent_framework                    │
-                 │   • _build_apptainer_command: bind mounts    │
-                 │   • runner_ray_remote: runs on Ray worker    │
+   (one          │   • dispatches request to runner_ray_remote  │
+    instance)    │   • receives completed response in memory    │
                  └────────────────┬─────────────────────────────┘
                                   │ Ray
                                   ▼
                  ┌──────────────────────────────────────────────┐
-                 │ RunOpenHandsAgent.process_single_datapoint   │
+                 │ runner_ray_remote (worker-local scratch)     │
+                 │   • plain SWERolloutExecutor (no server init)│
+                 │   • _setup_params + bind mounts              │
+                 │   • RunOpenHandsAgent.process_single_datapoint│
                  │   (used for both harnesses; the in-SIF       │
                  │   command differs by agent_framework)        │
                  │                                              │
@@ -59,6 +58,7 @@ The wrapper supports two agent harnesses, selected by the `agent_framework` conf
                  │   wait agent → copy patch to /trajectories   │
                  │   wait eval  → produce report.json           │
                  │   postprocess (per-dataset)                  │
+                 │   serialize response → remove scratch tree   │
                  └──────────────────────────────────────────────┘
 ```
 
@@ -69,7 +69,7 @@ Two Apptainer containers are launched concurrently per instance:
 
 The two containers are launched at the same time so the eval container's spin-up cost (often tens of seconds for SWE-bench's harness) is hidden behind the agent's run time. The eval container blocks on `until [ -f <predictions> ]; do sleep 5; done` until the agent finishes.
 
-Concurrency across instances is bounded by `concurrency` (default 256) via an asyncio semaphore on the server, and Ray's `SPREAD` scheduling distributes per-instance workers across the cluster.
+Concurrency across instances is bounded by `concurrency` (default 256) via an asyncio semaphore on the server, and Ray's `SPREAD` scheduling distributes per-instance workers across the cluster. Each worker uses a unique directory under `runtime_scratch_dir` (default `/tmp`; must already exist on every Ray worker node); the directory is removed after the response is materialized in memory, so rollout artifacts never land in the Gym results dir or the shared setup trees.
 
 ---
 
@@ -81,7 +81,7 @@ This server keeps three kinds of state, anchored differently (see the global `re
 |-------|----------|-----------|
 | Packaged read-only assets (setup scripts, prompts, configs) | next to the code (`responses_api_agents/swe_agents/`) | ships with the install |
 | Setup trees (harness clones, venvs, toolchains; multi-GB) | `<cache_dir>/swe_agents/swe_*_setup` | reused across runs; safe to delete when no run is active |
-| Per-run results | `<results_dir>/swebench_results_<run_session_id>` | one per server process per run; never deleted automatically |
+| Per-rollout artifacts (instance datasets, scripts, harness runtime state, logs, trajectories, eval reports, metrics) | `<runtime_scratch_dir>/nemo_gym_swe_*/` on the Ray worker that ran the rollout | removed as soon as the rollout's response is materialized (success or failure) |
 
 Per-instance work is scheduled across the cluster (Ray `SPREAD`), and the generated agent/eval commands embed the setup-tree and results paths as host paths executed from **other nodes**. Both roots must therefore resolve to the same content at the same path on every node that runs rollout workers: a shared filesystem, or trees pre-staged identically per node (e.g. baked into the container image). A `cache_dir` populated only on the head node breaks remote rollouts.
 
@@ -93,8 +93,9 @@ Two compatibility notes: setup trees pre-staged next to the package (the layout 
 
 Implemented in `RunOpenHandsAgent.process_single_datapoint` (and `_run_golden_patch_verification` for the verify-only path):
 
-1. **Setup params** (`SWEBenchWrapper._setup_params`)
-   - Pick a per-instance `persistent_dir` under `swebench_results_<run_session_id>/<instance_id>_<timestamp>_<uuid>`. This is bind-mounted into both containers as `/trajectories_mount`.
+1. **Setup params** (`SWERolloutExecutor._setup_params`, on the Ray worker)
+   - Create a unique per-rollout directory under `runtime_scratch_dir`. This is bind-mounted into both containers as `/trajectories_mount`. Harness runtime state (opencode/OpenHands `evaluation/oh`, OpenHands `.eval_sessions` and `logs`, per-rollout prompt copies) lives under its `harness_runtime/` subdir instead of the shared setup trees.
+   - Rehydrate only the plain rollout executor from setup state prepared once by the Gym server. Ray workers never construct `SWEBenchWrapper` or run `model_post_init`; the request's rollout id / token-capture flag are resolved by the server and passed as task arguments.
    - Resolve the SIF for this instance (`_find_container`) — supports exact match, `__` → `_1776_` / `_s_` rewrites, and fuzzy `*<id>*.sif` glob, plus dataset-specific rules for `SWE-rebench` and `R2E-Gym`.
    - Write the single-row dataset JSONL (the original `instance_dict`) to a per-instance file and mount it as `/root/dataset/data.jsonl` so OpenHands does not call the HF dataset API at run time.
    - Pick the dataset-specific `BaseDatasetHarnessProcessor` (see below).
@@ -106,7 +107,8 @@ Implemented in `RunOpenHandsAgent.process_single_datapoint` (and `_run_golden_pa
 5. **Wait for the eval container** to finish or hit `swebench_tests_timeout` (default 30 min). It produces a `report.json` whose location is dataset-specific.
 6. **Postprocess** the report (per-dataset; e.g. SWE-rebench / NV-internal / SWE-bench-Ext do their parsing host-side because the eval images may not have python3).
 7. **Decide `mask_sample`** (GRPO) — see [GRPO masking and failure modes](#grpo-masking-and-failure-modes).
-8. **Build the response** — convert the OpenHands chat-completions trajectory to Responses-API items via `VLLMConverter`, attach the tool list, return reward = `1.0 if resolved else 0.0` and metrics.
+8. **Build the response** — convert the OpenHands chat-completions trajectory to Responses-API items via `VLLMConverter`, attach the tool list, return reward = `1.0 if resolved else 0.0` and metrics. Every (session, segment) trajectory is also materialized here into `metadata["session_responses"]`, which `run()` rehydrates into `SWEBenchVerifyResponse.responses`.
+9. **Return through Ray and remove worker scratch** — the in-memory response crosses the Ray hop; the scratch tree (logs, patches, evaluation files, metrics, trajectory JSONs) is deleted. Container commands still alive at that point are killed first.
 
 If `verify_golden_patch=true`, step 2–4 are skipped: the dataset's golden patch (`instance_dict["patch"]`) is written directly as the prediction and the eval container is the only thing that runs. This is a sanity check that a dataset sample's golden patch actually resolves under our local eval. Supported for `swe-bench-ext`, the SWE-bench / SWE-bench_Multilingual families (e.g. `princeton-nlp/SWE-bench_Verified`, `SWE-bench/SWE-bench_Multilingual`), and `SWE-rebench`. See [Golden-patch validation](#golden-patch-validation).
 
@@ -157,7 +159,7 @@ Key details:
 - **Workspace safety** — for datasets where the SIF does *not* bake `/workspace`, the agent script aborts if `/workspace` is mounted, because OpenHands' default behaviour deletes everything in `/workspace`. This check is intentionally skipped for `SWE-rebench*`, `nv-internal-1`, and `swe-bench-ext` whose images legitimately use `/workspace` or the agent works in `/{repo_name}` / `/app`.
 - **`cryptography<43` shim** — for `nv-internal-1` and `swe-bench-ext`, a `cryptography<43` wheel is installed into a temp dir and prepended to `PYTHONPATH`. This works around openssl/cryptography ABI mismatches in older base images.
 - **R2E-Gym test hiding** — when running the *agent* (not eval) under R2E-Gym, the wrapper deletes `/r2e_tests` and `/run_tests.sh` from `/`, `/root`, and `/testbed` so the agent can't peek at the held-out tests.
-- **Trajectories** — after the agent finishes, the wrapper copies `output.jsonl` and the latest `llm_completions/*/*.json` out of OpenHands' per-run eval output directory and into `<persistent_dir>/trajectories/<instance_id>/`, then deletes the OpenHands-side dir to keep the shared setup tree clean.
+- **Trajectories** — writable harness state (`.eval_sessions`, logs, and `evaluation/oh`) is bind-mounted from worker-local scratch rather than the shared harness checkout. Standard, multilingual, and R2E-Gym evaluators run from rollout-local working directories while their shared setup trees are mounted read-only, and apptainer runs with `--no-mount home,tmp,hostfs,cwd,bind-paths --pwd /` (inherited `*_BIND` env unset) so the sandbox does not see the server's working directory. After the agent finishes, the wrapper copies the latest completion per (session, segment) into the temporary trajectories root, builds the API response, and removes the whole scratch tree.
 
 ---
 
@@ -419,6 +421,9 @@ The full schema lives in `SWEBenchWrapperConfig` (and the per-override `AgentPro
 | `opencode_subagents_enabled`       | `false`                                           | (opencode only) Enable opencode's `task` tool so the main agent can spawn subagent sessions. See [Subagents](#opencode-integration). |
 | `openhands_should_log`             | `false`                                           | If true, sets `LOG_LEVEL=DEBUG`, `LOG_TO_FILE=true`, etc.               |
 | `debug`                            | `false`                                           | Enables Profiler around the agent run + dumps callgrind/dot/png.        |
+| `runtime_scratch_dir`              | `/tmp`                                            | Existing node-local directory used for per-rollout scratch. Every Ray worker creates and removes its own unique child directory here. |
+| `opencode_prompt_variant`          | `legacy`                                          | (opencode only) `legacy` = `prompts/opencode_harness/user_prompt_legacy.txt`; `upstream` = `prompts/opencode_harness/user_prompt.txt` (adds the "Important rules to follow" block). Also applies when `agent_prompt_overrides` names the in-tree `user_prompt.txt`. |
+| `mask_unresolved_agent_errors`     | `false`                                           | `false`: mask `max_iteration`/`context_window` rollouts only when resolved (legacy). `true`: mask all of them (upstream). |
 
 Bundled YAML configs:
 
@@ -596,7 +601,7 @@ jq -C . swebench-verified.openhands.qwen3-30b-coder.jsonl | less -R
 
 ## Output format
 
-Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-API conversion of the OpenHands chat-completion trajectory, whose `tools` is the function-tool list the agent saw, and whose `metadata` carries `metrics` (a `SWEBenchMetrics` JSON) and the full `instance_config`. The same metrics are written incrementally to `<persistent_dir>/nemo_gym_metrics.json` for profiling and post-run inspection.
+Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-API conversion of the OpenHands chat-completion trajectory, whose `tools` is the function-tool list the agent saw, and whose `metadata` carries `metrics` (a `SWEBenchMetrics` JSON) and the full `instance_config`. Metrics are written incrementally only inside worker-local scratch while the rollout is active; the response carries their final value before scratch is removed.
 
 `run` wraps that in `SWEBenchVerifyResponse`:
 
@@ -669,7 +674,7 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 
 `SWEBenchWrapperInstanceConfig.mask_sample` is set to `True` (so downstream RL drops the gradient for this rollout) when:
 
-1. The patch resolved the tests **but** the agent terminated in a `max_iteration` or `context_window` error — the reward is accidental.
+1. The patch resolved the tests **but** the agent terminated in a `max_iteration` or `context_window` error — the reward is accidental. With `mask_unresolved_agent_errors=true` these rollouts are masked whether or not they resolved.
 2. The eval container hit `swebench_tests_timeout` — reward is unreliable.
 3. The agent hit `swebench_agent_timeout` (wall-clock) regardless of `resolved`.
 4. The memory watchdog killed the **agent** container (OOM).
@@ -702,13 +707,13 @@ The enroot/apptainer sandbox this runs under has no cgroup support (v1 + fakeroo
 
 ## Debug / profiling
 
-Set `debug=true` to wrap the agent run in a `Profiler` (callgrind output), then auto-render `.dot` and `.png` graphs via `gprof2dot` + `pydot` after the run. Profiling output lands under `<persistent_dir>/profiling/`. Apptainer also exports `NG_PROFILING_DIR` into the agent container so the OpenHands fork can dump matching profiles.
+Set `debug=true` to wrap the agent run in a `Profiler` (callgrind output), then auto-render `.dot` and `.png` graphs via `gprof2dot` + `pydot` after the run. Profiling output lands under `<persistent_dir>/profiling/` in worker-local scratch and is removed with the rest of the rollout artifacts. Apptainer also exports `NG_PROFILING_DIR` into the agent container so the OpenHands fork can dump matching profiles.
 
 Set `openhands_should_log=true` to flip OpenHands to `LOG_LEVEL=DEBUG`, `LOG_TO_FILE=true`, and write per-event logs. Otherwise the wrapper aggressively quiets OpenHands (`LOG_LEVEL=CRITICAL`, all `DEBUG_*` flags off).
 
-Per-instance Apptainer stdout/stderr is always streamed to `<persistent_dir>/apptainer_logs/<instance_id>_{agent,eval}.log` regardless of these flags.
+Per-instance Apptainer stdout/stderr is streamed to `<persistent_dir>/apptainer_logs/<instance_id>_{agent,eval}.log` in worker-local scratch while the rollout is active, then removed. Completed-run inspection should use the trajectory and metrics embedded in the returned rollout JSONL; the trace converter below requires deliberately preserving rollout directories (e.g. a debug copy) outside this wrapper.
 
-To inspect a completed run as a timeline, convert the precise per-rollout metrics to Chrome Trace Event Format:
+To inspect preserved rollouts as a timeline, convert the precise per-rollout metrics to Chrome Trace Event Format:
 
 ```bash
 python responses_api_agents/swe_agents/scripts/swe_trace_converter.py \
@@ -719,4 +724,4 @@ python responses_api_agents/swe_agents/scripts/swe_trace_converter.py \
 
 Open the generated `.json` file in [Perfetto](https://ui.perfetto.dev/) to explore rollout concurrency and per-turn timing.
 
-For the opencode harness, the agent script installs an `EXIT` trap (`opencode_log_trap`) that always copies opencode's internal XDG data dir (`/root/.local/share/opencode`) and any `/tmp/bench-*/data/log` directories back to `<persistent_dir>/opencode_logs/` — useful for debugging opencode-internal issues (e.g. session/storage errors) that don't show up in the `llm_completions` trajectory dump.
+For the opencode harness, the agent script installs an `EXIT` trap (`opencode_log_trap`) that always copies opencode's internal XDG data dir (`/root/.local/share/opencode`) and any `/tmp/bench-*/data/log` directories back to `<persistent_dir>/opencode_logs/` (worker-local scratch, removed when the rollout returns) — useful for debugging opencode-internal issues (e.g. session/storage errors) that don't show up in the `llm_completions` trajectory dump.
