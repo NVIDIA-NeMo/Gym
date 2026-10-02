@@ -121,7 +121,7 @@ export SUPPORT_MODEL_API_KEY="<your-api-key>"
 Gym starts three **Model Server** instances. These are inference proxies, not the User/Assistant Agent Servers
 or the Resources Server:
 
-- **`user_model`** serves the User Agent, which produces simulated User messages. Its upstream endpoint is
+- **`user_model`** belongs to the User Agent, which produces simulated User messages. Its upstream endpoint is
   configured with `user_model_base_url`, `user_model_api_key`, and `user_model_name`.
 - **`policy_model`** serves the Assistant Agent and produces the system-under-test responses. Its upstream
   endpoint is configured with `policy_base_url`, `policy_api_key`, and `policy_model_name`.
