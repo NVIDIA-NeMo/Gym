@@ -55,7 +55,7 @@ from nemo_gym.hf_utils import (
     download_hf_dataset_as_jsonl,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.single_agent_task import materialize_single_agent_task
+from nemo_gym.single_agent_turn_task import materialize_single_agent_task
 from nemo_gym.task_data import (
     TaskDataSchemaError,
     TaskDataValidator,

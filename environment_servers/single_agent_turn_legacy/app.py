@@ -23,7 +23,7 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.single_agent_task import materialize_single_agent_task
+from nemo_gym.single_agent_turn_task import materialize_single_agent_task
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
