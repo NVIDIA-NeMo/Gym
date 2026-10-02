@@ -384,7 +384,9 @@ class TestPackageStore:
             calls.append((method, path, params, body))
             if path == "/rest/v1/dataset_version_tag":
                 assert params["tag"] == f"eq.{tag}" and params["package.name"] == "eq.terminal-bench"
-                return json.dumps([{"dataset_version": {"id": "dv-1", "content_hash": "d" * 64}, "package": {}}]).encode()
+                return json.dumps(
+                    [{"dataset_version": {"id": "dv-1", "content_hash": "d" * 64}, "package": {}}]
+                ).encode()
             if path == "/rest/v1/dataset_version":
                 return json.dumps([{"id": "dv-1", "content_hash": "d" * 64, "package": {}}]).encode()
             if path == "/rest/v1/dataset_version_task":
@@ -394,7 +396,10 @@ class TestPackageStore:
                 rows = [
                     {
                         "task_version_id": f"tv-{name}",
-                        "task_version": {"content_hash": digest, "package": {"name": name, "org": {"name": "terminal-bench"}}},
+                        "task_version": {
+                            "content_hash": digest,
+                            "package": {"name": name, "org": {"name": "terminal-bench"}},
+                        },
                     }
                     for name, digest in sorted(digests.items())
                 ]
@@ -402,7 +407,9 @@ class TestPackageStore:
             if path == "/rest/v1/rpc/resolve_task_version":
                 name = body["p_name"]
                 assert body["p_ref"] == f"sha256:{digests[name]}"
-                return json.dumps({"content_hash": f"sha256:{digests[name]}", "archive_path": f"pkgs/{name}.tar.gz"}).encode()
+                return json.dumps(
+                    {"content_hash": f"sha256:{digests[name]}", "archive_path": f"pkgs/{name}.tar.gz"}
+                ).encode()
             if path.startswith("/storage/v1/object/packages/pkgs/"):
                 name = path.rsplit("/", 1)[1].removesuffix(".tar.gz")
                 return self.make_archive_for(name)
@@ -418,7 +425,9 @@ class TestPackageStore:
         folders = {name: write_task(tmp_path / "src" / name) for name in ("beta", "alpha")}
         module, digests, calls = self.fake_store(tmp_path, monkeypatch, folders)
 
-        folder = module.fetch_package_dataset(module.PackageRef("terminal-bench", "terminal-bench", "4.0.0"), tmp_path / "datasets")
+        folder = module.fetch_package_dataset(
+            module.PackageRef("terminal-bench", "terminal-bench", "4.0.0"), tmp_path / "datasets"
+        )
 
         assert folder == tmp_path / "datasets" / "terminal-bench-4.0.0"
         assert sorted(p.name for p in folder.iterdir() if p.is_dir()) == ["alpha", "beta"]
@@ -430,10 +439,15 @@ class TestPackageStore:
             "source": "harbor-package-store",
             "content_hash": "sha256:" + "d" * 64,
         }
-        assert manifest["tasks"]["beta"] == {"package": "terminal-bench/beta", "content_hash": f"sha256:{digests['beta']}"}
+        assert manifest["tasks"]["beta"] == {
+            "package": "terminal-bench/beta",
+            "content_hash": f"sha256:{digests['beta']}",
+        }
         # A second fetch downloads nothing: every folder's digest already matches.
         downloads_before = sum(1 for c in calls if c[1].startswith("/storage/"))
-        module.fetch_package_dataset(module.PackageRef("terminal-bench", "terminal-bench", "4.0.0"), tmp_path / "datasets")
+        module.fetch_package_dataset(
+            module.PackageRef("terminal-bench", "terminal-bench", "4.0.0"), tmp_path / "datasets"
+        )
         assert sum(1 for c in calls if c[1].startswith("/storage/")) == downloads_before
         # The tasks load like any local folder.
         assert [task.task_id for task in discover_tasks(folder)] == ["alpha", "beta"]
@@ -445,7 +459,9 @@ class TestPackageStore:
         (folders["alpha"] / "instruction.md").write_text("tampered\n")
         module.PackageStore.make_archive_for = staticmethod(lambda name: self.make_archive(folders[name]))
         with pytest.raises(module.PackageStoreError, match="content hash mismatch"):
-            module.fetch_package_dataset(module.PackageRef("terminal-bench", "terminal-bench", "4.0.0"), tmp_path / "datasets")
+            module.fetch_package_dataset(
+                module.PackageRef("terminal-bench", "terminal-bench", "4.0.0"), tmp_path / "datasets"
+            )
         assert not (tmp_path / "datasets" / "terminal-bench-4.0.0" / "alpha" / "task.toml").exists()
 
     def test_folder_names_and_digest_refs(self):
@@ -479,15 +495,23 @@ class TestSeparateVerifierFields:
 
         config = HarborTaskConfig.model_validate(
             {
-                "artifacts": ["/app/output/report.json", {"source": "/var/log/api", "destination": "api-logs", "service": "api"}],
+                "artifacts": [
+                    "/app/output/report.json",
+                    {"source": "/var/log/api", "destination": "api-logs", "service": "api"},
+                ],
                 "verifier": {
                     "environment_mode": "separate",
                     "environment": {"docker_image": "org/verifier:1", "cpus": 2},
-                    "collect": [{"command": "kafka-dump > /logs/artifacts/topics.txt", "service": "kafka", "timeout_sec": 10}],
+                    "collect": [
+                        {"command": "kafka-dump > /logs/artifacts/topics.txt", "service": "kafka", "timeout_sec": 10}
+                    ],
                 },
             }
         )
-        assert [a.host_path for a in config.artifacts] == [PurePosixPath("app/output/report.json"), PurePosixPath("api-logs")]
+        assert [a.host_path for a in config.artifacts] == [
+            PurePosixPath("app/output/report.json"),
+            PurePosixPath("api-logs"),
+        ]
         assert config.artifacts[1].service == "api"
         assert config.verifier.collect[0].service == "kafka" and config.verifier.collect[0].timeout_sec == 10
         assert not config.is_shared_verifier
@@ -507,6 +531,23 @@ class TestCli:
         assert prepared.taskset == "ds"
         assert prepared.rows_path == tmp_path / "out" / "ds" / "tasks.jsonl"
         assert [t.task_id for t in prepared.tasks] == ["a"]
+
+    def test_prepare_skips_excluded_and_compose_tasks(self, tmp_path, capsys):
+        folder = tmp_path / "ds"
+        for name in ("keep", "gpu-task", "grouped"):
+            write_task(folder / name)
+        (folder / "grouped" / "environment" / "docker-compose.yaml").write_text("services: {}\n")
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", exclude=["gpu-*"])
+        assert [task.task_id for task in prepared.tasks] == ["keep"]
+        out = capsys.readouterr().out
+        assert "Skipping gpu-task: excluded by --exclude-tasks 'gpu-*'" in out
+        assert "Skipping grouped: Compose environments are not supported yet" in out
+        assert len((prepared.rows_path).read_text().splitlines()) == 1
+        with pytest.raises(ValueError, match="No runnable task"):
+            prepare_target(str(folder), output_root=tmp_path / "out2", exclude=["*"])
+        only = prepare_target(str(folder), output_root=tmp_path / "out3", only=["gpu-*"])
+        assert [task.task_id for task in only.tasks] == ["gpu-task"]
+        assert "Skipping keep: not in --only-tasks" in capsys.readouterr().out
 
     def test_resolve_agent_accepts_short_name(self):
         selection = resolve_agent("simple")
@@ -538,9 +579,12 @@ class TestCli:
         assert written["environment_server_routes"] == {"ds": "harbor_ds_environment"}
         assert written["harbor_ds_agent"]["responses_api_agents"]["hermes_agent"]["enabled_toolsets"] == ["terminal"]
         terminus = AgentSelection(tmp_path / "t.yaml", "terminus_2_sandboxed_agent", "terminus_2_sandboxed_agent")
-        _, _ = build_run(prepared, terminus, sandbox=None, overrides=[])
-        written = yaml.safe_load(config_path.read_text())
+        terminus_path, _ = build_run(prepared, terminus, sandbox=None, overrides=[])
+        # Each agent gets its own file, so the hermes config above is untouched.
+        assert terminus_path != config_path and terminus_path.name == "run_config_terminus_2_sandboxed_agent.yaml"
+        written = yaml.safe_load(terminus_path.read_text())
         assert written["harbor_ds_agent"]["responses_api_agents"]["terminus_2_sandboxed_agent"]["num_workers"] == 1
+        assert "hermes_agent" in yaml.safe_load(config_path.read_text())["harbor_ds_agent"]["responses_api_agents"]
         assert "+split=train" in tokens
         assert not any(token.startswith("+agent_name") for token in tokens)
         config_paths = next(token for token in tokens if token.startswith("+config_paths="))
