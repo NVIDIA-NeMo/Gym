@@ -293,6 +293,44 @@ digest-covered `media` summary. Deploy the paired RL changes with this adapter; 
 checkpoints written in either older format need a separate migration. Supported
 processors and modalities are enforced by the framework's inference worker.
 
+## Retire capture ledgers
+
+With external staging, the model server keeps a token-free capture ledger for each rollout:
+one `<rollout_id>.lineage.jsonl` file in the lineage store's directory. Gym cannot tell when
+the training framework is done with a rollout, so the framework removes the ledger itself,
+with the same two operations the complete-record token store uses:
+
+- **Retire** every rollout the framework is done with: a finished rollout once its manifest has
+  been read and the receipt built from it is durable, and an abandoned rollout as soon as the
+  framework gives up on it. Retiring deletes the ledger and keeps an empty
+  `<rollout_id>.lineage.retired` fence, so a call that finishes later is discarded instead of
+  starting a new ledger. That covers an abandoned agent that keeps running, and a client retry
+  that ran a finished rollout twice. This matches `TokenSource.drop`, which keeps a retired
+  tombstone.
+- **Delete** retired rollouts once nothing of those attempts can still write, for example after
+  every Gym server has restarted or at the end of the run, to remove their fences. Delete a
+  rollout ID before reusing it. Deleting removes the ledger and any fence. This matches
+  `TokenCaptureStore.delete`.
+
+Send each request to the model server that served the rollout. A model server only sees the
+ledgers in its own lineage directory, and reports any other rollout as `absent`.
+
+```http
+POST /training-token-capture/control/rollouts/retire
+POST /training-token-capture/control/rollouts/delete
+Authorization: Bearer <control auth token>
+
+{"rollout_ids": ["<rollout_id>", ...]}
+```
+
+`RolloutControlClient.retire` and `RolloutControlClient.delete` send the same requests and
+split long lists into batches of at most 4096 IDs. The reply lists the rollouts whose ledger
+was removed under `removed`, and the rest under `absent`. Both operations are no-ops when
+repeated, so a failed batch can be retried as is.
+
+Neither operation touches staged token data. The framework removes the data it staged, and
+must keep any staged data that a checkpoint it may restore still refers to.
+
 ## Limitations
 
 The model-server boundary observes model HTTP requests and responses. It can record tool calls,

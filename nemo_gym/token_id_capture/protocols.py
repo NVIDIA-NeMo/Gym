@@ -41,6 +41,7 @@ That closes the window where the final call's entry is lost without a trace.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -133,6 +134,7 @@ class CaptureLedger(LineageResolver, Protocol):
     ``record`` publishes a successfully staged call for parent resolution.
     ``record_failure`` records a call that did not commit.
     ``manifest`` returns both kinds of rows without including token arrays.
+    ``retire`` and ``delete`` remove the rows of rollouts the framework no longer needs.
     Records must be visible to every serving worker before ``record`` returns.
     """
 
@@ -165,6 +167,35 @@ class CaptureLedger(LineageResolver, Protocol):
 
     async def has_rows(self, rollout_id: str) -> bool:
         """Return whether any ledger row (committed or failed) exists."""
+        ...
+
+    async def retire(self, rollout_ids: Sequence[str]) -> dict:
+        """Remove the ledgers of rollouts the framework is done with, and fence them.
+
+        Retire a finished rollout once its manifest has been read and the receipt built from it is
+        durable, and an abandoned rollout as soon as the framework gives up on it. Like
+        ``TokenSource.drop`` on the complete-record store, retiring keeps a fence: later ``record`` and
+        ``record_failure`` calls for the rollout are discarded instead of starting a new ledger. Even a
+        finished rollout can still write: a client retry can run it twice, and the second execution
+        writes after the first one returned.
+        Retiring again is a no-op, so retrying a batch is safe.
+        Staged token data is untouched: the framework that staged it also removes it.
+
+        The result validates as ``staging.records.RolloutRemoval``.
+        """
+        ...
+
+    async def delete(self, rollout_ids: Sequence[str]) -> dict:
+        """Remove the ledgers and fences of rollouts, as ``TokenCaptureStore.delete`` does.
+
+        Delete retired rollouts once nothing of those attempts can still write, for example after every
+        Gym server has restarted or at the end of the run, which removes their fences. Delete a rollout
+        ID before reusing it, so the new execution starts from an empty ledger. Deleting again is a
+        no-op.
+        Staged token data is untouched: the framework that staged it also removes it.
+
+        The result validates as ``staging.records.RolloutRemoval``.
+        """
         ...
 
 
