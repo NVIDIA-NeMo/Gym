@@ -1,0 +1,5 @@
+# Shared local-SEC library. Not a standalone server: these are the dependencies
+# its own tests need, and every consumer installs them again for itself.
+-e nemo-gym[dev] @ ../../
+aiohttp>=3.14.1
+beautifulsoup4>=4.12.0

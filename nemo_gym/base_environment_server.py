@@ -11,12 +11,13 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Generic, TypeVar
 
 from anyio import CancelScope
-from fastapi import FastAPI
+from fastapi import Body, FastAPI
 from pydantic import ConfigDict, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
-from nemo_gym.config_types import BaseRunServerInstanceConfig
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure, EpisodeId
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SimpleServer
 
 
@@ -147,6 +148,13 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         run_endpoint.__annotations__["body"] = self.request_model
         run_endpoint.__annotations__["return"] = self.response_model
         app.post("/run", response_model=self.response_model)(run_endpoint)
+
+        async def aggregate_metrics_endpoint(body: Any) -> Any:
+            return await self.aggregate_metrics(body)
+
+        aggregate_metrics_endpoint.__annotations__["body"] = AggregateMetricsRequest
+        aggregate_metrics_endpoint.__annotations__["return"] = AggregateMetrics
+        app.post("/aggregate_metrics", response_model=AggregateMetrics)(aggregate_metrics_endpoint)
         return app
 
     async def run_request(self, request: EpisodeRequestT) -> EpisodeResponseT:
@@ -174,34 +182,37 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         response: EpisodeResponseT
         cancelled: asyncio.CancelledError | None = None
         deadline = asyncio.timeout(self.config.default_episode_timeout_seconds)
-        try:
+        # Every downstream call of this episode, including final cleanup, carries its attempt-qualified
+        # rollout id, so Resources and Model Server calls stay correlated with the rollout.
+        with rollout_context(request.episode_id.capture_key):
             try:
-                async with deadline:
-                    response = await self.run(request, cleanup)
-            except TimeoutError as error:
-                if deadline.expired():
-                    response = self.failure_response(
-                        request,
-                        EpisodeFailure(
-                            message="Episode timed out",
-                            terminal=False,
-                        ),
-                    )
-                else:
+                try:
+                    async with deadline:
+                        response = await self.run(request, cleanup)
+                except TimeoutError as error:
+                    if deadline.expired():
+                        response = self.failure_response(
+                            request,
+                            EpisodeFailure(
+                                message="Episode timed out",
+                                terminal=False,
+                            ),
+                        )
+                    else:
+                        response = self._unhandled_failure_response(request, error)
+                except HandledEpisodeError as error:
+                    response = self.failure_response(request, error.failure)
+                except asyncio.CancelledError as error:
+                    cancelled = error
+                except Exception as error:
                     response = self._unhandled_failure_response(request, error)
-            except HandledEpisodeError as error:
-                response = self.failure_response(request, error.failure)
-            except asyncio.CancelledError as error:
-                cancelled = error
-            except Exception as error:
-                response = self._unhandled_failure_response(request, error)
-        finally:
-            try:
-                with CancelScope(shield=True):
-                    await cleanup.aclose()
             finally:
-                if acquired and self._admission is not None:
-                    self._admission.release()
+                try:
+                    with CancelScope(shield=True):
+                        await cleanup.aclose()
+                finally:
+                    if acquired and self._admission is not None:
+                        self._admission.release()
 
         if cancelled is not None:
             raise cancelled
@@ -239,3 +250,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             raise ValueError("response episode_id does not match request")
         if response.task_id != request.task.task_id:
             raise ValueError("response task_id does not match request")
+
+    @abstractmethod
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Aggregate per-rollout scores into task-level metrics."""

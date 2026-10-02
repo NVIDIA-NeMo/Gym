@@ -25,3 +25,11 @@ policy_generation_model:
 
 policy_tool_judge_model:
   _copy: policy_model
+
+conversational_tool_use_policy_tool_generation_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: conversational_tool_use_policy_tool_generation
