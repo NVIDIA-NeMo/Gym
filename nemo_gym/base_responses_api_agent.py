@@ -127,6 +127,7 @@ class BaseResponsesAPIAgent(BaseServer):
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
+    routes_sessions_to_owner = True
 
     def effective_tool_accesses(self, request: AgentSeedSessionRequest) -> list[ToolAccess]:
         """Overlay episode-scoped tool access onto configured declarations by name."""
