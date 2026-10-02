@@ -14,8 +14,10 @@
 # limitations under the License.
 """Runs the Claude Code CLI inside the task's own sandbox.
 
-``SandboxedHarnessAgent`` attaches to the sandbox the resources server seeded, runs this agent's
-command once under ``sandbox_timeout`` and then calls ``_harness_collect``. The command:
+Same shape as ``opencode_sandboxed_agent``: the resources server seeds the task and hands back its
+sandbox, this agent attaches to it, runs one command under ``sandbox_timeout``, reads the
+transcript the CLI left behind, calls ``/verify`` and stops the sandbox. Gym stays on the host;
+nothing but the Claude Code binary is needed inside the sandbox. The command:
 
 1. installs Claude Code. A staged binary is copied out of its read-only mount and made executable,
    since S3 mounts keep no file modes. Without a staged binary the official installer runs, which
@@ -34,18 +36,31 @@ import json
 import sys
 import tarfile
 import tempfile
+from asyncio import Semaphore
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
+from time import time
 from traceback import format_exc
-from typing import Any, ClassVar, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from uuid import uuid4
 
 from fastapi import Request
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
+from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.base_responses_api_agent import (
+    BaseResponsesAPIAgentConfig,
+    Body,
+    SimpleResponsesAPIAgent,
+)
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
@@ -56,30 +71,43 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.server_utils import SESSION_ID_KEY, get_server_url, is_nemo_gym_fastapi_entrypoint
-from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
-from responses_api_agents.sandboxed_harness_agent.app import (
-    HarnessTranscript,
-    SandboxedHarnessAgent,
-    SandboxedHarnessAgentConfig,
-    SandboxedHarnessAgentRunRequest,
-    SandboxedHarnessAgentVerifyRequest,
-    SandboxedHarnessAgentVerifyResponse,
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ObservationGap,
+    SandboxObservation,
+    ToolCallObservation,
 )
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
+from nemo_gym.sandbox.agent_tools import sandbox_server_url, verify_agent_response
+from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.utils import cpu_cap_env
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 
 
 STREAM_FNAME = "stream.jsonl"
 TRANSCRIPTS_TAR_FNAME = "transcripts.tar"
+FINISHED_MARKER = "Claude Code run finished"
 OFFICIAL_INSTALLER_URL = "https://claude.ai/install.sh"
 # The Gym model server does not authenticate; Claude Code only needs some credential to start.
 PLACEHOLDER_API_KEY = "nemo-gym"  # pragma: allowlist secret
 # Claude Code's model name for messages it makes up itself, such as API error notices.
 SYNTHETIC_MODEL = "<synthetic>"
+# The tools that start a subagent (Task is the pre-2.1 name Claude Code still accepts).
+SUBAGENT_TOOLS = frozenset({"Agent", "Task"})
+# How Claude Code reports a tool call it refused to run, and the refusal for a tool name that does
+# not exist (for example a lowercase ``read`` from a model used to another harness).
+TOOL_ERROR_TAG = "<tool_use_error>"
+UNKNOWN_TOOL_MESSAGE = "No such tool available"
+# The error text of a ``result`` event whose last request no longer fit the model's context.
+CONTEXT_OVERFLOW_MESSAGE = "Prompt is too long"
 
 
-class ClaudeCodeSandboxedAgentConfig(SandboxedHarnessAgentConfig):
+class ClaudeCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
+    resources_server: ResourcesServerRef
+    model_server: ModelServerRef
+
     claude_code_version: str
     # Binaries staged inside the sandbox, e.g. on a read-only bucket mount. The musl build is only
     # needed for musl-based task images. With no staged binary the official installer runs.
@@ -124,17 +152,66 @@ class ClaudeCodeSandboxedAgentConfig(SandboxedHarnessAgentConfig):
     claude_code_settings: Dict[str, Any] = Field(default_factory=dict)
     claude_code_env: Dict[str, str] = Field(default_factory=dict)
 
+    concurrency: int = Field(default=64, gt=0)
+    # Grade a failed run (exec error, nonzero exit, missing transcript, error result) as an empty
+    # response instead of whatever patch it left behind. The verifier must score an empty
+    # response as an unmasked zero.
+    execution_failure_reward_zero: bool = False
+    # Where each rollout's transcript and generation receipt are kept; this agent's ``results``
+    # directory by default.
+    artifacts_dir: Optional[str] = None
 
-ClaudeCodeSandboxedAgentRunRequest = SandboxedHarnessAgentRunRequest
-ClaudeCodeSandboxedAgentVerifyRequest = SandboxedHarnessAgentVerifyRequest
+    # Sandbox config
+    sandbox_provider: str
+    sandbox_config: Dict[str, Any]
+    sandbox_timeout: float
+
+    debug: bool = False
 
 
-class ClaudeCodeSandboxedAgentVerifyResponse(SandboxedHarnessAgentVerifyResponse):
+class ClaudeCodeSandboxedAgentRunRequest(BaseRunRequest):
+    # Allow for benchmark params to propagate properly
+    model_config = ConfigDict(extra="allow")
+
+
+class ClaudeCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
+    # Allow for benchmark params to propagate properly
+    model_config = ConfigDict(extra="allow")
+
+
+class ClaudeCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
+    # Allow for benchmark params to propagate properly
+    model_config = ConfigDict(extra="allow")
+
     claude_code_results_fpath: str
     claude_code_run_stdout: str
     claude_code_run_stderr: str
     claude_code_finished: bool
     claude_code_export_found: bool
+    claude_code_exit_code: Optional[int] = None
+    claude_code_error_type: Optional[str] = None
+    claude_code_failed: bool = False
+    # How the session ended, from its final ``result`` event: finished on its own, ended with an
+    # error (``claude_code_context_overflow`` names the one that matters most), or never wrote one
+    # (the deadline or a crash cut it off).
+    claude_code_result_success: bool = False
+    claude_code_result_error: bool = False
+    claude_code_result_missing: bool = True
+    claude_code_context_overflow: bool = False
+    claude_code_duration_s: Optional[float] = None
+    # What the session did: model turns of the main conversation and of subagents, subagent
+    # launches, tool calls, and tool calls Claude Code refused, of which the ones naming a tool that
+    # does not exist.
+    claude_code_main_turns: int = 0
+    claude_code_subagent_turns: int = 0
+    claude_code_subagent_calls: int = 0
+    claude_code_tool_calls: int = 0
+    claude_code_tool_errors: int = 0
+    claude_code_unknown_tool_calls: int = 0
+    ng_agent_observations: Optional[AgentObservationBundle] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 @dataclass(frozen=True)
@@ -174,6 +251,15 @@ class ClaudeCodeStream:
     compaction_attempts: List[Dict[str, str]]
     compaction_boundaries: int
     invalid_lines: int
+    # Distinct assistant message ids, in the main conversation and under a parent_tool_use_id.
+    main_turns: int = 0
+    subagent_turns: int = 0
+    # Tool calls of the main conversation that started a subagent.
+    subagent_calls: int = 0
+    # Tool calls, main conversation and subagents alike, and the ones Claude Code refused to run.
+    tool_calls: int = 0
+    tool_errors: int = 0
+    unknown_tool_calls: int = 0
 
 
 def _tool_result_text(content: Any) -> str:
@@ -218,6 +304,14 @@ def _usage_from_messages_usage(usages: Iterable[Dict[str, Any]]) -> Optional[NeM
     )
 
 
+def _content_blocks(content: Any) -> List[Dict[str, Any]]:
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if isinstance(content, list):
+        return [block for block in content if isinstance(block, dict)]
+    return []
+
+
 def parse_claude_code_stream(lines: Iterable[str]) -> ClaudeCodeStream:
     """Convert ``claude -p --output-format stream-json --verbose`` output into Responses items.
 
@@ -226,7 +320,8 @@ def parse_claude_code_stream(lines: Iterable[str]) -> ClaudeCodeStream:
     call and result. Messages Claude Code makes up itself (model ``<synthetic>``, e.g. API error
     notices) are not model output and are left out too. Claude Code emits one ``assistant`` event
     per content block, all with the same message id, so usage is taken once per message id
-    unless the final ``result`` event reports the session total.
+    unless the final ``result`` event reports the session total. The counters cover the main
+    conversation and subagents alike.
     """
     output: List[NeMoGymResponseOutputItem] = []
     usage_by_message: Dict[str, Dict[str, Any]] = {}
@@ -235,6 +330,9 @@ def parse_claude_code_stream(lines: Iterable[str]) -> ClaudeCodeStream:
     compaction_attempts: List[Dict[str, str]] = []
     compaction_boundaries = 0
     invalid_lines = 0
+    main_messages: set[str] = set()
+    subagent_messages: set[str] = set()
+    subagent_calls = tool_calls = tool_errors = unknown_tool_calls = 0
 
     for line in lines:
         line = line.strip()
@@ -269,26 +367,35 @@ def parse_claude_code_stream(lines: Iterable[str]) -> ClaudeCodeStream:
         message = event.get("message")
         if not isinstance(message, dict):
             continue
+        in_subagent = bool(event.get("parent_tool_use_id"))
+        blocks = _content_blocks(message.get("content"))
         if event_type == "assistant":
             if message.get("model") == SYNTHETIC_MODEL:
                 continue
             message_id = message.get("id")
-            if isinstance(message_id, str) and isinstance(message.get("usage"), dict):
-                usage_by_message[message_id] = message["usage"]
-        if event.get("parent_tool_use_id"):
+            if isinstance(message_id, str):
+                (subagent_messages if in_subagent else main_messages).add(message_id)
+                if isinstance(message.get("usage"), dict):
+                    usage_by_message[message_id] = message["usage"]
+            for block in blocks:
+                if block.get("type") == "tool_use":
+                    tool_calls += 1
+                    if not in_subagent and block.get("name") in SUBAGENT_TOOLS:
+                        subagent_calls += 1
+        elif event_type == "user":
+            for block in blocks:
+                if block.get("type") != "tool_result":
+                    continue
+                text = _tool_result_text(block.get("content"))
+                if block.get("is_error") is True or TOOL_ERROR_TAG in text:
+                    tool_errors += 1
+                    if UNKNOWN_TOOL_MESSAGE in text:
+                        unknown_tool_calls += 1
+        if in_subagent:
             continue
 
-        content = message.get("content")
         if event_type == "assistant":
-            if isinstance(content, str):
-                blocks: List[Any] = [{"type": "text", "text": content}]
-            elif isinstance(content, list):
-                blocks = content
-            else:
-                blocks = []
             for block in blocks:
-                if not isinstance(block, dict):
-                    continue
                 block_type = block.get("type")
                 if block_type == "thinking" and block.get("thinking"):
                     output.append(
@@ -320,11 +427,9 @@ def parse_claude_code_stream(lines: Iterable[str]) -> ClaudeCodeStream:
                             status="completed",
                         )
                     )
-        elif event_type == "user" and isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_result":
-                    if not isinstance(block.get("tool_use_id"), str):
-                        continue
+        elif event_type == "user":
+            for block in blocks:
+                if block.get("type") == "tool_result" and isinstance(block.get("tool_use_id"), str):
                     output.append(
                         NeMoGymFunctionCallOutput(
                             call_id=block["tool_use_id"],
@@ -345,36 +450,138 @@ def parse_claude_code_stream(lines: Iterable[str]) -> ClaudeCodeStream:
         compaction_attempts=compaction_attempts,
         compaction_boundaries=compaction_boundaries,
         invalid_lines=invalid_lines,
+        main_turns=len(main_messages),
+        subagent_turns=len(subagent_messages),
+        subagent_calls=subagent_calls,
+        tool_calls=tool_calls,
+        tool_errors=tool_errors,
+        unknown_tool_calls=unknown_tool_calls,
     )
 
 
+def context_overflow(result: Optional[Dict[str, Any]]) -> bool:
+    """Whether the session ended because a request no longer fit the model's context."""
+    if result is None or result.get("is_error") is not True:
+        return False
+    text = result.get("result")
+    return isinstance(text, str) and text.lstrip().startswith(CONTEXT_OVERFLOW_MESSAGE)
+
+
 def invocation_outcome(result: Optional[Dict[str, Any]]) -> tuple[str, Optional[str]]:
-    """Map the final ``result`` event to an invocation status and error type."""
+    """Map the final ``result`` event to an invocation status and error type.
+
+    Claude Code reports an error either as an ``error_*`` subtype or, for an API error such as a
+    context overflow, as subtype ``success`` with ``is_error`` set and the error text in ``result``.
+    """
     if result is None:
         return "incomplete", "result_missing"
     subtype = result.get("subtype")
     if subtype == "error_max_turns":
         return "incomplete", subtype
-    if result.get("is_error") is True or (isinstance(subtype, str) and subtype.startswith("error")):
-        return "failed", subtype if isinstance(subtype, str) else "agent_error"
+    if context_overflow(result):
+        return "failed", "context_overflow"
+    if isinstance(subtype, str) and subtype.startswith("error"):
+        return "failed", subtype
+    if result.get("is_error") is True:
+        return "failed", "agent_error"
     if subtype == "success":
         return "completed", None
     return "incomplete", "result_unrecognized"
 
 
-class ClaudeCodeSandboxedAgent(SandboxedHarnessAgent):
+class ClaudeCodeSandboxedAgent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: ClaudeCodeSandboxedAgentConfig
 
-    harness_name: ClassVar[str] = "Claude Code"
-    harness_id: ClassVar[str] = "claude_code"
-    finished_marker: ClassVar[str] = "Claude Code run finished"
-    verify_response_class: ClassVar[type[SandboxedHarnessAgentVerifyResponse]] = (
-        ClaudeCodeSandboxedAgentVerifyResponse
-    )
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+
+        self._sem = Semaphore(self.config.concurrency)
+        self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+        self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
+
+    async def _start_sandbox(self, sandbox_id: Optional[str] = None, workdir: Optional[str] = None) -> AsyncSandbox:
+        global_config_dict = get_global_config_dict()
+        resolved_sandbox_provider = create_provider(
+            resolve_provider_config(self.config.sandbox_provider, global_config_dict)
+        )
+        provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+
+        if sandbox_id:
+            return await AsyncSandbox.connect(
+                {"sandbox_id": sandbox_id, "workdir": workdir}, provider=resolved_sandbox_provider
+            )
+
+        if self.config.debug:
+            print("Creating new sandbox since one wasn't provided", file=sys.stderr)
+
+        resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
+        env = cpu_cap_env(resources.cpu) if self.config.sandbox_config.get("derive_cpu_env", True) else {}
+        env |= dict(self.config.sandbox_config.get("env", {}))  # explicit keys win over the derived caps
+
+        sandbox_spec = SandboxSpec(
+            image=self.config.sandbox_config.get("image", "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907"),
+            ttl_s=self.config.sandbox_config.get("ttl_s", None),
+            ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
+            workdir=self.config.sandbox_config.get("workdir"),
+            env=env,
+            files=dict(self.config.sandbox_config.get("files", {})),
+            metadata=provider_default_metadata
+            | self.config.sandbox_config.get("metadata", {})
+            | {
+                "nemo_gym_agent": self.config.name,
+            },
+            resources=resources,
+            entrypoint=self.config.sandbox_config.get("entrypoint"),
+            provider_options=deepcopy(self.config.sandbox_config.get("provider_options", {})),
+        )
+        sandbox = AsyncSandbox(resolved_sandbox_provider)
+        await sandbox.start(sandbox_spec)
+
+        return sandbox
+
+    def _agent_sandbox_observation(
+        self,
+        *,
+        sandbox: AsyncSandbox,
+        return_code: Any,
+        error_type: Any,
+        finished: bool,
+    ) -> SandboxObservation:
+        handle = getattr(sandbox, "_handle", None)
+        handle_provider = getattr(handle, "provider_name", None)
+        handle_sandbox_id = getattr(handle, "sandbox_id", None)
+        normalized_error = error_type.lower() if isinstance(error_type, str) else ""
+        if "timeout" in normalized_error or (not normalized_error and return_code == 124):
+            outcome = "timeout"
+        elif normalized_error:
+            outcome = "sandbox_error"
+        elif return_code == 0 and finished:
+            outcome = "completed"
+        elif isinstance(return_code, int):
+            outcome = "failed" if return_code != 0 else "unknown"
+        else:
+            outcome = "unknown"
+        return SandboxObservation(
+            role="agent",
+            provider=handle_provider if isinstance(handle_provider, str) else None,
+            sandbox_id=handle_sandbox_id if isinstance(handle_sandbox_id, str) else None,
+            outcome=outcome,
+            exit_code=return_code if not normalized_error and isinstance(return_code, int) else None,
+            error_type=error_type if isinstance(error_type, str) else None,
+        )
 
     def _new_run_paths(self) -> ClaudeCodeRunPaths:
         work_dir = self.config.remote_work_dir.rstrip("/")
         return ClaudeCodeRunPaths(root=f"{work_dir}/nemo-gym-claude-code-{uuid4().hex}")
+
+    def _results_dir(self, request: Request) -> Path:
+        results_root = (
+            Path(self.config.artifacts_dir) if self.config.artifacts_dir else Path(__file__).parent / "results"
+        )
+        results_dir = results_root / request.session[SESSION_ID_KEY]
+        results_dir.mkdir(parents=True, exist_ok=True)
+        return results_dir
 
     def _settings(self) -> Dict[str, Any]:
         settings: Dict[str, Any] = {}
@@ -503,21 +710,15 @@ class ClaudeCodeSandboxedAgent(SandboxedHarnessAgent):
             ' && echo "Installed Claude Code"'
             f" && printf '%s' {quote(json.dumps(self._settings()))} > {quote(paths.settings)}"
             f" && {limit}{env} $limit {quote(paths.binary)} {args} < /dev/null > {quote(paths.stream)}"
-            f' && echo "{self.finished_marker}"'
+            f' && echo "{FINISHED_MARKER}"'
         )
 
-    async def _harness_command(
-        self, request: Request, query: str, collect_observations: bool
-    ) -> tuple[str, ClaudeCodeRunPaths]:
-        base_url = self.base_url_for_run(
-            base_url=get_server_url(self.config.model_server.name),
+    async def _model_base_url(self, request: Request) -> str:
+        """The model server URL for this rollout; Claude Code appends ``/v1/messages`` itself."""
+        return self.base_url_for_run(
+            base_url=sandbox_server_url(self.config.model_server.name),
             body=await request.json(),
         )
-        paths = self._new_run_paths()
-        command = self.build_command(base_url, query, paths)
-        if self.config.debug:
-            print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
-        return command, paths
 
     async def _download_stream(
         self, sandbox: AsyncSandbox, paths: ClaudeCodeRunPaths, local_path: Path
@@ -576,20 +777,52 @@ class ClaudeCodeSandboxedAgent(SandboxedHarnessAgent):
                 ],
             )
 
-    async def _harness_collect(
+    async def responses(
         self,
         request: Request,
-        sandbox: AsyncSandbox,
-        state: ClaudeCodeRunPaths,
-        collect_observations: bool,
-        observation_invocation_id: Optional[str],
-    ) -> HarnessTranscript:
-        results_dir = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
-        results_dir.mkdir(parents=True, exist_ok=True)
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> NeMoGymResponse:
+        if "sandbox_id" not in request.cookies:
+            raise ValueError("Use /run: Claude Code needs the sandbox the resources server seeded")
+        sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
+
+        query = None
+        # This can be modified to handle system/developer prompts too.
+        for input_item in body.input:
+            if input_item.role == "user":
+                assert not query, body.input
+                if isinstance(input_item.content, str):
+                    query = input_item.content
+                elif isinstance(input_item.content, list):
+                    assert len(input_item.content) == 1, body.input
+                    query = input_item.content[0]["text"]
+
+        assert query, body.input
+
+        paths = self._new_run_paths()
+        command = self.build_command(await self._model_base_url(request), query, paths)
+        if self.config.debug:
+            print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
+
+        run_error_type = None
+        try:
+            result = await sandbox.exec(
+                command=command,
+                timeout_s=self.config.sandbox_timeout,
+            )
+        except Exception as exc:
+            result = None
+            run_error_type = type(exc).__name__
+            print("Claude Code exec hit error.", format_exc(), file=sys.stderr)
+
+        if self.config.debug and result:
+            print("Claude Code install and run stdout:\n", result.stdout, file=sys.stderr)
+            print("Claude Code install and run stderr:\n", result.stderr, file=sys.stderr)
+
+        results_dir = self._results_dir(request)
         local_stream = results_dir / STREAM_FNAME
         local_stream.unlink(missing_ok=True)
-
-        stream = await self._download_stream(sandbox, state, local_stream)
+        stream = await self._download_stream(sandbox, paths, local_stream)
         if stream is not None:
             if stream.compaction_boundaries and not self.config.auto_compact:
                 print(
@@ -599,22 +832,184 @@ class ClaudeCodeSandboxedAgent(SandboxedHarnessAgent):
             if stream.invalid_lines:
                 print(f"Claude Code stream had {stream.invalid_lines} unparseable line(s)", file=sys.stderr)
 
+        observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
+        observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
+        collect_observations = observation_invocation_id is not None
         observations = None
         if collect_observations:
-            observations = await self._collect_observations(sandbox, state, stream, observation_invocation_id)
+            observations = await self._collect_observations(sandbox, paths, stream, observation_invocation_id)
 
-        return HarnessTranscript(
+        result_stdout = (result.stdout if result else "") or ""
+        result_stderr = (result.stderr if result else "") or ""
+        finished = False
+        std_out_split = result_stdout.rsplit("Shell: ", maxsplit=1)
+        if len(std_out_split) > 1:
+            finished = FINISHED_MARKER in std_out_split[1]
+        return_code = getattr(result, "return_code", None)
+        error_type = getattr(result, "error_type", None) or run_error_type
+
+        if collect_observations and observations is not None:
+            agent_sandbox_observation = self._agent_sandbox_observation(
+                sandbox=sandbox,
+                return_code=return_code,
+                error_type=error_type,
+                finished=finished,
+            )
+            for record in observations.records:
+                if isinstance(record, ToolCallObservation):
+                    record.sandbox_id = agent_sandbox_observation.sandbox_id
+                elif isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
+                    status = {
+                        "completed": "completed",
+                        "failed": "failed",
+                        "sandbox_error": "failed",
+                        "timeout": "incomplete",
+                        "cancelled": "incomplete",
+                    }.get(agent_sandbox_observation.outcome)
+                    if status is not None:
+                        record.status = status
+            observations.records.append(agent_sandbox_observation)
+            observations.gaps.append(ObservationGap(code="sandbox_lifecycle_timing_unavailable"))
+
+        export_found = stream is not None
+        stream_result = stream.result if stream is not None else None
+        outcome, outcome_error = invocation_outcome(stream_result)
+        duration_ms = stream_result.get("duration_ms") if stream_result is not None else None
+        run_result: Dict[str, Any] = {
+            "claude_code_failed": bool(error_type)
+            or return_code != 0
+            or not finished
+            or not export_found
+            or outcome == "failed",
+            "claude_code_exit_code": return_code,
+            "claude_code_error_type": error_type or (outcome_error if outcome == "failed" else None),
+            "claude_code_results_fpath": str(local_stream) if export_found else "",
+            "claude_code_run_stdout": result_stdout,
+            "claude_code_run_stderr": result_stderr,
+            "claude_code_export_found": export_found,
+            "claude_code_finished": finished,
+            "claude_code_result_success": outcome == "completed",
+            "claude_code_result_error": outcome == "failed",
+            "claude_code_result_missing": stream_result is None,
+            "claude_code_context_overflow": context_overflow(stream_result),
+            "claude_code_duration_s": (
+                duration_ms / 1000
+                if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool)
+                else None
+            ),
+            "claude_code_main_turns": stream.main_turns if stream is not None else 0,
+            "claude_code_subagent_turns": stream.subagent_turns if stream is not None else 0,
+            "claude_code_subagent_calls": stream.subagent_calls if stream is not None else 0,
+            "claude_code_tool_calls": stream.tool_calls if stream is not None else 0,
+            "claude_code_tool_errors": stream.tool_errors if stream is not None else 0,
+            "claude_code_unknown_tool_calls": stream.unknown_tool_calls if stream is not None else 0,
+        }
+        if collect_observations:
+            run_result["_ng_agent_observations"] = observations
+        self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = run_result
+
+        response = NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=body.model or self.config.model_server.name,
+            object="response",
             output=stream.output if stream is not None else [],
+            tool_choice=body.tool_choice,
+            tools=body.tools,
+            parallel_tool_calls=body.parallel_tool_calls,
             usage=stream.usage if stream is not None else None,
-            results_fpath=local_stream if stream is not None else None,
-            observations=observations,
         )
+        # Written before grading, so a failed or interrupted verification still leaves the
+        # generation and how it ended on disk.
+        receipt = {
+            "response": response.model_dump(mode="json"),
+            "execution": {key: value for key, value in run_result.items() if not key.startswith("_ng_")},
+        }
+        pending = results_dir / "generation.json.partial"
+        pending.write_text(json.dumps(receipt))
+        pending.replace(results_dir / "generation.json")
+        return response
 
     async def run(
         self, request: Request, body: ClaudeCodeSandboxedAgentRunRequest
     ) -> ClaudeCodeSandboxedAgentVerifyResponse:
-        # FastAPI builds the /run request and response models from these annotations.
-        return await super().run(request, body)
+        async with self._sem:
+            return await self._run(request, body)
+
+    async def _run(
+        self, request: Request, body: ClaudeCodeSandboxedAgentRunRequest
+    ) -> ClaudeCodeSandboxedAgentVerifyResponse:
+        cookies = request.cookies
+        session_key = request.session[SESSION_ID_KEY]
+        rollout_id = self.rollout_id_from_run(body)
+
+        seed_session_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/seed_session",
+            json=body.model_dump(),
+            cookies=cookies,
+        )
+        await raise_for_status(seed_session_response)
+        cookies = cookies | seed_session_response.cookies
+
+        # "sandbox_handle" and "workdir" come from the SWE resources servers' seed_session responses.
+        seed_session_result = await seed_session_response.json()
+        sandbox = await self._start_sandbox(
+            sandbox_id=seed_session_result.get("sandbox_handle"),
+            workdir=seed_session_result.get("workdir"),
+        )
+        self._sandbox_id_to_sandbox[session_key] = sandbox
+
+        # Propagating the sandbox handle
+        cookies["sandbox_id"] = session_key
+
+        request._cookies = cookies
+        request.state._ng_observation_invocation_id = rollout_id
+        observations = None
+        try:
+            response = await self.responses(request, body.responses_create_params)
+            run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
+            observations = run_result.pop("_ng_agent_observations", None)
+            response_dict = await verify_agent_response(
+                self.server_client,
+                self.config.resources_server,
+                body,
+                response,
+                cookies,
+                force_zero_reward=self.config.execution_failure_reward_zero
+                and run_result.get("claude_code_failed", False),
+            )
+        finally:
+            del request.state._ng_observation_invocation_id
+            try:
+                await sandbox.stop()
+            except Exception:
+                print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+            finally:
+                self._sandbox_id_to_sandbox.pop(session_key, None)
+                self._sandbox_id_to_run_result.pop(session_key, None)
+
+        response_dict |= run_result
+        raw_verifier_sandbox_observation = response_dict.pop("verifier_sandbox_observation", None)
+        if rollout_id is not None:
+            if observations is None:
+                observations = AgentObservationBundle(
+                    source="claude_code",
+                    records=[AgentInvocation(invocation_id=rollout_id)],
+                    gaps=[ObservationGap(code="observation_capture_failed")],
+                )
+            if raw_verifier_sandbox_observation is not None:
+                try:
+                    verifier_observation = SandboxObservation.model_validate(raw_verifier_sandbox_observation)
+                    if verifier_observation.role != "verifier":
+                        raise ValueError("resources server returned a non-verifier sandbox observation")
+                    observations.records.append(verifier_observation)
+                except Exception:
+                    observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_invalid"))
+            else:
+                observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_unavailable"))
+            response_dict["ng_agent_observations"] = observations.model_dump(mode="json")
+        return ClaudeCodeSandboxedAgentVerifyResponse.model_validate(response_dict)
 
 
 if __name__ == "__main__":

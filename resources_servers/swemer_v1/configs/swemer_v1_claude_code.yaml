@@ -24,3 +24,14 @@ swemer_v1_claude_code_sandboxed_agent:
           jsonl_fpath: resources_servers/swemer_v1/data/swemer_v1_training.jsonl
           num_repeats: 1
           license: NVIDIA Internal Use Only, Do Not Distribute
+
+# Rollout collection reaches an agent through its environment server. Named after the agent, not
+# the environment: swemer_v1_opencode.yaml's swemer_v1_environment_server fronts the OpenCode
+# agent, and a run loads both.
+swemer_v1_claude_code_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swemer_v1_claude_code_sandboxed_agent
