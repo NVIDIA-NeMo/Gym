@@ -4,24 +4,25 @@
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 import pytest
 
+from nemo_gym.sandbox import process_supervisor
 from responses_api_agents.codex_agent import sandbox_runner
 
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper and /proc are required")
 
 
-def launch(tmp_path, code, timeout=3):
+def launch(tmp_path, code, timeout=3, python=sys.executable):
     request = {
         "directory": str(tmp_path),
-        "command": [sys.executable, "-c", code],
+        "command": [python, "-c", code],
         "cwd": str(tmp_path),
         "env": {},
         "timeout": timeout,
@@ -31,7 +32,24 @@ def launch(tmp_path, code, timeout=3):
     path = tmp_path / "input.json"
     path.write_text(json.dumps(request))
     process = subprocess.Popen(
-        [sys.executable, "-I", str(Path(sandbox_runner.__file__)), str(path)],
+        [
+            python,
+            "-I",
+            process_supervisor.__file__,
+            "--timeout",
+            str(timeout),
+            "--cleanup-timeout",
+            "0.5",
+            "--stop-file",
+            str(tmp_path / "runner.stop"),
+            "--receipt",
+            str(tmp_path / "cleanup.json"),
+            "--",
+            python,
+            "-I",
+            sandbox_runner.__file__,
+            str(path),
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -42,7 +60,7 @@ def result(tmp_path, process):
     try:
         stdout, stderr = process.communicate(timeout=10)
         assert process.returncode == 0, (stdout, stderr)
-        return json.loads((tmp_path / "result.json").read_text())
+        return json.loads((tmp_path / "cleanup.json").read_text())
     finally:
         if process.poll() is None:
             process.kill()
@@ -113,11 +131,7 @@ def interrupted_spawn(*args, **kwargs):
     return child
 subprocess.Popen = interrupted_spawn
 try:
-    summary = runner['run']({
-        'directory': sys.argv[2], 'cwd': sys.argv[2], 'env': {}, 'prompt': 'task',
-        'command': [sys.executable, '-c', 'import time; time.sleep(60)'],
-        'timeout': 5, 'cleanup_timeout': 2,
-    })
+    summary = runner['_supervise']([sys.executable, '-c', 'import time; time.sleep(60)'], timeout=5, cleanup_timeout=2)
     summary['child_alive'] = any(child.poll() is None for child in children)
     print(json.dumps(summary))
 finally:
@@ -127,7 +141,7 @@ finally:
         child.wait()
 """
     completed = subprocess.run(
-        [sys.executable, "-c", driver, sandbox_runner.__file__, str(tmp_path)],
+        [sys.executable, "-c", driver, process_supervisor.__file__, str(tmp_path)],
         capture_output=True,
         text=True,
         errors="replace",
@@ -163,11 +177,7 @@ def lost_handle(*args, **kwargs):
     raise OSError('launch handle lost after process creation')
 subprocess.Popen = lost_handle
 try:
-    summary = runner['run']({
-        'directory': sys.argv[2], 'cwd': sys.argv[2], 'env': {}, 'prompt': 'task',
-        'command': [sys.executable, '-c', 'import time; time.sleep(60)'],
-        'timeout': 5, 'cleanup_timeout': 2,
-    })
+    summary = runner['_supervise']([sys.executable, '-c', 'import time; time.sleep(60)'], timeout=5, cleanup_timeout=2)
     try:
         os.kill(children[0].pid, 0)
         summary['child_alive'] = True
@@ -181,7 +191,7 @@ finally:
         child.wait()
 """
     completed = subprocess.run(
-        [sys.executable, "-c", driver, sandbox_runner.__file__, str(tmp_path)],
+        [sys.executable, "-c", driver, process_supervisor.__file__, str(tmp_path)],
         capture_output=True,
         text=True,
         errors="replace",
@@ -193,3 +203,21 @@ finally:
     assert summary["error"] == "launch handle lost after process creation"
     assert summary["cleanup_confirmed"] is True
     assert summary["child_alive"] is False
+
+
+@pytest.mark.skipif(shutil.which("python3.8") is None, reason="Python 3.8 is not installed")
+def test_python38_worker_captures_output_and_reaps_detached_children(tmp_path):
+    code = (
+        "import json,pathlib,subprocess,sys; "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
+        "pathlib.Path('child.pid').write_text(str(child.pid)); "
+        "print(json.dumps({'prompt':sys.stdin.read()}))"
+    )
+    process = launch(tmp_path, code, python=shutil.which("python3.8"))
+    receipt = result(tmp_path, process)
+    assert receipt["cleanup_confirmed"] is True
+    assert receipt["return_code"] == 0
+    _, event = json.loads((tmp_path / "events.jsonl").read_text())
+    assert event["prompt"] == "task input"
+    with pytest.raises(ProcessLookupError):
+        os.kill(int((tmp_path / "child.pid").read_text()), 0)

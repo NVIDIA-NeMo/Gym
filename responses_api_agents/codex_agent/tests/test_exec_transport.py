@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from nemo_gym.sandbox import process_supervisor
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from responses_api_agents.codex_agent import sandbox_runner
 from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
@@ -71,6 +72,7 @@ def make_session(tmp_path):
     provider = ExecOnlySandbox()
     state = CodexSandboxSession(request, provider, str(directory), str(tmp_path / "runtime"))
     shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
+    shutil.copyfile(process_supervisor.__file__, directory / "process_supervisor.py")
     return state, provider, workdir
 
 
@@ -78,7 +80,7 @@ def payload(state, code, timeout=0.5):
     return {
         "directory": state.directory,
         "prompt": "task",
-        "cwd": state.seed.sandbox_access.workdir,
+        "cwd": state.request.sandbox_access.workdir,
         "command": [sys.executable, "-c", code],
         "env": {},
         "timeout": timeout,
@@ -112,7 +114,7 @@ async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
             await asyncio.gather(task, return_exceptions=True)
         else:
             await task
-        assert state.result.cleanup_confirmed is True
+        assert state.cleanup["cleanup_confirmed"] is True
         if ending == "timeout":
             assert state.result.timed_out is True
         with pytest.raises(ProcessLookupError):
@@ -133,9 +135,8 @@ async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
     provider.lost_launch = True
     with pytest.raises(TimeoutError, match="lost launch response"):
         await state.execute(payload(state, "open('started','w').close()"), timeout=0.5, close_timeout=3)
-    assert state.result.cleanup_confirmed is True
-    assert state.result.return_code != 0
-    assert state.result.error == "Closed before runner launch"
+    assert state.cleanup["cleanup_confirmed"] is True
+    assert state.result is None  # No worker ran after the failed launch.
     await state.close(3)
     provider.lost_launch = False
     await provider.exec(provider.delayed_command, cwd=str(workdir))
@@ -154,7 +155,7 @@ async def test_failed_receipt_keeps_files_and_can_retry(tmp_path):
         "hostname": "sandbox",
         "pid": 1,
     }
-    path = Path(state.directory) / "result.json"
+    path = Path(state.directory) / "cleanup.json"
     path.write_text(json.dumps(receipt))
     with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
         await state.close(3)
@@ -177,7 +178,7 @@ async def test_confirmed_cleanup_cancels_stuck_transport(tmp_path):
         "hostname": "sandbox",
         "pid": 1,
     }
-    (Path(state.directory) / "result.json").write_text(json.dumps(receipt))
+    (Path(state.directory) / "cleanup.json").write_text(json.dumps(receipt))
     state.exec_task = asyncio.create_task(asyncio.Event().wait())
     await asyncio.sleep(0)
     await state.close(0.5)

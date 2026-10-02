@@ -554,6 +554,7 @@ class TestRolloutMCPServers:
         agent.server_client.post.side_effect = fake_post
         object.__setattr__(agent, "_run_codex", fake_run_codex)
         request = MagicMock(spec=Request)
+        request.scope = {}
         request.cookies = {}
         body = CodexAgentRunRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="use the weather tool"),
@@ -597,6 +598,7 @@ class TestRolloutMCPServers:
         agent.server_client.post.side_effect = fake_post
         object.__setattr__(agent, "_run_codex", fake_run_codex)
         request = MagicMock(spec=Request)
+        request.scope = {}
         request.cookies = {}
         body = CodexAgentRunRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="use the weather tool"),

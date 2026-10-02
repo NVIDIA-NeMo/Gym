@@ -2,165 +2,125 @@
 
 Runs the OpenAI Codex CLI (`codex exec`) as a NeMo Gym agent server.
 
-## Native EnvironmentServer sessions
+## Configure and run
 
-For sandbox tasks, bind `single_agent_turn` to the Codex agent and a Resources server that returns
-`SandboxAccess`. Submit episodes to the **EnvironmentServer `/run`** endpoint. Resources creates
-and prepares the task sandbox; Codex borrows it, installs the pinned CLI, runs the harness and its
-own shell/file tools inside `SandboxAccess.workdir`, confirms process cleanup, and disconnects.
-EnvironmentServer verifies only after agent close succeeds, then asks Resources to destroy the sandbox.
+[configs/codex_agent.yaml](configs/codex_agent.yaml) is the default harness definition.
+The benchmark owns task data, preparation, tools, verification, and its sandbox. Codex borrows
+that sandbox and runs its CLI and shell/file tools inside it. The Environment Server binds
+these independent components and closes Codex before verification.
 
-Example agent and environment bindings (compose with your Resources, Gym model, and sandbox-provider configs):
+For SWE-bench Pro, save this composition as `run.yaml`:
 
 ```yaml
-codex_agent:
-  responses_api_agents:
-    codex_agent:
-      entrypoint: app.py
-      num_workers: 1
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      codex_version: 0.144.4
-      sandbox_mode: danger-full-access
-      timeout: 600
-      resources_server: null
-      openai_api_key: ""
+config_paths:
+  - resources_servers/swebench_pro/configs/swebench_pro.yaml
+  - responses_api_agents/codex_agent/configs/codex_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
-single_agent_turn_environment_server:
+single_agent_turn_legacy:
   environment_servers:
-    single_agent_turn:
-      entrypoint: app.py
+    single_agent_turn_legacy:
       resources_server:
-        type: resources_servers
-        name: task_resources
+        name: swebench_pro_resources_server
       agent_server:
-        type: responses_api_agents
         name: codex_agent
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
+      resources_tool_transports: []
 ```
 
-The native SWE-bench Pro recipe is `benchmarks/swebench/pro/codex_native.yaml`. Compose it with
-sandbox-provider and Gym model configs, materialize the benchmark into task rows, then run collection
-with that recipe. It sets `environment_routing_mode: taskset` and maps `swebench_pro:smoke` to
-`swebench_pro_codex`. Each input row must contain `task_id: {taskset, task_id}` and
-`task_input: {responses_create_params, task_data}`. The collector posts that typed episode to the
-EnvironmentServer `/run`; the environment calls Codex's session and `/v1/responses` routes.
-The agent's `/run` remains a legacy entrypoint and is not used by this native recipe.
-
-For a one-task native smoke run, first prepare the benchmark's pinned flat JSONL using
-`benchmarks/swebench/pro/prepare.py`. In the commands below, `model-provider.yaml` is your deployment
-config defining the sandbox provider and `policy_model`, including the served model name and a
-sandbox-reachable endpoint. Pass the same configs to both commands: `--no-serve` reuses the running
-servers but still loads the collector's routing configuration locally.
+Supply the `policy_model` Gym Model Server, `policy_model_name`, and sandbox provider in
+`model-provider.yaml`. Keep model sampling and per-call output limits on the Model Server.
+The default agent definition has no benchmark or dataset selection. Prepared flat rows work
+through `single_agent_turn_legacy` with the standard session lifecycle; no additional task
+materialization script or harness/benchmark preset is needed.
 
 ```bash
-python benchmarks/swebench/pro/materialize_single_agent_tasks.py \
-  benchmarks/swebench/data/swebench_pro_benchmark.jsonl /tmp/swebench_pro_native.jsonl
+python benchmarks/swebench/pro/prepare.py
 
-gym env start \
-  --config benchmarks/swebench/pro/codex_native.yaml \
-  --config model-provider.yaml
+gym env start --config run.yaml --config model-provider.yaml
 
 gym eval run --no-serve \
-  --config benchmarks/swebench/pro/codex_native.yaml \
-  --config model-provider.yaml \
-  --input /tmp/swebench_pro_native.jsonl \
-  --output results/codex_native.jsonl --limit 1
+  --config run.yaml --config model-provider.yaml \
+  --agent codex_agent \
+  -i benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
+  -o rollouts.jsonl --limit 3 --concurrency 3
 ```
 
-Use a sandbox-reachable address for `policy_model`; loopback on the agent host is generally not
-reachable from a container. Codex uses the Gym model server's streaming Responses API with the
-seeded episode's capture key in its URL. Chat-only backends need Gym's Responses-to-Chat adapter;
-pointing Codex directly at a Chat Completions endpoint does not work. This adapter does not strip
-reasoning or tool history from Codex model requests. Gym treats Codex's empty `include=[]` as requesting
-no additional fields; nonempty Responses-only include requests still require a Responses backend.
-Codex also sends `prompt_cache_key`; the inference backend must accept it. Some hosted NIM Chat
-endpoints reject this parameter, and no documented Codex configuration omits it. Gym preserves
-caller caching controls. A validation-only NIM compatibility bridge that explicitly omits this
-optimization does not establish direct NIM compatibility for this adapter.
+The collector calls EnvironmentServer `/run`, which seeds Resources and Codex, invokes
+Codex `/v1/responses`, closes Codex, verifies, then closes Resources. It does not call
+Codex's compatibility `/run`. Other compatible benchmarks use the same agent definition.
 
-Native setup requires a direct connection, one agent worker, Linux/glibc on x86_64 or
-AArch64 (or musl on x86_64), Bash, and Python 3.8+. The installer checks bootstrap dependencies and installs missing
-curl, CA certificates, tar, gzip, coreutils, awk, and flock (util-linux) on root/apt-get or root/apk images; other images must provide
-them. It installs Node 22.19.0 and `@openai/codex@0.144.4` under `/tmp/nemo-gym-codex-node-*`, verifies
-the CLI version, and reuses that runtime. An interprocess flock serializes cache setup before checking
-readiness, so concurrent sessions sharing a sandbox cannot rewrite a running runtime. Session configuration, HOME, and cache files live under
-`/tmp/nemo-gym-codex-sessions/*`, outside the task repository. `/`, `/tmp`, and adapter-owned paths
-cannot be task working directories. No CLI is required or installed on the agent host for native sessions.
-Image architecture support describes the installer contract; validate the actual task image before use.
+## Runtime and model requirements
 
-The runner uses ordinary sandbox `exec`, not the PTY/session API. It enforces its own deadline,
-with additional time for descendant cleanup before the provider timeout. Cancellation requests a
-stop and waits for the cleanup receipt; uncertain cleanup blocks verification and remains retryable.
-Old musl images use a checksum-pinned private C++ runtime for the private Node binary. The task's
-Node/Python and global library search path are not replaced.
+Use one agent worker, a pinned `codex_version` (default **0.144.4**), direct `SandboxAccess`,
+and an absolute task workdir disjoint from the adapter directories. Required Resources HTTP/MCP
+tools are rejected; Codex supplies its own tools. The task sandbox supplies isolation, so
+`sandbox_mode` must be `danger-full-access`. No Codex CLI is required on the agent-server host.
 
-Each session accepts one activation: a string or one text user message with an optional preceding
-system/developer message. Configured `system_prompt`, request `instructions`, and that preceding
-message are combined into Codex developer instructions. Existing conversation history and non-text
-inputs are rejected before consuming the activation. Native sessions use Codex's own tools; required
-HTTP/MCP tool accesses, `extra_config`, `cwd`, and direct-provider URL overrides are unsupported.
+The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine with Python 3.8+.
+It installs missing bootstrap prerequisites using apt-get or apk when running as root;
+otherwise the image must provide them. The pinned Node 22.19.0 build has no arm64 musl binary.
+Older Alpine images use a checksum-verified private C++ library for Node. Runtime files live
+under `/tmp/nemo-gym-codex-node-*`, and session HOME/cache/config live under
+`/tmp/nemo-gym-codex-sessions/*`. Task Python, Node, libraries, and PATH are preserved.
+Installation errors retain the command, exit status, stdout, and stderr. Runtime compatibility
+must still be checked on actual task images; a mocked installer test is not image validation.
 
-Native requests reject `max_output_tokens`, `temperature`, `top_p`, reasoning controls, tool-policy
-and other unsupported options. Codex does not expose a reliable output-token/sampling override for
-custom Gym providers at the model-request boundary. Set inference limits on the Gym model server
-and inspect captured requests to confirm the effective settings. Limits there apply per model call;
-`timeout` bounds the whole invocation. Configured `reasoning_effort` is also rejected in native mode.
-A supplied request `model` must match the configured agent model. The Resources sandbox supplies
-isolation; Codex's inner policy must be `danger-full-access`.
+Codex 0.144.4 uses the streaming **Responses API**. Use a sandbox-reachable Gym Model Server;
+Gym adapts Responses to Chat Completions where supported. Requests retain the rollout capture
+key, reasoning, and tool history. Codex sends `prompt_cache_key`, which some hosted NIM Chat
+endpoints reject. A deployment that removes that option is a separate compatibility bridge,
+not evidence of direct endpoint compatibility.
 
-For custom models, set `model_context_window` to the endpoint's actual served context limit.
-Codex 0.144.4 otherwise uses a 272,000-token fallback for unknown models, which can delay compaction
-until after a smaller endpoint has overflowed. Optionally set `model_auto_compact_token_limit` below
-that window to leave room for tool output and the next model response; for a 40,960-token endpoint,
-40,960 and 32,768 respectively are a conservative starting point. Both settings must be positive
-integers, and an explicit compaction threshold cannot exceed 90% of an explicit context window.
-Codex additionally clamps these settings to its model metadata: the unknown-model fallback caps
-the context override at 272,000 and compaction at 90% of that cap. Larger values therefore do not
-enable a larger context; they need a separately validated model metadata/runtime configuration.
-Omitted values preserve CLI defaults. These are harness context-management settings, not per-call
-generation limits; configure those on the Gym model server. Compaction remains owned by Codex.
+For custom models, set `model_context_window` to the served limit and optionally
+`model_auto_compact_token_limit` below it. Both must be positive integers; an explicit
+compaction threshold must not exceed 90% of the explicit window. The pinned CLI also clamps
+unknown-model metadata to a 272,000-token context and 90% compaction threshold. These are
+context-management controls, not generation budgets.
 
-Native responses preserve completed text, reasoning, tool calls/results, and CLI aggregate usage,
-including cached-input tokens. Missing `turn.completed`, CLI errors, nonzero exit, and timeouts do
-not produce a successful completion. Partial transcripts, including the latest unfinished item updates, are retained in close observations on
-cancellation or execution failure. CLI events omit per-model response IDs and often omit reasoning
-usage; observations record these gaps explicitly. Usage from a failed turn can be unavailable, so
-zero is not evidence of zero model consumption. Compare aggregate usage with captured Gym model calls.
-Gym preserves incomplete/failed model status in the Responses SSE terminal event. Codex 0.144.4
-treats a model output-limit event as a failed turn after at most five stream reconnects; partial
-reasoning survives, while failed-call usage remains available in Gym capture rather than CLI JSONL.
-The pinned CLI emits known model-metadata and compaction-accuracy advisories as error items.
-On a clean exit ending with `turn.completed` and no other errors, native observations retain their
-exact text as warning gaps. Unknown errors and failed or incomplete executions remain unsuccessful.
+## Requests, results, and lifecycle
 
-A Linux child-subreaper supervisor runs once per activation and kills/reaps detached tool descendants.
-A successful runner exit alone cannot authorize verification: close requires its cleanup receipt,
-runner-handle release, removal of session files, and successful disconnect. Unknown launches and
-unconfirmed cleanup fail close and retain session state for retry. Resources always owns sandbox
-destruction. The EnvironmentServer supplies the session ID. Repeating an identical seed returns that session;
-reusing the ID with changed task, episode, or sandbox access fails. Close also accepts the explicit
-ID and episode without a cookie, so a lost seed response can still be cleaned up. Closing an unknown
-ID prevents a delayed seed from creating it for the larger of the session lifetime and close retry
-window. After a close receipt expires, close returns a conflict while that tombstone remains; it
-cannot invent an empty replacement receipt. Caller IDs are never used
-as filesystem paths. Sessions expire after `session_lifetime_seconds` (21,600s by default), measured
-from completed initialization; expiry uses the same cleanup path and blocks further activation if
-cleanup fails. Failed cleanup retains state and logs the need for owner recovery.
+Input is a string or one text user message, optionally preceded by a system/developer message.
+Configured `system_prompt`, request `instructions`, and that preceding message become Codex
+developer instructions in that order. Unsupported conversation/multimodal input, required
+external tools, provider overrides, and extra host config are rejected before activation.
 
-Successful close receipts are retained for `session_close_retry_window_seconds` (300s
-default); retries do not extend this window. Concurrent close requests share one receipt. Stale cookies
-remain invalid after expiry and cannot fall back to host execution. Use a fresh cookie session for a
-new episode. State is process-local; permanently failed sessions require owner recovery and worker
-recycling. Cleanup is lifecycle coordination, not containment of hostile sandbox code.
+Request `max_output_tokens`, `temperature`, `top_p`, reasoning controls, and unsupported tool
+policies are rejected rather than ignored. Codex cannot enforce these request-level controls
+for a custom Gym provider. Set per-call generation settings on the Model Server and inspect
+captured requests to verify the effective values. A configured `reasoning_effort` is likewise
+rejected in sandbox sessions. An explicit request model must match the configured model.
 
-`session_close_timeout_seconds` defaults to 60 and `sandbox_install_timeout_seconds` to 600.
-Do not increase concurrency without measuring setup time, process/memory overhead, and normal versus
-failed close latency on the target image/provider. Native inference support does not establish
-training token-ID/logprob support or benchmark accuracy. Runtime/model/provider compatibility and
-real model rollout validation must be recorded for each deployment.
+Session identity, immutable seed binding, seed/close locking, and close receipts use Gym's
+shared agent-session implementation. Setup returns a session cookie only after installation
+succeeds. Failed setup with failed cleanup retains cleanup-only state through
+`AgentSessionSetupError`: activation/reseeding are rejected, and close can retry.
+
+Each session supports one logical activation. Identical requests join the running invocation
+or replay its result/error; changed requests are rejected. A disconnected HTTP waiter does
+not cancel the invocation. Session close owns cancellation. Shared successful close receipts
+last `session_close_retry_window_seconds` (default 300 seconds) without renewal on retries.
+Stale cookies never fall back to host execution. State is process-local; Resources/provider
+own sandbox expiry and crash recovery. There is no separate per-agent session-expiry timer.
+
+One shared Linux supervisor per activation fences delayed launches and kills/reaps detached
+tool descendants. Close confirms its cleanup receipt before cancelling provider execution,
+then removes adapter-owned files and disconnects. Missing/negative cleanup evidence blocks
+verification and retains state for retry. The borrowing agent never destroys the sandbox.
+Cleanup coordinates lifecycle; it is not a security boundary against hostile task code.
+
+Responses and close observations preserve text, reasoning, tool events, partial output,
+CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit
+model-output-limit event yield incomplete, potentially gradable work. Provider/API/runtime
+failures raise execution errors and bypass verification. Only Resources determines reward.
+
+CLI events omit exact model-call join IDs and can omit failed-call usage even after a recovered
+retry. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
+Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
+Known model-metadata/compaction warnings remain visible as gaps only after clean completion.
+
+`sandbox_install_timeout_seconds` defaults to 600 and `session_close_timeout_seconds` to 60;
+both must be finite and positive. Measure setup time, supervisor process/memory cost, and close
+latency before scaling. Inference support does not establish training token-ID/logprob support.
 
 ## Legacy direct-agent quick start
 
