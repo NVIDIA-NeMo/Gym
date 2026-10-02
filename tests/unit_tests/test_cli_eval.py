@@ -26,6 +26,7 @@ from omegaconf import DictConfig
 import nemo_gym.cli.eval as cli_eval
 from nemo_gym.cli.eval import (
     _data_processor_mode_for_split,
+    _is_preparable_dataset,
     _validate_prepared_split_file_exists,
     _validate_split_datasets_declared,
 )
@@ -242,3 +243,16 @@ def test_standard_splits_use_train_preparation(split: str) -> None:
 
 def test_example_split_uses_example_validation() -> None:
     assert _data_processor_mode_for_split("example") == "example_validation"
+
+
+@pytest.mark.parametrize(
+    ("dataset", "expected"),
+    [
+        ({"type": "benchmark"}, True),
+        ({"type": "example", "prepare_script": "prepare.py"}, True),
+        ({"type": "example"}, False),
+        ({"type": "train", "prepare_script": "prepare.py"}, False),
+    ],
+)
+def test_preparable_dataset_selection(dataset: dict, expected: bool) -> None:
+    assert _is_preparable_dataset(dataset) is expected

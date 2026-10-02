@@ -247,6 +247,14 @@ def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
         ) from exc
 
 
+def _is_preparable_dataset(dataset: DictConfig | dict) -> bool:
+    """Return whether `gym eval prepare` should run this dataset's prepare script."""
+
+    return dataset.get("type") == "benchmark" or (
+        dataset.get("type") == "example" and dataset.get("prepare_script") is not None
+    )
+
+
 @exit_cleanly_on_config_error
 def prepare_benchmark() -> None:
     """CLI command: prepare benchmark data."""
@@ -275,7 +283,7 @@ def prepare_benchmark() -> None:
 
         datasets: List[BenchmarkDatasetConfig] = []
         for dataset in inner_server_config.get("datasets") or []:
-            if dataset["type"] != "benchmark":
+            if not _is_preparable_dataset(dataset):
                 continue
 
             datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
@@ -285,9 +293,10 @@ def prepare_benchmark() -> None:
 
         if len(datasets) != 1:
             raise ConfigError(
-                f"Expected exactly 1 benchmark dataset for server instance `{server_instance_name}`, "
+                f"Expected exactly 1 preparable benchmark or example dataset for server instance "
+                f"`{server_instance_name}`, "
                 f"but found {len(datasets)}: {[d.name for d in datasets]}. "
-                "A benchmark config must define a single benchmark dataset."
+                "A config must define a single preparable dataset."
             )
 
         dataset = datasets[0]
@@ -309,9 +318,10 @@ def prepare_benchmark() -> None:
 
     if not benchmarks_dict:
         raise ConfigError(
-            "No benchmark config found. "
+            "No preparable benchmark or example dataset found. "
             + (
-                f"Inspected server instances {inspected_server_instances}, but none declared a `benchmark` dataset."
+                f"Inspected server instances {inspected_server_instances}, but none declared a `benchmark` dataset "
+                "or an `example` dataset with a prepare script."
                 if inspected_server_instances
                 else "No server instances with `responses_api_agents` were found in the resolved config."
             )
