@@ -15,7 +15,7 @@ ENVIRONMENT_DIR = Path(__file__).parent
 DATA_DIR = ENVIRONMENT_DIR / "data"
 TASKS_FPATH = DATA_DIR / "example.jsonl"
 PREPARE_REQUIREMENTS_FPATH = ENVIRONMENT_DIR / "requirements.txt"
-USERSIM_REVISION = "4fd4c800bbef8883329543df632f328860fc6429"  # pragma: allowlist secret
+USERSIM_REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
 _MATERIALIZE_SCRIPT = """
 import json
 import sys

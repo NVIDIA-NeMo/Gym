@@ -1,5 +1,5 @@
 -e nemo-gym[dev] @ ../../
 
-# Temporary source install while UserSim is private. Replace this with the
-# published package once https://github.com/NVIDIA-NeMo/UserSim is public.
-nemo-usersim @ git+ssh://git@github.com/NVIDIA-NeMo/UserSim.git@2d9ec0d7c32ac800f2171b5943382a7b1eb96cbc
+# Public source install pinned to a revision on UserSim main so materialized
+# provenance and runtime behavior remain reproducible.
+nemo-usersim @ git+https://github.com/NVIDIA-NeMo/UserSim.git@a5f676bf6dc5a73914c8a0860f97c10dd2c214ee

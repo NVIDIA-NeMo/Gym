@@ -4,7 +4,7 @@
 """Wire contracts for the NeMo UserSim episode protocol."""
 
 import json
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -17,91 +17,25 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.rollout_observability import AgentObservationBundle
 
 
-UserSimAgentRole = Literal["user", "assistant", "judge", "summary"]
+UserSimAgentRole = Literal["user", "assistant", "judge", "summary", "tool_simulation"]
 USERSIM_EPISODE_PROTOCOL = "usersim.ConversationLoop"
 
 
-class UserSimScenario(BaseModel):
-    """One fully resolved UserSim scenario."""
-
-    model_config = ConfigDict(extra="allow")
-
-    persona: dict[str, Any]
-    probe_type: str = "general_open_ended"
-    theme: dict[str, Any] | str
-    goal: str = ""
-    locale: str = "en_US"
-    probe_data: dict[str, Any] = Field(default_factory=dict)
-
-
-class UserSimTheme(BaseModel):
-    """One selectable theme used to construct a scenario."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    topic: str = Field(min_length=1)
-    goal: str = Field(min_length=1)
-
-
-class UserSimSamplingRequest(BaseModel):
-    """Dataset-owned inputs used to select one replayable scenario."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    locale: str = Field("en_US", pattern=r"^[A-Za-z0-9_]+$")
-    seed: int
-    probe_type: str | None = None
-
-
-class UserSimProtocolConfig(BaseModel):
-    """Run-wide subset of ``ConversationSimulatorConfig`` owned by the Environment Server."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    max_query_attempts: int = Field(3, ge=1)
-    max_assistant_attempts: int = Field(1, ge=1)
-    enforce_user_language: bool = True
-    user_language_min_script_compliance: float = Field(0.6, ge=0, le=1)
-    user_language_min_letters: int = Field(8, ge=0)
-    incremental_disclosure_ratio: float = Field(0.6, ge=0, le=1)
-    persona_grounding_ratio: float = Field(1, ge=0, le=1)
-    context_compression: bool = True
-    compression_window: int = Field(1, ge=1)
-    store_reasoning: bool = True
-    random_seed: int | None = None
-    verbosity: int = Field(1, ge=0, le=2)
-
-
 class UserSimTaskInput(BaseModel):
-    """Durable input loaded from one UserSim task row."""
+    """Fully resolved, provenance-pinned input loaded from one prepared task row."""
 
     model_config = ConfigDict(extra="forbid")
 
-    sampling: UserSimSamplingRequest
-    probe_data: dict[str, Any] = Field(default_factory=dict)
+    resolved_row: dict[str, Any]
     responses_create_params: dict[UserSimAgentRole, NeMoGymResponseCreateParamsNonStreaming] = Field(
         default_factory=dict
     )
 
 
-class ResolvedUserSimContext(BaseModel):
-    """Selection provenance required to replay a resolved scenario."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    locale: str
-    seed: int
-    personas_dataset_version: str
-    personas_panel_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    usersim_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
-
-
 class UserSimSeedResponse(ResourcesSeedSessionResponse):
-    """Return resources-session identity plus the resolved scenario."""
+    """Return resources-session identity plus the unchanged resolved row."""
 
-    scenario: UserSimScenario
-    usersim_context: ResolvedUserSimContext
-    assistant_tools: list[dict[str, Any]] = Field(default_factory=list)
+    resolved_row: dict[str, Any]
 
 
 class UserSimSimulationResult(BaseModel):
@@ -146,8 +80,7 @@ class UserSimVerificationInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    scenario: UserSimScenario
-    usersim_context: ResolvedUserSimContext
+    resolved_row: dict[str, Any]
     usersim_result: UserSimSimulationResult
     invocations: list[UserSimInvocation]
     episode_interaction_protocol: str = USERSIM_EPISODE_PROTOCOL
@@ -163,6 +96,9 @@ class UserSimVerification(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reward: float
+    mask_sample: bool = False
+    failure_kind: str | None = None
+    failure_reason: str | None = None
     reward_components: dict[str, float]
     scenario_completed: bool
     verifier_data: dict[str, Any] = Field(default_factory=dict)
@@ -174,10 +110,35 @@ class UserSimEpisodeResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    reward: float
+    mask_sample: bool = False
+    failure_kind: str | None = None
+    failure_reason: str | None = None
+    reward_components: dict[str, float]
     verification: UserSimVerification
     usersim_result: UserSimSimulationResult
     invocations: list[UserSimInvocation]
     episode_interaction_protocol: str = USERSIM_EPISODE_PROTOCOL
+
+    @classmethod
+    def from_verification(
+        cls,
+        *,
+        verification: UserSimVerification,
+        usersim_result: UserSimSimulationResult,
+        invocations: list[UserSimInvocation],
+    ) -> Self:
+        """Project verifier scoring fields onto Gym's persisted episode-result contract."""
+        return cls(
+            reward=verification.reward,
+            mask_sample=verification.mask_sample,
+            failure_kind=verification.failure_kind,
+            failure_reason=verification.failure_reason,
+            reward_components=verification.reward_components,
+            verification=verification,
+            usersim_result=usersim_result,
+            invocations=invocations,
+        )
 
 
 class UserSimEpisodeFailure(EpisodeFailure):

@@ -5,6 +5,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from omegaconf import OmegaConf
 
@@ -62,7 +64,9 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
                         "persona": {"source": "usersim"},
                         "theme": {"source": "usersim"},
                         "trajectory_id": f"usersim-{probe}",
-                        "usersim_provenance": {"code_sha": prepare_module.USERSIM_REVISION},
+                        "usersim_provenance": json.dumps(
+                            {"code_sha": prepare_module.USERSIM_REVISION, "bank_version": {}}
+                        ),
                         "usersim_config": {"random_seed": 1042 + index},
                     }
                 )
@@ -84,7 +88,8 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
     assert all(row["task_input"]["resolved_row"]["persona"] == {"source": "usersim"} for row in rows)
     assert all(row["task_input"]["resolved_row"]["theme"] == {"source": "usersim"} for row in rows)
     assert all(
-        row["task_input"]["resolved_row"]["usersim_provenance"]["code_sha"] == prepare_module.USERSIM_REVISION
+        json.loads(row["task_input"]["resolved_row"]["usersim_provenance"])["code_sha"]
+        == prepare_module.USERSIM_REVISION
         for row in rows
     )
     assert len(calls) == 1
@@ -112,3 +117,15 @@ def test_gym_does_not_author_sampling_content() -> None:
     assert "_stable_index" not in source
     assert "example_source.jsonl" not in source
     assert "personas_panel" not in source
+
+
+def test_materialized_provenance_is_parquet_safe(tmp_path: Path) -> None:
+    row = {
+        "probe_type": "tool_calling",
+        "usersim_provenance": json.dumps({"code_sha": prepare_module.USERSIM_REVISION, "bank_version": {}}),
+    }
+    path = tmp_path / "resolved.parquet"
+
+    pq.write_table(pa.Table.from_pylist([row]), path)
+
+    assert pq.read_table(path).to_pylist() == [row]
