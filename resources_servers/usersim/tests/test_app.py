@@ -27,7 +27,7 @@ from resources_servers.usersim.episode_contracts import (
 )
 
 
-REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"
+REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
 
 
 def _resolved_row(probe_type: str = "tool_calling", *, provenance_as_text: bool = True) -> dict:
