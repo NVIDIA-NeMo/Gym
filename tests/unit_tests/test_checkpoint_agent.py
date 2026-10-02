@@ -124,7 +124,7 @@ async def test_legacy_run_steps_block_prepare_only_when_waited_on() -> None:
     assert record.episode == {"next": "verify"}
 
 
-async def test_retire_cancels_the_activation_and_fences_the_attempt() -> None:
+async def test_retire_stops_the_activation_before_it_replies() -> None:
     hooks = Hooks()
     participant = AgentSessionParticipant(hooks)
     controller = ParticipantController(participant, instance_name="agent", lease_grace_seconds=60)
@@ -138,20 +138,21 @@ async def test_retire_cancels_the_activation_and_fences_the_attempt() -> None:
     task = asyncio.create_task(stuck())
     await asyncio.sleep(0.01)
     missed = await controller.prepare(CheckpointRequest(checkpoint_id="c1", deadline_ts=time.time() + 0.05))
+    # A straggler is retired after the checkpoint is abandoned.
+    await controller.resume(CheckpointRequest(**control()))
     await controller.retire(controller_retire_request(episode_id))
-    prepared = await controller.prepare(CheckpointRequest(**control()))
+    stopped = task.done()
+    prepared = await controller.prepare(CheckpointRequest(**control("c2")))
 
     assert missed["phase"] == "preparing"
+    assert stopped and task.cancelled()
     assert prepared["phase"] == "prepared"
     assert hooks.retired == ["s"]
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    with pytest.raises(StaleAttemptError):
-        participant.open_session("s", episode_id)
+    assert len(participant.attempts) == 0
 
 
 def controller_retire_request(episode_id: EpisodeId) -> RetireRequest:
-    return RetireRequest(**control(episode_ids=[episode_id.model_dump()]))
+    return RetireRequest(**control("retire", episode_ids=[episode_id.model_dump()]))
 
 
 async def test_restore_installs_sessions_under_the_next_attempt(tmp_path: Path) -> None:
@@ -300,12 +301,18 @@ async def test_an_agent_without_session_hooks_blocks_checkpoints_until_its_rollo
         )
         refused = await http.post("/run", json={**row, "_ng_rollout_id": "other"})
         unattributed = await http.post("/run", json={"responses_create_params": {"input": "x"}})
+        # The controller abandons the checkpoint, retires the rollout, and checkpoints again.
+        await http.post(
+            "/ng-control/v1/checkpoint/resume", json={"checkpoint_id": "c1", "deadline_ts": time.time() + 5}
+        )
         await http.post(
             "/ng-control/v1/checkpoint/retire",
-            json={"checkpoint_id": "c1", "deadline_ts": time.time() + 5, "episode_ids": [{"rollout_id": "r"}]},
+            json={"checkpoint_id": "retire", "deadline_ts": time.time() + 5, "episode_ids": [{"rollout_id": "r"}]},
         )
+        # The retire replied after the /run it retired had stopped.
+        stopped = run.done()
         prepared = await http.post(
-            "/ng-control/v1/checkpoint/prepare", json={"checkpoint_id": "c1", "deadline_ts": time.time() + 5}
+            "/ng-control/v1/checkpoint/prepare", json={"checkpoint_id": "c2", "deadline_ts": time.time() + 5}
         )
         with pytest.raises(BaseException):
             await run
@@ -313,6 +320,7 @@ async def test_an_agent_without_session_hooks_blocks_checkpoints_until_its_rollo
     assert missed.json()["report"]["blockers"] == ["r"]
     assert refused.json()["error"]["code"] == "checkpoint_parked"
     assert unattributed.json()["error"]["code"] == "rollout_id_required"
+    assert stopped
     assert prepared.json()["phase"] == "prepared"
     assert await agent._restart_only.export(None) == []
 
