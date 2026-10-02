@@ -743,7 +743,7 @@ class TestRun:
         assert dumped["claude_code_results_fpath"].endswith("results/session-1/stream.jsonl")
         assert [item["type"] for item in dumped["response"]["output"]][-1] == "message"
         assert dumped["ng_agent_observations"]["source"] == "claude_code"
-        assert "failure_kind" not in dumped
+        assert dumped.get("failure_kind") is None
         sandbox.stop.assert_awaited_once()
         assert agent._sandbox_id_to_sandbox == {} and agent._sandbox_id_to_run_result == {}
 
