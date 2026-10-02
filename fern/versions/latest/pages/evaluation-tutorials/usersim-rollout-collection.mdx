@@ -172,14 +172,6 @@ In practical terms:
 - At runtime, the Resources Server checks that the task is the same immutable, provenance-pinned row that was
   prepared. It does not choose a different persona, probe, or scenario.
 
-<Warning>
-The NGC key grants access to persona data; it is unrelated to GitHub authentication. This preparation flow
-does not require GitHub SSH keys or a separate UserSim installation. It downloads the public UserSim source
-over HTTPS and uses UserSim's canonical sampler directly. If the output mentions `git+ssh`, `usersim panel`,
-or `_prepare_panel`, your checkout contains an older preparation implementation and does not match this
-tutorial. Update your NeMo Gym checkout before continuing.
-</Warning>
-
 The equivalent UserSim CLI contract for one selected probe is:
 
 ```bash
