@@ -57,6 +57,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import AGENT_RUN_ERROR, AGENT_TIMEOUT, PROVIDER_OOM_KILLED, VERIFIER_ERROR
 from nemo_gym.global_config import (
     CACHE_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
@@ -312,8 +313,8 @@ class SWEBenchMetrics(BaseModel):
     patch_exists: Optional[bool] = None
     model_patch: Optional[str] = None
 
-    # Set by the worker when an episode failed due to infrastructure.
-    mask_sample: bool = False
+    # Mirror BaseVerifyResponse's failure fields so the worker's verdict reaches the response.
+    failure_kind: Optional[str] = None
     failure_reason: Optional[str] = None
 
     # Failure-mode signals used to decide mask_sample downstream.
@@ -2898,15 +2899,18 @@ class RunOpenHandsAgent(BaseModel):
                 metrics.openhands_run_time is not None
                 and metrics.openhands_run_time >= self.config.swebench_agent_timeout
             )
-            # An agent command that died without producing output is an infrastructure failure,
-            # not a model failure; allow for it to be masked out of the gradient.
-            metrics.mask_sample = True
+            # An agent command that died without output is an infrastructure failure, not a model one.
             if metrics.agent_timed_out:
-                metrics.failure_reason = "agent_timeout"
+                metrics.failure_kind = AGENT_TIMEOUT
+                metrics.failure_reason = (
+                    f"agent run exceeded swebench_agent_timeout ({self.config.swebench_agent_timeout}s)"
+                )
             elif metrics.oom_killed:
-                metrics.failure_reason = "agent_oom"
+                metrics.failure_kind = PROVIDER_OOM_KILLED
+                metrics.failure_reason = "agent container OOM-killed by the memory watchdog"
             else:
-                metrics.failure_reason = "agent_command_failure"
+                metrics.failure_kind = AGENT_RUN_ERROR
+                metrics.failure_reason = f"agent command failed: {str(e)[:500]}"
             metrics.agent_error_kind = metrics.agent_error_kind or "other"
             update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
             if self.config.debug:
@@ -3981,30 +3985,29 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         agent_timed_out = bool(persisted_metrics.agent_timed_out)
         oom_killed = bool(persisted_metrics.oom_killed)
         eval_oom_killed = bool(persisted_metrics.eval_oom_killed)
+        failure_kind = persisted_metrics.failure_kind
         failure_reason = persisted_metrics.failure_reason
-        if (
-            persisted_metrics.mask_sample
-            or (resolved_now and agent_error_kind in ("max_iteration", "context_window"))
-            or eval_timed_out
-            or agent_timed_out
-            or oom_killed
-            or eval_oom_killed
-        ):
+        if failure_kind is None:
+            if agent_timed_out:
+                failure_kind = AGENT_TIMEOUT
+                failure_reason = f"agent run exceeded swebench_agent_timeout ({params.swebench_agent_timeout}s)"
+            elif eval_timed_out:
+                failure_kind = VERIFIER_ERROR
+                failure_reason = f"final eval exceeded swebench_tests_timeout ({params.swebench_tests_timeout}s)"
+            elif oom_killed:
+                failure_kind = PROVIDER_OOM_KILLED
+                failure_reason = "agent container OOM-killed by the memory watchdog"
+            elif eval_oom_killed:
+                failure_kind = PROVIDER_OOM_KILLED
+                failure_reason = "eval container OOM-killed by the memory watchdog"
+            elif resolved_now and agent_error_kind in ("max_iteration", "context_window"):
+                failure_kind = f"swe_agents:agent_{agent_error_kind}"
+                failure_reason = f"patch resolved but the agent hit {agent_error_kind} without submitting"
+        # A named failure means the reward is not policy evidence; a valid wrong answer names nothing.
+        if failure_kind is not None:
             params.mask_sample = True
-            if not failure_reason:
-                if agent_timed_out:
-                    failure_reason = "agent_timeout"
-                elif eval_timed_out:
-                    failure_reason = "eval_timeout"
-                elif oom_killed:
-                    failure_reason = "agent_oom"
-                elif eval_oom_killed:
-                    failure_reason = "eval_oom"
-                else:
-                    failure_reason = f"agent_{agent_error_kind}"
-        # Persist the decision + reason next to the other metrics.
-        metrics_to_update["mask_sample"] = params.mask_sample
-        metrics_to_update["failure_reason"] = failure_reason
+            metrics_to_update["failure_kind"] = failure_kind
+            metrics_to_update["failure_reason"] = failure_reason
 
         trajectories_dir = params.persistent_dir / "trajectories"
         (

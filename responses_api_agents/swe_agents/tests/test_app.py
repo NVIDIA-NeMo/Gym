@@ -27,6 +27,7 @@ import pytest
 
 import responses_api_agents.swe_agents.app as swe_app
 from nemo_gym.config_types import ModelServerRef, OmegaConf
+from nemo_gym.failure_kinds import AGENT_RUN_ERROR, AGENT_TIMEOUT, PROVIDER_OOM_KILLED
 from nemo_gym.global_config import CACHE_DIR_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -1954,19 +1955,19 @@ class TestRunOpenHandsAgent:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "agent_timeout_s, oom, expected_reason, expected_kind",
+        "agent_timeout_s, oom, expected_failure_kind, expected_error_kind",
         [
-            (0, False, "agent_timeout", "other"),
-            (900, True, "agent_oom", "oom"),
-            (900, False, "agent_command_failure", "other"),
+            (0, False, AGENT_TIMEOUT, "other"),
+            (900, True, PROVIDER_OOM_KILLED, "oom"),
+            (900, False, AGENT_RUN_ERROR, "other"),
         ],
         ids=["timeout", "oom", "other"],
     )
-    async def test_worker_classifies_agent_failure_reason(
-        self, monkeypatch, agent_timeout_s, oom, expected_reason, expected_kind
+    async def test_worker_classifies_agent_failure_kind(
+        self, monkeypatch, agent_timeout_s, oom, expected_failure_kind, expected_error_kind
     ) -> None:
-        """The agent-failure path stamps the specific reason at the worker —
-        responses() never refines an already-set failure_reason — and keeps the
+        """The agent-failure path names the failure at the worker with a registered
+        failure_kind — responses() never refines an already-set kind — and keeps the
         watchdog's oom error kind instead of clobbering it to "other". The raised
         exception is deliberately generic: classification must come from the
         timeout/OOM signals, not the exception type."""
@@ -1992,9 +1993,9 @@ class TestRunOpenHandsAgent:
             assert await agent.process_single_datapoint() is None
 
             persisted = json.loads(agent.config.metrics_fpath.read_text())
-            assert persisted["mask_sample"] is True
-            assert persisted["failure_reason"] == expected_reason
-            assert persisted["agent_error_kind"] == expected_kind
+            assert persisted["failure_kind"] == expected_failure_kind
+            assert persisted["failure_reason"]
+            assert persisted["agent_error_kind"] == expected_error_kind
 
     def test_openhands_dir_copy_from_host_no_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3108,11 +3109,11 @@ class TestSWEBenchWrapperRun:
                     {
                         "resolved": False,
                         "patch_exists": True,
-                        "mask_sample": True,
-                        "failure_reason": "agent_timeout",
+                        "failure_kind": AGENT_TIMEOUT,
+                        "failure_reason": "agent run exceeded swebench_agent_timeout (900s)",
                     }
                 ),
-                "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
+                "instance_config": _make_instance_config(tempfile.mkdtemp(), mask_sample=True).model_dump_json(),
             },
         )
 
@@ -3138,7 +3139,8 @@ class TestSWEBenchWrapperRun:
             assert isinstance(result, SWEBenchVerifyResponse)
             assert result.reward == 0.0
             assert result.mask_sample is True
-            assert result.failure_reason == "agent_timeout"
+            assert result.failure_kind == AGENT_TIMEOUT
+            assert result.failure_reason == "agent run exceeded swebench_agent_timeout (900s)"
 
 
 ########################################
