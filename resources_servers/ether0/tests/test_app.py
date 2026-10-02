@@ -14,10 +14,12 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 from app import (
     Ether0ResourcesServer,
     Ether0VerifyRequest,
 )
+from ether0.rewards import EVAL_FUNCTIONS
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.openai_utils import NeMoGymResponse
@@ -79,6 +81,21 @@ class TestVerify:
         )
         result = await server.verify(req)
         assert result.reward == 1.0
+
+    @pytest.mark.skipif(
+        "completion_formula_eval" not in EVAL_FUNCTIONS,
+        reason="requires the completion_formula_eval grader from the pending Future-House/ether0 reward PR",
+    )
+    async def test_completion_prefix_dispatch(self) -> None:
+        server = _make_server()
+        prefix, reference = "O[C@H](C", "O[C@H](C)C=O"
+        solution = f"completion_formula_eval!:!{(prefix, reference)!r}!:!molecule-completion"
+        for prediction, expected in [(reference, 1.0), ("O[C@@H](C)C=O", 0.0)]:
+            req = _make_request(f"<answer>{prediction}</answer>", solution, "molecule-completion")
+            result = await server.verify(req)
+            assert result.reward == expected
+            assert result.eval_function == "completion_formula_eval"
+            assert result.extracted_answer == prediction
 
     async def test_str_eval_wrong(self) -> None:
         server = _make_server()
