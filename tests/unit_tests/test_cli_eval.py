@@ -27,6 +27,7 @@ import nemo_gym.cli.eval as cli_eval
 from nemo_gym.cli.eval import (
     _data_processor_mode_for_split,
     _is_preparable_dataset,
+    _preparation_dataset_config,
     _validate_prepared_split_file_exists,
     _validate_split_datasets_declared,
 )
@@ -256,3 +257,17 @@ def test_example_split_uses_example_validation() -> None:
 )
 def test_preparable_dataset_selection(dataset: dict, expected: bool) -> None:
     assert _is_preparable_dataset(dataset) is expected
+
+
+def test_example_preparation_does_not_change_runtime_dataset_type() -> None:
+    dataset = {
+        "name": "example",
+        "type": "example",
+        "jsonl_fpath": "example.jsonl",
+        "prepare_script": "prepare.py",
+    }
+
+    preparation_config = _preparation_dataset_config(dataset)
+
+    assert dataset["type"] == "example"
+    assert preparation_config.type == "benchmark"
