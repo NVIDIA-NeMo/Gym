@@ -89,6 +89,7 @@ class OpenSandboxCodeExecToolProvider(CodeExecToolProvider):
         arch: str = "arm64",
         poll_interval_s: float = 2.0,
         ready_timeout_s: int = 1200,
+        ttl_s: int = 6 * 3600,
         allowed_commands: list[str] | None = None,
     ) -> None:
         super().__init__(allowed_commands=allowed_commands)
@@ -99,6 +100,7 @@ class OpenSandboxCodeExecToolProvider(CodeExecToolProvider):
         self._arch = arch
         self._poll_interval_s = poll_interval_s
         self._ready_timeout_s = ready_timeout_s
+        self._ttl_s = ttl_s
 
         self._sandbox = None
         self._stale_io_dirs: list[str] = []
@@ -113,6 +115,7 @@ class OpenSandboxCodeExecToolProvider(CodeExecToolProvider):
             "arch": self._arch,
             "poll_interval_s": self._poll_interval_s,
             "ready_timeout_s": self._ready_timeout_s,
+            "ttl_s": self._ttl_s,
             "allowed_commands": None,
         }
 
@@ -132,6 +135,8 @@ class OpenSandboxCodeExecToolProvider(CodeExecToolProvider):
             image=self._image,
             workdir=self._working_dir,
             ready_timeout_s=self._ready_timeout_s,
+            # Without a TTL the SDK expires the sandbox after 10 minutes. A task runs within one 4 h job leg.
+            ttl_s=self._ttl_s,
             # execd holds every response for 1 s after the command ends unless told otherwise.
             env={"EXECD_API_GRACE_SHUTDOWN": "50ms"},
             resources={"cpu": self._cpu, "memory_mib": self._memory_mib},

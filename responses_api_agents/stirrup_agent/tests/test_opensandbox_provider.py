@@ -109,3 +109,20 @@ def test_execd_protocol_follows_domain_scheme(monkeypatch, domain, protocol):
     monkeypatch.setenv("OPENSANDBOX_DOMAIN", domain)
     monkeypatch.setenv("OPENSANDBOX_API_KEY", "k")
     assert opensandbox_provider._provider_config(2.0)["opensandbox"]["connection"]["protocol"] == protocol
+
+
+def test_sandbox_outlives_a_job_leg(monkeypatch):
+    specs = []
+
+    class _Recording(_LocalSandbox):
+        def __init__(self, provider):
+            pass
+
+        async def start(self, spec):
+            specs.append(spec)
+
+    monkeypatch.setattr("nemo_gym.sandbox.api.AsyncSandbox", _Recording)
+    monkeypatch.setattr(opensandbox_provider, "_provider_config", lambda poll: {})
+    p = OpenSandboxCodeExecToolProvider("img")
+    asyncio.run(p.__aenter__())
+    assert specs[0].ttl_s >= 4 * 3600
