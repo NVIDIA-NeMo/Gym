@@ -199,7 +199,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
                     raise ValueError("resources_session_id is already bound to another episode or task")
                 return ResourcesSeedSessionResponse(resources_session_id=session_id)
             spec = BrowserSeedSessionRequest.model_validate(body.task_data)
-            await self._open_session(session_id, spec)
+            await self._open_session(session_id, spec, episode_id=body.episode_id)
             self._typed_identity[session_id] = (body.episode_id, body.task_id)
             return ResourcesSeedSessionResponse(resources_session_id=session_id)
 
@@ -249,7 +249,9 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             # let the close report success silently.
             logger.warning("could not close the browser for session %s", session_id, exc_info=True)
 
-    async def _open_session(self, session_id: str, body: BrowserSeedSessionRequest) -> None:
+    async def _open_session(
+        self, session_id: str, body: BrowserSeedSessionRequest, episode_id: Optional[EpisodeId] = None
+    ) -> None:
         # Resolve a repo-relative initial_url (e.g. "site/index.html") to an
         # absolute file:// URI, so example tasks don't hard-code machine paths.
         initial_url = body.initial_url
@@ -260,9 +262,14 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
         # old browser first so we don't leak a session/process.
         await self._release(session_id)
 
-        # The rollout id travels with the session so a remote provider can tag
-        # (and later account for) the browser it hands out.
-        backend = create_backend(self.config.backend, session_metadata={"rollout_session_id": session_id})
+        # Identifiers travel with the session so a remote provider can tag (and later
+        # account for) the browser it hands out. The episode is what the training side
+        # records; the session id alone is internal to whoever seeded it.
+        session_metadata = {"rollout_session_id": session_id}
+        if episode_id is not None:
+            session_metadata["rollout_id"] = episode_id.rollout_id
+            session_metadata["attempt"] = str(episode_id.attempt)
+        backend = create_backend(self.config.backend, session_metadata=session_metadata)
         # `open()` unwinds its own partial state — including any provider
         # session it acquired — before it raises.
         await backend.open(initial_url)
