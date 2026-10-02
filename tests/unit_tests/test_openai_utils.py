@@ -1023,7 +1023,8 @@ class TestNeMoGymChatCompletionSchemas:
         """Third-party providers return tier strings outside the SDK's fixed enum.
 
         The SDK ``ChatCompletion.service_tier`` is a closed ``Literal``, so a
-        non-OpenAI value would otherwise fail validation with a 500 on replay.
+        non-OpenAI value would otherwise fail validation and turn the model
+        server response into a 500.
         """
         payload = {
             "id": "chatcmpl-1",
@@ -2061,8 +2062,9 @@ def test_response_field_set_is_pinned() -> None:
 def test_response_accepts_provider_specific_service_tier() -> None:
     """Third-party providers return tier strings outside the SDK's fixed enum.
 
-    The SDK ``Response.service_tier`` is a closed ``Literal``, so a non-OpenAI
-    value would otherwise fail validation with a 500 on replay.
+    The SDK ``Response.service_tier`` is a closed ``Literal``, so a
+    non-OpenAI value would otherwise fail validation and turn the model
+    server response into a 500.
     """
     payload = _response_with_output([]) | {"service_tier": "on-demand"}
 

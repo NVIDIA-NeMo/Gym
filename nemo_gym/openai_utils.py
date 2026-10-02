@@ -969,7 +969,9 @@ def accumulate_response_usage(
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
     usage: Optional[NeMoGymResponseUsage] = None
-    # Providers can return deployment-specific tiers. Accept any string.
+    # OpenAI-compatible providers may return provider-specific service-tier names.
+    # The OpenAI SDK's Literal may not include those names.
+    # Preserve the reported value.
     service_tier: Optional[str] = None
 
 
