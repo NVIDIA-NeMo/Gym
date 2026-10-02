@@ -72,7 +72,7 @@ from openai.types.responses import FunctionToolParam
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import SimpleResourcesServer
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput, NeMoGymChatCompletion
+from nemo_gym.openai_utils import NeMoGymChatCompletion, NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput
 from resources_servers.toolsandbox.schemas import (
     ToolSandboxCloseRequest,
     ToolSandboxCloseResponse,
