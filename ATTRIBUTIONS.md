@@ -233,6 +233,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 | Component | License | Upstream | Notes |
 |-----------|---------|----------|-------|
 | PinchBench skill | MIT | https://github.com/pinchbench/skill | Cloned and patched at image build (modification). |
+| FACTS Multimodal public release | Apache-2.0 | https://www.kaggle.com/datasets/deepmind/facts-multimodal-v2-public-data | Dataset downloaded and hash-verified at preparation time; coverage and factuality prompts are adapted from the public Kaggle implementation. |
 
 ---
 

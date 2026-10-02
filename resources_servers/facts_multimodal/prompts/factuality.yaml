@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Adapted from the public FACTS Multimodal notebook's factuality prompt.
+user: |-
+  SPECIAL INSTRUCTION: think silently if needed.
+
+  You are a meticulous fact-checking expert. Check every explicit and implicit
+  claim in RESPONSE against IMAGE_FACT_LIST, the supplied INPUT_IMAGE, and
+  established global truth. Seek high recall for factual inaccuracies: flag any
+  direct contradiction, fact-list violation, visual inconsistency, global-truth
+  inaccuracy, misrepresentation, or incorrect calculation. Omissions are not
+  contradictions unless RESPONSE falsely claims completeness.
+
+  Treat Sentence facts as true. For Exhaustive set facts, any claimed member,
+  count, or completeness statement must agree with the list. For Non-exhaustive
+  set facts, absence from the list alone is not a contradiction. All fact
+  importance levels are evidence for factuality.
+
+  Return a concise explanation followed by exactly one final line in one of
+  these forms:
+  FINAL VERDICT: HAS CLEAR CONTRADICTION(s).
+  FINAL VERDICT: NO CLEAR CONTRADICTION.
+
+  User prompt:
+  {prompt}
+
+  IMAGE_FACT_LIST:
+  {rubric_items}
+
+  RESPONSE:
+  {generation}
