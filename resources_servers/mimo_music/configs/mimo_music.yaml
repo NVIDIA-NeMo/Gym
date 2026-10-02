@@ -1,0 +1,28 @@
+mimo_music:
+  resources_servers:
+    mimo_music:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Single-turn ABC music composition using the released MiMo music scorer.
+      value: Graded symbolic-music rewards from MIDI features without an LLM judge.
+      num_processes: 4
+      score_timeout_seconds: 30.0
+
+mimo_music_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: mimo_music
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 1
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/mimo_music/data/example.jsonl
+        num_repeats: 1
+        license: Apache 2.0
