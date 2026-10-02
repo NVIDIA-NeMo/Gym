@@ -126,6 +126,9 @@ class EnvironmentParticipant(CheckpointParticipant):
             raise ControlError("environment restore requires a process without live episodes")
         self._restored = {next_attempt(record.episode_id).capture_key: record for record in records}
 
+    async def restored_pending(self) -> list[EpisodeId]:
+        return [EpisodeId.from_capture_key(key) for key in self._restored]
+
     def status_extra(self) -> dict[str, Any]:
         return {"restored_pending": sorted(self._restored)}
 
