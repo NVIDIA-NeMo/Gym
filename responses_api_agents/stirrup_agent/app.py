@@ -926,6 +926,13 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         default=None,
         description="Path to GDPVal Apptainer .sif container. When set, code execution runs inside the container.",
     )
+    gdpval_opensandbox_image: Optional[str] = Field(
+        default=None,
+        description="OCI image of the GDPVal sandbox. When set, code execution runs in OpenSandbox instead of Apptainer.",
+    )
+    gdpval_opensandbox_cpu: float = Field(default=4, description="CPUs per GDPVal OpenSandbox sandbox.")
+    gdpval_opensandbox_memory_mib: int = Field(default=16384, description="Memory per GDPVal OpenSandbox sandbox.")
+    gdpval_opensandbox_arch: str = Field(default="arm64", description="OpenSandbox pool architecture.")
     swebench_tests_timeout: int = Field(
         default=30 * 60,
         description="Timeout in seconds for SWE-bench test evaluation.",

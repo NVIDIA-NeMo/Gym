@@ -154,6 +154,22 @@ class GDPValTask(TaskStrategy):
         return task_info["prompt"]
 
     def get_exec_provider(self, task_info: Dict[str, Any], config: Any) -> Any:
+        opensandbox_image = getattr(config, "gdpval_opensandbox_image", None)
+        if opensandbox_image:
+            from responses_api_agents.stirrup_agent.opensandbox_provider import OpenSandboxCodeExecToolProvider
+
+            print(
+                f"[gdpval] Using OpenSandbox image {opensandbox_image} for task {task_info.get('task_id', '?')}",
+                flush=True,
+            )
+            return OpenSandboxCodeExecToolProvider(
+                image=opensandbox_image,
+                working_dir="/root",
+                cpu=config.gdpval_opensandbox_cpu,
+                memory_mib=config.gdpval_opensandbox_memory_mib,
+                arch=config.gdpval_opensandbox_arch,
+            )
+
         container_path = getattr(config, "gdpval_container_path", None)
 
         # GDPval MUST run inside the Apptainer sandbox built from
