@@ -250,22 +250,33 @@ Llama is shown under the paper's double-BOS condition.
 
 **Side by side with upstream's harness.** The same weights were also run through upstream's
 own `predict.py` and `eval.py` at the pinned commit, unmodified, in the same container (gen pass
-over all 7,306 prompts; `lm` pass over the 3,342 discriminative rows). Per-task composites:
+over all 7,306 prompts; `lm` pass over the 3,342 discriminative rows). Per-task composites, Gym
+under the same prompt condition as upstream (double BOS for Llama):
 
-| task | Llama Gym (double BOS) | Llama upstream | paper | Qwen Gym | Qwen upstream | paper |
-|---|---|---|---|---|---|---|
-| ordering | 73.15 | 73.13 | 73.14 | 78.70 | 78.51 | 78.74 |
-| contrastive_choice | 61.70 | 61.65 | 61.98 | 64.25 | 64.21 | 64.53 |
-| step_validation | 57.62 | 57.99 | 58.18 | 71.97 | 72.16 | 72.23 |
-| condition_validation | 71.16 | 71.41 | 71.30 | 82.83 | 82.95 | 82.95 |
-| step_completion | 9.48 | 9.43 | 9.22 | 7.10 | 6.97 | 7.25 |
-| rationalization | 22.99 | 22.94 | 22.87 | 18.05 | 18.11 | 17.96 |
-| **Primary-Overall** | **49.35** | **49.43** | **49.45** | **53.82** | **53.82** | **53.94** |
+| Llama-3.1-8B | upstream harness | Gym | paper |
+|---|---|---|---|
+| ordering | 73.13 | 73.15 | 73.14 |
+| contrastive_choice | 61.65 | 61.70 | 61.98 |
+| step_validation | 57.99 | 57.62 | 58.18 |
+| condition_validation | 71.41 | 71.16 | 71.30 |
+| step_completion | 9.43 | 9.48 | 9.22 |
+| rationalization | 22.94 | 22.99 | 22.87 |
+| **Primary-Overall** | **49.43** | **49.35** | **49.45** |
 
-Upstream's harness on our Llama weights lands at 49.43, next to the paper's 49.45 and Gym's
-49.35 under the same double-BOS prompt, and 1 point below Gym's single-BOS 50.43: the published
-Llama gap is the tokenization, not the model snapshot. Upstream caps generation at 96-200 new
-tokens per task where Gym allows 4096; at temperature 0 that changed no composite by more than 0.4.
+| Qwen2.5-7B | upstream harness | Gym | paper |
+|---|---|---|---|
+| ordering | 78.51 | 78.70 | 78.74 |
+| contrastive_choice | 64.21 | 64.25 | 64.53 |
+| step_validation | 72.16 | 71.97 | 72.23 |
+| condition_validation | 82.95 | 82.83 | 82.95 |
+| step_completion | 6.97 | 7.10 | 7.25 |
+| rationalization | 18.11 | 18.05 | 17.96 |
+| **Primary-Overall** | **53.82** | **53.82** | **53.94** |
+
+Every task agrees within 0.4 between the two harnesses. Upstream's code on our Llama weights
+gives 49.43 under its double BOS and Gym gives 50.43 with a single BOS: the published Llama gap
+is the tokenization, not the model snapshot. Upstream caps generation at 96-200 new tokens per
+task where Gym allows 4096.
 
 Under each model's own condition every cell is within ~1 point of the published row, and
 Phi-3's collapsed `lm` validation scores reproduce too: they are a property of that model, not
