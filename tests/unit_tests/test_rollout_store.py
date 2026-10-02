@@ -556,11 +556,16 @@ def test_exhaustion_counts_failed_and_unknown_but_not_terminal_or_completed(
     assert orjson.loads(coverage_path_for(output).read_bytes())["attempts_exhausted"] == expected_exhausted
 
 
-async def test_journal_reverification_waits_for_followup_without_changing_files(prepared_run, monkeypatch):
+@pytest.mark.parametrize("alias", [False, True])
+async def test_journal_reverification_waits_for_followup_without_changing_files(prepared_run, monkeypatch, alias):
     from nemo_gym.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
 
     output, prepare = prepared_run
     RolloutStore.start_or_resume(output, prepare, resume=False)
+    if alias:
+        shortcut = output.with_name("shortcut.jsonl")
+        shortcut.symlink_to(output)
+        output = shortcut
     before = snapshot(output)
     config = RolloutReverificationConfig(
         materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
@@ -581,12 +586,160 @@ async def test_journal_reverification_waits_for_followup_without_changing_files(
     assert snapshot(output) == before
 
 
-def test_journal_health_waits_for_followup_without_reporting_stale_results(prepared_run):
+@pytest.mark.parametrize("alias", [False, True])
+def test_journal_health_waits_for_followup_without_reporting_stale_results(prepared_run, alias):
     from nemo_gym.rollout_health import run_health_checks
 
     output, prepare = prepared_run
     RolloutStore.start_or_resume(output, prepare, resume=False)
+    if alias:
+        shortcut = output.with_name("shortcut.jsonl")
+        shortcut.symlink_to(output)
+        output = shortcut
     before = snapshot(output)
     with pytest.raises(ConfigError, match="Journal-aware health reports are a follow-up"):
         run_health_checks(output, workers=1)
     assert snapshot(output) == before
+
+
+@pytest.mark.parametrize("artifact", ["output", "failures"])
+@pytest.mark.parametrize("complete_corruption", [False, True])
+def test_migration_repairs_only_validated_incomplete_tails(prepared_run, artifact, complete_corruption):
+    from nemo_gym.rollout_collection import migrate_invalid_judge_main_rows
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(3)[0]
+        store.record_dispatch(row)
+        store.record_outcome(row | {"reward": 0.0, "response": {}, "invalid_judge_response": True})
+    target = output if artifact == "output" else failures_path_for(output)
+    with target.open("ab") as file:
+        file.write(b'{"reward":' + (b"\n" if complete_corruption else b""))
+    before = snapshot(output)
+    if complete_corruption:
+        with pytest.raises(ConfigError):
+            RolloutStore.start_or_resume(
+                output, prepare, resume=True, migrate_outcomes=migrate_invalid_judge_main_rows
+            )
+        assert snapshot(output) == before
+        return
+    for _ in range(2):
+        with RolloutStore.start_or_resume(
+            output, prepare, resume=True, migrate_outcomes=migrate_invalid_judge_main_rows
+        ) as recovered:
+            assert recovered.coverage()["failed"] == 1
+            retry = recovered.pending(3)[0]
+            assert retry["_ng_attempt_index"] == 1
+            assert recovered.failures()[0]["_ng_failure_class"] == "judge_invalid"
+    assert list(read_records(output)) == []
+    assert len(list(read_records(failures_path_for(output)))) == 1
+
+
+@pytest.mark.parametrize("newer_outcome", [None, "failure", "omission"])
+def test_cached_deliverable_survives_unknown_attempt_but_not_newer_outcome(prepared_run, newer_outcome):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(4)[0]
+        store.record_dispatch(row)
+        store.record_outcome(row | {"_ng_failure_class": "judge_invalid", "reuse_cached_deliverable": True})
+        retry = store.pending(4)[0]
+        assert retry["reuse_cached_deliverable"]
+        store.record_dispatch(retry)
+        if newer_outcome == "failure":
+            store.record_outcome(
+                {k: v for k, v in retry.items() if k != "reuse_cached_deliverable"}
+                | {"_ng_failure_class": "agent_run_error"}
+            )
+        elif newer_outcome == "omission":
+            store.record_omission(retry, "operator omitted")
+        store.record_dispatch(row | {"_ng_attempt_index": 2})
+    recovered = RolloutStore.start_or_resume(output, prepare, resume=True)
+    retry = recovered.pending(4)[0]
+    assert retry["_ng_attempt_index"] == 3
+    assert bool(retry.get("reuse_cached_deliverable")) == (newer_outcome is None)
+
+
+@pytest.mark.parametrize("mismatch", ["run_id", "rollout_id", "attempt", "terminal", "failure_kind"])
+def test_nested_failure_must_agree_with_saved_envelope(prepared_run, mismatch):
+    from nemo_gym.episode_types import EpisodeFailure, EpisodeId
+    from nemo_gym.rollout_collection import _failure_compatibility_row
+    from nemo_gym.rollout_journal import logical_rollout_id
+    from nemo_gym.rollout_outcomes import RolloutFailure
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(3)[0]
+        store.record_dispatch(row)
+        failure = RolloutFailure(
+            episode_id=EpisodeId(rollout_id=logical_rollout_id(row)),
+            run_id=store.manifest.run_id,
+            source="environment",
+            delivery="delivered",
+            failure=EpisodeFailure(failure_reason="Judge unavailable", terminal=False, failure_kind="judge_failed"),
+        )
+        result = row | _failure_compatibility_row(failure)
+        nested = result["_ng_failure_record"]
+        if mismatch == "run_id":
+            nested["run_id"] = "foreign"
+        elif mismatch in ("rollout_id", "attempt"):
+            nested["episode_id"][mismatch] = "foreign" if mismatch == "rollout_id" else 7
+        else:
+            nested["failure"][mismatch] = True if mismatch == "terminal" else "agent_run_error"
+        before = snapshot(output)
+        with pytest.raises(ConfigError, match="inconsistent"):
+            store.record_outcome(result)
+        assert snapshot(output) == before
+    failures_path_for(output).write_bytes(orjson.dumps(result) + b"\n")
+    before = snapshot(output)
+    with pytest.raises(ConfigError, match="inconsistent"):
+        RolloutStore.read(output)
+    assert snapshot(output) == before
+
+
+@pytest.mark.parametrize("input_order", ["alias", "alias-first", "real-first"])
+async def test_source_alias_uses_the_same_selected_history(prepared_run, monkeypatch, input_order):
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper, RolloutCollectionHelper
+    from nemo_gym.rollout_journal import coverage_path_for
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(3)[0]
+        store.record_dispatch(row)
+        store.record_outcome(row | {"reward": 1.0, "response": {}})
+        store.record_dispatch(row | {"_ng_attempt_index": 1})
+    alias = output.with_name("shortcut.jsonl")
+    alias.symlink_to(output)
+    paths = {"alias": [alias], "alias-first": [alias, output], "real-first": [output, alias]}[input_order]
+    before = snapshot(output)
+    assert RolloutStore.read(alias).selected("success") == []
+    aggregate = AsyncMock(return_value=None)
+    monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", aggregate)
+    destination = output.with_name("aggregate.jsonl")
+    await RolloutAggregationHelper().run_from_config(
+        RolloutAggregationConfig(
+            input_glob=",".join(map(str, paths)),
+            output_jsonl_fpath=str(destination),
+            disable_health_check=True,
+        )
+    )
+    assert aggregate.call_args.args[0] == []
+    report = orjson.loads(coverage_path_for(destination).read_bytes())
+    assert report["successful"] == 0 and report["unknown"] == 2 and len(report["shards"]) == 1
+    assert all((output.parent / name).read_bytes() == data for name, data in before.items())
+
+
+@pytest.mark.parametrize("retry_timeouts", [False, True])
+def test_offline_coverage_declares_and_applies_timeout_retry_policy(prepared_run, monkeypatch, retry_timeouts):
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(1, retry_terminal_timeouts=retry_timeouts)[0]
+        store.record_dispatch(row)
+        store.record_outcome(row | {"_ng_failure_class": "timeout_exceeded", "_ng_failure_terminal": True})
+        online = store.coverage()
+    offline = RolloutStore.read(output, retry_terminal_timeouts=retry_timeouts).coverage()
+    assert offline == online
+    assert offline["retry_terminal_timeouts"] is retry_timeouts
+    assert offline["attempts_exhausted"] == int(retry_timeouts)

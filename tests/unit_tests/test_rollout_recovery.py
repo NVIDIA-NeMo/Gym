@@ -90,7 +90,7 @@ async def test_malformed_results_become_associated_failures(payload, monkeypatch
     install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, payload)))
     row = failing_row()
     original, outcome = await next(RolloutCollectionHelper().run_outcomes([row]))
-    assert original is row
+    assert original == row | {"_ng_run_id": outcome.run_id}
     assert isinstance(outcome, RolloutFailure)
     assert outcome.failure.stage is None
     assert outcome.exception_type == "InvalidRolloutResult"
@@ -134,7 +134,7 @@ async def test_agent_can_return_a_failure_for_its_dispatched_attempt(monkeypatch
         payload["run_id"] = "another-run"
     install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, payload)))
     original, outcome = await next(RolloutCollectionHelper().run_outcomes([row]))
-    assert original is row
+    assert original == row | {"_ng_run_id": outcome.run_id}
     if wrong_identity is None:
         assert outcome == failure
     else:
@@ -433,7 +433,7 @@ async def test_native_recovery_preserves_terminal_failures_and_unscored_completi
             return FakeResponse(200, identity | {"result": {"artifact": "done", "mask_sample": masked_unscored}})
         if task == "1" and attempt == 1:
             return FakeResponse(200, identity | {"result": {"reward": 0.0}})
-        return FakeResponse(200, identity | {"failure": {"message": "setup failed", "terminal": task == "2"}})
+        return FakeResponse(200, identity | {"failure": {"failure_reason": "setup failed", "terminal": task == "2"}})
 
     client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
     client.global_config_dict = OmegaConf.create({"environment": {"environment_servers": {"custom": {"scenario": 1}}}})
@@ -453,6 +453,9 @@ async def test_native_recovery_preserves_terminal_failures_and_unscored_completi
     assert store.coverage()["unscored"] == 1 and store.coverage()["measured"] == 0
     assert store.selected("success")[0]["artifact"] == "done"
     assert all("reward" not in failure for failure in store.failures())
+    assert all(
+        failure["_ng_failure_record"]["failure"]["failure_reason"] == "setup failed" for failure in store.failures()
+    )
     assert all(failure["_ng_failure_record"]["failure"].get("stage") is None for failure in store.failures())
     config.resume_from_cache = True
     await RolloutCollectionHelper().run_from_config(config)
@@ -1260,14 +1263,14 @@ async def test_invalid_judge_migration_preserves_journal_identity(runner_config,
 async def test_structured_failure_preserves_native_metadata_and_transport_uncertainty(monkeypatch):
     row = failing_row()
     install_fake_server_client(monkeypatch, AsyncMock(side_effect=TimeoutError("no reply")))
-    _, failure = await next(RolloutCollectionHelper().run_outcomes([row], run_id="owner"))
+    owned_row, failure = await next(RolloutCollectionHelper().run_outcomes([row], run_id="owner"))
     assert failure.run_id == "owner"
     assert (failure.source, failure.delivery, failure.failure.stage) == ("collector", "possibly_delivered", None)
     record = collection._episode_record(
         {
             "task_id": {},
             "failure": {
-                "message": "judge unavailable",
+                "failure_reason": "judge unavailable",
                 "terminal": False,
                 "failure_kind": "judge_failed",
                 "stage": "verification",
@@ -1275,12 +1278,127 @@ async def test_structured_failure_preserves_native_metadata_and_transport_uncert
             },
         }
     )
-    native = collection._failure_outcome(row, record, "agent")
+    native = collection._failure_outcome(owned_row, record, "agent")
     assert (native.source, native.delivery, native.failure.failure_kind, native.failure.stage) == (
         "environment",
         "delivered",
         "judge_failed",
         "verification",
     )
+    assert native.failure.failure_reason == "judge unavailable"
     assert "partial_response" not in native.model_dump()["failure"]
     assert record["_ng_failure_partial_response"] == {"output": []}
+
+
+@pytest.mark.parametrize("field", ["policy_base_url", "policy_api_key"])
+def test_shipped_agent_runtime_references_do_not_change_identity(tmp_path, field):
+    servers = OmegaConf.to_container(
+        OmegaConf.load(
+            Path(__file__).parents[2] / "responses_api_agents/anyterminal_agent/configs/anyterminal_claude_code.yaml"
+        ),
+        resolve=False,
+    )
+    servers.update(policy_model_name="model", policy_api_key="key-a", policy_base_url="http://a/v1")
+    rows = [failing_row() | {"agent_ref": {"name": "anyterminal_claude_code"}}]
+    source = tmp_path / "tasks.jsonl"
+    source.write_text(json.dumps(rows[0]) + "\n")
+    before = RunManifest.create(source, rows, {}, servers)
+    assert (
+        RunManifest.create(source, rows, {}, servers | {field: "new-location-or-credential"}).config_digest
+        == before.config_digest
+    )
+    assert (
+        RunManifest.create(source, rows, {}, servers | {"policy_model_name": "another-model"}).config_digest
+        != before.config_digest
+    )
+    settings = servers["anyterminal_claude_code"]["responses_api_agents"]["anyterminal_agent"]["agent_kwargs"]
+    settings["max_turns"] = 10
+    assert RunManifest.create(source, rows, {}, servers).config_digest != before.config_digest
+
+
+@pytest.mark.parametrize("source", ["environment", "collector"])
+@pytest.mark.parametrize("alias", [False, True])
+async def test_unclassified_structured_failure_is_persisted_and_retried(runner_config, monkeypatch, source, alias):
+    from nemo_gym.rollout_store import RolloutStore
+
+    async def post(**kwargs):
+        row = kwargs["json"]
+        if row["task"] == 0:
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
+        return FakeResponse(
+            200,
+            RolloutFailure(
+                episode_id=EpisodeId(rollout_id=logical_rollout_id(row)),
+                run_id=row["_ng_run_id"],
+                source=source,
+                delivery="delivered",
+                failure=EpisodeFailure(failure_reason="Service unavailable", terminal=False),
+            ).model_dump(mode="json"),
+        )
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await RolloutCollectionHelper().run_from_config(runner_config)
+    output = Path(runner_config.output_jsonl_fpath)
+    saved = RolloutStore.read(output)
+    assert (saved.coverage()["successful"], saved.coverage()["failed"]) == (1, 2)
+    assert all(row["_ng_failure_record"]["failure"].get("failure_kind") is None for row in saved.failures())
+    assert all("reward" not in row for row in saved.failures())
+    if alias:
+        shortcut = output.with_name("shortcut.jsonl")
+        shortcut.symlink_to(output)
+        runner_config.output_jsonl_fpath = str(shortcut)
+    client.post.reset_mock()
+    client.post.side_effect = None
+    client.post.return_value = FakeResponse(200, {"reward": 0.0, "response": {}})
+    runner_config.resume_from_cache = True
+    await RolloutCollectionHelper().run_from_config(runner_config)
+    assert client.post.call_count == 2
+    assert RolloutStore.read(output).coverage()["successful"] == 3
+    if alias:
+        assert shortcut.is_symlink()
+        assert not collection.failures_path_for(shortcut).exists()
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_direct_invocations_own_run_identity_without_mutating_inputs(monkeypatch, explicit):
+    install_fake_server_client(
+        monkeypatch, AsyncMock(return_value=FakeResponse(200, {"_ng_failure_class": "judge_failed"}))
+    )
+    row = failing_row()
+    original = dict(row)
+    helper = RolloutCollectionHelper()
+    first_row, first = await next(helper.run_outcomes([row], run_id="one" if explicit else None))
+    second_row, second = await next(helper.run_outcomes([row], run_id="two" if explicit else None))
+    assert first.run_id != second.run_id
+    assert row == original
+    assert first_row["_ng_run_id"] == first.run_id
+    assert second_row["_ng_run_id"] == second.run_id
+    stamped = row | {"_ng_run_id": "saved"}
+    _, preserved = await next(helper.run_outcomes([stamped]))
+    _, overridden = await next(helper.run_outcomes([stamped], run_id="new"))
+    assert preserved.run_id == "saved" and overridden.run_id == "new"
+    assert stamped["_ng_run_id"] == "saved"
+
+
+@pytest.mark.parametrize("failure_class", ["transient", "permanent", "incomplete"])
+async def test_nonjudge_failure_retains_response_only_as_diagnostics(runner_config, monkeypatch, failure_class):
+    from nemo_gym.rollout_store import RolloutStore
+
+    response = {
+        "id": "actual-answer",
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": "42"}]}],
+    }
+
+    async def post(**kwargs):
+        if kwargs["json"]["task"] == 0:
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
+        return FakeResponse(200, {"reward": 0.0, "response": response, "_ng_failure_class": failure_class})
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await RolloutCollectionHelper().run_from_config(runner_config)
+    failures = RolloutStore.read(Path(runner_config.output_jsonl_fpath)).failures()
+    assert len(failures) == 2
+    for saved in failures:
+        assert saved["_ng_failure_response"] == response
+        assert "response" not in saved and "reward" not in saved
+        assert "response" not in saved["_ng_failure_record"]

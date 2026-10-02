@@ -92,6 +92,12 @@ Tasks drained before dispatch by `dispatch_budget_s` consume no attempt and rema
 The opt-in `retry_terminal_timeouts`, `retry_invalid_judge_responses`, and `dispatch_longest_first` controls
 also apply to journal-backed runs. Invalid-judge migration preserves the run and attempt identities; an interrupted
 sidecar-first migration can be reconciled, while conflicting or foreign payloads still fail validation.
+Incomplete final writes are repaired after history validation and before migration reads them. Cached-deliverable reuse
+survives an interrupted retry, but a newer recorded outcome can supersede that instruction.
+
+Offline aggregation accepts the same `+retry_terminal_timeouts=true` option. Coverage records the active
+`retry_terminal_timeouts` and `max_rollout_attempts` policy alongside `attempts_exhausted`; use the same settings as
+collection to compare that diagnostic count. These settings do not change selected scores.
 
 Reported `kill_shaped` failures consume attempts and are persisted in the failure sidecar, even when the legacy producer
 also sets `_ng_no_persist`. This differs from older collectors that discarded these failures and did not count them.
@@ -146,10 +152,14 @@ reconciliation and its partial bytes are removed before appending. Malformed com
 An old materialized inventory alone does not establish validated completion coverage during aggregation.
 Merged rollout files are selected-result projections; keep the original shard artifacts for further recovery.
 
-Journal-aware health reads are a follow-up. Until then, automatic checks report that the history is unsupported;
+Journal-aware health reads are a follow-up. Until then, automatic checks print a short skip message for these histories;
 collection and scoring still finish. Use `+disable_health_check=true` to skip those checks, or run health checks
 on the merged selected-result projection written by `gym eval aggregate`. Standalone health checks reject a
 journal-backed source rather than treating superseded attempts as extra samples.
+
+Known runtime connection references (for example `${policy_base_url}` and `${policy_api_key}` inside agent client
+settings) do not change experiment identity when their values change. Model names and task parameters still do.
+Arbitrary nested task fields named `port` or `api_key` are retained in the identity.
 
 ### Legacy artifacts and explicit overrides
 
@@ -189,10 +199,14 @@ who observed the failure (`environment` or `collector`), delivery evidence, and 
 The nested failure carries `failure_reason`, the terminal flag, an optional failure kind, and an optional execution stage
 (`admission`, `seed`, `agent`, `verification`, or `cleanup`). Unknown stages remain unset. Delivery evidence does not authorize
 transport replay: a timeout is `possibly_delivered`, because the server may already have received the request.
-Saved failure records include `schema_version: 1`; unsupported versions and unknown fields are rejected.
+Saved failure records include `schema_version: 1`; unsupported versions, unknown fields, and inconsistent nested
+run/attempt identities or routing aliases are rejected. An absent `failure_kind` still represents a failure; only
+the compatibility routing alias uses a generic source-based category.
 Structured failures require `failure_reason`; the former `message` name is not accepted.
 Legacy sidecar routing fields remain supported as described below.
-Pass `run_id` to associate direct calls with an existing run; otherwise each `run_outcomes` invocation receives a new ID.
+Pass `run_id` to associate direct calls with an existing run, overriding existing row stamps in the invocation's copies.
+Without it, pre-stamped rows retain their IDs and unstamped rows share a new ID for this invocation.
+The returned rows are copies; caller-owned input rows are not modified.
 
 ```python
 from nemo_gym.rollout_collection import RolloutCollectionHelper
@@ -227,16 +241,21 @@ still accepted as data. Diagnostic observations, trajectories, and captured mode
 sidecar record, outside the canonical failure; they do not turn a failure into a completed training sample.
 
 Producer-specific error messages and diagnostic fields, such as archived trace paths, remain in the sidecar envelope.
-The bounded canonical failure record stays separate from those diagnostics.
+The bounded canonical failure record stays separate from those diagnostics. Other producer responses are retained
+as `_ng_failure_response` for inspection, including any synthetic failure text a producer supplied. This field is
+diagnostic evidence only: it is neither a scored response nor an eligible saved answer for judge-only recovery.
 
 For a legacy `judge_failed` or `judge_invalid` result that includes the actual generated response, the sidecar preserves it outside
 the canonical failure record, without a reward. Diagnostic token and trajectory evidence is retained too.
 Judge-only recovery from these journal-backed runs is a separate follow-up: this PR resumes unfinished tasks
 from their inputs. The existing `gym eval reverify` workflow remains available for legacy files and exported
-selected-result projections. It rejects journal-backed inputs and outputs before changing them, so it cannot
+selected-result projections. A selected-result projection contains completed answers, not failed answers for
+`--judge-failed-only` recovery. Reverification rejects journal-backed inputs and outputs before changing them, so it cannot
 silently reuse an older answer or append results without recording attempts.
 
-Aggregation deduplicates path spellings and symlinks that resolve to the same rollout file. Copied journal-backed runs
+Aggregation resolves source file symlinks before locating their companion history, and deduplicates aliases of the
+same rollout file. Health and reverification apply the same history protections through aliases. A merged output
+symlink is still replaced at its original destination rather than overwriting the linked source. Copied journal-backed runs
 are rejected by run identity. Legacy runs have no trustworthy run identifier: independent evaluations may share the
 same input inventory, so Gym does not identify them by an inventory hash. Supply each original legacy run only once;
 copies at different locations are treated as separate inputs, and their coverage is relative to those supplied inputs.

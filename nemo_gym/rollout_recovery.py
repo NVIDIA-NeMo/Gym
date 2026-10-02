@@ -21,6 +21,7 @@ completed rollouts; it does not checkpoint an agent's conversation or remote san
 import hashlib
 import json
 import os
+import re
 import stat
 import warnings
 from collections.abc import Iterator, Mapping
@@ -171,11 +172,35 @@ def _without_runtime_options(value: Any) -> Any:
     return result
 
 
+def _normalize_runtime_references(value: Any) -> Any:
+    """Keep recognized connection references stable wherever clients nest them.
+
+    Literal nested task data is untouched, including fields named port or api_key.
+    Preserve the reference name and any surrounding URL template in the identity.
+    """
+    if isinstance(value, dict):
+        return {key: _normalize_runtime_references(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_runtime_references(item) for item in value]
+    if isinstance(value, str):
+
+        def normalize(match: re.Match[str]) -> str:
+            reference = match[1]
+            parts = reference.split(".")
+            operational = reference in _SERVER_RUNTIME_OPTIONS or (
+                len(parts) == 4 and parts[1] in _SERVER_KINDS and parts[3] in _SERVER_RUNTIME_OPTIONS
+            )
+            return f"<runtime:{reference}>" if operational else match[0]
+
+        return re.sub(r"\$\{([^{}]+)\}", normalize, value)
+    return value
+
+
 def _configuration_identity(config: dict, global_config: dict, rows: list[dict]) -> dict:
     # Resolve only the servers reachable from the materialized agents. Keep the
     # original root as interpolation context, but do not evaluate unused servers
     # (which may require credentials/environment variables unavailable here).
-    raw = _plain(global_config)
+    raw = _normalize_runtime_references(_plain(global_config))
     context = OmegaConf.create(raw)
     filtered = _without_runtime_options(raw)
     servers = {
@@ -220,7 +245,7 @@ def _configuration_identity(config: dict, global_config: dict, rows: list[dict])
         references(selected[name])
     # Collection overrides may themselves contain DictConfig/ListConfig values.
     collection = {key: _plain(value) for key, value in config.items() if key not in _COLLECTION_OPTIONS}
-    context["_collection_identity"] = collection
+    context["_collection_identity"] = _normalize_runtime_references(collection)
     capture = raw.get("token_id_capture", {})
     context["_capture_identity"] = {key: value for key, value in capture.items() if key != "dir"}
     return {

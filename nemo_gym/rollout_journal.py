@@ -276,12 +276,21 @@ class RolloutJournal:
         self.check_run_identity(row, legacy=legacy)
         if "_ng_failure_record" in row:
             try:
-                RolloutFailure.model_validate(row["_ng_failure_record"])
+                failure = RolloutFailure.model_validate(row["_ng_failure_record"])
             except ValidationError as error:
                 raise ConfigError(
                     f"Invalid saved failure record for rollout attempt {key!r}: {error}. "
                     "Upgrade Gym or explicitly migrate the record before resuming."
                 ) from error
+            if (
+                failure.run_id != self.manifest.run_id
+                or (failure.episode_id.rollout_id, failure.episode_id.attempt) != key
+                or row.get("_ng_failure_class") != failure.sidecar_failure_class
+                or bool(row.get("_ng_failure_terminal")) != failure.failure.terminal
+            ):
+                raise ConfigError(
+                    f"Saved failure record is inconsistent with its envelope for rollout attempt {key!r}."
+                )
         if not legacy and key not in self.dispatched:
             raise MissingDispatchHistory(f"Saved outcome {key!r} has no dispatch in this run's attempt history.")
         previous = self.payloads.get(key)
@@ -479,6 +488,7 @@ class RolloutJournal:
             "attempts": len(self.dispatched),
             "attempts_exhausted": self.exhausted_count(max_attempts),
             "max_rollout_attempts": max_attempts,
+            "retry_terminal_timeouts": self.retry_terminal_timeouts,
             "completion_fraction": counts["success"] / expected if expected else 1.0,
             "complete": counts["success"] == expected,
             "reconciled": counts["unknown"] == 0,

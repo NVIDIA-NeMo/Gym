@@ -1648,7 +1648,17 @@ def _failure_diagnostics(result: Any) -> Dict:
     if result.get("type") == "failure":
         # The envelope is a sidecar row; only _ng_failure_record is the typed model.
         excluded.add("type")
-    return {key: value for key, value in result.items() if key not in excluded}
+    diagnostics = {key: value for key, value in result.items() if key not in excluded}
+    response = result.get("response")
+    if (
+        isinstance(response, dict)
+        and response
+        and result.get(NG_FAILURE_CLASS_KEY) not in ("judge_failed", "judge_invalid")
+    ):
+        # This is producer evidence, possibly including synthetic failure text.
+        # It is never a scored response or a judge-only recovery candidate.
+        diagnostics.setdefault("_ng_failure_response", response)
+    return diagnostics
 
 
 def _failure_compatibility_row(failure: RolloutFailure, verification_response: Optional[Dict] = None) -> Dict:
@@ -1661,7 +1671,7 @@ def _failure_compatibility_row(failure: RolloutFailure, verification_response: O
     """
     row = {
         "_ng_failure_record": failure.model_dump(mode="json"),
-        NG_FAILURE_CLASS_KEY: failure.failure.failure_kind,
+        NG_FAILURE_CLASS_KEY: failure.sidecar_failure_class,
         "_ng_failure_type": failure.exception_type,
         "_ng_failure_message": failure.failure.failure_reason,
         "error": failure.failure.failure_reason,
@@ -2276,6 +2286,8 @@ class RolloutCollectionHelper(BaseModel):
             return await self._run_from_config(config)
 
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
+        if config.resume_from_cache:
+            config = config.model_copy(update={"output_jsonl_fpath": str(Path(config.output_jsonl_fpath).resolve())})
         output_fpath = Path(config.output_jsonl_fpath)
         failures_fpath = failures_path_for(output_fpath)
         environment_server_client = (
@@ -2829,7 +2841,7 @@ Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if not config.disable_aggregation and not config.disable_health_check:
-            from nemo_gym.rollout_health import format_health_report, run_health_checks
+            from nemo_gym.rollout_health import JournalHealthUnavailable, format_health_report, run_health_checks
 
             try:
                 health_result = await asyncio.to_thread(
@@ -2838,6 +2850,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
                 )
+            except JournalHealthUnavailable as error:
+                print(f"Rollout health checks skipped: {error}")
             except Exception:
                 logger.exception(
                     "Rollout health checks failed after collection; rollout artifacts are still available."
@@ -3436,11 +3450,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         errors and cancellation still propagate. Call ``preprocess_examples`` first, or
         provide stable explicit rollout ids. This does not persist or retry work; a direct
         caller owns those decisions. Supply ``run_id`` to associate direct calls with
-        a run; otherwise this invocation receives a new id. ``run_examples`` retains its behavior.
+        a run, overriding any row stamp. Without it, existing row stamps are preserved;
+        unstamped rows share a new invocation ID. Returned rows are invocation-owned copies;
+        input rows are not modified. ``run_examples`` retains its behavior.
         """
         owner = run_id or str(uuid4())
+        examples = [dict(row, **{RUN_ID_KEY: run_id or row.get(RUN_ID_KEY) or owner}) for row in examples]
         for row in examples:
-            row.setdefault(RUN_ID_KEY, owner)
             if maybe_rollout_id_from_run_body(row) is None:
                 raise ValueError("run_outcomes requires rollout ids; call preprocess_examples first.")
 
@@ -3542,6 +3558,10 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
     ```
     """
 
+    retry_terminal_timeouts: bool = Field(
+        default=False,
+        description="Apply the collection timeout-retry policy when reporting exhausted attempts; scores are unchanged.",
+    )
     input_glob: str = Field(
         description=(
             "Glob pattern or comma-separated list of glob patterns matching the rollout shards "
@@ -3605,13 +3625,14 @@ def _expand_input_glob(input_glob: str) -> List[str]:
       'a/*.jsonl, b/*.jsonl'   -> matches of both patterns, deduplicated
     """
     patterns = [p.strip() for p in input_glob.split(",") if p.strip()]
-    seen: Dict[Path, str] = {}  # retain the first spelling of each resolved path
+    seen: Dict[Path, str] = {}  # source identity includes its companion recovery files
     for pattern in patterns:
         for path in sorted(glob_module.glob(pattern)):
-            if Path(path).stem.endswith(("_attempts", "_failures", "_materialized_inputs")):
+            resolved = Path(path).resolve()
+            if resolved.stem.endswith(("_attempts", "_failures", "_materialized_inputs")):
                 # Broad shard globs must not score recovery artifacts as results.
                 continue
-            seen.setdefault(Path(path).resolve(), path)
+            seen.setdefault(resolved, str(resolved))
     return list(seen.values())
 
 
@@ -3648,7 +3669,9 @@ class RolloutAggregationHelper(BaseModel):
         run_ids: set[str] = set()
         for shard_path in input_paths:
             shard = Path(shard_path)
-            history = RolloutStore.read(shard, import_legacy=False)
+            history = RolloutStore.read(
+                shard, import_legacy=False, retry_terminal_timeouts=config.retry_terminal_timeouts
+            )
             if history is not None:
                 if history.manifest.run_id in run_ids:
                     raise ConfigError("The same run was supplied through multiple shard paths.")
@@ -3728,6 +3751,7 @@ class RolloutAggregationHelper(BaseModel):
             "unknown": sum(c["unknown"] for c in components) if inventory_known else None,
             "attempts_exhausted": sum(c["attempts_exhausted"] for c in components) if inventory_known else None,
             "max_rollout_attempts": _get_max_rollout_attempts(),
+            "retry_terminal_timeouts": config.retry_terminal_timeouts,
             "complete": inventory_known and all(c["complete"] for c in components),
             "coverage_known": inventory_known,
             "scored": scored_rollouts,
@@ -3777,7 +3801,7 @@ Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if not config.disable_health_check:
-            from nemo_gym.rollout_health import format_health_report, run_health_checks
+            from nemo_gym.rollout_health import JournalHealthUnavailable, format_health_report, run_health_checks
 
             try:
                 health_result = await asyncio.to_thread(
@@ -3787,6 +3811,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
                 )
+            except JournalHealthUnavailable as error:
+                print(f"Rollout health checks skipped: {error}")
             except Exception:
                 logger.exception(
                     "Rollout health checks failed after aggregation; aggregate artifacts are still available."

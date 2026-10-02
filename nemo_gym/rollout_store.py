@@ -94,6 +94,8 @@ class RolloutStore:
         Legacy imports need not have their original dataset available, so they
         deliberately do not invoke it when no saved manifest exists.
         """
+        if resume:
+            output = output.resolve()
         manifest_path = manifest_path_for(output)
         materialized = materialized_path_for(output)
         journal = journal_path_for(output)
@@ -155,10 +157,15 @@ class RolloutStore:
                     stacklevel=2,
                 )
                 seed_legacy = True
-            if migrate_outcomes is not None and migrate_outcomes(output):
-                state = RolloutJournal.load(
-                    output, manifest, import_legacy=manifest.legacy_import, rebuild_history=seed_legacy
-                )
+            if migrate_outcomes is not None:
+                # History validation above must precede every mutation. Migration
+                # reads strict JSON, so repair interrupted tails before invoking it.
+                for path in (output, failures_path_for(output), journal):
+                    prepare_append(path)
+                if migrate_outcomes(output):
+                    state = RolloutJournal.load(
+                        output, manifest, import_legacy=manifest.legacy_import, rebuild_history=seed_legacy
+                    )
             if seed_legacy or manifest.identity_overridden or not manifest_path.exists():
                 manifest.write(manifest_path)
             return cls(output, state, seed_legacy=seed_legacy)
@@ -186,7 +193,9 @@ class RolloutStore:
         return cls(output, state)
 
     @classmethod
-    def read(cls, output: Path, *, import_legacy: bool = True) -> "RolloutStore | None":
+    def read(
+        cls, output: Path, *, import_legacy: bool = True, retry_terminal_timeouts: bool = False
+    ) -> "RolloutStore | None":
         """Read the same selected outcomes offline, without modifying artifacts.
 
         A legacy file without an input inventory has unknown completion coverage;
@@ -194,6 +203,7 @@ class RolloutStore:
         With import_legacy=False, an inventory alone also stays on that path:
         pre-journal writers did not enforce the recovery identity invariants.
         """
+        output = output.resolve()
         path = manifest_path_for(output)
         if not import_legacy and not (path.exists() or journal_path_for(output).exists()):
             return None
@@ -209,6 +219,7 @@ class RolloutStore:
             import_legacy=manifest.legacy_import,
             rebuild_history=manifest.legacy_import and not journal_path_for(output).exists(),
         )
+        state.retry_terminal_timeouts = retry_terminal_timeouts
         return cls(output, state, read_only=True)
 
     def __enter__(self) -> "RolloutStore":
@@ -294,12 +305,17 @@ class RolloutStore:
         elapsed = {}
         # Main's cached-deliverable and longest-first controls still apply when
         # the journal supplies the attempt identities.
+        # Unknown attempts carry no new decision about a cached deliverable.
+        # Stop at the newest recorded outcome (including an omission), rather
+        # than carrying a reuse instruction past a newer failure without one.
+        latest_recorded = {}
+        for identity, attempt in self._state.payloads.keys() | self._state.omitted:
+            latest_recorded[identity] = max(attempt, latest_recorded.get(identity, -1))
         for row in rows:
             identity = logical_rollout_id(row)
-            previous = self._state.payloads.get((identity, self._state.latest.get(identity)))
-            if previous is not None:
-                if previous.reuse_cached_deliverable:
-                    row["reuse_cached_deliverable"] = True
+            previous = self._state.payloads.get((identity, latest_recorded.get(identity)))
+            if previous is not None and previous.reuse_cached_deliverable:
+                row["reuse_cached_deliverable"] = True
         if dispatch_longest_first:
             for (identity, _), outcome in self._state.payloads.items():
                 if outcome.failure_class is not None:

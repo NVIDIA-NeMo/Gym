@@ -963,10 +963,15 @@ def _prepare_output_fpaths(
     output_fpath = Path(output_jsonl_fpath)
     output_fpath = output_fpath.with_name(output_name_prefix + output_fpath.name)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
-    if overwrite and (manifest_path_for(output_fpath).exists() or journal_path_for(output_fpath).exists()):
-        raise ConfigError("Cannot overwrite a journal-backed run with reverification; choose a new output path.")
-    if manifest_path_for(output_fpath).exists() or journal_path_for(output_fpath).exists():
-        raise ConfigError("Journal-backed reverification is a follow-up; choose a selected-result projection.")
+    # Inspect both spellings, but retain the destination for atomic publication:
+    # replacing an output symlink must not replace its target.
+    for target in {output_fpath, output_fpath.resolve()}:
+        if manifest_path_for(target).exists() or journal_path_for(target).exists():
+            if overwrite:
+                raise ConfigError(
+                    "Cannot overwrite a journal-backed run with reverification; choose a new output path."
+                )
+            raise ConfigError("Journal-backed reverification is a follow-up; choose a selected-result projection.")
     failures_fpath = failures_path_for(output_fpath)
     if not (append or resume_from_cache):
         # A fresh run must not silently clobber a prior run's rollouts: delete only when the user
@@ -1008,7 +1013,7 @@ class RolloutReverificationHelper(BaseModel):
         for name in (config.rollouts_jsonl_fpath, config.output_jsonl_fpath):
             if name is None:
                 continue
-            path = _resolve_under_cwd_or_install(name)
+            path = _resolve_under_cwd_or_install(name).resolve()
             if manifest_path_for(path).exists() or journal_path_for(path).exists():
                 raise ConfigError(
                     "Journal-backed reverification is a follow-up to evaluation resume. "
