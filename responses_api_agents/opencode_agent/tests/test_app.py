@@ -15,9 +15,11 @@
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 import yaml
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -537,6 +539,39 @@ class TestRepoDir:
         assert "agent_artifact_unavailable" in {gap.code for gap in observations.gaps}
         assert "turns_unavailable" in {gap.code for gap in trajectory.gaps}
         assert repo_dir.is_dir()
+        assert not workspace.exists()
+
+    async def test_artifact_reader_keeps_loop_live_and_owns_workspace_on_cancel(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        process = MagicMock(returncode=0)
+        process.communicate = AsyncMock(return_value=(b"", b""))
+        agent = _make_agent()
+        entered = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        def read_artifacts(path):
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5), "event loop did not release artifact reader"
+            assert workspace.is_dir(), "workspace removed while reader still owns it"
+            return [], {"input_tokens": 0, "output_tokens": 0}
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=workspace),
+            patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", return_value=process),
+            patch("responses_api_agents.opencode_agent.app.parse_opencode_session", side_effect=read_artifacts),
+        ):
+            running = asyncio.create_task(agent._run_opencode("solve", None, collect_observations=False))
+            try:
+                await asyncio.wait_for(entered.wait(), 3)
+                running.cancel()
+                await asyncio.sleep(0)
+                assert not running.done()
+                assert workspace.is_dir()
+            finally:
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await running
         assert not workspace.exists()
 
 

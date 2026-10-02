@@ -194,6 +194,28 @@ class TestModelServer:
 
 
 class TestRolloutObservability:
+    @pytest.mark.parametrize("header", [False, True])
+    def test_native_session_identity(self, header: bool) -> None:
+        events = [(0.0, {"type": "session", "id": "native-session"})] if header else []
+        events.extend(
+            [
+                (1.0, {"type": "agent_start", "id": "not-a-session"}),
+                (2.0, {"type": "tool_execution_start", "toolCallId": "tool", "toolName": "bash"}),
+                (3.0, {"type": "tool_execution_end", "toolCallId": "tool", "isError": False}),
+            ]
+        )
+        bundle = _build_pi_observations(events, "rollout-1", None, [])
+        expected = "native-session" if header else "rollout-1"
+        [invocation] = _records(bundle, AgentInvocation)
+        [tool] = _records(bundle, ToolCallObservation)
+        assert invocation.invocation_id == tool.invocation_id == expected
+        assert all(gap.invocation_id == expected for gap in bundle.gaps)
+
+    def test_conflicting_native_sessions_fail_observation_parsing(self) -> None:
+        events = [(0.0, {"type": "session", "id": identity}) for identity in ("one", "two")]
+        with pytest.raises(ValueError, match="session identity changed"):
+            _build_pi_observations(events, "rollout-1", None, [])
+
     async def test_reads_and_timestamps_json_events(self) -> None:
         stream = asyncio.StreamReader()
         stream.feed_data(b'{"type":"tool_execution_start","toolCallId":"a"}\nnot-json\n')

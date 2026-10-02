@@ -116,3 +116,13 @@ class RolloutContextMiddleware:
         scope = {**scope, "path": path, "raw_path": path.encode()}
         with rollout_context(match.group("rollout_id")):
             await self._app(scope, receive, send)
+
+
+def trajectory_identity(row: Mapping[str, Any]) -> tuple[str, str]:
+    """Canonical collector task and expanded rollout identity, including attempts."""
+    task_id = next(
+        (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
+        str(row[TASK_INDEX_KEY_NAME]),
+    )
+    rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+    return task_id, rollout_id

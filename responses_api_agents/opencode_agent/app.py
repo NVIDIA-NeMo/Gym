@@ -38,6 +38,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.native_stream import communicate_native, kill_native_process_group, native_stream_headers, run_native_io
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -635,7 +636,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         cmd.extend(self.config.extra_args)
         cmd.append(prompt)
 
+        observer = None
+        proc = None
         try:
+            observer = self._native_output_observer(rollout_id)
+            if observer is not None:
+                await observer.start(instruction, system_prompt)
+            if observer is not None:
+                cmd = [*cmd[:-1], "--format", "json", cmd[-1]]
             timed_out = False
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -643,40 +651,67 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
             )
             try:
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                _, stderr = await asyncio.wait_for(
+                    communicate_native(proc, observer) if observer is not None else proc.communicate(),
+                    timeout=self.config.timeout,
+                )
             except asyncio.TimeoutError:
-                proc.kill()
+                if observer is not None:
+                    observer.failed = True
+                kill_native_process_group(proc)
                 _, stderr = await proc.communicate()
                 timed_out = True
                 LOG.warning("opencode timed out after %ds", self.config.timeout)
+            except asyncio.CancelledError:
+                kill_native_process_group(proc)
+                await proc.communicate()
+                raise
 
             if proc.returncode not in (0, None):
                 LOG.warning("opencode exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
             db_path = data_home / "opencode" / "opencode.db"
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"
-            output_items, usage = (
-                ([], {"input_tokens": 0, "output_tokens": 0}) if timed_out else parse_opencode_session(db_path)
-            )
-            observations = AgentObservationBundle(source="opencode")
-            if collect_observations:
+
+            def read_artifacts():
+                output_items, usage = (
+                    ([], {"input_tokens": 0, "output_tokens": 0}) if timed_out else parse_opencode_session(db_path)
+                )
+                observations = AgentObservationBundle(source="opencode")
+                if collect_observations:
+                    try:
+                        observations = _parse_opencode_session(db_path, invocation_id, trajectory)
+                    except Exception:
+                        LOG.exception("failed to read OpenCode session artifact")
+                        if trajectory is not None:
+                            trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
+                        observations = AgentObservationBundle(
+                            source="opencode",
+                            records=[AgentInvocation(invocation_id=invocation_id)],
+                            gaps=[
+                                ObservationGap(code="agent_artifact_unavailable"),
+                                ObservationGap(code="agent_transcript_unavailable"),
+                                ObservationGap(code="model_call_ownership_unavailable"),
+                            ],
+                        )
+                return output_items, usage, observations
+
+            # SQLite lock waits must not stall other native pipe readers. Join the
+            # worker even on cancellation before removing its workspace below.
+            reading = asyncio.create_task(asyncio.to_thread(read_artifacts))
+            cancelled = False
+            while not reading.done():
                 try:
-                    observations = _parse_opencode_session(db_path, invocation_id, trajectory)
-                except Exception:
-                    LOG.exception("failed to read OpenCode session artifact")
-                    if trajectory is not None:
-                        trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
-                    observations = AgentObservationBundle(
-                        source="opencode",
-                        records=[AgentInvocation(invocation_id=invocation_id)],
-                        gaps=[
-                            ObservationGap(code="agent_artifact_unavailable"),
-                            ObservationGap(code="agent_transcript_unavailable"),
-                            ObservationGap(code="model_call_ownership_unavailable"),
-                        ],
-                    )
+                    await asyncio.shield(reading)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if cancelled:
+                reading.exception()
+                raise asyncio.CancelledError
+            output_items, usage, observations = reading.result()
             run_status = "incomplete" if timed_out else "completed" if proc.returncode == 0 else "failed"
             for invocation in observations.records:
                 if not isinstance(invocation, AgentInvocation):
@@ -686,8 +721,18 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if timed_out:
                 observations.gaps.append(ObservationGap(code="agent_run_timeout"))
             return output_items, usage, self.config.model, observations
+        except BaseException:
+            if observer is not None:
+                observer.failed = True
+            raise
         finally:
-            shutil.rmtree(work_dir, ignore_errors=True)
+            try:
+                if observer is not None:
+                    await observer.close(
+                        returncode=proc.returncode if proc is not None else None,
+                    )
+            finally:
+                await run_native_io(lambda: shutil.rmtree(work_dir, ignore_errors=True))
 
     async def _create_episode(
         self,
@@ -805,6 +850,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             rollout_id = self.rollout_id_from_run(body)
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
+                headers=native_stream_headers(),
                 url_path=self.url_path_for_run("/v1/responses", body),
                 json=body.responses_create_params,
                 cookies=cookies,

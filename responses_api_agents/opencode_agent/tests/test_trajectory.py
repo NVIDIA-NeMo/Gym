@@ -3,6 +3,7 @@
 
 import json
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -199,7 +200,7 @@ def test_native_timestamp_falls_back_to_database(tmp_path, parse, timestamp, exp
 )
 def test_unowned_or_untimed_artifact_does_not_invent_turns(tmp_path, parse, mutation):
     db = _session_db(tmp_path, [_policy(time={})])
-    with sqlite3.connect(db) as con:
+    with closing(sqlite3.connect(db)) as con, con:
         con.execute(mutation)
     trajectory, _ = _trajectory(parse, db)
     assert trajectory.turns == []
@@ -208,7 +209,7 @@ def test_unowned_or_untimed_artifact_does_not_invent_turns(tmp_path, parse, muta
 
 def test_invalid_json_and_tool_state_are_partial_evidence(tmp_path, parse):
     db = _session_db(tmp_path, [_policy({"type": "tool", "tool": "bash", "state": "invalid"}, {"type": "patch"})])
-    with sqlite3.connect(db) as con:
+    with closing(sqlite3.connect(db)) as con, con:
         con.execute("insert into part values ('bad-json', 'm0', 'root', '{', 20)")
     trajectory, _ = _trajectory(parse, db)
     assert len(trajectory.turns) == 1

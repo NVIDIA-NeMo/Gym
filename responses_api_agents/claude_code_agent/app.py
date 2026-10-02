@@ -22,7 +22,6 @@ import shutil
 import subprocess
 import tempfile
 from asyncio import Semaphore
-from contextlib import suppress
 from pathlib import Path
 from time import monotonic, time
 from typing import Any, Callable, Optional
@@ -35,6 +34,7 @@ from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunReq
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
+from nemo_gym.native_stream import communicate_native, kill_native_process_group, run_native_io
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -449,10 +449,20 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
         claude_config_dir = None
         run_metadata: dict[str, Any] = {"status": "unknown"}
+        observer = None
+        proc = None
         try:
+            observer = self._native_output_observer(rollout_id)
+            if observer is not None:
+                await observer.start(instruction, system_prompt)
+
             # Inside the try so a bad skills.path (raising in stage_skills) still cleans up the
             # partially-created config dir in the finally rather than leaking it per failing request.
-            claude_config_dir = self._setup_config_dir(skills_path=skills_path)
+            def prepare() -> None:
+                nonlocal claude_config_dir
+                claude_config_dir = self._setup_config_dir(skills_path=skills_path)
+
+            await run_native_io(prepare)
             env = {
                 **os.environ,
                 "ANTHROPIC_API_KEY": api_key,  # pragma: allowlist secret
@@ -482,17 +492,20 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
             )
-            communication = asyncio.create_task(proc.communicate())
+            communication = asyncio.create_task(
+                communicate_native(proc, observer) if observer is not None else proc.communicate()
+            )
             try:
                 stdout, stderr = await asyncio.wait_for(
                     asyncio.shield(communication),
                     timeout=self.config.timeout,
                 )
             except asyncio.TimeoutError:
-                if proc.returncode is None:
-                    with suppress(ProcessLookupError):
-                        proc.kill()
+                if observer is not None:
+                    observer.failed = True
+                kill_native_process_group(proc)
                 stdout, _ = await communication
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
                 _, run_metadata = parse_stream_json(stdout.decode(errors="replace"))
@@ -503,9 +516,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 )
                 return [], model, run_metadata
             except asyncio.CancelledError:
-                if proc.returncode is None:
-                    with suppress(ProcessLookupError):
-                        proc.kill()
+                kill_native_process_group(proc)
                 await asyncio.gather(communication, return_exceptions=True)
                 raise
 
@@ -521,15 +532,29 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             if error_type is not None:
                 run_metadata["error_type"] = error_type
             return output_items, model, run_metadata
+        except BaseException:
+            if observer is not None:
+                observer.failed = True
+            raise
         finally:
-            if claude_config_dir is not None:
-                try:
-                    if observation_collector is not None:
-                        await asyncio.to_thread(observation_collector, claude_config_dir, run_metadata)
-                except Exception:
-                    LOG.exception("failed to collect Claude Code observations")
-                finally:
-                    shutil.rmtree(claude_config_dir, ignore_errors=True)
+            try:
+                if observer is not None:
+                    await observer.close(
+                        returncode=proc.returncode if proc is not None else None,
+                    )
+            finally:
+                if claude_config_dir is not None:
+
+                    def collect_and_remove() -> None:
+                        try:
+                            if observation_collector is not None:
+                                observation_collector(claude_config_dir, run_metadata)
+                        except Exception:
+                            LOG.exception("failed to collect Claude Code observations")
+                        finally:
+                            shutil.rmtree(claude_config_dir, ignore_errors=True)
+
+                    await run_native_io(collect_and_remove)
 
     def _resources_server_base_url(self) -> str:
         cfg = get_first_server_config_dict(
@@ -725,8 +750,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             skills_path = ((body.model_extra or {}).get(SKILLS_REF_KEY_NAME) or {}).get("path")
             rollout_id = self.rollout_id_from_run(body)
 
-            with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
-                mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
+            mcp_directory = tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_")
+            try:
+                mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_directory.name))
                 if rollout_id is not None:
                     episode = await self._create_episode(
                         body.responses_create_params,
@@ -743,6 +769,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     )
                     observations = None
                 agent_resp_json = agent_resp.model_dump(mode="json")
+            finally:
+                await run_native_io(mcp_directory.cleanup)
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,

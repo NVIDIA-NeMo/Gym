@@ -37,6 +37,15 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.native_stream import (
+    PIPE_CHUNK_BYTES,
+    NativeStreamObserver,
+    communicate_native,
+    kill_native_process_group,
+    native_stream_headers,
+    read_native_pipe,
+    run_native_io,
+)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -144,7 +153,9 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
     return output_items, {"input_tokens": input_tokens, "output_tokens": output_tokens}
 
 
-async def _read_pi_stdout(stream: asyncio.StreamReader) -> tuple[str, list[tuple[float, dict[str, Any]]]]:
+async def _read_pi_stdout(
+    stream: asyncio.StreamReader, observer: NativeStreamObserver | None = None
+) -> tuple[str, list[tuple[float, dict[str, Any]]]]:
     lines: list[str] = []
     events: list[tuple[float, dict[str, Any]]] = []
 
@@ -160,13 +171,17 @@ async def _read_pi_stdout(stream: asyncio.StreamReader) -> tuple[str, list[tuple
             events.append((observed_at, event))
 
     pending = bytearray()
-    while chunk := await stream.read(64 * 1024):
+    while chunk := await stream.read(PIPE_CHUNK_BYTES):
+        if observer is not None:
+            await observer.emit("stdout", chunk)
         pending.extend(chunk)
         while (newline := pending.find(b"\n")) >= 0:
             consume(bytes(pending[: newline + 1]))
             del pending[: newline + 1]
     if pending:
         consume(bytes(pending))
+    if observer is not None:
+        await observer.emit("stdout", b"")
     return "".join(lines), events
 
 
@@ -178,6 +193,16 @@ def _build_pi_observations(
     *,
     transcript_available: bool = True,
 ) -> AgentObservationBundle:
+    session_ids = {
+        event["id"]
+        for _, event in events
+        if event.get("type") == "session" and isinstance(event.get("id"), str) and event["id"]
+    }
+    if len(session_ids) > 1:
+        raise ValueError("Pi native session identity changed")
+    if session_ids:
+        invocation_id = session_ids.pop()
+
     def gap(code: str, detail: Optional[str] = None) -> ObservationGap:
         return ObservationGap(code=code, invocation_id=invocation_id, detail=detail)
 
@@ -531,7 +556,12 @@ class PiAgent(SimpleResponsesAPIAgent):
         cmd += self.config.extra_args
         cmd.append(instruction)
 
+        observer = None
+        proc = None
         try:
+            observer = self._native_output_observer(rollout_id)
+            if observer is not None:
+                await observer.start(instruction, system_prompt)
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(work_dir),
@@ -539,38 +569,65 @@ class PiAgent(SimpleResponsesAPIAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
             )
             assert proc.stdout is not None and proc.stderr is not None
             events: list[tuple[float, dict[str, Any]]] = []
             if collect_observations:
-                stdout_task = asyncio.create_task(_read_pi_stdout(proc.stdout))
-                stderr_task = asyncio.create_task(proc.stderr.read())
+                stdout_task = asyncio.create_task(_read_pi_stdout(proc.stdout, observer))
+                stderr_task = asyncio.create_task(read_native_pipe(proc.stderr, "stderr", observer))
                 output_task = asyncio.gather(stdout_task, stderr_task, proc.wait())
                 try:
                     (stdout, events), stderr, _ = await asyncio.wait_for(
                         asyncio.shield(output_task), timeout=self.config.timeout
                     )
                 except asyncio.TimeoutError:
-                    if proc.returncode is None:
-                        proc.kill()
+                    if observer is not None:
+                        observer.failed = True
+                    kill_native_process_group(proc)
                     (_, events), _, _ = await output_task
                     LOG.warning("pi timed out after %ds", self.config.timeout)
                     return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model, events
+                except asyncio.CancelledError:
+                    if observer is not None:
+                        observer.failed = True
+                    kill_native_process_group(proc)
+                    await asyncio.gather(output_task, return_exceptions=True)
+                    raise
             else:
                 try:
-                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                    stdout, stderr = await asyncio.wait_for(
+                        communicate_native(proc, observer) if observer is not None else proc.communicate(),
+                        timeout=self.config.timeout,
+                    )
                 except asyncio.TimeoutError:
-                    proc.kill()
+                    if observer is not None:
+                        observer.failed = True
+                    kill_native_process_group(proc)
                     await proc.communicate()
                     LOG.warning("pi timed out after %ds", self.config.timeout)
                     return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model, events
+                except asyncio.CancelledError:
+                    kill_native_process_group(proc)
+                    await proc.communicate()
+                    raise
 
             if proc.returncode not in (0, None):
                 LOG.warning("pi exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
             output_items, usage = parse_pi_events(stdout)
             return output_items, usage, self.config.model, events
+        except BaseException:
+            if observer is not None:
+                observer.failed = True
+            raise
         finally:
-            shutil.rmtree(work_dir, ignore_errors=True)
+            try:
+                if observer is not None:
+                    await observer.close(
+                        returncode=proc.returncode if proc is not None else None,
+                    )
+            finally:
+                await run_native_io(lambda: shutil.rmtree(work_dir, ignore_errors=True))
 
     async def _create_episode(
         self,
@@ -689,6 +746,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             rollout_id = self.rollout_id_from_run(body)
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
+                headers=native_stream_headers(),
                 url_path=self.url_path_for_run("/v1/responses", body),
                 json=body.responses_create_params,
                 cookies=cookies,
