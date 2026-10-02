@@ -28,7 +28,7 @@ from uuid import uuid4
 from anyio import CancelScope
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, FilePath
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -406,6 +406,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
     remote_opencode_musl_binary_path: Optional[str] = None
+    local_ripgrep_binary_path: FilePath | None = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
     concurrency: int = Field(default=64, gt=0)
@@ -797,6 +798,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             remote_data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
             xdg_home_str = f"XDG_DATA_HOME={remote_data_home}"
 
+        # OpenCode's glob/grep tools otherwise download rg inside the sandbox.
+        ripgrep_remote_path = None
+        ripgrep_install_str = ""
+        if self.config.local_ripgrep_binary_path is not None:
+            ripgrep_remote_path = f"/tmp/nemo-gym-ripgrep-{uuid4().hex}"
+            ripgrep_install_str = (
+                '&& mkdir -p "$HOME/.opencode/bin" '
+                f'&& mv {quote(ripgrep_remote_path)} "$HOME/.opencode/bin/rg" '
+                '&& chmod 0755 "$HOME/.opencode/bin/rg" '
+                '&& "$HOME/.opencode/bin/rg" --version'
+            )
+
         # @bxyu-nvidia: Regarding `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000` below:
         # OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
         # and there is no way to set it to null.
@@ -805,6 +818,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         command = f"""
         echo "Shell: $SHELL" \
         && {install_str} \
+        {ripgrep_install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
@@ -818,6 +832,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         run_error_type = None
         try:
+            if ripgrep_remote_path is not None:
+                await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
             result = await sandbox.exec(
                 command=command,
                 timeout_s=self.config.sandbox_timeout,
