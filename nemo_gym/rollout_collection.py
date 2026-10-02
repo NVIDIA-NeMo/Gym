@@ -1617,12 +1617,16 @@ def _normalize_rollout_outcome(row: Dict, result: Any) -> Dict | RolloutFailure:
             if "reward" in result and (type(result["reward"]) not in (int, float) or not isfinite(result["reward"])):
                 raise InvalidRolloutResult("An episode reward, when present, must be finite.")
             return result
-        if (
-            type(result.get("reward")) not in (int, float)
-            or not isfinite(result["reward"])
-            or not isinstance(result.get("response"), dict)
+        # Stirrup's execute_only completion intentionally skips verification.
+        # Missing scores are allowed only for this explicit legacy contract;
+        # a present score still has to be valid, and empty/malformed bodies fail.
+        unscored = result.get("execute_only") is True and "reward" not in result
+        if not isinstance(result.get("response"), dict) or (
+            not unscored and (type(result.get("reward")) not in (int, float) or not isfinite(result["reward"]))
         ):
-            raise InvalidRolloutResult("Completed results require a finite reward and a response object.")
+            raise InvalidRolloutResult(
+                "Completed results require a response object and a finite reward, unless execute_only is true."
+            )
     except (ValidationError, OverflowError) as error:
         raise InvalidRolloutResult(str(error)) from error
     return result
@@ -2295,6 +2299,9 @@ class RolloutCollectionHelper(BaseModel):
             if config.environment_routing_mode != "agent" or config.environment_server_routes
             else None
         )
+        # With --no-serve, local config may contain only collector options.
+        # Fingerprint the running servers, as dispatch does, in every route mode.
+        identity_client = environment_server_client or self.setup_server_client()
         global_config = (
             environment_server_client.global_config_dict
             if environment_server_client is not None
@@ -2310,15 +2317,14 @@ class RolloutCollectionHelper(BaseModel):
                 (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is None and row.get(TASK_SOURCE_KEY_NAME) is not None
                 for row in direct_source_rows
             ):
-                server_client = environment_server_client or self.setup_server_client()
-                self.resolve_task_sources(direct_source_rows, server_client.global_config_dict)
+                self.resolve_task_sources(direct_source_rows, identity_client.global_config_dict)
             if environment_server_client is not None:
                 self._stamp_environment_server_agent_refs(input_rows, environment_server_client.global_config_dict)
             manifest = RunManifest.create(
                 _resolve_under_cwd_or_install(config.input_jsonl_fpath),
                 input_rows,
                 config.model_dump(),
-                global_config,
+                identity_client.global_config_dict,
             )
             return input_rows, manifest
 
@@ -3459,6 +3465,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         for row in examples:
             if maybe_rollout_id_from_run_body(row) is None:
                 raise ValueError("run_outcomes requires rollout ids; call preprocess_examples first.")
+            logical_rollout_id(row)  # Enforce the shared EpisodeId rules before any HTTP dispatch.
 
         async def without_metadata(future: Future) -> Tuple[Dict, Dict | RolloutFailure]:
             completed = await future

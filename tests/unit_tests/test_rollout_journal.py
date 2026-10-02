@@ -44,7 +44,9 @@ def run(tmp_path):
     rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(5)]
     output = tmp_path / "rollouts.jsonl"
     materialized_path_for(output).write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
-    manifest = RunManifest.create(materialized_path_for(output), rows, {}, {})
+    manifest = RunManifest.create(
+        materialized_path_for(output), rows, {}, {"agent": {"responses_api_agents": {"impl": {}}}}
+    )
     manifest.write(manifest_path_for(output))
     output.touch()
     failures_path_for(output).touch()
@@ -399,7 +401,7 @@ async def test_aggregation_preserves_existing_target_recovery_artifacts(run, mon
         save(run, history, rows[0], reward=1.0)
     target = source.with_name("combined.jsonl")
     target_rows = [dict(rows[0], _ng_task_index=99)]
-    manifest = RunManifest.create(source, target_rows, {}, {})
+    manifest = RunManifest.create(source, target_rows, {}, {"agent": {"responses_api_agents": {"impl": {}}}})
     with RolloutStore.start_or_resume(target, lambda: (target_rows, manifest), resume=False) as store:
         row = store.pending(3)[0]
         store.record_dispatch(row)

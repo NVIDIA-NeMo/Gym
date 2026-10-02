@@ -54,6 +54,8 @@ but not retried. Native episode replies must match the dispatched task and attem
 
 Native Environment Servers may return completed results without a `reward` or model `response`. Such results
 remain saved and reusable; no zero reward is invented. Results without a numeric reward are reported as `unscored`.
+Stirrup legacy `execute_only=true` results are also completed and reusable without a reward; enabling failure routing
+does not turn them into failures.
 `require_complete` checks completed episodes, so an unscored completion satisfies that check without becoming a score.
 
 Native episode failures preserve their shared `failure_kind` when provided, falling back to `environment_server_failed`, along with the terminal flag, stage, and any
@@ -85,7 +87,9 @@ recorded failures.
 </Warning>
 
 Explicit `_ng_rollout_id` values must be valid capture IDs. Preprocessing preserves them for single copies and adds
-`-r<rollout_index>` when repeats or agent fan-out expand a row. The resulting IDs must be unique within the run.
+`-r<rollout_index>` when repeats or agent fan-out expand a row. Direct preprocessing callers should use the returned
+IDs and capture keys rather than assuming the original ID survives expansion. The resulting IDs must be unique within
+the run and follow `EpisodeId` rules; the `-a<N>` suffix for positive attempt numbers is reserved.
 Invalid or colliding IDs are configuration errors before dispatch.
 
 Tasks drained before dispatch by `dispatch_budget_s` consume no attempt and remain available on resume.
@@ -152,7 +156,8 @@ reconciliation and its partial bytes are removed before appending. Malformed com
 An old materialized inventory alone does not establish validated completion coverage during aggregation.
 Merged rollout files are selected-result projections; keep the original shard artifacts for further recovery.
 
-Journal-aware health reads are a follow-up. Until then, automatic checks print a short skip message for these histories;
+Every newly collected run has recovery history, including its first collection. Journal-aware health reads are a
+follow-up, so automatic checks print a short skip message for all these runs;
 collection and scoring still finish. Use `+disable_health_check=true` to skip those checks, or run health checks
 on the merged selected-result projection written by `gym eval aggregate`. Standalone health checks reject a
 journal-backed source rather than treating superseded attempts as extra samples.
@@ -169,7 +174,14 @@ Gym warns and reuses the **saved materialized tasks**. The manifest records that
 and coverage reports `identity_verified=false`. Future resumes continue to require the override. Existing legacy
 payloads are preserved; newly written payloads carry the run identifier. Gym still rejects corrupt or unsupported
 manifests and materialized inputs that no longer match their saved manifest.
+
+With `--no-serve`, Gym obtains the server configuration from the running head server, so a changed model or verifier
+still prevents verified resume. Missing required server configurations are errors. Stirrup's `RERUN_INCOMPLETE=true`
+recovery toggle is allowed; nested task parameters and model settings still affect experiment identity.
+
 Use a fresh output location when the intention is to evaluate changed tasks or a different model.
+A non-resume collection at an existing output path replaces the main output, failure sidecar, attempt journal,
+manifest, materialized inputs, coverage, and aggregate metrics. Keep the previous run under a different path to retain it.
 
 If only part of a legacy cache exists and there is no manifest or journal, Gym prints `Skipping resume_from_cache`
 and starts fresh from the current inputs, replacing the incomplete cache. This also covers interruption during initial
@@ -254,8 +266,9 @@ selected-result projections. A selected-result projection contains completed ans
 silently reuse an older answer or append results without recording attempts.
 
 Aggregation resolves source file symlinks before locating their companion history, and deduplicates aliases of the
-same rollout file. Health and reverification apply the same history protections through aliases. A merged output
-symlink is still replaced at its original destination rather than overwriting the linked source. Copied journal-backed runs
+same rollout file. Health and reverification apply the same history protections through aliases. For a merged output
+symlink, aggregation replaces the target file and preserves the symlink. It refuses to replace an input or an established
+recovery history through either spelling. Copied journal-backed runs
 are rejected by run identity. Legacy runs have no trustworthy run identifier: independent evaluations may share the
 same input inventory, so Gym does not identify them by an inventory hash. Supply each original legacy run only once;
 copies at different locations are treated as separate inputs, and their coverage is relative to those supplied inputs.

@@ -142,10 +142,14 @@ def _without_runtime_options(value: Any) -> Any:
     # as "port" would also erase meaningful tool schemas or environment parameters.
     result = {k: v for k, v in value.items() if k not in _SERVER_RUNTIME_OPTIONS and k not in _COLLECTION_OPTIONS}
 
-    def settings_identity(settings):
+    def settings_identity(settings, kind: str, implementation: str):
         if not isinstance(settings, dict):
             return settings
         settings = {k: v for k, v in settings.items() if k not in _SERVER_RUNTIME_OPTIONS}
+        if kind == "responses_api_agents" and implementation == "stirrup_agent":
+            # The documented resume switch controls reuse of cached execution;
+            # similarly named task data remains part of experiment identity.
+            settings.pop("rerun_incomplete", None)
         # Only authentication headers at known HTTP settings boundaries are
         # operational. Other headers may change task data or model behavior.
         for name in ("headers", "default_headers", "openai_default_headers", "artifact_request_headers"):
@@ -166,7 +170,8 @@ def _without_runtime_options(value: Any) -> Any:
         for kind in _SERVER_KINDS:
             if kind in block and isinstance(block[kind], dict):
                 updated[kind] = {
-                    implementation: settings_identity(settings) for implementation, settings in block[kind].items()
+                    implementation: settings_identity(settings, kind, implementation)
+                    for implementation, settings in block[kind].items()
                 }
         result[name] = updated
     return result
@@ -221,20 +226,32 @@ def _configuration_identity(config: dict, global_config: dict, rows: list[dict])
                 reference = settings.get("agent_server") if OmegaConf.is_dict(settings) else None
                 if OmegaConf.is_dict(reference) and reference.get("name") in agents:
                     pending.add(name)
-    pending.update(row["task_source"] for row in rows if isinstance(row.get("task_source"), str))
+    missing = pending - servers
+    if missing:
+        raise ConfigError(f"Cannot verify run identity: running configuration is missing servers {sorted(missing)!r}.")
+    pending.update(
+        row["task_source"] for row in rows if isinstance(row.get("task_source"), str) and row["task_source"] in servers
+    )
     if not pending:
         pending = set(servers)
     selected = {}
 
-    def references(value):
+    def references(value, *, server_reference: bool = False):
         if isinstance(value, dict):
-            if isinstance(value.get("name"), str) and value["name"] in servers:
-                pending.add(value["name"])
-            for item in value.values():
-                references(item)
+            name = value.get("name")
+            if isinstance(name, str):
+                if (server_reference or value.get("type") in _SERVER_KINDS) and name not in servers:
+                    raise ConfigError(f"Cannot verify run identity: running configuration is missing server {name!r}.")
+                if name in servers:
+                    pending.add(name)
+            for key, item in value.items():
+                references(
+                    item,
+                    server_reference=key in {"model_server", "resources_server", "agent_server", "environment_server"},
+                )
         elif isinstance(value, list):
             for item in value:
-                references(item)
+                references(item, server_reference=server_reference)
 
     while pending:
         name = pending.pop()

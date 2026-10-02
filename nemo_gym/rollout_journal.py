@@ -33,6 +33,7 @@ import orjson
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.config_types import ConfigError
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
@@ -69,6 +70,8 @@ def logical_rollout_id(row: dict) -> str:
     logical = {key: value for key, value in row.items() if key != ATTEMPT_INDEX_KEY_NAME}
     try:
         identity = maybe_rollout_id_from_run_body(logical)
+        if identity is not None:
+            EpisodeId(rollout_id=identity)
     except (TypeError, ValueError) as error:
         raise ConfigError(f"Invalid rollout identity: {error}") from error
     if identity is None:

@@ -148,6 +148,17 @@ class _StubLineageStore:
 def empty_global_config(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     get_global_config_dict = MagicMock(return_value={})
     monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
+    # Collector-only tests replace dispatch, but still supply the running
+    # configuration used by the manifest. No head-server HTTP is needed here.
+    client = SimpleNamespace(
+        global_config_dict=OmegaConf.create(
+            {
+                name: {"responses_api_agents": {"impl": {}}}
+                for name in ("agent", "my_agent", "my agent name", "agent_a", "agent_b", "a")
+            }
+        )
+    )
+    monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: client)
     return get_global_config_dict
 
 
@@ -3668,7 +3679,12 @@ class TestRolloutCollection:
     @pytest.mark.parametrize("resume_from_cache", [False, True])
     @pytest.mark.parametrize("redact_payloads", [False, True])
     async def test_run_from_config_replaces_stale_capture_before_dispatch(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_from_cache: bool, redact_payloads: bool
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        resume_from_cache: bool,
+        redact_payloads: bool,
     ) -> None:
         from nemo_gym.base_responses_api_model import CaptureStore
 
@@ -3737,7 +3753,7 @@ class TestRolloutCollection:
             assert "data:image/png;base64,secret" not in orjson.dumps(results[0]).decode()
 
     async def test_run_from_config_keys_capture_by_an_explicit_rollout_id(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
         from nemo_gym.base_responses_api_model import CaptureStore
         from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
@@ -3790,7 +3806,7 @@ class TestRolloutCollection:
         assert store.read("0-0") == []
 
     async def test_run_from_config_does_not_finalize_a_nonparticipating_agent(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
         capture_dir = tmp_path / "tokens"
         monkeypatch.setattr(
@@ -3835,7 +3851,7 @@ class TestRolloutCollection:
         assert TOKEN_CAPTURE_KEY not in result
 
     async def test_run_from_config_requires_source_before_dispatch(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
@@ -3878,6 +3894,7 @@ class TestRolloutCollection:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
     ) -> None:
         closed = False
         original_close = TokenCaptureStore.close
@@ -3940,7 +3957,7 @@ class TestRolloutCollection:
         assert closed is True
 
     async def test_run_from_config_does_not_close_an_installed_source(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
         class Source:
             closed = False

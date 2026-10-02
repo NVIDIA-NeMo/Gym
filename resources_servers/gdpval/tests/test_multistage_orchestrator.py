@@ -3989,3 +3989,40 @@ class TestRetryInProcess:
             assert data["num_dispatched"] == 0
             assert data["num_drained"] == 1
             assert data["num_recovered"] == 0
+
+
+def test_single_pass_history_is_quarantined_before_switching_to_multistage(tmp_path):
+    from types import SimpleNamespace
+
+    import orjson
+
+    from nemo_gym.rollout_journal import coverage_path_for, materialized_path_for
+    from nemo_gym.rollout_journal import journal_path_for as attempts_path_for
+    from nemo_gym.rollout_recovery import RunManifest, manifest_path_for
+    from nemo_gym.rollout_store import RolloutStore
+
+    output = tmp_path / "rollouts.jsonl"
+    source = tmp_path / "source.jsonl"
+    rows = [{"_ng_task_index": 0, "_ng_rollout_index": 0}]
+    source.write_bytes(orjson.dumps(rows[0]) + b"\n")
+    manifest = RunManifest.create(source, rows, {}, {})
+    with RolloutStore.start_or_resume(output, lambda: (rows, manifest), resume=False) as store:
+        row = store.pending(3)[0]
+        store.record_dispatch(row)
+        store.record_outcome(row | {"reward": 1.0, "response": {}})
+    companions = [
+        output,
+        failures_path_for(output),
+        attempts_path_for(output),
+        manifest_path_for(output),
+        materialized_path_for(output),
+        coverage_path_for(output),
+    ]
+    old = {path: path.read_bytes() for path in companions}
+    _prepare_resume(SimpleNamespace(resume_from_cache=False), output, journal_path_for(output), "new-stage-config")
+    for path, data in old.items():
+        assert not path.exists()
+        moved = list(tmp_path.glob(path.name + ".stale.*"))
+        assert len(moved) == 1 and moved[0].read_bytes() == data
+    output.write_bytes(orjson.dumps(rows[0] | {"stage_index": 0, "reward": 1.0}) + b"\n")
+    assert RolloutStore.read(output, import_legacy=False) is None

@@ -37,6 +37,7 @@ from nemo_gym.rollout_journal import (
 )
 from nemo_gym.rollout_outcomes import RolloutFailure
 from nemo_gym.rollout_recovery import RunManifest, manifest_path_for, validate_resume
+from nemo_gym.rollout_store import RolloutStore
 from tests.unit_tests.test_rollout_collection import FakeResponse, failing_row, http_error, install_fake_server_client
 
 
@@ -273,6 +274,8 @@ def test_unknown_selection_policy_is_rejected_even_with_override(saved_manifest)
 
 @pytest.mark.parametrize("interruption", [asyncio.CancelledError, RuntimeError])
 async def test_interrupted_runner_closes_files_and_reuses_saved_zero(tmp_path, monkeypatch, interruption):
+    client = install_fake_server_client(monkeypatch, AsyncMock())
+    client.global_config_dict = OmegaConf.create({"agent": {"responses_api_agents": {"impl": {}}}})
     monkeypatch.setattr(collection, "get_global_config_dict", lambda: {})
     source = tmp_path / "input.jsonl"
     source.write_text(
@@ -350,6 +353,8 @@ async def test_interrupted_runner_closes_files_and_reuses_saved_zero(tmp_path, m
 
 
 async def test_runner_rejects_changed_inputs_before_dispatch_or_output_mutation(tmp_path, monkeypatch):
+    client = install_fake_server_client(monkeypatch, AsyncMock())
+    client.global_config_dict = OmegaConf.create({"agent": {"responses_api_agents": {"impl": {}}}})
     monkeypatch.setattr(collection, "get_global_config_dict", lambda: {})
     source = tmp_path / "input.jsonl"
     source.write_text(json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "agent"}}) + "\n")
@@ -615,7 +620,7 @@ async def test_unbounded_interruption_consumes_attempts_until_the_cap_is_raised(
     output = tmp_path / "rollouts.jsonl"
 
     def prepare():
-        return rows, RunManifest.create(source, rows, {}, {})
+        return rows, RunManifest.create(source, rows, {}, {"my_agent": {"responses_api_agents": {"impl": {}}}})
 
     for restart in range(3):
         queued = []
@@ -1402,3 +1407,182 @@ async def test_nonjudge_failure_retains_response_only_as_diagnostics(runner_conf
         assert saved["_ng_failure_response"] == response
         assert "response" not in saved and "reward" not in saved
         assert "response" not in saved["_ng_failure_record"]
+
+
+@pytest.mark.parametrize("change", ["model", "verifier", "address"])
+async def test_no_serve_resume_uses_running_server_identity(runner_config, monkeypatch, change):
+    phase = "A"
+
+    async def post(**kwargs):
+        row = kwargs["json"]
+        if phase == "A" and row["task"] == 1:
+            raise TimeoutError("No saved outcome")
+        return FakeResponse(200, {"reward": 1.0, "response": {}, "model_used": phase})
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    client.global_config_dict.my_agent.responses_api_agents.impl.update(
+        {"model_server": {"name": "policy"}, "resources_server": {"name": "verifier"}}
+    )
+    client.global_config_dict.policy = {"responses_api_models": {"openai_model": {"model": "A", "host": "old"}}}
+    client.global_config_dict.verifier = {"resources_servers": {"example": {"prompt": "original"}}}
+    helper = RolloutCollectionHelper()
+    await helper.run_from_config(runner_config)
+    output = Path(runner_config.output_jsonl_fpath)
+    saved = {path: path.read_bytes() for path in output.parent.iterdir() if path.is_file()}
+    phase = "B"
+    if change == "model":
+        client.global_config_dict.policy.responses_api_models.openai_model.model = "B"
+    elif change == "verifier":
+        client.global_config_dict.verifier.resources_servers.example.prompt = "changed"
+    else:
+        client.global_config_dict.policy.responses_api_models.openai_model.host = "new"
+    runner_config.resume_from_cache = True
+    if change == "address":
+        await helper.run_from_config(runner_config)
+        assert client.post.await_count == 4
+        assert RolloutStore.read(output).coverage()["complete"]
+    else:
+        with pytest.raises(ConfigError, match="incompatible resolved configuration"):
+            await helper.run_from_config(runner_config)
+        assert client.post.await_count == 3
+        assert all(path.read_bytes() == data for path, data in saved.items())
+
+
+@pytest.mark.parametrize("missing", ["agent", "environment", "model", "verifier"])
+def test_manifest_rejects_missing_required_server_configuration(saved_manifest, missing):
+    source, rows, _, config, _, _, _ = saved_manifest
+    rows[0]["agent_ref"] = {"name": "agent"}
+    servers = {
+        "agent": {
+            "responses_api_agents": {
+                "impl": {
+                    "model_server": {"name": "model"},
+                    "resources_server": {"type": "resources_servers", "name": "verifier"},
+                }
+            }
+        },
+        "model": {"responses_api_models": {"impl": {"model": "model-A"}}},
+        "verifier": {"resources_servers": {"impl": {}}},
+        "environment": {"environment_servers": {"impl": {"agent_server": {"name": "agent"}}}},
+    }
+    rows[0]["_ng_environment_server"] = "environment"
+    del servers[missing]
+    with pytest.raises(ConfigError, match="configuration.*" + missing):
+        RunManifest.create(source, rows, config, servers)
+
+
+@pytest.mark.parametrize("route_failures", [False, True])
+@pytest.mark.parametrize("all_unscored", [False, True])
+async def test_execute_only_completions_are_saved_and_reused(runner_config, monkeypatch, route_failures, all_unscored):
+    runner_config.route_failures_to_sidecar = route_failures
+
+    async def post(**kwargs):
+        row = kwargs["json"]
+        # Stirrup's execute_only /run contract retains the real generated
+        # response and cached deliverables, but deliberately omits reward.
+        result = {"response": {"output": [{"type": "message", "content": [{"type": "output_text", "text": "done"}]}]}}
+        if all_unscored or row["task"]:
+            result.update(execute_only=True, deliverables_dir="/cached/completed", elapsed_seconds=3.0)
+        else:
+            result["reward"] = 1.0
+        return FakeResponse(200, result)
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    helper = RolloutCollectionHelper()
+    await helper.run_from_config(runner_config)
+    output = Path(runner_config.output_jsonl_fpath)
+    store = RolloutStore.read(output)
+    coverage = store.coverage()
+    assert coverage["successful"] == 3 and coverage["failed"] == 0 and coverage["complete"]
+    assert coverage["unscored"] == (3 if all_unscored else 2)
+    assert all("reward" not in row for row in store.selected("success") if row.get("execute_only"))
+    saved = output.read_bytes()
+    runner_config.resume_from_cache = True
+    await helper.run_from_config(runner_config)
+    assert client.post.await_count == 3 and output.read_bytes() == saved
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {},
+        {"execute_only": True},
+        {"response": {}},
+        {"execute_only": "true", "response": {}},
+        {"execute_only": True, "response": {}, "reward": None},
+        {"execute_only": True, "response": {}, "reward": False},
+    ],
+)
+def test_unscored_support_does_not_accept_malformed_results(result):
+    with pytest.raises(collection.InvalidRolloutResult):
+        collection._normalize_rollout_outcome(failing_row() | {"_ng_run_id": "test"}, result)
+
+
+def test_documented_stirrup_rerun_toggle_preserves_verified_identity(saved_manifest, monkeypatch):
+    source, rows, materialized, config, _, _, path = saved_manifest
+    benchmark = OmegaConf.to_container(OmegaConf.load("benchmarks/gdpval/config.yaml"), resolve=False)
+    settings = next(
+        block["responses_api_agents"]["stirrup_agent"]
+        for block in benchmark.values()
+        if isinstance(block, dict) and "stirrup_agent" in block.get("responses_api_agents", {})
+    )
+    servers = {
+        "agent": {
+            "responses_api_agents": {
+                "stirrup_agent": {
+                    "rerun_incomplete": settings["rerun_incomplete"],
+                    "model_name": "A",
+                    "task_options": {"rerun_incomplete": False},
+                }
+            }
+        }
+    }
+    monkeypatch.setenv("RERUN_INCOMPLETE", "false")
+    before = RunManifest.create(source, rows, config, servers)
+    before.write(path)
+    monkeypatch.setenv("RERUN_INCOMPLETE", "true")
+    current = RunManifest.create(source, rows, config, servers)
+    assert current.config_digest == before.config_digest
+    assert not validate_resume(path, current, materialized).identity_overridden
+    servers["agent"]["responses_api_agents"]["stirrup_agent"]["task_options"]["rerun_incomplete"] = True
+    assert RunManifest.create(source, rows, config, servers).config_digest != before.config_digest
+
+
+@pytest.mark.parametrize("direct", [False, True])
+async def test_reserved_explicit_id_is_rejected_before_dispatch(runner_config, monkeypatch, direct):
+    row = failing_row() | {"_ng_rollout_id": "case-a1"}
+    client = install_fake_server_client(
+        monkeypatch, AsyncMock(return_value=FakeResponse(200, {"_ng_failure_class": "judge_failed"}))
+    )
+    helper = RolloutCollectionHelper()
+    with pytest.raises(ConfigError, match="reserved attempt suffix"):
+        if direct:
+            await next(helper.run_outcomes([row], run_id="test"))
+        else:
+            Path(runner_config.input_jsonl_fpath).write_text(json.dumps(row) + "\n")
+            await helper.run_from_config(runner_config)
+    client.post.assert_not_called()
+
+
+async def test_resumed_collector_dispatches_longest_previous_failure_first(runner_config, monkeypatch):
+    dispatched = []
+    phase = "fail"
+
+    async def post(**kwargs):
+        task = kwargs["json"]["task"]
+        dispatched.append(task)
+        if phase == "fail":
+            return FakeResponse(200, {"_ng_failure_class": "agent_run_error", "elapsed_seconds": [5, 20, 10][task]})
+        return FakeResponse(200, {"response": {}, "reward": 1.0})
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    helper = RolloutCollectionHelper()
+    with pytest.raises(RuntimeError, match="None of the 3 dispatched"):
+        await helper.run_from_config(runner_config)
+    assert dispatched == [0, 1, 2]
+    dispatched.clear()
+    phase = "success"
+    runner_config.resume_from_cache = runner_config.dispatch_longest_first = True
+    await helper.run_from_config(runner_config)
+    assert dispatched == [1, 2, 0]
+    assert RolloutStore.read(Path(runner_config.output_jsonl_fpath)).coverage()["complete"]

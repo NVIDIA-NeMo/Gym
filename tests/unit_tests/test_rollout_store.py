@@ -43,7 +43,12 @@ def prepared_run(tmp_path):
     rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(2)]
     source = tmp_path / "source.jsonl"
     source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
-    prepare = Mock(side_effect=lambda: (rows, RunManifest.create(source, rows, {}, {})))
+    prepare = Mock(
+        side_effect=lambda: (
+            rows,
+            RunManifest.create(source, rows, {}, {"agent": {"responses_api_agents": {"impl": {}}}}),
+        )
+    )
     return tmp_path / "rollouts.jsonl", prepare
 
 
@@ -536,7 +541,9 @@ def test_exhaustion_counts_failed_and_unknown_but_not_terminal_or_completed(
     source.write_text("source")
     output = tmp_path / "out.jsonl"
     with RolloutStore.start_or_resume(
-        output, lambda: (rows, RunManifest.create(source, rows, {}, {})), resume=False
+        output,
+        lambda: (rows, RunManifest.create(source, rows, {}, {"agent": {"responses_api_agents": {"impl": {}}}})),
+        resume=False,
     ) as store:
         dispatched = store.pending(cap)
         for row in dispatched[:5]:

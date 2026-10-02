@@ -312,6 +312,7 @@ async def test_protocol_failure_metadata_survives_collection(
                 },
             }
         )
+        collector.global_config_dict["resources"] = {"resources_servers": {"example": {}}}
         monkeypatch.setattr(collection, "get_global_config_dict", lambda: {})
         source = tmp_path / "input.jsonl"
         row = (
