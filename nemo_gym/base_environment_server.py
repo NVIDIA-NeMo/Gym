@@ -221,6 +221,9 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 except Exception as error:
                     response = self._unhandled_failure_response(request, error)
             finally:
+                if self._checkpoint is not None:
+                    # The shield below holds against anyio cancellation, not a retire's native task.cancel().
+                    self._checkpoint.finishing(request.episode_id)
                 try:
                     with CancelScope(shield=True):
                         await cleanup.aclose()

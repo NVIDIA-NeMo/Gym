@@ -88,6 +88,16 @@ class EpisodeSteps:
         continuation, episode.continuation = episode.continuation, None
         return continuation
 
+    def finishing(self, key: str) -> None:
+        """The episode's protocol is over and its owner is releasing what it created.
+
+        A retire from here on stops tracking the episode but does not cancel its task: the owner's cleanup,
+        which closes the episode's sessions, must run to completion.
+        """
+        episode = self._episodes.get(key)
+        if episode is not None:
+            episode.task = None
+
     async def end(self, key: str) -> None:
         self._episodes.pop(key, None)
         await self._notify()

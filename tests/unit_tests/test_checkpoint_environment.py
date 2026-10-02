@@ -223,3 +223,34 @@ async def test_a_restored_episode_not_yet_restarted_survives_the_next_checkpoint
 
     assert committed["episode_ids"] == ["r-a1"]
     assert again.continuation(EpisodeId(rollout_id="r", attempt=2)) == {"next": "verify"}
+
+
+async def test_a_retire_during_final_cleanup_does_not_interrupt_it() -> None:
+    from nemo_gym.base_environment_server import CleanupContext
+    from tests.unit_tests.test_environment_server import _environment_server, _EnvironmentServer, _request
+
+    cleanup_started, cleanup_finished = asyncio.Event(), asyncio.Event()
+
+    class SlowCleanupServer(_EnvironmentServer):
+        async def run(self, request, cleanup: CleanupContext):
+            async def close_sessions() -> None:
+                cleanup_started.set()
+                await asyncio.sleep(0.2)
+                cleanup_finished.set()
+
+            cleanup.register_cleanup("sessions", close_sessions)
+            return await super().run(request, cleanup)
+
+    config = _environment_server().config.model_copy(update={"cleanup_timeout_seconds": 5})
+    server = SlowCleanupServer(config=config, server_client=_environment_server().server_client)
+    server._checkpoint = EnvironmentParticipant()
+    controller = controller_for(server._checkpoint)
+    episode = _request()
+    run = asyncio.create_task(server.run_request(episode))
+    await cleanup_started.wait()
+
+    # A controller retiring a straggler: the episode still counts as running until its cleanup ends.
+    await controller.retire(RetireRequest(**request(episode_ids=[episode.episode_id.model_dump()])))
+    await run
+
+    assert cleanup_finished.is_set()
