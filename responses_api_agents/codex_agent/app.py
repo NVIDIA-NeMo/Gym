@@ -572,8 +572,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, f"Native Codex does not support extra request fields: {sorted(unknown)}")
         if body.tools or body.tool_choice != "auto" or not body.parallel_tool_calls or body.background:
             raise HTTPException(422, "Codex owns tool selection and execution policy")
-        if (body.metadata or {}).get("chat_template_kwargs") is not None:
-            raise HTTPException(422, "Configure chat_template_kwargs on the Gym model server for Codex")
+        for name in ("chat_template_kwargs", "extra_body"):
+            if name in (body.metadata or {}):
+                raise HTTPException(422, f"Configure {name} on the Gym model server for Codex")
         items = (
             [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
         )

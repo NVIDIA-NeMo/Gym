@@ -90,23 +90,24 @@ class TestApp:
         assert policy._client.max_http_attempts == 3
 
     @pytest.mark.parametrize(
-        "status,message",
+        "status,message,code",
         [
-            (400, "This model's maximum context length is 262144 tokens."),
-            (429, "Rate limit exceeded"),
-            (503, "Model service unavailable"),
+            (400, "This model's maximum context length is 262144 tokens.", "context_length_exceeded"),
+            (429, "Rate limit exceeded", "rate_limit_exceeded"),
+            (503, "Model service unavailable", "server_error"),
         ],
     )
     @pytest.mark.parametrize(
-        "api,stream", [("chat/completions", False), ("chat/completions", True), ("responses", False)]
+        "api,stream",
+        [("chat/completions", False), ("chat/completions", True), ("responses", False), ("responses", True)],
     )
-    def test_upstream_error_preserves_status_and_body(self, tmp_path, status, message, api, stream):
+    def test_upstream_error_preserves_status_and_body(self, tmp_path, status, message, code, api, stream):
         server = self._setup_server()
         server.server_client.global_config_dict = {
             "observability_enabled": True,
             "model_call_capture_dir": str(tmp_path),
         }
-        payload = {"error": {"message": message, "type": "upstream_error", "code": status}}
+        payload = {"error": {"message": message, "type": "upstream_error", "code": code}}
         error = ClientResponseError(MagicMock(), (), status=status, message=message)
         error.response_content = json.dumps(payload).encode()
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
@@ -124,6 +125,8 @@ class TestApp:
             response = client.post(f"/ng-rollout/upstream-error/v1/{api}", json=body)
 
         assert response.status_code == status
+        assert response.headers["content-type"] == "application/json"
+        assert response.content == error.response_content
         assert response.json() == payload
         calls = read_model_call_records(CaptureStore(tmp_path), "upstream-error")
         assert len(calls) == 1

@@ -576,6 +576,33 @@ def test_rejected_request_does_not_consume_activation(setup):
     sandbox.launch.assert_awaited_once()
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"extra_body": '{"temperature": 0.0, "max_tokens": 1}'},
+        {"extra_body": "{}"},
+        {"extra_body": ""},
+        {"extra_body": "not-json"},
+        {"chat_template_kwargs": '{"enable_thinking": false}'},
+    ],
+)
+def test_metadata_overrides_rejected_without_consuming_activation(setup, metadata):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        path = "/ng-rollout/codex-smoke-a2/v1/responses"
+        rejected = client.post(path, json={"input": "task", "metadata": metadata})
+        assert rejected.status_code == 422, rejected.text
+        assert next(iter(metadata)) in rejected.json()["detail"]
+        assert "model server" in rejected.json()["detail"]
+        sandbox.launch.assert_not_awaited()
+        accepted = client.post(path, json={"input": "task"})
+        assert accepted.status_code == 200, accepted.text
+        assert client.post(path, json={"input": "task"}).json() == accepted.json()
+        client.post("/v1/agent_sessions/close", json=close_body(seed().agent_session_id)).raise_for_status()
+    sandbox.launch.assert_awaited_once()
+
+
 def test_no_session_keeps_existing_local_path(setup):
     agent, sandbox = setup
     with patch.object(agent, "_create_response", AsyncMock(side_effect=RuntimeError("legacy path reached"))) as legacy:
