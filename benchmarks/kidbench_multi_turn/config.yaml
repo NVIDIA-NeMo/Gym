@@ -1,0 +1,22 @@
+# KIDBench (https://arxiv.org/abs/2605.25510), multi-turn track: 100 scenario/child-goal pairs
+# x 2 age settings = 200 five-turn conversations against a child-actor model, judged by
+# deepseek-v4-flash. Scores are not comparable to the single-turn track: upstream uses a
+# different judge for each. See benchmarks/kidbench/README.md and METRICS.md.
+config_paths:
+  - resources_servers/kidbench/configs/kidbench.yaml
+
+# Inherits the resources server, judge, policy and child-actor wiring from
+# kidbench_multi_turn_agent. Rows carry the scenario and the responder's system prompt; the
+# agent generates the child's turns, so no prompt template applies.
+kidbench_multi_turn_benchmark_agent:
+  _inherit_from: kidbench_multi_turn_agent
+  responses_api_agents:
+    kidbench_child_actor:
+      datasets:
+      - name: kidbench_multi_turn
+        type: benchmark
+        jsonl_fpath: benchmarks/kidbench_multi_turn/data/kidbench_multi_turn_benchmark.jsonl
+        prepare_script: benchmarks/kidbench_multi_turn/prepare.py
+        prompt_config: null
+        license: TBD
+        num_repeats: 1
