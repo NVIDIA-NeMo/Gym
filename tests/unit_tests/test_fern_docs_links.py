@@ -170,7 +170,7 @@ class TestFernDocsLinks(unittest.TestCase):
 
         workflows = (
             ".github/workflows/fern-docs-ci.yml",
-            ".github/workflows/fern-docs-preview-comment.yml",
+            ".github/workflows/fern-docs-preview.yml",
             ".github/workflows/publish-fern-docs.yml",
         )
         for workflow in workflows:

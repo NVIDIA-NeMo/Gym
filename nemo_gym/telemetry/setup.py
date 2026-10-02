@@ -32,10 +32,9 @@ So there are two entry points:
   ``SimpleServer.run_webserver``. It reads that propagated environment and builds this
   process's providers.
 
-``export_strategy`` defaults to ``all_ranks`` here rather than ``single_rank``. Each Gym
-server is rank 0 of its own world of 1, so a rank-based filter would either silence every
-process or none; and silencing any one of them puts a hole in the middle of the
-distributed trace this integration exists to produce.
+nemo-lens allows one ``setup_telemetry`` per process. When something else in the process
+already called it — NeMo-RL, when Gym runs inside an RL job — :func:`init_telemetry`
+reuses those providers instead of failing, and leaves their shutdown to their owner.
 
 Importing this module never requires nemo-lens: every lens import is function-local and
 guarded. With lens absent, or ``enabled: false``, the init functions return ``None`` and
@@ -50,7 +49,7 @@ from uuid import uuid4
 
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.telemetry.config import TelemetryConfig
+from nemo_gym.telemetry.config import MemoryProfilingConfig, TelemetryConfig
 
 
 if TYPE_CHECKING:
@@ -66,7 +65,11 @@ logger = logging.getLogger(__name__)
 #: False`` before either sets it and both call ``setup_telemetry``, which nemo-lens
 #: raises on for a second call in the same process.
 _TELEMETRY_HANDLE: Optional["TelemetryHandle"] = None
+_METRICS_EXPORTING = False
 _INITIALISED = False
+#: False when ``_TELEMETRY_HANDLE`` wraps providers another library set up in this
+#: process. Shutting those down would end that library's telemetry too.
+_OWNS_PROVIDERS = False
 _INIT_LOCK = threading.Lock()
 
 #: ``NemoLensConfig.from_env`` reads ``NEMO_GYM_OTEL_<KEY>`` first, then ``NEMO_LENS_<KEY>``.
@@ -91,8 +94,6 @@ TELEMETRY_KEY_NAME = "telemetry"
 _ENV_FIELD_MAP = {
     "enabled": f"{_OTEL_PREFIX}_ENABLED",
     "span_groups": f"{_OTEL_PREFIX}_SPAN_GROUPS",
-    "export_strategy": f"{_OTEL_PREFIX}_EXPORT_STRATEGY",
-    "export_rank": f"{_OTEL_PREFIX}_EXPORT_RANK",
     "traces_enabled": f"{_OTEL_PREFIX}_TRACES_ENABLED",
     "metrics_enabled": f"{_OTEL_PREFIX}_METRICS_ENABLED",
     "logs_enabled": f"{_OTEL_PREFIX}_LOGS_ENABLED",
@@ -101,6 +102,11 @@ _ENV_FIELD_MAP = {
     # Gym-owned flags, read back by init_telemetry / server_utils rather than by lens.
     "service_name_per_server": f"{_OTEL_PREFIX}_SERVICE_NAME_PER_SERVER",
     "instrument_aiohttp": f"{_OTEL_PREFIX}_INSTRUMENT_AIOHTTP",
+}
+
+_MEMORY_PROFILING_ENV_FIELD_MAP = {
+    "enabled": f"{_OTEL_PREFIX}_MEMORY_PROFILING_ENABLED",
+    "interval_seconds": f"{_OTEL_PREFIX}_MEMORY_PROFILING_INTERVAL_SECONDS",
 }
 
 #: OTLP destination fields -> the standard (unprefixed) OTel SDK env vars they configure.
@@ -134,6 +140,27 @@ def is_telemetry_env_enabled() -> bool:
         if raw:
             return raw in _TRUTHY
     return False
+
+
+def is_telemetry_metrics_enabled() -> bool:
+    """Return the effective metrics switch after Gym/Lens env precedence."""
+    for prefix in (_OTEL_PREFIX, _OTEL_FALLBACK_PREFIX):
+        raw = os.environ.get(f"{prefix}_METRICS_ENABLED", "").strip().lower()
+        if raw:
+            return raw in _TRUTHY
+    return True
+
+
+def memory_profiling_config_from_env(defaults: MemoryProfilingConfig) -> MemoryProfilingConfig:
+    """Resolve memory profiling after raw environment variables take precedence."""
+    enabled_env = _MEMORY_PROFILING_ENV_FIELD_MAP["enabled"]
+    interval_env = _MEMORY_PROFILING_ENV_FIELD_MAP["interval_seconds"]
+    return MemoryProfilingConfig.model_validate(
+        {
+            "enabled": _env_flag(enabled_env, defaults.enabled),
+            "interval_seconds": os.environ.get(interval_env, defaults.interval_seconds),
+        }
+    )
 
 
 def telemetry_config_from_global_config(global_config_dict: Any) -> TelemetryConfig:
@@ -193,6 +220,10 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
         value = getattr(telemetry_config, field, None)
         if value is None:
             continue
+        os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
+
+    for field, env_name in _MEMORY_PROFILING_ENV_FIELD_MAP.items():
+        value = getattr(telemetry_config.memory_profiling, field)
         os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
 
     for field, env_name in _OTLP_ENV_FIELD_MAP.items():
@@ -316,12 +347,20 @@ def _build_resource_attributes(server_name: Optional[str], server_type: Optional
     return attrs
 
 
+def _sdk_meter_provider_installed() -> bool:
+    """Whether a real OpenTelemetry SDK meter provider, not a no-op or proxy, is registered."""
+    try:
+        from opentelemetry import metrics
+        from opentelemetry.sdk.metrics import MeterProvider
+    except ImportError:
+        return False
+    return isinstance(metrics.get_meter_provider(), MeterProvider)
+
+
 def init_telemetry(
     server_name: Optional[str] = None,
     server_type: Optional[str] = None,
     resource_attributes: Optional[dict] = None,
-    rank: int = 0,
-    world_size: int = 1,
 ) -> Optional["TelemetryHandle"]:
     """Initialise this process's telemetry. Call once per process; idempotent.
 
@@ -334,15 +373,14 @@ def init_telemetry(
         server_type: ``resources_servers`` | ``responses_api_agents`` |
             ``responses_api_models``, or ``orchestrator`` for the CLI.
         resource_attributes: Extra process-lifetime attributes to merge.
-        rank / world_size: Passed to the export strategy. Each Gym server process is rank
-            0 of a world of 1 by default, which is why ``all_ranks`` is the default
-            strategy.
 
     Returns:
         The :class:`TelemetryHandle`, or ``None`` when nemo-lens is absent or telemetry is
-        disabled. Never raises: a telemetry failure must not take a server down.
+        disabled. When another library already initialised nemo-lens in this process, a
+        handle over its providers; Gym's service name and resource attributes do not apply
+        then. Never raises: a telemetry failure must not take a server down.
     """
-    global _TELEMETRY_HANDLE, _INITIALISED
+    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _INITIALISED, _OWNS_PROVIDERS
     # The whole check-and-set plus the actual setup_telemetry() call is one critical
     # section: without the lock, two threads can both observe `_INITIALISED is False`
     # before either sets it and both call setup_telemetry, which nemo-lens raises on for
@@ -358,19 +396,32 @@ def init_telemetry(
             return None
 
         try:
-            from nemo.lens import NemoLensConfig, setup_telemetry
+            from nemo.lens import NemoLensConfig, TelemetryHandle, get_meter, get_tracer, setup_telemetry
+            from nemo.lens import handle as lens_handle
+            from nemo.lens.semconv import NV_DL_RANK, NV_DL_WORLD_SIZE
         except ImportError:
             logger.debug("nemo-lens is not installed; telemetry stays disabled")
             return None
 
-        from nemo_gym.telemetry.span_groups import GymSpanGroup
+        # Registers Gym's span groups, which setup_telemetry resolves the spec against.
+        import nemo_gym.telemetry.span_groups  # noqa: F401
+
+        # nemo-lens raises on a second setup_telemetry in one process. Its init flag is
+        # private, but it is the only signal that another library owns the providers. Lens
+        # sets it only for an enabled setup, so the owner is exporting.
+        if getattr(lens_handle, "_INITIALIZED", False):
+            _TELEMETRY_HANDLE = TelemetryHandle(tracer=get_tracer(), meter=get_meter(), is_exporting=True)
+            # Lens registers an SDK meter provider only when the owner enabled metrics.
+            _METRICS_EXPORTING = _sdk_meter_provider_installed()
+            logger.info(
+                "nemo-lens was already initialised in this process; Gym reuses its providers "
+                "and span-group spec (server=%s)",
+                server_name,
+            )
+            return _TELEMETRY_HANDLE
 
         try:
-            config = NemoLensConfig.from_env(
-                prefix=_OTEL_PREFIX,
-                fallback_prefix=_OTEL_FALLBACK_PREFIX,
-                span_group_cls=GymSpanGroup,
-            )
+            config = NemoLensConfig.from_env(prefix=_OTEL_PREFIX, fallback_prefix=_OTEL_FALLBACK_PREFIX)
         except ValueError:
             logger.warning("nemo-lens: invalid telemetry environment; telemetry disabled", exc_info=True)
             return None
@@ -387,16 +438,22 @@ def init_telemetry(
 
         attrs = _build_resource_attributes(server_name, server_type)
         attrs["nemo.gym.service_group"] = service_group
+        # Each Gym server is its own single-process world. nemo-lens warns when a process
+        # reports no rank, since the collector could not filter it by rank.
+        attrs[NV_DL_RANK] = 0
+        attrs[NV_DL_WORLD_SIZE] = 1
         if resource_attributes:
             attrs.update(resource_attributes)
 
         try:
-            handle = setup_telemetry(config, rank=rank, world_size=world_size, resource_attributes=attrs)
+            handle = setup_telemetry(config, resource_attributes=attrs)
         except Exception:
             logger.warning("nemo-lens: telemetry setup failed; continuing without it", exc_info=True)
             return None
 
         _TELEMETRY_HANDLE = handle
+        _OWNS_PROVIDERS = True
+        _METRICS_EXPORTING = bool(config.metrics_enabled and handle.is_exporting)
 
         if config.logs_enabled and handle.is_exporting:
             try:
@@ -421,14 +478,25 @@ def get_telemetry() -> Optional["TelemetryHandle"]:
     return _TELEMETRY_HANDLE
 
 
+def is_metrics_exporter_active() -> bool:
+    """Whether this process has an active metrics exporter for Gym to record into.
+
+    True after Gym's own telemetry setup succeeds with metrics enabled, or after Gym reuses
+    providers that another library set up with metrics enabled. Unlike
+    :func:`is_telemetry_metrics_enabled`, this stays false until telemetry is set up.
+    """
+    return _METRICS_EXPORTING
+
+
 def shutdown_telemetry(timeout_ms: int = 5000) -> None:
     """Flush and shut down this process's telemetry providers.
 
     Idempotent — ``TelemetryHandle.shutdown`` guards against a second call, and Gym
-    reaches this from more than one terminal path. Never raises.
+    reaches this from more than one terminal path. A no-op when Gym reused providers that
+    another library set up. Never raises.
     """
     handle = _TELEMETRY_HANDLE
-    if handle is None:
+    if handle is None or not _OWNS_PROVIDERS:
         return
     try:
         handle.shutdown(timeout_ms=timeout_ms)
@@ -442,6 +510,8 @@ def _reset_for_testing() -> None:
     Test-only. Production code has exactly one init per process, which is what
     ``_INITIALISED`` enforces.
     """
-    global _TELEMETRY_HANDLE, _INITIALISED
+    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _INITIALISED, _OWNS_PROVIDERS
     _TELEMETRY_HANDLE = None
+    _METRICS_EXPORTING = False
     _INITIALISED = False
+    _OWNS_PROVIDERS = False

@@ -312,6 +312,41 @@ class TestRewardProfile:
         assert actual_agent_metrics["mean_across_repeats/mean/abc usage"] == pytest.approx(1.0)
         assert actual_agent_metrics["se_across_repeats/mean/abc usage"] == pytest.approx(0.0)
 
+    def test_profile_labels_rows_without_agent_ref_by_environment_server(self) -> None:
+        """Episode rows carry no agent_ref and may lack a response; profiling labels them by server."""
+        rows = [
+            {"_ng_task_index": 0, "_ng_rollout_index": r, "_ng_environment_server": "environment"} for r in range(2)
+        ]
+        results = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {"usage": {"total_tokens": 3}}},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "reward": 0.0},
+        ]
+
+        _, agent_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
+
+        assert [m["agent_ref"]["name"] for m in agent_level_metrics] == ["environment"]
+        assert agent_level_metrics[0]["mean/reward"] == 0.5
+
+    def test_profile_keeps_two_servers_that_front_one_agent_apart(self) -> None:
+        rows = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": r,
+                "agent_ref": {"name": "hermes"},
+                "_ng_environment_server": server,
+            }
+            for r, server in enumerate(("hermes_relay", "hermes_turn"))
+        ]
+        results = [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0},
+            {"_ng_task_index": 0, "_ng_rollout_index": 1, "reward": 0.0},
+        ]
+
+        _, agent_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
+
+        rewards = {m["agent_ref"]["name"]: m["mean/reward"] for m in agent_level_metrics}
+        assert rewards == {"hermes_relay": 1.0, "hermes_turn": 0.0}
+
     def test_profile_from_data_series(self) -> None:
         rows = [
             {
@@ -427,6 +462,31 @@ class TestRewardProfile:
         ]
         assert row["mean/input_tokens"] == 4.0
         assert row["mean/verifier_score"] == 2.5
+
+    def test_private_retry_metadata_is_excluded_from_all_metric_levels(self) -> None:
+        rows = [{"_ng_task_index": 0, "_ng_rollout_index": i, "agent_ref": {"name": "agent"}} for i in range(2)]
+        results = [
+            row
+            | {
+                "response": {},
+                "reward": 1.0,
+                "verifier_score": 3.0,
+                "_ng_group_attempt": 2,
+                "_ng_attempt_index": 3,
+                "_private_value": 4,
+            }
+            for row in rows
+        ]
+        group, agent, dataset = RewardProfiler().profile_from_data(rows, results)
+        assert group[0]["_ng_task_index"] == 0
+        assert [r["_ng_rollout_index"] for r in group[0]["rollout_infos"]] == [0, 1]
+        assert group[0]["mean/verifier_score"] == 3.0
+        for record in [*group, *agent, *dataset, *group[0]["rollout_infos"]]:
+            assert not any(
+                field in key
+                for key in record
+                for field in ("_ng_group_attempt", "_ng_attempt_index", "_private_value")
+            )
 
     def test_profile_from_data_missing_rollouts_requires_partial_flag(self) -> None:
         rows = [_row(0, 0), _row(0, 1)]
