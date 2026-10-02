@@ -31,3 +31,11 @@ swe_rebench_opencode_sandboxed_agent:
           num_repeats: 1
           # nebius/SWE-rebench-V2's own Hub metadata license (cc-by-4.0).
           license: Creative Commons Attribution 4.0 International
+
+swe_rebench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swe_rebench_opencode_sandboxed_agent
