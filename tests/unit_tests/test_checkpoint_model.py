@@ -176,6 +176,8 @@ async def test_restored_ledger_lets_the_next_attempt_resolve_its_parent(tmp_path
     assert (resolution.match.model_call_id, resolution.match.staging_chain) == ("c1", ("r/c1",))
     assert [record.model_call_id for record in manifest.records] == ["c1"]
     assert len(restored.attempts) == 0
+    # The carried-over call stays staged under the attempt that made it.
+    assert [record.capture_key for record in manifest.records] == ["r"]
 
 
 async def test_model_commit_requires_the_continued_episodes(tmp_path: Path) -> None:
@@ -486,7 +488,9 @@ async def test_ledger_export_and_import_run_off_the_event_loop(tmp_path: Path) -
 
         def export_rows(self, rollout_id: str) -> list[dict]:
             self.threads.append(threading.get_ident())
-            return self.rows.get(rollout_id, [{"model_call_id": "c1", "staging_key": "r/c1"}])
+            # Only the source episode starts with rows; the restore target starts empty.
+            default = [{"model_call_id": "c1", "staging_key": "r/c1"}] if rollout_id == "r" else []
+            return self.rows.get(rollout_id, default)
 
         def import_rows(self, rollout_id: str, rows: list[dict]) -> None:
             self.threads.append(threading.get_ident())
@@ -509,7 +513,7 @@ async def test_ledger_export_and_import_run_off_the_event_loop(tmp_path: Path) -
     loop_thread = threading.get_ident()
     assert source.threads and loop_thread not in source.threads
     assert target.threads and loop_thread not in target.threads
-    assert target.rows["r-a1"] == [{"model_call_id": "c1", "staging_key": "r/c1"}]
+    assert target.rows["r-a1"] == [{"model_call_id": "c1", "staging_key": "r/c1", "capture_key": "r"}]
 
 
 def test_a_batched_ledger_import_syncs_the_directory_per_batch(
@@ -548,7 +552,8 @@ def test_restoring_a_checkpoint_again_after_its_replacement_made_a_call_continue
 
     import_model_records(FileLineageStore(tmp_path), [record])
 
-    assert FileLineageStore(tmp_path).export_rows("roll-1-a1") == [row]
+    # Only the checkpointed call, stamped with the attempt that staged it.
+    assert FileLineageStore(tmp_path).export_rows("roll-1-a1") == [{**row, "capture_key": "roll-1"}]
 
 
 async def test_a_ledger_import_deletes_dead_executions_and_fences_of_the_target_and_later_attempts(
@@ -674,3 +679,44 @@ async def test_a_restore_retires_the_ledgers_of_the_attempts_it_continues(tmp_pa
     assert [row["model_call_id"] for row in restored_ledger.export_rows("r-a1")] == ["c1"]
     assert not await restored_ledger.has_rows("r")
     assert (tmp_path / "ledger" / "r.lineage.retired").exists()
+
+
+def test_a_chain_of_restores_keeps_each_row_staged_under_its_own_attempt() -> None:
+    """Restoring attempt 1 again stamps its own calls and keeps attempt 0's stamps."""
+
+    class DictLedger:
+        def __init__(self) -> None:
+            self.rows: dict[str, list[dict]] = {}
+
+        def export_rows(self, rollout_id: str) -> list[dict]:
+            return self.rows.get(rollout_id, [])
+
+        def import_rows(self, rollout_id: str, rows: list[dict]) -> None:
+            self.rows[rollout_id] = rows
+
+    ledger = DictLedger()
+    failure = {"model_call_id": "lost", "failure_reason": "capture_failed"}
+    import_model_records(
+        ledger,
+        [
+            ModelRecord(
+                episode_id=EpisodeId(rollout_id="r"), rows=[{"model_call_id": "c1", "staging_key": "r/c1"}, failure]
+            )
+        ],
+    )
+    import_model_records(
+        ledger,
+        [
+            ModelRecord(
+                episode_id=EpisodeId(rollout_id="r", attempt=1),
+                rows=[*ledger.rows["r-a1"], {"model_call_id": "c2", "staging_key": "r-a1/c2"}],
+            )
+        ],
+    )
+
+    assert ledger.rows["r-a1"] == [{"model_call_id": "c1", "staging_key": "r/c1", "capture_key": "r"}, failure]
+    assert ledger.rows["r-a2"] == [
+        {"model_call_id": "c1", "staging_key": "r/c1", "capture_key": "r"},
+        failure,
+        {"model_call_id": "c2", "staging_key": "r-a1/c2", "capture_key": "r-a1"},
+    ]
