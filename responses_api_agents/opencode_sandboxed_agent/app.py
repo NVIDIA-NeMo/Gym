@@ -25,6 +25,7 @@ from traceback import format_exc
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
+from anyio import CancelScope
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, FilePath
@@ -1091,13 +1092,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         finally:
             del request.state._ng_observation_invocation_id
             del request.state._ng_opencode_mcp
-            try:
-                await sandbox.stop()
-            except Exception:
-                print("Failed to stop sandbox", format_exc(), file=sys.stderr)
-            finally:
-                self._sandbox_id_to_sandbox.pop(session_key, None)
-                self._sandbox_id_to_run_result.pop(session_key, None)
+            # A server cancels its handler when the caller disconnects, and OpenCode keeps running
+            # in its pod regardless: only stopping the sandbox ends it. Shielded because the
+            # cancellation is re-delivered at every await until the handler exits, so an unshielded
+            # stop would itself be cancelled and leave the pod generating until its TTL.
+            with CancelScope(shield=True):
+                try:
+                    await sandbox.stop()
+                except Exception:
+                    print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+                finally:
+                    self._sandbox_id_to_sandbox.pop(session_key, None)
+                    self._sandbox_id_to_run_result.pop(session_key, None)
 
         response_dict |= run_result
         if trajectory is not None:

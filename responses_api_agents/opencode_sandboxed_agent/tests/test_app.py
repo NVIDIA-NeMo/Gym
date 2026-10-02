@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock, call
 
+import anyio
 from pydantic import ValidationError
 from pytest import MonkeyPatch, fixture, mark, raises
 
@@ -649,6 +650,56 @@ class TestOpenCodeSandboxedAgent:
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
+
+    async def test_a_cancelled_run_stops_its_sandbox(self, monkeypatch: MonkeyPatch) -> None:
+        """A caller that disconnects mid-rollout must not leave OpenCode running in its pod.
+
+        The server cancels the handler on disconnect, but OpenCode keeps working, and keeps
+        calling the model, until its sandbox is stopped. The cancellation is the anyio
+        kind, re-delivered at every await, so this also fails if the stop is not shielded.
+        """
+
+        class Response:
+            ok = True
+            cookies: dict[str, str] = {}
+
+            async def json(self) -> dict[str, Any]:
+                return {"sandbox_handle": "seed-sandbox"}
+
+        request = SimpleNamespace(cookies={}, session={SESSION_ID_KEY: "session-1"}, state=SimpleNamespace())
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=Response())
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
+
+        stopped = anyio.Event()
+
+        async def stop() -> None:
+            await anyio.sleep(0)
+            stopped.set()
+
+        sandbox = MagicMock()
+        sandbox.stop = stop
+        server._start_sandbox = AsyncMock(return_value=sandbox)
+        rollout_started = anyio.Event()
+
+        async def responses(self, request, params):
+            self._sandbox_id_to_run_result["session-1"] = {"_ng_trajectory": "partial"}
+            rollout_started.set()
+            await anyio.sleep_forever()
+
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", responses)
+        body = OpenCodeSandboxedAgentRunRequest.model_validate(
+            {"responses_create_params": {"input": [{"role": "user", "content": "solve"}]}}
+        )
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(server.run, request, body)
+            await rollout_started.wait()
+            task_group.cancel_scope.cancel()
+
+        assert stopped.is_set(), "the pod was left running"
+        assert server._sandbox_id_to_sandbox == {}
+        assert server._sandbox_id_to_run_result == {}
 
 
 class TestBenchmarkLifecycle:
