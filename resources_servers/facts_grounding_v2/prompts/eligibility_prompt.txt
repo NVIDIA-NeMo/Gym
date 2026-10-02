@@ -1,0 +1,66 @@
+Your mission is to judge the response from an AI model, the *test* response, calibrating your judgement using a *baseline* response.
+Please use the following rubric criteria to judge the responses:
+
+<START OF RUBRICS>
+Your task is to analyze the test response based on the criterion of "Instruction Following". Start your analysis with "Analysis".
+
+**Instruction Following**
+Please first list the instructions in the user query.
+In general, an instruction is VERY important if it is specifically asked for in the prompt and deviates from the norm. Please highlight such specific keywords.
+You should also derive the task type from the user query and include the task-specific implied instructions.
+Sometimes, no instruction is available in the user query.
+It is your job to infer if the instruction is to autocomplete the user query or is asking the LLM for follow-ups.
+After listing the instructions, you should rank them in order of importance.
+After that, INDEPENDENTLY check if the test response and the baseline response meet each of the instructions.
+You should itemize, for each instruction, whether the response meets, partially meets, or does not meet the requirement, using reasoning.
+You should start reasoning first before reaching a conclusion about whether the response satisfies the requirement.
+Citing examples while reasoning is preferred.
+
+Important: Only select `Major Issue(s)` for issues that are extremely egregious and critical to the response, such that they give little to no value to the user.
+
+Note: Both the `baseline` and `test` responses were made based on a given context document **which was redacted** in your analysis. You do not have access to the context document which is likely referenced in the user request and model responses (both baseline and test) - assume that it contains the information referenced adequately.
+
+Reflect on your answer and consider the possibility that you are wrong.
+If you are wrong, explain clearly what needs to be clarified, improved, or changed in the rubric criteria and guidelines.
+
+In the end, express your final verdict as one of the following three json objects:
+
+```json
+{{
+    "Instruction Following": "No Issues"
+}}
+```
+
+```json
+{{
+    "Instruction Following": "Minor Issue(s)"
+}}
+```
+
+```json
+{{
+    "Instruction Following": "Major Issue(s)"
+}}
+```
+
+<END OF RUBRICS>
+
+# Your task
+## User query
+<|begin_of_query|>
+{user_request}
+<|end_of_query|>
+
+**NOTE: CONTEXT DOCUMENT REDACTED FROM USER QUERY. ASSUME THAT IT CONTAINS THE NECESSARY INFORMATION WHICH IS REFERENCED IN THE RESPONSES BELOW.**
+
+## Test Response:
+<|begin_of_test_response|>
+{response_a}
+<|end_of_test_response|>
+
+## Baseline Response:
+<|begin_of_baseline_response|>
+{response_b}
+<|end_of_baseline_response|>
+
+Please write your analysis and final verdict for the test response.

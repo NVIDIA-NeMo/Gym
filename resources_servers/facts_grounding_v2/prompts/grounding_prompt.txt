@@ -1,0 +1,50 @@
+## Task: Evaluate Factual Accuracy of Model Response Against Provided Context
+
+Your goal is to evaluate whether each sentence in the model's response is factually accurate **solely based on the provided context document**. You must act as a strict fact-checker. Do not use any external knowledge or make assumptions beyond what is stated in the text.
+
+**Output Format:**
+For each sentence in the response, output a JSON object with the following fields, representing an evaluation of a single sentence from the model's response:
+
+* `sentence`: (string) The exact sentence from the model's response being evaluated.
+* `label`: (string) Your verdict for the sentence. Must be one of:
+    * `supported`: The sentence is fully and accurately supported by the provided context document.
+    * `not_supported`: The sentence is NOT accurately supported by the provided context document. This includes sentences that are partially correct but contain inaccuracies, unsupported inferences, misattributions, or ignore crucial context.
+    * `no_rad`: The sentence is introductory, concluding, conversational filler, or otherwise does not make a factual claim that can be verified against the context (e.g., "Here is the summary:", "Key aspects include:").
+* `rationale`: (string) A detailed justification for your `label`.
+    * If `supported`, explain *how* the provided excerpt(s) directly and accurately support the *entire* claim made in the sentence. Point out specific phrases or data points.
+    * If `not_supported`, clearly explain *why* the sentence is inaccurate. Specify the inaccuracy (e.g., contradicts the text, makes an unsupported inference, misrepresents nuance, misattributes information, ignores contradictory context, uses incorrect terminology). Reference the relevant part(s) of the text or the lack thereof.
+    * If `no_rad`, briefly explain why the sentence doesn't require factual verification against the context.
+* `excerpt`: (string or null) One or more direct quotes (excerpts) from the context document that are **most relevant** to supporting or refuting the sentence. Concatenate multiple relevant excerpts with a semicolon and space (`; `). If the label is `not_supported` due to a complete lack of information, or if the label is `no_rad`, this field should be `null`.
+
+**Evaluation Criteria - Strict Adherence Required:**
+
+1.  **Explicit Support or Trivial/Strongly-Implied Inferences Only:** A sentence is only `supported` if the information is **explicitly stated** in the context or are logically inferred statements that are strongly implied by the context or trivially implied. Do NOT mark sentences as `supported` if they require inference, assumption, synthesis beyond direct statements, or understanding of implied meaning beyond a very strong or trivial implication. A non-trivial inference that goes well beyond what is strongly or trivially implied by the context is NOT supported.
+2.  **Precision and Nuance:** Pay close attention to specific terminology, qualifiers (e.g., "significantly", "most", "some"), quantities, and causal relationships mentioned in the text. Simplifications in the model response are only acceptable if they maintain **full factual accuracy** and do not misrepresent the nuance of the source.
+3.  **Completeness and Context:** Evaluate the sentence in the context of the *entire* provided document. A sentence is `not_supported` if it cherry-picks information while ignoring contradictory or significantly qualifying information present elsewhere *in the same document*. The response should not be misleading even if technically based on a fragment of the text.
+4.  **Accurate Attribution:** Ensure that claims, descriptions, or characteristics are attributed to the correct subject, object, or scope as defined in the text. Misattributions make a sentence `not_supported`.
+5.  **No Hallucinations:** The model response must not introduce information, terms, or concepts not present in the context. Such additions make a sentence `not_supported`.
+6.  **Sentence-Level Evaluation:** Evaluate each sentence independently based on these criteria.
+
+Output each JSON object on a new line.
+
+**Example Structure:**
+
+```json
+{{"sentence": "The first sentence of the model response.", "label": "supported/not_supported/no_rad", "rationale": "Detailed explanation referencing the criteria and text.", "excerpt": "Relevant quote(s) from context; null if none."}}
+{{"sentence": "The second sentence of the model response.", "label": "supported/not_supported/no_rad", "rationale": "Detailed explanation referencing the criteria and text.", "excerpt": "Relevant quote(s) from context; null if none."}}
+// ... more sentence evaluations
+```
+
+**DO NOT** use RAW quotation marks (") in the values of the sentence, rationale, or excerpt fields in the response. Replace any quotations (") with tick (`)
+Example: "The response states, `This is the way it goes`". DO NOT attempt any escaping of the quotations marks - just replace them with ticks.
+
+**Now, please analyze the following context and response:**
+
+**User Query:**
+{user_query}
+
+**Context:**
+{context}
+
+**Response:**
+{response}
