@@ -144,6 +144,13 @@ Preparation calls `usersim.engine.external.materialize_episode_inputs(...)` in t
 writes `environments/usersim/data/example.jsonl`. It produces one deterministic row for every registered
 probe. UserSim—not Gym—owns all sampled content and provenance.
 
+<Warning>
+This preparation flow does **not** require `NGC_API_KEY`, GitHub SSH keys, or a separate UserSim installation.
+It downloads the public UserSim source over HTTPS and uses UserSim's canonical sampler directly. If the output
+mentions `git+ssh`, `usersim panel`, or `_prepare_panel`, your checkout contains an older preparation
+implementation and does not match this tutorial. Update your NeMo Gym checkout before continuing.
+</Warning>
+
 The equivalent UserSim CLI contract for one selected probe is:
 
 ```bash
