@@ -1723,7 +1723,11 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         # run configured with a different ref could `reset --hard` the shared
         # tree while containers still execute from it.
         legacy_dir = self.parent_dir / "swe_openhands_setup"
-        if legacy_dir.exists() and self._cache_dir_is_default() and self._openhands_tree_valid(legacy_dir):
+        if (
+            legacy_dir.exists()
+            and self._cache_dir_is_default()
+            and self._existing_setup_is_reusable(legacy_dir / "OpenHands")
+        ):
             print(f"Using pre-staged setup tree at {legacy_dir}", flush=True)
             return legacy_dir
         return self.setup_root / "swe_openhands_setup" / _repo_slug(self.config.agent_framework_repo) / commit
@@ -1760,8 +1764,7 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         probe_failure = self._probe_openhands_venv(openhands_dir)
         if probe_failure is not None:
             print(
-                f"OpenHands venv at {openhands_dir} failed its runtime probe ({probe_failure}); "
-                "rebuilding the setup instead of reusing it",
+                f"OpenHands venv at {openhands_dir} failed its runtime probe ({probe_failure}); not reusing it",
                 flush=True,
             )
             return False
@@ -1780,6 +1783,13 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         ):
             # Baked tree with no remote to resolve `ref` against: use it as
             # shipped (the pre-resolution local-HEAD sync was a no-op here).
+            probe_failure = self._probe_openhands_venv(legacy_dir / "OpenHands")
+            if probe_failure is not None:
+                print(
+                    f"WARNING: pre-staged OpenHands venv at {legacy_dir} failed its runtime probe "
+                    f"({probe_failure}); using it anyway because there is no remote to rebuild from",
+                    flush=True,
+                )
             print(f"Using pre-staged setup tree at {legacy_dir} (no resolvable remote)", flush=True)
             return legacy_dir
 

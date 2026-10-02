@@ -605,10 +605,12 @@ class TestOpenHandsSetupDirResolution:
         stack.enter_context(patch.object(swe_app, "maybe_get_global_config_dict", return_value=config_dict))
         return stack
 
-    def _make_valid_legacy_tree(self, legacy_root: Path) -> Path:
+    def _make_valid_legacy_tree(self, legacy_root: Path, probe_script: str = "#!/bin/sh\nexit 0\n") -> Path:
         legacy_setup = legacy_root / "swe_openhands_setup"
         (legacy_setup / "OpenHands" / ".venv" / "bin").mkdir(parents=True)
-        (legacy_setup / "OpenHands" / ".venv" / "bin" / "python").touch()
+        python = legacy_setup / "OpenHands" / ".venv" / "bin" / "python"
+        python.write_text(probe_script)
+        python.chmod(0o755)
         return legacy_setup
 
     def test_target_keys_by_repo_identity_and_commit(self, tmp_path: Path) -> None:
