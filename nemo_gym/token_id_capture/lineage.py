@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.token_id_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
@@ -759,6 +760,18 @@ class IncrementalLineageStore:
             self._materialized_tokens = 0
 
 
+_LEDGER_SUFFIX = ".lineage.jsonl"
+# Every per-attempt capture file but the lock, which every process touching the key must keep sharing.
+_CAPTURE_FILE_SUFFIXES = (
+    _LEDGER_SUFFIX,
+    ".lineage.retired",
+    ".tokens.jsonl",
+    ".tokens.state.json",
+    ".tokens.intents",
+    ".tokens.incomplete",
+)
+
+
 class FileLineageStore(IncrementalLineageStore):
     """Resolve lineage from the token JSONL committed by ``TokenCaptureStore``.
 
@@ -835,7 +848,7 @@ class FileLineageStore(IncrementalLineageStore):
     def _ledger_path(self, rollout_id: str) -> Path:
         from nemo_gym.token_id_capture.store import validate_rollout_id
 
-        return self._ledger_root / f"{validate_rollout_id(rollout_id)}.lineage.jsonl"
+        return self._ledger_root / f"{validate_rollout_id(rollout_id)}{_LEDGER_SUFFIX}"
 
     def _retired_path(self, rollout_id: str) -> Path:
         # Present while the rollout is retired: its writes are discarded. ``delete`` removes it.
@@ -1054,30 +1067,37 @@ class FileLineageStore(IncrementalLineageStore):
             return list(self._read(rollout_id))
 
     def import_rows(self, rollout_id: str, rows: list[dict]) -> None:
-        """Install checkpointed rows as the complete ledger of an unused ``rollout_id``.
-
-        Importing identical rows again is a no-op; any other existing ledger is an error.
-        """
+        """Install checkpointed rows as the complete ledger of ``rollout_id``; see ``import_rows_many``."""
         self.import_rows_many({rollout_id: rows})
 
     def import_rows_many(self, ledgers: Mapping[str, list[dict]]) -> None:
         """Install several rollouts' ledgers from a checkpoint, then sync the directory once.
 
-        The files are not synced one by one: the checkpoint they come from is the durable copy, and importing it
-        again is a no-op for ledgers that match, so a crash during or after the import only repeats it. A later
-        append to a ledger syncs its file, imported rows included.
+        Restore runs on a freshly started model server, so capture files already present for a target attempt, or
+        for a later attempt of the same rollout, belong to executions that died after an earlier restore of the
+        checkpoint. They are deleted first, retire fences included: a stale ledger would mix a dead execution's
+        calls into the replacement's lineage, and a fence would silently discard the replacement's rows once the
+        episode reached that attempt again.
+
+        The ledgers are not synced one by one: the checkpoint they come from is the durable copy, and a crash
+        during or after the import only means importing again. A later append to a ledger syncs its file.
         """
         present = {entry.name for entry in os.scandir(self._ledger_root)} if self._ledger_root.exists() else set()
-        installed = []
+        stale = sorted(
+            {key for rollout_id in ledgers for key in [rollout_id, *self._later_attempts(rollout_id, present)]}
+        )
+        if stale:
+            self._remove(stale, unretire=True)
+            self._store.delete_now(stale)
+            with self._cache_guard:
+                for key in stale:
+                    self._cache.pop(key, None)
+                    materialized = self._materialized.pop(key, None)
+                    if materialized is not None:
+                        self._materialized_tokens -= len(materialized[1])
         for rollout_id, rows in ledgers.items():
             with self._locked(rollout_id):
                 path = self._ledger_path(rollout_id)
-                if path.name in present:
-                    existing = self._read(rollout_id)
-                    if existing == rows:
-                        continue
-                    if existing:
-                        raise ValueError(f"lineage ledger for {rollout_id} already holds different rows")
                 payload = b"".join(
                     json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows
                 )
@@ -1086,10 +1106,21 @@ class FileLineageStore(IncrementalLineageStore):
                     handle.write(payload)
                 os.replace(temporary, path)
                 self._ledger_cache_pop(rollout_id)
-                installed.append(rollout_id)
-        if installed:
-            directory_fd = os.open(self._ledger_root, os.O_RDONLY)
+        if ledgers:
+            self._fsync_ledger_root()
+
+    def _later_attempts(self, capture_key: str, present: set[str]) -> list[str]:
+        """Capture keys with files in ``present`` of the same rollout as ``capture_key`` and a later attempt."""
+        episode = EpisodeId.from_capture_key(capture_key)
+        later = set()
+        for name in present:
+            suffix = next((suffix for suffix in _CAPTURE_FILE_SUFFIXES if name.endswith(suffix)), None)
+            if suffix is None or not name.startswith(f"{episode.rollout_id}-a"):
+                continue
             try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+                candidate = EpisodeId.from_capture_key(name.removesuffix(suffix))
+            except ValueError:
+                continue
+            if candidate.rollout_id == episode.rollout_id and candidate.attempt > episode.attempt:
+                later.add(candidate.capture_key)
+        return sorted(later)
