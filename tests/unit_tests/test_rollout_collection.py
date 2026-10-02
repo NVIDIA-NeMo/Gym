@@ -7908,7 +7908,77 @@ class TestEnvironmentServerRouting:
         assert calls["legacy_environment"] is flat_row
         assert flat_row[AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
 
-    def test_materialized_row_rejects_num_repeats_add_seed(self) -> None:
+    @pytest.mark.parametrize(
+        "seed_policy",
+        [False, {"_default": False}, {"swe_pro": False}, {"swe_pro": False, "_default": True}],
+    )
+    def test_materialized_row_accepts_disabled_seed_policy(self, seed_policy: bool | dict[str, bool]) -> None:
+        """Native repeats preserve task input when their effective seed setting is disabled."""
+        materialized = self._materialized_row()
+        original = deepcopy(materialized)
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            environment_server_routes={"swe_pro": "environment"},
+            num_repeats=2,
+            num_repeats_add_seed=seed_policy,
+        )
+
+        rows = RolloutCollectionHelper._preprocess_raw_rows(
+            [(0, orjson.dumps(materialized).decode(), materialized)], config
+        )
+
+        assert len(rows) == 2
+        assert [row[ROLLOUT_INDEX_KEY_NAME] for row in rows] == [0, 1]
+        for row in rows:
+            assert row["task_id"] == original["task_id"]
+            assert row["task_input"] == original["task_input"]
+            assert row[NG_ENVIRONMENT_SERVER_KEY] == "environment"
+            assert "responses_create_params" not in row
+            assert AGENT_REF_KEY_NAME not in row
+
+    @pytest.mark.parametrize(
+        "seed_policy",
+        [{"hermes_legacy": True, "_default": False}, {"hermes_legacy": True, "swe_pro": False}],
+    )
+    def test_mixed_rows_seed_only_the_legacy_agent(self, seed_policy: dict[str, bool]) -> None:
+        """One policy can seed legacy repeats without rejecting unseeded native repeats."""
+        materialized = self._materialized_row()
+        original_task_input = deepcopy(materialized["task_input"])
+        flat = {
+            AGENT_REF_KEY_NAME: {"name": "hermes_legacy"},
+            "responses_create_params": {"input": "fix it"},
+        }
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            environment_server_routes={"swe_pro": "environment"},
+            num_repeats=2,
+            num_repeats_add_seed=seed_policy,
+        )
+
+        rows = RolloutCollectionHelper._preprocess_raw_rows(
+            [(0, orjson.dumps(materialized).decode(), materialized), (1, orjson.dumps(flat).decode(), flat)],
+            config,
+        )
+
+        native_rows = [row for row in rows if "task_input" in row]
+        legacy_rows = [row for row in rows if "task_input" not in row]
+        assert len(native_rows) == len(legacy_rows) == 2
+        for row in native_rows:
+            assert row["task_input"] == original_task_input
+            assert "responses_create_params" not in row
+            assert row[NG_ENVIRONMENT_SERVER_KEY] == "environment"
+        assert [row[ROLLOUT_INDEX_KEY_NAME] for row in native_rows] == [0, 1]
+        assert [row[ROLLOUT_INDEX_KEY_NAME] for row in legacy_rows] == [0, 1]
+        assert [
+            json.loads(row["responses_create_params"]["metadata"]["extra_body"])["seed"] for row in legacy_rows
+        ] == [0, 1]
+        assert all(row[AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"} for row in legacy_rows)
+        assert "metadata" not in flat["responses_create_params"]
+
+    @pytest.mark.parametrize("seed_policy", [True, {"_default": True}, {"swe_pro": True, "_default": False}])
+    def test_materialized_row_rejects_num_repeats_add_seed(self, seed_policy: bool | dict[str, bool]) -> None:
         """The seed lives in the top-level prompt, which a materialized row keeps under task_input."""
         materialized = self._materialized_row()
         config = RolloutCollectionConfig(
@@ -7916,7 +7986,7 @@ class TestEnvironmentServerRouting:
             output_jsonl_fpath="output.jsonl",
             environment_server_routes={"swe_pro": "environment"},
             num_repeats=2,
-            num_repeats_add_seed=True,
+            num_repeats_add_seed=seed_policy,
         )
 
         with pytest.raises(ValueError, match="num_repeats_add_seed is not supported for materialized task rows"):
