@@ -161,6 +161,32 @@ def _chat_logprobs_to_responses(logprobs: Any) -> Optional[List[Dict[str, Any]]]
     return [_one(entry) for entry in content]
 
 
+def _align_logprobs_to_text(
+    logprobs: Optional[List[Dict[str, Any]]], original: str, text: str
+) -> Optional[List[Dict[str, Any]]]:
+    """Keep only the token entries that produced ``text``, a substring of ``original``.
+
+    Reasoning extraction shortens the output text; its logprobs must shrink with it or
+    they describe different text. If the tokens do not reconstruct ``original`` the
+    alignment is unknowable and the logprobs are dropped rather than misattributed.
+    """
+    if not logprobs or text == original:
+        return logprobs
+    if not text or "".join(e.get("token") or "" for e in logprobs) != original:
+        return None
+    start = original.find(text)
+    if start < 0:
+        return None
+    end = start + len(text)
+    kept, offset = [], 0
+    for entry in logprobs:
+        token_end = offset + len(entry.get("token") or "")
+        if token_end > start and offset < end:
+            kept.append(entry)
+        offset = token_end
+    return kept or None
+
+
 class ResponsesConverter(BaseModel):
     """Converts between OpenAI Responses API and Chat Completions API formats."""
 
@@ -690,6 +716,8 @@ class ResponsesConverter(BaseModel):
         refusal = message_dict.get("refusal") or ""
         if self.uses_reasoning_parser:
             reasoning_matches, content = self._extract_reasoning_from_content(content)
+            if reasoning_matches:
+                logprobs = _align_logprobs_to_text(logprobs, message_dict.get("content") or "", content)
         else:
             reasoning_matches = []
         if reasoning_matches:

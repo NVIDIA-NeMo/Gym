@@ -129,7 +129,11 @@ therefore asks for them: `logprobs` is not a Responses API field and `top_logpro
 inert in vLLM, so both travel on the row's `metadata.extra_body`, and
 `nemo_gym/responses_converter.py` carries the choice-level logprobs back onto the output text.
 The decision follows the paper's appendix F.3.2: eq. (1), a softmax over `{YES, NO}` with
-label `P(YES) >= 0.5`, and eq. (2), an argmax over the option indices. A row with no visible
+label `P(YES) >= 0.5`, and eq. (2), an argmax over the option indices. The distribution is read
+at the first token of the output text; with a reasoning parser that is the first token after the
+reasoning block, where upstream reads the first generated token. When only one of YES/NO is inside
+the top-k window the other is given the window's smallest probability rather than abstaining,
+so a confident NO is not turned into the positive default. A row with no visible
 candidate takes upstream's own fallbacks (0.5, which counts positive; index -1) and is reported
 as `lm_abstained`.
 

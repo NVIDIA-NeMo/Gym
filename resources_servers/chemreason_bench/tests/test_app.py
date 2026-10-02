@@ -311,7 +311,9 @@ class TestModelOutputHandling:
         assert _verify(server, reply, task_type="step_validation", ground_truth={"label": True}).reward == 1.0
         assert _verify(server, reply, task_type="step_validation", ground_truth={"label": False}).reward == 0.0
 
-    @pytest.mark.parametrize("reply", ["[1, 2]", "null", '"YES"'])
+    @pytest.mark.parametrize(
+        "reply", ["[1, 2]", "null", '"YES"', "```json\n[1, 2]\n```", "```\nnull\n```", '[{"score": 0.9}]']
+    )
     def test_valid_non_object_json_is_negative(self, reply):
         """Valid JSON that is not an object reaches post_binary as a non-dict: label False.
 
@@ -838,9 +840,30 @@ class TestLmLogprobs:
             task_type="step_validation",
             ground_truth={"label": False},
         )
-        assert positive.status == "lm_abstained"
+        assert positive.status == "ok_logprobs"
         assert positive.reward == pytest.approx(1.0)
         assert negative.reward == pytest.approx(0.0)
+
+    def test_confident_no_with_yes_outside_the_window_stays_negative(self):
+        """Upstream sees YES in the full vocabulary and labels this False; abstaining
+        here would hand a confident NO the positive default."""
+        window = [("NO", -0.01)] + [(f"t{i}", -7.5) for i in range(19)]
+        negative = self._with_logprobs(
+            _make_server(), "NO", window, task_type="step_validation", ground_truth={"label": False}
+        )
+        assert negative.status == "ok_logprobs"
+        assert negative.reward == pytest.approx(1.0)
+
+    def test_neither_candidate_visible_abstains_positive(self):
+        result = self._with_logprobs(
+            _make_server(),
+            "ok",
+            [("ok", -0.1), ("the", -2.0)],
+            task_type="step_validation",
+            ground_truth={"label": True},
+        )
+        assert result.status == "lm_abstained"
+        assert result.reward == pytest.approx(1.0)
 
     def test_a_single_visible_index_still_decides(self):
         """predict.py's >=2-index guard zeroed every Phi-3-mini contrastive row

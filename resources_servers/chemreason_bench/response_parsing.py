@@ -24,6 +24,8 @@ _THINK_BLOCK_RE = re.compile(r"<(think|thinking)\b[^>]*>.*?</\1>", re.DOTALL | r
 # An unterminated block (truncated by the output budget) leaves no closing tag.
 _OPEN_THINK_RE = re.compile(r"<(think|thinking)\b[^>]*>.*\Z", re.DOTALL | re.IGNORECASE)
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+_UPSTREAM_SPAN_RE = re.compile(r"\{[\s\S]*\}\s*$")
+_NO_PARSE = object()
 
 # Upstream's threshold for turning the requested score into a discrete label
 # (predict.py, `label = bool(score >= threshold)`).
@@ -98,6 +100,21 @@ def extract_json(raw: Optional[str]) -> Tuple[Optional[Dict[str, Any]], str]:
         # The whole reply was reasoning: the budget ran out before any answer.
         return None, "no_json_found"
 
+    # Upstream's single candidate (chat_json_hf): first fenced block, else the span from
+    # the first "{" to a closing "}" at the end, else the whole reply. When it parses, its
+    # outcome is upstream's outcome: a dict scores, anything else is a non-object reply.
+    fence = _FENCE_RE.search(text)
+    span = _UPSTREAM_SPAN_RE.search(text)
+    upstream_candidate = fence.group(1) if fence else (span.group(0) if span else text)
+    try:
+        value = json.loads(upstream_candidate.strip())
+    except (ValueError, RecursionError):
+        value = _NO_PARSE
+    if value is not _NO_PARSE:
+        return (value, "ok") if isinstance(value, dict) else (None, "non_object_json")
+
+    # DEPARTURE: upstream stops here with {"_raw": ...}. This port also scans for embedded
+    # objects and takes the rightmost, so a multi-object or prose-wrapped reply still scores.
     candidates = [m.group(1) for m in _FENCE_RE.finditer(text)]
     candidates.extend(_iter_json_objects(text))
 
@@ -326,9 +343,15 @@ def _lm_binary_prob_yes(alternatives: List[Tuple[str, float]]) -> Optional[float
             m_yes += probability
         elif normalized == "NO":
             m_no += probability
-    # Upstream's guard: both candidates must be observed.
-    if m_yes <= 0.0 or m_no <= 0.0:
+    if m_yes <= 0.0 and m_no <= 0.0:
         return None
+    # DEPARTURE: upstream requires both candidates, over the full vocabulary where both
+    # always exist. Over a top-k window the unseen side is not absent, it is below the
+    # smallest returned probability; use that floor as its mass rather than abstaining,
+    # which would turn a confident NO into the positive default.
+    floor = min(probability for _, probability in alternatives if probability > 0.0)
+    m_yes = m_yes or floor
+    m_no = m_no or floor
     return float((m_yes + _LM_EPS) / (m_yes + m_no + 2.0 * _LM_EPS))
 
 

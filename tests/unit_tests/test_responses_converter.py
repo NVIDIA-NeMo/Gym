@@ -1161,6 +1161,36 @@ def test_postprocess_carries_choice_logprobs_onto_the_output_text(converter: Res
     assert [(a["token"] if isinstance(a, dict) else a.token) for a in alternatives] == ["YES", "NO"]
 
 
+def _choice_with_tokens(tokens):
+    content = "".join(tokens)
+    return NeMoGymChoice.model_validate(
+        {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {"role": "assistant", "content": content},
+            "logprobs": {
+                "content": [{"token": t, "logprob": -0.1, "bytes": None, "top_logprobs": []} for t in tokens]
+            },
+        }
+    )
+
+
+def test_postprocess_logprobs_follow_the_output_text_when_reasoning_is_extracted(converter: ResponsesConverter):
+    output = converter.postprocess_chat_response(_choice_with_tokens(["<think>", "reason", "</think>", "NO"]))
+    part = output[1].content[0]
+    assert part.text == "NO"
+    tokens = [(e["token"] if isinstance(e, dict) else e.token) for e in part.logprobs]
+    assert tokens == ["NO"]
+
+
+def test_postprocess_drops_logprobs_it_cannot_align(converter: ResponsesConverter):
+    choice = _choice_with_tokens(["<think>", "reason", "</think>", "NO"])
+    choice.logprobs.content[0].token = "<thin"  # tokens no longer reconstruct the content
+    output = converter.postprocess_chat_response(choice)
+    assert output[1].content[0].text == "NO"
+    assert output[1].content[0].logprobs is None
+
+
 def test_postprocess_without_logprobs_leaves_the_field_unset(converter: ResponsesConverter):
     choice = NeMoGymChoice.model_validate(
         {"finish_reason": "stop", "index": 0, "message": {"role": "assistant", "content": "NO"}}
