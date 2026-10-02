@@ -687,8 +687,8 @@ if (( should_run_eval )); then
         sbatch \
             --parsable \
             --dependency=afterany:"$main_job_id" \
-            --partition=cpu \
-            --qos=cpu-normal \
+            --partition="${SBATCH_CPU_PARTITION:-cpu}" \
+            --qos="${SBATCH_CPU_QOS:-${SBATCH_QOS:-normal}}" \
             --gres=none \
             --gpus-per-node=0 \
             --nodes=1 \
