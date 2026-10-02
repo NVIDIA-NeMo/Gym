@@ -50,6 +50,8 @@ LATEST = "LATEST"
 MANIFEST = "collection.json"
 # The latest published checkpoint and the one before it; a checkpoint is deleted once two newer ones exist.
 KEEP_CHECKPOINTS = 2
+# Failed rows retired per coordination call.
+_RETIRE_BATCH = 1024
 
 
 class CollectionStopped(Exception):
@@ -100,8 +102,14 @@ class CollectionCheckpointer:
         self._lock = asyncio.Lock()
         # Rows whose /run has been sent and has not replied, by rollout ID: the episodes a checkpoint continues.
         self._in_flight: dict[str, int] = {}
+        # Restored rows not dispatched yet, by rollout ID, with the attempt they continue as. Participants still
+        # hold their restored state, so a checkpoint continues them too.
+        self._restored: dict[str, int] = {}
         self._participants: Optional[coordination.Participants] = None
         self._background: set[asyncio.Task] = set()
+        # Attempts of rows that did not end successfully; retired in batches between checkpoints.
+        self._failed: list[EpisodeId] = []
+        self._retiring: Optional[asyncio.Task] = None
         self._timer: Optional[asyncio.Task] = None
         self._collection: Optional[asyncio.Task] = None
 
@@ -110,11 +118,37 @@ class CollectionCheckpointer:
     async def before_dispatch(self, rollout_id: str, attempt: int) -> None:
         """Wait while a checkpoint is open, then count the row as in flight."""
         await self._dispatching.wait()
+        self._restored.pop(rollout_id, None)
         self._in_flight[rollout_id] = attempt
 
-    def after_dispatch(self, rollout_id: str) -> None:
-        """The row's /run replied (or failed): a checkpoint no longer continues it."""
-        self._in_flight.pop(rollout_id, None)
+    def after_dispatch(self, rollout_id: str, *, failed: bool = False) -> None:
+        """The row's /run replied (or failed): a checkpoint no longer continues it.
+
+        ``failed`` means /run got no reply. The episode may not have reached the environment server, or ended
+        without releasing what it holds, so its attempt is retired everywhere. Otherwise a restored record nothing
+        claimed would be exported by every later checkpoint. A reply, even a failure, means the environment
+        server already ended the episode.
+        """
+        attempt = self._in_flight.pop(rollout_id, None)
+        if failed and attempt is not None:
+            self._failed.append(EpisodeId(rollout_id=rollout_id, attempt=attempt))
+            if self._retiring is None or self._retiring.done():
+                self._retiring = asyncio.create_task(self._retire_failed())
+                self._background.add(self._retiring)
+                self._retiring.add_done_callback(self._background.discard)
+
+    async def _retire_failed(self) -> None:
+        # Under the checkpoint lock, so a retire never lands inside a checkpoint.
+        while self._failed:
+            async with self._lock:
+                batch, self._failed = self._failed[:_RETIRE_BATCH], self._failed[_RETIRE_BATCH:]
+                try:
+                    participants = await self._discover()
+                    await coordination.retire(participants, "retire", batch, deadline_ts=time.time() + self.timeout_s)
+                except Exception:
+                    LOGGER.warning(
+                        "could not retire %d failed rows; their state stays until restart", len(batch), exc_info=True
+                    )
 
     # -- checkpoint ---------------------------------------------------------------------------------
 
@@ -139,7 +173,10 @@ class CollectionCheckpointer:
                 if not prepared.prepared:
                     LOGGER.warning("checkpoint %s did not prepare in time: %s", checkpoint_id, prepared.blockers())
                 else:
-                    continued = [ContinuedRow(rollout_id=key, attempt=value) for key, value in self._in_flight.items()]
+                    continued = [
+                        ContinuedRow(rollout_id=key, attempt=value)
+                        for key, value in {**self._restored, **self._in_flight}.items()
+                    ]
                     target = self.checkpoint_dir / checkpoint_id
                     await coordination.commit(
                         participants,
@@ -171,15 +208,26 @@ class CollectionCheckpointer:
             return published
 
     def _publish(self, target: Path, manifest: CollectionManifest) -> None:
-        """Write the manifest, then point LATEST at the checkpoint, then drop checkpoints two behind it."""
+        """Write the manifest, then point LATEST at the checkpoint, then drop checkpoints two behind it.
+
+        Directories without a manifest are partial checkpoints whose commit or publish failed, and dot files are
+        temporary files a crash left behind; nothing restores either, so they go too. This runs under the
+        checkpoint lock, so no other checkpoint of this collector is being written.
+        """
         _atomic_write(target / MANIFEST, orjson.dumps(manifest.model_dump(mode="json")))
         _atomic_write(self.checkpoint_dir / LATEST, manifest.checkpoint_id.encode())
+        entries = list(self.checkpoint_dir.iterdir())
         published = sorted(
-            (path for path in self.checkpoint_dir.iterdir() if (path / MANIFEST).exists()),
+            (path for path in entries if (path / MANIFEST).exists()),
             key=lambda path: CollectionManifest.model_validate_json((path / MANIFEST).read_bytes()).created_at,
         )
         for old in published[:-KEEP_CHECKPOINTS]:
             shutil.rmtree(old, ignore_errors=True)
+        for path in entries:
+            if path.is_dir() and path.name.startswith("ckpt-") and not (path / MANIFEST).exists():
+                shutil.rmtree(path, ignore_errors=True)
+            elif path.is_file() and path.name.startswith("."):
+                path.unlink(missing_ok=True)
 
     async def _discover(self) -> coordination.Participants:
         if self._participants is None:
@@ -230,7 +278,8 @@ class CollectionCheckpointer:
         print(
             f"Restored {len(continued)} in-flight rows from {target}; they continue as their next attempt", flush=True
         )
-        return {row.rollout_id: row.attempt + 1 for row in continued}
+        self._restored = {row.rollout_id: row.attempt + 1 for row in continued}
+        return dict(self._restored)
 
     # -- triggers -----------------------------------------------------------------------------------
 
@@ -275,8 +324,11 @@ class CollectionCheckpointer:
 def _atomic_write(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}")
-    with open(temporary, "wb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    try:
+        with open(temporary, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)

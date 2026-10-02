@@ -57,11 +57,14 @@ class FakeCoordination:
     async def resume(self, participants: Any, checkpoint_id: str, *, deadline_ts: float) -> None:
         self.calls.append(("resume", checkpoint_id))
 
+    async def retire(self, participants: Any, checkpoint_id: str, episodes: list, *, deadline_ts: float) -> None:
+        self.calls.append(("retire", sorted((episode.rollout_id, episode.attempt) for episode in episodes)))
+
 
 @pytest.fixture
 def coordination(monkeypatch: pytest.MonkeyPatch) -> FakeCoordination:
     fake = FakeCoordination()
-    for name in ("discover", "prepare", "commit", "restore", "resume"):
+    for name in ("discover", "prepare", "commit", "restore", "resume", "retire"):
         monkeypatch.setattr(collection_module.coordination, name, getattr(fake, name))
     return fake
 
@@ -237,3 +240,47 @@ def test_the_checkpoint_timer_needs_a_checkpoint_dir() -> None:
 
     with pytest.raises(ValueError, match="checkpoint_every_s needs checkpoint_dir"):
         RolloutCollectionConfig(input_jsonl_fpath="in.jsonl", output_jsonl_fpath="out.jsonl", checkpoint_every_s=60)
+
+
+async def test_restored_rows_not_dispatched_yet_are_continued_by_the_next_checkpoint(
+    tmp_path: Path, coordination: FakeCoordination
+) -> None:
+    source = checkpointer(tmp_path)
+    await source.before_dispatch("0-0", 0)
+    await source.before_dispatch("1-0", 0)
+    await source.checkpoint()
+    restored = checkpointer(tmp_path)
+    await restored.restore(["0-0", "1-0"])
+    coordination.calls.clear()
+
+    # Row 0-0's replacement has started; row 1-0's has not, so participants still hold its restored state.
+    await restored.before_dispatch("0-0", 1)
+    await restored.checkpoint()
+
+    assert coordination.calls[1] == ("commit", [("0-0", 1), ("1-0", 1)])
+
+
+async def test_rows_that_fail_are_retired_and_rows_that_succeed_are_not(
+    tmp_path: Path, coordination: FakeCoordination
+) -> None:
+    checkpoints = checkpointer(tmp_path)
+    await checkpoints.before_dispatch("0-0", 0)
+    await checkpoints.before_dispatch("1-0", 2)
+    checkpoints.after_dispatch("0-0")
+    checkpoints.after_dispatch("1-0", failed=True)
+    await checkpoints.close()
+
+    assert coordination.calls == [("retire", [("1-0", 2)])]
+
+
+async def test_publishing_removes_partial_checkpoints_and_temporary_files(
+    tmp_path: Path, coordination: FakeCoordination
+) -> None:
+    (tmp_path / "ckpt-20260101T000000-deadbeef" / "gym").mkdir(parents=True)
+    (tmp_path / ".LATEST.0123abcd").write_text("stale")
+    checkpoints = checkpointer(tmp_path)
+    await checkpoints.before_dispatch("0-0", 0)
+
+    published = await checkpoints.checkpoint()
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(["LATEST", published.name])

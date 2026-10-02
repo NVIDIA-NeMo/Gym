@@ -3498,6 +3498,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started = time.monotonic()
                 started_at = time.time()
                 res = None
+                succeeded = False
                 try:
                     request_body = _native_episode_request_body(row) if _materialized_taskset(row) else row
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
@@ -3507,6 +3508,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000
                     tracker.record(time.monotonic() - started)
+                    # A reply, even a failure, means the environment server ended the episode and released it.
+                    succeeded = True
                     return _CompletedRollout(
                         row=row,
                         result=result,
@@ -3537,7 +3540,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     )
                 finally:
                     if checkpointer is not None:
-                        checkpointer.after_dispatch(rollout_id)
+                        checkpointer.after_dispatch(rollout_id, failed=not succeeded)
 
         awaitables = map(_post_subroutine, examples)
         if max_resident_tasks is not None:
