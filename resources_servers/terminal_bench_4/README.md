@@ -3,15 +3,16 @@
 ## Contract
 
 `/seed_session` provisions the pinned task and returns its sandbox descriptor,
-connection configuration, instruction, `task_id`, execution user, MCP/skills metadata,
+connection configuration, explicit working directory, `task_id`, execution user, MCP/skills metadata,
 and official agent timeout. An agent server connects to that sandbox and owns
 harness setup, model calls, and the rollout loop. `/verify` collects artifacts,
 runs the separate official verifier, and cleans up the task's resources.
 
-Seed requests include `task_name`, `task_ref`, `dataset_ref`, and `rollout_id`.
-The task must match the configured manifest. The agent supplies a stable
-`client_session_id`, so identical seed retries share provisioning before the first
-cookie response. Verification retries share one finalizer and replay its result;
+Seed requests include `task_name`, `task_ref`, and `dataset_ref`. Prepared rows carry the task instruction in `responses_create_params.input`.
+The task must match the configured manifest. The agent supplies a stable `Idempotency-Key` header per seed attempt, so identical
+transport retries share provisioning before the first cookie response. A new key
+starts a new attempt; requests without a key always start a new attempt. Rollout
+capture IDs are independent of this HTTP retry contract. Verification retries share one finalizer and replay its result;
 conflicting requests fail. Run one resources worker per artifact directory.
 
 A seeded session has a resource-owned 10-hour deadline covering agent setup and
@@ -35,6 +36,44 @@ their own HTTP models and need not import this server. `termination.reason` acce
 `completed`, `timeout`, `nonzero_exit`, `cancelled`, and `infrastructure_error`;
 `agent_started` indicates whether execution began. `harness_metadata` is opaque
 result metadata, independent of the selected harness.
+
+### Shared sandbox access
+
+Set `environment.sandbox_provider` to a named top-level Gym provider configuration
+to return Gym's existing `SandboxAccess` in `sandbox_access`. For example, compose
+the provider configuration named `sandbox` on both servers and override:
+
+```yaml
+terminal_bench_4:
+  resources_servers:
+    terminal_bench_4:
+      environment:
+        sandbox_provider: sandbox
+```
+
+For split deployments, also set `sandbox_provider_by_pool: {cpu: sandbox_cpu,
+gpu: sandbox_gpu}` and define both named providers on the resources and agent
+servers. The agent, verifier, and Compose services use the same pool, including
+GPU verification of a CPU task. Named providers supply their own connection
+settings; the legacy `OPENSANDBOX_DOMAIN_CPU/GPU` overrides do not replace them.
+Missing selected pool references fail setup.
+
+The access object contains the selected `provider_config_ref`, serialized
+`descriptor`, and `workdir`. Resources resolves the working directory as the task
+user before returning the seed. `environment.workdir` takes precedence over the
+task's configured working directory, then the image's default applies.
+
+Inline provider mappings remain supported and return the legacy connection fields
+with an explicit `workdir`; they cannot advertise a shared named-provider reference.
+Named configurations also retain those legacy fields for existing clients. New
+clients should prefer `sandbox_access` and resolve its provider reference from their
+own Gym configuration. The execution user, task timeout, and MCP/skills fields
+remain alongside the access object in this legacy seed contract.
+
+Agent close must finish before calling `/verify`. miniSWE refuses verification
+after an unacknowledged process cleanup or transport close; the resource deadline
+still disposes of abandoned sandboxes. The PID-file quiesce step remains for legacy
+clients and expiry recovery, rather than establishing miniSWE's successful close.
 
 Completed version-3 records can replay after a restart. Active records cannot
 resume after resources-process restart. Shutdown drains active verification for

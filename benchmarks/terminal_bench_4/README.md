@@ -8,6 +8,9 @@
   `mini.yaml` prompts, native bash tool calls through Gym's Responses model
   adapter, and task-local MCP CLI.
 
+- `terminal_bench_4/opencode`: sandboxed OpenCode using the prepared task prompt
+  and TB4-owned provisioning, separate verification, and cleanup.
+
 ## Artificial Analysis comparison
 
 The version, prompts, 500-step limit, and 30-second command timeout follow
@@ -44,8 +47,10 @@ benchmark supplies 30 seconds. Task-specific overall deadlines remain separate.
 The dataset is `terminal-bench/terminal-bench@4.0.0`, pinned to
 `sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732`.
 `manifest.json` retains all 52 CPU, 11 CPU Compose, and 3 H100 tasks and their
-individual package digests. Preparation writes identities only; the resources
-server validates the dataset and task digests before allocation.
+individual package digests. Preparation downloads and verifies the pinned task packages and writes their
+identities and normalized instructions. The resources server validates the dataset
+and task digests again before allocation. Re-run `gym eval prepare` for rows
+created by older versions that contained empty input.
 
 Set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` for one deployment. For the
 established split deployment, set `OPENSANDBOX_DOMAIN_CPU`,
@@ -82,9 +87,8 @@ gym eval run --benchmark terminal_bench_4/miniswe \
   ++use_absolute_ip=true ++tb4_split_sandbox_endpoints=true
 ```
 
-mini-SWE's loop runs in the resources process, using its existing sandbox and
-calling the Gym model server. The agent endpoint forwards the collector's run
-request and returns the result; it does not manage task environments.
+The selected agent runs its harness in the task sandbox and calls the Gym model
+server. Resources owns task provisioning, grading, and cleanup.
 MCP tasks also need Python venv/pip
 for its pinned task-local `mcp==1.29.0` client.
 

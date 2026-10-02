@@ -316,3 +316,52 @@ def test_offline_policy_and_unsupported_config(tmp_path, monkeypatch):
         make_environment(tmp_path, monkeypatch, config={"sandbox_split_endpoints": True})
     with pytest.raises(ValueError, match="Offline"):
         make_environment(tmp_path, monkeypatch, compose=True, task_config={"environment": {"allow_internet": False}})
+
+
+@pytest.mark.parametrize("split,pool", [(False, "default"), (True, "cpu"), (True, "gpu")])
+def test_named_provider_preserves_task_pool_and_shared_connection(tmp_path, monkeypatch, split, pool):
+    configs = {
+        name: {
+            "opensandbox": {"connection": {"domain": name + ".invalid", "api_key": "named-key"}},
+            "default_metadata": {"owner": "named-provider"},
+        }
+        for name in ("sandbox", "cpu", "gpu")
+    }
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: configs)
+    monkeypatch.setenv("OPENSANDBOX_DOMAIN_CPU", "wrong.invalid")
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", "wrong-key")
+    env, *_ = make_environment(
+        tmp_path,
+        monkeypatch,
+        config={
+            "sandbox_provider": "sandbox",
+            "sandbox_split_endpoints": split,
+            "sandbox_provider_by_pool": {"cpu": "cpu", "gpu": "gpu"},
+        },
+        task_config={"verifier": {"environment": {"docker_image": "verifier", "gpus": int(pool == "gpu")}}},
+    )
+    expected = pool if split else "sandbox"
+    assert env.provider_config_ref == expected
+    assert env.provider_config == module.resolve_provider_config(expected, configs)
+    assert env.build_spec().metadata["owner"] == "named-provider"
+    verifier = Environment(env.task, env.config, "verifier", tmp_path / "verifier", verifier=True)
+    assert verifier.provider_config_ref == expected
+    assert verifier.provider_config == env.provider_config
+
+
+def test_named_split_provider_requires_explicit_pool_mapping(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="sandbox_provider_by_pool.gpu"):
+        make_environment(
+            tmp_path, monkeypatch, config={"sandbox_provider": "sandbox", "sandbox_split_endpoints": True}
+        )
+
+
+async def test_resource_resolves_workdir_as_task_user(tmp_path, monkeypatch):
+    env, box, *_ = make_environment(tmp_path, monkeypatch, task_config={"environment": {"workdir": "/task"}})
+    await env.start()
+    assert await env.agent_workdir() == "/app"
+    assert box.exec.call_args.kwargs["cwd"] == "/task"
+    assert box.exec.call_args.kwargs["user"] == "task-user"
+    box.exec.return_value.stdout = "relative"
+    with pytest.raises(RuntimeError, match="working directory"):
+        await env.agent_workdir()

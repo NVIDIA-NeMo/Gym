@@ -3,6 +3,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from omegaconf import OmegaConf
@@ -12,6 +13,14 @@ from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def pinned_packages(monkeypatch):
+    async def load(self, name, ref):
+        return SimpleNamespace(instruction=f"Prepared instruction for {name} at {ref}")
+
+    monkeypatch.setattr(preparation.PackageLoader, "load", load)
 
 
 def task_validator() -> TaskDataValidator:
@@ -32,6 +41,9 @@ def test_prepared_names_match_pinned_manifest(tmp_path, monkeypatch):
         assert row["task_id"] == row["task_name"]
         assert row["task_ref"] == tasks[row["task_name"]]
         assert row["dataset_ref"] == manifest["ref"]
+        assert row["responses_create_params"]["input"] == [
+            {"role": "user", "content": f"Prepared instruction for {row['task_name']} at {row['task_ref']}"}
+        ]
         assert "path" not in row
     assert validator.report.clean, validator.report.summary()
 

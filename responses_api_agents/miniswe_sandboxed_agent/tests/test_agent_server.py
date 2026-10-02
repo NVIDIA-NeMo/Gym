@@ -37,7 +37,11 @@ async def fixture(tmp_path, monkeypatch):
     request = Request(
         {"type": "http", "session": {SESSION_ID_KEY: "owner"}, "headers": [(b"cookie", b"session=incoming")]}
     )
-    body = MiniSWERunRequest(responses_create_params={"input": []}, problem={"id": 42}, rollout_id="rollout")
+    body = MiniSWERunRequest(
+        responses_create_params={"input": [{"role": "user", "content": "Prepared instruction"}]},
+        problem={"id": 42},
+        rollout_id="rollout",
+    )
     seed = dict(
         session_id="resource-session",
         task_id="problem-42",
@@ -113,7 +117,7 @@ async def test_run_with_unrelated_resource_schema(fixture):
     assert response.model_dump()["problem_score"] == {"passed": 1, "total": 4}
     assert "evaluation_completed" not in response.model_dump()
     context = f.harnesses[0].context
-    assert context.task_id == "problem-42" and context.instruction == f.seed["instruction"]
+    assert context.task_id == "problem-42" and context.instruction == "Prepared instruction"
     assert context.workdir == "/workspace"
     assert f.verification["session_id"] == "resource-session"
     assert f.verification["termination"]["reason"] == "completed"
@@ -121,7 +125,7 @@ async def test_run_with_unrelated_resource_schema(fixture):
     assert f.verification["harness_metadata"] == {"harness_version": "test"}
     assert f.harnesses[0].model_base_url == "http://gym-model:8000/v1"
     f.provider.aclose.assert_awaited_once()
-    assert f.body.responses_create_params.input == []
+    assert f.body.responses_create_params.input[0].content == "Prepared instruction"
 
 
 async def test_run_passes_rollout_prefixed_gym_model_url(fixture):
@@ -170,6 +174,7 @@ async def test_responses_sets_up_borrowed_session_without_resource_calls(fixture
         original_params=f.body.responses_create_params.model_copy(deep=True),
         rollout_id="activation",
         capture_model_calls=False,
+        ready=True,
     )
     f.agent._sessions[("owner", state.rollout_id)] = state
     response = await f.agent.responses(f.request, f.body.responses_create_params)
@@ -179,8 +184,8 @@ async def test_responses_sets_up_borrowed_session_without_resource_calls(fixture
     module.AsyncSandbox.connect.assert_not_awaited()
     f.harnesses[0].setup.assert_awaited_once()
     assert f.harnesses[0].context.task_id is None
-    assert f.harnesses[0].params.input[0].content == f.seed["instruction"]
-    assert f.body.responses_create_params.input == []
+    assert f.harnesses[0].params.input[0].content == "Prepared instruction"
+    assert f.body.responses_create_params.input[0].content == "Prepared instruction"
     f.provider.aclose.assert_not_awaited()
 
 
@@ -233,7 +238,7 @@ async def test_run_invokes_responses_with_session_state_and_releases_it(fixture,
         assert state.sandbox is f.sandbox
         assert not f.harnesses
         module.AsyncSandbox.connect.assert_awaited_once()
-        assert body.input == []
+        assert body.input[0].content == "Prepared instruction"
         calls.append(key)
         return await original(self, request, body)
 
@@ -242,7 +247,7 @@ async def test_run_invokes_responses_with_session_state_and_releases_it(fixture,
     assert first == replay
     assert calls == [("owner", "rollout")]
     assert not f.agent._sessions
-    assert f.body.responses_create_params.input == []
+    assert f.body.responses_create_params.input[0].content == "Prepared instruction"
 
 
 async def test_responses_requires_matching_session_and_replays_one_execution(fixture, monkeypatch):
@@ -272,6 +277,7 @@ async def test_responses_requires_matching_session_and_replays_one_execution(fix
         original_params=params.model_copy(deep=True),
         rollout_id="rollout",
         capture_model_calls=False,
+        ready=True,
     )
     f.agent._sessions[("owner", state.rollout_id)] = state
 
@@ -317,6 +323,7 @@ async def test_http_responses_uses_middleware_session_cookie(fixture, monkeypatc
         original_params=params.model_copy(deep=True),
         rollout_id="rollout",
         capture_model_calls=False,
+        ready=True,
     )
     if prefixed:
         f.agent._sessions[("owner", "another")] = module.MiniSWESession(
@@ -460,10 +467,11 @@ async def test_cancellation_during_cleanup_delays_transport_release_and_verifica
         entered.set()
         await release.wait()
         finished.set()
-        return SimpleNamespace(return_code=0)
+        return SimpleNamespace(return_code=0, error_type=None)
 
     class Harness(MiniSWEHarness):
         async def setup(self):
+            self._processes_started = True
             if during_setup:
                 raise RuntimeError("setup failed")
 
@@ -493,3 +501,150 @@ async def test_cancellation_during_cleanup_delays_transport_release_and_verifica
     f.provider.aclose.assert_awaited_once()
     assert f.verification["termination"]["reason"] == "cancelled"
     assert not f.agent._sessions
+
+
+async def test_shared_sandbox_access_uses_named_provider_and_supplied_workdir(fixture):
+    f = fixture
+    f.agent.server_client.global_config_dict = {"task_gpu": {"local": {}}}
+    f.seed["sandbox_access"] = {
+        "connection": {"kind": "direct", "provider_config_ref": "task_gpu", "descriptor": {"sandbox_id": "gpu"}},
+        "workdir": "/resource/workdir",
+    }
+    # Contradictory legacy data must never override the shared access contract.
+    f.seed["sandbox_provider"] = {"invalid": {}}
+    f.seed["workdir"] = "/wrong"
+    await f.agent.run(f.request, f.body)
+    module.AsyncSandbox.connect.assert_awaited_once_with({"sandbox_id": "gpu"}, provider=f.provider)
+    assert f.harnesses[0].context.workdir == "/resource/workdir"
+    f.sandbox.exec.assert_not_awaited()
+
+
+async def test_legacy_inline_seed_accepts_explicit_resource_workdir(fixture):
+    f = fixture
+    f.seed["workdir"] = "/resource/workdir"
+    await f.agent.run(f.request, f.body)
+    assert f.harnesses[0].context.workdir == "/resource/workdir"
+    f.sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("stage", ["harness", "transport"])
+async def test_close_failure_blocks_verification_and_retains_retryable_state(fixture, monkeypatch, stage):
+    f = fixture
+    original = module.MiniSWEHarness
+
+    def harness(**kwargs):
+        instance = original(**kwargs)
+        if stage == "harness":
+            instance.close.side_effect = ConnectionError("cleanup acknowledgement lost")
+        else:
+            f.provider.aclose.side_effect = ConnectionError("disconnect failed")
+        return instance
+
+    monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    with pytest.raises(HTTPException, match="verification blocked"):
+        await f.agent.run(f.request, f.body)
+    assert not f.verification
+    state = f.agent._sessions[("owner", "rollout")]
+    assert state.closing and state.result.termination.reason == "completed"
+    with pytest.raises(HTTPException, match="closing"):
+        await f.agent.responses(f.request, f.body.responses_create_params)
+    if stage == "harness":
+        f.provider.aclose.assert_not_awaited()
+    state.harness.close.side_effect = None
+    f.provider.aclose.side_effect = None
+    await asyncio.gather(f.agent._close_session(("owner", "rollout")), f.agent._close_session(("owner", "rollout")))
+    assert not f.agent._sessions
+    assert f.harnesses[0].execute.await_count == 1
+    assert not f.verification
+
+
+async def test_explicit_attach_execute_close_orders_cleanup_before_verify(fixture, monkeypatch):
+    f = fixture
+    events = []
+    original = module.MiniSWESandboxedAgent._attach_session
+
+    async def attach(self, *args, **kwargs):
+        state = await original(self, *args, **kwargs)
+        events.append("attached")
+        assert state.harness is None
+        return state
+
+    original_harness = module.MiniSWEHarness
+
+    def harness(**kwargs):
+        assert events == ["attached"]
+        instance = original_harness(**kwargs)
+        instance.close.side_effect = lambda: events.append("closed")
+        return instance
+
+    monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    monkeypatch.setattr(module.MiniSWESandboxedAgent, "_attach_session", attach)
+    post = f.agent.server_client.post.side_effect
+
+    async def checked_post(**kwargs):
+        if kwargs["url_path"] == "/verify":
+            assert events == ["attached", "closed"]
+            assert not f.agent._sessions
+            f.provider.aclose.assert_awaited_once()
+        return await post(**kwargs)
+
+    f.agent.server_client.post.side_effect = checked_post
+    await f.agent.run(f.request, f.body)
+    assert f.verification
+
+
+async def test_close_joins_active_execution_and_rejects_new_activation(fixture, monkeypatch):
+    f = fixture
+    state = await f.agent._attach_session(
+        ("owner", "rollout"),
+        SeedSessionResponse.model_validate(f.seed),
+        f.body.responses_create_params.model_copy(deep=True),
+        rollout_id="rollout",
+        artifact_directory=None,
+    )
+    entered, cancelling, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def execute(budget):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelling.set()
+            await release.wait()
+            return module.empty_response(state.original_params, "model"), HarnessOutcome(reason="cancelled"), {}
+
+    original_harness = module.MiniSWEHarness
+
+    def harness(**kwargs):
+        instance = original_harness(**kwargs)
+        instance.execute.side_effect = execute
+        return instance
+
+    monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    activation = asyncio.create_task(f.agent.responses(f.request, state.original_params))
+    await entered.wait()
+    closing = asyncio.create_task(f.agent._close_session(("owner", "rollout")))
+    await cancelling.wait()
+    state.harness.close.assert_not_awaited()
+    f.provider.aclose.assert_not_awaited()
+    with pytest.raises(HTTPException, match="closing"):
+        await f.agent.responses(f.request, state.original_params)
+    release.set()
+    await asyncio.gather(activation, closing)
+    state.harness.close.assert_awaited_once()
+    f.provider.aclose.assert_awaited_once()
+    assert not f.agent._sessions
+
+
+async def test_missing_named_provider_does_not_fall_back_to_inline_seed(fixture):
+    f = fixture
+    f.agent.server_client.global_config_dict = {}
+    f.seed["sandbox_access"] = {
+        "connection": {"provider_config_ref": "missing", "descriptor": {"sandbox_id": "borrowed"}},
+        "workdir": "/app",
+    }
+    await f.agent.run(f.request, f.body)
+    module.create_provider.assert_not_called()
+    module.AsyncSandbox.connect.assert_not_awaited()
+    assert "not defined in the merged config" in f.verification["termination"]["detail"]
+    assert not f.verification["agent_started"]

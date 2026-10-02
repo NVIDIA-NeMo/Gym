@@ -33,12 +33,35 @@ includes the resource session's `x-session-id` header. Set
 the sandbox. The TB4 override is `++tb4_sandbox_model_base_url=...`; an optional
 `/v1` suffix is accepted and any reverse-proxy path is preserved.
 
-The caller supplies the task instruction, task user and working directory,
+Prepared rows supply the task instruction in `responses_create_params.input`.
+The resources seed supplies the task user and working directory,
 setup/execution budgets, optional skills/MCP configuration, and artifact path.
 Setup has a separate 360-second budget. Execution uses the smaller of the task's
 budget and `agent_max_timeout_sec`. Default artifacts are written to
 `results/miniswe_sandboxed_agent/<session_id>/`; TB4 uses its configured jobs'
 `agent/` directory. `artifact_directory` can override the location per run.
+
+## Borrowed-session lifecycle
+
+The existing `/run` orchestrates three internal operations: `_attach_session`
+connects to the sandbox, `responses()` sets up the harness and executes one activation, and
+`_close_session` joins the activation, confirms process cleanup, and disconnects.
+These operations add no HTTP endpoints. Resources still owns sandbox destruction.
+
+When the seed includes Gym's `sandbox_access`, miniSWE resolves the named provider
+from its own Gym configuration and uses the supplied descriptor and working
+directory. Configure the same provider names on both servers. A missing name fails
+setup; conflicting legacy connection fields never override the access object.
+Legacy inline provider seeds remain supported. Their explicit `workdir` is used
+when supplied; only older seeds without one require working-directory discovery.
+
+Close rejects new activation and serializes retries. The harness scans its process
+groups and, on Linux, the inherited run marker until no live matching processes
+remain. A failed cleanup or disconnect retains the session for an internal close
+retry and blocks `/verify` with HTTP 503. No reward is produced for that failed
+close; Resources retains its expiry/teardown responsibility. Session state and
+retry results are process-local. Process cleanup is lifecycle coordination, not
+containment of hostile sandbox code.
 
 ## Native behavior and observability
 

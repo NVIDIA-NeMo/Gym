@@ -1,1 +1,2 @@
 -e nemo-gym[dev,sandbox] @ ../../
+certifi>=2025.1.31

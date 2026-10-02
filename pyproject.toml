@@ -72,7 +72,7 @@ dependencies = [
     # 3. The license of the dependencies.
     #
     # If you are adding or removing dependencies, please do your due diligence to update this information. PRs to main that modify dependencies will not be accepted unless this information is provided.
-    # The licenses of the below dependencies include: Apache 2.0, MIT, and BSD 3-Clause
+    # The licenses of the below dependencies include: Apache 2.0, MIT, BSD 3-Clause, and MPL 2.0
     #
     # By design, most (if not all) dependencies are unfrozen here to be easier to consume. The core pieces we need are server infra like FastAPI, etc.
     #
@@ -120,6 +120,11 @@ dependencies = [
     # Updated Tue Aug 11, 2026 with packaging==25.0
     # License: Apache-2.0 OR BSD-2-Clause https://github.com/pypa/packaging/tree/25.0
     "packaging>=24.2",
+
+    # pathspec: Validates pinned task packages when preparing TB4 benchmark rows.
+    # Updated: Thu Oct 01, 2026 with pathspec==1.1.1 (the gitignore pattern factory).
+    # License: MPL 2.0 https://github.com/cpburnz/python-pathspec/blob/master/LICENSE
+    "pathspec>=1.1.1",
 
     # FastAPI: Used for server infrastructure
     # Updated Thu Mar 26, 2026 with fastapi==0.135.2
