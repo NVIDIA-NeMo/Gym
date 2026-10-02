@@ -318,6 +318,75 @@ async def test_ambiguous_siblings_are_unresolved(store):
 
 
 @pytest.mark.asyncio
+async def test_echo_with_a_rewritten_tool_call_resolves_to_the_served_call(store):
+    """Claude Code echoes a served Bash call with ``cd <cwd> &&`` dropped; its call id still names it."""
+    served = {
+        "type": "function_call",
+        "call_id": "call-1",
+        "name": "Bash",
+        "arguments": '{"command": "cd /repo && pytest"}',
+    }
+    await store.record(_commit(_call_record("c1"), [USER_1], [served], staging_chain=("r1/c1",)))
+    echoed = dict(served, arguments='{"command": "pytest"}')
+    result = {"type": "function_call_output", "call_id": "call-1", "output": "1 passed"}
+    context = await _admit(store, [USER_1, echoed, result])
+    admission = context.capture_admission
+    assert admission is not None and admission.mode == "token_in"
+    assert admission.parent_call_id == "c1"
+    assert RolloutManifest.model_validate(await store.manifest("r1")).failures == []
+
+
+@pytest.mark.asyncio
+async def test_retry_after_a_dropped_reasoning_only_reply_resolves_to_the_earlier_call(store):
+    """A reasoning-only reply adds no model-authored turn, so it is never a parent.
+
+    Claude Code drops such a reply and retries with a nudge. Indexed under its parent's
+    fingerprint, the dropped call made every retry ambiguous and poisoned the rollout.
+    """
+    await _record_call_1(store)
+    tokens_2 = TOKENS_1 + [901, 902]
+    reasoning_only = {"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking, no answer"}]}
+    await store.record(
+        _commit(
+            _call_record(
+                "c2",
+                parent_call_id="c1",
+                prev_len=len(TOKENS_1),
+                delta_len=2,
+                chain_hash=compute_chain_hash(CHAIN_HASH_1, [901, 902]),
+                cumulative_hash=hash_token_ids(tokens_2),
+            ),
+            [USER_1, ASSISTANT_1, USER_2],
+            [reasoning_only],
+            staging_chain=("r1/c1", "r1/c2"),
+        )
+    )
+    nudge = {"role": "user", "content": "[Your previous response had no visible output. Please continue.]"}
+    context = await _admit(store, [USER_1, ASSISTANT_1, USER_2, nudge], model_call_id="c3")
+    admission = context.capture_admission
+    assert admission is not None and admission.parent_call_id == "c1"
+    assert admission.staging_chain == ["r1/c1"]
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.failures == []
+    # The dropped call stays a committed (dead-branch) row of the manifest.
+    assert [record.model_call_id for record in manifest.records] == ["c1", "c2"]
+
+
+@pytest.mark.asyncio
+async def test_a_same_reply_in_another_conversation_does_not_make_the_parent_ambiguous(store):
+    """Two conversations of one rollout (a main agent and a subagent) can produce the same reply.
+
+    Only the call whose recorded context the request extends is a candidate.
+    """
+    await _record_call_1(store)
+    other = _call_record("c1b", cumulative_hash=hash_token_ids(TOKENS_1 + [1]))
+    await store.record(_commit(other, [USER_3], [ASSISTANT_1], staging_chain=("r1/c1b",)))
+    context = await _admit(store, [USER_1, ASSISTANT_1, USER_2])
+    admission = context.capture_admission
+    assert admission is not None and admission.parent_call_id == "c1"
+
+
+@pytest.mark.asyncio
 async def test_commit_ordering_parent_resolvable_only_after_record(store):
     # Before the ledger row exists, the follow-up cannot resolve a parent.
     assert (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match is None
