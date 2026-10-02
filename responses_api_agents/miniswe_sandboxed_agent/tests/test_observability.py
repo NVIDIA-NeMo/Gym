@@ -240,13 +240,11 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
     for key in (
         "model_call_zero_completion_tokens",
         "model_call_missing_token_counts",
+        "rollout_ended_on_failed_model_call",
         "model_call_runaway_generation",
         "rollout_missing_agent_turns",
         "agent_turn_hollow",
     ):
         assert coverage[key]["evaluated"] == 1, (key, result.summary)
-    last_call_coverage = coverage["model_call_last_failed"]
-    assert last_call_coverage["unobserved"] == int(invocations[0]["status"] == "incomplete")
-    assert last_call_coverage["evaluated"] == int(invocations[0]["status"] != "incomplete")
     if scenario == "http_error":
-        assert result.summary["run"]["issues"]["model_call_last_failed"] == 1
+        assert result.summary["run"]["issues"]["rollout_ended_on_failed_model_call"] == 1

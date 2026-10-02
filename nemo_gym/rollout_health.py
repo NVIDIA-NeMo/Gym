@@ -30,11 +30,10 @@ from nemo_gym.health.checks import (
     CHECK_REGISTRY,
     _bind_policy_call_views,
     _canonical_trajectory,
+    _ended_on_failed_call,
     _is_context_overflow_rejection,
     _is_failed,
     _is_successful,
-    _last_root_model_calls,
-    _model_call_last_failed,
     _normalized_trajectory_calls,
     _replay_identity,
     _subject,
@@ -162,6 +161,9 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         if CheckInput.AGENT_TURNS in spec.reads and not turns_observed:
             unobserved.append(spec.id)
             continue
+        if CheckInput.OBSERVED_MODEL_CALLS in spec.reads and not (model_calls_observed and calls):
+            unobserved.append(spec.id)
+            continue
         binding_input = next(iter(spec.reads & CALL_BINDING_INPUTS), None)
         bindings = owned_bindings if binding_input == CheckInput.OWNED_MODEL_CALLS else turn_bindings
         if binding_input is not None:
@@ -194,12 +196,6 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             unobserved.append(spec.id)
             continue
         try:
-            if spec.id == "model_call_last_failed":
-                last_calls, last_call_unobserved = _last_root_model_calls(trajectory, calls)
-                findings.extend(_model_call_last_failed(last_calls, subject))
-                if last_call_unobserved:
-                    unobserved.append(spec.id)
-                continue
             findings.extend(_ROLLOUT_CHECKS[spec.id](record, trajectory, bindings, subject))
         except Exception as exc:
             unobserved.append(spec.id)
@@ -228,6 +224,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
     return RolloutDigest(
         task_index=task_index,
         rollout_index=rollout_index,
+        stage_index=record.get("stage_index"),
         rollout_id=rollout_id,
         verdict=verdict,
         findings=findings,
@@ -238,7 +235,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         successful_model_calls=sum(_is_successful(call) for call in turn_bindings.matched_calls),
         model_call_errors=len(failed),
         errors_by_status=dict(errors_by_status),
-        ended_on_error=bool(calls and _is_failed(calls[-1])),
+        ended_on_error=_ended_on_failed_call(calls),
         duplicated_calls=duplicated,
         transcript_prompt_tokens=transcript_prompt,
         transcript_completion_tokens=transcript_completion,
@@ -300,9 +297,9 @@ def _mark_duplicate_identities(digests: list[RolloutDigest], ignored_checks: fro
     if "rollout_duplicate_identity" in ignored_checks:
         return
 
-    grouped: dict[tuple[int | str, int | str], list[RolloutDigest]] = defaultdict(list)
+    grouped: dict[tuple[int | str | None, int | str, int | str], list[RolloutDigest]] = defaultdict(list)
     for digest in digests:
-        grouped[(digest.task_index, digest.rollout_index)].append(digest)
+        grouped[(digest.stage_index, digest.task_index, digest.rollout_index)].append(digest)
 
     for copies in grouped.values():
         if len(copies) < 2:
@@ -435,11 +432,11 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
     }
 
 
-def _sort_key(digest: RolloutDigest) -> tuple[tuple[int, Any], tuple[int, Any]]:
-    def part(value: int | str) -> tuple[int, Any]:
+def _sort_key(digest: RolloutDigest) -> tuple[tuple[int, Any], ...]:
+    def part(value: int | str | None) -> tuple[int, Any]:
         return (0, value) if isinstance(value, int) else (1, str(value))
 
-    return part(digest.task_index), part(digest.rollout_index)
+    return part(digest.task_index), part(digest.rollout_index), part(digest.stage_index)
 
 
 def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output_dir: Path) -> tuple[Path, Path]:
@@ -460,6 +457,8 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
                 "findings": findings,
                 "unobserved": digest.unobserved,
             }
+            if digest.stage_index is not None:
+                row["stage_index"] = digest.stage_index
             handle.write(orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE))
     return summary_path, verdicts_path
 
