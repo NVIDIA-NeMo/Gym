@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Pi-specific borrowed-sandbox execution; Resources retains sandbox ownership."""
+"""Pi execution in borrowed or agent-owned sandboxes."""
 
 import asyncio
 import json
 import logging
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
 from uuid import uuid4
@@ -38,6 +38,9 @@ class PiSandboxSession(AgentSessionState):
     sandbox: AsyncSandbox
     directory: str
     runtime: str
+    workdir: str = field(kw_only=True)
+    owns_sandbox: bool = field(default=False, kw_only=True)
+    sandbox_stopped: bool = False
     task: asyncio.Task[NeMoGymResponse] | None = None
     result: PiSandboxResult | None = None
     observations: AgentObservationBundle | None = None
@@ -63,7 +66,7 @@ class PiSandboxSession(AgentSessionState):
 
     async def stop_runner(self, timeout: float) -> None:
         """Fence a delayed launch or require the shared supervisor's cleanup receipt."""
-        if not self.launch_started or self.cleanup is not None:
+        if self.sandbox_stopped or not self.launch_started or self.cleanup is not None:
             return
         receipt_path = f"{self.directory}/cleanup.json"
         try:
@@ -86,7 +89,7 @@ class PiSandboxSession(AgentSessionState):
                 f"for _ in $(seq 1 {max(1, int(timeout))}); do "
                 f"[ -f {quote(receipt_path)} ] && exit 0; sleep 1; done; exit 1"
             )
-            await self.sandbox.exec(script, cwd=self.request.sandbox_access.workdir, timeout_s=timeout + 5)
+            await self.sandbox.exec(script, cwd=self.workdir, timeout_s=timeout + 5)
             try:
                 receipt = json.loads(await self.read_text("cleanup.json"))
             except Exception as error:
@@ -96,13 +99,20 @@ class PiSandboxSession(AgentSessionState):
         self.cleanup = receipt
 
     async def close(self, timeout: float) -> None:
-        """Stop only Pi-owned work and detach; never call sandbox.stop()."""
+        """Stop owned sandboxes; only stop harness work and disconnect borrowed ones."""
         if self.closed:
             return
         self.closing = True
         # Provider cancellation can kill its exec process group, including the
         # supervisor. Let the supervisor reap Pi and acknowledge cleanup first.
-        await self.stop_runner(timeout)
+        if self.owns_sandbox:
+            # The provider is the cleanup authority for an agent-owned sandbox.
+            # Keep the handle retryable if stop fails or times out.
+            if not self.sandbox_stopped:
+                await asyncio.wait_for(self.sandbox.stop(), timeout=timeout)
+                self.sandbox_stopped = True
+        else:
+            await self.stop_runner(timeout)
         if self.task is not None:
             if not self.task.done() and not self.task.cancelling():
                 self.task.cancel()
@@ -115,6 +125,9 @@ class PiSandboxSession(AgentSessionState):
                 if not self.task.done():
                     raise
                 # The supervisor has already acknowledged cleanup above.
+        if self.owns_sandbox:
+            self.closed = True
+            return
         retired = f"{self.directory}.closed"
         # Keep the claim intact until its parent path is retired, fencing delayed execs.
         result = await self.sandbox.exec(
@@ -128,7 +141,7 @@ class PiSandboxSession(AgentSessionState):
         self.closed = True
 
     async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> str:
-        """Start the supervisor and Pi inside the borrowed task sandbox."""
+        """Start the supervisor and Pi inside the session sandbox."""
         await self.upload_json("input.json", payload)
         cleanup_timeout = close_timeout / 3
         command = (
@@ -145,7 +158,7 @@ class PiSandboxSession(AgentSessionState):
         try:
             launched = await self.sandbox.exec(
                 command,
-                cwd=self.request.sandbox_access.workdir,
+                cwd=self.workdir,
                 timeout_s=process_supervisor.exec_timeout(timeout=timeout, cleanup_timeout=cleanup_timeout),
             )
             if launched.error_type == "timeout":

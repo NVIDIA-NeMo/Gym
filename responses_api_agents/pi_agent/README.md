@@ -72,10 +72,11 @@ A new pairing does not need another combined preset.
 
 ## Runtime and model requirements
 
-Use one agent worker, an exact `pi_version` (default **0.80.2**), a Gym `model_server`, and
-direct `SandboxAccess` with an absolute task working directory. Pi does not create a
-fallback sandbox. Session setup rejects `pi_version: latest`. Pi's `resources_server`
-setting is required only for its compatibility `/run`, not native sessions.
+Use one agent worker, an exact `pi_version` (default **0.80.2**), and a Gym `model_server`.
+For a Resources-owned task sandbox, supply direct `SandboxAccess` with an absolute
+task working directory. Without access, configure agent-owned creation as noted below.
+Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is required
+only for its compatibility `/run`, not native sessions.
 
 Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with Python 3.8+,
 bash, tar/gzip, and SHA-256 utilities. Missing bootstrap packages are installed with apt-get
@@ -223,3 +224,11 @@ models_config:
 For Gym-managed inference, set `model_server` to a Gym Model Server and set `model` to its served model id. The
 agent creates the Pi provider entry automatically. Without `model_server`, the existing provider
 configuration is unchanged.
+
+Without `sandbox_access`, configure `sandbox_provider` and `sandbox_config`
+(`SandboxSpec` fields such as `image`, `workdir`, and `ttl_s`) on the agent.
+It creates a sandbox, runs there, and destroys it on close; the default workdir is
+`/app`. A supplied access always wins, including its workdir; connection failure
+never triggers a replacement or host execution. With neither access nor a usable
+provider, setup fails. Verifiers that inspect task files must keep using a
+Resources-owned sandbox, since agent-owned sandboxes are gone before verification.

@@ -35,6 +35,7 @@ from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
@@ -63,7 +64,7 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, create_provider, process_supervisor
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, process_supervisor
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
@@ -459,6 +460,8 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     auto_compaction: bool = True
     pi_version: Optional[str] = None
     mcp_servers: dict[str, PiMCPServerConfig] = Field(default_factory=dict)
+    sandbox_provider: str | None = None
+    sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     sandbox_bash_timeout_seconds: int = Field(default=900, gt=0)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
@@ -494,9 +497,19 @@ class PiAgent(SimpleResponsesAPIAgent):
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> PiSandboxSession:
         # Match Hermes: session initialization owns the sandbox runtime setup,
         # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
-        if body.sandbox_access is None or not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
-            raise HTTPException(422, "Pi requires direct, Resources-owned SandboxAccess")
-        if not body.sandbox_access.workdir.startswith("/"):
+        owns_sandbox = body.sandbox_access is None
+        if owns_sandbox:
+            if not self.config.sandbox_provider:
+                raise HTTPException(422, "Pi requires sandbox_access or a configured sandbox_provider")
+            spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config})
+            workdir = spec.workdir
+            provider_ref = self.config.sandbox_provider
+        else:
+            if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
+                raise HTTPException(422, "Pi requires direct SandboxAccess")
+            workdir = body.sandbox_access.workdir
+            provider_ref = body.sandbox_access.connection.provider_config_ref
+        if not isinstance(workdir, str) or not workdir.startswith("/"):
             raise HTTPException(422, "Pi sandbox workdir must be absolute")
         if any(access.required for access in self.effective_tool_accesses(body)):
             raise HTTPException(422, "Pi supports its own sandbox tools, not required HTTP/MCP tools")
@@ -507,19 +520,27 @@ class PiAgent(SimpleResponsesAPIAgent):
         if self.config.command != "pi" or self.config.extra_args or self.config.env:
             raise HTTPException(422, "Pi does not support command, extra_args, or env overrides")
 
-        connection = body.sandbox_access.connection
-        provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
-        try:
-            sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
-        except BaseException:
-            await provider.aclose()
-            raise
+        provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
+        if owns_sandbox:
+            sandbox = AsyncSandbox(provider)
+        else:
+            try:
+                sandbox = await AsyncSandbox.connect(body.sandbox_access.connection.descriptor, provider=provider)
+            except BaseException:
+                await provider.aclose()
+                raise
         directory = f"/tmp/nemo-gym-pi-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-pi-node-22.19.0-{self.config.pi_version}"
-        state = PiSandboxSession(body, sandbox, directory, runtime)
-        record = self._session_records[body.agent_session_id]
-        record.state = state
+        state = PiSandboxSession(body, sandbox, directory, runtime, workdir=workdir, owns_sandbox=owns_sandbox)
         try:
+            if owns_sandbox:
+                await sandbox.start(spec)
+                # Providers need not create SandboxSpec.workdir. Never prepare a borrowed task here.
+                workspace = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
+                if workspace.return_code != 0 or workspace.error_type:
+                    raise RuntimeError(
+                        f"Cannot create Pi sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
+                    )
             prepared = await sandbox.exec(f"mkdir -p {shlex.quote(directory + '/home/.pi/agent')}", timeout_s=30)
             if prepared.return_code != 0:
                 raise RuntimeError(prepared.stderr or "Cannot create Pi sandbox session directory")
@@ -530,7 +551,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             installed = await sandbox.exec(
                 f"bash {shlex.quote(directory + '/' + installer)} {shlex.quote(runtime)} "
                 f"{shlex.quote(self.config.pi_version)}",
-                cwd=body.sandbox_access.workdir,
+                cwd=workdir,
                 timeout_s=self.config.sandbox_install_timeout_seconds,
             )
             if installed.return_code != 0:
@@ -542,13 +563,12 @@ class PiAgent(SimpleResponsesAPIAgent):
                 )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
             await sandbox.upload(Path(process_supervisor.__file__), f"{directory}/process_supervisor.py")
-        except BaseException:
+        except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
             except BaseException:
                 LOG.exception("Pi seed cleanup failed; retaining session %s", body.agent_session_id)
-            else:
-                record.state = None
+                raise AgentSessionSetupError(state, error=error) from error
             raise
         return state
 
@@ -659,7 +679,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             "directory": state.directory,
             "command": command,
             "prompt": prompt,
-            "cwd": state.request.sandbox_access.workdir,
+            "cwd": state.workdir,
             "env": {
                 "HOME": f"{state.directory}/home",
                 "PI_CODING_AGENT_DIR": f"{state.directory}/home/.pi/agent",
