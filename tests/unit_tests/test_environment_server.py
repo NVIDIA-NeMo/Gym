@@ -123,7 +123,7 @@ def test_failure_response_validates_base_failure_as_protocol_subclass() -> None:
     )
     response = server.failure_response(
         _request(),
-        EpisodeFailure(message="failed", terminal=True),
+        EpisodeFailure(failure_reason="failed", terminal=True),
     )
 
     assert isinstance(response.failure, _ProtocolFailure)
@@ -234,8 +234,8 @@ def test_internal_timeout_error_is_not_reported_as_episode_timeout() -> None:
     response = asyncio.run(server.run_request(_request()))
     assert response.failure is not None
     assert response.failure.terminal is True
-    assert "TimeoutError: dependency timed out" in response.failure.message
-    assert response.failure.message != "Episode timed out"
+    assert "TimeoutError: dependency timed out" in response.failure.failure_reason
+    assert response.failure.failure_reason != "Episode timed out"
 
 
 def test_episode_deadline_returns_retryable_typed_failure() -> None:
@@ -248,7 +248,7 @@ def test_episode_deadline_returns_retryable_typed_failure() -> None:
     server = _TimedOutEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
     response = asyncio.run(server.run_request(_request()))
     assert response.failure is not None
-    assert response.failure.message == "Episode timed out"
+    assert response.failure.failure_reason == "Episode timed out"
     assert response.failure.terminal is False
 
 
@@ -264,7 +264,7 @@ def test_unhandled_error_returns_terminal_typed_failure() -> None:
     response = asyncio.run(server.run_request(_request()))
     assert response.failure is not None
     assert response.failure.terminal is True
-    assert "ValueError: invalid protocol state" in response.failure.message
+    assert "ValueError: invalid protocol state" in response.failure.failure_reason
 
 
 def test_caller_cancellation_waits_for_cleanup() -> None:
@@ -332,7 +332,7 @@ def test_failure_metadata_survives_the_environment_http_boundary(classified: boo
             return self.failure_response(
                 request,
                 EpisodeFailure(
-                    message="Judge unavailable",
+                    failure_reason="Judge unavailable",
                     terminal=False,
                     failure_kind="judge_failed" if classified else None,
                     stage="verification" if classified else None,

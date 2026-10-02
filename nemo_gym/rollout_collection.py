@@ -352,7 +352,7 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             NG_TASK_ID_KEY: task_id,
             NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
             NG_TERMINAL_KEY: bool(failure.get("terminal", False)),
-            "_ng_failure_message": failure.get("failure_reason", failure.get("message")),
+            "_ng_failure_message": failure.get("failure_reason"),
         }
         if failure.get("stage") is not None:
             record["_ng_failure_stage"] = failure["stage"]

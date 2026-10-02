@@ -7131,12 +7131,11 @@ class TestEnvironmentServerRouting:
             "task_id": {"taskset": "swe_pro", "task_id": task},
         }
 
-    @pytest.mark.parametrize("reason_field", ["message", "failure_reason"])
-    def test_episode_failure_reply_becomes_a_sidecar_row(self, reason_field: str) -> None:
+    def test_episode_failure_reply_becomes_a_sidecar_row(self) -> None:
         reply = self._native_identity("a") | {
             "result": None,
             "failure": {
-                reason_field: "agent unavailable",
+                "failure_reason": "agent unavailable",
                 "terminal": False,
                 "stage": "agent",
                 "partial_response": {"id": "partial"},
@@ -7155,7 +7154,7 @@ class TestEnvironmentServerRouting:
         assert "reward" not in record
 
         terminal = nemo_gym.rollout_collection._episode_record(
-            self._native_identity("a") | {"failure": {"message": "bad task", "terminal": True}}
+            self._native_identity("a") | {"failure": {"failure_reason": "bad task", "terminal": True}}
         )
         assert terminal[NG_TERMINAL_KEY] is True
 
@@ -7201,7 +7200,7 @@ class TestEnvironmentServerRouting:
     def test_episode_detection_needs_object_identities_and_an_object_failure(self) -> None:
         """An agent reply echoing identity fields as strings is not an episode reply; a bad failure is an error."""
         is_episode = nemo_gym.rollout_collection._is_episode_response
-        assert is_episode(self._native_identity("a") | {"failure": {"message": "x", "terminal": True}})
+        assert is_episode(self._native_identity("a") | {"failure": {"failure_reason": "x", "terminal": True}})
         assert not is_episode({"episode_id": "0-a", "task_id": "a", "reward": 1.0, "failure": {"reason": "echoed"}})
         assert not is_episode(self._native_identity("a") | {"reward": 1.0})
 
@@ -7432,7 +7431,8 @@ class TestEnvironmentServerRouting:
                     failed_once.add(task)
                     return FakeResponse(
                         200,
-                        identity | {"result": None, "failure": {"message": "agent unavailable", "terminal": False}},
+                        identity
+                        | {"result": None, "failure": {"failure_reason": "agent unavailable", "terminal": False}},
                     )
                 return FakeResponse(
                     200,

@@ -15,7 +15,7 @@ def test_same_failure_survives_wire_and_persisted_record_json() -> None:
         episode_id=EpisodeId(rollout_id="task-7", attempt=2),
         task_id=TaskId(taskset="eval", task_id="7"),
         failure=EpisodeFailure(
-            message="Judge timed out", terminal=False, failure_kind="judge_failed", stage="verification"
+            failure_reason="Judge timed out", terminal=False, failure_kind="judge_failed", stage="verification"
         ),
     )
     received = BaseEpisodeResponse[str].model_validate_json(wire.model_dump_json())
@@ -42,7 +42,7 @@ def test_collector_observation_does_not_invent_an_execution_stage_or_retry_decis
         run_id="eval-1",
         source="collector",
         delivery="possibly_delivered",
-        failure=EpisodeFailure(message="No reply", terminal=terminal, failure_kind="transport_timeout"),
+        failure=EpisodeFailure(failure_reason="No reply", terminal=terminal, failure_kind="transport_timeout"),
         http_status=504,
         exception_type="TimeoutError",
     )
@@ -59,7 +59,7 @@ def test_protocol_diagnostics_remain_outside_the_serialized_failure_record() -> 
         partial_response: dict[str, str]
 
     failure = DiagnosticFailure(
-        message="Judge unavailable",
+        failure_reason="Judge unavailable",
         terminal=False,
         failure_kind="judge_failed",
         stage="verification",
@@ -93,7 +93,7 @@ def test_saved_record_requires_explicit_run_and_delivery_evidence() -> None:
         "run_id": "eval-1",
         "source": "collector",
         "delivery": "not_sent",
-        "failure": {"message": "Input could not be sent", "terminal": True},
+        "failure": {"failure_reason": "Input could not be sent", "terminal": True},
     }
     assert RolloutFailure.model_validate(payload).delivery == "not_sent"
     for field in ("run_id", "source", "delivery"):
@@ -145,7 +145,7 @@ def test_saved_failure_record_versions(schema_version: int | None) -> None:
         "run_id": "eval-1",
         "source": "collector",
         "delivery": "not_sent",
-        "failure": {"message": "Input could not be sent", "terminal": True},
+        "failure": {"failure_reason": "Input could not be sent", "terminal": True},
     }
     if schema_version is not None:
         payload["schema_version"] = schema_version
@@ -169,7 +169,7 @@ def test_saved_failure_http_status_bounds(http_status: int | None) -> None:
         "run_id": "eval-1",
         "source": "collector",
         "delivery": "possibly_delivered",
-        "failure": {"message": "No reply", "terminal": False},
+        "failure": {"failure_reason": "No reply", "terminal": False},
         "http_status": http_status,
     }
     if http_status is not None and not 100 <= http_status <= 599:
