@@ -39,7 +39,7 @@ gym eval run \
   --benchmark biomnibench_da \
   --split benchmark \
   --model nvinf/nvidia/nvidia/nemotron-3-ultra \
-  --output benchmarks/biomnibench_da/logs/rollouts.jsonl \
+  --output "${PWD}/benchmarks/biomnibench_da/logs/rollouts.jsonl" \
   --concurrency 8 \
   --resume
 ```
