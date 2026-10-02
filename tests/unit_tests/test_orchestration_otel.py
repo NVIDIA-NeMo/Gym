@@ -124,6 +124,22 @@ def test_scrape_targets_are_the_model_services():
     assert scrape_targets(config) == {"policy": 8000, "judge": 8100}
 
 
+def test_scrape_targets_include_both_tiers_of_a_pd_service():
+    pd = {
+        "type": "vllm_pd",
+        "container": "vllm:latest",
+        "model": "m",
+        "prefill": {"node_pool": "prefill"},
+        "decode": {"node_pool": "decode"},
+    }
+    pools = {"prefill": {"partition": "batch"}, "decode": {"partition": "batch"}}
+    config = _config(
+        services={"policy": pd},
+        compute={"cluster-a": {"type": "slurm", "account": "acct", "node_pools": pools}},
+    )
+    assert scrape_targets(config) == {"policy-prefill": 8001, "policy-decode": 8002, "policy": 8000}
+
+
 def test_active_without_a_model_service():
     """Gym's own servers produce telemetry with or without a local model, so the collector runs."""
     driver = {"container": "gym:latest", "benchmarks": {"scicode": {}}}
@@ -172,12 +188,12 @@ def _rendered(config=None):
     return yaml.safe_load(render_collector_config(config or _config(), "scicode", BENCH_DIR))
 
 
-def _attrs(doc):
-    return {a["key"]: (a["value"], a["action"]) for a in doc["processors"]["resource"]["attributes"] if "value" in a}
+def _attrs(doc, processor="resource/managed"):
+    return {a["key"]: (a["value"], a["action"]) for a in doc["processors"][processor]["attributes"] if "value" in a}
 
 
 def test_collector_converts_the_slurm_job_id_to_a_string():
-    actions = _rendered()["processors"]["resource"]["attributes"]
+    actions = _rendered()["processors"]["resource/local"]["attributes"]
     convert = [a for a in actions if a["action"] == "convert"]
     assert convert == [{"key": "slurm_job_id", "action": "convert", "converted_type": "string"}]
     assert actions.index(convert[0]) > max(
@@ -229,9 +245,10 @@ def test_collector_keeps_each_producers_own_name_as_display_identity():
     )
     for signal in ("metric", "trace", "log"):
         assert identity[f"{signal}_statements"] == [{"context": "resource", "statements": [rule]}]
-    for pipeline in doc["service"]["pipelines"].values():
+    for name, pipeline in doc["service"]["pipelines"].items():
         processors = pipeline["processors"]
-        assert processors.index("transform/identity") < processors.index("resource")
+        resource = "resource/local" if name.endswith("/local") else "resource/managed"
+        assert processors.index("transform/identity") < processors.index(resource), name
     assert "service.name.override" not in _attrs(doc)
 
 
@@ -244,11 +261,12 @@ def test_collector_derives_metrics_from_spans_with_display_identity_and_sandbox_
     connector = doc["connectors"]["span_metrics"]
     assert connector["dimensions"] == [{"name": "service.name.override"}, {"name": "nemo.gym.sandbox.provider"}]
     assert connector["metrics_flush_interval"] == "15s"
-    assert "span_metrics" in doc["service"]["pipelines"]["traces"]["exporters"]
-    # The traces pipeline has already applied identity + resource stamping when the connector runs,
-    # so the derived series carry run_id/user like everything else.
-    traces = doc["service"]["pipelines"]["traces"]["processors"]
-    assert traces.index("transform/identity") < traces.index("resource")
+    assert "span_metrics" in doc["service"]["pipelines"]["traces/local"]["exporters"]
+    assert "span_metrics" not in doc["service"]["pipelines"]["traces"]["exporters"]
+    traces = doc["service"]["pipelines"]["traces/local"]["processors"]
+    assert traces.index("transform/identity") < traces.index("resource/local")
+    for name in ("metrics", "metrics/local"):
+        assert "span_metrics" in doc["service"]["pipelines"][name]["receivers"], name
 
 
 def test_collector_renames_colon_metrics_to_underscores_before_export():
@@ -309,8 +327,27 @@ def test_collector_writes_a_local_copy_next_to_the_managed_export():
     doc = _rendered()
     assert doc["exporters"]["file/metrics"]["path"] == str(BENCH_DIR / "otel" / "metrics.jsonl")
     for signal in ("metrics", "traces", "logs"):
-        exporters = doc["service"]["pipelines"][signal]["exporters"]
-        assert exporters[:2] == ["otlp_http/managed", f"file/{signal}"]
+        managed, local = doc["service"]["pipelines"][signal], doc["service"]["pipelines"][f"{signal}/local"]
+        assert managed["exporters"] == ["otlp_http/managed"]
+        assert local["exporters"][0] == f"file/{signal}"
+        assert managed["receivers"] == local["receivers"]
+
+
+def test_the_token_never_reaches_the_job_directory_copies():
+    doc = _rendered()
+    assert "Authorization" in _attrs(doc, "resource/managed")
+    assert "Authorization" not in _attrs(doc, "resource/local")
+    local_keys = {a["key"] for a in doc["processors"]["resource/local"]["attributes"]}
+    assert local_keys == {a["key"] for a in doc["processors"]["resource/managed"]["attributes"]} - {"Authorization"}
+    for name, pipeline in doc["service"]["pipelines"].items():
+        writes_files = any(e.startswith("file/") for e in pipeline["exporters"])
+        assert writes_files == ("resource/local" in pipeline["processors"]), name
+        assert writes_files == name.endswith("/local"), name
+        assert ("otlp_http/managed" in pipeline["exporters"]) == ("resource/managed" in pipeline["processors"]), name
+
+
+def test_collector_log_level_does_not_print_batches():
+    assert _rendered()["service"]["telemetry"]["logs"]["level"] == "info"
 
 
 def test_collector_receives_otlp_for_the_job_processes():
@@ -341,7 +378,7 @@ def test_script_starts_the_collector_before_the_model_service():
 
 
 def _collector_line(script):
-    return next(line for line in script.splitlines() if "--output=logs/otel_collector.log" in line)
+    return next(line for line in script.splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line)
 
 
 def test_script_pins_the_collector_to_one_node_of_a_multi_node_job():
@@ -365,18 +402,22 @@ def test_script_pins_the_collector_to_one_node_of_a_multi_node_job():
 
 
 def test_script_runs_the_collector_on_the_node_by_default():
-    line = next(line for line in _script(_config()).splitlines() if "--output=logs/otel_collector.log" in line)
+    line = next(
+        line for line in _script(_config()).splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line
+    )
     assert "--container" not in line
     assert line.startswith("env ")
     assert (
-        f" srun --overlap --output=logs/otel_collector.log otelcol-contrib --config {collector_config_path(BENCH_DIR)} &"
+        f" srun --overlap --output=logs/otel_collector-$SLURM_JOB_ID.log otelcol-contrib --config {collector_config_path(BENCH_DIR)} &"
         in line
     )
 
 
 def test_script_runs_the_collector_in_a_container_with_the_job_dir_mounted_when_one_is_set():
     config = _config(otel={"container": "/shared/images/otelcol.sqsh", "binary": "/otelcol-contrib"})
-    line = next(line for line in _script(config).splitlines() if "--output=logs/otel_collector.log" in line)
+    line = next(
+        line for line in _script(config).splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line
+    )
     assert "--container-image=/shared/images/otelcol.sqsh" in line
     assert "--no-container-mount-home" in line
     assert f"--container-mounts={BENCH_DIR}:{BENCH_DIR}" in line
@@ -387,7 +428,9 @@ def test_script_runs_the_collector_in_a_container_with_the_job_dir_mounted_when_
 
 def test_script_forwards_the_token_from_the_job_environment_not_a_literal(monkeypatch):
     monkeypatch.setenv("OTEL_TOKEN", "secret-token")
-    line = next(line for line in _script(_config()).splitlines() if "--output=logs/otel_collector.log" in line)
+    line = next(
+        line for line in _script(_config()).splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line
+    )
     assert "OTEL_TOKEN=${OTEL_TOKEN}" in line
     assert "SLURM_JOB_ID=${SLURM_JOB_ID}" in line
     assert "secret-token" not in line
@@ -395,7 +438,9 @@ def test_script_forwards_the_token_from_the_job_environment_not_a_literal(monkey
 
 def test_script_honours_a_binary_path_on_shared_storage():
     config = _config(otel={"binary": "/shared/tools/otelcol-contrib"})
-    line = next(line for line in _script(config).splitlines() if "--output=logs/otel_collector.log" in line)
+    line = next(
+        line for line in _script(config).splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line
+    )
     assert " /shared/tools/otelcol-contrib --config " in line
     assert "--container" not in line
 
@@ -409,7 +454,7 @@ def test_script_health_checks_the_collector_before_the_model_service():
 
 def test_script_flushes_the_collector_after_the_driver_and_keeps_the_driver_exit_code():
     script = _script(_config())
-    tail = script[script.index("--output=logs/driver.log") :]
+    tail = script[script.index("--output=logs/driver-$SLURM_JOB_ID.log") :]
     assert "DRIVER_RC=$?" in tail
     # Anchored to the binary so the launching srun, whose command line also carries the path, is
     # not signalled: TERM to srun kills the step before the collector can flush.
@@ -422,7 +467,7 @@ def test_script_flushes_the_collector_after_the_driver_and_keeps_the_driver_exit
 
 
 def _driver_line(script):
-    return next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    return next(line for line in script.splitlines() if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
 
 
 _DRIVER_WITH_INSTALL = {
@@ -528,7 +573,7 @@ def test_submit_fails_when_gym_telemetry_has_no_checkout_to_install_it_from(tmp_
 
 def test_gym_telemetry_off_keeps_the_collector_and_skips_lens():
     script = _script(_config(otel={"gym_telemetry": False}, driver=_DRIVER_WITH_INSTALL))
-    assert "--output=logs/otel_collector.log" in script
+    assert "--output=logs/otel_collector-$SLURM_JOB_ID.log" in script
     assert "NEMO_GYM_OTEL_ENABLED" not in script
     assert "[telemetry]" not in script
 

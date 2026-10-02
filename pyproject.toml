@@ -116,6 +116,11 @@ dependencies = [
     "pydantic_core",
     "devtools",
 
+    # JSON Schema: Validates retained harness capability evidence.
+    # Updated Tue Sep 22, 2026 with jsonschema>=4.18,<5
+    # License: MIT https://github.com/python-jsonschema/jsonschema/blob/main/COPYING
+    "jsonschema>=4.18,<5",
+
     # Packaging: Validates SPDX license expressions in environment manifests.
     # Updated Tue Aug 11, 2026 with packaging==25.0
     # License: Apache-2.0 OR BSD-2-Clause https://github.com/pypa/packaging/tree/25.0
@@ -229,9 +234,15 @@ dependencies = [
     "orjson>=3.11.6",
 
     # urllib3: HTTP client library (transitive dependency, pinned for security)
-    # Updated: Mon May 19, 2026 with urllib3>=2.7.0
+    # Updated: Tue Sep 30, 2026 with urllib3>=2.8.0 (CVE mitigation)
     # License: MIT https://github.com/urllib3/urllib3/blob/main/LICENSE.txt
-    "urllib3>=2.7.0",
+    "urllib3>=2.8.0",
+
+    # PyJWT: transitive dependency of mcp (a core nemo-gym dep); pinned directly
+    # since mcp's own floor resolves to a version with a known CVE.
+    # Updated: Tue Sep 30, 2026 with PyJWT>=2.15.1 (CVE mitigation)
+    # License: MIT https://raw.githubusercontent.com/jpadilla/pyjwt/master/LICENSE
+    "PyJWT>=2.15.1",
 
     # sqlparse: SQL parsing library (transitive dependency of mlflow-skinny, pinned for security)
     # mlflow-skinny only requires sqlparse<1,>=0.4.0, so it won't pull the fixed version on its own.
@@ -350,8 +361,9 @@ telemetry = [
     # tracer/meter lifecycle, span-group gating, W3C context propagation, and the FastAPI /
     # aiohttp auto-instrumentation Gym uses to stitch one trace across its server processes.
     # Pinned to a Lens commit via [tool.uv.sources] until 0.2.0 ships to PyPI; then drop that
-    # entry and use a version range. Megatron-LM pins this same commit.
-    # Updated: Tue Aug 18, 2026 with nemo-lens @ b85578fc
+    # entry and use a version range. NeMo-RL pins this same commit; the two must agree,
+    # since an RL job installs Gym into its environment and resolves one nemo-lens.
+    # Updated: Thu Oct 1, 2026 with nemo-lens @ b0f977d4
     # License: Apache 2.0 https://github.com/NVIDIA-NeMo/Lens/blob/main/LICENSE
     "nemo-lens[sdk]",
 
@@ -502,7 +514,7 @@ exclude-dependencies = [
 # venvs that `gym env test` / `gym env start` build, which inherit it through the editable
 # nemo-gym install exactly as override-dependencies does.
 [tool.uv.sources]
-nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "b85578fc2b736a1804705e537001b5f45e9c715d" }
+nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "b0f977d414b2f89938604a0b7eaa78ee08bc8700" }
 
 [tool.setuptools.package-data]
 # The built-in asset trees (resources_servers, responses_api_agents, responses_api_models,

@@ -121,6 +121,105 @@ class TestServerJunitReports:
         assert (tmp_path / "reports").is_dir()
 
 
+@pytest.mark.parametrize("internal_error", [True, False])
+def test_server_suite_exit_status(tmp_path: Path, monkeypatch: MonkeyPatch, capfd, internal_error: bool) -> None:
+    servers = [tmp_path / "responses_api_models" / name for name in ("first", "second")]
+    for server in servers:
+        server.mkdir(parents=True)
+        (server / "README.md").touch()
+        (server / "requirements.txt").touch()
+        (server / "test_app.py").write_text("from pathlib import Path\n\ndef test_runs():\n    Path('ran').touch()\n")
+    if internal_error:
+        (servers[0] / "conftest.py").write_text(
+            "def pytest_configure(config):\n    raise RuntimeError('server setup failed')\n"
+        )
+
+    config = OmegaConf.create({"uv_cache_dir": str(tmp_path / "uv-cache")})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr("nemo_gym.cli.setup_command.get_global_config_dict", lambda: config)
+    monkeypatch.setattr("nemo_gym.cli.setup_command.stdout", sys.stdout)
+    monkeypatch.setattr("nemo_gym.cli.setup_command.stderr", sys.stderr)
+    monkeypatch.setattr(nemo_gym.cli.env, "component_search_roots", lambda: [tmp_path])
+    # Reuse this interpreter's pytest instead of installing a venv for each synthetic server.
+    monkeypatch.setattr(
+        nemo_gym.cli.env,
+        "setup_env_command",
+        lambda directory, *_: f"cd {shlex.quote(str(directory))} && "
+        f"export PATH={shlex.quote(str(Path(sys.executable).parent))}:$PATH",
+    )
+    monkeypatch.setenv("PYTEST_ADDOPTS", "")
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    monkeypatch.delenv("GYM_CI_JUNIT_DIR", raising=False)
+
+    if internal_error:
+        with raises(SystemExit) as exc:
+            nemo_gym.cli.env.test_all()
+        assert exc.value.code == 1
+    else:
+        nemo_gym.cli.env.test_all()
+
+    assert (servers[1] / "ran").exists(), "The suite must still run the later server."
+    output = capfd.readouterr()
+    if internal_error:
+        assert "RuntimeError: server setup failed" in output.err
+        assert "Tests that returned unrecognized exit codes 1 / 2" in output.out
+    else:
+        assert (servers[0] / "ran").exists()
+        assert "Tests passed 2 / 2" in output.out
+
+
+def test_server_suite_setup_only_installs_every_venv_without_running_tests(
+    tmp_path: Path, monkeypatch: MonkeyPatch, capfd
+) -> None:
+    """`setup_only` installs each server venv the suite would build, runs no pytest, and reports every failure.
+
+    The container build relies on this to seed its uv cache for offline server tests, so a server whose
+    venv cannot be installed must fail the run without hiding the servers after it.
+    """
+    servers = [tmp_path / "resources_servers" / name for name in ("broken", "first", "second")]
+    for server in servers:
+        server.mkdir(parents=True)
+        (server / "README.md").touch()
+        (server / "requirements.txt").touch()
+        (server / "test_app.py").write_text("from pathlib import Path\n\ndef test_runs():\n    Path('ran').touch()\n")
+    venv_root = tmp_path / "venvs"
+    config = OmegaConf.create(
+        {
+            "uv_cache_dir": str(tmp_path / "uv-cache"),
+            "uv_venv_dir": str(venv_root),
+            "setup_only": True,
+            "delete_venvs_after_each_test": True,
+        }
+    )
+
+    def fake_setup(directory: Path, *_) -> str:
+        if directory.name == "broken":
+            return "exit 3"
+        venv = venv_root / "resources_servers" / directory.name / ".venv"
+        return f"cd {shlex.quote(str(directory))} && mkdir -p {shlex.quote(str(venv))} && touch set-up"
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr("nemo_gym.cli.setup_command.get_global_config_dict", lambda: config)
+    monkeypatch.setattr("nemo_gym.cli.setup_command.stdout", sys.stdout)
+    monkeypatch.setattr("nemo_gym.cli.setup_command.stderr", sys.stderr)
+    monkeypatch.setattr(nemo_gym.cli.env, "component_search_roots", lambda: [tmp_path])
+    monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", fake_setup)
+
+    with raises(SystemExit) as exc:
+        nemo_gym.cli.env.test_all()
+
+    assert exc.value.code == 1
+    assert [(server / "set-up").exists() for server in servers] == [False, True, True]
+    assert not any((server / "ran").exists() for server in servers)
+    assert not any(venv_root.glob("resources_servers/*/.venv"))
+    output = capfd.readouterr().out
+    assert "Server venvs set up 2 / 3" in output
+    assert "Server venv setup failed 1 / 3 (33.33%):\n- resources_servers/broken\n" in output
+    assert "Tests passed" not in output
+
+
 def test_server_venv_cleanup_uses_configured_root(tmp_path: Path) -> None:
     server_dir = tmp_path / "checkout" / "resources_servers" / "example"
     source_venv = server_dir / ".venv"
@@ -310,6 +409,73 @@ class TestRunHelperDryRunSpinup:
 
         with raises(RuntimeError, match="1 server"):
             runner.wait_for_dry_run_spinup()
+
+
+class TestRunHelperLaunchEnvironment:
+    """RunHelper.start must pass config dict and path via process environment rather than command line."""
+
+    def test_secrets_passed_in_env_not_command_line(self, monkeypatch: MonkeyPatch) -> None:
+        from nemo_gym.global_config import (
+            NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+            NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+        )
+
+        cfg = OmegaConf.create(
+            {
+                "dry_run": True,
+                "verbose": False,
+                "uv_venv_dir": str(PARENT_DIR),
+                "test_server": {
+                    "resources_servers": {
+                        "dummy": {
+                            "entrypoint": "app.py",
+                            "domain": "other",
+                            "host": "127.0.0.1",
+                            "port": 8000,
+                            "secret_token": "sk-super-secret-12345",
+                        }
+                    }
+                },
+            }
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **kwargs: cfg)
+        monkeypatch.setattr(nemo_gym.cli.env, "configure_telemetry_env", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "init_telemetry", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "initialize_ray", MagicMock())
+        mock_head_instance = MagicMock()
+        monkeypatch.setattr(
+            nemo_gym.cli.env.HeadServer,
+            "run_webserver",
+            MagicMock(return_value=(MagicMock(), MagicMock(), mock_head_instance)),
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "_resolve_server_dir", lambda p: Path("/mock/server/dir"))
+        monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *args: "echo setup")
+        mock_client = MagicMock()
+        mock_client.poll_for_status.return_value = "success"
+        monkeypatch.setattr(nemo_gym.cli.env, "ServerClient", MagicMock(return_value=mock_client))
+
+        captured_calls = []
+
+        def mock_run_command(cmd, dir_path, server_name="", extra_env=None, **kwargs):
+            mock_proc = MagicMock()
+            mock_proc.pid = 12345
+            captured_calls.append((cmd, extra_env))
+            return mock_proc
+
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", mock_run_command)
+        runner = RunHelper()
+        runner.wait_for_dry_run_spinup = MagicMock()
+        runner.start(MagicMock())
+
+        assert len(captured_calls) == 1
+        cmd, extra_env = captured_calls[0]
+        # Command line must NOT contain the sensitive config dict or secret token
+        assert "NEMO_GYM_CONFIG_DICT=" not in cmd
+        assert "sk-super-secret-12345" not in cmd
+        # Process environment block MUST contain the config dict with the secret
+        assert extra_env is not None
+        assert "sk-super-secret-12345" in extra_env[NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME]
+        assert extra_env[NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME] == "test_server"
 
 
 class TestRunHelperServerReadiness:

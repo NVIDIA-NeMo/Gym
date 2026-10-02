@@ -361,10 +361,10 @@ async def test_every_downstream_call_carries_the_attempt_rollout_id() -> None:
     assert client.rollout_ids == ["rollout-a2"] * len(client.calls)
 
 
-def test_dependency_failure_messages_are_bounded() -> None:
+def test_dependency_failure_reasons_are_bounded() -> None:
     environment_server, _ = _environment_server()
-    error = environment_server._failure(stage="agent", message="x" * 3000, terminal=False)
-    assert len(error.failure.message) == 2000
+    error = environment_server._failure(stage="agent", failure_reason="x" * 3000, terminal=False)
+    assert len(error.failure.failure_reason) == 2000
 
 
 def test_retry_requires_a_transient_dependency_error() -> None:
@@ -490,7 +490,7 @@ async def test_dependency_failure_closes_sessions(stage: str, error: Exception) 
 
     assert result.result is None
     assert result.failure.stage == stage
-    assert result.failure.message == str(error)
+    assert result.failure.failure_reason == str(error)
     assert result.failure.terminal is isinstance(error, ValueError)
     assert result.failure.partial_response == (_agent_response() if stage == "verification" else None)
     paths = [path for _, path, _ in client.calls]
@@ -515,7 +515,7 @@ async def test_admission_timeout_is_retryable_without_starting_sessions() -> Non
         result = await environment.run_request(_request())
 
     assert result.result is None
-    assert result.failure.message == "Episode admission timed out"
+    assert result.failure.failure_reason == "Episode admission timed out"
     assert result.failure.terminal is False
     assert client.calls == []
 
@@ -549,7 +549,7 @@ async def test_interrupted_activation_closes_agent_before_resources(
     else:
         result = await asyncio.wait_for(run_task, timeout=1)
         assert result.result is None
-        assert result.failure.message == "Episode timed out"
+        assert result.failure.failure_reason == "Episode timed out"
         assert result.failure.terminal is False
 
     assert [path for _, path, _ in client.calls] == [

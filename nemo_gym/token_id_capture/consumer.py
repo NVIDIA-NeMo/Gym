@@ -181,9 +181,9 @@ def _assemble(
         # Off-path calls (auxiliary calls, sub-agent forks, abandoned retries)
         # are excluded from delivery instead of masking the rollout.
         mask = False
-    elif attribution.attributed:
-        # Attribution succeeded but its chain is broken or unbuildable.
-        # The rollout's verified trajectory is known and undeliverable.
+    elif attribution.attributed or declared_response_id:
+        # A declared terminal must be attributable, and an attributed terminal
+        # must have a buildable chain. Neither can use the single-chain fallback.
         mask = True
     else:
         # No attribution: the strict single-chain policy applies.

@@ -127,7 +127,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="seed",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -146,13 +146,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             if seed.resources_tools is None:
                 raise self._failure(
                     stage="seed",
-                    message="Resources seed did not return requested MCP metadata",
+                    failure_reason="Resources seed did not return requested MCP metadata",
                     terminal=True,
                 )
             if seed.resources_tools.transport != "http":
                 raise self._failure(
                     stage="seed",
-                    message=f"Unsupported resources MCP transport: {seed.resources_tools.transport}",
+                    failure_reason=f"Unsupported resources MCP transport: {seed.resources_tools.transport}",
                     terminal=True,
                 )
             url_path = seed.resources_tools.url_path.lstrip("/")
@@ -218,7 +218,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="agent",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -240,7 +240,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="agent",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -251,7 +251,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="cleanup",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
             ) from error
@@ -275,7 +275,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="verification",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
             ) from error
@@ -310,14 +310,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     def _failure(
         *,
         stage: str,
-        message: str,
+        failure_reason: str,
         terminal: bool,
         partial_response: Any = None,
     ) -> HandledEpisodeError:
         return HandledEpisodeError(
             SingleAgentTurnFailure(
                 stage=stage,
-                message=message[:2000],
+                failure_reason=failure_reason[:2000],
                 terminal=terminal,
                 partial_response=partial_response,
             )
