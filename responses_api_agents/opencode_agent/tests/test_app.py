@@ -43,8 +43,10 @@ from responses_api_agents.opencode_agent.app import (
     OpenCodeAgent,
     OpenCodeAgentConfig,
     OpenCodeAgentRunRequest,
+    _extract_images,
     _extract_instruction,
     _parse_opencode_session,
+    _tmp_roots,
     parse_opencode_session,
 )
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_export
@@ -1343,3 +1345,104 @@ async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget
     assert wait.await_args.kwargs["timeout"] == expected
     assert episode.response.metadata == {"agent_timeout_sec": str(float(expected))}
     assert agent.config.timeout == 1800
+
+
+PNG = b"\x89PNG\r\n\x1a\nfake"
+
+
+def _image_input() -> list:
+    return [
+        NeMoGymEasyInputMessage(
+            role="user",
+            content=[
+                {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgpmYWtl", "detail": "auto"},
+                {"type": "input_image", "image_url": "https://example.com/not-a-data-url.png", "detail": "auto"},
+                {"type": "input_text", "text": "What is shown?"},
+            ],
+        ),
+    ]
+
+
+class TestMultimodal:
+    def test_data_url_images_extracted(self) -> None:
+        assert _extract_images(_image_input()) == [(".png", PNG)]
+        assert _extract_instruction(_image_input()) == ("What is shown?", None)
+
+    def test_vision_marks_generated_model_entry(self) -> None:
+        agent = _make_agent(model="m", vision=True, model_server=ModelServerRef(type="responses_api_models", name="p"))
+        with patch.object(OpenCodeAgent, "_resolve_model_base_url", return_value="http://model/v1"):
+            entry = agent._build_opencode_config()["provider"]["nemo"]["models"]["m"]
+        assert entry["attachment"] is True and "image" in entry["modalities"]["input"]
+
+    def test_no_vision_entry_by_default(self) -> None:
+        agent = _make_agent(model="m", model_server=ModelServerRef(type="responses_api_models", name="p"))
+        with patch.object(OpenCodeAgent, "_resolve_model_base_url", return_value="http://model/v1"):
+            entry = agent._build_opencode_config()["provider"]["nemo"]["models"]["m"]
+        assert "attachment" not in entry and "modalities" not in entry
+
+    def test_xdg_dirs_stay_in_run_dir(self, tmp_path: Path) -> None:
+        env = _make_agent()._env(str(tmp_path / ".opencode-data"))
+        for name in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+            assert Path(env[name]).parent == tmp_path
+
+    async def test_images_written_to_project_dir_and_attached(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        seen = {}
+
+        async def spawn(*cmd, **kwargs):
+            files = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "-f"]
+            seen["files"] = {f: Path(f).read_bytes() for f in files}
+            seen["prompt_before_files"] = cmd.index("-f") > cmd.index("look")
+            process = MagicMock(returncode=0)
+            process.communicate = AsyncMock(return_value=(b"", b""))
+            return process
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=tmp_path / "work"),
+            patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", side_effect=spawn),
+            patch("responses_api_agents.opencode_agent.app.parse_opencode_session", return_value=([], {})),
+        ):
+            (tmp_path / "work").mkdir()
+            await agent._run_opencode("look", None, collect_observations=False, images=[(".png", PNG)])
+
+        ((path, data),) = seen["files"].items()
+        assert path == str((tmp_path / "work" / "image_0.png").resolve()) and data == PNG
+        assert seen["prompt_before_files"]
+
+    async def test_attach_images_off_by_default(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        body = NeMoGymResponseCreateParamsNonStreaming(input=_image_input())
+        with patch.object(agent, "_run_opencode", AsyncMock(return_value=([], {}, "m", AgentObservationBundle(source="opencode")))) as run:
+            await agent._create_episode(body, collect_observations=False)
+        assert run.call_args.kwargs["images"] == []
+
+
+class TestPrivateTmp:
+    def test_tmp_roots(self) -> None:
+        assert _tmp_roots(["/tmp/gym-1/gym/a", "/tmp/gym-1/b", "/usr/bin/x", None, "/tmp/uv/py"]) == [
+            "/tmp/gym-1",
+            "/tmp/uv",
+        ]
+
+    async def test_command_wrapped_in_namespace(self, tmp_path: Path) -> None:
+        agent = _make_agent(private_tmp=True)
+        seen = {}
+
+        async def spawn(*cmd, **kwargs):
+            seen["cmd"] = cmd
+            process = MagicMock(returncode=0)
+            process.communicate = AsyncMock(return_value=(b"", b""))
+            return process
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=tmp_path / "work"),
+            patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", side_effect=spawn),
+            patch("responses_api_agents.opencode_agent.app.parse_opencode_session", return_value=([], {})),
+        ):
+            (tmp_path / "work").mkdir()
+            await agent._run_opencode("look", None, collect_observations=False)
+
+        cmd = seen["cmd"]
+        assert cmd[:4] == ("unshare", "--user", "--map-current-user", "--mount")
+        assert cmd[8] == str((tmp_path / "work").resolve())
+        assert cmd[10:12] == ("opencode", "run") and cmd[-1] == "look"
