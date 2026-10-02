@@ -440,6 +440,7 @@ async def test_aggregation_can_replace_a_plain_projection_without_recovery_histo
     from unittest.mock import AsyncMock
 
     import nemo_gym.rollout_collection as collection
+    import nemo_gym.rollout_health as health
 
     source, _, rows = run
     with writer(run) as history:
@@ -457,10 +458,12 @@ async def test_aggregation_can_replace_a_plain_projection_without_recovery_histo
         input_glob=str(source), output_jsonl_fpath=str(destination), disable_health_check=True
     )
     for _ in range(2):
+        [indexed] = health._index_jsonl([destination])
         await collection.RolloutAggregationHelper().run_from_config(config)
         assert list(read_records(target)) == [result]
         assert target.stat().st_mode & 0o777 == 0o640
         assert destination.is_symlink() == alias
+        assert health._read_record(indexed) == ({}, "rollout file was replaced after indexing")
         assert coverage_path_for(destination).exists()  # A reporting snapshot alone is not recovery history.
 
 
@@ -593,12 +596,42 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
     }
     assert report["coverage_known"] and not report["complete"]
     assert len(list(read_records(output))) == 2  # Aggregating does not rewrite history.
-    if merge_shards:
-        health = orjson.loads((merged.parent / "quality_summary.json").read_bytes())["run"]
-        assert health["issues"]["rollout_duplicate_identity"] == 0
-        assert health["artifacts"]["records"] == 1
-    else:
-        assert not (merged.parent / "quality_summary.json").exists()
+    health = orjson.loads((merged.parent / "quality_summary.json").read_bytes())["run"]
+    assert health["issues"]["rollout_duplicate_identity"] == 0
+    assert health["artifacts"]["records"] == 1  # Same selected success as the score; not both attempts.
+
+
+@pytest.mark.parametrize("newer_failure", [False, True])
+@pytest.mark.parametrize("merge_shards", [False, True])
+async def test_health_excludes_late_success_from_superseded_attempt(run, monkeypatch, newer_failure, merge_shards):
+    import nemo_gym.rollout_collection as collection
+    from nemo_gym.rollout_health import run_health_checks
+
+    output, _, rows = run
+    retry = rows[0] | {"_ng_attempt_index": 1}
+    with writer(run) as history:
+        history.dispatch(rows[0])
+        history.dispatch(retry)
+        if newer_failure:
+            save(run, history, retry, failure="judge_failed")
+        save(run, history, rows[0], reward=1.0)  # Late result, accepted but not selected by the store.
+    scored = []
+
+    async def aggregate(self, results, rows, path):
+        scored.extend(results)
+
+    monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", aggregate)
+    monkeypatch.setattr(collection, "get_exporters", list)
+    target = output.parent / "aggregate" / "rollouts.jsonl"
+    await collection.RolloutAggregationHelper().run_from_config(
+        collection.RolloutAggregationConfig(
+            input_glob=str(output), output_jsonl_fpath=str(target), merge_shards=merge_shards, health_check_workers=1
+        )
+    )
+    assert scored == []
+    automatic = orjson.loads((target.parent / "quality_summary.json").read_bytes())["run"]
+    standalone = run_health_checks(output, workers=1, output_dir=output.parent / "standalone").summary["run"]
+    assert (automatic["artifacts"]["records"], standalone["artifacts"]["records"]) == (0, 0)
 
 
 @pytest.mark.parametrize("masked", [False, True])
