@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - benchmarks/math-500/config.yaml
+
+math_500_math_with_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: indic_math_500
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/math_500/data/math_500_benchmark.jsonl
+          prompt_config: benchmarks/prompts/generic/math.yaml
+          prepare_script: benchmarks/indic/math_500/prepare.py
+          num_repeats: 1
+          license: Apache-2.0
