@@ -607,6 +607,8 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             metadata.setdefault("response_status", response["status"])
         projected = TrajectoryModelCall(
             model_call_id=model_call_id,
+            client_session_id=raw_call.get("client_session_id"),
+            client_assistant_message_id=raw_call.get("client_assistant_message_id"),
             started_at=raw_call.get("started_at"),
             completed_at=raw_call.get("completed_at"),
             duration_ms=raw_call.get("latency_total_ms"),
