@@ -23,3 +23,11 @@ hotpotqa_qa_simple_agent:
           type: example
           jsonl_fpath: resources_servers/hotpotqa_qa/data/example.jsonl
           license: CC BY-SA 4.0
+
+hotpotqa_qa_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: hotpotqa_qa_simple_agent
