@@ -26,6 +26,8 @@ DATASETS_DIR_ENV = "NEMO_GYM_DATASETS_DIR"
 MANIFEST_FILE = "manifest.toml"
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# Package-store datasets are `org/name`; registry datasets are a bare name.
+_PACKAGE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 class HubError(ValueError):
@@ -52,9 +54,16 @@ class HubRef:
             raise HubError(f"Not a Harbor hub reference: {target!r} (expected `harbor:<dataset>[@<version>]`)")
         body = target[len(REF_PREFIX) :]
         name, _, version = body.partition("@")
-        if not _NAME.fullmatch(name) or (version and not _NAME.fullmatch(version)):
+        if not (_NAME.fullmatch(name) or _PACKAGE_NAME.fullmatch(name)) or (
+            version and not (_NAME.fullmatch(version) or version.startswith("sha256:"))
+        ):
             raise HubError(f"Malformed Harbor hub reference: {target!r}")
         return cls(name=name, version=version or None)
+
+    @property
+    def is_package(self) -> bool:
+        """``org/name`` references live in Harbor's package store, not in ``registry.json``."""
+        return "/" in self.name
 
 
 @dataclass(frozen=True)
@@ -215,5 +224,10 @@ def fetch_ref(target: str, root: Path | None = None, *, refresh_registry: bool =
     """Resolve and fetch a ``harbor:`` reference; return the dataset folder."""
     root = Path(root) if root is not None else datasets_dir()
     ref = HubRef.parse(target)
+    if ref.is_package:
+        from nemo_gym.tasks.harbor.package_store import PackageRef, fetch_package_dataset
+
+        org, _, name = ref.name.partition("/")
+        return fetch_package_dataset(PackageRef(org=org, name=name, ref=ref.version or "latest"), root)
     registry = load_registry(root / ".harbor", refresh=refresh_registry)
     return fetch_dataset(resolve_dataset(ref, registry), root)
