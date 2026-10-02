@@ -18,13 +18,16 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 
+from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.reward_profile import IMPUTED_REWARD_FIELD
 from nemo_gym.server_utils import ServerClient
 from resources_servers.gdpval.app import (
     GDPValResourcesServer,
@@ -1242,6 +1245,81 @@ class TestApp:
         assert result.agent_metrics["comparison/judged"] == 24
         # win_rate = (12 + 0.5*2) / 24 = 13/24 ≈ 0.5417
         assert abs(result.agent_metrics["comparison/win_rate"] - (13.0 / 24.0)) < 1e-6
+
+
+class TestImputedRewards:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["preflight", "marked_zero", "earlier_stage"])
+    async def test_comparison_rejects_imputed_rewards_before_comparison_work(self, source: str) -> None:
+        server = _server(
+            reward_mode="comparison",
+            reference_deliverables_dir="/tmp/fork-deliverables",
+            name="gdpval_comparison",
+        )
+        options = ["count_failure_classes_as_zero"] if source == "preflight" else []
+        responses = []
+        if source != "preflight":
+            responses.append(
+                {
+                    "_ng_task_index": 0,
+                    "_ng_rollout_index": 0,
+                    "reward": 0.0,
+                    "stage_index": 0,
+                    IMPUTED_REWARD_FIELD: "count_failure_classes_as_zero",
+                }
+            )
+        if source == "earlier_stage":
+            # The base reward stats use the last stage, but the check must cover all stages.
+            responses.append(
+                {
+                    "_ng_task_index": 0,
+                    "_ng_rollout_index": 0,
+                    "reward": 1.0,
+                    "stage_index": 1,
+                    "win": True,
+                    "loss": False,
+                    "tie": False,
+                    "response": {},
+                }
+            )
+        body = AggregateMetricsRequest(verify_responses=responses, imputed_reward_options=options)
+
+        # The check must reject these rows before it loads the comparison code.
+        with patch.dict("sys.modules", {"resources_servers.gdpval.comparison": None}):
+            with pytest.raises(HTTPException) as error:
+                await server.aggregate_metrics(body)
+
+        assert error.value.status_code == 422
+        assert "gdpval_comparison" in error.value.detail
+        assert "count_failure_classes_as_zero" in error.value.detail
+        assert "supports_imputed_zero_rewards" in error.value.detail
+
+    @pytest.mark.asyncio
+    async def test_rubric_accepts_imputed_reward_preflight(self) -> None:
+        server = _server(reward_mode="rubric")
+        body = AggregateMetricsRequest(verify_responses=[], imputed_reward_options=["count_failure_classes_as_zero"])
+
+        result = await server.aggregate_metrics(body)
+
+        assert result.agent_metrics == {}
+        assert result.group_level_metrics == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("imputed", [False, True])
+    async def test_rubric_keeps_zero_rewards_in_the_mean(self, imputed: bool) -> None:
+        server = _server(reward_mode="rubric")
+        zero = {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 0.0}
+        if imputed:
+            zero[IMPUTED_REWARD_FIELD] = "count_failure_classes_as_zero"
+        body = AggregateMetricsRequest(
+            verify_responses=[zero, {"_ng_task_index": 1, "_ng_rollout_index": 0, "reward": 1.0}]
+        )
+
+        result = await server.aggregate_metrics(body)
+
+        assert result.agent_metrics["mean/reward"] == pytest.approx(0.5)
+        assert result.key_metrics["mean/reward"] == pytest.approx(0.5)
+        assert all(IMPUTED_REWARD_FIELD not in name for name in result.agent_metrics)
 
 
 class TestMleElo:

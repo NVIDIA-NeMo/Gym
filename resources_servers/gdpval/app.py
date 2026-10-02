@@ -1395,6 +1395,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 key_metrics={**base.key_metrics, **coverage},
             )
 
+        self.validate_imputed_rewards(body, has_custom_metrics=True)
+
         from resources_servers.gdpval.comparison import (
             calculate_elo,
             calculate_mle_elo,

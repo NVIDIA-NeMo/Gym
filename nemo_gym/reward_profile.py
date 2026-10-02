@@ -21,16 +21,17 @@ import warnings
 from collections import Counter, defaultdict
 from numbers import Real
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import orjson
+from fastapi import HTTPException
 from pandas import DataFrame, Series, notna
 from pandas.core.groupby.generic import DataFrameGroupBy
 from pydantic import Field
 from scipy import stats
 from wandb import Histogram
 
-from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -791,12 +792,49 @@ def highest_k_metrics(
     return {key: agent_metrics[key] for k, key in matches if k == max_k}
 
 
+IMPUTED_REWARD_FIELD = "_ng_imputed_reward"
+
+
 class AggregateMetricsMixin:
     """Mixin providing full-run, per-repeat, and key-metric aggregation hooks.
 
     Inherited by both SimpleResourcesServer and SimpleResponsesAPIAgent so that
     benchmark-specific metric logic can live on either server type.
     """
+
+    supports_imputed_zero_rewards: ClassVar[bool] = False
+
+    def validate_imputed_rewards(self, body: AggregateMetricsRequest, *, has_custom_metrics: bool = False) -> None:
+        """Check that custom metrics support zeros added for failed rollouts.
+
+        Default reward statistics only need the reward and task IDs. Custom metrics
+        must define how to score a row with no verifier results before they opt in.
+        If an aggregate_metrics override computes its own metrics, it must call
+        this method with has_custom_metrics=True before it reads the rows.
+        """
+        options = set(body.imputed_reward_options)
+        options.update(
+            row[IMPUTED_REWARD_FIELD]
+            for row in body.verify_responses
+            if isinstance(row.get(IMPUTED_REWARD_FIELD), str)
+        )
+        if not options or self.supports_imputed_zero_rewards:
+            return
+        has_custom_metrics = has_custom_metrics or any(
+            getattr(getattr(self, name), "__func__", None) is not getattr(AggregateMetricsMixin, name)
+            for name in ("compute_metrics", "compute_repeat_metrics")
+        )
+        if has_custom_metrics:
+            server_name = self.config.name
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{server_name!r} does not support {', '.join(sorted(options))}. "
+                    "These options may add rows with a zero reward but no verifier results. "
+                    "Remove the option, or add and test support in this benchmark before "
+                    "you set supports_imputed_zero_rewards=True."
+                ),
+            )
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Override to compute custom metrics from all verify responses.

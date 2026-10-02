@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
-from aiohttp import ClientError
+from aiohttp import ClientError, ClientResponseError
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
@@ -81,6 +81,7 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.reward_profile import IMPUTED_REWARD_FIELD
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     AgentInvocation,
@@ -1676,7 +1677,9 @@ def _failure_rows_counted_as_zero(
         # This metrics-only copy honors the explicit denominator policy. The original
         # answer, failure diagnostics, and training mask remain untouched in the sidecar.
         scored["mask_sample"] = False
-        scored.setdefault("reward", 0.0)
+        if "reward" not in scored:
+            scored["reward"] = 0.0
+            scored[IMPUTED_REWARD_FIELD] = "count_failure_classes_as_zero"
         counted.append(scored)
     return counted
 
@@ -2217,6 +2220,10 @@ class RolloutCollectionHelper(BaseModel):
 
         persisted_success_keys: set = set()
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
+            if not config.disable_aggregation and config.count_failure_classes_as_zero:
+                await self._validate_imputed_reward_support(
+                    _read_jsonl(config.materialized_jsonl_fpath), config.count_failure_classes_as_zero
+                )
             _drop_truncated_tail(output_fpath)
             if failures_fpath.exists():
                 _drop_truncated_tail(failures_fpath)
@@ -2267,6 +2274,9 @@ class RolloutCollectionHelper(BaseModel):
                     input_rows,
                     environment_server_client.global_config_dict,
                 )
+
+            if not config.disable_aggregation and config.count_failure_classes_as_zero:
+                await self._validate_imputed_reward_support(input_rows, config.count_failure_classes_as_zero)
 
             with config.materialized_jsonl_fpath.open("wb") as f:
                 for row in tqdm(input_rows, desc="Writing materialized rows"):
@@ -2764,6 +2774,35 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         config.check_completion(expected=expected_rollouts, results=persisted_results)
         return results
+
+    async def _validate_imputed_reward_support(self, rows: List[Dict], failure_classes: List[str]) -> None:
+        """Check metric support before rollouts start or merged files are written."""
+        if not failure_classes or not rows:
+            return
+        server_client = self.setup_server_client()
+        servers_by_agent = _environment_servers_by_agent(server_client.global_config_dict)
+        server_names = set()
+        for row in rows:
+            server_name = row.get(NG_ENVIRONMENT_SERVER_KEY)
+            if not isinstance(server_name, str):
+                agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+                server_name = _environment_server_for_agent(agent_name, servers_by_agent)
+            server_names.add(server_name)
+
+        body = AggregateMetricsRequest(verify_responses=[], imputed_reward_options=["count_failure_classes_as_zero"])
+        for server_name in sorted(server_names):
+            try:
+                response = await server_client.post(server_name=server_name, url_path="/aggregate_metrics", json=body)
+                try:
+                    await raise_for_status(response)
+                finally:
+                    response.release()
+            except ClientResponseError as exc:
+                content = getattr(exc, "response_content", b"").decode("utf-8", errors="replace")
+                raise ConfigError(
+                    f"Cannot use count_failure_classes_as_zero={failure_classes!r} with environment server "
+                    f"{server_name!r}. Could not confirm metric support: {content or str(exc)}"
+                ) from exc
 
     async def _call_aggregate_metrics(
         self,
@@ -3476,14 +3515,6 @@ class RolloutAggregationHelper(BaseModel):
         results.sort(key=lambda r: (r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)))
 
         output_fpath = Path(config.output_jsonl_fpath)
-        output_fpath.parent.mkdir(parents=True, exist_ok=True)
-
-        if config.merge_shards:
-            print(f"Merging shards into {output_fpath}")
-            with output_fpath.open("wb") as out:
-                for r in results:
-                    out.write(orjson.dumps(r) + b"\n")
-
         failures_fpaths = [failures_path_for(Path(path)) for path in input_paths]
         scored_keys = {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in results}
         counted = _failure_rows_counted_as_zero(
@@ -3498,6 +3529,15 @@ class RolloutAggregationHelper(BaseModel):
         # AGENT_REF_KEY_NAME; result rows carry both from the run that produced them.
         helper = RolloutCollectionHelper()
         scored = results + counted
+        await helper._validate_imputed_reward_support(scored, config.count_failure_classes_as_zero)
+
+        output_fpath.parent.mkdir(parents=True, exist_ok=True)
+        if config.merge_shards:
+            print(f"Merging shards into {output_fpath}")
+            with output_fpath.open("wb") as out:
+                for r in results:
+                    out.write(orjson.dumps(r) + b"\n")
+
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(scored, scored, output_fpath)
 
         # The shards' own sidecars say which rollouts never made it into the files just scored.

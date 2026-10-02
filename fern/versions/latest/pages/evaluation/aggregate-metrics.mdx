@@ -16,6 +16,33 @@ After rollout collection, NeMo Gym computes **aggregate metrics** for each agent
 5. **Compute variability stats** — when an agent has two or more repeats, eligible numeric per-repeat metrics are summarized across repeats. See [Repeat-Level Metrics](#repeat-level-metrics).
 6. **Write results** — all per-agent metrics are written to `<output>_aggregate_metrics.json`.
 
+## Failed rollouts and custom metrics
+
+`count_failure_classes_as_zero` includes selected failed rollouts in the score. If a
+failure has no reward, Gym uses `reward: 0.0` for the metrics. These rows may lack fields
+that custom metrics need. A custom metric cannot treat a missing field as a real score.
+
+Before a new run, a resumed run, or an offline shard merge, Gym sends each metric endpoint
+an `/aggregate_metrics` request with an empty `verify_responses` list and the selected option.
+If custom `compute_metrics()` or
+`compute_repeat_metrics()` hooks have not declared support, the check fails with an
+error that names the server and option. With `disable_aggregation=True`, Gym skips this
+check during rollout collection. It checks support when you run `gym eval aggregate`.
+
+Default reward statistics support these zeros. To add support to a custom benchmark,
+first define what a failed rollout means for each metric. Test both a mix of successful
+and failed rollouts and a batch where all rollouts failed. Then set
+`supports_imputed_zero_rewards: ClassVar[bool] = True` on the server class.
+
+If an `aggregate_metrics()` override computes its own metrics, it must call
+`self.validate_imputed_rewards(body, has_custom_metrics=True)` before it reads or filters
+the rows. A proxy must pass the whole request to the server that computes the metrics.
+
+Rows with an added zero carry `_ng_imputed_reward`, set to the option name. The endpoint
+also checks this field when it receives a direct aggregation request. The added reward
+and marker stay in the metric input; they are never saved to the rollout file or failure
+sidecar. A failed row that already has a reward keeps its value.
+
 ## Output Format
 
 The output file is a JSON array with one entry per agent:

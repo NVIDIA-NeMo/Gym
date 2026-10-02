@@ -13,9 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import warnings
-from unittest.mock import MagicMock
+from contextlib import ExitStack
+from typing import ClassVar
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError, RequestInfo
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+from yarl import URL
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -31,6 +37,7 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.metrics_config import ACROSS_REPEATS_MARKER
 from nemo_gym.reward_profile import (
+    IMPUTED_REWARD_FIELD,
     RewardProfiler,
     add_avg_sample_std_dev,
     compute_aggregate_metrics,
@@ -46,6 +53,221 @@ from nemo_gym.server_utils import ServerClient
 class _TestResourcesServer(SimpleResourcesServer):
     async def verify(self, body):
         pass
+
+
+class _TestAgentServer(SimpleResponsesAPIAgent):
+    async def responses(self, body=None):
+        pass
+
+    async def run(self, body=None):
+        pass
+
+
+@pytest.fixture(params=[_TestResourcesServer, _TestAgentServer], ids=["resources", "agent"])
+def aggregate_server_base(request):
+    return request.param
+
+
+def _make_aggregation_server(server_class):
+    config_class = (
+        BaseResourcesServerConfig if issubclass(server_class, SimpleResourcesServer) else BaseResponsesAPIAgentConfig
+    )
+    config = config_class(host="127.0.0.1", port=12345, entrypoint="app.py", name="custom_metrics")
+    return server_class(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def _required_field_metric(self, tasks):
+    values = [row["custom_score"] for task in tasks for row in task]
+    return {"custom_score": sum(values) / len(values)}
+
+
+def _default_field_metric(self, tasks):
+    values = [row.get("custom_score", 1.0) for task in tasks for row in task]
+    return {"custom_score": sum(values) / len(values)}
+
+
+class TestImputedRewardCompatibility:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "custom_hook", [_required_field_metric, _default_field_metric], ids=["required", "default"]
+    )
+    async def test_empty_preflight_rejects_custom_metrics(self, aggregate_server_base, custom_hook) -> None:
+        class CustomServer(aggregate_server_base):
+            compute_metrics = custom_hook
+
+        server = _make_aggregation_server(CustomServer)
+        body = AggregateMetricsRequest(verify_responses=[], imputed_reward_options=["count_failure_classes_as_zero"])
+
+        with pytest.raises(HTTPException) as exc_info:
+            await server.aggregate_metrics(body)
+
+        assert exc_info.value.status_code == 422
+        assert server.config.name in exc_info.value.detail
+        assert "count_failure_classes_as_zero" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_empty_preflight_rejects_repeat_only_override(self, aggregate_server_base) -> None:
+        class CustomServer(aggregate_server_base):
+            compute_repeat_metrics = _required_field_metric
+
+        server = _make_aggregation_server(CustomServer)
+        body = AggregateMetricsRequest(verify_responses=[], imputed_reward_options=["count_failure_classes_as_zero"])
+
+        with pytest.raises(HTTPException) as exc_info:
+            await server.aggregate_metrics(body)
+
+        assert exc_info.value.status_code == 422
+        assert server.config.name in exc_info.value.detail
+        assert "count_failure_classes_as_zero" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_marked_rows_reject_custom_metrics_without_request_options(self, aggregate_server_base) -> None:
+        class CustomServer(aggregate_server_base):
+            compute_metrics = _default_field_metric
+
+        server = _make_aggregation_server(CustomServer)
+        rows = _make_verify_responses(1, 1, reward_fn=lambda t, r: 0.0)
+        rows[0][IMPUTED_REWARD_FIELD] = "count_failure_classes_as_zero"
+
+        with pytest.raises(HTTPException) as exc_info:
+            await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+        assert exc_info.value.status_code == 422
+        assert "count_failure_classes_as_zero" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_default_metrics_count_imputed_zeros(self, aggregate_server_base) -> None:
+        server = _make_aggregation_server(aggregate_server_base)
+        options = ["count_failure_classes_as_zero"]
+        empty = await server.aggregate_metrics(
+            AggregateMetricsRequest(verify_responses=[], imputed_reward_options=options)
+        )
+        assert empty.agent_metrics == {}
+
+        rows = _make_verify_responses(1, 2, reward_fn=lambda t, r: float(r == 0))
+        rows[1][IMPUTED_REWARD_FIELD] = options[0]
+        result = await server.aggregate_metrics(
+            AggregateMetricsRequest(verify_responses=rows, imputed_reward_options=options)
+        )
+
+        assert result.agent_metrics["mean/reward"] == pytest.approx(0.5)
+        assert result.group_level_metrics[0]["mean/reward"] == pytest.approx(0.5)
+
+    @pytest.mark.asyncio
+    async def test_explicit_support_scores_complete_and_imputed_rows(self, aggregate_server_base) -> None:
+        class CustomServer(aggregate_server_base):
+            supports_imputed_zero_rewards: ClassVar[bool] = True
+
+            def compute_metrics(self, tasks):
+                values = [
+                    0.0 if row.get(IMPUTED_REWARD_FIELD) else row["custom_score"] for task in tasks for row in task
+                ]
+                return {"custom_score": sum(values) / len(values)}
+
+            def compute_repeat_metrics(self, tasks):
+                return self.compute_metrics(tasks)
+
+        server = _make_aggregation_server(CustomServer)
+        options = ["count_failure_classes_as_zero"]
+        empty = await server.aggregate_metrics(
+            AggregateMetricsRequest(verify_responses=[], imputed_reward_options=options)
+        )
+        assert empty.agent_metrics == {}
+        rows = _make_verify_responses(2, 2)
+        for row, score in zip(rows, [1.0, 0.0, 0.0, 0.5]):
+            row.update(reward=score, custom_score=score)
+        rows[1].pop("custom_score")
+        rows[1][IMPUTED_REWARD_FIELD] = options[0]
+
+        result = await server.aggregate_metrics(
+            AggregateMetricsRequest(verify_responses=rows, imputed_reward_options=options)
+        )
+
+        assert result.agent_metrics["mean/reward"] == pytest.approx(0.375)
+        assert result.agent_metrics["custom_score"] == pytest.approx(0.375)
+        assert [row["custom_score"] for row in result.repeat_level_metrics] == pytest.approx([0.5, 0.25])
+        assert result.agent_metrics["mean_across_repeats/custom_score"] == pytest.approx(0.375)
+
+    @pytest.mark.asyncio
+    async def test_genuine_zero_rewards_still_reach_custom_metrics(self, aggregate_server_base) -> None:
+        class CustomServer(aggregate_server_base):
+            compute_metrics = _required_field_metric
+
+        server = _make_aggregation_server(CustomServer)
+        rows = _make_verify_responses(1, 2, reward_fn=lambda t, r: float(r))
+        rows[0]["custom_score"] = 0.25
+        rows[1]["custom_score"] = 0.75
+
+        result = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+        assert result.agent_metrics["mean/reward"] == pytest.approx(0.5)
+        assert result.agent_metrics["custom_score"] == pytest.approx(0.5)
+
+
+def test_imputed_reward_preflight_error_survives_environment_and_agent_proxies() -> None:
+    from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
+    from resources_servers.asr_with_pc.app import ASRWithPCConfig, ASRWithPCResourcesServer
+    from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
+
+    server_client = MagicMock(spec=ServerClient)
+    common = {"host": "127.0.0.1", "port": 12345, "entrypoint": "app.py"}
+    resources = ASRWithPCResourcesServer(
+        config=ASRWithPCConfig(name="asr_metrics", **common), server_client=server_client
+    )
+    agent = SimpleAgent(
+        config=SimpleAgentConfig(
+            name="simple_agent",
+            resources_server={"type": "resources_servers", "name": "asr_metrics"},
+            model_server={"type": "responses_api_models", "name": "unused_model"},
+            **common,
+        ),
+        server_client=server_client,
+    )
+    environment = LegacyAgentEnvironmentServer(
+        config=LegacyAgentEnvironmentServerConfig(
+            name="environment",
+            agent_server={"type": "responses_api_agents", "name": "simple_agent"},
+            **common,
+        ),
+        server_client=server_client,
+    )
+    calls = []
+    with ExitStack() as stack:
+        clients = {}
+        for server in [resources, agent, environment]:
+            app = server.setup_webserver()
+            server.setup_exception_middleware(app)
+            clients[server.config.name] = stack.enter_context(TestClient(app))
+
+        async def post(*, server_name, url_path, json):
+            calls.append((server_name, json.model_dump()))
+            result = clients[server_name].post(url_path, json=json.model_dump())
+            response = MagicMock()
+            response.ok = result.is_success
+            response.read = AsyncMock(return_value=result.content)
+            response.content.read = AsyncMock(return_value=result.content)
+            if not result.is_success:
+                url = URL(f"http://{server_name}{url_path}")
+                response.raise_for_status.side_effect = ClientResponseError(
+                    request_info=RequestInfo(url=url, method="POST", headers={}, real_url=url),
+                    history=(),
+                    status=result.status_code,
+                    message=result.reason_phrase,
+                )
+            return response
+
+        server_client.post = AsyncMock(side_effect=post)
+        result = clients["environment"].post(
+            "/aggregate_metrics",
+            json={"verify_responses": [], "imputed_reward_options": ["count_failure_classes_as_zero"]},
+        )
+
+    assert result.status_code == 500
+    assert "asr_metrics" in result.text
+    assert "count_failure_classes_as_zero" in result.text
+    assert "does not support" in result.text
+    assert [name for name, _ in calls] == ["simple_agent", "asr_metrics"]
+    assert all(body["imputed_reward_options"] == ["count_failure_classes_as_zero"] for _, body in calls)
 
 
 def _make_server():
