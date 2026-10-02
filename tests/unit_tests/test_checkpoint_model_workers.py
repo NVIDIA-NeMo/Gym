@@ -23,7 +23,7 @@ from nemo_gym._checkpoint.control import (
     RetireRequest,
     install_control_routes,
 )
-from nemo_gym._checkpoint.errors import InvalidPhaseError, StaleAttemptError
+from nemo_gym._checkpoint.errors import ControlError, InvalidPhaseError, StaleAttemptError
 from nemo_gym._checkpoint.model import GenerationCutRecord, PolicyGate, _Ticket
 from nemo_gym._checkpoint.model_workers import PolicyCoordinator, PolicyWorkerLink
 from nemo_gym.episode_types import EpisodeId
@@ -259,3 +259,26 @@ async def test_restore_across_workers_imports_once_and_fences_and_offers_the_cut
     assert closed == [False, False]
     assert [row["model_call_id"] for row in fresh.export_rows("r-a1")] == ["c1"]
     assert offered == [{"r-a1"}, {"r-a1"}]
+
+
+async def test_restore_refuses_workers_that_have_served_calls(tmp_path: Path) -> None:
+    ledger = FileLineageStore(tmp_path / "ledger")
+    await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r", staging_chain=("r/c1",)))
+    async with deployment(ledger=ledger) as (coordinator, _):
+        await coordinator.controller.prepare(CheckpointRequest(**control()))
+        await coordinator.controller.commit(
+            CommitRequest(**control(checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r"}]))
+        )
+
+    fresh = FileLineageStore(tmp_path / "fresh")
+    async with deployment(ledger=fresh) as (coordinator, (first, _)):
+        # A ledger a worker wrote may belong to a live episode, which the import would replace.
+        await first.gate.exit(first.gate.enter("r-a1"))
+        with pytest.raises(ControlError, match="has served calls"):
+            await coordinator.controller.restore(
+                RestoreRequest(
+                    **control("r1", checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r"}])
+                )
+            )
+
+    assert fresh.export_rows("r-a1") == []

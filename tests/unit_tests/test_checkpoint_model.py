@@ -19,7 +19,14 @@ from nemo_gym._checkpoint.control import (
 )
 from nemo_gym._checkpoint.errors import ControlError, StaleAttemptError
 from nemo_gym._checkpoint.generation_cut import GenerationCutInventory, GenerationCutPrefixAck, GenerationCutReceipt
-from nemo_gym._checkpoint.model import PolicyAdmissionMiddleware, PolicyModelParticipant, attach_capture_context
+from nemo_gym._checkpoint.model import (
+    ModelRecord,
+    PolicyAdmissionMiddleware,
+    PolicyModelParticipant,
+    attach_capture_context,
+    import_model_records,
+)
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_rollout_id
 from nemo_gym.token_id_capture.lineage import FileLineageStore
 from nemo_gym.token_id_capture.records import ParentResolutionStatus
@@ -177,16 +184,17 @@ async def test_model_commit_requires_the_continued_episodes(tmp_path: Path) -> N
         await controller.commit(_commit_request("c1", tmp_path / "ckpt"))
 
 
-async def test_restore_refuses_to_merge_into_a_foreign_ledger(tmp_path: Path) -> None:
+async def test_restore_refuses_a_model_server_that_has_served_calls(tmp_path: Path) -> None:
     ledger, _, controller = await _ledger_participant(tmp_path / "before")
     await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r"))
     await ledger.record(_commit(_call_record("c9"), [USER_3], [ASSISTANT_1], rollout_id="s"))
     await controller.prepare(CheckpointRequest(**control()))
     await controller.commit(_commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}, {"rollout_id": "s"}]))
 
-    restored_ledger, _, restored_controller = await _ledger_participant(tmp_path / "after")
-    await restored_ledger.record(_commit(_call_record("other"), [USER_2], [ASSISTANT_2], rollout_id="s-a1"))
-    with pytest.raises(ControlError, match="s-a1"):
+    # A ledger this process wrote may belong to a live episode, which the import would replace.
+    restored_ledger, restored, restored_controller = await _ledger_participant(tmp_path / "after")
+    await restored.gate.exit(restored.gate.enter("s-a1"))
+    with pytest.raises(ControlError, match="has served calls"):
         await restored_controller.restore(
             _restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}, {"rollout_id": "s"}])
         )
@@ -499,7 +507,9 @@ async def test_ledger_export_and_import_run_off_the_event_loop(tmp_path: Path) -
     assert target.rows["r-a1"] == [{"model_call_id": "c1", "staging_key": "r/c1"}]
 
 
-def test_a_batched_ledger_import_syncs_the_directory_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_batched_ledger_import_syncs_the_directory_per_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import nemo_gym.token_id_capture.lineage as lineage
 
     ledger = FileLineageStore(tmp_path / "ledger")
@@ -512,14 +522,57 @@ def test_a_batched_ledger_import_syncs_the_directory_once(tmp_path: Path, monkey
         return real_open(path, flags, *args)
 
     monkeypatch.setattr(lineage.os, "open", counting_open)
+    ledger.import_rows_many({"single-a1": [{"model_call_id": "c"}]})
+    per_batch = len(directory_opens)
     rows = {f"r{index}-a1": [{"model_call_id": f"c{index}"}] for index in range(20)}
     ledger.import_rows_many(rows)
-    ledger.import_rows_many(rows)
 
-    assert len(directory_opens) == 1
+    assert len(directory_opens) == 2 * per_batch
     assert ledger.export_rows("r7-a1") == [{"model_call_id": "c7"}]
-    with pytest.raises(ValueError, match="different rows"):
-        ledger.import_rows_many({"r7-a1": [{"model_call_id": "other"}]})
+
+
+def test_restoring_a_checkpoint_again_after_its_replacement_made_a_call_continues_from_the_checkpoint(
+    tmp_path: Path,
+) -> None:
+    row = {"model_call_id": "c0", "staging_key": "roll-1/c0"}
+    record = ModelRecord(episode_id=EpisodeId.from_capture_key("roll-1"), rows=[row])
+    import_model_records(FileLineageStore(tmp_path), [record])
+    # The replacement attempt commits a call, then Gym crashes before the next checkpoint.
+    with (tmp_path / "roll-1-a1.lineage.jsonl").open("a") as handle:
+        handle.write('{"model_call_id":"c1","staging_key":"roll-1-a1/c1"}\n')
+
+    import_model_records(FileLineageStore(tmp_path), [record])
+
+    assert FileLineageStore(tmp_path).export_rows("roll-1-a1") == [row]
+
+
+async def test_a_ledger_import_deletes_dead_executions_and_fences_of_the_target_and_later_attempts(
+    tmp_path: Path,
+) -> None:
+    ledger = FileLineageStore(tmp_path)
+    ledger.import_rows_many(
+        {
+            "r-a1": [{"model_call_id": "dead"}],
+            "r-a2": [{"model_call_id": "dead-later"}],
+            "r1-a2": [{"model_call_id": "other-rollout"}],
+            "r-a1x-a3": [{"model_call_id": "look-alike"}],
+        }
+    )
+    (tmp_path / "r-a2.tokens.jsonl").write_text("{}\n")
+    (tmp_path / "r-a2.tokens.incomplete").write_text("x\n")
+    # The trainer finished or abandoned the dead execution's attempts 1 and 3 and retired them, leaving fences.
+    await ledger.retire(["r-a1", "r-a3"])
+    # A restored attempt 1 owns the rollout from here on: attempt 2 of the dead execution must not survive.
+    fresh = FileLineageStore(tmp_path)
+    fresh.import_rows_many({"r-a1": [{"model_call_id": "checkpointed"}]})
+
+    assert fresh.export_rows("r-a1") == [{"model_call_id": "checkpointed"}]
+    assert fresh.export_rows("r-a2") == []
+    assert not (tmp_path / "r-a2.tokens.jsonl").exists() and not (tmp_path / "r-a2.tokens.incomplete").exists()
+    # A fence left in place would silently discard the restored episode's rows when it reaches that attempt.
+    assert not (tmp_path / "r-a1.lineage.retired").exists() and not (tmp_path / "r-a3.lineage.retired").exists()
+    assert fresh.export_rows("r1-a2") == [{"model_call_id": "other-rollout"}]
+    assert fresh.export_rows("r-a1x-a3") == [{"model_call_id": "look-alike"}]
 
 
 async def test_readiness_stays_cheap_while_many_cut_calls_are_held(
