@@ -3,6 +3,7 @@
 
 import json
 import sqlite3
+from functools import partial
 
 import pytest
 
@@ -12,10 +13,12 @@ from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.rollout_observability import AgentInvocation, TrajectoryRecord, join_model_call_observations
 from responses_api_agents.opencode_agent.app import _parse_opencode_session
 from responses_api_agents.opencode_agent.tests.test_app import _session_db
-from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
 
 
-@pytest.fixture(params=[_parse_opencode_session, parse_opencode_observations], ids=["local", "sandboxed"])
+@pytest.fixture(
+    params=[_parse_opencode_session, partial(_parse_opencode_session, require_terminal_finish=True)],
+    ids=["local", "native"],
+)
 def parse(request):
     return request.param
 

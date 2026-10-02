@@ -4,9 +4,43 @@
 
 ## Profiles
 
-- `terminal_bench_4/miniswe`: mini-SWE **2.4.6** `DefaultAgent`, with upstream
-  `mini.yaml` prompts, native bash tool calls through Gym's Responses model
-  adapter, and task-local MCP CLI.
+- `terminal_bench_4/episode` runs the native EnvironmentServer lifecycle, with
+  mini-SWE as its default. The existing standalone-agent composition can select
+  Hermes or OpenCode without another benchmark-specific profile.
+- `terminal_bench_4/miniswe` retains the legacy Resources/agent exchange.
+
+```sh
+gym env start --config benchmarks/terminal_bench_4/episode.yaml \
+  --agent hermes_agent --model-type openai_model
+
+gym env start --config benchmarks/terminal_bench_4/episode.yaml \
+  --config responses_api_agents/opencode_agent/configs/opencode_native_agent.yaml \
+  --model-type openai_model
+```
+
+The episode profile uses the merged `single_agent_turn_legacy` flat-row adapter,
+which calls the native `single_agent_turn` lifecycle. The native HTTP endpoint
+also accepts materialized `nemo_gym.single_agent_turn.v1` tasks. TB4 Resources owns
+pinned instructions, provisioning, grading, expiry, and destruction. Agents borrow
+a named provider/descriptor and own their runtime installation and process cleanup.
+Optional `AgentTaskContext` carries task user, deadline, skills, and sandbox-local
+MCP connections; CPU/GPU tasks receive the matching borrower provider reference.
+
+To reproduce a bounded integration check against a public hosted model:
+
+```sh
+python -m benchmarks.terminal_bench_4.swapping_smoke --pair tb4-miniswe \
+  --task interleaved-vigenere --steps 6 --agent-timeout 900 \
+  --env-file /path/to/private.env --host GYM_HOST_REACHABLE_FROM_SANDBOX \
+  --split-endpoints --output results/tb4-miniswe-cpu
+```
+
+Use `tb4-hermes` or `tb4-opencode` for the other harnesses. Representative GPU and
+Compose tasks are `fp8-rmsnorm-gemm` and `kv-live-surgery`. The smoke saves request,
+episode, resource artifacts, and model captures. A capped rollout can score zero;
+success requires a nonfailed agent response and completed official verification.
+The private env file supplies OpenSandbox endpoint/key variables and `OPENAI_API_KEY`.
+No task package or grader is edited.
 
 ## Artificial Analysis comparison
 
@@ -20,10 +54,9 @@ The following choices remain intentional differences:
 - **Repeats:** keep `num_repeats: 1` in this profile. Clients must explicitly set
   `++num_repeats=3` to reproduce AA's repetition protocol and average pass@1 over
   all three attempts, rather than reporting pass@3.
-- **Observations:** retain full command output, without the upstream template's
-  first/last 5,000-character truncation. It is unclear whether AA intended that
-  truncation or was unaware of the upstream behavior. No history compaction or
-  summarization is applied.
+- **Observations:** the native mini-SWE CLI uses the pinned package's first/last
+  5,000-character observation bounds and retains raw output in its trajectory.
+  No history compaction or summarization is applied.
 - **Verifier timeouts:** preserve the current behavior until we understand how
   often these occur on real workloads. Timeouts remain incomplete evaluations
   classified as infrastructure failures and excluded from default aggregates,
@@ -82,11 +115,11 @@ gym eval run --benchmark terminal_bench_4/miniswe \
   ++use_absolute_ip=true ++tb4_split_sandbox_endpoints=true
 ```
 
-mini-SWE's loop runs in the resources process, using its existing sandbox and
-calling the Gym model server. The agent endpoint forwards the collector's run
-request and returns the result; it does not manage task environments.
-MCP tasks also need Python venv/pip
-for its pinned task-local `mcp==1.29.0` client.
+mini-SWE's CLI and tool loop run inside the task sandbox and call the Gym model
+server directly. The legacy agent `/run` coordinates Resources seed and verify;
+the episode profile delegates that coordination to EnvironmentServer. Resources
+owns task environments. Bootstrap installs an isolated Python runtime and the
+pinned task-local `mcp==1.29.0` client when the task declares MCP services.
 
 Select tasks during preparation:
 

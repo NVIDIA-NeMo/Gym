@@ -12,7 +12,7 @@ import pytest
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
-from responses_api_agents.miniswe_sandboxed_agent import bootstrap
+from nemo_gym.sandbox import python_bootstrap as bootstrap
 from responses_api_agents.miniswe_sandboxed_agent import harness as module
 from responses_api_agents.miniswe_sandboxed_agent.tests.conftest import ProcessSandbox
 

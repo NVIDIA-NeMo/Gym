@@ -87,14 +87,47 @@ hermes_agent:
 | `sandbox_config` | `{}` | `SandboxSpec` fields used with `sandbox_provider`; ignored when Resources supplies a sandbox |
 | `sandbox_runner_timeout_seconds` | `21600` | bounds one sandbox activation; the episode deadline still applies |
 | `system_prompt` | `null` | passed as `system_message` to `run_conversation`; falls back to any system item in `body.input` |
+| `session_close_retry_window_seconds` | `300` | native-session close receipt retention from successful cleanup; retries do not extend expiry |
 
 The model-server url is resolved at request time and passed to `AIAgent(base_url=..., api_key="gym")`. <!-- pragma: allowlist secret -->
+
+Native EnvironmentServer sessions run Hermes inside a sandbox. They borrow the Resources-owned
+task sandbox when supplied, or create an agent-owned sandbox from `sandbox_provider` and
+`sandbox_config`. SWE-bench Pro uses the borrowed path. Use one agent-server worker and a Linux
+sandbox with exec support; the benchmark recipe enables `[terminal]`.
+Each session runs once and must confirm process cleanup before verification. Close receipts are
+process-local; configure the retry window to cover response timeouts and backoff. Other sessions
+cannot evict receipts early, and expired sessions return 409 without falling back to the host.
+Native requests support text input and instructions; output limits apply per model call, and
+unsupported settings return 422. Response usage is still zero pending aggregation support.
+The iteration-limit summary uses the regular model-request formatter and settings, preserving
+reasoning and tool history while keeping internal Responses IDs out of Chat Completions.
+Summary request failures propagate as activation failures with partial observations.
+
+
+For native TB4 collection, compose the generic
+[episode profile](../../benchmarks/terminal_bench_4/episode.yaml) with this agent:
+
+```bash
+gym env start --config benchmarks/terminal_bench_4/episode.yaml \
+  --agent hermes_agent --config model-provider.yaml
+```
+
+The existing SWE-bench Pro `hermes.yaml` profile retains its upstream behavior.
+Use the same composition when starting servers and collecting.
+
+EnvironmentServer assigns session IDs before seeding and sends cleanup after a lost
+seed response. Identical retries share a session; mismatched requests and closed IDs
+are rejected. Abandoned sessions expire after `session_lifetime_seconds` (default 21600);
+failed cleanup retains its handle for a retry. Close receipts expire separately from
+closed-ID tombstones, which remain for at least the lifetime/retry horizon.
+
 
 ## Sandbox-mode requirements
 
 Sandbox sessions live in the memory of the worker that seeded them, so seeding a session requires `num_workers: 1`. Calling the agent's `/run` directly keeps no session and still supports several workers.
 
-Each sandbox session installs the Hermes version pinned in `requirements.txt`, the same one this server runs, at seed time unless it already imports from `/tmp/nemo-gym-hermes-runtime-<commit>/venv`, for example because the image bakes it in or an earlier session in the same sandbox installed it. Installing needs outbound access to GitHub and the Python package index. Hermes calls the Model Server directly from the sandbox, so the sandbox must also reach the Model Server at its configured host and port. Its image must also match the host CPU architecture and C library because the host's `uv` executable is copied into the sandbox.
+Each sandbox session installs the Hermes version pinned in `requirements.txt`, the same one this server runs, at seed time unless it already imports from `/tmp/nemo-gym-hermes-runtime-<commit>/venv`, for example because the image bakes it in or an earlier session in the same sandbox installed it. Installing needs outbound access to GitHub and the Python package index. Hermes calls the Model Server directly from the sandbox, so the sandbox must also reach the Model Server at its configured host and port. Bootstrap probes the sandbox's architecture and libc, then uploads matching pinned uv and Python archives. The task image needs bash, uname, and tar; its architecture can differ from the agent server's. Session HOME and caches stay inside the adapter directory. Optional resource task context supplies the execution user, deadline, skills, and sandbox-local MCP connections.
 
 Sessions use MCP tool grants and reject other required grants. Each granted MCP server is added to that session's Hermes configuration, so the sandbox must reach it at the granted URL, usually the Resources Server's `/mcp` endpoint. An activation fails before its first model call when a required server does not connect. Hermes names MCP tools `mcp_<server>_<tool>`; the response reports them as `mcp__<server>__<tool>`, the form Gym strips before verification, while captured model calls keep Hermes' names. The session token in each grant is readable inside the sandbox and gives access only to that episode's tools.
 

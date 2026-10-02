@@ -94,7 +94,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
 
     def _owner(self, request):
         return hashlib.sha256(
-            request.session.get("tb4_client_session_id", request.session[SESSION_ID_KEY]).encode()
+            (request.session.get("tb4_client_session_id") or request.session[SESSION_ID_KEY]).encode()
         ).hexdigest()
 
     def _state_path(self, identity):

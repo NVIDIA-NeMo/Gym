@@ -3,11 +3,16 @@
 
 import asyncio
 import json
+import os
+import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import openai
@@ -17,6 +22,7 @@ from run_agent import AIAgent
 from tools.mcp_tool import shutdown_mcp_servers
 
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
+from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherResourcesServer,
@@ -49,7 +55,7 @@ class _ModelServer:
                 server.requests.append(body)
                 answer = server.answers[min(len(server.requests), len(server.answers)) - 1]
                 payload = json.dumps(answer).encode()
-                self.send_response(200)
+                self.send_response(answer.get("_status", 200))
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -212,9 +218,11 @@ def test_required_mcp_server_that_does_not_connect_fails_before_the_model(tmp_pa
     assert model_server.requests == []
 
 
-def test_iteration_limit_summary_reaches_the_model_server(tmp_path, restore_process_globals) -> None:
+@pytest.mark.parametrize("template_enabled", [False, True])
+def test_iteration_limit_summary_reaches_the_model_server(tmp_path, restore_process_globals, template_enabled) -> None:
     tool_call = {
         "content": None,
+        "reasoning_content": "Inspect the task before answering.",
         "tool_calls": [
             {
                 "id": "call-1",
@@ -227,13 +235,53 @@ def test_iteration_limit_summary_reaches_the_model_server(tmp_path, restore_proc
 
     with _ModelServer(answers) as model_server:
         output = _run(
-            _payload(model_server.base_url),
+            _payload(model_server.base_url, chat_template_kwargs_enabled=template_enabled),
             tmp_path,
         )
 
     assert len(model_server.requests) == 2
     assert all(not request.get("stream") for request in model_server.requests)
+    first, summary = [
+        NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(request) for request in model_server.requests
+    ]
+    assert summary.max_tokens == first.max_tokens == 128
+    assert summary.temperature == first.temperature == 0.0
+    assert not summary.tools
+    assistant = next(message for message in model_server.requests[1]["messages"] if message["role"] == "assistant")
+    assert assistant["reasoning_content"] == "Inspect the task before answering."
+    assert assistant["tool_calls"][0]["id"] == "call-1"
+    assert any(message.get("tool_call_id") == "call-1" for message in model_server.requests[1]["messages"])
+    stored = next(message for message in output["result"]["messages"] if message.get("tool_calls"))
+    assert stored["tool_calls"][0]["call_id"] == "call-1"
+    assert stored["tool_calls"][0]["response_item_id"]
+    if template_enabled:
+        assert json.loads(first.metadata["chat_template_kwargs"]) == {
+            "enable_thinking": True,
+            "truncate_history_thinking": False,
+        }
+        assert summary.metadata == first.metadata
     assert output["result"]["final_response"] == "summary of the work"
+
+
+def test_summary_model_error_keeps_tool_observations_and_fails_activation(tmp_path, restore_process_globals) -> None:
+    tool_call = {
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "terminal", "arguments": json.dumps({"command": "echo hi"})},
+            }
+        ],
+    }
+    answers = [_completion(tool_call), {"_status": 422, "error": {"message": "summary rejected"}}]
+    with _ModelServer(answers) as model_server:
+        with pytest.raises(openai.UnprocessableEntityError) as caught:
+            _run(_payload(model_server.base_url), tmp_path)
+    assert len(model_server.requests) == 2
+    observations = caught.value._sandbox_observations
+    assert observations["invocations"][0]["status"] == "failed"
+    assert observations["tools"][0]["status"] == "completed"
 
 
 def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globals) -> None:
@@ -252,3 +300,58 @@ def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globa
     # Delegated children are AIAgents Hermes constructs itself; the Model Server rejects streaming.
     child = AIAgent(base_url=model_server.base_url, api_key="gym", model="m", quiet_mode=True)
     assert child.use_streaming is False
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper and /proc are required")
+@pytest.mark.parametrize("ending", ["normal", "cancel"])
+def test_supervisor_reaps_detached_tools_before_acknowledging_close(tmp_path, ending):
+    worker = (
+        "import subprocess,sys,pathlib,time,signal; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
+        "pathlib.Path('child.pid').write_text(str(p.pid)); " + ("time.sleep(60)" if ending == "cancel" else "pass")
+    )
+    root = str(Path(__file__).resolve().parents[3])
+    supervisor = (
+        "import sys,json,pathlib; "
+        f"sys.path.insert(0, {root!r}); "
+        "import responses_api_agents; "
+        f"responses_api_agents.__path__ = [{str(Path(root) / 'responses_api_agents')!r}]; "
+        "from responses_api_agents.hermes_agent.sandbox_runner import _supervise; "
+        "receipt=_supervise(json.loads(sys.argv[1]),cleanup_timeout=2); "
+        "pathlib.Path('cleanup.json').write_text(json.dumps(receipt))"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", supervisor, json.dumps([sys.executable, "-c", worker])],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        if ending == "cancel":
+            for _ in range(500):
+                if (tmp_path / "child.pid").exists():
+                    break
+                if process.poll() is not None:
+                    break
+                time.sleep(0.01)
+            assert (tmp_path / "child.pid").exists()
+            process.send_signal(signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=15)
+        assert process.returncode == 0, (stdout, stderr)
+        receipt = json.loads((tmp_path / "cleanup.json").read_text())
+        assert receipt == {"cleanup_confirmed": True, "error": None}
+        pid = int((tmp_path / "child.pid").read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        # A failing regression must not leave the test's detached child running.
+        if (tmp_path / "child.pid").exists():
+            try:
+                os.kill(int((tmp_path / "child.pid").read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
