@@ -14,11 +14,15 @@
 import asyncio
 import base64
 import dataclasses
+import functools
 import hashlib
+import importlib.util
 import json
 import re
 import shlex
 import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -155,6 +159,8 @@ def _should_mask_sample(
 def _dataset_family(dataset_name: str) -> str:
     if "R2E-Gym" in dataset_name:
         return "r2e"
+    if "SWE-rebench" in dataset_name:
+        return "rebench"
     if "SWE-bench_Multilingual" in dataset_name:
         return "swebench_multilingual"
     return "swebench"
@@ -167,6 +173,66 @@ def _as_list(value: Any) -> list[str]:
         except json.JSONDecodeError:
             return [value] if value else []
     return list(value or [])
+
+
+def _repo_dir(problem_info: Dict[str, Any]) -> str:
+    # SWE-rebench images keep the repo at /<repo name>.
+    if _dataset_family(problem_info.get("dataset_name", "")) != "rebench":
+        return "/testbed"
+    instance = problem_info.get("instance_dict", {})
+    instance = json.loads(instance) if isinstance(instance, str) else instance
+    return "/" + (instance.get("repo") or problem_info["repo"]).split("/")[-1]
+
+
+_REBENCH_REPO = "https://github.com/SWE-rebench/SWE-rebench-V2.git"
+_REBENCH_COMMIT = "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"
+# Same timing-suffix normalization as SWE-rebench-V2 scripts/eval.py.
+_REBENCH_TIMING_RES = (
+    re.compile(r"\s*\[\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\]\s*$", re.IGNORECASE),
+    re.compile(r"\s+in\s+\d+(?:\.\d+)?\s+(?:msec|sec)\b", re.IGNORECASE),
+    re.compile(r"\s*\(\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\)\s*$", re.IGNORECASE),
+)
+
+
+@functools.cache
+def _rebench_log_parsers() -> Any:
+    root = Path(__file__).parent / "swe_rebench_setup" / _REBENCH_COMMIT[:12]
+    parsers = root / "lib" / "agent" / "log_parsers.py"
+    if not parsers.exists():
+        root.parent.mkdir(parents=True, exist_ok=True)
+        clone = root.with_name(f"{root.name}.{uuid.uuid4().hex[:8]}")
+        subprocess.run(["git", "clone", "-q", _REBENCH_REPO, str(clone)], check=True)
+        subprocess.run(["git", "checkout", "-q", _REBENCH_COMMIT], cwd=clone, check=True)
+        try:
+            clone.rename(root)
+        except OSError:
+            # Another worker finished the clone first.
+            shutil.rmtree(clone, ignore_errors=True)
+    # log_parsers.py imports lib.agent.swe_constants.
+    sys.path.insert(0, str(root))
+    try:
+        spec = importlib.util.spec_from_file_location("_rebench_log_parsers", parsers)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(str(root))
+
+
+def _rebench_test_name(name: str) -> str:
+    for pattern in _REBENCH_TIMING_RES:
+        name = pattern.sub("", name)
+    return name.strip()
+
+
+def _rebench_resolved(instance: Dict[str, Any], log: str) -> bool:
+    parsers = _rebench_log_parsers()
+    name = instance["install_config"]["log_parser"]
+    parser = parsers.NAME_TO_PARSER.get(name) or getattr(parsers, name)
+    passed = {_rebench_test_name(test) for test, status in parser(log).items() if status == "PASSED"}
+    required = {_rebench_test_name(test) for test in _as_list(instance.get("FAIL_TO_PASS"))}
+    required |= {_rebench_test_name(test) for test in _as_list(instance.get("PASS_TO_PASS"))}
+    return bool(required) and required <= passed
 
 
 def _r2e_resolved(instance: Dict[str, Any], log: str) -> bool:
@@ -410,7 +476,12 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         sif_formatters = [formatter for formatter in formatters if formatter.endswith(".sif")]
         if sif_formatters:
             return cls._sandbox_sif(problem_info, sif_formatters)
-        explicit_image = problem_info.get("image") or instance.get("image") or instance.get("docker_image")
+        explicit_image = (
+            problem_info.get("image")
+            or instance.get("image")
+            or instance.get("image_name")
+            or instance.get("docker_image")
+        )
         if explicit_image:
             return str(explicit_image).removeprefix("docker://")
         if not formatters:
@@ -436,13 +507,25 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             "nemo_gym_agent": "anyswe_agent",
             "instance_id": params.instance_id[:63],
         }
+        env = config.pop("env", {})
+        files = files or {}
+        if _dataset_family(params.problem_info.get("dataset_name", "")) == "rebench":
+            # The images prefer IPv6, which the sandboxes lack, so maven/lein downloads fail (as in scripts/eval.py).
+            env = {"_JAVA_OPTIONS": "-Djava.net.preferIPv6Addresses=false", **env}
+            # Maven Central answers the shared sandbox egress with HTTP 429; swe_agents' mirror config avoids it.
+            mirror = PARENT_DIR / "responses_api_agents" / "swe_agents" / "maven_mirror"
+            files = {
+                "/root/.m2/settings.xml": (mirror / "settings.xml").read_text(),
+                "/root/.gradle/init.d/maven_central_mirror.gradle": (mirror / "init.gradle").read_text(),
+                **files,
+            }
         return SandboxSpec(
             image=params.container,
             ttl_s=config.pop("ttl_s", params.swebench_agent_timeout + params.swebench_tests_timeout + 600),
             ready_timeout_s=config.pop("ready_timeout_s", 1200),
-            workdir=config.pop("workdir", "/testbed"),
-            env=config.pop("env", {}),
-            files=files or {},
+            workdir=config.pop("workdir", _repo_dir(params.problem_info)),
+            env=env,
+            files=files,
             metadata=metadata,
             resources=SandboxResources.from_mapping(config.pop("resources", {})),
             entrypoint=config.pop("entrypoint", None),
@@ -494,8 +577,11 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         return staged
 
     async def _grade_sandbox_patch(self, params: AnySweInstanceConfig, patch: bytes) -> tuple[bool, Optional[str]]:
-        if _dataset_family(params.problem_info.get("dataset_name", "")) == "r2e":
+        family = _dataset_family(params.problem_info.get("dataset_name", ""))
+        if family == "r2e":
             return await self._grade_r2e_patch(params, patch)
+        if family == "rebench":
+            return await self._grade_rebench_patch(params, patch)
 
         from swebench.harness.grading import get_eval_report
         from swebench.harness.test_spec.test_spec import make_test_spec
@@ -567,6 +653,56 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         log = "\n".join(part for part in (result.stdout, result.stderr) if part)
         return _r2e_resolved(instance, log), None
 
+    async def _grade_rebench_patch(self, params: AnySweInstanceConfig, patch: bytes) -> tuple[bool, Optional[str]]:
+        instance = self._instance_dict(params)
+        test_cmds = instance["install_config"]["test_cmd"]
+        test_cmds = [test_cmds] if isinstance(test_cmds, str) else list(test_cmds)
+        test_files = sorted(set(re.findall(r"^diff --git a/\S+ b/(\S+)$", instance["test_patch"], re.MULTILINE)))
+        repo = _repo_dir(params.problem_info)
+        # SWE-rebench-V2 scripts/eval.py, which produced FAIL_TO_PASS/PASS_TO_PASS, plus resetting the
+        # test files first so a patch that edits them cannot block the test patch.
+        script = "\n".join(
+            [
+                "exec >/tmp/anyswe_test.log 2>&1",
+                "set -e",
+                f"cd {repo}",
+                "git reset --hard HEAD",
+                "git apply -v --3way --recount --ignore-space-change --whitespace=nowarn /root/patch.diff",
+                "for f in " + " ".join(shlex.quote(f) for f in test_files) + "; do "
+                'git checkout HEAD -- "$f" 2>/dev/null || rm -f "$f"; done',
+                "git apply -v --3way --recount --ignore-space-change --whitespace=nowarn /root/test_patch.diff",
+                *test_cmds,
+            ]
+        )
+        spec = self._sandbox_spec(
+            params,
+            files={
+                "/root/test_patch.diff": instance["test_patch"],
+                "/tmp/anyswe_eval.sh": script + "\n",
+            },
+        )
+        log_path = params.persistent_dir / "eval_test.log"
+        sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
+        try:
+            await sandbox.start()
+            await sandbox.upload(self._stage_patch(params, patch), "/root/patch.diff")
+            result = await sandbox.exec(
+                "bash /tmp/anyswe_eval.sh",
+                cwd=repo,
+                timeout_s=params.swebench_tests_timeout,
+                user="root",
+            )
+            if result.error_type not in ("timeout", "sandbox"):
+                await sandbox.download("/tmp/anyswe_test.log", log_path)
+        finally:
+            await sandbox.stop()
+
+        if result.error_type in ("timeout", "sandbox"):
+            return False, "eval_timeout" if result.error_type == "timeout" else "sandbox"
+
+        log = log_path.read_text(errors="replace")
+        return await asyncio.to_thread(_rebench_resolved, instance, log), None
+
     async def _run_agent_in_sandbox(self, params: AnySweInstanceConfig) -> NeMoGymResponse:
         files = {
             "/trajectories_mount/instruction.txt": (params.persistent_dir / "instruction.txt").read_text(),
@@ -631,6 +767,10 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                     timeout_s=30,
                     user="root",
                 )
+            repo_dir = _repo_dir(params.problem_info)
+            if repo_dir != "/testbed":
+                # Harness configs and prompts point at /testbed.
+                await sandbox.exec(f"[ -e /testbed ] || ln -s {repo_dir} /testbed", timeout_s=30, user="root")
             runtime_dir = "/sandbox/agent_deps_runtime" if external_runtime else "/agent_deps_mount"
             agent_env = self._sandbox_agent_env(params)
             agent_env["NGSWE_AGENT_DEPS_DIR"] = runtime_dir

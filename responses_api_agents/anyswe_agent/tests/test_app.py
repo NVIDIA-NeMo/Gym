@@ -162,6 +162,7 @@ class TestSandboxAPI:
             swebench_tests_timeout=200,
             instance_id="astropy__astropy-12907",
             container="image:tag",
+            problem_info={},
         )
         spec = AnySweAgent._sandbox_spec(params, files={"/tmp/input": "data"})
         assert spec.image == "image:tag"

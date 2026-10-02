@@ -1,3 +1,4 @@
 anyswe_results_*
 anyswe_*_deps
 .anyswe_*_deps.tar.gz
+swe_rebench_setup/

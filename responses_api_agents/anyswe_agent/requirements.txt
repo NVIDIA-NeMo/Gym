@@ -1,2 +1,3 @@
 -e nemo-gym[dev,sandbox] @ ../../
-swebench==4.1.0
+# Fork that swe_agents grades with; upstream swebench lacks the SWE-Gym repo specs (moto, mypy, dask, ...).
+swebench @ git+https://github.com/HeyyyyyyG/SWE-bench.git@d546b5e4be7e5fd5eaec6ee67b7588d85306a422

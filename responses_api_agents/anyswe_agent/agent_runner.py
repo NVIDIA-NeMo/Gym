@@ -66,20 +66,18 @@ def _agent_bin_dir(deps_dir: str, agent_module: str) -> str:
     return str(shim)
 
 
-_TESTBED_VENV_BIN = "/testbed/.venv/bin"
+# R2E keeps the repo's python in /testbed/.venv, SWE-Gym/SWE-bench in the conda testbed env.
+_TESTBED_VENV_BINS = ("/testbed/.venv/bin", "/opt/miniconda3/envs/testbed/bin")
 
 
-def _agent_path(agent_bin_dir: str, inherited_path: str, testbed_venv_bin: str = _TESTBED_VENV_BIN) -> str:
+def _agent_path(agent_bin_dir: str, inherited_path: str, testbed_venv_bins: tuple[str, ...] = _TESTBED_VENV_BINS) -> str:
     """PATH for the coding agent: the harness executable, then the task's own virtualenv, then the image PATH.
 
     Task images that ship ``/testbed/.venv`` expect ``python``, ``pip`` and ``pytest`` to come from it. Without
     it first, the agent falls through to whatever the image's PATH resolves, which is often a different
     interpreter than the one the task's tests run under.
     """
-    parts = [agent_bin_dir]
-    if Path(testbed_venv_bin).is_dir():
-        parts.append(testbed_venv_bin)
-    parts.append(inherited_path)
+    parts = [agent_bin_dir, *(path for path in testbed_venv_bins if Path(path).is_dir()), inherited_path]
     return ":".join(part for part in parts if part)
 
 
