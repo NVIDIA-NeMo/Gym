@@ -88,6 +88,7 @@ def _extract_text(outputs):
 
 
 class ParallelThinkingAgent(LangGraphAgentAdapter):
+    ray_enabled = False
     config: ParallelThinkingAgentConfig
 
     async def _call_model(self, state, prompt):
