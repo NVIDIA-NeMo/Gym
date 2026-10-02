@@ -191,7 +191,13 @@ class MCPServerMetadata(BaseModel):
 
 
 class ResourcesSeedSessionRequest(BaseModel):
-    """Idempotently initialize resources state under a caller-assigned identifier."""
+    """Idempotently initialize resources state under a caller-assigned identifier.
+
+    Repeating the same identifier and episode must return the existing session.
+    Closing an unknown identifier must prevent a racing seed from creating it later.
+    External resources should use provider TTLs when available. Current process-local
+    session records may remain until the server shuts down.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -380,6 +386,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         Served at ``/close_session``. Servers that keep per-rollout state override this method, and may accept
         other close bodies by overriding it with a different signature. The name differs from the
         ``close_session`` helpers some servers already define for their own state.
+
+        An override must:
+
+        - succeed when the session is already closed or was never seeded;
+        - keep a seed that arrives after the close from creating the session again;
+        - raise when releasing fails rather than recording the session as closed, so the caller can retry.
+
+        The default seed does not tie the session cookie to ``resources_session_id``. A server that keys state
+        by the cookie's ``SESSION_ID_KEY`` releases it by that key, from ``request.session``, or sets
+        ``request.session[SESSION_ID_KEY] = body.resources_session_id`` in its own seed.
         """
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 

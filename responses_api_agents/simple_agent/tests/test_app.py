@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, call
 
 import orjson
@@ -21,6 +22,9 @@ from fastapi import Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym._checkpoint.agent import AgentSessionParticipant, AgentSessionRecord
+from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -39,6 +43,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
@@ -221,6 +226,198 @@ class TestApp:
         )
         assert prefixed_response.status_code == 200
         assert prefixed_response.json()["_ng_trajectory"]["rollout_id"] == "0-0"
+
+    @pytest.mark.parametrize("observability_enabled", [False, True])
+    async def test_native_session_uses_seeded_direct_http_tool_access(
+        self, monkeypatch: MonkeyPatch, observability_enabled: bool
+    ) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="simple",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {"observability_enabled": observability_enabled}
+        server = SimpleAgent(config=config, server_client=server_client)
+
+        response_base = {
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        server_client.post = AsyncMock(
+            side_effect=[
+                _mock_response(
+                    response_base
+                    | {
+                        "id": "resp-tool",
+                        "output": [
+                            {
+                                "id": "fc-1",
+                                "call_id": "call-1",
+                                "name": "get_weather",
+                                "arguments": '{"city":"San Francisco"}',
+                                "type": "function_call",
+                                "status": "completed",
+                            }
+                        ],
+                    }
+                ),
+                _mock_response(
+                    response_base
+                    | {
+                        "id": "resp-final",
+                        "output": [
+                            {
+                                "id": "msg-1",
+                                "content": [{"annotations": [], "text": "Cold.", "type": "output_text"}],
+                                "role": "assistant",
+                                "status": "completed",
+                                "type": "message",
+                            }
+                        ],
+                    }
+                ),
+            ]
+        )
+        tool_response = _mock_response(content='{"city":"San Francisco","weather_description":"cold"}')
+        tool_response.cookies = {"session_id": MagicMock(value="updated-resource-cookie")}
+        direct_request = AsyncMock(return_value=tool_response)
+        monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", direct_request)
+
+        app = server.setup_webserver()
+        client = TestClient(app)
+        episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+        seed = client.post(
+            "/v1/agent_sessions",
+            json=AgentSeedSessionRequest(
+                agent_session_id="agent-session",
+                episode_id=episode_id,
+                task_id=TaskId(taskset="example", task_id="0"),
+                tool_accesses=[
+                    DirectHTTPToolAccess(
+                        name="weather.direct_http",
+                        required=True,
+                        base_url="http://resources:8000",
+                        cookies={"session_id": "seeded-resource-cookie"},
+                        headers={"X-Scoped-Access": "token"},
+                    )
+                ],
+            ).model_dump(mode="json"),
+        )
+        assert seed.status_code == 200
+
+        # The Environment Server calls the attempt-qualified route, which enables trajectory collection.
+        result = client.post(
+            "/ng-rollout/rollout/v1/responses" if observability_enabled else "/v1/responses",
+            json={
+                "input": [{"role": "user", "content": "weather?"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather",
+                        "description": "",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                            "additionalProperties": False,
+                        },
+                        "strict": True,
+                    }
+                ],
+            },
+        )
+        assert result.status_code == 200
+        assert result.json()["output"][-1]["content"][0]["text"] == "Cold."
+        direct_request.assert_awaited_once_with(
+            method="POST",
+            url="http://resources:8000/get_weather",
+            json={"city": "San Francisco"},
+            cookies={"session_id": "seeded-resource-cookie"},
+            headers={"X-Scoped-Access": "token"},
+            _internal=True,
+        )
+        assert [item.kwargs["server_name"] for item in server_client.post.await_args_list] == ["model", "model"]
+
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json=AgentCloseSessionRequest(
+                agent_session_id=seed.json()["agent_session_id"],
+                episode_id=episode_id,
+            ).model_dump(mode="json"),
+        )
+        assert close.status_code == 200
+        assert close.json()["resources_cookies"] == {"session_id": "updated-resource-cookie"}
+        # A session returns its agent evidence at close, which becomes the episode's ng_agent_observations.
+        observations = close.json()["agent_observations"]
+        if observability_enabled:
+            assert [record["kind"] for record in observations["records"]] == ["agent_invocation"]
+            assert observations["source"] == "simple_agent"
+        else:
+            assert observations is None
+
+    async def test_native_session_rejects_required_mcp_access(self) -> None:
+        server, _ = _make_agent(False)
+        request = MagicMock(session={})
+        body = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="example", task_id="0"),
+            tool_accesses=[
+                MCPToolAccess(
+                    name="resources",
+                    required=True,
+                    connection=MCPStreamableHTTPConnection(url="http://resources:8000/mcp"),
+                )
+            ],
+        )
+
+        with pytest.raises(ValueError, match="does not support required MCP"):
+            await server.seed_agent_session(request, body)
+
+    async def test_several_workers_are_allowed_but_reject_sessions(self) -> None:
+        """The legacy /run path keeps no session, so only session seeding needs a single worker."""
+        server, _ = _make_agent(False)
+        server = type(server)(
+            config=server.config.model_copy(update={"num_workers": 2}), server_client=server.server_client
+        )
+        body = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="example", task_id="0"),
+        )
+
+        with pytest.raises(ValueError, match="sessions require num_workers=1"):
+            await server.seed_agent_session(MagicMock(session={}), body)
+
+    async def test_native_session_seed_and_close_are_idempotent(self) -> None:
+        server, _ = _make_agent(False)
+        request = MagicMock(session={})
+        body = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="example:test", task_id="0"),
+        )
+
+        first = await server.seed_agent_session(request, body)
+        second = await server.seed_agent_session(request, body)
+        assert first == second
+
+        close_body = AgentCloseSessionRequest(
+            agent_session_id=body.agent_session_id,
+            episode_id=body.episode_id,
+        )
+        await server.close_agent_session(request, close_body)
+        await server.close_agent_session(request, close_body)
+
+        with pytest.raises(ValueError, match="already closed"):
+            await server.seed_agent_session(request, body)
 
     @pytest.mark.parametrize("resolved", [False, None])
     async def test_run_emits_standard_turns_and_tool_observation(self, resolved: bool | None) -> None:
@@ -1123,3 +1320,179 @@ class TestApp:
         assert post_call_kwargs[0]["server_name"] == "my resources server"
         assert post_call_kwargs[1]["server_name"] == "simple_agent"
         assert post_call_kwargs[1]["cookies"] == {"session": "seeded"}
+
+
+class _RecordingActivation:
+    """Stands in for a checkpoint activation: supplies a continuation and records boundaries."""
+
+    def __init__(self, continuation=None) -> None:
+        self.continuation = continuation
+        self.snapshots: list = []
+        self.eager: list[dict] = []
+
+    async def boundary(self, snapshot) -> None:
+        # Keep the lazy snapshot and also evaluate it now, to check that evaluating it later agrees.
+        self.snapshots.append(snapshot)
+        self.eager.append(snapshot())
+
+    @property
+    def boundaries(self) -> list[dict]:
+        return [snapshot() for snapshot in self.snapshots]
+
+    @asynccontextmanager
+    async def awaiting_model(self):
+        yield
+
+
+_TOOL_CALL_RESPONSE = {
+    "id": "response-1",
+    "created_at": 1.0,
+    "model": "model",
+    "object": "response",
+    "output": [
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "get_weather",
+            "arguments": '{"city": "SF"}',
+            "id": "fc-1",
+        }
+    ],
+    "parallel_tool_calls": True,
+    "tool_choice": "auto",
+    "tools": [],
+    "usage": {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 15,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": 0},
+    },
+}
+_FINAL_RESPONSE = _TOOL_CALL_RESPONSE | {
+    "id": "response-2",
+    "output": [
+        {
+            "type": "message",
+            "id": "msg-1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "cold", "annotations": []}],
+        }
+    ],
+}
+
+
+class TestCheckpointContinuation:
+    async def test_boundaries_capture_a_resumable_loop_and_resume_skips_regeneration(self) -> None:
+        server, server_client = _make_agent(False)
+        calls: list[str] = []
+        # The first model call asks for the tool; every later one answers.
+        model_calls = 0
+
+        async def post(*, server_name, url_path, **kwargs):
+            nonlocal model_calls
+            calls.append(url_path)
+            if url_path == "/get_weather":
+                return _mock_response(content="cold")
+            model_calls += 1
+            return _mock_response(_TOOL_CALL_RESPONSE if model_calls == 1 else _FINAL_RESPONSE)
+
+        server_client.post = AsyncMock(side_effect=post)
+        body = NeMoGymResponseCreateParamsNonStreaming(input="weather?")
+        original = _RecordingActivation()
+        first, *_ = await server._create_episode(body, model_url_path="/v1/responses", activation=original)
+
+        # Snapshots evaluated after the loop finished still describe their own boundary.
+        assert original.boundaries == original.eager
+        # The boundary after the first model response has its tool call pending.
+        pending = next(state for state in original.boundaries if state["pending_tools"])
+        assert pending["step"] == 1 and calls[:2] == ["/v1/responses", "/get_weather"]
+
+        calls.clear()
+        resumed_activation = _RecordingActivation(continuation=pending)
+        resumed, *_ = await server._create_episode(body, model_url_path="/v1/responses", activation=resumed_activation)
+
+        assert calls == ["/get_weather", "/v1/responses"]
+        assert resumed.model_dump(mode="json")["output"] == first.model_dump(mode="json")["output"]
+        assert resumed.usage.total_tokens == first.usage.total_tokens == 30
+
+    async def test_restored_legacy_run_skips_resources_seeding(self) -> None:
+        # Observability is off: checkpointing alone must key the legacy /run by its rollout.
+        server, server_client = _make_agent(False)
+        participant = AgentSessionParticipant(server)
+        server._checkpoint_participant = participant
+        await participant.install(
+            [
+                AgentSessionRecord(
+                    session_key="run:0-0",
+                    episode_id=EpisodeId(rollout_id="0-0"),
+                    session={},
+                    boundary={"step": 0},
+                    episode={"next": "loop", "cookies": {}},
+                )
+            ]
+        )
+
+        async def post(*, url_path, **kwargs):
+            if url_path.endswith("/v1/responses"):
+                return _mock_response(_FINAL_RESPONSE)
+            assert url_path == "/verify"
+            return _mock_response(kwargs["json"] | {"reward": 1.0})
+
+        server_client.post = AsyncMock(side_effect=post)
+        body = SimpleAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": "question"},
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                ATTEMPT_INDEX_KEY_NAME: 1,
+            }
+        )
+
+        await server.run(MagicMock(cookies={}), body)
+
+        assert [call.kwargs["url_path"] for call in server_client.post.await_args_list] == [
+            "/ng-rollout/0-0-a1/v1/responses",
+            "/verify",
+        ]
+
+    @pytest.mark.parametrize("reported, blocks_while_verifying", [("replay", False), (None, True)])
+    async def test_legacy_verify_mode_comes_from_the_seed_reply(
+        self, reported: str | None, blocks_while_verifying: bool
+    ) -> None:
+        server, server_client = _make_agent(False)
+        participant = AgentSessionParticipant(server)
+        server._checkpoint_participant = participant
+        blocked_during_verify: list[bool] = []
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                response = _mock_response({})
+                response.headers = {"x-ng-checkpoint-verify": reported} if reported else {}
+                return response
+            if url_path.endswith("/v1/responses"):
+                return _mock_response(_FINAL_RESPONSE)
+            # A replayed verification does not hold a checkpoint; a waited-on one does.
+            blocked_during_verify.append(not participant.readiness().ready)
+            return _mock_response(kwargs["json"] | {"reward": 1.0})
+
+        server_client.post = AsyncMock(side_effect=post)
+        body = SimpleAgentRunRequest.model_validate(
+            {"responses_create_params": {"input": "question"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        )
+
+        await server.run(MagicMock(cookies={}), body)
+
+        assert blocked_during_verify == [blocks_while_verifying]
+
+    async def test_direct_legacy_responses_call_leaves_no_session(self) -> None:
+        server, server_client = _make_agent(False)
+        participant = AgentSessionParticipant(server)
+        server._checkpoint_participant = participant
+        server_client.post = AsyncMock(return_value=_mock_response(_FINAL_RESPONSE))
+        request = MagicMock(path_params={"rollout_id": "direct-1"}, cookies={}, session={})
+
+        await server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="q"))
+
+        assert participant.readiness().counts["sessions"] == 0
