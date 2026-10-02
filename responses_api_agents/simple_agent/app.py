@@ -63,8 +63,9 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from nemo_gym.server_utils import request as http_request
+from nemo_gym.session_routing import SESSION_OWNER_HEADER
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 
 
@@ -142,10 +143,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: AgentSeedSessionRequest,
     ) -> AgentSeedSessionResponse:
-        # Sessions live in this worker's memory, so every call for a session must reach this worker.
-        # The legacy /run path keeps no session and still supports several workers.
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Simple Agent sessions require num_workers=1")
+        # Sessions live in this worker's memory. With several workers, the session cookie routes every call
+        # for a session to this worker (see nemo_gym.session_routing).
         new_state = self._new_session_state(body)
 
         agent_session_id = body.agent_session_id
@@ -661,13 +660,16 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         if stage == "loop":
             await boundary({"next": "loop", "cookies": _cookie_values(cookies), "verify_mode": verify_mode})
-            # The turn loop parks at its own boundaries and continues from them after a restore.
+            # The turn loop parks at its own boundaries and continues from them after a restore. Its
+            # activation is tracked by this worker, which holds the episode, so the call comes back here.
+            owner = getattr(request.app.state, "nemo_gym_session_owner", None) if legacy_run is not None else None
             async with step("replay"):
                 response = await self.server_client.post(
                     server_name=self.config.name,
                     url_path=self.url_path_for_run("/v1/responses", body),
                     json=body.responses_create_params,
                     cookies=cookies,
+                    headers={SESSION_OWNER_HEADER: owner} if owner is not None else {},
                 )
                 await raise_for_status(response)
                 model_response_json = await get_response_json(response)
@@ -773,3 +775,6 @@ def _cookies(response: Any) -> dict[str, str]:
 
 if __name__ == "__main__":
     SimpleAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SimpleAgent.run_webserver()  # noqa: F401

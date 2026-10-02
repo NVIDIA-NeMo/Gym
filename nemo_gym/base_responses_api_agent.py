@@ -22,7 +22,7 @@ from fastapi import Body, FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
 
 from nemo_gym._checkpoint.agent import AgentSessionParticipant, RestartOnlyAgentParticipant, RestoredAgentSession
-from nemo_gym._checkpoint.control import install_participant
+from nemo_gym._checkpoint.participant_workers import install_server_participant
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -136,6 +136,7 @@ class BaseResponsesAPIAgent(BaseServer):
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
+    routes_sessions_to_owner = True
     # Agents that implement the AgentSessionHooks methods set this to take part in partial-rollout
     # checkpoints. Other agents restart unfinished rollouts from their input.
     checkpoint_sessions_supported: ClassVar[bool] = False
@@ -169,9 +170,6 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        if (self.config.num_workers or 1) != 1:
-            # Each worker would track only its own calls, so a checkpoint could miss work in the others.
-            raise ValueError("agent checkpointing requires num_workers=1: sessions live in one process")
         if not self.checkpoint_sessions_supported:
             # Fail closed: in-flight work blocks a checkpoint until the controller retires it.
             self._restart_only = RestartOnlyAgentParticipant()
@@ -179,9 +177,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         else:
             self._checkpoint_participant = AgentSessionParticipant(self)
             participant = self._checkpoint_participant
-        install_participant(
+        install_server_participant(
             app,
             participant,
+            num_workers=self.config.num_workers or 1,
             auth_token=settings.control_auth_token,
             lease_grace_seconds=settings.lease_grace_seconds,
             instance_name=self.config.name,

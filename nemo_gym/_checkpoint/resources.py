@@ -41,6 +41,7 @@ from nemo_gym._checkpoint.steps import CHECKPOINT_VERIFY_HEADER, StepMode
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_correlation import current_episode_id
 from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.session_routing import SESSION_OWNER_KEY
 
 
 LOGGER = logging.getLogger(__name__)
@@ -58,6 +59,8 @@ class ResourcesAdmissionClosedError(ControlError):
 class ResourcesSessionRecord(CheckpointRecord):
     session_id: str
     state: JsonPayload
+    # With several workers, the worker ID in the session's cookie and MCP token (see nemo_gym.session_routing).
+    owner: Optional[str] = None
 
 
 class ResourcesSessionHooks(Protocol):
@@ -112,6 +115,9 @@ class ResourcesParticipant(CheckpointParticipant):
         # Sessions a retire is stopping, refused until it has; and requests in flight per session.
         self._stopping_sessions: set[str] = set()
         self._session_requests: Counter[str] = Counter()
+        # The routing owner of each session, with several workers; ``owner`` is this worker's.
+        self.owner: Optional[str] = None
+        self._owners: dict[str, Optional[str]] = {}
         # Sessions seeded after admission closed. Their episodes' boundaries precede the seed, so they
         # are not part of this checkpoint: they neither block it nor are exported by it.
         self._seeded_while_closed: set[str] = set()
@@ -132,14 +138,17 @@ class ResourcesParticipant(CheckpointParticipant):
         """Return once admission is open: after resume, or when a lease expires."""
         await self._open.wait()
 
-    def seeded(self, session_id: str, episode_id: EpisodeId) -> None:
+    def seeded(self, session_id: str, episode_id: EpisodeId, owner: Optional[str] = None) -> None:
         if self.mode != "stateless":
             self._sessions[session_id] = episode_id
+            # A restored session keeps the owner its cookie names.
+            self._owners.setdefault(session_id, owner or self.owner)
             if not self.accepting:
                 self._seeded_while_closed.add(session_id)
 
     def ended(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
+        self._owners.pop(session_id, None)
         self._seeded_while_closed.discard(session_id)
         self._restored_unused.discard(session_id)
 
@@ -178,6 +187,7 @@ class ResourcesParticipant(CheckpointParticipant):
             for session_id in retired:
                 self._sessions.pop(session_id, None)
                 self._restored_unused.discard(session_id)
+                self._owners.pop(session_id, None)
                 if self.mode == "exported":
                     await self.hooks.retire_session_state(session_id)
         finally:
@@ -206,9 +216,16 @@ class ResourcesParticipant(CheckpointParticipant):
                 # it up. There is nothing to continue, so stop tracking it rather than fail the commit.
                 LOGGER.warning("resources session %s of %s is gone; not exported", session_id, episode_id.capture_key)
                 self._sessions.pop(session_id, None)
+                self._owners.pop(session_id, None)
                 continue
-            state = states[session_id]
-            records.append(ResourcesSessionRecord(session_id=session_id, episode_id=episode_id, state=state))
+            records.append(
+                ResourcesSessionRecord(
+                    session_id=session_id,
+                    episode_id=episode_id,
+                    state=states[session_id],
+                    owner=self._owners.get(session_id),
+                )
+            )
         return records
 
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
@@ -228,6 +245,7 @@ class ResourcesParticipant(CheckpointParticipant):
             await self.hooks.restore_session_states({record.session_id: record.state for record in records})
         for record in records:
             self._sessions[record.session_id] = next_attempt(record.episode_id)
+            self._owners[record.session_id] = record.owner
             self._restored_unused.add(record.session_id)
 
     async def restored_pending(self) -> list[EpisodeId]:
@@ -276,7 +294,8 @@ class ResourcesCheckpointMiddleware:
         if scope.get("type") != "http" or scope.get("method") in ("GET", "HEAD") or path.startswith("/ng-control/"):
             await self.app(scope, receive, send)
             return
-        session_id = (scope.get("session") or {}).get(SESSION_ID_KEY)
+        session = scope.get("session") or {}
+        session_id = session.get(SESSION_ID_KEY)
         is_mcp = self.mcp_session_id is not None and (path == self.mcp_path or path.startswith(self.mcp_path + "/"))
         if is_mcp:
             session_id = self.mcp_session_id(scope) or session_id
@@ -317,6 +336,6 @@ class ResourcesCheckpointMiddleware:
             # Inside an episode every resources call carries the rollout prefix, native seeds included.
             episode_id = current_episode_id()
             if episode_id is not None:
-                self.participant.seeded(session_id, episode_id)
+                self.participant.seeded(session_id, episode_id, session.get(SESSION_OWNER_KEY))
         elif path in _SESSION_ENDS:
             self.participant.ended(session_id)

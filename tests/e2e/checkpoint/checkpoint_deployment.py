@@ -81,7 +81,8 @@ class Deployment:
     - ``slow``: ``single_agent_turn`` over Simple Agent and a resources server whose verify blocks.
 
     With ``inference_url``, the policy model serves from that endpoint and the fake backend's control
-    routes are unavailable.
+    routes are unavailable. ``policy_workers`` sets the policy model server's uvicorn workers, and
+    ``server_workers`` those of the environment, agent, and resources servers.
     """
 
     def __init__(
@@ -95,6 +96,8 @@ class Deployment:
         inference_url: Optional[str] = None,
         model_name: str = "fake-model",
         policy_workers: int = 1,
+        server_workers: int = 1,
+        resources_mcp: bool = False,
         extra_config: Optional[dict[str, Any]] = None,
     ) -> None:
         self.topology = topology
@@ -109,6 +112,9 @@ class Deployment:
         self.inference_url = inference_url or f"http://127.0.0.1:{self.backend_port}/v1"
         self.model_name = model_name
         self.policy_workers = policy_workers
+        self.server_workers = server_workers
+        # Expose the counter resources server's tools over MCP, as a CLI agent harness calls them.
+        self.resources_mcp = resources_mcp
         self.external_inference = inference_url is not None
         self.procs: dict[str, subprocess.Popen] = {}
         self.dirs: dict[str, Path] = {}
@@ -145,6 +151,8 @@ class Deployment:
         def add(name: str, server_dir: str, entry: dict) -> None:
             inner = next(iter(next(iter(entry.values())).values()))
             inner["port"] = free_port()
+            if name != "policy_model":
+                inner["num_workers"] = self.server_workers
             config[name] = entry
             self.dirs[name] = REPO / server_dir if not server_dir.startswith("/") else Path(server_dir)
 
@@ -172,6 +180,7 @@ class Deployment:
                 domain="agent",
                 verified=False,
                 description="counter",
+                expose_tools_over_mcp=self.resources_mcp,
             )
             add("resources", "resources_servers/example_session_state_mgmt", resources)
         elif self.topology == "slow":
@@ -214,6 +223,13 @@ class Deployment:
             )
             add("environment", "environment_servers/legacy_agent", environment)
         return config
+
+    def set_server_workers(self, count: int) -> None:
+        """Change the worker count of the environment, agent, and resources servers for their next start."""
+        self.server_workers = count
+        for name in self.dirs:
+            if name != "policy_model":
+                next(iter(next(iter(self.config[name].values())).values()))["num_workers"] = count
 
     # -- processes ------------------------------------------------------------------------------
 
