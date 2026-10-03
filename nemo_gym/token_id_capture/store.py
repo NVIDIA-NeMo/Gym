@@ -40,7 +40,7 @@ from uuid import uuid4
 
 import orjson
 
-from nemo_gym.token_id_capture.protocols import TokenCaptureSnapshot
+from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenCaptureSnapshot
 from nemo_gym.token_id_capture.records import TokenEntry
 
 
@@ -240,7 +240,7 @@ class TokenCaptureStore:
             if state.get("retired", False):
                 raise RuntimeError(f"Token capture for rollout {rollout_id} is retired")
             if state.get("frozen", False):
-                raise RuntimeError(f"Token capture for rollout {rollout_id} is already frozen")
+                raise TokenCaptureFrozenError(f"Token capture for rollout {rollout_id} is already frozen")
             index_changed = self._sync_entry_index(rollout_id, state)
             entry_digests = state["entry_digests"]
             existing_digest = entry_digests.get(entry.model_call_id)
@@ -291,7 +291,7 @@ class TokenCaptureStore:
             if state.get("retired", False):
                 raise RuntimeError(f"Token capture for rollout {rollout_id} is retired")
             if state.get("frozen", False):
-                raise RuntimeError(f"Token capture for rollout {rollout_id} is already frozen")
+                raise TokenCaptureFrozenError(f"Token capture for rollout {rollout_id} is already frozen")
             with self.intents_path_for(rollout_id).open("ab") as handle:
                 handle.write(model_call_id.encode("utf-8") + b"\n")
                 handle.flush()

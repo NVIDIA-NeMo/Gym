@@ -84,7 +84,7 @@ from nemo_gym.token_id_capture.lineage import (
     LineageIndex,
     RolloutLineage,
 )
-from nemo_gym.token_id_capture.protocols import TokenSource
+from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenSource
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -346,6 +346,46 @@ def test_token_store_freeze_is_atomic_and_conditional_drop_is_race_safe(tmp_path
     replacement = entry.model_copy(update={"model_call_id": "replacement"})
     asyncio.run(store.put(replacement))
     assert store.read_entries("r0") == [replacement]
+
+
+def test_a_late_capture_after_freeze_is_dropped_without_marking_the_frozen_rollout(tmp_path, caplog):
+    """A commit that lost the freeze race must not disturb the sealed verdict.
+
+    The store rejects the late write with the typed frozen error.
+    The sink drops the record without a traceback.
+    It must not mark the rollout incomplete.
+    A post-freeze mark would change the snapshot version and break retirement.
+    """
+    store = TokenCaptureStore(tmp_path)
+    entry = TokenEntry(
+        rollout_id="late-r0",
+        model_call_id="c1",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    asyncio.run(store.put(entry))
+    snapshot = asyncio.run(store.freeze("late-r0"))
+    assert snapshot.incomplete is False
+
+    with pytest.raises(TokenCaptureFrozenError):
+        asyncio.run(store.put(entry.model_copy(update={"model_call_id": "c2"})))
+
+    context = CaptureContext(rollout_id="late-r0", model_call_id="c2", token_sink=store)
+    token = set_token_sink(context)
+    try:
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(commit_entry(entry.model_copy(update={"model_call_id": "c2"})))
+    finally:
+        reset_token_sink(token)
+
+    assert context.committed is False
+    assert any("arrived after the capture was frozen" in record.message for record in caplog.records)
+    assert all(record.exc_info is None for record in caplog.records)
+    # The frozen snapshot identity and verdict are unchanged, so it still retires.
+    assert not store.is_incomplete("late-r0")
+    assert asyncio.run(store.freeze("late-r0")) == snapshot
+    assert asyncio.run(store.drop("late-r0", snapshot_id=snapshot.snapshot_id, version=snapshot.version))
 
 
 def test_token_store_sweeps_only_old_retired_tombstones(tmp_path):
