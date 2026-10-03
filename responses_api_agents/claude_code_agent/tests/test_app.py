@@ -418,6 +418,7 @@ class TestRunClaudeCode:
             # the staged dir + settings must exist while the subprocess runs
             captured["dir_exists_during_run"] = (Path(config_dir) / "settings.json").is_file()
             captured["sandbox"] = env.get("IS_SANDBOX")
+            captured["start_new_session"] = kwargs.get("start_new_session")
             return FakeProc()
 
         with (
@@ -430,6 +431,7 @@ class TestRunClaudeCode:
         assert "--mcp-config" in captured["cmd"]
         assert "be terse" in captured["cmd"]
         assert captured["sandbox"] == "1"
+        assert captured["start_new_session"] is True
         assert captured["dir_exists_during_run"] is True
         # config dir is removed after the run (no leakage between rollouts)
         assert not Path(captured["config_dir"]).exists()
@@ -506,6 +508,9 @@ class TestRunClaudeCode:
         with (
             patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
             patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+            patch(
+                "responses_api_agents.claude_code_agent.app.kill_process_tree", side_effect=lambda proc: proc.kill()
+            ),
             patch("responses_api_agents.claude_code_agent.app.asyncio.wait_for", fake_wait_for),
         ):
             output_items, model, metadata = asyncio.run(agent._run_claude_code("hello"))
@@ -551,6 +556,10 @@ class TestRunClaudeCode:
             with (
                 patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
                 patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+                patch(
+                    "responses_api_agents.claude_code_agent.app.kill_process_tree",
+                    side_effect=lambda proc: proc.kill(),
+                ),
             ):
                 task = asyncio.create_task(agent._run_claude_code("hello", observation_collector=collect))
                 await communicating.wait()

@@ -119,7 +119,9 @@ codex_agent:
 - `openai_api_key`: API key for the endpoint, or any non-empty string for local endpoints
 - `openai_base_url`: if set, used as the provider `base_url` (include `/v1`; Codex appends `/responses`). Leave null for the real OpenAI API
 - `sandbox_mode`: Codex sandbox policy for model-generated shell commands (`read-only`, `workspace-write`, `danger-full-access`). The default is `danger-full-access` because Gym environments are expected to provide their own isolation (mirroring the Claude Code agent's skip-permissions default); OS-level sandboxing (Landlock/seccomp) is unavailable in many containers
-- `timeout`: per-request wall-clock seconds
+- `timeout`: per-request wall-clock seconds. On timeout or cancellation, the harness
+  stops the launcher and its observed descendants, including children that start
+  separate process groups, before removing the per-request home and scratch directory.
 - `system_prompt`: inserted as a `developer` role message via Codex's `developer_instructions` config. The data's system message (if any) is appended after this
 - `reasoning_effort`: passed as `model_reasoning_effort` (e.g. `low`, `medium`, `high`)
 - `codex_version`: **required** — npm version pinned on auto-install. Every config must pin an explicit version so runs are reproducible and cannot silently drift as new Codex releases land; version bumps become explicit, tested changes
