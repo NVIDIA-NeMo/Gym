@@ -20,7 +20,7 @@ from asyncio import Semaphore
 from copy import deepcopy
 from pathlib import Path
 from shlex import quote
-from time import time
+from time import perf_counter, time
 from traceback import format_exc
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
@@ -443,6 +443,22 @@ def _build_remote_opencode_install_command(
     )
 
 
+def _opencode_tool_time_taken(opencode_export: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Seconds the exported session's tool calls ran (``state.time`` start/end, ms)."""
+    if not opencode_export:
+        return None
+    total_ms = 0.0
+    for message in opencode_export.get("messages", []):
+        for part in message.get("parts", []):
+            if part.get("type") != "tool":
+                continue
+            state_time = (part.get("state") or {}).get("time") or {}
+            start, end = state_time.get("start"), state_time.get("end")
+            if isinstance(start, (int, float)) and isinstance(end, (int, float)) and end >= start:
+                total_ms += end - start
+    return total_ms / 1000.0
+
+
 def _extract_opencode_session_id(session_list_stdout: str) -> str:
     """Return the newest OpenCode session ID from ``session list`` JSON output."""
     sessions = json.loads(session_list_stdout)
@@ -472,6 +488,18 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_exit_code: Optional[int] = None
     opencode_error_type: Optional[str] = None
     opencode_failed: bool = False
+    # Per-rollout phase timings (seconds), for comparing sandbox backends with
+    # local-container harnesses. seed_session creates the task sandbox; the
+    # OpenCode run includes its install; tool time sums the main session's
+    # tool-call durations; verify covers the resources server's evaluation.
+    agent_queue_time_taken: Optional[float] = None
+    seed_session_time_taken: Optional[float] = None
+    agent_sandbox_start_time_taken: Optional[float] = None
+    opencode_run_time_taken: Optional[float] = None
+    opencode_export_time_taken: Optional[float] = None
+    opencode_tool_time_taken: Optional[float] = None
+    verify_time_taken: Optional[float] = None
+    rollout_time_taken: Optional[float] = None
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -817,6 +845,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("Starting OpenCode (runtime configuration omitted to protect credentials)", file=sys.stderr)
 
         run_error_type = None
+        run_started = perf_counter()
         try:
             result = await sandbox.exec(
                 command=command,
@@ -826,6 +855,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             result = None
             run_error_type = type(exc).__name__
             print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
+        opencode_run_time_taken = perf_counter() - run_started
 
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
@@ -841,6 +871,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # to the git repo, and resources servers extract the model patch with `git add -N . && git
         # diff`, which would sweep this transcript into the patch.
         export_remote_fpath = f"/tmp/opencode_{export_fname}"
+        export_started = perf_counter()
         try:
             session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
             session_list_result = await sandbox.exec(
@@ -875,6 +906,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         results_local_fpath = results_dir / export_fname
         results_local_fpath.unlink(missing_ok=True)
         await sandbox.download(export_remote_fpath, results_local_fpath)
+        opencode_export_time_taken = perf_counter() - export_started
 
         observations = None
         trajectory = (
@@ -992,6 +1024,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_stderr": result_stderr,
             "opencode_export_found": opencode_export_found,
             "opencode_finished": opencode_finished,
+            "opencode_run_time_taken": opencode_run_time_taken,
+            "opencode_export_time_taken": opencode_export_time_taken,
+            "opencode_tool_time_taken": _opencode_tool_time_taken(opencode_export),
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations
@@ -1023,16 +1058,22 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     async def run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
     ) -> OpenCodeSandboxedAgentVerifyResponse:
+        queued = perf_counter()
         async with self._sem:
-            return await self._run(request, body)
+            return await self._run(request, body, queue_time_taken=perf_counter() - queued)
 
     async def _run(
-        self, request: Request, body: OpenCodeSandboxedAgentRunRequest
+        self,
+        request: Request,
+        body: OpenCodeSandboxedAgentRunRequest,
+        queue_time_taken: Optional[float] = None,
     ) -> OpenCodeSandboxedAgentVerifyResponse:
+        run_started = perf_counter()
         cookies = request.cookies
         session_key = request.session[SESSION_ID_KEY]
         rollout_id = self.rollout_id_from_run(body)
 
+        seed_started = perf_counter()
         seed_session_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/seed_session",
@@ -1040,6 +1081,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(seed_session_response)
+        seed_session_time_taken = perf_counter() - seed_started
         cookies = cookies | seed_session_response.cookies
 
         request.state._ng_opencode_mcp = await self._seed_tool_servers(request, body)
@@ -1047,10 +1089,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # @bxyu-nvidia: "sandbox_handle" comes from resources_servers/swebench/app.py
         # Once we graduate to use the sandbox server, this will be in a generic seed_session type that can be model validated.
         seed_session_result = await seed_session_response.json()
+        sandbox_started = perf_counter()
         sandbox = await self._start_sandbox(
             sandbox_id=seed_session_result.get("sandbox_handle"),
             workdir=seed_session_result.get("workdir"),
         )
+        agent_sandbox_start_time_taken = perf_counter() - sandbox_started
         self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
 
         # Propagating the sandbox handle
@@ -1064,6 +1108,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
             observations = run_result.pop("_ng_agent_observations", None)
             trajectory = run_result.pop("_ng_trajectory", None)
+            verify_started = perf_counter()
             response_dict = await verify_agent_response(
                 self.server_client,
                 self.config.resources_server,
@@ -1073,6 +1118,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 force_zero_reward=self.config.execution_failure_reward_zero
                 and run_result.get("opencode_failed", False),
             )
+            verify_time_taken = perf_counter() - verify_started
         finally:
             del request.state._ng_observation_invocation_id
             del request.state._ng_opencode_mcp
@@ -1090,6 +1136,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     self._sandbox_id_to_run_result.pop(session_key, None)
 
         response_dict |= run_result
+        response_dict |= {
+            "agent_queue_time_taken": queue_time_taken,
+            "seed_session_time_taken": seed_session_time_taken,
+            "agent_sandbox_start_time_taken": agent_sandbox_start_time_taken,
+            "verify_time_taken": verify_time_taken,
+            "rollout_time_taken": perf_counter() - run_started,
+        }
         if trajectory is not None:
             response_dict["ng_trajectory"] = scope_opencode_trajectory(trajectory, body, rollout_id)
         raw_verifier_sandbox_observation = response_dict.pop("verifier_sandbox_observation", None)

@@ -1015,3 +1015,24 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
     assert receipt["response"]["output"]
     assert receipt["response"]["status"] == result.response.status
     sandbox.stop.assert_awaited_once()
+
+
+def test_opencode_tool_time_taken_sums_tool_part_durations():
+    from responses_api_agents.opencode_sandboxed_agent.app import _opencode_tool_time_taken
+
+    export = {
+        "messages": [
+            {"parts": [{"type": "text", "text": "hi"}]},
+            {
+                "parts": [
+                    {"type": "tool", "state": {"time": {"start": 1000, "end": 3500}}},
+                    {"type": "tool", "state": {"time": {"start": 4000, "end": 4500}}},
+                    # An unfinished tool call carries no end time and is skipped.
+                    {"type": "tool", "state": {"time": {"start": 5000}}},
+                ]
+            },
+        ]
+    }
+    assert _opencode_tool_time_taken(export) == 3.0
+    assert _opencode_tool_time_taken({}) is None
+    assert _opencode_tool_time_taken({"messages": []}) == 0.0
