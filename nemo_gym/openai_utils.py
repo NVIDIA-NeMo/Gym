@@ -969,6 +969,10 @@ def accumulate_response_usage(
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
     usage: Optional[NeMoGymResponseUsage] = None
+    # OpenAI-compatible providers may return provider-specific service-tier names.
+    # The OpenAI SDK's Literal may not include those names.
+    # Preserve the reported value.
+    service_tier: Optional[str] = None
 
 
 ########################################
@@ -1018,6 +1022,8 @@ class NeMoGymChoice(Choice):
 
 class NeMoGymChatCompletion(ChatCompletion):
     choices: List[NeMoGymChoice]
+    # Providers can return deployment-specific tiers. Accept any string.
+    service_tier: Optional[str] = None
 
 
 ########################################

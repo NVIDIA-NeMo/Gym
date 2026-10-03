@@ -313,6 +313,43 @@ class TestApp:
         assert res.status_code == 200
         assert res.json()["output"][0]["type"] == "mcp_call"
 
+    async def test_provider_specific_service_tier_returns_200(self) -> None:
+        """A provider tier outside the SDK's ``Literal`` must validate (200), not 500."""
+        server = self._setup_server()
+        client = TestClient(server.setup_webserver())
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(
+            return_value={
+                "id": "resp_tier",
+                "created_at": 1753983920.0,
+                "model": "dummy_model",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+                "service_tier": "on-demand",
+            }
+        )
+        server._client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl-tier",
+                "choices": [{"finish_reason": "stop", "index": 0, "message": {"content": "hi", "role": "assistant"}}],
+                "created": 1753983922,
+                "model": "dummy_model",
+                "object": "chat.completion",
+                "service_tier": "on-demand",
+            }
+        )
+
+        res = client.post("/v1/responses", json={"input": "hi"})
+        assert res.status_code == 200
+        assert res.json()["service_tier"] == "on-demand"
+
+        res = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        assert res.status_code == 200
+        assert res.json()["service_tier"] == "on-demand"
+
     async def test_drop_input_reasoning_items_strips_reasoning(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(drop_input_reasoning_items=True)
         client = TestClient(server.setup_webserver())
