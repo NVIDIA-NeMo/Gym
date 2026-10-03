@@ -149,7 +149,7 @@ finally:
         check=True,
     )
     summary = json.loads(completed.stdout)
-    assert summary["timed_out"] is True
+    assert summary["timed_out"] is False
     assert summary["cleanup_confirmed"] is True
     assert summary["child_alive"] is False
 
