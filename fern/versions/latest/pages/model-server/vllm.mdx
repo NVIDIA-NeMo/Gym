@@ -249,6 +249,7 @@ Make sure your input JSONL respects the selected mode in the [Constraint matrix]
 | `use_completions_api` | `bool` | `false` | When `true`, drives vLLM's `/v1/completions` instead of `/v1/chat/completions`. See [Two upstream backends](#two-upstream-backends). |
 | `render_chat_template` | `bool` | `false` | Only consulted when `use_completions_api: true`. When `true`, renders messages to the `prompt` string client-side via `AutoTokenizer.apply_chat_template`. Lifts the multi-turn restriction. See [Render modes](#render-modes). |
 | `tokenizer` | `str` | `null` | Only consulted when `use_completions_api: true` and `render_chat_template: true`. HF identifier or local path passed to `AutoTokenizer.from_pretrained`. When `null`, falls back to `model`. Use this to borrow a chat template from a different model. |
+| `drop_unrepresentable_request_fields` | `bool` | `false` | How the Responses-to-Chat-Completions conversion treats a request field with no Chat Completions representation. When `false`, the conversion refuses the request with `NotImplementedError`, so the caller can route it to a server that serves Responses natively. When `true`, the fields that only select what the provider reports back, rather than what the model generates, are dropped and the request proceeds: `include`, `reasoning.summary`, `reasoning.context`, a message `phase`, and an image part in a tool's output, which becomes a text placeholder. Every other unrepresentable field is still refused. |
 
 ### Advanced: `chat_template_kwargs`
 
