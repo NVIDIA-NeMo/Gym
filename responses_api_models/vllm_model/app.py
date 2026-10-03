@@ -19,11 +19,12 @@ import json
 import logging
 import os
 from copy import deepcopy
+from dataclasses import dataclass
 from threading import Lock
 from time import monotonic, time, time_ns
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Union, get_args
+from typing import Any, Awaitable, ClassVar, Dict, List, Literal, Optional, Union, get_args
 
-from aiohttp.client_exceptions import ClientResponseError
+from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
 from fastapi import Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
@@ -158,6 +159,20 @@ def _append_transport_io(event: Dict[str, Any]) -> None:
         LOG.exception("Failed to append vLLM transport log to %s", path)
 
 
+@dataclass
+class _EndpointHealth:
+    """What the server has observed of one engine endpoint.
+
+    ``consecutive_failures`` counts 5xx and connection-error answers since the last good
+    answer. ``failed_at`` is the monotonic time the endpoint stopped receiving sessions, or
+    None while it serves; it is refreshed whenever a trial call is claimed or fails, so the
+    retry interval always runs from the latest attempt.
+    """
+
+    consecutive_failures: int = 0
+    failed_at: Optional[float] = None
+
+
 ReasoningFieldMode = Literal["both", "reasoning", "reasoning_content"]
 
 
@@ -271,6 +286,18 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     # How often endpoint_file may be stat'd; otherwise the `os.stat` results is cached and reused.
     endpoint_check_interval_s: float = 10.0
+
+    # Move sessions off an engine endpoint that keeps failing. Off, a session stays on the
+    # endpoint its id hashes to for the whole run, so an endpoint whose engine has died
+    # answers every call of every session pinned to it with a 5xx until the run ends. On, an
+    # endpoint that has answered `endpoint_failure_threshold` consecutive calls with a 5xx or
+    # a connection error stops receiving sessions, and the sessions pinned to it move to a
+    # serving endpoint on their next call. Once per `endpoint_retry_after_s` one call is tried
+    # on the failed endpoint; when it succeeds the endpoint serves sessions again.
+    route_around_failing_endpoints: bool = False
+    endpoint_failure_threshold: int = Field(default=3, ge=1)
+    endpoint_retry_after_s: float = Field(default=60.0, gt=0)
+
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
     # as-is. When unset, relative paths raise. Audio is always inlined as a
@@ -384,6 +411,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+        # Keyed by base_url so the record outlives a client rebind to the same address.
+        self._endpoint_health: Dict[str, _EndpointHealth] = dict()
         self._endpoint_file_mtime: Optional[float] = None
         self._endpoint_missing_since: Optional[float] = None
         self._endpoint_last_check_at: Optional[float] = None
@@ -515,7 +544,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         client = self._resolve_client(request)
         execution = start_model_execution(request, upstream_attempted=True)
         try:
-            response_dict = await client.create_response(**body_dict)
+            response_dict = await self._call_endpoint(client, client.create_response(**body_dict))
         except ClientResponseError as error:
             execution.update(response_source="upstream", upstream_status_code=error.status)
             raise
@@ -953,7 +982,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         execution["upstream_attempted"] = True
         try:
-            chat_completion_dict = await client.create_chat_completion(**body_dict)
+            chat_completion_dict = await self._call_endpoint(client, client.create_chat_completion(**body_dict))
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
             if transport_io_enabled:
@@ -1316,7 +1345,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         execution = start_model_execution(request, upstream_attempted=True)
         try:
-            completion_dict = await client.create_completion(**completion_body)
+            completion_dict = await self._call_endpoint(client, client.create_completion(**completion_body))
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
             result_content_str = e.response_content.decode()
@@ -1683,16 +1712,114 @@ class VLLMModel(SimpleResponsesAPIModel):
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
         session_id = request.session[SESSION_ID_KEY]
-        if session_id not in self._session_id_to_client:
-            # Uvicorn workers do not share this cache. A stable assignment keeps
-            # every turn in a session on the same vLLM endpoint across workers.
-            digest = hashlib.sha256(session_id.encode("utf-8")).digest()
-            client_idx = int.from_bytes(digest[:8], byteorder="big") % len(self._clients)
-            client = self._clients[client_idx]
-            self._session_id_to_client[session_id] = client
-        client = self._session_id_to_client[session_id]
+        client = self._session_id_to_client.get(session_id)
+        if self.config.route_around_failing_endpoints:
+            hashed = self._hashed_client(session_id)
+            if client is not hashed and self._endpoint_serves(hashed):
+                # The session's own endpoint serves again, or is due for its trial
+                # call: this call goes back to it. Sessions moved off a failed
+                # endpoint are the only callers left once a wave has started, so
+                # they are what probes it, and a recovered endpoint gets its
+                # sessions back.
+                client = hashed
+            elif client is not None and not self._endpoint_serves(client):
+                client = None
+        if client is None:
+            client = self._assign_client(session_id)
+        self._session_id_to_client[session_id] = client
 
         return client
+
+    def _hashed_client(self, session_id: str) -> NeMoGymAsyncOpenAI:
+        # Uvicorn workers do not share the session cache. A stable assignment keeps
+        # every turn in a session on the same vLLM endpoint across workers.
+        return self._clients[self._hashed_index(session_id, len(self._clients))]
+
+    @staticmethod
+    def _hashed_index(session_id: str, n: int) -> int:
+        digest = hashlib.sha256(session_id.encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], byteorder="big") % n
+
+    def _assign_client(self, session_id: str) -> NeMoGymAsyncOpenAI:
+        client = self._hashed_client(session_id)
+        if not self.config.route_around_failing_endpoints or self._endpoint_serves(client):
+            return client
+        # The same digest picks among the serving endpoints, so the assignment stays a
+        # function of the session id and of which endpoints have failed.
+        serving = [candidate for candidate in self._clients if not self._endpoint_failed(candidate)]
+        if not serving:
+            return client
+        return serving[self._hashed_index(session_id, len(serving))]
+
+    def _endpoint_failed(self, client: NeMoGymAsyncOpenAI) -> bool:
+        health = self._endpoint_health.get(client.base_url)
+        return health is not None and health.failed_at is not None
+
+    def _endpoint_serves(self, client: NeMoGymAsyncOpenAI) -> bool:
+        """Whether a call may go to this endpoint now.
+
+        A failed endpoint takes one trial call per ``endpoint_retry_after_s``. Claiming the
+        trial restarts the interval, so concurrent callers do not all land on it at once.
+        """
+        health = self._endpoint_health.get(client.base_url)
+        if health is None or health.failed_at is None:
+            return True
+        now = monotonic()
+        if now - health.failed_at < self.config.endpoint_retry_after_s:
+            return False
+        health.failed_at = now
+        return True
+
+    async def _call_endpoint(self, client: NeMoGymAsyncOpenAI, call: Awaitable[Dict[str, Any]]) -> Dict[str, Any]:
+        """Await one engine call and record how the endpoint answered.
+
+        A 5xx or a connection error counts against the endpoint. Any other answer, a 4xx
+        included, shows the engine alive and resets its count.
+        """
+        try:
+            result = await call
+        except ClientResponseError as error:
+            if error.status >= 500:
+                self._note_endpoint_failure(client)
+            else:
+                self._note_endpoint_success(client)
+            raise
+        except ClientConnectionError:
+            self._note_endpoint_failure(client)
+            raise
+        self._note_endpoint_success(client)
+        return result
+
+    def _note_endpoint_failure(self, client: NeMoGymAsyncOpenAI) -> None:
+        if not self.config.route_around_failing_endpoints:
+            return
+        health = self._endpoint_health.setdefault(client.base_url, _EndpointHealth())
+        health.consecutive_failures += 1
+        if health.failed_at is not None:
+            # A trial call failed; the next trial waits a whole interval again.
+            health.failed_at = monotonic()
+            return
+        if health.consecutive_failures < self.config.endpoint_failure_threshold:
+            return
+        health.failed_at = monotonic()
+        LOG.warning(
+            "endpoint %s answered %d consecutive calls with a server or connection error; its sessions move "
+            "to the other endpoints and one call is tried here every %.0fs",
+            client.base_url,
+            health.consecutive_failures,
+            self.config.endpoint_retry_after_s,
+        )
+
+    def _note_endpoint_success(self, client: NeMoGymAsyncOpenAI) -> None:
+        if not self.config.route_around_failing_endpoints:
+            return
+        health = self._endpoint_health.get(client.base_url)
+        if health is None:
+            return
+        if health.failed_at is not None:
+            LOG.warning("endpoint %s answered a call; it serves sessions again", client.base_url)
+        health.consecutive_failures = 0
+        health.failed_at = None
 
 
 if __name__ == "__main__":
