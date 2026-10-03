@@ -107,3 +107,21 @@ def test_unmatched_history_starts_a_new_root() -> None:
     messages = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "", "tool_calls": [{"id": "x"}]}]
     assert attach_parent_tokens(messages, calls) == (None, [])
     assert "prompt_token_ids" not in messages[1]
+
+
+def test_topk_is_kept_on_output_but_not_sent_back() -> None:
+    calls = []
+    first = reply("Cropping.", [1, 2], [3, 11], ("call_a",))
+    first["generation_topk_token_ids"] = [[3, 4], [11, 5]]
+    first["generation_topk_log_probs"] = [[-0.1, -2.5], [-0.01, -5.0]]
+    assert record_call(calls, None, [], first)
+    assert "generation_topk_token_ids" not in first
+
+    messages = [{"role": "user", "content": "q"}, echoed(first)]
+    assert attach_parent_tokens(messages, calls)[0] == 0
+    assert "generation_topk_token_ids" not in messages[1]
+    assert messages[1]["generation_token_ids"] == [3, 11]
+
+    (item, _) = chain_output_items(calls, num_input_images=0)
+    assert item.generation_topk_token_ids == [[3, 4], [11, 5]]
+    assert item.generation_topk_log_probs == [[-0.1, -2.5], [-0.01, -5.0]]
