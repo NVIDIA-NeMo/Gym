@@ -51,7 +51,7 @@ _REDUNDANT_CAPTURE_KEY = "_redundant_capture"
 
 # A caller that knows the kept model call names it here on the result.
 # A gate seal or an agent-declared terminal id uses this key.
-# It joins with the response-id and content witnesses for terminal attribution.
+# It joins with the response-id, item-id, and content witnesses for terminal attribution.
 TERMINAL_CALL_KEY = "_ng_terminal_model_call_id"
 # Served response id the harness reports for the completion it kept.
 TERMINAL_RESPONSE_ID_KEY = "terminal_response_id"
