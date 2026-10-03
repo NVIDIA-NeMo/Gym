@@ -33,6 +33,8 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 PROFILES_DIR = Path(__file__).parent / "profiles"
+# mimoagent's own loops call the model through the OpenAI SDK. The CLIs append their API path themselves.
+NATIVE_LOOPS = {"default", "bashonly-agent", "cc-agent", "codex-agent", "mimocode-agent"}
 # Written by resources_servers/mimo_rl_oss for tasks that ship MCP tool servers (general_agent).
 MCP_CONFIG_PATH = Path("/work/_setup/mcp_servers.json")
 
@@ -131,7 +133,7 @@ class MimoAgent(SimpleResponsesAPIAgent):
         base_url = self._base_url()
         model_kwargs = {
             "api_key": os.environ.get("MIMOAGENT_API_KEY", "dummy-key"),
-            "base_url": base_url if protocol == "anthropic" else f"{base_url}/v1",
+            "base_url": f"{base_url}/v1" if agent_type in NATIVE_LOOPS and protocol != "anthropic" else base_url,
             **self.config.model_kwargs,
         }
         if body.temperature is not None:
