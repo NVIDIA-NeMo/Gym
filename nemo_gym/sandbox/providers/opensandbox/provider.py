@@ -808,7 +808,7 @@ class OpenSandboxProvider:
     ) -> None:
         """Run loopback listeners in a foreground command owned by the collection."""
         self.validate_port_forwarding()
-        from nemo_gym.sandbox.providers.opensandbox import _port_forward
+        from nemo_gym.sandbox.providers import _port_forward
 
         address = str(ipaddress.ip_address(target_address))
         validated_ports = SandboxSpec(ports=ports).ports
