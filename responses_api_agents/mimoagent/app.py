@@ -60,6 +60,12 @@ def _text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
+def _without_tool_name(message: dict) -> dict:
+    if message.get("role") != "tool" or "name" not in message:
+        return message
+    return {k: v for k, v in message.items() if k != "name"}
+
+
 def _task_from_input(body: NeMoGymResponseCreateParamsNonStreaming) -> str:
     if isinstance(body.input, str):
         return body.input
@@ -149,6 +155,14 @@ class MimoAgent(SimpleResponsesAPIAgent):
                 "model_kwargs": model_kwargs,
             }
         )
+        if protocol == "chat":
+            query = model.query
+
+            # Gym's chat schema forbids the legacy `name` field mimoagent puts on tool messages.
+            def strip_tool_names(messages: list[dict], **kwargs: Any) -> dict:
+                return query([_without_tool_name(m) for m in messages], **kwargs)
+
+            model.query = strip_tool_names
         env = LocalEnvironment(cwd=os.getcwd() or self.config.cwd, timeout=self.config.command_timeout)
         agent = make_agent(agent_type, model, env, **agent_cfg)
         if MCP_CONFIG_PATH.exists() and hasattr(agent, "tool_registry"):
