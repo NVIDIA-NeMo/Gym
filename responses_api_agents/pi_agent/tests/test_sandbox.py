@@ -856,7 +856,7 @@ async def test_default_config_collects_through_environment_run(setup, monkeypatc
                 assert body["task_data"] == task_data
                 return Response(
                     {
-                        "resources_session_id": body.resources_session_id,
+                        "resources_session_id": body["resources_session_id"],
                         "sandbox_access": seed().sandbox_access.model_dump(),
                     },
                     cookie="resources-cookie",
@@ -872,18 +872,18 @@ async def test_default_config_collects_through_environment_run(setup, monkeypatc
                 assert "verification_input" not in body
                 return Response({**body, "reward": 1.0})
             assert url_path == "/close_session"
-            return Response({"resources_session_id": body.resources_session_id})
+            return Response({"resources_session_id": body["resources_session_id"]})
         assert server_name == agent_name
         request = Request({"type": "http", "session": cookies})
         if url_path == "/v1/agent_sessions":
-            result = await agent.seed_agent_session(request, body)
-            assert result.agent_session_id == body.agent_session_id
+            result = await agent.seed_agent_session(request, AgentSeedSessionRequest.model_validate(body))
+            assert result.agent_session_id == body["agent_session_id"]
         elif url_path == "/v1/agent_sessions/close":
-            result = await agent.close_agent_session(request, body)
+            result = await agent.close_agent_session(request, AgentCloseSessionRequest.model_validate(body))
         else:
             assert url_path.endswith("/v1/responses")
             request.scope["path_params"] = {"rollout_id": url_path.split("/")[2]}
-            result = await agent.responses(request, body)
+            result = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming.model_validate(body))
         return Response(result.model_dump(mode="json"), cookie="agent-cookie")
 
     monkeypatch.setattr(ServerClient, "post", post)
@@ -905,9 +905,9 @@ async def test_default_config_collects_through_environment_run(setup, monkeypatc
     )
     _, result = await next(RolloutCollectionHelper().run_examples(rows))
     assert result["failure"] is None
-    assert result["result"]["verification"]["reward"] == 1.0
-    assert result["result"]["verification"]["response"]["usage"]["total_tokens"] == 22
-    assert result["result"]["agent_observations"]["source"] == "pi"
+    assert result["result"]["reward"] == 1.0
+    assert result["result"]["response"]["usage"]["total_tokens"] == 22
+    assert result["result"]["ng_agent_observations"]["source"] == "pi"
     assert calls == [
         (environment_name, "/run"),
         (resources_name, "/seed_session"),

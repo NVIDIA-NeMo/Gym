@@ -182,6 +182,12 @@ and blocks verification. Cleanup is cooperative, not a security boundary against
 
 ## Local CLI compatibility
 
+Local settings retain `output_token_policy` (`fixed` or `remaining_context`),
+`auto_compaction`, and an optional per-call `bash_timeout`. The dedicated
+`pi_sandboxed_agent` also uses this local adapter inside its sandbox and supplies
+`mcp_servers` for authenticated Gym tools. Native sessions continue to reject
+required Resources tool access rather than silently ignoring it.
+
 Calls without an agent session retain local CLI compatibility. They do not use the
 Resources-owned task sandbox. Configure a Gym `model_server`, or supply an explicit Pi provider
 configuration as below. The self-contained math example keeps its local execution settings.

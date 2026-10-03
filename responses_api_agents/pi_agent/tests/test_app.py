@@ -134,7 +134,10 @@ class TestLocalRuntimeSetup:
         assert process.kill.call_count == int(timed_out)
         assert not list(tmp_path.iterdir())
         assert "--thinking" in spawn.call_args.args and "system rules" in spawn.call_args.args
-        assert [event for _, event in events] == ([json.loads(event)] if collect else [])
+        expected_events = [json.loads(event)] if collect else []
+        if collect and timed_out:
+            expected_events.append({"type": "_ng_process_exit", "timed_out": True})
+        assert [event for _, event in events] == expected_events
         if timed_out:
             assert items == [] and usage == {"input_tokens": 0, "output_tokens": 0}
         else:
@@ -331,7 +334,9 @@ async def test_run_stages_private_mcp_config_and_cleans_workspace(tmp_path, with
         homes.append(home)
         assert "private-token" not in " ".join(cmd)
         assert json.loads((home / ".pi" / "agent" / "settings.json").read_text()) == {
-            "compaction": {"enabled": not remaining_context}
+            "compaction": {"enabled": not remaining_context},
+            "httpIdleTimeoutMs": agent.config.timeout * 1000,
+            "retry": {"provider": {"timeoutMs": agent.config.timeout * 1000}},
         }
         extensions = [Path(cmd[i + 1]).name for i, arg in enumerate(cmd) if arg == "--extension"]
         assert ("remaining-context.mjs" in extensions) is remaining_context
@@ -746,7 +751,6 @@ class TestConfigYaml:
         assert config.model_server == ModelServerRef(type="responses_api_models", name="policy_model")
         assert config.num_workers == 1
         assert config.pi_version == "0.80.2"
-
 
 
 @pytest.mark.parametrize(

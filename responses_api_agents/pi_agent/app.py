@@ -834,7 +834,11 @@ class PiAgent(SimpleResponsesAPIAgent):
         # Gym buffers completions before replaying SSE. Pi's default five-minute
         # HTTP idle limit can otherwise retry a model call still generating.
         timeout_ms = self.config.timeout * 1000
-        return {"httpIdleTimeoutMs": timeout_ms, "retry": {"provider": {"timeoutMs": timeout_ms}}}
+        return {
+            "compaction": {"enabled": self.config.auto_compaction},
+            "httpIdleTimeoutMs": timeout_ms,
+            "retry": {"provider": {"timeoutMs": timeout_ms}},
+        }
 
     def _build_models_config(self, rollout_id: Optional[str] = None) -> dict[str, Any]:
         config = copy.deepcopy(self.config.models_config)
