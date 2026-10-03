@@ -138,6 +138,13 @@ Sessions use MCP tool grants and reject other required grants. Each granted MCP 
 
 The Hermes runner and the model's terminal tool execute as the same user in the same sandbox. The host reads the final result, including token IDs, from `/tmp/nemo-gym-hermes-sessions/<session-id>/output.json`; commands issued by the model can also write that file. Sandbox mode is suitable for evaluation, but it must not be used to produce RL training data until results are returned through a channel the model cannot modify.
 
+Response `usage` sums provider-reported tokens for the root agent's model replies,
+including retries, truncated replies, and the iteration-limit summary. Cached input
+and reasoning tokens remain subsets of input and output tokens. Missing detail counts
+stay `null`; if any reply omits token usage, the aggregate is `null`. Counts do not depend
+on token IDs or the retained conversation history. Delegated agents and auxiliary model
+clients (such as context compression) are outside this root-agent total.
+
 ## Local compatibility
 
 Calls without an agent session run Hermes on the agent-server host. They do not operate on
