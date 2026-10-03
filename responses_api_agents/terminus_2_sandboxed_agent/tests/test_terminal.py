@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sys
@@ -97,7 +98,12 @@ async def test_controls_preserve_command_order():
 
 @pytest.mark.skipif(sys.platform != "linux" or shutil.which("tmux") is None, reason="requires Linux tmux")
 @pytest.mark.asyncio
-async def test_ctrl_c_recovers_a_full_pty_input_queue_without_executing_pending_text(tmp_path):
+@pytest.mark.parametrize("queued_commands", [160, 16384])
+async def test_ctrl_c_recovers_a_full_pty_input_queue_without_executing_pending_text(
+    tmp_path, caplog, queued_commands
+):
+    caplog.set_level(logging.INFO, logger="harbor.utils.logger")
+
     class Environment:
         session_id = "test"
 
@@ -125,7 +131,7 @@ async def test_ctrl_c_recovers_a_full_pty_input_queue_without_executing_pending_
         assert result.return_code == 0, result.stderr
         await asyncio.sleep(0.3)
         await terminal.send_keys("sleep 120\n", min_timeout_sec=0.3)
-        await terminal.send_keys(f"touch {marker}\n" * 160, min_timeout_sec=0.3)
+        await terminal.send_keys(f"touch {marker}\n" * queued_commands, min_timeout_sec=0.3)
         # Unpatched tmux queues Ctrl-C after the paste and leaves sleep running.
         await environment.exec("tmux send-keys -t test C-c")
         await asyncio.sleep(0.2)

@@ -77,16 +77,23 @@ class TerminusTmuxSession(TmuxSession):
         # input first so the native interrupt reaches the terminal driver. Do
         # not signal the process directly: that can execute queued shell text
         # when the foreground job exits. Raw applications own Ctrl-C themselves.
+        # Require an idle pass: a large paste can outlast one fixed read window.
         target = shlex.quote(self._session_name)
-        command = f"""tty=$(tmux display-message -p -t {target} '#{{pane_tty}}') || exit $?
+        script = f"""set -o pipefail
+tty=$(tmux display-message -p -t {target} '#{{pane_tty}}') || exit $?
 settings=$(stty -F "$tty" -a) || exit $?
 for setting in $settings; do
   case "$setting" in -isig|"-isig;") exit 0 ;; esac
 done
-timeout 0.2 cat "$tty" > /dev/null
-status=$?
-case "$status" in 0|124) ;; *) exit "$status" ;; esac"""
-        result = await self.environment.exec(command, user=self._user)
+for attempt in {{1..25}}; do
+  bytes=$(timeout 0.2 cat "$tty" | wc -c)
+  status=$?
+  case "$status" in 0|124) ;; *) exit "$status" ;; esac
+  [ "$bytes" -eq 0 ] && exit 0
+done
+echo 'Pending terminal input did not become quiet within 5 seconds' >&2
+exit 1"""
+        result = await self.environment.exec(f"bash -c {shlex.quote(script)}", user=self._user)
         if result.return_code != 0:
             raise RuntimeError(f"Could not clear pending terminal input before Ctrl-C: {result.stderr}")
 

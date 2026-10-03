@@ -34,8 +34,9 @@ per-turn JSON trajectory files; it is `false` by default.
 Use standalone tmux key names such as `C-c` for control keys. The agent accepts
 an accidental trailing newline on a standalone key and reports the correction.
 On Linux terminals with signal handling enabled, Ctrl-C drains pending input
-before delivering the interrupt, so a long paste behind a busy foreground job
-cannot block cancellation. Raw applications retain their own Ctrl-C handling.
+until it becomes quiet before delivering the interrupt, allowing cancellation
+behind a long queued paste. The drain fails explicitly if input remains busy
+for five seconds. Raw applications retain their own Ctrl-C handling.
 
 ## Tmux binary: online or pre-staged
 
