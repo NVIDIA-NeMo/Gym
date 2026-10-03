@@ -208,8 +208,8 @@ class TestDropTestPatchFiles:
 
 
 class _FakeSandbox:
-    def __init__(self, stdout: str, return_code: int = 0) -> None:
-        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code)
+    def __init__(self, stdout: str, return_code: int = 0, error_type: str | None = None) -> None:
+        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code, error_type=error_type)
         self.commands: list[str] = []
 
     async def exec(self, command: str, timeout_s=None):
@@ -253,6 +253,29 @@ class TestRunVerification:
         assert result.completed is False
         assert result.resolved is False
         assert "not present in the image" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("return_code", "error_type", "message"),
+        [
+            (124, "timeout", "timed out"),
+            (124, None, "timed out"),
+            (137, None, "exit 137"),
+        ],
+    )
+    async def test_a_timed_out_or_killed_eval_is_incomplete_not_graded(
+        self, return_code: int, error_type: str | None, message: str
+    ) -> None:
+        """Partial test output from a cut-off eval must not be graded as a policy failure."""
+        log = f"{TEST_OUTPUT_BEGIN}\npartial\n"
+        result = await run_verification(
+            sandbox=_FakeSandbox(log, return_code=return_code, error_type=error_type),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=lambda _log: {"a": "PASSED"},
+        )
+        assert result.completed is False
+        assert result.resolved is False
+        assert message in result.error
 
     @pytest.mark.asyncio
     async def test_a_parser_crash_is_reported_rather_than_scored_zero(self) -> None:

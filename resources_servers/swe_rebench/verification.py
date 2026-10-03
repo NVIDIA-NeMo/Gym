@@ -303,6 +303,18 @@ async def run_verification(
             test_output=output,
             error=f"repo directory {repo_directory(inputs.repo)} not present in the image",
         )
+    # A timed-out or OOM-killed eval only produced partial test output: grading
+    # it would read as a policy failure. Report it as incomplete instead.
+    timed_out = getattr(result, "error_type", None) == "timeout" or result.return_code == 124
+    if timed_out or result.return_code == 137:
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=True,
+            test_results=None,
+            test_output=output,
+            error=("evaluation timed out" if timed_out else "evaluation was killed (exit 137, likely OOM)"),
+        )
 
     try:
         # Also off the loop. The parsers are regex passes over the whole test log, so they are
