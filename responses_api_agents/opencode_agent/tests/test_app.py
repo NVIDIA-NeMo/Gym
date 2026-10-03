@@ -1505,7 +1505,9 @@ class TestMultimodal:
     async def test_attach_images_off_by_default(self, tmp_path: Path) -> None:
         agent = _make_agent()
         body = NeMoGymResponseCreateParamsNonStreaming(input=_image_input())
-        with patch.object(agent, "_run_opencode", AsyncMock(return_value=([], {}, "m", AgentObservationBundle(source="opencode")))) as run:
+        with patch.object(
+            agent, "_run_opencode", AsyncMock(return_value=([], {}, "m", AgentObservationBundle(source="opencode")))
+        ) as run:
             await agent._create_episode(body, collect_observations=False)
         assert run.call_args.kwargs["images"] == []
 
