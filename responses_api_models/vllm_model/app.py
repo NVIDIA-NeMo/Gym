@@ -232,6 +232,8 @@ def _set_reasoning(message_dict: dict[str, Any], reasoning: str, mode: Reasoning
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
+    # Aligned with `base_url`.
+    generation_cut_control_url: Optional[Union[str, List[str]]] = None
     api_key: str
     model: str
     return_token_id_information: bool
@@ -379,6 +381,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     def model_post_init(self, context):
         if isinstance(self.base_url, str):
             self.base_url = [self.base_url]
+        if isinstance(self.generation_cut_control_url, str):
+            self.generation_cut_control_url = [self.generation_cut_control_url]
+        if self.generation_cut_control_url is not None and len(self.generation_cut_control_url) != len(self.base_url):
+            raise ValueError(
+                "generation_cut_control_url must list one control URL per base_url: "
+                f"{len(self.generation_cut_control_url)} control URL(s) for {len(self.base_url)} base_url(s)"
+            )
         return super().model_post_init(context)
 
 
@@ -396,6 +405,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     )
     _external_capture_handler: ExternalCaptureHandler | None = PrivateAttr(default=None)
     _warned_request_chat_template_kwargs_dropped: bool = PrivateAttr(default=False)
+    _generation_cut_control_urls: Dict[str, str] = PrivateAttr(default_factory=dict)
 
     def setup_exception_middleware(self, app) -> None:
         @app.middleware("http")
@@ -450,6 +460,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
         # Keyed by base_url so the record outlives a client rebind to the same address.
         self._endpoint_health: Dict[str, _EndpointHealth] = dict()
+        self._generation_cut_control_urls = dict(
+            zip(self.config.base_url, self.config.generation_cut_control_url or ())
+        )
         self._endpoint_file_mtime: Optional[float] = None
         self._endpoint_missing_since: Optional[float] = None
         self._endpoint_last_check_at: Optional[float] = None
@@ -1752,6 +1765,13 @@ class VLLMModel(SimpleResponsesAPIModel):
                 f"{self.config.endpoint_stale_grace_s:.0f}s); refusing to keep serving "
                 "against a backend that is no longer published."
             )
+
+    def generation_cut_control_root(self, base_url: str) -> str:
+        """The generation-cut control root of the backend serving `base_url`."""
+        control_url = self._generation_cut_control_urls.get(base_url)
+        if control_url is not None:
+            return control_url.rstrip("/")
+        return super().generation_cut_control_root(base_url)
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
