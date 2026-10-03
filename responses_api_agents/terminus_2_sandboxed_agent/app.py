@@ -58,6 +58,7 @@ from nemo_gym.server_utils import (
 )
 from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
 from responses_api_agents.terminus_2_sandboxed_agent.terminal import (
+    ShellExitedError,
     TerminusJSONParser,
     TerminusTmuxSession,
     TerminusXMLParser,
@@ -394,7 +395,14 @@ class NeMoGymTerminus2(Terminus2):
 
     async def _execute_commands(self, commands, session):
         start_time = perf_counter()
-        res = await super()._execute_commands(commands, session)
+        try:
+            res = await super()._execute_commands(commands, session)
+        except ShellExitedError:
+            # The model must see the state reset before confirming completion.
+            # Do not retry the command that discovered the exit or the rest of
+            # its batch: they were planned for the previous shell state.
+            self._pending_completion = False
+            res = False, self._limit_output_length(await session.recover_shell())
         if commands:
             self._completed_command_batches += 1
         self._times_spent.append(perf_counter() - start_time)

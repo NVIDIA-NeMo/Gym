@@ -55,8 +55,75 @@ class TerminusXMLParser(TerminusXMLPlainParser):
         return result
 
 
+class ShellExitedError(RuntimeError):
+    """The interactive shell exited before its command batch finished."""
+
+
 class TerminusTmuxSession(TmuxSession):
+    async def start(self) -> None:
+        await super().start()
+        result = await self.environment.exec(
+            f"tmux set-option -w -t {shlex.quote(self._session_name)} remain-on-exit on", user=self._user
+        )
+        if result.return_code != 0:
+            raise RuntimeError(f"Could not preserve exited terminal output: {result.stderr}")
+
+    async def is_session_alive(self) -> bool:
+        if not await super().is_session_alive():
+            # Harbor treats False as normal agent completion. A missing session
+            # is a terminal failure, not a model completion declaration.
+            raise RuntimeError("The terminal session disappeared before the agent completed")
+        return True
+
+    async def _require_live_shell(self) -> None:
+        result = await self.environment.exec(
+            f"tmux display-message -p -t {shlex.quote(self._session_name)} '#{{pane_dead}}'", user=self._user
+        )
+        state = (result.stdout or "").strip()
+        if result.return_code != 0 or state not in ("0", "1"):
+            raise RuntimeError(f"Could not inspect terminal shell state: {result.stderr}")
+        if state == "1":
+            raise ShellExitedError("The interactive shell exited")
+
+    async def get_incremental_output(self) -> str:
+        await self._require_live_shell()
+        return await super().get_incremental_output()
+
+    async def recover_shell(self) -> str:
+        """Replace a dead shell, retaining its output and discarding pending input."""
+        if self._remote_asciinema_recording_path is not None:
+            raise RuntimeError("The recorded shell exited; recovery would interrupt its recording")
+        previous_output = await super().get_incremental_output()
+        target = shlex.quote(self._session_name)
+        append_log = shlex.quote(f"cat >> {shlex.quote(str(self._logging_path))}")
+        # respawn-pane replaces the PTY, discarding both kernel input and tmux's
+        # pending write buffer. Reusing the dead PTY could replay cancelled text.
+        result = await self.environment.exec(
+            f"tmux respawn-pane -t {target} && tmux pipe-pane -t {target} {append_log}", user=self._user
+        )
+        if result.return_code != 0:
+            raise RuntimeError(f"Could not replace the exited terminal shell: {result.stderr}")
+        self._previous_buffer = None
+        fresh_output = await super().get_incremental_output()
+        # Keep this notice at the end so output truncation retains it.
+        return (
+            f"{previous_output}\n\n{fresh_output}\n\n"
+            "The interactive shell exited. A new shell has been started. Files remain, but shell variables, "
+            "options, and the working directory have reset. Pending input was discarded, and any remaining "
+            "commands in the previous response were skipped. Inspect the state before continuing."
+        )
+
     async def _send_keys_to_session(self, keys: list[str], action: str) -> None:
+        await self._require_live_shell()
+        try:
+            await self._send_keys_with_controls(keys, action)
+        except RuntimeError:
+            # The shell can exit while a large paste is being staged. Recover
+            # only a confirmed shell exit; retain unrelated transport failures.
+            await self._require_live_shell()
+            raise
+
+    async def _send_keys_with_controls(self, keys: list[str], action: str) -> None:
         batch: list[str] = []
         for original in keys:
             key = _control_key(original) or original

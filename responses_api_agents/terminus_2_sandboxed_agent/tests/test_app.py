@@ -55,6 +55,32 @@ def test_missing_usage_falls_back_to_counting_current_chat(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_shell_recovery_skips_remaining_commands_and_resets_completion():
+    from responses_api_agents.terminus_2_sandboxed_agent.terminal import ShellExitedError
+
+    sent = []
+
+    async def send_keys(keys, **kwargs):
+        sent.append(keys)
+        if keys == "second":
+            raise ShellExitedError("shell exited after first command")
+
+    async def recover_shell():
+        return "The shell exited. Its state has reset; remaining commands were skipped."
+
+    agent = object.__new__(NeMoGymTerminus2)
+    agent._pending_completion = True
+    agent._completed_command_batches = 0
+    agent._times_spent = []
+    commands = [SimpleNamespace(keystrokes=key, duration_sec=0) for key in ("first", "second", "third")]
+    result = await agent._execute_commands(commands, SimpleNamespace(send_keys=send_keys, recover_shell=recover_shell))
+    assert sent == ["first", "second"]
+    assert result == (False, "The shell exited. Its state has reset; remaining commands were skipped.")
+    assert agent._pending_completion is False
+    assert agent._completed_command_batches == 1
+
+
+@pytest.mark.asyncio
 async def test_sandbox_environment_adapts_exec_and_is_dir():
     sandbox_calls = []
 
