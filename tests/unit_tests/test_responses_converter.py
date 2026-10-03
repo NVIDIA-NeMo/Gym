@@ -534,6 +534,59 @@ def test_responses_to_chat_completion_rejects_unrepresentable_function_output(
         converter.responses_to_chat_completion_create_params(responses_params)
 
 
+def test_responses_to_chat_completion_renders_a_function_output_image_as_a_placeholder(
+    converter: ResponsesConverter,
+):
+    # With the switch on, an image a tool returned becomes a text placeholder in the tool message,
+    # so the conversion succeeds and the surrounding text parts keep their positions.
+    responses_params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [
+                    {"type": "input_text", "text": "Rendered the plot."},
+                    {"type": "input_image", "image_url": "data:image/png;base64,AAAA", "detail": "auto"},
+                ],
+            }
+        ]
+    )
+
+    params = converter.responses_to_chat_completion_create_params(
+        responses_params, drop_unrepresentable_request_fields=True
+    )
+
+    (tool_message,) = params.messages
+    assert tool_message["role"] == "tool"
+    assert tool_message["tool_call_id"] == "call_1"
+    assert tool_message["content"][0] == {"type": "text", "text": "Rendered the plot."}
+    assert tool_message["content"][1]["type"] == "text"
+    assert "image omitted" in tool_message["content"][1]["text"]
+
+
+def test_responses_to_chat_completion_still_rejects_other_function_output_parts_when_dropping(
+    converter: ResponsesConverter,
+):
+    """The switch covers image parts only; every other part type still fails the conversion."""
+    responses_params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [{"type": "input_file", "file_id": "file_123"}],
+            }
+        ]
+    )
+
+    with pytest.raises(
+        NotImplementedError,
+        match=r"Chat tool messages cannot represent content part type\(s\) 'input_file'",
+    ):
+        converter.responses_to_chat_completion_create_params(
+            responses_params, drop_unrepresentable_request_fields=True
+        )
+
+
 def test_responses_to_chat_completion_plain_assistant_turn_omits_tool_calls(converter: ResponsesConverter):
     """A plain assistant turn must not carry `tool_calls: []`.
 
@@ -991,8 +1044,8 @@ def test_shared_openai_request_fields_round_trip(converter: ResponsesConverter):
     assert round_tripped.verbosity == chat_params.verbosity
 
 
-def test_responses_to_chat_completion_rejects_message_phase(converter: ResponsesConverter):
-    params = NeMoGymResponseCreateParamsNonStreaming(
+def _message_with_phase() -> NeMoGymResponseCreateParamsNonStreaming:
+    return NeMoGymResponseCreateParamsNonStreaming(
         input=[
             {
                 "type": "message",
@@ -1005,8 +1058,21 @@ def test_responses_to_chat_completion_rejects_message_phase(converter: Responses
         ]
     )
 
+
+def test_responses_to_chat_completion_rejects_message_phase(converter: ResponsesConverter):
     with pytest.raises(NotImplementedError, match="phase"):
-        converter.responses_to_chat_completion_create_params(params)
+        converter.responses_to_chat_completion_create_params(_message_with_phase())
+
+
+def test_responses_to_chat_completion_drops_message_phase_when_configured(converter: ResponsesConverter):
+    chat_params = converter.responses_to_chat_completion_create_params(
+        _message_with_phase(), drop_unrepresentable_request_fields=True
+    )
+
+    (message,) = chat_params.messages
+    assert message["role"] == "assistant"
+    assert message["content"] == "working"
+    assert "phase" not in message
 
 
 def test_responses_to_chat_completion_rejects_function_namespace(converter: ResponsesConverter):
@@ -1793,6 +1859,44 @@ def test_downconverting_null_responses_only_fields_treats_them_as_absent(convert
     converted = converter.responses_to_chat_completion_create_params(params)
 
     assert converted.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+
+def test_downconverting_drops_include_when_configured(converter: ResponsesConverter):
+    # `include` selects extra fields on the response object and does not change what the model
+    # generates, so a chat backend answers the request faithfully without it.
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", include=["reasoning.encrypted_content"])
+
+    converted = converter.responses_to_chat_completion_create_params(params, drop_unrepresentable_request_fields=True)
+
+    assert converted.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+
+@pytest.mark.parametrize(
+    "reasoning",
+    [
+        {"effort": "high", "summary": "auto"},
+        {"effort": "high", "summary": "auto", "context": "all_turns"},
+    ],
+)
+def test_downconverting_drops_reporting_only_reasoning_fields_when_configured(
+    converter: ResponsesConverter, reasoning: dict
+):
+    # `summary` and `context` select how the provider presents and carries reasoning on the response
+    # object. The effort is the only reasoning field a chat completion carries, and it still travels.
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", reasoning=reasoning)
+
+    converted = converter.responses_to_chat_completion_create_params(params, drop_unrepresentable_request_fields=True)
+
+    assert converted.reasoning_effort == "high"
+    assert converted.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+
+def test_downconverting_still_rejects_other_reasoning_fields_when_configured(converter: ResponsesConverter):
+    """The switch covers `summary` and `context`; every other reasoning field is still refused."""
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", reasoning={"generate_summary": "auto"})
+
+    with pytest.raises(NotImplementedError, match="generate_summary"):
+        converter.responses_to_chat_completion_create_params(params, drop_unrepresentable_request_fields=True)
 
 
 def test_downconverting_json_object_text_format(converter: ResponsesConverter):
