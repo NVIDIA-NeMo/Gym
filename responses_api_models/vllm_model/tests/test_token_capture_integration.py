@@ -431,6 +431,8 @@ def _simulate_two_workers(
     assert entries[1].parent_call_id == entries[0].model_call_id
     assert entries[1].prefix_requested is True
     assert entries[1].prefix_supplied is True
+    # The engine's chat finish reason survives the vLLM chat path into the record.
+    assert [entry.finish_reason for entry in entries] == ["stop", "stop"]
 
     assert first_context.parent_resolution is not None
     assert first_context.parent_resolution.status == ParentResolutionStatus.ROOT
