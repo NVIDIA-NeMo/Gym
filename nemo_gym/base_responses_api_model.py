@@ -632,25 +632,10 @@ class CaptureStore:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return exchanges
 
-    def offset(self, rollout_id: str) -> int:
-        """Return an append boundary while excluding an in-progress writer."""
-        try:
-            handle = self.path_for(rollout_id).open("rb")
-        except FileNotFoundError:
-            return 0
-        with handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-            try:
-                return handle.seek(0, os.SEEK_END)
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-    def read_available(
-        self, rollout_id: str, *, start_offset: int = 0
-    ) -> tuple[list[tuple[int, dict[str, Any]]], int]:
+    def read_available(self, rollout_id: str) -> tuple[list[tuple[int, dict[str, Any]]], int]:
         """Read valid exchanges without letting one damaged line hide the rest."""
         path = self.path_for(rollout_id)
-        if not path.exists() and start_offset == 0:
+        if not path.exists():
             return [], 0
         exchanges: list[tuple[int, dict[str, Any]]] = []
         invalid_count = 0
@@ -658,9 +643,6 @@ class CaptureStore:
         with path.open("rb") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
             try:
-                if handle.seek(0, os.SEEK_END) < start_offset:
-                    raise OSError("Model-call capture was truncated during agent execution")
-                handle.seek(start_offset)
                 for line in handle:
                     stripped = line.strip()
                     if not stripped:

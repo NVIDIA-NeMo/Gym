@@ -140,8 +140,6 @@ The Hermes runner and the model's terminal tool execute as the same user in the 
 
 ## Local compatibility
 
-Hermes does not report reliable aggregate usage itself. Its response uses `usage: null`; the shared [single-agent-turn Environment Server](../../environment_servers/single_agent_turn/README.md) supplies provider counts when Model Server capture is enabled. This includes delegated and auxiliary model calls routed through the episode's Model Server URL. Direct Agent Server calls leave usage unknown.
-
 Calls without an agent session run Hermes on the agent-server host. They do not operate on
 a Resources-owned task sandbox. The agent's compatibility `/run` requires an explicit
 `resources_server`; native sessions and direct `/v1/responses` do not.
