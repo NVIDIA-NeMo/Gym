@@ -8,13 +8,13 @@ position: 4
 
 `responses_api_agents/opencode_agent` is the canonical OpenCode package. Its shipped
 `opencode_agent.yaml` selects native sandbox execution. OpenCode and its tools run in
-the task sandbox created by Resources; EnvironmentServer owns the episode lifecycle.
+the task sandbox; EnvironmentServer owns the episode lifecycle.
 
 ## Select the execution mode
 
 | `execution_mode` | Caller | Execution and ownership |
 |---|---|---|
-| `sandbox` | EnvironmentServer | Borrows Resources' `SandboxAccess`; installs and runs OpenCode inside that sandbox. |
+| `sandbox` | EnvironmentServer | Borrows `SandboxAccess`, or creates a sandbox using an explicitly configured provider when no access is supplied. |
 | `local` | A guest runner already inside its task container | Runs OpenCode in the current process's filesystem, using `repo_dir` when set. |
 | `legacy_sandbox` | Existing agent `/run` benchmark recipes | Uses the older Resources `/seed_session` and `sandbox_handle` bridge. |
 
@@ -27,7 +27,7 @@ host execution or the legacy bridge.
 ## Wire a native episode
 
 Compose the single-agent EnvironmentServer, this agent, a Gym model server, and a
-Resources implementation that supports native sessions and returns `SandboxAccess`.
+Resources implementation that supports native sessions. For SWE Pro, Resources returns `SandboxAccess`.
 SWE-bench Pro implements that Resources contract. The model server's advertised
 address must be reachable from inside the task sandbox.
 
@@ -74,7 +74,7 @@ run the collector against the started composition:
 <Warning>
 Older `resources_servers/swebench_pro/data/example.jsonl` rows may contain only
 `problem_statement` in the agent input, omitting `requirements` and `interface`.
-The native materializer preserves the supplied prompt; it does not repair it.
+Task materialization must preserve the supplied prompt; it does not repair it.
 Use the preparation step below for benchmark runs. For selected existing rows,
 rebuild the input with `benchmarks.swebench.pro.prepare.render_prompt` using only
 those three task-description fields, while preserving all verifier and image data.
@@ -84,9 +84,14 @@ Check the materialized input before interpreting a reward as an accuracy result.
 ```bash
 python benchmarks/swebench/pro/prepare.py
 
-python benchmarks/swebench/pro/materialize_single_agent_tasks.py \
-    benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
-    /tmp/swebench_pro_native.jsonl
+# Wrap prepared SWE Pro rows in the native task envelope.
+jq -c '{
+  task_id: {taskset: "swebench_pro:smoke", task_id: .instance_id},
+  task_input: {
+    responses_create_params: .responses_create_params,
+    task_data: del(.responses_create_params, .agent_ref, .skills_ref)
+  }
+}' benchmarks/swebench/data/swebench_pro_benchmark.jsonl > /tmp/swebench_pro_native.jsonl
 
 gym env start \
     --config benchmarks/swebench/pro/opencode_native.yaml \
@@ -102,7 +107,7 @@ gym eval run --no-serve \
 Set `policy_base_url`, `policy_model_name`, `policy_api_key`, and the sandbox provider
 in `env.yaml`, or pass the same deployment overlay with `--config` to both commands.
 The collector loads taskset routing and server definitions from its local configuration.
-The materializer's default taskset is `swebench_pro:smoke`; a different taskset needs a
+The example uses taskset `swebench_pro:smoke`; a different taskset needs a
 matching `environment_server_routes` entry. Each materialized row has `task_id` and
 `task_input`, with prompt controls under `task_input.responses_create_params` and
 benchmark data under `task_input.task_data`. Grader data never enters the agent prompt.
@@ -173,17 +178,18 @@ outcomes separately: a failed model call can still leave a useful patch.
 
 ## Migrate an older configuration
 
-The `opencode_sandboxed_agent` package and config path have been removed. Change package
-keys, Python imports, `allowed_agents`, and agent instance names to `opencode_agent`.
-For example, `swebench_pro_opencode_sandboxed_agent` becomes
-`swebench_pro_opencode_agent`. Regenerate prepared rows that contain the old routing
-name, and update `--agent` arguments and overlays together.
-Frozen release documentation and saved example rollouts retain their historical names;
-they do not identify a supported current entrypoint.
+Existing `opencode_sandboxed_agent` configurations remain supported through a thin
+compatibility entrypoint using the same legacy implementation. This preserves current
+scientific benchmark recipes, MCP tools, and cancellation cleanup.
+Use `opencode_agent` for new native-session configurations. If renaming an existing
+agent instance, update prepared-row routing names, `--agent` arguments, and overlays together.
 
 For native execution, replace `opencode_max_context_window` with `context_window` and
-`sandbox_timeout` with `timeout`. Resources owns sandbox provisioning; native mode
-does not use the agent's legacy `sandbox_provider` or `sandbox_config` fields.
+`sandbox_timeout` with `timeout`. Resources owns task sandboxes when it supplies access.
+Otherwise native mode requires `sandbox_provider` and `sandbox_config` on the agent;
+the agent destroys that sandbox on close. A verifier that needs task files must use
+a Resources-owned sandbox. Native requests activate sandbox execution regardless of
+the direct-call `execution_mode`; missing access and provider is an error.
 `setup_timeout` bounds native runtime installation.
 
 The existing SWE-bench Verified/Multilingual/Pro, DeepSWE, and Terminal Bench 2.1

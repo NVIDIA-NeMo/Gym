@@ -12,7 +12,6 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import BaseModel
 
-from benchmarks.swebench.pro.materialize_single_agent_tasks import materialize_row
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
@@ -127,17 +126,20 @@ async def test_native_recipe_routes_collector_through_environment_and_responses(
             assert cookies == {"session": "resources-cookie"}
             if url_path == "/verify":
                 sandbox.disconnect.assert_awaited_once()
-                assert body["verification_input"]["response"] == responses_body
-                return _Response({**body["verification_input"], "reward": 1.0})
+                assert body["response"] == responses_body
+                return _Response({**body, "reward": 1.0})
             assert url_path == "/close_session"
             return _Response({"resources_session_id": body["resources_session_id"]})
 
         client.post = AsyncMock(side_effect=dispatch)
         monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda *args, **kwargs: client)
-        materialized = materialize_row(
-            {"instance_id": "case-1", "responses_create_params": {"input": "Fix the code"}, "patch": "grader-only"},
-            taskset="swebench_pro:smoke",
-        )
+        materialized = {
+            "task_id": {"taskset": "swebench_pro:smoke", "task_id": "case-1"},
+            "task_input": {
+                "responses_create_params": {"input": "Fix the code"},
+                "task_data": {"instance_id": "case-1", "patch": "grader-only"},
+            },
+        }
         collection_config = RolloutCollectionConfig(
             input_jsonl_fpath="unused.jsonl",
             output_jsonl_fpath="unused-output.jsonl",
@@ -150,7 +152,7 @@ async def test_native_recipe_routes_collector_through_environment_and_responses(
         )
         _, result = await next(RolloutCollectionHelper().run_examples(rows))
     assert result["failure"] is None, result
-    assert result["result"]["verification"]["reward"] == 1.0
+    assert result["result"]["reward"] == 1.0
     assert [path for _, path, _ in calls] == [
         "/run",
         "/seed_session",
@@ -165,5 +167,5 @@ async def test_native_recipe_routes_collector_through_environment_and_responses(
     assert "grader-only" not in json.dumps(calls[3][2])
     assert responses_body["output"][-1]["content"][0]["text"] == "Fixed"
     assert responses_body["usage"]["total_tokens"] == 16
-    assert not agent._native_sessions
+    assert not any(record.state is not None for record in agent._session_records.values())
     sandbox.stop.assert_not_awaited()

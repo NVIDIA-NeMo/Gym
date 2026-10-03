@@ -66,7 +66,6 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
-    is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
 from responses_api_agents.opencode_agent.artifacts import (
@@ -409,7 +408,9 @@ class LegacyOpenCodeAgent(SimpleResponsesAPIAgent):
 
         effective_config = await self._create_opencode_config(request)
         for name in self._runtime_plugins():
-            await sandbox.upload((Path(__file__).parents[1] / "opencode_sandboxed_agent" / name), f"/tmp/nemo-gym-{name}")
+            await sandbox.upload(
+                (Path(__file__).parents[1] / "opencode_sandboxed_agent" / name), f"/tmp/nemo-gym-{name}"
+            )
         build_agent = effective_config.setdefault("agent", {}).setdefault("build", {})
         for name in ("temperature", "top_p"):
             value = getattr(body, name, None)
@@ -648,15 +649,11 @@ class LegacyOpenCodeAgent(SimpleResponsesAPIAgent):
         pending.replace(results_dir / "generation.json")
         return response
 
-    async def run(
-        self, request: Request, body: LegacyOpenCodeAgentRunRequest
-    ) -> LegacyOpenCodeAgentVerifyResponse:
+    async def run(self, request: Request, body: LegacyOpenCodeAgentRunRequest) -> LegacyOpenCodeAgentVerifyResponse:
         async with self._sem:
             return await self._run(request, body)
 
-    async def _run(
-        self, request: Request, body: LegacyOpenCodeAgentRunRequest
-    ) -> LegacyOpenCodeAgentVerifyResponse:
+    async def _run(self, request: Request, body: LegacyOpenCodeAgentRunRequest) -> LegacyOpenCodeAgentVerifyResponse:
         if self._native_session_marker(request) is not None:
             raise HTTPException(409, "Native OpenCode sessions must use EnvironmentServer /run")
         if self.config.resources_server is None:
