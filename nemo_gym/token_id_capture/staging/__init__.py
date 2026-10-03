@@ -48,13 +48,23 @@ from nemo_gym.token_id_capture.staging.protocols import (
     install_capture,
 )
 from nemo_gym.token_id_capture.staging.rebuild import (
+    CHAIN_KIND_SUBAGENT,
+    CHAIN_KIND_TERMINAL,
+    CHAIN_KINDS,
+    SKIP_ABANDONED_ROOT,
+    SKIP_AMBIGUOUS_LEAF,
+    SKIP_EMPTY_TRAINING_ROW,
+    SKIP_LEAF_ON_TERMINAL_CHAIN,
     ExtrasCommitment,
+    LinearizedRollout,
     LinearizedRow,
     RebuildError,
     ReceiptVerificationError,
+    SkippedChain,
     WeightVersionSpan,
     linearize,
     verify_and_linearize,
+    verify_and_linearize_all,
 )
 from nemo_gym.token_id_capture.staging.records import (
     CallRecord,
@@ -79,7 +89,13 @@ from nemo_gym.token_id_capture.staging.routes import (
     encode_routed_experts,
     routed_experts_token_count,
 )
-from nemo_gym.token_id_capture.staging.terminal import TerminalSelection, select_terminal_call
+from nemo_gym.token_id_capture.staging.terminal import (
+    TerminalSelection,
+    children_by_parent,
+    descend_to_leaf,
+    select_terminal_call,
+    survivors,
+)
 
 # Terminal selection is shared with the existing capture path.
 # Rows with a ``staging_key`` use their recorded response and content fingerprints.
@@ -93,9 +109,16 @@ from nemo_gym.token_id_capture.terminal import (
 
 
 __all__ = [
+    "CHAIN_KIND_SUBAGENT",
+    "CHAIN_KIND_TERMINAL",
+    "CHAIN_KINDS",
     "EMPTY_EXTRAS_DIGEST",
     "EXTRAS_DIGEST_VERSION",
     "MISSING_ROUTE_SENTINEL",
+    "SKIP_ABANDONED_ROOT",
+    "SKIP_AMBIGUOUS_LEAF",
+    "SKIP_EMPTY_TRAINING_ROW",
+    "SKIP_LEAF_ON_TERMINAL_CHAIN",
     "STAGING_DIGEST_VERSION",
     "STAGING_SCHEMA_VERSION",
     "CallRecord",
@@ -109,6 +132,7 @@ __all__ = [
     "CaptureMode",
     "CommitCoords",
     "ExtrasCommitment",
+    "LinearizedRollout",
     "LinearizedRow",
     "ReceiptVerificationError",
     "RebuildError",
@@ -116,6 +140,7 @@ __all__ = [
     "RolloutTokenCapture",
     "RoutedExpertsFragment",
     "RouteSpanMode",
+    "SkippedChain",
     "StagedCallBaseSnapshot",
     "StagedCallRecord",
     "StagedCallSnapshot",
@@ -129,11 +154,13 @@ __all__ = [
     "WeightVersionSpan",
     "assert_golden_vectors",
     "build_staging_delta",
+    "children_by_parent",
     "classify_route_span",
     "compute_chain_hash",
     "compute_extras_digest",
     "compute_staging_digest",
     "decode_routed_experts",
+    "descend_to_leaf",
     "encode_routed_experts",
     "encode_token_ids",
     "hash_token_ids",
@@ -144,5 +171,7 @@ __all__ = [
     "resolve_terminal",
     "select_terminal_call",
     "staging_key",
+    "survivors",
     "verify_and_linearize",
+    "verify_and_linearize_all",
 ]

@@ -9,12 +9,14 @@ It returns no result when more than one terminal call remains possible.
 
 This function does not inspect token data.
 ``verify_and_linearize`` validates the selected chain before training.
+``verify_and_linearize_all`` reuses the same helpers to walk every other root
+(subagent sessions) down to its own leaf.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Callable, Mapping, Sequence
 
 from nemo_gym.token_id_capture.staging.records import (
     TERMINAL_AMBIGUOUS,
@@ -44,7 +46,7 @@ class TerminalSelection:
     reason: str
 
 
-def _root_order_key(records: Sequence[CallRecord]):
+def root_order_key(records: Sequence[CallRecord]) -> Callable[[CallRecord], tuple]:
     """Order candidate roots by admission time, unstamped rows last.
 
     ``admitted_at`` is absent on rows written before the column existed and on
@@ -62,6 +64,44 @@ def _root_order_key(records: Sequence[CallRecord]):
         )
 
     return key
+
+
+def children_by_parent(records: Sequence[CallRecord]) -> dict[str, list[CallRecord]]:
+    """Map each call to its token-linked children, in manifest order."""
+    children: dict[str, list[CallRecord]] = {}
+    for record in records:
+        if record.parent_call_id is not None:
+            children.setdefault(record.parent_call_id, []).append(record)
+    return children
+
+
+def survivors(
+    candidates: Sequence[CallRecord],
+    children: Mapping[str, Sequence[CallRecord]],
+) -> list[CallRecord]:
+    """Keep the candidates that have token-linked children; fall back to all of them.
+
+    An abandoned sibling is only eliminated when another candidate was extended.
+    """
+    extended = [record for record in candidates if children.get(record.model_call_id)]
+    return extended or list(candidates)
+
+
+def descend_to_leaf(root_id: str, children: Mapping[str, Sequence[CallRecord]]) -> str | None:
+    """Walk token links from ``root_id`` to a unique leaf; ``None`` when ambiguous.
+
+    At each level children with descendants are preferred over childless
+    siblings; more than one surviving child is ambiguous.
+    """
+    node_id = root_id
+    while True:
+        candidates = children.get(node_id) or []
+        if not candidates:
+            return node_id
+        pool = survivors(candidates, children)
+        if len(pool) > 1:
+            return None
+        node_id = pool[0].model_call_id
 
 
 def select_terminal_call(records: Sequence[CallRecord]) -> TerminalSelection:
@@ -84,30 +124,19 @@ def select_terminal_call(records: Sequence[CallRecord]) -> TerminalSelection:
         if record.parent_call_id is not None and record.parent_call_id not in by_id:
             return TerminalSelection(None, ORPHANED_ROW)
 
-    children: dict[str, list[CallRecord]] = {}
-    roots: list[CallRecord] = []
-    for record in records:
-        if record.parent_call_id is None:
-            roots.append(record)
-        else:
-            children.setdefault(record.parent_call_id, []).append(record)
+    children = children_by_parent(records)
+    roots = [record for record in records if record.parent_call_id is None]
     if not roots:
         # Every row names a present parent: the graph is cyclic.
         return TerminalSelection(None, NO_ROOT)
 
-    key = _root_order_key(records)
-
-    def survivors(candidates: list[CallRecord]) -> list[CallRecord]:
-        extended = [record for record in candidates if children.get(record.model_call_id)]
-        return extended or candidates
-
-    root_pool = survivors(roots)
-    node = min(root_pool, key=key)
+    key = root_order_key(records)
+    node = min(survivors(roots, children), key=key)
     while True:
         candidates = children.get(node.model_call_id) or []
         if not candidates:
             return TerminalSelection(node.model_call_id, SELECTED)
-        pool = survivors(candidates)
+        pool = survivors(candidates, children)
         if len(pool) > 1:
             return TerminalSelection(None, AMBIGUOUS_TERMINAL)
         node = pool[0]

@@ -7,7 +7,13 @@ from __future__ import annotations
 
 from nemo_gym.token_id_capture.staging.digest import EMPTY_EXTRAS_DIGEST
 from nemo_gym.token_id_capture.staging.records import CallRecord
-from nemo_gym.token_id_capture.staging.terminal import TerminalSelection, select_terminal_call
+from nemo_gym.token_id_capture.staging.terminal import (
+    TerminalSelection,
+    children_by_parent,
+    descend_to_leaf,
+    select_terminal_call,
+    survivors,
+)
 
 
 DIGEST = "b" * 64
@@ -146,3 +152,25 @@ def test_cyclic_rows_select_nothing():
 def test_duplicate_call_ids_select_nothing():
     rows = _chain("c1", "c2") + _chain("c1", start_at=300.0)
     assert select_terminal_call(rows) == TerminalSelection(None, "duplicate_call_id")
+
+
+def test_children_survivors_and_descend_to_leaf_helpers():
+    """The helpers verify_and_linearize_all walks every non-terminal root with."""
+    rows = _chain("c1", "c2", "c3")
+    rows.append(_row("c2-retry", parent_call_id="c1", prev_len=10, admitted_at=101.5))
+    rows += _chain("u1", "u2", start_at=200.0)
+    children = children_by_parent(rows)
+    assert {parent: [r.model_call_id for r in kids] for parent, kids in children.items()} == {
+        "c1": ["c2", "c2-retry"],
+        "c2": ["c3"],
+        "u1": ["u2"],
+    }
+    # The abandoned retry is eliminated only because a sibling was extended.
+    assert [r.model_call_id for r in survivors(children["c1"], children)] == ["c2"]
+    assert [r.model_call_id for r in survivors([rows[2], rows[3]], children)] == ["c3", "c2-retry"]
+    assert descend_to_leaf("c1", children) == "c3"
+    assert descend_to_leaf("u1", children) == "u2"
+    assert descend_to_leaf("c3", children) == "c3"
+    # Two extended siblings leave the walk ambiguous.
+    rows.append(_row("d3", parent_call_id="c2-retry", prev_len=20, admitted_at=102.5))
+    assert descend_to_leaf("c1", children_by_parent(rows)) is None

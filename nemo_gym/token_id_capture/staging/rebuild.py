@@ -1,18 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Verify a rollout receipt and rebuild its selected token sequence.
+"""Verify a rollout receipt and rebuild its selected token sequence(s).
 
 The verifier reads token columns from :class:`StagedCallBaseSnapshot`.
 It does not fetch or decode optional extras.
 For each selected call, it returns an :class:`ExtrasCommitment`.
 Consumers fetch the extras and compare their digest before use.
+
+Two entry points share one verification pass:
+
+* :func:`verify_and_linearize` returns the receipt's declared terminal chain
+  as a single :class:`LinearizedRow` (the historical contract).
+* :func:`verify_and_linearize_all` additionally linearizes every other
+  surviving root of the manifest forest (subagent sessions), one row per
+  chain, terminal chain first, then the other roots in admission order.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from nemo_gym.token_id_capture.staging.digest import (
     EXTRAS_DIGEST_VERSION,
@@ -27,6 +35,11 @@ from nemo_gym.token_id_capture.staging.records import (
     RolloutReceipt,
     StagedCallBaseSnapshot,
 )
+from nemo_gym.token_id_capture.staging.terminal import (
+    children_by_parent,
+    descend_to_leaf,
+    root_order_key,
+)
 
 
 class ReceiptVerificationError(ValueError):
@@ -39,6 +52,22 @@ class ReceiptVerificationError(ValueError):
 
 class RebuildError(ReceiptVerificationError):
     """A verified manifest cannot form the declared terminal ancestry."""
+
+
+# Chain kinds carried on ``LinearizedRow.chain_kind``.
+CHAIN_KIND_TERMINAL = "terminal"
+CHAIN_KIND_SUBAGENT = "subagent"
+CHAIN_KINDS = (CHAIN_KIND_TERMINAL, CHAIN_KIND_SUBAGENT)
+
+# Reasons carried on ``SkippedChain.reason`` for structural skips. A
+# non-terminal chain that fails a per-chain custody check is skipped with the
+# :class:`RebuildError` code instead (``chain_hash_mismatch``,
+# ``invalid_mask_order``, ``empty_generation``, ``cumulative_hash_mismatch``,
+# ``empty_training_row``).
+SKIP_AMBIGUOUS_LEAF = "ambiguous_leaf"
+SKIP_ABANDONED_ROOT = "abandoned_root"
+SKIP_EMPTY_TRAINING_ROW = "empty_training_row"
+SKIP_LEAF_ON_TERMINAL_CHAIN = "leaf_on_terminal_chain"
 
 
 @dataclass(frozen=True)
@@ -67,11 +96,23 @@ class ExtrasCommitment:
 
 @dataclass(frozen=True)
 class LinearizedRow:
-    """One verified terminal chain ready for framework publication.
+    """One verified root-to-leaf chain ready for framework publication.
 
     This is a proof that the base training row was verified. It carries no
     extras payloads; ``extras_commitments`` lists the selected calls'
-    receipt-bound digests root-to-terminal for point-of-use verification.
+    receipt-bound digests root-to-leaf for point-of-use verification.
+
+    Chain placement fields (defaults describe the receipt's terminal chain):
+
+    * ``terminal_model_call_id`` -- the leaf this row was linearized to.
+    * ``chain_index`` -- position in ``LinearizedRollout.rows``; 0 is always
+      the receipt's terminal chain.
+    * ``chain_kind`` -- ``terminal`` or ``subagent`` (any other root of the
+      rollout's manifest forest).
+    * ``segment_index`` -- position along a context-rewrite sequence; always 0
+      here (context rewrites are not linearized as segments).
+    * ``boundary_parent_call_id`` -- reserved for context-rewrite roots; always
+      ``None`` here.
     """
 
     rollout_id: str
@@ -84,11 +125,40 @@ class LinearizedRow:
     weight_version_spans: list[WeightVersionSpan]
     link_spans: list[tuple[str, int, int]] = field(default_factory=list)
     extras_commitments: list[ExtrasCommitment] = field(default_factory=list)
+    terminal_model_call_id: str = ""
+    chain_index: int = 0
+    chain_kind: str = CHAIN_KIND_TERMINAL
+    segment_index: int = 0
+    boundary_parent_call_id: str | None = None
 
     @property
     def call_ids(self) -> list[str]:
         """Compatibility spelling for existing framework consumers."""
         return self.model_call_ids
+
+
+@dataclass(frozen=True)
+class SkippedChain:
+    """A non-terminal root that verified but produced no publishable row."""
+
+    root_call_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class LinearizedRollout:
+    """Every publishable chain of one rollout, terminal chain first."""
+
+    rows: list[LinearizedRow]
+    skipped: list[SkippedChain] = field(default_factory=list)
+    num_roots: int = 0
+    # Context-rewrite roots; always 0 here (kept for consumers that report it).
+    num_boundary_roots: int = 0
+
+    @property
+    def terminal(self) -> LinearizedRow:
+        """The receipt's declared terminal chain (always ``rows[0]``)."""
+        return self.rows[0]
 
 
 def _fail(code: str, detail: str) -> ReceiptVerificationError:
@@ -198,6 +268,17 @@ def _validate_manifest_graph(records: dict[str, CallRecord]) -> None:
             cursor = records.get(cursor.parent_call_id) if cursor.parent_call_id is not None else None
 
 
+def _ancestry(records: dict[str, CallRecord], leaf_id: str) -> list[CallRecord]:
+    """Root-to-leaf records of the chain ending at ``leaf_id`` (graph already validated)."""
+    chain: list[CallRecord] = []
+    cursor = records.get(leaf_id)
+    while cursor is not None:
+        chain.append(cursor)
+        cursor = records.get(cursor.parent_call_id) if cursor.parent_call_id is not None else None
+    chain.reverse()
+    return chain
+
+
 def _terminal_chain(
     receipt: RolloutReceipt,
     records: dict[str, CallRecord],
@@ -205,15 +286,9 @@ def _terminal_chain(
     terminal = receipt.terminal_model_call_id
     if terminal is None:
         raise RebuildError("missing_terminal", "successful receipt has no terminal call")
-    chain: list[CallRecord] = []
-    cursor = records.get(terminal)
-    if cursor is None:
+    if terminal not in records:
         raise RebuildError("missing_terminal", f"terminal call {terminal} is absent")
-    while cursor is not None:
-        chain.append(cursor)
-        cursor = records.get(cursor.parent_call_id) if cursor.parent_call_id is not None else None
-    chain.reverse()
-    return chain
+    return _ancestry(records, terminal)
 
 
 def _carry_boundary(snapshot: StagedCallBaseSnapshot) -> int:
@@ -235,15 +310,14 @@ def _carry_boundary(snapshot: StagedCallBaseSnapshot) -> int:
     return boundary
 
 
-def verify_and_linearize(
+def _verify_receipt_and_snapshots(
     receipt: RolloutReceipt,
     snapshots: Sequence[StagedCallBaseSnapshot],
-) -> LinearizedRow:
-    """Verify an untrusted staged base set and linearize the declared terminal chain.
+) -> tuple[dict[str, CallRecord], dict[str, StagedCallBaseSnapshot]]:
+    """Receipt-level checks plus per-row binding and integrity for every manifest row.
 
-    Metadata-only: extras payloads are never read. The returned row's
-    ``extras_commitments`` carry the selected calls' receipt-bound digests for
-    consumers to verify fetched extras against at their own point of use.
+    Shared by both linearization entry points; runs once per rollout and
+    covers rows on every chain, whether or not they are delivered.
     """
     if not isinstance(receipt, RolloutReceipt):
         raise TypeError("receipt must be a RolloutReceipt")
@@ -289,7 +363,29 @@ def verify_and_linearize(
         _compare_manifest_fields(receipt, record, snapshot)
         _recompute_integrity(snapshot)
     _validate_manifest_graph(records_by_id)
-    chain = _terminal_chain(receipt, records_by_id)
+    return records_by_id, snapshots_by_id
+
+
+def _linearize_chain(
+    receipt: RolloutReceipt,
+    records_by_id: dict[str, CallRecord],
+    snapshots_by_id: dict[str, StagedCallBaseSnapshot],
+    leaf_id: str,
+    *,
+    chain_index: int = 0,
+    chain_kind: str = CHAIN_KIND_TERMINAL,
+) -> LinearizedRow:
+    """Verify and concatenate the root-to-``leaf_id`` chain into one row.
+
+    Checks chain-hash continuity link by link, the carry-then-generation mask
+    order of every delta, that the chain trains at least one token, and the
+    leaf's cumulative hash over the concatenated tokens. Raises
+    :class:`RebuildError` on any failure; callers decide whether a failure on
+    a non-terminal chain is fatal.
+    """
+    chain = _ancestry(records_by_id, leaf_id)
+    if not chain:
+        raise RebuildError("missing_terminal", f"terminal call {leaf_id} is absent")
 
     token_ids: list[int] = []
     token_mask: list[float] = []
@@ -330,13 +426,13 @@ def verify_and_linearize(
         )
         link_spans.append((record.model_call_id, boundary, record.delta_len - boundary))
     if not any(token_mask):
-        raise RebuildError("empty_training_row", "terminal chain has no generated tokens")
-    # Terminal-only whole-sequence anchor; per-record cumulative checks would
+        raise RebuildError("empty_training_row", f"chain ending at {leaf_id} has no generated tokens")
+    # Leaf-only whole-sequence anchor; per-record cumulative checks would
     # rehash O(n^2) tokens for no additional coverage over the chain hashes.
     if chain[-1].cumulative_hash != hash_token_ids(token_ids):
         raise RebuildError(
             "cumulative_hash_mismatch",
-            f"terminal call {chain[-1].model_call_id} cumulative hash does not cover the linearized tokens",
+            f"leaf call {chain[-1].model_call_id} cumulative hash does not cover the linearized tokens",
         )
 
     extras_commitments = [
@@ -358,7 +454,164 @@ def verify_and_linearize(
         weight_version_spans=weight_version_spans,
         link_spans=link_spans,
         extras_commitments=extras_commitments,
+        terminal_model_call_id=leaf_id,
+        chain_index=chain_index,
+        chain_kind=chain_kind,
     )
+
+
+def verify_and_linearize(
+    receipt: RolloutReceipt,
+    snapshots: Sequence[StagedCallBaseSnapshot],
+) -> LinearizedRow:
+    """Verify an untrusted staged base set and linearize the declared terminal chain.
+
+    Metadata-only: extras payloads are never read. The returned row's
+    ``extras_commitments`` carry the selected calls' receipt-bound digests for
+    consumers to verify fetched extras against at their own point of use.
+    """
+    records_by_id, snapshots_by_id = _verify_receipt_and_snapshots(receipt, snapshots)
+    chain = _terminal_chain(receipt, records_by_id)
+    return _linearize_chain(receipt, records_by_id, snapshots_by_id, chain[-1].model_call_id)
+
+
+def _root_prompts(
+    roots: Sequence[CallRecord],
+    snapshots_by_id: Mapping[str, StagedCallBaseSnapshot],
+) -> dict[str, tuple[int, ...]]:
+    """Root -> the prompt tokens of its first request (the carry span of the root call's delta).
+
+    Two roots whose first requests carried the same prompt tokens were started
+    by the same request; the one the session did not go on with is a retry of
+    the other. A root whose delta is not carry-then-generation has no readable
+    prompt and joins no retry pool (its chain is skipped with the custody error
+    code when it is linearized), nor does a root that carried no prompt token.
+    """
+    prompts: dict[str, tuple[int, ...]] = {}
+    for root in roots:
+        snapshot = snapshots_by_id[root.model_call_id]
+        try:
+            boundary = _carry_boundary(snapshot)
+        except RebuildError:
+            continue
+        if boundary:
+            prompts[root.model_call_id] = tuple(snapshot.token_ids_delta[:boundary])
+    return prompts
+
+
+def _abandoned_roots(
+    roots: Sequence[CallRecord],
+    children: Mapping[str, Sequence[CallRecord]],
+    prompts: Mapping[str, tuple[int, ...]],
+    terminal_root_id: str,
+) -> set[str]:
+    """Roots that are dead retries of another root.
+
+    A retry pool is the set of roots whose first request carried identical
+    prompt tokens (a retried first call beside the attempt that was
+    continued). Inside a pool the terminal heuristic's ``survivors`` rule
+    applies: an unextended member (no token child) is eliminated only when
+    another member was extended, and the receipt's terminal root counts as
+    extended because the session ended there. A childless root with a
+    distinct prompt is a genuine single-call session (a subagent that
+    answered in one call) and is kept; byte-identical duplicates are
+    collapsed later by cumulative hash.
+    """
+
+    def extended(record: CallRecord) -> bool:
+        call_id = record.model_call_id
+        return call_id == terminal_root_id or bool(children.get(call_id))
+
+    by_prompt: dict[tuple[int, ...], list[CallRecord]] = {}
+    for root in roots:
+        prompt = prompts.get(root.model_call_id)
+        if prompt is not None:
+            by_prompt.setdefault(prompt, []).append(root)
+    abandoned: set[str] = set()
+    for pool in by_prompt.values():
+        if len(pool) > 1 and any(extended(record) for record in pool):
+            abandoned.update(record.model_call_id for record in pool if not extended(record))
+    return abandoned
+
+
+def verify_and_linearize_all(
+    receipt: RolloutReceipt,
+    snapshots: Sequence[StagedCallBaseSnapshot],
+) -> LinearizedRollout:
+    """Verify once and linearize every publishable chain of the manifest forest.
+
+    ``rows[0]`` is the receipt's declared terminal chain, built exactly as
+    :func:`verify_and_linearize` builds it (and subject to the same errors).
+    Every other root (a subagent session) is first checked for being a dead
+    retry (an unextended root beside an extended one with the same prompt
+    tokens is ``abandoned_root``; a childless root with a prompt of its own is
+    a genuine single-call session and is published), then descended to its
+    leaf (a surviving fork is ``ambiguous_leaf``), de-duplicated by the leaf's
+    cumulative hash (an identical retry is ``abandoned_root``) and linearized
+    root-to-leaf with the same per-chain checks. A per-chain custody failure
+    on a non-terminal chain skips that chain with the error code; the
+    terminal chain's failures raise.
+
+    Rows follow the terminal, then the other roots by admission time
+    (unstamped last) and manifest position, all as ``subagent`` rows.
+    """
+    records_by_id, snapshots_by_id = _verify_receipt_and_snapshots(receipt, snapshots)
+    terminal_chain = _terminal_chain(receipt, records_by_id)
+    terminal_root_id = terminal_chain[0].model_call_id
+    terminal_call_ids = {record.model_call_id for record in terminal_chain}
+
+    manifest = list(receipt.manifest)
+    roots = [record for record in manifest if record.parent_call_id is None]
+    children = children_by_parent(manifest)
+    abandoned = _abandoned_roots(roots, children, _root_prompts(roots, snapshots_by_id), terminal_root_id)
+    others = sorted(
+        (root for root in roots if root.model_call_id != terminal_root_id),
+        key=root_order_key(manifest),
+    )
+
+    rows: list[LinearizedRow] = [
+        _linearize_chain(receipt, records_by_id, snapshots_by_id, terminal_chain[-1].model_call_id)
+    ]
+    skipped: list[SkippedChain] = []
+    published_hashes = {terminal_chain[-1].cumulative_hash}
+    for root in others:
+        root_id = root.model_call_id
+        if root_id in abandoned:
+            skipped.append(SkippedChain(root_id, SKIP_ABANDONED_ROOT))
+            continue
+        leaf_id = descend_to_leaf(root_id, children)
+        if leaf_id is None:
+            skipped.append(SkippedChain(root_id, SKIP_AMBIGUOUS_LEAF))
+            continue
+        if leaf_id in terminal_call_ids:
+            # Distinct roots own disjoint trees; this only guards a caller
+            # that hands in a terminal chain rooted elsewhere.
+            skipped.append(SkippedChain(root_id, SKIP_LEAF_ON_TERMINAL_CHAIN))
+            continue
+        leaf_hash = records_by_id[leaf_id].cumulative_hash
+        if leaf_hash in published_hashes:
+            # Byte-identical retry of a published chain: training it twice
+            # would double-count the same tokens.
+            skipped.append(SkippedChain(root_id, SKIP_ABANDONED_ROOT))
+            continue
+        try:
+            row = _linearize_chain(
+                receipt,
+                records_by_id,
+                snapshots_by_id,
+                leaf_id,
+                chain_index=len(rows),
+                chain_kind=CHAIN_KIND_SUBAGENT,
+            )
+        except RebuildError as error:
+            # The terminal chain was verified on its own above; a corrupt
+            # secondary chain says nothing about the canonical row.
+            skipped.append(SkippedChain(root_id, error.code))
+            continue
+        published_hashes.add(leaf_hash)
+        rows.append(row)
+
+    return LinearizedRollout(rows=rows, skipped=skipped, num_roots=len(roots))
 
 
 def linearize(
