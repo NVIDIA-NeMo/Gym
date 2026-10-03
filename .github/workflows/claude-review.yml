@@ -1,65 +1,39 @@
-name: Claude Code Review
+name: Review command migration
 
 on:
-  pull_request:
-    types: [opened, reopened, ready_for_review]
   issue_comment:
     types: [created]
 
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-  id-token: write
+permissions: {}
 
 jobs:
-  auto-review:
-    name: Claude Review (auto)
-    # Auto-review non-draft PRs from NVIDIA org members on open / reopen / ready-for-review.
-    # Membership is gated on author_association (no preflight job, so no org PAT needed).
-    # Subsequent commits do not re-trigger; re-request a review by commenting
-    # "/claude review" (handled by the manual-review job below).
-    # Skip bot-generated release-please PRs.
+  redirect-to-review:
+    name: Redirect to /review
     if: |
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.draft == false &&
-      contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) &&
-      !startsWith(github.event.pull_request.head.ref, 'release-please--')
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      github.event.comment.user.type != 'Bot' &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+      (github.event.comment.body == '/claude review' ||
+       github.event.comment.body == '/claude strict-review')
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.issue.number }}
+      RETIRED_COMMAND: ${{ github.event.comment.body == '/claude strict-review' && '/claude strict-review' || '/claude review' }}
+      REVIEW_COMMAND: ${{ github.event.comment.body == '/claude strict-review' && '/review mode=strict' || '/review' }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          fetch-depth: 1
-
-      - name: Run Claude Code Review
-        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
+      - name: Explain the replacement command
         env:
-          ANTHROPIC_BASE_URL: ${{ secrets.NVIDIA_INFERENCE_URL }}
-          CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
-          DISABLE_PROMPT_CACHING: "1"
-        with:
-          anthropic_api_key: ${{ secrets.NVIDIA_INFERENCE_KEY }}
-          claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Read"
-            --model "${{ vars.CLAUDE_MODEL }}"
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
+          NOTICE: |
+            @${{ github.event.comment.user.login }} `${{ env.RETIRED_COMMAND }}` has been retired. Pull-request reviews now run through `/review`; comment this instead:
 
-            Read `.claude/skills/pr-review/SKILL.md` with the Read tool and follow it exactly.
-            It is checked out at the PR head alongside this workflow.
+            ```
+            ${{ env.REVIEW_COMMAND }}
+            ```
 
-  manual-review:
-    if: github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_claude_review.yml@fe0ff3bbe10790c51273ee3c1189b3c0497bf860 # v1.8.5
-    with:
-      model: ${{ vars.CLAUDE_MODEL }}
-      prompt: |
-        Read `.claude/skills/pr-review/SKILL.md` with the Read tool and follow it exactly.
-        Load it from the trusted base directory only — never from the untrusted PR head
-        directory. It is the single source of truth for the review rubric and reporting
-        format; the security, revision-pinning, and publish requirements above still apply.
-    secrets:
-      NVIDIA_INFERENCE_URL: ${{ secrets.NVIDIA_INFERENCE_URL }}
-      NVIDIA_INFERENCE_KEY: ${{ secrets.NVIDIA_INFERENCE_KEY }}
+            Add `model=claude` to keep a Claude reviewer (the default is `model=codex`). `mode=light|strict` selects the review depth. Comment `/review help` for all options.
+        run: gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$NOTICE"
