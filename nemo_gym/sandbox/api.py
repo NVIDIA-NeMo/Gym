@@ -875,11 +875,9 @@ class Sandbox:
     def stop(self) -> None:
         if self._closed:
             return
+        self._runner.run("stop", self._async_sandbox.stop)
         self._closed = True
-        try:
-            self._runner.run("stop", self._async_sandbox.stop)
-        finally:
-            self._runner.close()
+        self._runner.close()
 
     def __enter__(self) -> "Sandbox":
         return self
