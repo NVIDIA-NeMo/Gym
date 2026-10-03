@@ -80,8 +80,12 @@ class CheckpointTestAgent(SimpleAgent):
             min_tokens = int(os.environ.get(PREFIX_MIN_TOKENS_ENV, "384"))
         except ValueError as error:
             raise ValueError(f"{PREFIX_MIN_TOKENS_ENV} must be an integer") from error
-        if min_tokens <= 0:
-            raise ValueError(f"{PREFIX_MIN_TOKENS_ENV} must be greater than zero")
+        if min_tokens < 0:
+            raise ValueError(f"{PREFIX_MIN_TOKENS_ENV} must not be negative")
+        if min_tokens == 0:
+            # Natural length: the closing response stops at its own EOS within the row's budget. Forcing
+            # min_tokens past EOS leaves near-tied argmax tokens that flip between otherwise identical runs.
+            return body.model_copy(update={"tool_choice": "none", "parallel_tool_calls": False})
 
         metadata = dict(body.metadata or {})
         raw_extra_body = metadata.get("extra_body")
