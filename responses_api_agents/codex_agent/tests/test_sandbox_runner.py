@@ -94,7 +94,7 @@ def test_detached_descendants_are_gone_before_receipt(tmp_path, ending):
         process.send_signal(signal.SIGTERM)
     summary = result(tmp_path, process)
     assert summary["cleanup_confirmed"] is True
-    assert summary["timed_out"] is (ending != "natural")
+    assert summary["timed_out"] is (ending == "timeout")
     pid = int((tmp_path / "child.pid").read_text())
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
