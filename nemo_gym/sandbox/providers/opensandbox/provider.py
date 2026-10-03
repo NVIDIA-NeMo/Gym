@@ -533,6 +533,10 @@ class OpenSandboxCreateConfig:
     # Refresh a created sandbox's TTL while this provider owns its handle.
     # This does not change task/command timeouts or renew borrowed handles.
     renew_interval_s: float | None = None
+    # Defaults merged into every sandbox's env / provider_options (top-level keys; the spec's own values win),
+    # so a cell-wide setting such as sandbank egress caching is one provider-config change.
+    default_env: dict[str, str] = field(default_factory=dict)
+    default_provider_options: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.image_pull_policy is not None:
@@ -1616,8 +1620,14 @@ class OpenSandboxProvider:
 
         Job attribution keys (``team`` / ``user`` / ``workload`` / ``run``) are merged into the
         spec's metadata (explicit spec keys win) so every sandbox is attributable via its labels.
+        ``create.default_env`` / ``create.default_provider_options`` are merged the same way.
         """
-        spec = replace(spec, metadata={**self._attribution_metadata(), **spec.metadata})
+        spec = replace(
+            spec,
+            metadata={**self._attribution_metadata(), **spec.metadata},
+            env={**self._create.default_env, **spec.env},
+            provider_options={**self._create.default_provider_options, **spec.provider_options},
+        )
         return await self._create_with_retries(_normalize_spec(spec))
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:

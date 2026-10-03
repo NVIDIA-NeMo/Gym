@@ -1832,6 +1832,36 @@ async def test_create_injects_attribution_metadata(
     }
 
 
+async def test_create_merges_config_default_env_and_provider_options(fake_opensandbox_sdk: None) -> None:
+    policy = {"defaultAction": "allow", "egress": []}
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+        create={
+            "default_env": {"CACHE": "on", "SHARED": "default"},
+            "default_provider_options": {"network_policy": policy},
+        },
+    )
+
+    await provider.create(SandboxSpec(image="image:tag", env={"SHARED": "spec", "TASK": "1"}))
+
+    assert FakeSandbox.created_kwargs["env"] == {"CACHE": "on", "SHARED": "spec", "TASK": "1"}
+    assert FakeSandbox.created_kwargs["network_policy"].model_dump(by_alias=True, exclude_none=True) == policy
+
+
+async def test_create_spec_provider_options_win_over_config_defaults(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+        create={"default_provider_options": {"network_policy": {"defaultAction": "allow", "egress": []}}},
+    )
+    spec_policy = {"defaultAction": "deny", "egress": []}
+
+    await provider.create(SandboxSpec(image="image:tag", provider_options={"network_policy": spec_policy}))
+
+    assert FakeSandbox.created_kwargs["network_policy"].model_dump(by_alias=True, exclude_none=True) == spec_policy
+
+
 async def test_create_spec_metadata_and_config_win_over_attribution_detection(
     fake_opensandbox_sdk: None,
     clean_attribution_env: None,

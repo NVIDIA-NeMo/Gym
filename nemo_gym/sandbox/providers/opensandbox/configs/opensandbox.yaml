@@ -47,6 +47,10 @@ sandbox:
       retries: 10
       retry_delay_s: 5.0
       retry_max_delay_s: 90.0
+      # Optional defaults merged into every sandbox (a benchmark's own sandbox_config wins per top-level key).
+      # E.g. opt every sandbox into the egress sidecar's transparent package cache:
+      # default_env: { OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT: "true" }
+      # default_provider_options: { network_policy: { defaultAction: allow, egress: [] } }
     probe:
       timeout_s: 60
       deadline_s: 180
