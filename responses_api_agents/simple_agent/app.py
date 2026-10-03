@@ -137,6 +137,17 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     _agent_sessions: dict[str, SimpleAgentSessionState] = PrivateAttr(default_factory=dict)
     _closed_agent_session_ids: set[str] = PrivateAttr(default_factory=set)
 
+    def _prepare_model_request_for_turn(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        turn_index: int,
+    ) -> NeMoGymResponseCreateParamsNonStreaming:
+        """Allow specialized agents to adjust a fully materialized turn request."""
+
+        del turn_index
+        return body
+
     async def seed_agent_session(
         self,
         request: Request,
@@ -340,6 +351,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             if not pending_tools:
                 step += 1
                 new_body = body.model_copy(update={"input": body.input + new_outputs})
+                new_body = self._prepare_model_request_for_turn(
+                    new_body,
+                    turn_index=step,
+                )
                 if collect_trajectory:
                     turn_timestamp = time()
 
