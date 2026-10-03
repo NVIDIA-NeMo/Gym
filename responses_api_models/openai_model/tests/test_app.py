@@ -34,6 +34,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    PermanentEndpointError,
 )
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.openai_model import app as openai_model_module
@@ -687,6 +688,33 @@ class TestApp:
 
         assert calls == 1
         assert sleeps == [0.1]
+
+    async def test_retry_policy_stops_on_a_permanent_endpoint_failure(self, monkeypatch: MonkeyPatch) -> None:
+        provider_response = SimpleNamespace(
+            status=429,
+            content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":{"type":"insufficient_quota"}}')),
+        )
+        transport = AsyncMock(return_value=provider_response)
+        backoff_sleeps = []
+
+        async def record_sleep(seconds):
+            backoff_sleeps.append(seconds)
+
+        monkeypatch.setattr("nemo_gym.openai_utils.request", transport)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr(openai_model_module.asyncio, "sleep", record_sleep)
+        server = self._setup_server(
+            upstream_max_num_tries=1,
+            upstream_retry_policy={"max_attempts": 3, "backoff_initial_seconds": 1.0},
+        )
+
+        # The first request trips the client; the second never reaches the provider.
+        for _ in range(2):
+            with pytest.raises(PermanentEndpointError):
+                await server.responses(NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+        transport.assert_awaited_once()
+        assert backoff_sleeps == []
 
     @pytest.mark.asyncio
     async def test_responses_preserves_provider_http_400_across_server_hop(

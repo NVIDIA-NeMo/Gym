@@ -34,6 +34,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    PermanentEndpointError,
     ReasoningEffort,
 )
 
@@ -259,6 +260,10 @@ class SimpleModelServer(SimpleResponsesAPIModel):
                 # the full retry loop.
                 async with self._upstream_request_slot():
                     return await operation()
+            except PermanentEndpointError:
+                # The client has stopped calling a spent or unauthorized endpoint,
+                # so every later attempt would fail without reaching the provider.
+                raise
             except ClientResponseError as exc:
                 if exc.status in retry_policy.terminal_http_status_codes:
                     raise
