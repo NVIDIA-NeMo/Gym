@@ -532,6 +532,29 @@ class TestApp:
         assert config["datasets"][0]["version"] == "2.0"
         assert config["datasets"][0]["task_names"] == ["fix-git"]
 
+    @pytest.mark.parametrize("setup_timeout", [None, 120, 900])
+    def test_build_job_config_forwards_setup_timeout_without_changing_execution_timeout(
+        self, setup_timeout: int | None, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("harbor")
+        server = _make_server(
+            harbor_agent_override_setup_timeout=setup_timeout,
+            harbor_agent_override_timeout=30,
+            harbor_agent_max_timeout=60,
+        )
+        config = server._build_job_config(
+            dataset_alias="scientific",
+            task_name="test_task_123",
+            model_name="test_model",
+            api_base="http://localhost:9000/v1",
+            job_name="test_job",
+            jobs_dir=tmp_path,
+        )
+        agent = config["agents"][0]
+        assert agent["override_setup_timeout_sec"] == setup_timeout
+        assert agent["override_timeout_sec"] == 30
+        assert agent["max_timeout_sec"] == 60
+
     def test_build_job_config_harbor_no_delete(self) -> None:
         pytest.importorskip("harbor")
         server = _make_server(harbor_no_delete=True, harbor_environment_type="docker")
