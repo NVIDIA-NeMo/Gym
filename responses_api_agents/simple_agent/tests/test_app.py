@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, MagicMock, call
 
 import orjson
@@ -151,7 +152,7 @@ class TestApp:
 
         dotjson_mock = AsyncMock()
         dotjson_mock.read.return_value = json.dumps(mock_response_data)
-        dotjson_mock.cookies = MagicMock()
+        dotjson_mock.cookies = SimpleCookie({"model_session": "active"})
         server.server_client.post.return_value = dotjson_mock
 
         # No model provided should use the one from the config
@@ -634,7 +635,7 @@ class TestApp:
             json.dumps(mock_response_bad_tool_call),
             json.dumps(mock_response_chat_data),
         ]
-        dotjson_mock.cookies = MagicMock()
+        dotjson_mock.cookies = SimpleCookie({"model_session": "active"})
         server.server_client.post.return_value = dotjson_mock
 
         res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
@@ -897,7 +898,7 @@ class TestApp:
 
         dotjson_mock = AsyncMock()
         dotjson_mock.read.side_effect = [json.dumps(response_1), json.dumps(response_2), json.dumps(response_3)]
-        dotjson_mock.cookies = MagicMock()
+        dotjson_mock.cookies = SimpleCookie({"model_session": "active"})
         server.server_client.post.return_value = dotjson_mock
 
         # No model provided should use the one from the config
@@ -990,7 +991,7 @@ class TestApp:
 
         dotjson_mock = AsyncMock()
         dotjson_mock.read.side_effect = [json.dumps(mock_response_reasoning_data), json.dumps(mock_response_chat_data)]
-        dotjson_mock.cookies = MagicMock()
+        dotjson_mock.cookies = SimpleCookie({"model_session": "active"})
         server.server_client.post.return_value = dotjson_mock
 
         # No model provided should use the one from the config
@@ -1008,9 +1009,6 @@ class TestApp:
             ),
             call().ok.__bool__(),
             call().read(),
-            call().cookies.items(),
-            call().cookies.items().__iter__(),
-            call().cookies.items().__len__(),
         ]
         server.server_client.post.assert_has_calls(expected_calls)
 
