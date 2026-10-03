@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Compatibility config path for the native taskset-routed benchmark composition.
+config_paths:
+  - benchmarks/swebench/pro/opencode_native.yaml
+
+# Preserve the earlier direct API deployment name; collection uses swebench_pro_opencode.
+swebench_pro_opencode_environment:
+  _copy: swebench_pro_opencode

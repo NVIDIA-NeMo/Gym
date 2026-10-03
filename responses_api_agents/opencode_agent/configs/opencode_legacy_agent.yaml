@@ -1,29 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Native EnvironmentServer sessions: Resources creates and owns the task sandbox.
-# Use opencode_local_agent.yaml for local CLI execution or opencode_legacy_agent.yaml
-# for existing flat-row benchmark /run recipes.
+# Compatibility profile for existing flat-row agent /run benchmark recipes.
+# A compatibility EnvironmentServer delegates to agent /run; native sessions are not used.
 opencode_agent:
   responses_api_agents:
     opencode_agent:
       entrypoint: app.py
-      execution_mode: sandbox
+      execution_mode: legacy_sandbox
       num_workers: 1
-      resources_server: null
+      # Unbound for --agent-type opencode_agent/opencode_legacy_agent composition.
+      resources_server:
+        type: resources_servers
+        name: ???
       model_server:
         type: responses_api_models
         name: policy_model
       token_id_capture: true
 
+      debug: false
+
       opencode_version: 1.17.11
-      # Set this to the actual model context window; it is metadata, not an output-token limit.
-      context_window: 262144
-      timeout: 10800
-      setup_timeout: 600
-      session_lifetime_seconds: 21600
-      session_close_timeout_seconds: 30
-      session_close_retry_window_seconds: 300
+      # @bxyu-nvidia: This needs to be set appropriately for every model!
+      opencode_max_context_window: 262144
+
+      opencode_model_call_timeout: 3600000  # In milliseconds e.g. 600000 is 10min. Leave null for no timeout. Default to 1hr
 
       remote_opencode_install_script_path: null
       remote_opencode_binary_path: null
@@ -33,6 +34,9 @@ opencode_agent:
       opencode_config:
         permission:
           "*": allow
+          webfetch: deny
+          websearch: deny
+          skill: deny
 
           edit:
             "**": allow
@@ -135,18 +139,26 @@ opencode_agent:
             "*curl *github.io*": deny
             "*wget *github.io*": deny
 
-        tools:
-          bash: true
-          edit: true
-          read: true
-          glob: true
-          grep: true
-          write: true
-          apply_patch: true
-          webfetch: false
-          websearch: false
-          task: true
-          skill: false
-          todowrite: true
+
+      sandbox_timeout: 10800  # 3hr default for harness execution
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        env:
+          # execd holds each finished command's response open for this long (default 1s);
+          # a short grace keeps every command and the readiness probe from paying that tail.
+          EXECD_API_GRACE_SHUTDOWN: "50ms"
+        resources:
+          cpu: 0.25
+          memory_mib: 512
+          # 30 GiB works on every provider: within Fargate's 21-200 GiB ephemeral range
+          # (an explicit 20 is rejected there) and fine as an ephemeral request elsewhere.
+          disk_gib: 30
+        provider_options: {}
+        metadata:
+          benchmark: swebench-verified
+          harness: mini-swe-agent
 
       datasets: []

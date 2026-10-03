@@ -1,88 +1,28 @@
 # OpenCode Agent
 
-Runs the OpenCode CLI (`opencode run`). OpenCode runs its own tools internally. 
-The run's sqlite session is read for the full trajectory (including tool
-calls) and converts it into Gym format and uses resources server to verify.
+The canonical OpenCode package supports native EnvironmentServer sessions, local guest
+runners, and an explicit compatibility mode for legacy Resources lifecycles.
 
-Minimal, meant to be extended, and currently eval-only. 
-Token IDs and logprobs are not wired up and
-it does not use a Gym model server yet.
+Native sessions use ordinary sandbox `exec`, not a PTY. The supervisor enforces the
+runner deadline and confirms descendant cleanup before verification; uncertain
+cleanup remains retryable and blocks verification. The task image needs Linux,
+Bash and Python 3.8+; the installer selects a glibc or musl OpenCode release binary.
 
-## Quick start
+`context_window` and `max_output_tokens` are independent native settings. For a
+bounded 262144-context smoke, use `max_output_tokens: 32768`; this is a per-call
+budget, not a full-benchmark recommendation. A full-context output setting requires
+a matching model-server policy that leaves room for the prompt, as in the historical
+vLLM sampling overrides. Do not copy it unchanged to a generic OpenAI endpoint.
 
-OpenCode must be on PATH (auto-installed on first start, or `npm install -g opencode-ai`). Set
-`policy_base_url`, `policy_api_key`, and `policy_model_name` in `env.yaml`.
+See the [OpenCode wiring and migration guide](../../fern/versions/latest/pages/evaluation/opencode.mdx)
+for configuration, runtime requirements, and lifecycle guarantees.
 
-```bash
-gym env start \
-  --config environments/opencode_math/config.yaml \
-  --model-type openai_model
-
-gym eval run --no-serve --agent opencode_math_agent \
-  --input environments/opencode_math/data/example.jsonl \
-  --output opencode_rollout.jsonl --limit 5
-```
-
-Each request gets a temporary directory under `workspace_root`, which the agent deletes after the
-run. Leave `repo_dir` unset when no files need to survive, such as a math task. Set `repo_dir` when
-OpenCode must edit an environment-owned task directory: the agent creates it if needed, runs
-OpenCode there, and preserves it for the environment to grade or collect before cleanup.
-
-```yaml
-# Math or another task without persistent files.
-repo_dir: null
-
-# AnySWE repository provided by the task sandbox.
-repo_dir: /testbed
-
-# Terminal workspace provided by the task sandbox.
-repo_dir: /workspace
-```
-
-`repo_dir` sets the working directory, not a filesystem boundary. Do not share it across concurrent
-requests unless each request runs in an isolated filesystem.
-
-## Model id
-
-`model` is `<provider>/<model-name>`. For a custom OpenAI-compatible endpoint, define the provider
-in `opencode_config` (written to `opencode.json`) and reference it here:
-
-```yaml
-model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
-opencode_config:
-  provider:
-    nvinf:
-      npm: "@ai-sdk/openai-compatible"
-      options:
-        baseURL: ${policy_base_url}
-        apiKey: ${policy_api_key}
-      models:
-        nvidia/qwen/qwen3-next-80b-a3b-instruct: {}
-```
-
-Alternatively, set `model_server` to a Gym model server and set `model` to its served model id. The
-agent creates the OpenCode provider entry automatically. Without `model_server`, the existing URL,
-key, and provider configuration are unchanged.
-
-## Config fields
-
-- `concurrency`: max simultaneous `run()` calls
-- `command`: the OpenCode command, split on spaces so a multi-word launcher works (e.g. `npx opencode`)
-- `model`: `<provider>/<model-name>` (see Model id)
-- `model_server`: optional Gym model server used to generate the provider entry
-- `context_window`: context limit for a generated model entry
-- `max_output_tokens`: output limit for a generated model entry
-- `openai_api_key`: passed to the subprocess as `OPENAI_API_KEY`
-- `openai_base_url`: passed to the subprocess as `OPENAI_BASE_URL`
-- `env`: extra env vars for the subprocess
-- `workspace_root`: where per-request run dirs are created and deleted
-- `repo_dir`: optional environment-owned task directory that OpenCode edits and the agent preserves
-- `thinking`: passes `--thinking` when true
-- `system_prompt`: prepended to the user message
-- `setup_timeout`: reserved, currently unused
-- `timeout`: seconds for the `opencode run` call
-- `extra_args`: extra flags appended to `opencode run`
-- `opencode_config`: written to `opencode.json` in `repo_dir` when set, otherwise in the run dir
-- `opencode_version`: npm version to pin on install (null means latest)
-
-See `configs/opencode_agent.yaml`.
+Without `sandbox_access`, configure `sandbox_provider` and `sandbox_config`
+(`SandboxSpec` fields such as `image`, `workdir`, and `ttl_s`) on the agent.
+It creates a sandbox, runs there, and destroys it on close; the default workdir is
+`/app`. A supplied access always wins, including its workdir; connection failure
+never triggers a replacement or host execution. With neither access nor a usable
+provider, setup fails. Verifiers that inspect task files must keep using a
+Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
+Native sessions are selected by the session cookie, regardless of `execution_mode`.
+That setting still controls unseeded local/legacy calls; `sandbox` rejects unseeded calls.
