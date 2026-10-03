@@ -337,6 +337,19 @@ class TestSanitizeStreamingBody:
         # the cleaned body validates against the strict params model
         NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
 
+    def test_keeps_replayed_assistant_message_without_annotations(self) -> None:
+        # A client replaying an output message it received may omit the annotations list (the
+        # Codex CLI does); the item must survive as the assistant turn it is, not be dropped.
+        item = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Let me inspect the workload first."}],
+        }
+        cleaned, _ = sanitize_streaming_responses_body({"input": [item], "stream": True})
+        assert cleaned["input"] == [item]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
     def test_flattens_namespace_tools(self) -> None:
         flat, ns_map = flatten_namespace_tools([NAMESPACE_TOOL])
         assert len(flat) == 1
