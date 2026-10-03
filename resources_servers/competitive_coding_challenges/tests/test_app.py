@@ -145,7 +145,7 @@ def test_setup_webserver_warns_when_shared_dir_is_tmp(
         server.setup_webserver()
 
     assert "CCC shared_dir is /tmp" in caplog.text
-    assert "Set SHARED_TEMP_DIR to a path mounted into both containers" in caplog.text
+    assert "Set CCC_SHARED_TEMP_DIR to a path mounted into both containers" in caplog.text
 
 
 def test_setup_webserver_allows_disabling_local_compile_staging() -> None:
