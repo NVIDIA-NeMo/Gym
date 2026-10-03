@@ -1237,7 +1237,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
                 assert body["task_data"]["instance_id"] == "instance"
                 return Response(
                     {
-                        "resources_session_id": body.resources_session_id,
+                        "resources_session_id": body["resources_session_id"],
                         "sandbox_access": seed().sandbox_access.model_dump(),
                     },
                     cookie="resources-cookie",
@@ -1249,12 +1249,12 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
                 assert body["response"]["usage"]["total_tokens"] == 22
                 return Response({**body, "reward": 1.0})
             assert url_path == "/close_session"
-            return Response({"resources_session_id": body.resources_session_id})
+            return Response({"resources_session_id": body["resources_session_id"]})
         assert server_name == agent_name
         request = Request({"type": "http", "session": cookies})
         if url_path == "/v1/agent_sessions":
-            result = await agent.seed_agent_session(request, body)
-            assert result.agent_session_id == body.agent_session_id
+            result = await agent.seed_agent_session(request, AgentSeedSessionRequest.model_validate(body))
+            assert result.agent_session_id == body["agent_session_id"]
         elif url_path == "/v1/agent_sessions/close":
             result = await agent.close_agent_session(request, AgentCloseSessionRequest.model_validate(body))
             close_receipts.append(result)
