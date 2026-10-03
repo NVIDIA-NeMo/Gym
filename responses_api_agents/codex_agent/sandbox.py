@@ -5,31 +5,24 @@
 import asyncio
 import json
 import logging
-import tempfile
 from dataclasses import dataclass, field
-from pathlib import Path
 from shlex import quote
-from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import JsonValue
 
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import AsyncSandbox, process_supervisor
+from nemo_gym.sandbox.process_supervisor import CleanupReceipt
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-
-
-class CodexSandboxResult(BaseModel):
-    """Require an explicit cleanup acknowledgement, not just process exit."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-    return_code: int
-    timed_out: bool
-    cleanup_confirmed: bool
-    error: str | None
-    hostname: str
-    pid: int
+from nemo_gym.sandbox.runner import (
+    RunnerRuntimeInfo,
+    confirm_runner_cleanup,
+    read_text,
+    supervisor_command,
+    upload_text,
+)
 
 
 @dataclass
@@ -44,67 +37,32 @@ class CodexSandboxSession(AgentSessionState):
     sandbox_stopped: bool = False
     task: asyncio.Task[NeMoGymResponse] | None = None
     exec_task: asyncio.Task[SandboxExecResult] | None = None
-    result: CodexSandboxResult | None = None
+    runtime_info: RunnerRuntimeInfo | None = None
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     closing: bool = False
     launch_started: bool = False
-    cleanup: dict[str, JsonValue] | None = None
+    cleanup: CleanupReceipt | None = None
     closed: bool = False
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
         """Upload adapter-owned data beneath this session's directory."""
-        with tempfile.TemporaryDirectory(prefix="codex-session-upload-") as directory:
-            path = Path(directory) / "payload.json"
-            path.write_text(json.dumps(payload))
-            await self.sandbox.upload(path, f"{self.directory}/{name}")
+        await upload_text(self.sandbox, path=f"{self.directory}/{name}", text=json.dumps(payload))
 
     async def upload_text(self, name: str, text: str) -> None:
-        with tempfile.TemporaryDirectory(prefix="codex-session-upload-") as directory:
-            path = Path(directory) / "payload"
-            path.write_text(text)
-            await self.sandbox.upload(path, f"{self.directory}/{name}")
+        await upload_text(self.sandbox, path=f"{self.directory}/{name}", text=text)
 
     async def read_text(self, name: str) -> str:
         """Read an adapter-owned result without interpreting it as a shell command."""
-        with tempfile.TemporaryDirectory(prefix="codex-session-download-") as directory:
-            path = Path(directory) / "payload"
-            await self.sandbox.download(f"{self.directory}/{name}", path)
-            return path.read_text(errors="replace")
+        return await read_text(self.sandbox, path=f"{self.directory}/{name}")
 
     async def stop_runner(self, timeout: float) -> None:
         """Fence a delayed launch or require the shared supervisor's cleanup receipt."""
         if self.sandbox_stopped or not self.launch_started or self.cleanup is not None:
             return
-        receipt_path = f"{self.directory}/cleanup.json"
-        try:
-            receipt = json.loads(await self.read_text("cleanup.json"))
-        except Exception:
-            receipt = {}
-        if receipt.get("cleanup_confirmed") is not True:
-            pid_path = quote(f"{self.directory}/runner.pid")
-            stop_path = quote(f"{self.directory}/runner.stop")
-            claim_path = quote(f"{self.directory}/launch.claim")
-            temporary = quote(f"{receipt_path}.{uuid4().hex}.tmp")
-            stopped = quote(json.dumps({"cleanup_confirmed": True, "error": None}))
-            script = (
-                f"[ -f {quote(receipt_path)} ] && exit 0; "
-                f"touch {stop_path} || exit 1; "
-                f"ln -s stop {claim_path} 2>/dev/null || true; "
-                f'if [ "$(readlink {claim_path})" = stop ]; then '
-                f"printf '%s' {stopped} > {temporary} && mv {temporary} {quote(receipt_path)}; exit $?; fi; "
-                f'if [ -s {pid_path} ]; then kill -TERM "$(cat {pid_path})" 2>/dev/null || true; fi; '
-                f"for _ in $(seq 1 {max(1, int(timeout))}); do "
-                f"[ -f {quote(receipt_path)} ] && exit 0; sleep 1; done; exit 1"
-            )
-            await self.sandbox.exec(script, cwd=self.workdir, timeout_s=timeout + 5)
-            try:
-                receipt = json.loads(await self.read_text("cleanup.json"))
-            except Exception as error:
-                raise RuntimeError("Codex launch outcome is unknown; cannot confirm termination") from error
-            if receipt.get("cleanup_confirmed") is not True:
-                raise RuntimeError(f"Codex sandbox cleanup was not confirmed: {receipt.get('error')}")
-        self.cleanup = receipt
+        self.cleanup = await confirm_runner_cleanup(
+            self.sandbox, directory=self.directory, workdir=self.workdir, timeout=timeout, harness="Codex"
+        )
 
     async def _release_exec(self) -> None:
         # Only release the provider transport after remote cleanup is acknowledged.
@@ -160,15 +118,11 @@ class CodexSandboxSession(AgentSessionState):
         """Start the supervisor and Codex inside the session sandbox."""
         await self.upload_json("input.json", payload)
         cleanup_timeout = close_timeout / 3
-        command = (
-            f"trap '' TERM; ln -s launch {quote(self.directory + '/launch.claim')} 2>/dev/null || exit 0; "
-            f"echo $$ > {quote(self.directory + '/runner.pid')} && "
-            f"exec python3 -I {quote(self.directory + '/process_supervisor.py')} "
-            f"--timeout {timeout} --cleanup-timeout {cleanup_timeout} "
-            f"--stop-file {quote(self.directory + '/runner.stop')} "
-            f"--receipt {quote(self.directory + '/cleanup.json')} -- "
-            f"python3 -I {quote(self.directory + '/sandbox_runner.py')} {quote(self.directory + '/input.json')} "
-            f">{quote(self.directory + '/runner.log')} 2>&1"
+        command = supervisor_command(
+            directory=self.directory,
+            command=["python3", "-I", f"{self.directory}/sandbox_runner.py", f"{self.directory}/input.json"],
+            timeout=timeout,
+            cleanup_timeout=cleanup_timeout,
         )
         self.launch_started = True
         self.exec_task = asyncio.create_task(
@@ -193,8 +147,10 @@ class CodexSandboxSession(AgentSessionState):
         finally:
             await self._release_exec()
         try:
-            runtime = json.loads(await self.read_text("runtime.json"))
-            self.result = CodexSandboxResult.model_validate({**self.cleanup, **runtime})
+            # Cleanup alone can acknowledge a fenced launch that never ran a worker.
+            if self.cleanup is None or self.cleanup["return_code"] is None:
+                raise RuntimeError("Sandbox runner has no worker exit code")
+            self.runtime_info = RunnerRuntimeInfo.model_validate_json(await self.read_text("runtime.json"))
             return await self.read_text("events.jsonl")
         except Exception as error:
             logs = await self.sandbox.exec(f"cat {quote(self.directory + '/runner.log')}", timeout_s=30)

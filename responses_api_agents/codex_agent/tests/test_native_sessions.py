@@ -22,9 +22,9 @@ from pydantic import ValidationError
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox.runner import parse_cleanup_receipt
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig
-from responses_api_agents.codex_agent.sandbox import CodexSandboxResult
 
 
 def seed() -> AgentSeedSessionRequest:
@@ -659,7 +659,45 @@ async def test_disconnect_failure_retains_session_for_retry(setup):
 
 def test_cleanup_receipt_is_required():
     with pytest.raises(ValueError):
-        CodexSandboxResult.model_validate({"return_code": 0, "error": None})
+        parse_cleanup_receipt({"return_code": 0, "error": None})
+
+
+@pytest.mark.parametrize("artifact", ["missing_runtime", "invalid_runtime", "unknown_exit", "runtime_overrides_exit"])
+async def test_worker_output_failure_does_not_invalidate_cleanup(setup, artifact):
+    agent, sandbox = setup
+    download = sandbox.download
+    if artifact == "unknown_exit":
+        sandbox.result["return_code"] = None
+    elif artifact == "runtime_overrides_exit":
+        sandbox.result["return_code"] = 7
+
+    async def download_artifact(source, destination):
+        if source.endswith("/runtime.json"):
+            if artifact == "missing_runtime":
+                raise FileNotFoundError(source)
+            if artifact == "invalid_runtime":
+                Path(destination).write_text(json.dumps({"hostname": "sandbox", "pid": "invalid"}))
+                return
+            if artifact == "runtime_overrides_exit":
+                Path(destination).write_text(json.dumps({"hostname": "sandbox", "pid": 123, "return_code": 0}))
+                return
+        await download(source, destination)
+
+    sandbox.download = AsyncMock(side_effect=download_artifact)
+    request, session_id, task = await activate(agent, sandbox)
+    with pytest.raises(RuntimeError, match="runner returned no valid result"):
+        await task
+    state = agent._session_records[session_id].state
+    assert state.cleanup["cleanup_confirmed"] is True
+    assert state.runtime_info is None
+    if artifact == "unknown_exit":
+        assert state.cleanup["return_code"] is None
+    elif artifact == "runtime_overrides_exit":
+        assert state.cleanup["return_code"] == 7
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert agent._session_records[session_id].state is None
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
 
 
 def test_instructions_and_text_parts_reach_codex_without_other_provider_credentials(setup):
@@ -1458,8 +1496,8 @@ async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_ses
     raw = await state.execute(payload, timeout=3, close_timeout=2)
     _, event = json.loads(raw)
     assert event == {"prompt": "real invocation"}
-    assert state.result.cleanup_confirmed and state.result.return_code == 0
-    assert state.result.hostname
+    assert state.cleanup["cleanup_confirmed"] and state.cleanup["return_code"] == 0
+    assert state.runtime_info.hostname
     await state.close(2)
     assert not Path(state.directory).exists()
     state.sandbox.stop.assert_not_awaited()

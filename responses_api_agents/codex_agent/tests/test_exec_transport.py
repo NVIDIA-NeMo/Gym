@@ -118,7 +118,7 @@ async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
             await task
         assert state.cleanup["cleanup_confirmed"] is True
         if ending == "timeout":
-            assert state.result.timed_out is True
+            assert state.cleanup["timed_out"] is True
         with pytest.raises(ProcessLookupError):
             os.kill(int((workdir / "child.pid").read_text()), 0)
         assert provider.cancelled_launch is False
@@ -138,7 +138,7 @@ async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
     with pytest.raises(TimeoutError, match="lost launch response"):
         await state.execute(payload(state, "open('started','w').close()"), timeout=0.5, close_timeout=3)
     assert state.cleanup["cleanup_confirmed"] is True
-    assert state.result is None  # No worker ran after the failed launch.
+    assert state.runtime_info is None  # No worker ran after the failed launch.
     await state.close(3)
     provider.lost_launch = False
     await provider.exec(provider.delayed_command, cwd=str(workdir))
@@ -154,8 +154,6 @@ async def test_failed_receipt_keeps_files_and_can_retry(tmp_path):
         "timed_out": False,
         "cleanup_confirmed": False,
         "error": "descendants remain",
-        "hostname": "sandbox",
-        "pid": 1,
     }
     path = Path(state.directory) / "cleanup.json"
     path.write_text(json.dumps(receipt))
@@ -177,8 +175,6 @@ async def test_confirmed_cleanup_cancels_stuck_transport(tmp_path):
         "timed_out": False,
         "cleanup_confirmed": True,
         "error": None,
-        "hostname": "sandbox",
-        "pid": 1,
     }
     (Path(state.directory) / "cleanup.json").write_text(json.dumps(receipt))
     state.exec_task = asyncio.create_task(asyncio.Event().wait())

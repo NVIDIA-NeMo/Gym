@@ -693,7 +693,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     events.append((float(observed_at), event))
             except (ValueError, TypeError):
                 LOG.warning("Skipping malformed Codex event record")
-        result = state.result
+        cleanup = state.cleanup
+        runtime = state.runtime_info
         terminal_events = [
             event.get("type") for _, event in events if event.get("type") in ("turn.completed", "turn.failed")
         ]
@@ -702,10 +703,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
         compaction_warnings = []
         started = False
         successful_exit = (
-            result is not None
-            and result.return_code == 0
-            and not result.timed_out
-            and not result.error
+            cleanup is not None
+            and cleanup["return_code"] == 0
+            and not cleanup["timed_out"]
+            and not cleanup["error"]
             and failure is None
             and terminal_events[-1:] == ["turn.completed"]
             and any(event.get("type") == "turn.started" for _, event in events)
@@ -738,7 +739,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             include_partial=True,
             conservative_usage_details=True,
         )
-        error = result.error if result else "Codex runner result unavailable"
+        error = cleanup["error"] if cleanup and runtime else "Codex runner result unavailable"
         errors = usage.get("errors") or []
         output_limited = (
             bool(errors)
@@ -747,15 +748,15 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 == "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
                 for message in errors
             )
-            and result is not None
-            and not result.error
+            and cleanup is not None
+            and not cleanup["error"]
             and failure is None
         )
         gradable_limit = (
-            result is not None
-            and not result.error
+            cleanup is not None
+            and not cleanup["error"]
             and failure is None
-            and (output_limited or (result.timed_out and not errors))
+            and (output_limited or (cleanup["timed_out"] and not errors))
         )
         if not ((successful_exit and not errors) or gradable_limit):
             errors = [*startup_warnings, *compaction_warnings, *errors]
@@ -763,12 +764,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
             compaction_warnings = []
         if errors and not output_limited:
             error = error or "; ".join(errors)
-        if result and result.return_code != 0 and not result.timed_out and not output_limited:
-            error = error or f"Codex exited with code {result.return_code}"
+        if cleanup and cleanup["return_code"] != 0 and not cleanup["timed_out"] and not output_limited:
+            error = error or f"Codex exited with code {cleanup['return_code']}"
         completed = any(event.get("type") == "turn.completed" for _, event in events)
-        if result and not completed and not result.timed_out and not output_limited:
+        if cleanup and not completed and not cleanup["timed_out"] and not output_limited:
             error = error or "Codex ended without turn.completed"
-        status = "failed" if error else "incomplete" if result.timed_out or output_limited else "completed"
+        status = "failed" if error else "incomplete" if cleanup["timed_out"] or output_limited else "completed"
         conversation = [NeMoGymEasyInputMessage(role="user", content=prompt)]
         if system:
             conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
@@ -882,8 +883,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
             ),
             metadata={
                 "harness_execution": "sandbox",
-                "harness_hostname": result.hostname,
-                "harness_pid": str(result.pid),
+                "harness_hostname": runtime.hostname,
+                "harness_pid": str(runtime.pid),
                 "codex_version": self.config.codex_version,
             },
         )
