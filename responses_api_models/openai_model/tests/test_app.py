@@ -246,7 +246,8 @@ class TestApp:
         res_no_model = client.post("/ng-rollout/openai-test/v1/responses", json={"input": "hello"})
         assert res_no_model.status_code == 200
         assert called_args_response.get("model") == "dummy_model"
-        assert res_no_model.json()["reasoning"]["effort"] == "minimal"
+        # The provider's reasoning effort is reported unchanged unless a stand-in is configured.
+        assert res_no_model.json()["reasoning"]["effort"] == "none"
 
         # model provided should override config
         res_with_model = client.post("/v1/responses", json={"input": "hello", "model": "override_model"})
@@ -373,7 +374,7 @@ class TestApp:
         assert "reasoning" not in sent_types
         assert "message" in sent_types
 
-    @pytest.mark.parametrize("replacement, expected_effort", [("low", "low"), (None, "none")])
+    @pytest.mark.parametrize("replacement, expected_effort", [("minimal", "minimal"), ("low", "low"), (None, "none")])
     async def test_responses_reasoning_effort_none_replacement_is_configurable(
         self, replacement, expected_effort
     ) -> None:

@@ -123,12 +123,12 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
 
     reasoning_effort_none_replacement: Optional[ReasoningEffort] = Field(
-        default="minimal",
+        default=None,
         description=(
-            "Some providers (e.g. NVIDIA's Responses-compatible endpoint) return "
-            "reasoning.effort: 'none'. For compatibility with callers that expect "
-            "a different effort, 'none' is rewritten to this value. Set to null "
-            "to preserve the provider's value, including for exact provenance validation."
+            "Opt-in stand-in for a response's reasoning.effort 'none', for callers "
+            "that cannot accept 'none' (some providers, e.g. NVIDIA's "
+            "Responses-compatible endpoint, return it). Null, the default, reports "
+            "the provider's value unchanged."
         ),
     )
 
