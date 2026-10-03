@@ -56,6 +56,7 @@ from nemo_gym._checkpoint.model import (
     attach_capture_context,
     generation_cut_requester,
     ledger_removal_refusal,
+    worker_control_root,
 )
 from nemo_gym._checkpoint.model_workers import (
     COORDINATOR_SOCKET_ENV,
@@ -313,7 +314,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if self.config.checkpoint_generation_cuts:
             if capture_ledger is None:
                 raise ValueError("checkpoint_generation_cuts requires token_id_capture with external_staging")
-            cut_requester = generation_cut_requester(capture_settings.token_id_capture.resolve_control_auth_token())
+            cut_requester = generation_cut_requester(
+                capture_settings.token_id_capture.resolve_control_auth_token(),
+                control_root=self.generation_cut_control_root,
+            )
         num_workers = self.config.num_workers or 1
         if num_workers == 1:
             participant = PolicyModelParticipant(
@@ -364,6 +368,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Outermost of this app's middleware: a refused call must not register capture intent.
         app.add_middleware(PolicyAdmissionMiddleware, gate=gate)
         app.state.nemo_gym_policy_gate = gate
+
+    def generation_cut_control_root(self, base_url: str) -> str:
+        """The URL root where the inference worker serving ``base_url`` takes generation cuts."""
+        return worker_control_root(base_url)
 
     @abstractmethod
     async def chat_completions(
