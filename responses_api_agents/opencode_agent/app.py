@@ -385,19 +385,31 @@ def _parse_opencode_session(
     )
 
 
-def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
-    """Convert an OpenCode session database into the existing Gym response shape."""
+def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) -> tuple[list[Any], dict[str, int]]:
+    """Convert an OpenCode session database into the existing Gym response shape.
+
+    ``root_session_only`` restricts the transcript to sessions without a
+    parent: a sub-agent spawned by the ``task`` tool runs in its own session
+    (stored with ``parent_id``), and its parts would otherwise interleave with
+    the root conversation. Parts are ordered by creation time and then id,
+    OpenCode's own order, because parallel tool parts can share a creation
+    millisecond.
+    """
     output_items: list[Any] = []
     input_tokens = 0
     output_tokens = 0
     if not db_path.is_file():
         return output_items, {"input_tokens": 0, "output_tokens": 0}
 
+    scope = " where session_id in (select id from session where parent_id is null)" if root_session_only else ""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
-        roles = {row["id"]: _load_json(row["data"]).get("role") for row in con.execute("select id, data from message")}
-        rows = con.execute("select message_id, data from part order by time_created").fetchall()
+        roles = {
+            row["id"]: _load_json(row["data"]).get("role")
+            for row in con.execute(f"select id, data from message{scope}")
+        }
+        rows = con.execute(f"select message_id, data from part{scope} order by time_created, id").fetchall()
     finally:
         con.close()
 
