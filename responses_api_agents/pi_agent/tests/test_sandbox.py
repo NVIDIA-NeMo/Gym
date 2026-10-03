@@ -1181,14 +1181,27 @@ async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_ses
     payload = {
         "directory": state.directory,
         "cwd": state.request.sandbox_access.workdir,
-        "command": [sys.executable, "-c", "import json,sys; print(json.dumps({'prompt':sys.stdin.read()}))"],
+        # This stdlib-only event producer must not load the host's editable installs or site hooks.
+        "command": [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            "import json,sys; print(json.dumps({'prompt':sys.stdin.read()}))",
+        ],
         "env": {},
         "prompt": "real invocation",
     }
     raw = await state.execute(payload, timeout=3, close_timeout=2)
+    diagnostics = {
+        name: path.read_text(errors="replace")
+        for name in ("cleanup.json", "runtime.json", "runner.log", "stderr.log", "events.jsonl")
+        if (path := Path(state.directory) / name).exists()
+    }
+    assert state.cleanup["cleanup_confirmed"] and state.cleanup["return_code"] == 0, diagnostics
+    assert raw.strip(), diagnostics
     _, event = json.loads(raw)
     assert event == {"prompt": "real invocation"}
-    assert state.cleanup["cleanup_confirmed"] and state.cleanup["return_code"] == 0
     assert state.runtime_info.hostname
     await state.close(2)
     assert not Path(state.directory).exists()
