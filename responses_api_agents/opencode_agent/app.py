@@ -68,7 +68,7 @@ from nemo_gym.rollout_observability import (
     SandboxObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider, process_supervisor
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import (
@@ -747,6 +747,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.setup_timeout)
             self._check_native_setup(command, result)
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+            await sandbox.upload(Path(process_supervisor.__file__), f"{directory}/process_supervisor.py")
         except BaseException:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -1023,8 +1024,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
                 "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
             },
-            "timeout": self.config.timeout,
-            "cleanup_timeout": self.config.session_close_timeout_seconds / 3,
         }
         error = None
         export = {}
@@ -1086,11 +1085,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     )
             except Exception as exc:
                 error = error or f"OpenCode output parse failed: {exc}"
-        result = state.result
+        result = state.cleanup
+        runtime = state.runtime_info
         if result is not None:
-            error = error or result.error
-            if result.return_code != 0 and not result.timed_out:
-                error = error or f"OpenCode exited with code {result.return_code}"
+            error = error or result["error"]
+            if result["return_code"] != 0 and not result["timed_out"]:
+                error = error or f"OpenCode exited with code {result['return_code']}"
         assistants = [
             message["info"] for message in export.get("messages", []) if message["info"].get("role") == "assistant"
         ]
@@ -1099,7 +1099,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 error = error or json.dumps(info["error"])
         if not assistants:
             error = error or "OpenCode produced no assistant result"
-        incomplete = result is not None and result.timed_out
+        incomplete = result is not None and result["timed_out"]
         if assistants and not incomplete:
             last = assistants[-1]
             finish = last.get("finish")
@@ -1112,7 +1112,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         for record in state.observations.records:
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 record.status = status
-                record.error_type = "server_error" if error else "timeout" if result and result.timed_out else None
+                record.error_type = "server_error" if error else "timeout" if result and result["timed_out"] else None
         if result is not None:
             state.observations.records.append(
                 SandboxObservation(
@@ -1127,8 +1127,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         if state.owns_sandbox
                         else str(state.seed.sandbox_access.connection.descriptor.get("sandbox_id", "unknown"))
                     ),
-                    outcome="timeout" if result.timed_out else "failed" if error else "completed",
-                    exit_code=result.return_code,
+                    outcome="timeout" if result["timed_out"] else "failed" if error else "completed",
+                    exit_code=result["return_code"],
                 )
             )
         state.observations.gaps.append(
@@ -1152,8 +1152,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             metadata={
                 "harness_execution": "sandbox",
                 "opencode_version": self.config.opencode_version,
-                "harness_hostname": result.hostname if result else "unknown",
-                "harness_pid": str(result.pid) if result else "unknown",
+                "harness_hostname": runtime.hostname if runtime else "unknown",
+                "harness_pid": str(runtime.pid) if runtime else "unknown",
             },
         )
 

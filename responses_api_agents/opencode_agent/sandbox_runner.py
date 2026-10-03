@@ -1,10 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Run OpenCode inside a Linux task sandbox; confirm descendant cleanup before verification."""
+"""Capture OpenCode output; the shared process supervisor owns deadlines and cleanup."""
 
 from __future__ import annotations
 
-import ctypes
 import json
 import os
 import signal
@@ -13,137 +12,55 @@ import subprocess
 import sys
 from contextlib import ExitStack
 from pathlib import Path
-from time import monotonic, sleep
 from typing import TypedDict
 
 
 class RunnerInput(TypedDict):
-    """Adapter-owned settings for one supervised harness invocation."""
+    """Harness input, independent of supervisor cleanup and runtime metadata."""
 
     directory: str
+    prompt: str
     command: list[str]
     cwd: str
     env: dict[str, str]
-    prompt: str
-    timeout: float
-    cleanup_timeout: float
 
 
-class RunnerResult(TypedDict):
-    """Completion and descendant-cleanup evidence consumed by session close."""
-
-    return_code: int
-    timed_out: bool
-    cleanup_confirmed: bool
-    error: str | None
-    hostname: str
-    pid: int
-
-
-def enable_subreaper() -> None:
-    """Adopt detached tool processes so they cannot outlive a successful close."""
-    if sys.platform != "linux":
-        raise RuntimeError("Native OpenCode sessions require a Linux sandbox")
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-        raise OSError(ctypes.get_errno(), "Cannot establish OpenCode child-subreaper boundary")
-
-
-def drain_children(timeout: float) -> None:
-    """Kill and reap descendants, including double-forked terminal commands."""
-    children = Path(f"/proc/self/task/{os.getpid()}/children")
-    deadline = monotonic() + timeout
-    while True:
-        for child in children.read_text().split():
-            try:
-                os.kill(int(child), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        try:
-            while os.waitpid(-1, os.WNOHANG)[0]:
-                pass
-        except ChildProcessError:
-            return
-        if monotonic() >= deadline:
-            raise TimeoutError("OpenCode descendants remain alive; verification must not proceed")
-        sleep(0.01)
-
-
-def run(params: RunnerInput) -> RunnerResult:
-    """Execute one invocation and preserve stdout, SQLite state, and cleanup evidence."""
+def run(params: RunnerInput) -> int:
+    """Run the harness with isolated files and let the supervisor reap descendants."""
     directory = Path(params["directory"])
-    process = None
-    error = None
-    timed_out = False
-    cleanup_confirmed = False
-    stopping = False
-
-    def interrupt(*_: object) -> None:
-        nonlocal stopping
-        # Do not interrupt Popen between process creation and handle assignment.
-        stopping = True
-
-    signal.signal(signal.SIGTERM, interrupt)
-    stop_file = directory / "runner.stop"
+    (directory / "runtime.json").write_text(json.dumps({"hostname": os.uname().nodename, "pid": os.getpid()}))
     for key in ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
         if key in params["env"]:
             Path(params["env"][key]).mkdir(parents=True, exist_ok=True)
     (directory / "prompt.txt").write_text(params["prompt"])
+    stopping = False
+
+    def interrupt(*_: object) -> None:
+        nonlocal stopping
+        # Defer TERM until Popen returns so a signal cannot lose the child handle.
+        stopping = True
+
+    signal.signal(signal.SIGTERM, interrupt)
     with ExitStack() as stack:
-        stderr = stack.enter_context((directory / "stderr.log").open("wb"))
         stdout = stack.enter_context((directory / "stdout.jsonl").open("wb"))
+        stderr = stack.enter_context((directory / "stderr.log").open("wb"))
         stdin = stack.enter_context((directory / "prompt.txt").open("rb"))
-        try:
-            enable_subreaper()
-            if stopping or stop_file.exists():
-                raise RuntimeError("OpenCode closed before process launch")
-            process = subprocess.Popen(
-                params["command"],
-                cwd=params["cwd"],
-                env={**os.environ, **params["env"]},
-                stdin=stdin,
-                stdout=stdout,
-                stderr=stderr,
-                start_new_session=True,
-            )
-            deadline = monotonic() + params["timeout"]
-            while process.poll() is None:
-                if stopping or stop_file.exists() or monotonic() >= deadline:
-                    timed_out = True
-                    break
-                sleep(0.05)
-        except Exception as exc:
-            error = str(exc)
-        finally:
-            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        process = subprocess.Popen(
+            params["command"],
+            cwd=params["cwd"],
+            env={**os.environ, **params["env"]},
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        while True:
+            if stopping:
+                process.terminate()
+                stopping = False
             try:
-                if process is not None:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    process.wait(timeout=params["cleanup_timeout"])
-                # Popen may create a child and then raise before returning its handle.
-                drain_children(params["cleanup_timeout"])
-                cleanup_confirmed = True
-            except Exception as exc:
-                error = f"cleanup: {exc}"
-    # A failed cleanup may leave writers alive. Do not touch their database or
-    # publish a transcript; the negative receipt keeps verification blocked.
-    if cleanup_confirmed:
-        try:
-            snapshot(directory)
-        except Exception as exc:
-            error = error or f"OpenCode transcript capture failed: {exc}"
-            (directory / "export.json").write_text("{}")
-    return {
-        "return_code": process.returncode if process else 1,
-        "timed_out": timed_out,
-        "cleanup_confirmed": cleanup_confirmed,
-        "error": error,
-        "hostname": os.uname().nodename,
-        "pid": os.getpid(),
-    }
+                return process.wait(timeout=0.05)
+            except subprocess.TimeoutExpired:
+                pass
 
 
 def snapshot(directory: Path) -> None:
@@ -176,12 +93,11 @@ def snapshot(directory: Path) -> None:
 
 
 def main() -> None:
+    if sys.argv[1] == "--snapshot":
+        snapshot(Path(sys.argv[2]))
+        return
     params = json.loads(Path(sys.argv[1]).read_text())
-    result = run(params)
-    output = Path(params["directory"]) / "result.json"
-    temporary = output.with_suffix(".tmp")
-    temporary.write_text(json.dumps(result))
-    temporary.replace(output)
+    raise SystemExit(run(params))
 
 
 if __name__ == "__main__":

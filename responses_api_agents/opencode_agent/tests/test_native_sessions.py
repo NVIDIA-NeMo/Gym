@@ -18,9 +18,9 @@ from pydantic import ValidationError
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox.runner import parse_cleanup_receipt
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig
-from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxResult
 
 
 def seed() -> AgentSeedSessionRequest:
@@ -75,9 +75,8 @@ class Sandbox:
             "timed_out": False,
             "cleanup_confirmed": True,
             "error": None,
-            "hostname": "task-container",
-            "pid": 123,
         }
+        self.runtime_info = {"hostname": "task-container", "pid": 123}
         self.events = events()
         self.blocked = False
         self.started = asyncio.Event()
@@ -129,7 +128,8 @@ class Sandbox:
 
     async def wait_exit(self):
         await self.exited.wait()
-        self.files[f"{self.directory}/result.json"] = json.dumps(self.result)
+        self.files[f"{self.directory}/cleanup.json"] = json.dumps(self.result)
+        self.files[f"{self.directory}/runtime.json"] = json.dumps(self.runtime_info)
         self.files[f"{self.directory}/export.json"] = self.events
         return 0
 
@@ -385,7 +385,7 @@ async def test_disconnect_failure_retains_session_for_retry(setup):
 
 def test_cleanup_receipt_is_required():
     with pytest.raises(ValueError):
-        OpenCodeSandboxResult.model_validate({"return_code": 0, "error": None})
+        parse_cleanup_receipt({"return_code": 0, "error": None})
 
 
 def test_instructions_and_text_parts_reach_opencode(setup):
