@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 import logging
 import random
 from contextlib import asynccontextmanager, nullcontext
@@ -41,6 +42,32 @@ from nemo_gym.openai_utils import (
 
 LOG = logging.getLogger(__name__)
 ResponseT = TypeVar("ResponseT")
+
+
+class UpstreamRetriesExhaustedError(RuntimeError):
+    """An upstream retry policy ran out of attempts.
+
+    Keeps the final provider error's HTTP status and body, which model-call capture reads from
+    the raised exception; the error still reaches callers as HTTP 500.
+    """
+
+    def __init__(self, attempts: int, last_error: Optional[Exception]) -> None:
+        super().__init__(f"Upstream provider request failed after {attempts} attempts")
+        self.status = getattr(last_error, "status", None)
+        self.response_content = getattr(last_error, "response_content", None)
+
+
+def _upstream_error_detail(error: ClientResponseError) -> Any:
+    """Return the provider's error body, parsed as JSON when possible, for a propagated status."""
+    content = getattr(error, "response_content", None)
+    if not content:
+        return f"Upstream provider request failed with HTTP {error.status}"
+    if isinstance(content, bytes):
+        content = content.decode(errors="replace")
+    try:
+        return json.loads(content)
+    except ValueError:
+        return content
 
 
 class UpstreamRetryPolicy(BaseModel):
@@ -288,9 +315,20 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             )
             await asyncio.sleep(retry_wait)
 
-        raise RuntimeError(
-            f"Upstream provider request failed after {retry_policy.max_attempts} attempts"
-        ) from last_error
+        raise UpstreamRetriesExhaustedError(retry_policy.max_attempts, last_error) from last_error
+
+    async def _serve_upstream(self, operation: Callable[[], Awaitable[ResponseT]]) -> ResponseT:
+        """Call the provider under the retry policy and propagate configured HTTP statuses."""
+        try:
+            return await self._call_upstream(operation)
+        except ClientResponseError as exc:
+            if exc.status in self.config.propagate_upstream_http_status_codes:
+                # Preserve the provider status and error body across the model-server hop.
+                # Otherwise SimpleServer's generic exception middleware turns this into
+                # HTTP 500 and an outer caller may retry a request that the provider
+                # rejected immediately.
+                raise HTTPException(status_code=exc.status, detail=_upstream_error_detail(exc)) from exc
+            raise
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
@@ -317,19 +355,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
                 }
             return NeMoGymResponse.model_validate(response_dict)
 
-        try:
-            return await self._call_upstream(create_and_validate)
-        except ClientResponseError as exc:
-            if self._should_propagate_http_error(exc):
-                # Preserve the provider status across the model-server hop.
-                # Otherwise SimpleServer's generic exception middleware turns
-                # this into HTTP 500 and an outer caller may retry a request
-                # that the provider rejected immediately.
-                raise HTTPException(
-                    status_code=exc.status,
-                    detail=f"Upstream provider request failed with HTTP {exc.status}",
-                ) from exc
-            raise
+        return await self._serve_upstream(create_and_validate)
 
     async def chat_completions(
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
@@ -341,18 +367,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             response_dict = await self._client.create_chat_completion(**body_dict)
             return NeMoGymChatCompletion.model_validate(response_dict)
 
-        try:
-            return await self._call_upstream(create_and_validate)
-        except ClientResponseError as exc:
-            if self._should_propagate_http_error(exc):
-                raise HTTPException(
-                    status_code=exc.status,
-                    detail=f"Upstream provider request failed with HTTP {exc.status}",
-                ) from exc
-            raise
-
-    def _should_propagate_http_error(self, exc: ClientResponseError) -> bool:
-        return exc.status in self.config.propagate_upstream_http_status_codes
+        return await self._serve_upstream(create_and_validate)
 
 
 if __name__ == "__main__":

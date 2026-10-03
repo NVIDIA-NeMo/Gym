@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -744,6 +745,7 @@ class TestApp:
             await server.responses(NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
         assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Upstream provider request failed with HTTP 400"
         assert server._client.create_response.await_count == 1
 
     @pytest.mark.asyncio
@@ -776,14 +778,20 @@ class TestApp:
         assert exc_info.value is provider_error
 
     @pytest.mark.parametrize("endpoint", ["responses", "chat_completions"])
-    def test_opt_in_preserves_provider_http_400_across_server_hop(self, endpoint: str) -> None:
+    def test_opt_in_preserves_provider_http_400_across_server_hop(self, endpoint: str, tmp_path) -> None:
+        provider_body = {"error": {"code": "context_length_exceeded", "message": "Input is too long."}}
         provider_error = ClientResponseError(
             SimpleNamespace(real_url="https://api.openai.com/v1"),
             (),
             status=400,
             message="bad request",
         )
+        provider_error.response_content = json.dumps(provider_body).encode()
         server = self._setup_server(propagate_upstream_http_status_codes=[400])
+        server.server_client.global_config_dict = {
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path),
+        }
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         app = server.setup_webserver()
         server.setup_exception_middleware(app)
@@ -791,14 +799,20 @@ class TestApp:
 
         if endpoint == "responses":
             operation = server._client.create_response = AsyncMock(side_effect=provider_error)
-            response = client.post("/v1/responses", json={"input": "hello"})
+            response = client.post("/ng-rollout/propagated/v1/responses", json={"input": "hello"})
         else:
             operation = server._client.create_chat_completion = AsyncMock(side_effect=provider_error)
-            response = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hello"}]})
+            response = client.post(
+                "/ng-rollout/propagated/v1/chat/completions", json={"messages": [{"role": "user", "content": "hello"}]}
+            )
 
+        # Callers such as Harbor's Terminus 2 agent recognize the provider's error code in the body.
         assert response.status_code == 400
-        assert response.json() == {"detail": "Upstream provider request failed with HTTP 400"}
+        assert response.json() == {"detail": provider_body}
         operation.assert_awaited_once()
+        [call] = read_model_call_records(CaptureStore(tmp_path), "propagated")
+        assert (call.status_code, call.error_category) == (400, "client_error")
+        assert call.response == {"detail": provider_body}
 
     @pytest.mark.parametrize("endpoint", ["responses", "chat_completions"])
     @pytest.mark.parametrize("status_code", [429, 503])
@@ -829,6 +843,35 @@ class TestApp:
         assert response.status_code == 500
         assert "after 2 attempts" in response.text
         assert operation.await_count == 2
+
+    def test_exhausted_retries_keep_the_provider_status_for_capture(self, tmp_path) -> None:
+        provider_error = ClientResponseError(
+            SimpleNamespace(real_url="https://api.openai.com/v1"),
+            (),
+            status=429,
+            message="rate limited",
+        )
+        provider_error.response_content = b'{"error":{"code":"rate_limit_exceeded"}}'
+        server = self._setup_server(
+            upstream_max_num_tries=1,
+            upstream_retry_policy={"max_attempts": 2, "backoff_initial_seconds": 0},
+        )
+        server.server_client.global_config_dict = {
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path),
+        }
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=provider_error)
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+
+        response = TestClient(app).post("/ng-rollout/exhausted/v1/responses", json={"input": "hello"})
+
+        assert response.status_code == 500
+        assert "after 2 attempts" in response.text
+        [call] = read_model_call_records(CaptureStore(tmp_path), "exhausted")
+        assert (call.status_code, call.error_category) == (429, "rate_limit")
+        assert "rate_limit_exceeded" in call.response_raw
 
     @pytest.mark.parametrize("propagate_status_codes", [[], [400], [429]])
     async def test_exhausted_retries_wrap_http_errors_even_with_matching_propagation(
