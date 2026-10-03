@@ -459,6 +459,18 @@ def _opencode_tool_time_taken(opencode_export: Optional[Dict[str, Any]]) -> Opti
     return total_ms / 1000.0
 
 
+def _opencode_num_task_calls(opencode_export: Optional[Dict[str, Any]]) -> Optional[int]:
+    """Subagent launches: the exported session's ``task`` tool calls."""
+    if not opencode_export:
+        return None
+    return sum(
+        1
+        for message in opencode_export.get("messages", [])
+        for part in message.get("parts", [])
+        if part.get("type") == "tool" and part.get("tool") == "task"
+    )
+
+
 def _extract_opencode_session_id(session_list_stdout: str) -> str:
     """Return the newest OpenCode session ID from ``session list`` JSON output."""
     sessions = json.loads(session_list_stdout)
@@ -500,6 +512,8 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_tool_time_taken: Optional[float] = None
     verify_time_taken: Optional[float] = None
     rollout_time_taken: Optional[float] = None
+    # Subagent launches: ``task`` tool calls in the exported main session.
+    opencode_num_task_calls: Optional[int] = None
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -1027,6 +1041,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_time_taken": opencode_run_time_taken,
             "opencode_export_time_taken": opencode_export_time_taken,
             "opencode_tool_time_taken": _opencode_tool_time_taken(opencode_export),
+            "opencode_num_task_calls": _opencode_num_task_calls(opencode_export),
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations

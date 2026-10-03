@@ -1036,3 +1036,22 @@ def test_opencode_tool_time_taken_sums_tool_part_durations():
     assert _opencode_tool_time_taken(export) == 3.0
     assert _opencode_tool_time_taken({}) is None
     assert _opencode_tool_time_taken({"messages": []}) == 0.0
+
+
+def test_opencode_num_task_calls_counts_subagent_launches():
+    from responses_api_agents.opencode_sandboxed_agent.app import _opencode_num_task_calls
+
+    export = {
+        "messages": [
+            {
+                "parts": [
+                    {"type": "tool", "tool": "task"},
+                    {"type": "tool", "tool": "bash"},
+                    {"type": "tool", "tool": "task"},
+                    {"type": "text", "text": "task"},
+                ]
+            }
+        ]
+    }
+    assert _opencode_num_task_calls(export) == 2
+    assert _opencode_num_task_calls({}) is None
