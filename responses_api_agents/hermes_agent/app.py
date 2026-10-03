@@ -76,6 +76,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, process_supervisor
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
+from nemo_gym.sandbox.runner import RunnerRuntimeInfo, parse_cleanup_receipt
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs
@@ -258,7 +259,7 @@ def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Opti
 
 
 class HermesAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
+    resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     model: Optional[str] = None
     concurrency: int = 32
@@ -552,6 +553,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 raise RuntimeError("Hermes launch outcome is unknown; cannot confirm termination") from error
             if receipt.get("cleanup_confirmed") is not True:
                 raise RuntimeError(f"Hermes descendant cleanup was not confirmed: {receipt.get('error')}")
+        parse_cleanup_receipt(receipt)
         state.runner_cleanup = RunnerCleanup.CONFIRMED
 
     async def _cleanup_sandbox_session(
@@ -785,9 +787,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if output.get("error") is not None:
             raise RuntimeError(f"Hermes sandbox runner failed: {output['error']}\n{output.get('traceback', '')}")
         result = output.get("result")
-        runtime = output.get("runtime")
-        if not isinstance(result, dict) or not isinstance(runtime, dict):
+        if not isinstance(result, dict):
             raise RuntimeError("Hermes sandbox runner returned an invalid output")
+        try:
+            runtime = RunnerRuntimeInfo.model_validate(output.get("runtime"))
+        except ValueError as error:
+            raise RuntimeError("Hermes sandbox runner returned invalid runtime metadata") from error
         response = self._response_from_result(
             body=body,
             result=result,
@@ -802,9 +807,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         response.metadata = {
             **(response.metadata or {}),
             "harness_execution": "sandbox",
-            "harness_hostname": str(runtime.get("hostname") or ""),
-            "harness_pid": str(runtime.get("pid") or ""),
-            "harness_python": str(runtime.get("python") or ""),
+            "harness_hostname": runtime.hostname,
+            "harness_pid": str(runtime.pid),
+            "harness_python": runtime.python or "",
         }
         return AgentEpisode(
             response=response,
@@ -1145,6 +1150,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: HermesAgentRunRequest) -> HermesAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
             raise HTTPException(409, "Use the agent session responses and close routes")
+        if self.config.resources_server is None:
+            raise HTTPException(422, "Hermes /run requires resources_server; use Environment Server /run for sessions")
         async with self.sem:
             cookies = request.cookies
 
