@@ -32,6 +32,7 @@ from nemo_gym.orchestration.api import (
     VllmPDTierConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
     effective_ray_serve,
+    plan_gpus,
 )
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_HEALTH_PORT,
@@ -551,12 +552,36 @@ def _pool_of(compute: SlurmComputeConfig, node: int) -> str | None:
     return None
 
 
+_GPU_RELAY_VAR = "GYM_CUDA_VISIBLE_DEVICES"
+
+
+def _with_gpus(env: dict[str, str], pre_command: str, gpus: str | None) -> tuple[dict[str, str] | None, str]:
+    """The step's env and pre_command, exporting the CUDA_VISIBLE_DEVICES plan_gpus gave it,
+    else the service's own.
+
+    Exported inside the step: Slurm resets CUDA_VISIBLE_DEVICES to the step's GPUs, so an
+    `env K=V srun` value never reaches the task. A runtime:VAR value is relayed under another
+    name, so the step still exports the batch shell's $VAR.
+    """
+    gpus = gpus if gpus is not None else env.get("CUDA_VISIBLE_DEVICES")
+    if gpus is None:
+        return env or None, pre_command
+    env = {k: v for k, v in env.items() if k != "CUDA_VISIBLE_DEVICES"}
+    if gpus.startswith(RUNTIME_ENV_PREFIX):
+        env[_GPU_RELAY_VAR] = gpus
+        export = f'export CUDA_VISIBLE_DEVICES="${_GPU_RELAY_VAR}"'
+    else:
+        export = f"export CUDA_VISIBLE_DEVICES={shlex.quote(gpus)}"
+    return env or None, f"{export}\n{pre_command}".rstrip()
+
+
 def _render_ray_service(
     name: str,
     service: RayServiceConfig,
     config: SubmitConfig,
     compute: SlurmComputeConfig,
     driver_node: int | None,
+    gpu_plan: dict[str, dict[str, str]],
 ) -> str:
     """A ray service's srun steps: the head beside the driver, then one step per spanned pool's workers.
 
@@ -566,6 +591,7 @@ def _render_ray_service(
     head_node = _driver_node(config, compute)
     head_pool = _pool_of(compute, head_node)
     address_var = ray_head_address_var(name)
+    head_env, head_pre = _with_gpus(service.env, service.pre_command, gpu_plan.get(head_pool, {}).get(name))
     steps = [
         _render_service_command(
             name,
@@ -573,27 +599,30 @@ def _render_ray_service(
             _build_ray_command(
                 service, pool=head_pool if head_pool in service.node_pools else None, address_var=address_var
             ),
-            service.env or None,
+            head_env,
             service.mounts or None,
             nodes=_srun_nodes(service, compute, total_nodes),
             ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
-            pre_command=service.pre_command,
+            pre_command=head_pre,
             nodelist=_service_nodelist(service, driver_node, total_nodes),
         )
     ]
     # A worker only joins a running head, and the head may still be installing.
     wait_for_head = f'until ray status --address "${address_var}" >/dev/null 2>&1; do sleep 5; done'
     for pool, (_, count) in _ray_worker_ranges(service, compute, head_node).items():
+        worker_env, worker_pre = _with_gpus(
+            service.env, f"{service.pre_command.rstrip()}\n{wait_for_head}".lstrip(), gpu_plan.get(pool, {}).get(name)
+        )
         steps.append(
             _render_service_command(
                 f"{name}_{pool}_workers",
                 service.container,
                 _build_ray_command(service, pool=pool, address_var=address_var, worker=True),
-                service.env or None,
+                worker_env,
                 service.mounts or None,
                 nodes=count,
                 ntasks=count,
-                pre_command=f"{service.pre_command.rstrip()}\n{wait_for_head}".lstrip(),
+                pre_command=worker_pre,
                 nodelist=ray_workers_var(name, pool),
             )
         )
@@ -909,6 +938,13 @@ def build_sbatch_script(
     instrumented = gym_telemetry_active(config)
 
     driver_node = _driver_node(config, compute) if is_multi_node else None
+    gpu_plan = plan_gpus(config)
+    # A vLLM service sits on one pool, so its name is unique across the plan.
+    vllm_gpus = {name: gpus for planned in gpu_plan.values() for name, gpus in planned.items()}
+    env_and_pre = {
+        name: _with_gpus(s.env, _service_pre_command(s), vllm_gpus.get(name))
+        for name, s in config.deployed_services.items()
+    }
     service_commands = "\n\n".join(
         (
             [_render_collector_service(config, remote_bench_dir, is_multi_node=is_multi_node, driver_node=driver_node)]
@@ -925,7 +961,7 @@ def build_sbatch_script(
                     gpus_per_node_values,
                     offsets,
                 ),
-                service.env or None,
+                env_and_pre[name][0],
                 service.mounts or None,
                 # Only services that actually span multiple nodes need --nodes/--ntasks - not every
                 # service in a multi-node job (e.g. a plain Ray head service runs on a single node
@@ -933,14 +969,14 @@ def build_sbatch_script(
                 # them, so the node list and the step size agree.
                 nodes=_srun_nodes(service, compute, total_nodes),
                 ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
-                pre_command=_service_pre_command(service),
+                pre_command=env_and_pre[name][1],
                 nodelist=_service_nodelist(service, driver_node, total_nodes),
             )
             for name, service in config.deployed_services.items()
             if not isinstance(service, RayServiceConfig)
         ]
         + [
-            _render_ray_service(name, service, config, compute, driver_node)
+            _render_ray_service(name, service, config, compute, driver_node, gpu_plan)
             for name, service in config.deployed_services.items()
             if isinstance(service, RayServiceConfig)
         ]
