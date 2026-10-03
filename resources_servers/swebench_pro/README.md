@@ -13,7 +13,7 @@ test to pass.
 ## Prepare data
 
 For a Hermes rollout using this resources server, see the
-[sandboxed Hermes launch instructions](../../responses_api_agents/hermes_sandboxed_agent/README.md).
+[Hermes Environment Server guide](../../fern/versions/latest/pages/evaluation-tutorials/hermes-swe-bench-pro.mdx).
 The agent uses the same task preparation and verifier as OpenCode. Command-based
 agents can request `create_pty=false` at `/seed_session`; the default still creates
 a terminal. Connectable providers also return `sandbox_descriptor`, and agents

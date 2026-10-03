@@ -107,6 +107,11 @@ For SWE-bench Pro, use [`hermes.yaml`](../../benchmarks/swebench/pro/hermes.yaml
 See [Evaluate SWE-bench Pro with Hermes](../../fern/versions/latest/pages/evaluation-tutorials/hermes-swe-bench-pro.mdx)
 for task preparation, Environment Server configuration, evaluation commands, and session limits.
 
+The standalone `hermes_sandboxed_agent` has been removed. Migrate its launch configuration
+to the recipe above and send rollouts through the Environment Server; renaming the agent
+in an existing `/run` call does not enable sandbox sessions. The guide also covers changes
+to runtime preparation, request controls, and rollout results.
+
 ## Sandbox-mode requirements
 
 Sandbox sessions live in the memory of the worker that seeded them, so seeding a session requires `num_workers: 1`. Calling the agent's `/run` directly keeps no session and still supports several workers.

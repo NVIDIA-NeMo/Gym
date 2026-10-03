@@ -73,3 +73,45 @@ gym eval run --no-serve \
 - This integration is evaluation-only, not suitable for producing RL training data.
 - The sandbox runner records `stop_reason=wall_time` for its deadline and
   `stop_reason=cancelled` for a close-requested stop, checkpointing available partial work before exit.
+
+## Migrate from the standalone sandboxed agent
+
+`hermes_sandboxed_agent` and its configuration files have been removed. Use the recipe
+and commands above to run `hermes_agent` through the Environment Server. Prepared SWE-Pro
+JSONL rows remain usable through `single_agent_turn_legacy`; no data conversion is needed.
+
+- Replace the old agent configuration with `benchmarks/swebench/pro/hermes.yaml`, and
+  select `swebench_pro_hermes_agent` when using `--no-serve`. Include the recipe in both
+  the server and evaluation commands so collection routes through the Environment Server.
+  Direct HTTP callers must call that Environment Server's `/run`, not the agent's `/run`.
+- Move model, toolset, and sampling settings under
+  `swebench_pro_hermes_agent.responses_api_agents.hermes_agent`. Remove the old
+  `runtime_python`, `remote_run_root`, `results_dir`, `sandbox_timeout`, `cleanup_timeout`,
+  `api_timeout`, `context_length`, and `chat_template_kwargs` settings. Use
+  `sandbox_runner_timeout_seconds` for the runner deadline; the Environment Server
+  controls episode and cleanup deadlines.
+- Keep the task sandbox provider under `sandbox`. For Apptainer, copy the provider
+  settings into your model/provider YAML under `sandbox.apptainer`; the shared
+  [provider configuration reference](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/sandbox/providers/apptainer/README.md#selecting-and-configuring-the-provider)
+  describes the supported fields. The old agent-specific `configs/apptainer.yaml` is removed.
+  Existing SWE-Pro `image_template` and image-cache provenance settings belong under
+  `swebench_pro_hermes_resources_server.resources_servers.swebench_pro`.
+- The old `prepare_runtime.sh`, libc-selecting launcher, and `/opt/hermes` mount convention
+  have been removed. The unified agent uses the Hermes revision pinned in its
+  `requirements.txt`, which differs from the old standalone upstream runtime. It installs
+  that revision at seed time, or reuses an already installed runtime at
+  `/tmp/nemo-gym-hermes-runtime-<commit>/venv`. Network-restricted deployments must preinstall
+  that runtime. The old portable glibc/musl bundles are not a drop-in replacement; validate
+  each task image's architecture and libc with the unified runtime before migrating a batch.
+- Remove request `max_output_tokens`: the unified agent rejects it with HTTP 422.
+  Agent config `max_tokens` limits each model call, not the whole response.
+  Retune budgets explicitly rather than treating the two limits as equivalent.
+- Update reporting that consumes standalone `hermes_*`, `verifier_reward`, or
+  `agent_image_provenance` fields to use the Environment Server rollout and observation
+  records. Incomplete runs, infrastructure failures, and scoring exclusions follow the
+  Environment Server's outcome policy; compare coverage as well as rewards when migrating.
+
+The SWE-Pro verifier is unchanged by this removal. The Hermes revision, execution settings,
+and failure reporting differ between the adapters, so previous benchmark scores are not
+an accuracy baseline for the migrated configuration. Revalidate representative tasks,
+including Alpine/musl images and offline deployments when used by your configuration.
