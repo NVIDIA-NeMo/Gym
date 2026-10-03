@@ -48,6 +48,7 @@ VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT:-${CACHE_ROOT}/vllm}
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-300}
 GLM52_WARMUP_MAX_TOKENS=${GLM52_WARMUP_MAX_TOKENS:-256}
 GLM52_ENFORCE_EAGER=${GLM52_ENFORCE_EAGER:-false}
+GLM52_CUDAGRAPH_MODE=${GLM52_CUDAGRAPH_MODE:-PIECEWISE}
 
 require_positive_int API_PORT "${API_PORT}"
 require_positive_int BASE_RAY_PORT "${BASE_RAY_PORT}"
@@ -63,6 +64,8 @@ require_positive_int VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS "${VLLM_EXECUTE_MODEL_TI
 require_positive_int GLM52_WARMUP_MAX_TOKENS "${GLM52_WARMUP_MAX_TOKENS}"
 [[ "${GLM52_ENFORCE_EAGER}" == "true" || "${GLM52_ENFORCE_EAGER}" == "false" ]] ||
     die "GLM52_ENFORCE_EAGER must be true or false; got ${GLM52_ENFORCE_EAGER}"
+[[ "${GLM52_CUDAGRAPH_MODE}" == "PIECEWISE" || "${GLM52_CUDAGRAPH_MODE}" == "FULL_DECODE_ONLY" ]] ||
+    die "GLM52_CUDAGRAPH_MODE must be PIECEWISE or FULL_DECODE_ONLY; got ${GLM52_CUDAGRAPH_MODE}"
 
 (( DATA_PARALLEL_SIZE % DATA_PARALLEL_SIZE_LOCAL == 0 )) ||
     die "DATA_PARALLEL_SIZE must be divisible by DATA_PARALLEL_SIZE_LOCAL"
@@ -95,7 +98,7 @@ rm -f "${server_info_file}" "${server_info_file}.tmp" "${head_ip_file}"
 export API_PORT API_SERVER_COUNT BASE_RAY_PORT CACHE_ROOT CONTAINER_IMAGE DATA_PARALLEL_SIZE
 export DATA_PARALLEL_SIZE_LOCAL GPU_MEMORY_UTILIZATION HF_HOME MAX_MODEL_LEN MODEL_NAME MODEL_PATH
 export OUTPUT_DIR PIPELINE_PARALLEL_SIZE RAY_PORT="${ray_port}" TENSOR_PARALLEL_SIZE VLLM_CACHE_ROOT
-export GLM52_ENFORCE_EAGER GLM52_WARMUP_MAX_TOKENS VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+export GLM52_ENFORCE_EAGER GLM52_CUDAGRAPH_MODE GLM52_WARMUP_MAX_TOKENS VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
 export VLLM_LOG="${vllm_log}"
 
 step_pid=""
@@ -113,7 +116,7 @@ trap cleanup EXIT INT TERM
 
 log "nodes=${REPLICA_NODES}; head=${head_host} (${head_ip}); API=${server_url}"
 log "TP=${TENSOR_PARALLEL_SIZE}, PP=${PIPELINE_PARALLEL_SIZE}, DP=${DATA_PARALLEL_SIZE}, DPL=${DATA_PARALLEL_SIZE_LOCAL}"
-log "eager=${GLM52_ENFORCE_EAGER}; execute-model timeout=${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS}s; warm-up tokens=${GLM52_WARMUP_MAX_TOKENS}"
+log "eager=${GLM52_ENFORCE_EAGER}; cudagraph mode=${GLM52_CUDAGRAPH_MODE}; execute-model timeout=${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS}s; warm-up tokens=${GLM52_WARMUP_MAX_TOKENS}"
 
 srun --overlap --exact \
     --nodes="${node_count}" \
@@ -208,15 +211,39 @@ srun --overlap --exact \
             unset VLLM_PORT
             echo "Starting GLM-5.2 BF16 vLLM server on port ${serve_port}"
             # Blackwell startup has independent FlashInfer and TorchInductor
-            # autotuners. Disable both problematic benchmark paths while
-            # retaining ordinary Inductor compilation and CUDA graphs.
-            compilation_config="{\"inductor_compile_config\": {\"combo_kernels\": false, "
-            compilation_config+="\"benchmark_combo_kernel\": false}, "
-            compilation_config+="\"pass_config\": {\"fuse_allreduce_rms\": false}}"
+            # autotuners. GLM52_ENFORCE_EAGER=true keeps the eager path: no CUDA
+            # graphs, ~4.8 tok/s per stream at batch 4-5, and most 12600 s rollout
+            # timeouts come from that speed. The default captures CUDA graphs
+            # WITHOUT Inductor; GLM52_CUDAGRAPH_MODE selects how:
+            #   PIECEWISE        torch.compile with the eager backend (no Inductor
+            #                    codegen); attention and the MoE all-to-all stay
+            #                    outside the graphs, so DP+EP ranks never capture a
+            #                    cross-rank collective. ~20 tok/s per stream on
+            #                    TP=4 x DP=4 replicas.
+            #   FULL_DECODE_ONLY no compile, whole decode step captured. Faster
+            #                    still, but hung a DP=4+EP replica on its first
+            #                    step (sample_tokens RPC timeout, NCCL timeout).
             execution_args=()
             if [[ "${GLM52_ENFORCE_EAGER}" == "true" ]]; then
                 echo "DP=${DATA_PARALLEL_SIZE}: forcing eager execution"
+                compilation_config="{\"inductor_compile_config\": {\"combo_kernels\": false, "
+                compilation_config+="\"benchmark_combo_kernel\": false}, "
+                compilation_config+="\"pass_config\": {\"fuse_allreduce_rms\": false}}"
                 execution_args+=(--enforce-eager)
+            else
+                echo "DP=${DATA_PARALLEL_SIZE}: CUDA graphs without Inductor (${GLM52_CUDAGRAPH_MODE})"
+                case "${GLM52_CUDAGRAPH_MODE}" in
+                    PIECEWISE)
+                        compilation_config="{\"mode\": 3, \"backend\": \"eager\", \"cudagraph_mode\": \"PIECEWISE\", "
+                        compilation_config+="\"pass_config\": {\"fuse_allreduce_rms\": false}}" ;;
+                    FULL_DECODE_ONLY)
+                        compilation_config="{\"mode\": 0, \"cudagraph_mode\": \"FULL_DECODE_ONLY\", "
+                        compilation_config+="\"pass_config\": {\"fuse_allreduce_rms\": false}}" ;;
+                    *)
+                        echo "ERROR: GLM52_CUDAGRAPH_MODE must be PIECEWISE or FULL_DECODE_ONLY; got ${GLM52_CUDAGRAPH_MODE}" >&2
+                        ray stop || true
+                        exit 1 ;;
+                esac
             fi
             vllm serve "${MODEL_PATH}" \
                 --enable-log-requests \

@@ -41,11 +41,14 @@ export APEX_GYM_DIR
 # This is a model-specific launcher: never inherit another launcher's profile.
 export PROFILE=${APEX_GYM_DIR}/scripts/profiles/apex-glm52-bf16.env
 export GLM52_NUM_NODES=${NODES}
-# Eager execution is the validated path for this launcher. It avoids both the
-# Blackwell TorchInductor autotuning failure seen at DP16 and the compiled/
-# CUDA-graph rank divergence seen in the reduced-node canary. Callers may set
-# GLM52_ENFORCE_EAGER=false explicitly for a separate performance experiment.
-export GLM52_ENFORCE_EAGER=${GLM52_ENFORCE_EAGER:-true}
+# Default: CUDA graphs without Inductor (GLM52_CUDAGRAPH_MODE=PIECEWISE in the
+# serve script). Eager execution avoided the Blackwell TorchInductor autotuning
+# failure, but decodes at ~4.8 tok/s per stream and turned most rollouts into
+# 12600 s timeouts; PIECEWISE graphs skip Inductor entirely and measured ~20 tok/s
+# per stream on the full 452 x 3 benchmark. Set GLM52_ENFORCE_EAGER=true to fall
+# back to the eager path.
+export GLM52_ENFORCE_EAGER=${GLM52_ENFORCE_EAGER:-false}
+export GLM52_CUDAGRAPH_MODE=${GLM52_CUDAGRAPH_MODE:-PIECEWISE}
 export DATASET=${DATASET:-${APEX_GYM_DIR}/benchmarks/apex_agents/data/apex_agents_benchmark.jsonl}
 export GYM_CONFIG=${GYM_CONFIG:-${APEX_GYM_DIR}/env.yaml}
 export CONCURRENCY NUM_REPEATS
@@ -72,6 +75,22 @@ unset NEMO_GYM_CONFIG_DICT NEMO_GYM_CONFIG_PATH SBATCH_DEPENDENCY
 
 mkdir -p "${RUN_DIR}/logs" "${APEX_GYM_DIR}/results/slurm-logs"
 
+# Rack locality: --segment=<nodes per replica> makes Slurm place the replica's
+# node group inside one NVL72 block. --switches=1 alone is a soft preference that
+# Slurm drops after its wait budget, and every rack-straddling replica we ran died
+# at its first decode step (sample_tokens RPC timeout, engine dead) while rack-local
+# replicas stayed healthy. This launcher runs one Ray-DP replica across all nodes,
+# so the segment defaults to NODES; SBATCH_SEGMENT=none disables it.
+SBATCH_SEGMENT=${SBATCH_SEGMENT:-${NODES}}
+[[ "${SBATCH_SEGMENT}" == "none" || "${SBATCH_SEGMENT}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "ERROR: SBATCH_SEGMENT must be a positive integer or 'none'" >&2
+    exit 64
+}
+placement_args=(--switches=1)
+if [[ "${SBATCH_SEGMENT}" != "none" ]]; then
+    placement_args+=(--segment="${SBATCH_SEGMENT}")
+fi
+
 bash "${BATCH_SCRIPT}" --validate
 if [[ "${VALIDATE_ONLY:-false}" == "true" ]]; then
     echo "Validation-only mode passed; no Slurm job was submitted."
@@ -90,7 +109,7 @@ job_id=$(
         --partition="${SBATCH_PARTITION:-batch}" \
         --qos="${SBATCH_QOS:-normal}" \
         --time="${WALLTIME:-04:00:00}" \
-        --switches=1 \
+        "${placement_args[@]}" \
         --output="${RUN_DIR}/logs/%j_rollout.out" \
         --error="${RUN_DIR}/logs/%j_rollout.err" \
         --export=ALL \
