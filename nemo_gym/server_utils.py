@@ -634,7 +634,8 @@ async def _request_with_retries(
                 if _max_connection_retries is not None and num_tries >= _max_connection_retries:
                     raise
 
-                # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
+                # Internal calls skip this print and the MAX_NUM_TRIES limit, but still count tries so
+                # `_max_connection_retries` applies.
                 if not _internal:
                     print(
                         f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
@@ -644,7 +645,7 @@ Sleeping 0.5s and retrying...
                     if num_tries >= MAX_NUM_TRIES:
                         raise e
 
-                    num_tries += 1
+                num_tries += 1
 
                 await asyncio.sleep(0.5)
     finally:
