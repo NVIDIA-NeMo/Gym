@@ -107,6 +107,8 @@ For SWE-bench Pro, use [`hermes.yaml`](../../benchmarks/swebench/pro/hermes.yaml
 See [Evaluate SWE-bench Pro with Hermes](../../fern/versions/latest/pages/evaluation-tutorials/hermes-swe-bench-pro.mdx)
 for task preparation, Environment Server configuration, evaluation commands, and session limits.
 
+Agent Server responses use `usage: null`. The shared [single-agent-turn Environment Server](../../environment_servers/single_agent_turn/README.md) supplies provider counts when Model Server capture is enabled, including delegated and auxiliary calls routed through the episode's Model Server URL. Direct Agent Server calls leave usage unknown.
+
 ## Sandbox-mode requirements
 
 Sandbox sessions live in the memory of the worker that seeded them, so seeding a session requires `num_workers: 1`. Calling the agent's `/run` directly keeps no session and still supports several workers.
