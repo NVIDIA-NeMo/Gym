@@ -28,15 +28,19 @@ MCP_CONFIG_PATH = "/work/_setup/mcp_servers.json"
 class SingleBoxGeneralAgentEnvironment(GeneralAgentEnvironment):
     """MiMo's general_agent environment with main and sidecar in one box.
 
-    The released images install the MCP stack into the system python3, while the task scripts
-    expect ``/opt/openai-agents-venv/bin/python`` from MiMo's internal images.
+    The task scripts need mcp 1.x in ``/opt/openai-agents-venv``, which MiMo's internal images ship. The released
+    images only have mcp 2.x in the system python3, so setup builds that venv.
     """
 
     def _setup_dataset_specific(self) -> None:
-        venv = self.VENV_PYTHON
-        self.execute(
-            f"[ -x {venv} ] || {{ mkdir -p $(dirname {venv}) && ln -sf $(command -v python3) {venv}; }}", cwd="/"
+        venv = os.path.dirname(os.path.dirname(self.VENV_PYTHON))
+        res = self.execute(
+            f"[ -x {self.VENV_PYTHON} ] || {{ python3 -m venv {venv} && {venv}/bin/pip install -q 'mcp>=1.9,<2'; }}",
+            cwd="/",
+            timeout=600,
         )
+        if res.get("returncode") != 0:
+            raise RuntimeError(f"{self.instance_id}: building the MCP venv failed: {res.get('output', '')[-800:]}")
         super()._setup_dataset_specific()
 
 
