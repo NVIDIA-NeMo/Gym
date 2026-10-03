@@ -208,8 +208,10 @@ dependencies = [
 
     # Ray: Used for distributed processing
     # Updated Mon Sep 28, 2026 with ray[default]>=2.58.0 (CVE mitigation: httpcore5 bundled in ray_dist.jar)
+    # LOCAL HOLD: >=2.56.1 so the overlay runs on nemo-rl nightly containers built before RL's
+    # Ray 2.58 bump (server venvs pin ray to the parent's exact version). Drop with a newer container.
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
-    "ray[default]>=2.58.0",
+    "ray[default]>=2.56.1",
 
     # jinja2: Ray Serve's HAProxy-based ingress (ray.serve._private.haproxy, since ray 2.57)
     # imports jinja2 unconditionally, but ray[default] doesn't declare it (only ray[serve] does).
