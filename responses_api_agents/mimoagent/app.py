@@ -155,14 +155,21 @@ class MimoAgent(SimpleResponsesAPIAgent):
                 "model_kwargs": model_kwargs,
             }
         )
-        if protocol == "chat":
-            query = model.query
+        # Gym's schemas are stricter than the OpenAI SDK: no legacy `name` on chat tool messages,
+        # and Responses function tools need `strict`.
+        query = model.query
+        model.query = lambda messages, **kwargs: query([_without_tool_name(m) for m in messages], **kwargs)
+        if protocol == "responses" and hasattr(model, "client"):
+            create = model.client.responses.create
 
-            # Gym's chat schema forbids the legacy `name` field mimoagent puts on tool messages.
-            def strip_tool_names(messages: list[dict], **kwargs: Any) -> dict:
-                return query([_without_tool_name(m) for m in messages], **kwargs)
+            def create_with_strict(**kwargs: Any) -> Any:
+                if kwargs.get("tools"):
+                    kwargs["tools"] = [
+                        {"strict": False, **t} if t.get("type") == "function" else t for t in kwargs["tools"]
+                    ]
+                return create(**kwargs)
 
-            model.query = strip_tool_names
+            model.client.responses.create = create_with_strict
         env = LocalEnvironment(cwd=os.getcwd() or self.config.cwd, timeout=self.config.command_timeout)
         agent = make_agent(agent_type, model, env, **agent_cfg)
         if MCP_CONFIG_PATH.exists() and hasattr(agent, "tool_registry"):
