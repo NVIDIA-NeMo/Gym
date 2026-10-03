@@ -1,7 +1,9 @@
 # Results
 
-All runs use OpenSandbox boxes from the released Docker Hub images and `nvidia/nvidia/nemotron-3.5-lightning` on the
-NVIDIA inference endpoint, graded by the real verifiers. One rollout per cell unless noted.
+All runs use OpenSandbox boxes from the released Docker Hub images and the real verifiers. The first sections use
+`nvidia/nvidia/nemotron-3.5-lightning` on the NVIDIA inference endpoint with mimoagent driving the box from outside.
+The last section runs the full Gym path (harness_agent, `agent: mimoagent`, in-box runtime) with Nemotron 3.5 Nano
+(`nano-3p5-honest-dolphin-rlvr-v41`) self-hosted on vLLM.
 
 ## Grader checks
 
@@ -49,6 +51,30 @@ NVIDIA inference endpoint, graded by the real verifiers. One rollout per cell un
 | webdev | opencode | 0.0 | |
 | webdev | cc-agent | dropped | page loads scripts from a mistyped CDN host, MiMo masks these |
 
+## Gym path with self-hosted Nano (4 code tasks, 2 rollouts each)
+
+| Profile | Mean reward | Pass@2 | Notes |
+|---|---|---|---|
+| default | 0.38 | 0.50 | |
+| bashonly-agent | 0.25 | 0.25 | |
+| cc-agent | 0.63 | 0.75 | |
+| codex-agent | 0.13 | 0.25 | |
+| mimocode-agent | 0.50 | 0.50 | |
+| claude-code | 0.25 | 0.25 | |
+| codex | 0.13 | 0.25 | |
+| mimocode | 0.25 | 0.50 | |
+| kilocode | 0.43 | 0.50 | |
+| kimi-code | 0.50 | 0.67 | |
+| kimi-cli | 0.25 | 0.25 | |
+| openclaw | 0.25 | 0.25 | |
+| opencode | 0.50 | 0.75 | |
+| hermes | 0.25 | 0.25 | |
+| omp | 0.25 | 0.25 | |
+| mini-swe-agent | 0.13 | 0.25 | |
+| dsh | 0.63 | 0.75 | |
+| pi | 0.17 | 0.25 | |
+| grok | 0.00 | 0.00 | Gym's Anthropic stream sends thinking blocks without `signature`, which grok's client requires |
+
 ## Integration findings
 
 - Some released code images keep commits past the task's base, so mimoagent's history check fails. Code rows strip
@@ -57,3 +83,9 @@ NVIDIA inference endpoint, graded by the real verifiers. One rollout per cell un
   `/opt/openai-agents-venv`. Setup builds that venv.
 - The general_agent images have no git, so the in-box runtime installs mimoagent from a source archive.
 - Claude Opus refuses the cyber tasks under Anthropic's cyber safeguards.
+- Gym's chat schema rejects the `name` mimoagent puts on tool messages, and its Responses schema requires `strict` on
+  function tools. The agent fixes both before sending.
+- harness_agent on main points boxes at the policy server's backend `base_url`, so with vLLM the harness reaches vLLM
+  directly and sends its profile's model name. Profiling serves those names as vLLM aliases, or sets
+  `sandbox_model_base_url` to the Gym model server.
+- The CLI harnesses append their own API path, so they get the bare model URL.
