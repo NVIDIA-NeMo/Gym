@@ -21,6 +21,7 @@ import logging
 import math
 import re
 import shlex
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -177,6 +178,29 @@ def _require_tenacity() -> tuple[Any, Any, Any, Any]:
 def _has_retryable_error_marker(exception: BaseException) -> bool:
     message = str(exception).lower()
     return any(marker in message for marker in RETRYABLE_ERROR_MARKERS)
+
+
+# Monotonic clock for exec deadlines (module-level so tests can drive it).
+_monotonic = time.monotonic
+
+
+def _deadline_killed(result: SandboxExecResult, timeout_s: int | float | None, elapsed_s: float) -> SandboxExecResult:
+    """Report a command the server-side timeout killed like the client deadline does.
+
+    OpenSandbox enforces ``RunCommandOpts.timeout`` itself and reports the kill as an
+    ordinary non-zero exit (-1) with no error type, indistinguishable from a command
+    failure. A non-zero exit at or past the deadline can only be that kill, so it gets
+    ``exec_with_background_services``' timeout result (124, ``error_type="timeout"``).
+    """
+    if timeout_s is None or result.return_code == 0 or result.error_type is not None or elapsed_s < float(timeout_s):
+        return result
+    note = f"Command timed out after {float(timeout_s):g}s"
+    return replace(
+        result,
+        stderr=f"{result.stderr}\n{note}" if result.stderr else note,
+        return_code=124,
+        error_type="timeout",
+    )
 
 
 def _exception_status_code(exception: BaseException) -> int | None:
@@ -1679,8 +1703,9 @@ class OpenSandboxProvider:
         effective_retries = self._command_retry_count() if retries is None else retries
 
         async def _dispatch() -> SandboxExecResult:
+            started = _monotonic()
             if self._operations.background_exec:
-                return await self._exec_background(
+                result = await self._exec_background(
                     handle,
                     effective_command,
                     opts_kwargs,
@@ -1688,6 +1713,7 @@ class OpenSandboxProvider:
                     total_timeout_s=timeout_s,
                     retries=effective_retries,
                 )
+                return _deadline_killed(result, timeout_s, _monotonic() - started)
 
             execution = await self._submit_command(
                 lambda: handle.raw.commands.run(effective_command, opts=RunCommandOpts(**opts_kwargs)),
@@ -1710,7 +1736,8 @@ class OpenSandboxProvider:
             else:
                 return_code = 0
 
-            return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
+            result = SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
+            return _deadline_killed(result, timeout_s, _monotonic() - started)
 
         # Backstop for wedges the inner deadlines miss. Background exec polls, so
         # sdk_timeout_s bounds a single request rather than the command: without

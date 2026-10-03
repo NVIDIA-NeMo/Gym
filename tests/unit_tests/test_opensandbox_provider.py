@@ -1125,6 +1125,68 @@ async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
+async def test_exec_background_reports_a_deadline_kill_as_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The server kills a command at RunCommandOpts.timeout and reports exit -1; that is a timeout."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            return SimpleNamespace(id="exec-7")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            return SimpleNamespace(running=False, exit_code=-1, error=None)
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            return SimpleNamespace(content="partial output", cursor=None)
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    clock = iter([100.0, 131.0])
+    monkeypatch.setattr(opensandbox_provider, "_monotonic", lambda: next(clock))
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "background_poll_interval_s": 0.01},
+    )
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-bg", provider_name="opensandbox", raw=SimpleNamespace(commands=FakeCommands())
+    )
+
+    result = await provider.exec(handle, "opencode run", timeout_s=30)
+
+    assert result.return_code == 124
+    assert result.error_type == "timeout"
+    assert result.stdout == "partial output"
+    assert result.stderr == "Command timed out after 30s"
+
+
+def test_deadline_killed_keeps_other_results() -> None:
+    failed = opensandbox_provider.SandboxExecResult(stdout=None, stderr="boom", return_code=-1)
+    ok = opensandbox_provider.SandboxExecResult(stdout="x", stderr=None, return_code=0)
+    sandbox_error = opensandbox_provider.SandboxExecResult(
+        stdout=None, stderr=None, return_code=125, error_type="sandbox"
+    )
+    deadline_killed = opensandbox_provider._deadline_killed
+    # Finished before the deadline: an ordinary failure.
+    assert deadline_killed(failed, 30, 12.0) is failed
+    # Success, an already-classified error, or no deadline at all are left alone.
+    assert deadline_killed(ok, 30, 45.0) is ok
+    assert deadline_killed(sandbox_error, 30, 45.0) is sandbox_error
+    assert deadline_killed(failed, None, 45.0) is failed
+    timed_out = deadline_killed(failed, 30, 30.0)
+    assert (timed_out.return_code, timed_out.error_type) == (124, "timeout")
+    assert timed_out.stderr == "boom\nCommand timed out after 30s"
+
+
+@pytest.mark.asyncio
 async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.MonkeyPatch) -> None:
     class Backend502Error(Exception):
         status_code = 502
