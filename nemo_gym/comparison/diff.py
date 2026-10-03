@@ -37,7 +37,7 @@ from nemo_gym.global_config import (
     ROLLOUT_INFOS_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
-from nemo_gym.metrics_config import PassMajorityStat, Stat, is_primary_metric
+from nemo_gym.metrics_config import COMPLETION_TOKEN_METRIC_NAMES, PassMajorityStat, Stat, is_primary_metric
 
 
 # The per-task field flips are computed from. Every verify response carries `reward` at minimum.
@@ -158,7 +158,16 @@ def build_metric_rows(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> L
 
     baseline_metrics = {**baseline.key_metrics, **baseline.agent_metrics}
     candidate_metrics = [{**run.key_metrics, **run.agent_metrics} for run in candidates]
-    key_metric_names = set(baseline.key_metrics) | {name for run in candidates for name in run.key_metrics}
+    for metrics in (baseline_metrics, *candidate_metrics):
+        for name in COMPLETION_TOKEN_METRIC_NAMES:
+            repeat_mean = _numeric(metrics.get(f"{Stat.MEAN.across_repeats_prefix}{name}"))
+            if repeat_mean is not None:
+                metrics[name] = repeat_mean
+    headline_metric_names = (
+        set(baseline.key_metrics)
+        | {name for run in candidates for name in run.key_metrics}
+        | set(COMPLETION_TOKEN_METRIC_NAMES)
+    )
 
     rows: List[MetricRow] = []
     for name in _ordered_metric_names(baseline_metrics, candidate_metrics):
@@ -180,7 +189,7 @@ def build_metric_rows(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> L
         rows.append(
             MetricRow(
                 metric=name,
-                is_key_metric=name in key_metric_names,
+                is_key_metric=name in headline_metric_names,
                 present_in=present_in,
                 baseline=baseline_value,
                 candidates=candidate_values,
@@ -372,6 +381,13 @@ def compare_runs(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> AgentC
             "Runs collected with different --num-repeats produce different pass@k metric names."
         )
 
+    reported = {row.metric for row in rows}
+    rows.extend(
+        MetricRow(metric=name, is_key_metric=True, present_in=[], candidates=[None] * len(candidates))
+        for name in COMPLETION_TOKEN_METRIC_NAMES
+        if name not in reported
+    )
+
     notes: List[str] = []
     repeat_counts = [run.num_repeats for run in candidates]
     if baseline.num_repeats is not None and any(
@@ -387,7 +403,7 @@ def compare_runs(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> AgentC
             "Neither run recorded per-run cross-repeat confidence intervals, so every baseline/candidate "
             "CI cell is empty. They are written for repeat-aggregated metrics when a run has 2 or more repeats."
         )
-    one_sided = [row.metric for row in rows if len(row.present_in) < 1 + len(candidates)]
+    one_sided = [row.metric for row in rows if row.present_in and len(row.present_in) < 1 + len(candidates)]
     if one_sided:
         notes.append(f"{len(one_sided)} metric(s) were reported by only one of the runs.")
 
