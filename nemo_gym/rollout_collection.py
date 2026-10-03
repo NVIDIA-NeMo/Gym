@@ -114,6 +114,7 @@ from nemo_gym.token_id_capture import (
     TokenIdCaptureConfig,
     clear_token_captures_for_rollouts,
     installed_token_source,
+    mask_incomplete_when_attributed_from_config,
     token_id_capture_dirs_from_config,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
@@ -2455,6 +2456,9 @@ class RolloutCollectionHelper(BaseModel):
         )
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         observability_enabled = observability_enabled_from_config(global_config)
+        # How a finalized rollout with an incomplete capture is treated
+        # (token_id_capture.mask_incomplete_when_attributed): read once, applied to every rebuild below.
+        mask_incomplete_when_attributed = mask_incomplete_when_attributed_from_config(global_config)
         # Resolve the training-token store directory once.
         # Training capture is independent of evaluation capture.
         # An empty result disables training-token capture.
@@ -2647,7 +2651,9 @@ class RolloutCollectionHelper(BaseModel):
                     global_config,
                     self._agent_name_for_row(row, global_config),
                 ):
-                    token_capture_build = await finalize_rollout_token_capture(result, token_source)
+                    token_capture_build = await finalize_rollout_token_capture(
+                        result, token_source, mask_incomplete_when_attributed=mask_incomplete_when_attributed
+                    )
                     if token_capture_build is not None:
                         finalized_count += 1
                         if token_capture_build.get(MASK_SAMPLE_KEY):
