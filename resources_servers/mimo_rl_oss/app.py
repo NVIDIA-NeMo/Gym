@@ -34,7 +34,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY
-from resources_servers.mimo_rl_oss import terminal_bench  # noqa: F401  (registers the dataset type)
+from resources_servers.mimo_rl_oss import opensource_code, terminal_bench  # noqa: F401  (register dataset types)
 from resources_servers.mimo_rl_oss.general_agent.register import MCP_CONFIG_PATH, resolve_task_dir
 from resources_servers.mimo_rl_oss.sandbox_env import GymSandboxEnvironment
 from resources_servers.mimo_rl_oss.webdev import environment as webdev  # noqa: F401  (registers the dataset type)
@@ -118,18 +118,13 @@ class MimoRLOSSResourcesServer(SimpleResourcesServer):
             **resolve_provider_metadata(self.config.sandbox_provider, global_config),
             **spec.get("metadata", {}),
         }
-        kwargs = dict(self.config.environment_kwargs)
-        if instance.get("dataset_type") == "opensource-code":
-            # Some released code images keep commits past the task's base, so the fix is readable from git log.
-            # mimoagent refuses those unless history is stripped per rollout.
-            kwargs.setdefault("git_leak_prevention", "strip")
         return make_dataset_env(
             instance,
             environment_class=GymSandboxEnvironment,
             provider=resolve_provider_config(self.config.sandbox_provider, global_config),
             spec=spec,
             timeout=self.config.exec_timeout,
-            **kwargs,
+            **self.config.environment_kwargs,
         )
 
     def _setup(self, instance: dict[str, Any]) -> tuple[DatasetEnvironment, dict[str, Any]]:
