@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Multi-turn visual coding: OpenCode with a Python image toolkit solves an image question,
+# and a GPT judge grades the final \boxed{} answer against the gold answer. Nothing here is
+# dataset-specific; benchmarks (e.g. benchmarks/babyvision_opencode) and training sets only
+# supply rows with an image, the prompt, `question` and `expected_answer`.
+visual_coding_opencode:
+  resources_servers:
+    visual_coding_opencode:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Image questions solved by OpenCode with a Python image toolkit (multi-turn visual coding), GPT-judged final answers.
+      value: Train and evaluate tool-assisted fine-grained visual reasoning (counting, coordinates, tracing).
+      judge_model_server:
+        type: responses_api_models
+        name: visual_coding_opencode_judge_model
+      judge_model: ${oc.select:visual_coding_opencode_judge_model_name,us/azure/openai/gpt-4o-mini}
+
+visual_coding_opencode_agent:
+  responses_api_agents:
+    opencode_vision_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: visual_coding_opencode
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: policy
+      concurrency: 64
+      command: opencode
+      opencode_version: 1.17.11
+      thinking: false
+      # The only hard stop, as in Python_call_gen: OpenCode itself has no turn cap.
+      timeout: 1800
+      context_window: 131072
+      max_output_tokens: 32768
+      attach_images: true
+      vision: true
+      # Each task gets its own /tmp: models write crops to fixed names such as /tmp/crop.png.
+      private_tmp: true
+      env:
+        OMP_NUM_THREADS: "1"
+        OPENBLAS_NUM_THREADS: "1"
+        MKL_NUM_THREADS: "1"
+        NUMEXPR_NUM_THREADS: "1"
+        VECLIB_MAXIMUM_THREADS: "1"
+        OPENCV_FOR_THREADS_NUM: "1"
+      opencode_config:
+        permission:
+          bash: allow
+          edit: allow
+          webfetch: deny
+          external_directory:
+            /tmp/*: allow
+        experimental:
+          continue_loop_on_deny: true
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/visual_coding_opencode/data/example.jsonl
+        num_repeats: 1
+
+visual_coding_opencode_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:visual_coding_opencode_judge_base_url,https://inference-api.nvidia.com/v1}
+      # Default empty: `gym eval prepare` loads this config without the run's key override.
+      openai_api_key: ${oc.env:OPENAI_API_KEY,""}
+      openai_model: ${oc.select:visual_coding_opencode_judge_model_name,us/azure/openai/gpt-4o-mini}
+      openai_default_headers: {}
+      max_concurrent_requests: 32

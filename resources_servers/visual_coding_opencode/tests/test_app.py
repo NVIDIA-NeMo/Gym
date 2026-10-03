@@ -9,11 +9,11 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
-from resources_servers.babyvision_opencode.app import (
+from resources_servers.visual_coding_opencode.app import (
     JUDGE_SYSTEM,
-    BabyVisionOpenCodeConfig,
-    BabyVisionOpenCodeServer,
-    BabyVisionOpenCodeVerifyRequest,
+    VisualCodingOpenCodeConfig,
+    VisualCodingOpenCodeServer,
+    VisualCodingOpenCodeVerifyRequest,
     parse_verdict,
 )
 
@@ -28,7 +28,7 @@ def message(text: str) -> dict:
     }
 
 
-def request(*texts: str, expected: str = "(4,7)") -> BabyVisionOpenCodeVerifyRequest:
+def request(*texts: str, expected: str = "(4,7)") -> VisualCodingOpenCodeVerifyRequest:
     response = NeMoGymResponse.model_validate(
         {
             "id": "r",
@@ -41,22 +41,22 @@ def request(*texts: str, expected: str = "(4,7)") -> BabyVisionOpenCodeVerifyReq
             "output": [message(text) for text in texts],
         }
     )
-    return BabyVisionOpenCodeVerifyRequest(
+    return VisualCodingOpenCodeVerifyRequest(
         responses_create_params={"input": "q"}, response=response, expected_answer=expected, question="Which cell?"
     )
 
 
 @pytest.fixture
-def server() -> BabyVisionOpenCodeServer:
-    config = BabyVisionOpenCodeConfig(
-        name="babyvision_opencode",
+def server() -> VisualCodingOpenCodeServer:
+    config = VisualCodingOpenCodeConfig(
+        name="visual_coding_opencode",
         host="localhost",
         port=1,
         entrypoint="",
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
         judge_model="gpt",
     )
-    return BabyVisionOpenCodeServer(config=config, server_client=MagicMock(spec=ServerClient))
+    return VisualCodingOpenCodeServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 @pytest.mark.parametrize(
@@ -76,7 +76,9 @@ def test_parse_verdict(reply: str, verdict: str) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("verdict", "reward"), [("equivalent", 1.0), ("different", 0.0), ("unsure", 0.0)])
 async def test_reward_is_the_judge_verdict(server, verdict: str, reward: float) -> None:
-    with patch.object(BabyVisionOpenCodeServer, "judge", AsyncMock(return_value={"verdict": verdict, "reason": ""})) as judge:
+    with patch.object(
+        VisualCodingOpenCodeServer, "judge", AsyncMock(return_value={"verdict": verdict, "reason": ""})
+    ) as judge:
         result = await server.verify(request("Looking at row 4.", "It is \\boxed{(4,7)}"))
     assert result.reward == reward and result.judge_verdict == verdict
     assert result.extracted_answer == "(4,7)" and result.string_match_reward == 1.0
@@ -87,7 +89,9 @@ async def test_reward_is_the_judge_verdict(server, verdict: str, reward: float) 
 
 @pytest.mark.asyncio
 async def test_unextracted_answer_still_judged(server) -> None:
-    with patch.object(BabyVisionOpenCodeServer, "judge", AsyncMock(return_value={"verdict": "equivalent", "reason": ""})) as judge:
+    with patch.object(
+        VisualCodingOpenCodeServer, "judge", AsyncMock(return_value={"verdict": "equivalent", "reason": ""})
+    ) as judge:
         result = await server.verify(request("row 4, column 7"))
     assert result.reward == 1.0 and result.extracted_answer is None
     assert judge.call_args.args[2] is None
@@ -95,7 +99,7 @@ async def test_unextracted_answer_still_judged(server) -> None:
 
 @pytest.mark.asyncio
 async def test_empty_response_is_wrong_without_a_judge_call(server) -> None:
-    with patch.object(BabyVisionOpenCodeServer, "judge", AsyncMock()) as judge:
+    with patch.object(VisualCodingOpenCodeServer, "judge", AsyncMock()) as judge:
         result = await server.verify(request(""))
     assert result.reward == 0.0 and result.failure_reason == "no_response"
     judge.assert_not_called()
@@ -103,7 +107,7 @@ async def test_empty_response_is_wrong_without_a_judge_call(server) -> None:
 
 @pytest.mark.asyncio
 async def test_judge_error_scores_zero(server) -> None:
-    with patch.object(BabyVisionOpenCodeServer, "judge", AsyncMock(side_effect=JudgeError("down"))):
+    with patch.object(VisualCodingOpenCodeServer, "judge", AsyncMock(side_effect=JudgeError("down"))):
         result = await server.verify(request("\\boxed{(4,7)}"))
     assert result.reward == 0.0 and result.failure_reason == "judge_error"
 
@@ -123,7 +127,7 @@ async def test_judge_request(server) -> None:
             }
         ],
     }
-    with patch("resources_servers.babyvision_opencode.app.call_judge", AsyncMock()) as call:
+    with patch("resources_servers.visual_coding_opencode.app.call_judge", AsyncMock()) as call:
         from nemo_gym.openai_utils import NeMoGymChatCompletion
 
         call.return_value = NeMoGymChatCompletion.model_validate(completion)
