@@ -396,3 +396,77 @@ class TestCli:
         assert "resources_servers/harbor/configs/harbor.yaml" in config_paths
         assert "opensandbox/configs/opensandbox.yaml" in config_paths
         assert f"+output_jsonl_fpath={tmp_path / 'out' / 'rollouts.jsonl'}" in tokens
+
+
+class TestValidationSummary:
+    def test_summarizes_rollouts(self, tmp_path):
+        from nemo_gym.tasks.harbor.cli import summarize_validation
+
+        # Rows are the verify response as returned plus the collector's `_ng_task_id` stamp.
+        rows = [
+            {
+                "_ng_task_id": {"taskset": "ds", "task_id": "solved"},
+                "reward": 1.0,
+                "mask_sample": False,
+                "response": {"metadata": {"oracle": "solved"}},
+            },
+            {
+                "_ng_task_id": {"taskset": "ds", "task_id": "wrong"},
+                "reward": 0.0,
+                "mask_sample": False,
+                "failure_kind": "harbor:missing_reward",
+                "response": {"metadata": {"oracle": "solved"}},
+            },
+            {
+                "_ng_task_id": {"taskset": "ds", "task_id": "skipped"},
+                "reward": 0.0,
+                "mask_sample": False,
+                "response": {"metadata": {"oracle": "unvalidated"}},
+            },
+            {
+                "_ng_task_id": {"taskset": "ds", "task_id": "masked"},
+                "reward": 0.0,
+                "mask_sample": True,
+                "failure_kind": "provider_unavailable",
+            },
+        ]
+        rollouts = tmp_path / "rollouts.jsonl"
+        rollouts.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        # An episode that failed before verification lands in the failures sidecar.
+        (tmp_path / "rollouts_failures.jsonl").write_text(
+            json.dumps(
+                {
+                    "_ng_task_id": {"taskset": "ds", "task_id": "broken"},
+                    "_ng_failure_class": "environment_server_failed",
+                    "_ng_failure_terminal": True,
+                    "_ng_failure_message": "seed exploded",
+                }
+            )
+            + "\n"
+        )
+
+        report = summarize_validation(rollouts, ["never_ran"])
+
+        lines = report.text.splitlines()
+        assert lines[0] == "task_id\tstatus\treward"
+        assert "solved\toracle solved\t1.0" in lines
+        assert "wrong\toracle solved (harbor:missing_reward)\t0.0" in lines
+        assert "skipped\tunvalidated (no solution/)\t-" in lines
+        assert "broken\tfailed: seed exploded\t-" in lines
+        assert "masked\tmasked (provider_unavailable)\t-" in lines
+        assert "never_ran\tunvalidated (no solution/)\t-" in lines
+        assert report.ok is False
+
+    def test_all_good_is_ok(self, tmp_path):
+        from nemo_gym.tasks.harbor.cli import summarize_validation
+
+        rollouts = tmp_path / "rollouts.jsonl"
+        rollouts.write_text(json.dumps({"_ng_task_id": {"taskset": "ds", "task_id": "a"}, "reward": 1.0}) + "\n")
+        report = summarize_validation(rollouts, [])
+        assert report.ok is True and "a\toracle ran\t1.0" in report.text
+
+    def test_missing_rollouts_file(self, tmp_path):
+        from nemo_gym.tasks.harbor.cli import summarize_validation
+
+        report = summarize_validation(tmp_path / "none.jsonl", [])
+        assert report.ok is False and "no rollouts written" in report.text
