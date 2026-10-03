@@ -1,0 +1,27 @@
+config_paths:
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+- resources_servers/ns_tools/configs/ns_tools.yaml
+ns_tools:
+  resources_servers:
+    ns_tools:
+      sandbox_type: sandbox_pool
+      sandbox_pool:
+        provider:
+          opensandbox: ${sandbox.opensandbox}
+        image: ${oc.env:NS_SANDBOX_IMAGE}
+        entrypoint:
+        - /start-with-nginx.sh
+        env:
+          EXECD_API_GRACE_SHUTDOWN: 50ms
+        port: 6000
+        size: ${oc.decode:${oc.env:NS_SANDBOX_POOL_SIZE,8}}
+        ttl_s: ${oc.decode:${oc.env:NS_SANDBOX_TTL_S,14400}}
+        pool_ref: ${oc.env:NS_SANDBOX_POOL_REF,""}
+        pool_fallback: ${oc.decode:${oc.env:NS_SANDBOX_POOL_FALLBACK,true}}
+        resources:
+          cpu: 8
+          memory_mib: 32768
+        resource_requests:
+          cpu: 4
+          memory_mib: 16384
+      verified: false
