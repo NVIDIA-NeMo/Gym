@@ -1,0 +1,19 @@
+agent:
+  type: pi
+  version: 0.83.0
+  api: anthropic-messages
+  adaptive_thinking: true # thinking.type=adaptive + output_config.effort
+  thinking: max           # effort with adaptive_thinking; budget level without
+  context_window: 1000000 # a claude-opus-4-8 gateway channel serving a 1M context
+  max_tokens: 65536       # thinking tokens count in
+  # thinking_budgets:     # budget mode only
+  #   high: 32768
+  # skip_install: false
+
+# Environment configuration
+
+model:
+  model_name: "claude-opus-4-8"
+  model_kwargs:
+    base_url: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
+    api_key: "${ANTHROPIC_API_KEY:-}"

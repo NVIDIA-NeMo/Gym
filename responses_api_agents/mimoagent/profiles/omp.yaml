@@ -1,0 +1,20 @@
+agent:
+  type: omp
+  version: 17.3.4
+  thinking: xhigh         # off|minimal|low|medium|high|xhigh|max|auto
+  context_limit: 1000000
+  output_limit: 65536
+  # thinking_mode: anthropic-adaptive  # or "budget" + thinking_budgets
+  # tools: "read,bash,edit,write,grep,glob,todo,task,web_search"  # default (full set)
+  # context_management: false  # default. true re-adds the clear_thinking beta
+  #                            # field — an Anthropic-native route takes it, a
+  #                            # Bedrock-backed one 400s the whole request
+  # tool_strict: false         # default. same story for `strict: true` on the
+  #                            # edit tool definition
+  # skip_install: false
+
+model:
+  model_name: "claude-opus-5"
+  model_kwargs:
+    base_url: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
+    api_key: "${ANTHROPIC_API_KEY:-}"
