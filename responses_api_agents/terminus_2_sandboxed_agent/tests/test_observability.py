@@ -170,7 +170,7 @@ def execution(monkeypatch):
         )
 
     # Keep Harbor's real run loop, parser, query/retry/fallback and summarization hooks.
-    monkeypatch.setattr(app_module.Terminus2, "setup", setup)
+    monkeypatch.setattr(app_module.NeMoGymTerminus2, "setup", setup)
     monkeypatch.setattr(app_module.Terminus2, "_build_skills_section", AsyncMock(return_value=None))
     monkeypatch.setattr(app_module.Terminus2, "_count_total_tokens", lambda self, chat: 0)
 
