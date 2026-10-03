@@ -61,7 +61,7 @@ def test_template_settings_merge_without_mutating_hermes_input():
 
 def test_standalone_runner_loads_shared_helper_without_gym_on_path(tmp_path):
     source = Path(__file__).parents[1]
-    for name in ("sandbox_runner.py", "sandbox_observer.py", "model_kwargs.py"):
+    for name in ("sandbox_runner.py", "sandbox_observer.py", "model_kwargs.py", "token_usage.py"):
         shutil.copyfile(source / name, tmp_path / name)
     # -S excludes site-packages (including Gym); only the uploaded runtime files are importable.
     completed = subprocess.run(
