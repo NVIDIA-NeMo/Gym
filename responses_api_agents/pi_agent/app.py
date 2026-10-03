@@ -732,20 +732,24 @@ class PiAgent(SimpleResponsesAPIAgent):
                 output.append(item)
             for key in usage:
                 usage[key] += tokens[key]
-        result = state.result
-        error = result.error or terminal_error
+        cleanup = state.cleanup
+        runtime = state.runtime_info
+        assert cleanup is not None and runtime is not None
+        error = cleanup["error"] or terminal_error
         model_limit = bool(stop_reasons and stop_reasons[-1] == "error" and context_overflow)
-        if result.return_code != 0 and not result.timed_out and not model_limit:
-            error = error or f"Pi exited with code {result.return_code}"
+        if cleanup["return_code"] != 0 and not cleanup["timed_out"] and not model_limit:
+            error = error or f"Pi exited with code {cleanup['return_code']}"
         if not stop_reasons:
             cached_tokens = None
             error = error or "Pi produced no assistant result"
-        elif stop_reasons[-1] not in ("stop", "length", "error", "aborted") and not result.timed_out:
+        elif stop_reasons[-1] not in ("stop", "length", "error", "aborted") and not cleanup["timed_out"]:
             error = error or "Pi ended without a terminal assistant result"
-        incomplete = result.timed_out or model_limit or (stop_reasons and stop_reasons[-1] in ("length", "aborted"))
+        incomplete = (
+            cleanup["timed_out"] or model_limit or (stop_reasons and stop_reasons[-1] in ("length", "aborted"))
+        )
         if model_limit or (stop_reasons and stop_reasons[-1] == "aborted"):
-            error = result.error  # Model limits/interruptions preserve a gradable partial patch.
-        if result.timed_out and not stop_reasons and result.error is None:
+            error = cleanup["error"]  # Model limits/interruptions preserve a gradable partial patch.
+        if cleanup["timed_out"] and not stop_reasons and cleanup["error"] is None:
             error = None
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
@@ -767,8 +771,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             ),
             metadata={
                 "harness_execution": "sandbox",
-                "harness_hostname": result.hostname,
-                "harness_pid": str(result.pid),
+                "harness_hostname": runtime.hostname,
+                "harness_pid": str(runtime.pid),
                 "pi_version": self.config.pi_version,
             },
         )
