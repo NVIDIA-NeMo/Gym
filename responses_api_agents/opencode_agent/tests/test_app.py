@@ -1541,3 +1541,40 @@ class TestPrivateTmp:
         assert cmd[:4] == ("unshare", "--user", "--map-current-user", "--mount")
         assert cmd[8] == str((tmp_path / "work").resolve())
         assert cmd[10:12] == ("opencode", "run") and cmd[-1] == "look"
+
+
+class TestProcessGroupCleanup:
+    def test_kills_children_left_running(self, tmp_path: Path) -> None:
+        import asyncio
+        import os
+        import time
+
+        from responses_api_agents.opencode_agent.app import _kill_process_group
+
+        pidfile = tmp_path / "child.pid"
+
+        async def run() -> int:
+            proc = await asyncio.create_subprocess_exec(
+                "sh", "-c", f"sleep 1000 & echo $! > {pidfile}; exit 0", start_new_session=True
+            )
+            await proc.wait()
+            _kill_process_group(proc.pid)
+            return int(pidfile.read_text())
+
+        child = asyncio.run(run())
+        for _ in range(50):
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("background child survived the run")
+
+    def test_never_kills_own_group(self) -> None:
+        import os
+
+        from responses_api_agents.opencode_agent.app import _kill_process_group
+
+        _kill_process_group(0)
+        _kill_process_group(os.getpgrp())
