@@ -116,6 +116,11 @@ dependencies = [
     "pydantic_core",
     "devtools",
 
+    # JSON Schema: Validates retained harness capability evidence.
+    # Updated Tue Sep 22, 2026 with jsonschema>=4.18,<5
+    # License: MIT https://github.com/python-jsonschema/jsonschema/blob/main/COPYING
+    "jsonschema>=4.18,<5",
+
     # Packaging: Validates SPDX license expressions in environment manifests.
     # Updated Tue Aug 11, 2026 with packaging==25.0
     # License: Apache-2.0 OR BSD-2-Clause https://github.com/pypa/packaging/tree/25.0
@@ -130,6 +135,12 @@ dependencies = [
     # Updated Tue Jul 29, 2026 with mcp>=1.28.1,<2
     # License: MIT https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE
     "mcp>=1.28.1,<2",
+
+    # anyio: transitive dependency of mcp/fastapi/starlette; pinned directly since
+    # mcp's own floor (>=4.10.0) resolves to a version with a known CVE.
+    # Updated Tue Sep 29, 2026 with anyio>=4.15.1 (CVE mitigation)
+    # License: MIT https://github.com/agronholm/anyio/blob/master/LICENSE
+    "anyio>=4.15.1",
 
     # itsdangerous: Requirement for Starlette SessionMiddleware
     # Updated Tue Feb 17, 2026 with itsdangerous==2.2.0
@@ -172,10 +183,10 @@ dependencies = [
 
     # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
     # mlflow dependency is necessary for importing. However, all of mlflow's dependencies that don't overlap with mlflow-skinny are excluded below.
-    # Updated Fri Sep 04, 2026 with mlflow>=3.16.0 (security bump)
+    # Updated Mon Sep 28, 2026 with mlflow>=3.16.1 (security bump)
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
-    "mlflow-skinny>=3.16.0",
-    "mlflow>=3.16.0",
+    "mlflow-skinny>=3.16.1",
+    "mlflow>=3.16.1",
 
     # scipy: t-distribution confidence intervals for repeat-level reward metrics in
     # nemo_gym/reward_profile.py. Lower bound is the first release with cp313 wheels;
@@ -196,9 +207,16 @@ dependencies = [
     "yappi>=1.7.6",
 
     # Ray: Used for distributed processing
-    # Updated Tue Jul 29, 2026 with ray[default]>=2.56.1
+    # Updated Mon Sep 28, 2026 with ray[default]>=2.58.0 (CVE mitigation: httpcore5 bundled in ray_dist.jar)
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
-    "ray[default]>=2.56.1",
+    "ray[default]>=2.58.0",
+
+    # jinja2: Ray Serve's HAProxy-based ingress (ray.serve._private.haproxy, since ray 2.57)
+    # imports jinja2 unconditionally, but ray[default] doesn't declare it (only ray[serve] does).
+    # nemo_gym.orchestration.ray_serve_gateway imports ray.serve at module level, so pin it directly.
+    # Updated: Mon Sep 28, 2026 with jinja2>=3.1
+    # License: BSD 3-Clause https://github.com/pallets/jinja/blob/main/LICENSE.txt
+    "jinja2>=3.1",
 
     # psutil: Cross-platform process and system utilities
     # Updated: Fri Nov 07, 2025 with psutil==6.1.1
@@ -211,14 +229,20 @@ dependencies = [
     "datasets",
 
     # orjson: JSON library for faster serialization/deserialization
-    # Updated: Thu Jan 08, 2026 with orjson==3.11.3
+    # Updated: Tue Sep 29, 2026 with orjson>=3.11.6 (CVE mitigation: unbounded recursion on deeply nested JSON)
     # License: Apache 2.0 https://github.com/ijl/orjson/blob/fb3eb1f729c7e7b019f780af5695722c99c7c695/LICENSE-APACHE
-    "orjson",
+    "orjson>=3.11.6",
 
     # urllib3: HTTP client library (transitive dependency, pinned for security)
-    # Updated: Mon May 19, 2026 with urllib3>=2.7.0
+    # Updated: Tue Sep 30, 2026 with urllib3>=2.8.0 (CVE mitigation)
     # License: MIT https://github.com/urllib3/urllib3/blob/main/LICENSE.txt
-    "urllib3>=2.7.0",
+    "urllib3>=2.8.0",
+
+    # PyJWT: transitive dependency of mcp (a core nemo-gym dep); pinned directly
+    # since mcp's own floor resolves to a version with a known CVE.
+    # Updated: Tue Sep 30, 2026 with PyJWT>=2.15.1 (CVE mitigation)
+    # License: MIT https://raw.githubusercontent.com/jpadilla/pyjwt/master/LICENSE
+    "PyJWT>=2.15.1",
 
     # sqlparse: SQL parsing library (transitive dependency of mlflow-skinny, pinned for security)
     # mlflow-skinny only requires sqlparse<1,>=0.4.0, so it won't pull the fixed version on its own.
@@ -232,9 +256,9 @@ dependencies = [
     "fonttools>=4.60.2",
 
     # python-multipart: Streaming multipart parser (transitive dependency, pinned for security)
-    # Updated: Mon Feb 10, 2026 with python-multipart>=0.0.22
+    # Updated: Tue Sep 29, 2026 with python-multipart>=0.0.27 (CVE mitigation: unbounded multipart part headers DoS)
     # License: Apache 2.0 https://github.com/andrew-d/python-multipart/blob/master/LICENSE.txt
-    "python-multipart>=0.0.22",
+    "python-multipart>=0.0.27",
 
     # pyarrow: columnar data library (transitive dependency via mlflow, pinned for security)
     # mlflow caps pyarrow<25; versions >=23.0.1 have cp313 wheels and address use-after-free.
@@ -243,9 +267,9 @@ dependencies = [
     "pyarrow>=23.0.1",
 
     # wandb: E2E rollout collection data and metrics upload
-    # Updated: Mon May 19, 2026 with wandb==0.27.0
+    # Updated: Mon Sep 28, 2026 with wandb>=0.30.0 (CVE mitigation: x/crypto, x/net, grpc-go, go-git bundled in wandb-core)
     # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
-    "wandb",
+    "wandb>=0.30.0",
 
     # GitPython: Git interaction library (transitive dependency of wandb, pinned for security)
     # Updated: Fri Sep 04, 2026 with GitPython>=3.1.61
@@ -268,12 +292,12 @@ all = [
 
 vllm = [
     # Pin to the same version used by local_vllm_model / genrm_model server venvs.
-    # Updated: Mon Aug 24, 2026 with vllm==0.25.1
-    "vllm==0.25.1",
-    # Pin flashinfer to the exact version vllm 0.25.1 specifies, ensuring pre-compiled
+    # Updated: Mon Sep 28, 2026 with vllm==0.29.0
+    "vllm==0.29.0",
+    # Pin flashinfer to the exact version vllm 0.29.0 specifies, ensuring pre-compiled
     # CUDA kernels are used (avoids JIT compilation on first generation == slow step time).
     # flashinfer>=0.2 bundles compiled kernels in the python package directly.
-    "flashinfer-python==0.6.13",
+    "flashinfer-python==0.6.18",
 ]
 
 sandbox = [
@@ -287,14 +311,6 @@ sandbox = [
     # Updated: Thu Jul 30, 2026 with opensandbox>=0.1.15
     # License: Apache 2.0
     "opensandbox>=0.1.15",
-
-    # httpx-aiohttp: aiohttp-backed httpx transport used by the OpenSandbox
-    # provider's `connection.transport_backend: aiohttp`; without it the
-    # provider silently falls back to the httpx transport with only a warning.
-    # Pulls in aiohttp (aiohttp<4,>=3.10).
-    # Updated: Tue Aug 11, 2026 with httpx-aiohttp>=0.2.0
-    # License: BSD 3-Clause https://github.com/karpetrosyan/httpx-aiohttp/blob/master/LICENSE
-    "httpx-aiohttp>=0.2.0",
 
     # Daytona SDK: used by the Daytona sandbox provider for create/exec/delete and file operations.
     # License: Apache 2.0 https://pypi.org/project/daytona/
@@ -345,8 +361,9 @@ telemetry = [
     # tracer/meter lifecycle, span-group gating, W3C context propagation, and the FastAPI /
     # aiohttp auto-instrumentation Gym uses to stitch one trace across its server processes.
     # Pinned to a Lens commit via [tool.uv.sources] until 0.2.0 ships to PyPI; then drop that
-    # entry and use a version range. Megatron-LM pins this same commit.
-    # Updated: Tue Aug 18, 2026 with nemo-lens @ b85578fc
+    # entry and use a version range. NeMo-RL pins this same commit; the two must agree,
+    # since an RL job installs Gym into its environment and resolves one nemo-lens.
+    # Updated: Thu Oct 1, 2026 with nemo-lens @ b0f977d4
     # License: Apache 2.0 https://github.com/NVIDIA-NeMo/Lens/blob/main/LICENSE
     "nemo-lens[sdk]",
 
@@ -441,6 +458,10 @@ override-dependencies = [
     # segale pins spacy==3.8.4 which has no cp313 wheels; 3.8.13+ does.
     "spacy>=3.8.13",
 
+    # Keep wcwidth opt-in; mini-SWE's native CLI restores it via overrides.txt.
+    # exclude-dependencies would prevent that server override from taking effect.
+    "wcwidth; sys_platform == 'never'",
+
     # Codec-bearing packages — never installed in the shipped package or container.
     # Binary wheels bundle libavcodec / static FFmpeg executables (H.264, H.265, AAC)
     # that may incur MPEG-LA royalties. Servers that genuinely need these declare
@@ -477,7 +498,6 @@ exclude-dependencies = [
     "prettytable",
     "skops",
     "sqlalchemy",
-    "wcwidth",
     "werkzeug",
     "waitress",
     # diskcache has unfixed CVEs and is no longer a transitive dep since vllm>=0.24.0.
@@ -494,7 +514,7 @@ exclude-dependencies = [
 # venvs that `gym env test` / `gym env start` build, which inherit it through the editable
 # nemo-gym install exactly as override-dependencies does.
 [tool.uv.sources]
-nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "b85578fc2b736a1804705e537001b5f45e9c715d" }
+nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "b0f977d414b2f89938604a0b7eaa78ee08bc8700" }
 
 [tool.setuptools.package-data]
 # The built-in asset trees (resources_servers, responses_api_agents, responses_api_models,
@@ -613,6 +633,8 @@ where = ["."]
 include = [
     "benchmarks",
     "benchmarks.*",
+    "environment_servers",
+    "environment_servers.*",
     "resources_servers",
     "resources_servers.*",
     "responses_api_agents",
@@ -712,6 +734,9 @@ directory = "results/htmlcov"
 [tool.coverage.report]
 skip_covered = true
 sort = "miss"
+# Coverage uses this precision for both display and fail_under comparisons.
+# Without it, 94.97% rounds to 95% and incorrectly satisfies a 95% gate.
+precision = 2
 fail_under = 95.0
 exclude_also = [
     "def __repr__",

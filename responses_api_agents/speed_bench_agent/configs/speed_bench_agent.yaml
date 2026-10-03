@@ -8,3 +8,11 @@ speed_bench_agent_default:
       model_server:
         type: responses_api_models
         name: policy_model
+
+speed_bench_agent_default_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: speed_bench_agent_default

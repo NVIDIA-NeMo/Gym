@@ -1,0 +1,48 @@
+# Example Haystack Agent pipeline for the NeMo Gym haystack_agent.
+# The Agent's chat_generator is a NeMoGymResponsesChatGenerator (calls a native NeMo Gym model
+# server). It may combine local tools with ContextAwareMCPToolset environment tools. The MCP URL
+# is replaced with the configured Resources Server endpoint at startup.
+components:
+  agent:
+    init_parameters:
+      chat_generator:
+        init_parameters:
+          generation_kwargs: {}
+          server_name: policy_model
+        type: responses_api_agents.haystack_agent.chat_generator.NeMoGymResponsesChatGenerator
+      exit_conditions:
+      - text
+      hooks: null
+      max_agent_steps: 6
+      raise_on_tool_invocation_failure: true
+      required_variables: null
+      state_schema: {}
+      streaming_callback: null
+      system_prompt: null
+      tool_concurrency_limit: 4
+      tool_streaming_callback_passthrough: false
+      tools:
+      - data:
+          connection_timeout: 30.0
+          eager_connect: false
+          inputs_from_state: null
+          invocation_timeout: 30.0
+          outputs_to_state: null
+          outputs_to_string: null
+          server_info:
+            base_delay: 1.0
+            headers: null
+            max_delay: 30.0
+            max_retries: 3
+            timeout: 30
+            token: null
+            type: haystack_integrations.tools.mcp.mcp_tool.StreamableHttpServerInfo
+            url: http://localhost:8000/mcp
+          tool_names: null
+        type: responses_api_agents.haystack_agent.mcp_toolset.ContextAwareMCPToolset
+      user_prompt: null
+    type: haystack.components.agents.agent.Agent
+connection_type_validation: true
+connections: []
+max_runs_per_component: 100
+metadata: {}

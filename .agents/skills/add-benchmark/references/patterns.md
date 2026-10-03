@@ -84,6 +84,14 @@ sample_benchmark_agent:
         type: responses_api_models
         name: policy_model
 
+sample_benchmark_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: sample_benchmark_agent
+
 sample_benchmark_resources_server:
   resources_servers:
     sample_benchmark:
@@ -324,10 +332,11 @@ current root `AGENTS.md`. Those cross-cutting contracts deliberately are not cop
 
 Use each layer for what it proves:
 
-```bash
-# Inspect resolved runtime wiring.
-gym env resolve --config benchmarks/sample_benchmark/config.yaml
+To inspect runtime wiring with `gym env resolve`, compose the workload with a model config and its required endpoint
+settings first; this example references `policy_model` but does not define one. Static validation below does not require
+a live or configured model endpoint.
 
+```bash
 # Validate schema, mirrors, prompt rendering, paths, and inferred profile.
 gym env validate sample_benchmark --kind benchmark
 
@@ -340,8 +349,9 @@ gym env publish sample_benchmark --kind benchmark
 
 Static validation does not import components, execute preparation code, start services, call a model, or prove grading
 quality. Run preparation tests, server tests, representative real smoke rollouts, and inspect verifier behavior as
-required by `AGENTS.md`. For benchmarks, also perform reward profiling and inspect task-level failures and variance.
-For a port, reproduce upstream metrics first and compare the same models in Gym.
+required by `AGENTS.md`. Fuller evaluations, reward profiling, and variance analysis provide stronger fidelity evidence
+but are not an additional merge or publication compute gate. For a parity claim, compare the same models under
+comparable upstream and Gym conditions; record unperformed comparisons and limitations.
 
 Stop and investigate rather than declaring the integration complete when any of these remains unexplained:
 

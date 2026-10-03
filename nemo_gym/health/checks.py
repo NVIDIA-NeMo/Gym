@@ -49,6 +49,12 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.AGENT_TURNS}),
     ),
     CheckSpec(
+        id="rollout_ended_on_failed_model_call",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.ROLLOUT,
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OBSERVED_MODEL_CALLS}),
+    ),
+    CheckSpec(
         id="agent_turn_hollow",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.AGENT_TURN,
@@ -58,25 +64,25 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         id="model_call_zero_completion_tokens",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
         id="model_call_missing_token_counts",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
         id="trajectory_capture_mismatch",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.TRAJECTORY_CAPTURE,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
         id="model_call_failed",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
         id="rollout_token_count_mismatch",
@@ -88,7 +94,7 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         id="model_call_runaway_generation",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
         id="task_consistently_unhealthy",
@@ -261,6 +267,9 @@ def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, A
         calls.append(
             {
                 "call_index": position,
+                # Ordering signal. `call_index` is the position in the merged
+                # trajectory list, which is not chronological.
+                "started_at": raw.get("started_at"),
                 "model_call_id": raw.get("model_call_id"),
                 "response_id": metadata.get("response_id"),
                 "model_ref": metadata.get("model_ref"),
@@ -304,19 +313,49 @@ def _call_identity(call: dict[str, Any]) -> str | None:
     return None
 
 
-def _canonical_model_call_references(trajectory: dict[str, Any]) -> tuple[tuple[str, dict[str, Any]], ...]:
-    """Return explicit model-call references from canonical TrajectoryTurn records only."""
+def _item_model_call_references(items: Any) -> tuple[tuple[str, dict[str, Any]], ...]:
+    """Return usable model-call references from turns or invocations."""
     return tuple(
         (reference, raw_reference)
-        for turn in trajectory.get("turns") or []
-        for raw_reference in turn.get("model_calls") or []
+        for item in items or []
+        if isinstance(item, dict)
+        for raw_reference in item.get("model_calls") or []
         if isinstance(raw_reference, dict) and (reference := _call_ref_key(raw_reference)) is not None
     )
 
 
-def _bind_policy_calls(trajectory: dict[str, Any], calls: list[dict[str, Any]]) -> _CallBindings:
-    reference_items = _canonical_model_call_references(trajectory)
-    references = tuple(reference for reference, _ in reference_items)
+def _call_reference_signature(reference: dict[str, Any]) -> tuple[str, str, str, str]:
+    model_ref = reference.get("model_ref")
+    return (
+        str(reference.get("model_call_id") or ""),
+        str(model_ref.get("type") or "") if isinstance(model_ref, dict) else "",
+        str(model_ref.get("name") or "") if isinstance(model_ref, dict) else "",
+        str(reference.get("response_id") or ""),
+    )
+
+
+def _deduplicate_reference_items(
+    reference_items: Sequence[tuple[str, dict[str, Any]]],
+) -> tuple[tuple[str, dict[str, Any]], ...]:
+    unique: list[tuple[str, dict[str, Any]]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for reference, raw_reference in reference_items:
+        signature = _call_reference_signature(raw_reference)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique.append((reference, raw_reference))
+    return tuple(unique)
+
+
+def _bind_policy_call_views(
+    trajectory: dict[str, Any], calls: list[dict[str, Any]]
+) -> tuple[_CallBindings, _CallBindings]:
+    """Bind turn-only and turn-or-invocation references with shared indexes and resolutions."""
+    turn_reference_items = _deduplicate_reference_items(_item_model_call_references(trajectory.get("turns")))
+    invocation_reference_items = _item_model_call_references(trajectory.get("invocations"))
+    owned_reference_items = _deduplicate_reference_items((*turn_reference_items, *invocation_reference_items))
+
     calls_by_call_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
     calls_by_response: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for call in calls:
@@ -327,11 +366,8 @@ def _bind_policy_calls(trajectory: dict[str, Any], calls: list[dict[str, Any]]) 
         if isinstance(model_ref, dict) and response_id:
             calls_by_response[(str(model_ref.get("type")), str(model_ref.get("name")), str(response_id))].append(call)
 
-    matched_calls: list[dict[str, Any]] = []
-    missing_references: list[str] = []
-    duplicated_references: list[tuple[str, int]] = []
-    unique_references = dict(reference_items)
-    for reference, raw_reference in unique_references.items():
+    resolved: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for _, raw_reference in owned_reference_items:
         model_call_id = raw_reference.get("model_call_id")
         model_ref = raw_reference.get("model_ref")
         response_id = raw_reference.get("response_id")
@@ -346,18 +382,36 @@ def _bind_policy_calls(trajectory: dict[str, Any], calls: list[dict[str, Any]]) 
             assert isinstance(model_ref, dict) and response_id
             response_key = (str(model_ref.get("type")), str(model_ref.get("name")), str(response_id))
             matches = calls_by_response.get(response_key, [])
-        if not matches:
-            missing_references.append(reference)
-        elif len(matches) > 1:
-            duplicated_references.append((reference, len(matches)))
-        else:
-            matched_calls.append(matches[0])
-    return _CallBindings(
-        references=references,
-        matched_calls=tuple(matched_calls),
-        missing_references=tuple(missing_references),
-        duplicated_references=tuple(duplicated_references),
-    )
+        resolved[_call_reference_signature(raw_reference)] = matches
+
+    call_positions = {id(call): position for position, call in enumerate(calls)}
+
+    def build_bindings(reference_items: tuple[tuple[str, dict[str, Any]], ...]) -> _CallBindings:
+        matched_calls: list[dict[str, Any]] = []
+        matched_positions: set[int] = set()
+        missing_references: list[str] = []
+        duplicated_references: list[tuple[str, int]] = []
+        for reference, raw_reference in reference_items:
+            matches = resolved[_call_reference_signature(raw_reference)]
+            if not matches:
+                missing_references.append(reference)
+            elif len(matches) > 1:
+                duplicated_references.append((reference, len(matches)))
+            else:
+                call = matches[0]
+                call_position = call_positions[id(call)]
+                if call_position not in matched_positions:
+                    matched_positions.add(call_position)
+                    matched_calls.append(call)
+        matched_calls.sort(key=lambda call: call_positions[id(call)])
+        return _CallBindings(
+            references=tuple(reference for reference, _ in reference_items),
+            matched_calls=tuple(matched_calls),
+            missing_references=tuple(missing_references),
+            duplicated_references=tuple(duplicated_references),
+        )
+
+    return build_bindings(turn_reference_items), build_bindings(owned_reference_items)
 
 
 def _replay_identity(call: dict[str, Any]) -> str | None:
@@ -475,7 +529,10 @@ def _trajectory_capture_mismatch(
     seen: set[tuple[str, str]] = set()
     for reference in bindings.missing_references:
         locator = reference.split(":")[-1]
-        seen.add(("missing_captured_call", locator))
+        finding_key = ("missing_captured_call", locator)
+        if finding_key in seen:
+            continue
+        seen.add(finding_key)
         findings.append(
             Finding(
                 check="trajectory_capture_mismatch",
@@ -486,7 +543,10 @@ def _trajectory_capture_mismatch(
         )
     for reference, count in bindings.duplicated_references:
         locator = reference.split(":")[-1]
-        seen.add(("duplicated_captured_call", locator))
+        finding_key = ("duplicated_captured_call", locator)
+        if finding_key in seen:
+            continue
+        seen.add(finding_key)
         findings.append(
             Finding(
                 check="trajectory_capture_mismatch",
@@ -517,6 +577,10 @@ def _trajectory_capture_mismatch(
 
 
 def _model_call_failed(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
+    terminal_call_index = max(
+        (call["call_index"] for call in bindings.matched_calls if type(call.get("call_index")) is int),
+        default=None,
+    )
     return [
         Finding(
             check="model_call_failed",
@@ -525,12 +589,94 @@ def _model_call_failed(bindings: _CallBindings, subject: dict[str, int | str]) -
             detail={
                 "status": call.get("status_code"),
                 "error_category": call.get("error_category"),
-                "terminal": bindings.complete and position == len(bindings.matched_calls) - 1,
+                "terminal": (
+                    bindings.complete
+                    and terminal_call_index is not None
+                    and call.get("call_index") == terminal_call_index
+                ),
             },
         )
         for position, call in enumerate(bindings.matched_calls)
         if _is_failed(call)
     ]
+
+
+def _model_chains(calls: Sequence[dict[str, Any]]) -> dict[Any, list[dict[str, Any]]]:
+    """Group calls by the model they went to."""
+    chains: dict[Any, list[dict[str, Any]]] = defaultdict(list)
+    for call in calls:
+        ref = call.get("model_ref")
+        key = (ref.get("type"), ref.get("name")) if isinstance(ref, dict) else None
+        chains[key].append(call)
+    return chains
+
+
+def _chain_ended_on_failure(chain: Sequence[dict[str, Any]]) -> bool:
+    """Whether this model's own last call, in time, failed.
+
+    Per model rather than across every captured call: a judge or auxiliary
+    request landing after a failed policy call would otherwise read as the
+    rollout recovering, and hide the failure.
+
+    Without timestamps a multi-call chain cannot be ordered -- `call_index` is
+    the position in the merged trajectory list, so a producer-supplied retry
+    can precede the attempt it retried. Say nothing rather than call a
+    recovered rollout unhealthy.
+    """
+    if not chain:
+        return False
+    failed = [call for call in chain if _is_failed(call)]
+    if not failed:
+        return False
+    if len(failed) == len(chain):
+        # Nothing to order: whichever went last, it failed.
+        return True
+    if any(call.get("started_at") is None for call in chain):
+        return False
+    ordered = sorted(chain, key=lambda call: (call.get("started_at") or 0.0, call.get("call_index") or 0))
+    return _is_failed(ordered[-1])
+
+
+def _ended_on_failed_call(calls: Sequence[dict[str, Any]]) -> bool:
+    """Whether any model's own last call failed."""
+    return any(_chain_ended_on_failure(chain) for chain in _model_chains(calls).values())
+
+
+def _rollout_ended_on_failed_model_call(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+    """Flag a model whose own last call in the rollout failed.
+
+    The bound-call checks cannot see this: binding resolves a reference by
+    `(model_ref, response_id)` or `model_call_id`, and a call that failed came
+    back with none of them, so it is absent from `matched_calls` no matter what
+    the producer claims. Reading the captured calls directly also covers the
+    agents that publish no trajectory at all.
+
+    Judged per model and in time order -- see `_chain_ended_on_failure`. Only
+    the chain's last call counts, so a failure the client retried successfully
+    stays healthy; the signal is that the rollout ENDED on a failure, which is
+    what makes its reward indistinguishable from a genuine zero.
+    """
+    findings = []
+    for key, chain in _model_chains(_normalized_trajectory_calls(trajectory)).items():
+        if not _chain_ended_on_failure(chain):
+            continue
+        ordered = sorted(chain, key=lambda call: (call.get("started_at") or 0.0, call.get("call_index") or 0))
+        last = ordered[-1]
+        findings.append(
+            Finding(
+                check="rollout_ended_on_failed_model_call",
+                subject=subject,
+                locator=_call_locator(last, last.get("call_index")),
+                detail={
+                    "model_ref": "/".join(str(part) for part in key) if key else None,
+                    "status": last.get("status_code"),
+                    "error_category": last.get("error_category"),
+                    "observed_calls": len(chain),
+                    "successful_calls": sum(1 for call in chain if _is_successful(call)),
+                },
+            )
+        )
+    return findings
 
 
 def _rollout_token_count_mismatch(
@@ -584,21 +730,24 @@ _ROLLOUT_CHECKS: dict[
     "rollout_missing_agent_turns": lambda record, trajectory, bindings, subject: _rollout_missing_agent_turns(
         trajectory, subject
     ),
+    "rollout_ended_on_failed_model_call": lambda record, trajectory, bindings, subject: (
+        _rollout_ended_on_failed_model_call(trajectory, subject)
+    ),
     "agent_turn_hollow": lambda record, trajectory, bindings, subject: _agent_turn_hollow(trajectory, subject),
     "model_call_zero_completion_tokens": lambda record, trajectory, bindings, subject: (
         _model_call_zero_completion_tokens(bindings, subject)
     ),
-    "model_call_missing_token_counts": lambda record, trajectory, bindings, subject: (
-        _model_call_missing_token_counts(bindings, subject)
+    "model_call_missing_token_counts": lambda record, trajectory, bindings, subject: _model_call_missing_token_counts(
+        bindings, subject
     ),
-    "trajectory_capture_mismatch": lambda record, trajectory, bindings, subject: (
-        _trajectory_capture_mismatch(trajectory, bindings, subject)
+    "trajectory_capture_mismatch": lambda record, trajectory, bindings, subject: _trajectory_capture_mismatch(
+        trajectory, bindings, subject
     ),
     "model_call_failed": lambda record, trajectory, bindings, subject: _model_call_failed(bindings, subject),
-    "rollout_token_count_mismatch": lambda record, trajectory, bindings, subject: (
-        _rollout_token_count_mismatch(record, bindings, subject)
+    "rollout_token_count_mismatch": lambda record, trajectory, bindings, subject: _rollout_token_count_mismatch(
+        record, bindings, subject
     ),
-    "model_call_runaway_generation": lambda record, trajectory, bindings, subject: (
-        _model_call_runaway_generation(bindings, subject)
+    "model_call_runaway_generation": lambda record, trajectory, bindings, subject: _model_call_runaway_generation(
+        bindings, subject
     ),
 }

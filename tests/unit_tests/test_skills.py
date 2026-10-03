@@ -43,6 +43,8 @@ def _write_skill(skills_dir, name, description="A skill.", version=None, body="#
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CANONICAL_SKILLS_DIR = REPO_ROOT / ".agents/skills"
 AGENT_SKILLS_DOC = REPO_ROOT / "fern/versions/latest/pages/contribute/agent-skills.mdx"
+# This Claude workflow prompt lives beside skills but is deliberately not advertised for interactive use.
+WORKFLOW_ONLY_SKILLS = {"pr-review"}
 
 
 def _canonical_skill_dirs():
@@ -137,7 +139,12 @@ class TestRepositorySkills:
         for skill_dir in _canonical_skill_dirs():
             skill_md = skill_dir / "SKILL.md"
             content, frontmatter, body_start = _skill_frontmatter(skill_md)
-            assert set(frontmatter) <= allowed_frontmatter
+            if skill_dir.name in WORKFLOW_ONLY_SKILLS:
+                assert frontmatter.get("disable-model-invocation") is True
+                assert frontmatter.get("user_invocable") is False
+                assert set(frontmatter) <= allowed_frontmatter | {"disable-model-invocation", "user_invocable"}
+            else:
+                assert set(frontmatter) <= allowed_frontmatter
 
             name = frontmatter.get("name")
             assert isinstance(name, str) and re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name)
@@ -154,6 +161,8 @@ class TestRepositorySkills:
     @pytest.mark.parametrize("native_dir", [".claude/skills", ".codex/skills"])
     def test_native_discovery_links_cover_canonical_skills(self, native_dir):
         expected_names = {path.name for path in _canonical_skill_dirs()}
+        if native_dir == ".codex/skills":
+            expected_names -= WORKFLOW_ONLY_SKILLS
         discovered_names = {path.name for path in (REPO_ROOT / native_dir).iterdir() if path.is_symlink()}
         assert discovered_names == expected_names
 
@@ -165,6 +174,7 @@ class TestRepositorySkills:
         available_skills = AGENT_SKILLS_DOC.read_text().split("## Available Skills", 1)[1].split("\n## ", 1)[0]
         documented_names = set(re.findall(r"\.agents/skills/([a-z0-9-]+)", available_skills))
         expected_names = {path.name for path in _canonical_skill_dirs()}
+        expected_names -= WORKFLOW_ONLY_SKILLS
         assert documented_names == expected_names
 
     def test_relative_markdown_links_resolve(self):

@@ -34,9 +34,9 @@ confirmed findings in severity order.
 ## Preserve the upstream contract
 
 Record the upstream revision, license, canonical splits, task identifiers, prompt templates, scoring behavior, reward
-range, and published reference metrics before choosing the integration. For a port, reproduce the published metrics in
-the original repository before integration, then reproduce them in Gym with the same models. Inspect task-level
-discrepancies; aggregate parity alone can hide conversion and scoring errors.
+range, and published reference metrics before choosing the integration. For a port, try to reproduce a published result
+under comparable conditions. If claiming parity, compare the same models and inspect task-level discrepancies;
+aggregate parity alone can hide conversion and scoring errors.
 
 Choose the narrowest integration profile that preserves the workload:
 
@@ -76,8 +76,10 @@ more of the rollout loop. Inspect `gym env init --help` rather than guessing fla
 - Keep stable task IDs and keep private answer keys and scorer inputs out of `responses_create_params.input`. Follow the
   resources server's `TaskData` schema and request model for field placement: current rows commonly use flat task
   fields; use legacy `verifier_metadata` only when the wire contract declares it.
-- Every benchmark declares `canonical_split` and `standard_prompt_config`, and at least one benchmark dataset declares
-  `prepare_script`. A dataset's `prompt_config`, when present, must match the standard prompt contract.
+- Every benchmark declares `canonical_split`, and at least one benchmark dataset declares `prepare_script`.
+  For `prompt_source: template`, require `standard_prompt_config` and matching dataset prompt configs when present.
+  For `prepared`, omit both prompt config fields; for `agent`, omit dataset prompt configs and optionally document
+  `standard_prompt_config`. Follow the [prompt-source contract](../../../fern/versions/latest/pages/contribute/environments/new-environment.mdx#prompt-sources).
 - Provide a deterministic `VERIFIER_FIXTURE` for a custom verifier and test both accepted and rejected behavior.
 - Do not assume rewards are binary. Implement the declared range and optimization direction.
 - Preserve Responses API items, session cookies, and trace context across multi-turn or external integrations.
@@ -96,16 +98,17 @@ gym env test <name> --kind benchmark
 ```
 
 Add focused tests for conversion, scoring boundaries, malformed model output, failure handling, and state isolation.
-Coverage must remain at least 96%, and tests must assert observable behavior.
+Use the coverage threshold in `[tool.coverage.report].fail_under` in `pyproject.toml`; tests must assert observable
+behavior.
 
 For grouped, weighted, or partially overlapping tests, exercise selector-to-test membership, per-rollout reward, and
 aggregate metrics independently. A correct `verify()` result does not prove that `compute_metrics()` groups, caps, or
 deduplicates scores correctly.
 
 For behavior-changing environment or agent work, run representative real smoke rollouts and inspect both agent and
-verifier behavior. All benchmarks additionally require the reward profiling, rollout inspection, and variance
-characterization in the benchmark guide. Ports of existing benchmarks also require upstream reproduction followed by
-a same-model Gym comparison. These are fidelity checks, not a requirement to run training.
+verifier behavior. Use fuller evaluations, reward profiling, and variance analysis when assessing benchmark fidelity;
+they are stronger evidence, not an additional merge or publication compute gate. Report unperformed comparisons and
+limitations. A parity claim still needs a comparable upstream-versus-Gym evaluation.
 
 Before handoff, run scoped pre-commit checks, then the repository checks required by `AGENTS.md`. New source files need
 the NVIDIA SPDX header, and commits need DCO sign-off.
