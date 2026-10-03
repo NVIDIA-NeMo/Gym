@@ -615,6 +615,10 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
     It contains ``object: "response"``, ``output`` items, and ``usage``.
     Token fields describe one unbroken sequence across the rollout.
     The sequence combines items from multiple model calls.
+
+    When the delivered chain's terminal call stopped for ``length``, the payload carries
+    ``status: "incomplete"`` with ``incomplete_details.reason: "max_output_tokens"``, the
+    verdict the Responses converter gives a chat completion cut at the output-token budget.
     """
     if not out.chains:
         raise ValueError("capture produced no safe trainable chain")
@@ -629,13 +633,19 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
     generated = [item for item in output if item.get("generation_token_ids") is not None]
     n_in = len(generated[0]["prompt_token_ids"]) if generated else 0
     n_out = sum(len(item["generation_token_ids"]) for item in generated)
-    return {
+    response = {
         "id": f"proj-{rollout_id}",
         "model": model,
         "object": "response",
         "output": output,
         "usage": {"input_tokens": n_in, "output_tokens": n_out},
     }
+    # Only the terminal call decides: an earlier ``length`` stop did not end the delivered
+    # chain, because a later call extended it. Any other finish reason leaves ``status`` unset.
+    if mains[0].links[-1].entry.finish_reason == "length":
+        response["status"] = "incomplete"
+        response["incomplete_details"] = {"reason": "max_output_tokens"}
+    return response
 
 
 def assert_prefix_contiguity(response: dict) -> None:
