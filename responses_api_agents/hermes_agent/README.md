@@ -107,10 +107,9 @@ For SWE-bench Pro, use [`hermes.yaml`](../../benchmarks/swebench/pro/hermes.yaml
 See [Evaluate SWE-bench Pro with Hermes](../../fern/versions/latest/pages/evaluation-tutorials/hermes-swe-bench-pro.mdx)
 for task preparation, Environment Server configuration, evaluation commands, and session limits.
 
-The standalone `hermes_sandboxed_agent` has been removed. Migrate its launch configuration
-to the recipe above and send rollouts through the Environment Server; renaming the agent
-in an existing `/run` call does not enable sandbox sessions. The guide also covers changes
-to runtime preparation, request controls, and rollout results.
+The standalone `hermes_sandboxed_agent` has been removed. Follow the
+[migration guide](../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#migrate-from-the-standalone-sandboxed-hermes-agent)
+for Environment Server routing, runtime preparation, request controls, and rollout results.
 
 ## Sandbox-mode requirements
 

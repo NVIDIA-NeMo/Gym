@@ -8,6 +8,44 @@ You can use an existing agent in NeMo Gym, integrate an external one, or build y
 
 [`SimpleAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) is a native NeMo Gym agent that handles general-purpose multi-step tool calling with configurable max steps, and works with any Resources server out of the box. NeMo Gym also includes agents that integrate external tools: for example, [`MiniSWEAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) wraps an external coding harness running in Docker containers and converts its output back into the NeMo Gym format, and [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) runs the Claude Code CLI. Because every Gym model server speaks Anthropic Messages, you can point Claude Code at any backend — see [Anthropic Messages](/model-server/anthropic-messages).
 
+## Migrate from the standalone sandboxed Hermes agent
+
+`hermes_sandboxed_agent` and its configuration files have been removed. Use `hermes_agent`
+through an Environment Server. Include the environment and agent configuration in both
+server startup and evaluation commands so collection routes through the Environment Server.
+Direct HTTP callers must call the Environment Server's `/run`, not the agent's `/run`;
+renaming the agent in an existing `/run` call does not enable sandbox sessions.
+
+- Move model, toolset, and sampling settings to your agent deployment's
+  `responses_api_agents.hermes_agent` configuration. Remove the old `runtime_python`,
+  `remote_run_root`, `results_dir`, `sandbox_timeout`, `cleanup_timeout`, `api_timeout`,
+  `context_length`, and `chat_template_kwargs` settings. Use `sandbox_runner_timeout_seconds`
+  for the runner deadline; the Environment Server controls episode and cleanup deadlines.
+- Keep sandbox providers in the shared configuration. For Apptainer, copy the provider
+  settings into your configuration under `sandbox.apptainer`; the shared
+  [provider configuration reference](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/sandbox/providers/apptainer/README.md#selecting-and-configuring-the-provider)
+  describes the supported fields. The old agent-specific `configs/apptainer.yaml` is removed.
+- The old `prepare_runtime.sh`, libc-selecting launcher, and `/opt/hermes` mount convention
+  have been removed. The unified agent uses the Hermes revision pinned in its
+  `requirements.txt`, which differs from the old standalone upstream runtime. It installs
+  that revision at seed time, or reuses an already installed runtime at
+  `/tmp/nemo-gym-hermes-runtime-<commit>/venv`. Network-restricted deployments must preinstall
+  that runtime. The old portable glibc/musl bundles are not a drop-in replacement; validate
+  each task image's architecture and libc with the unified runtime before migrating a batch.
+- Remove request `max_output_tokens`: the unified agent rejects it with HTTP 422.
+  Agent config `max_tokens` limits each model call, not the whole response.
+  Retune budgets explicitly rather than treating the two limits as equivalent.
+- Update reporting that consumes standalone `hermes_*`, `verifier_reward`, or
+  `agent_image_provenance` fields to use the Environment Server rollout and observation
+  records. Incomplete runs, infrastructure failures, and scoring exclusions follow the
+  Environment Server's outcome policy; compare coverage as well as rewards when migrating.
+
+The Hermes revision, execution settings, and failure reporting differ between the adapters,
+so previous benchmark scores are not an accuracy baseline for the migrated configuration.
+Revalidate representative tasks, including Alpine/musl images and offline deployments when
+used by your configuration. For the SWE-Pro recipe and configuration mapping, see
+[Evaluate SWE-bench Pro with Hermes](/main/evaluation-tutorials/hermes-swe-bench-pro).
+
 ## Agent session hooks
 
 For Environment Server execution, implement these `SimpleResponsesAPIAgent` hooks:
