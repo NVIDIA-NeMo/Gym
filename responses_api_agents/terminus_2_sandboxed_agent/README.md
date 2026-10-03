@@ -38,6 +38,12 @@ until it becomes quiet before delivering the interrupt, allowing cancellation
 behind a long queued paste. The drain fails explicitly if input remains busy
 for five seconds. Raw applications retain their own Ctrl-C handling.
 
+If the interactive shell exits, the agent preserves its final output and starts
+a fresh shell. Files remain, while shell variables, options, and the working
+directory reset. The model receives a notice before continuing; pending input
+and the rest of the previous command batch are discarded. A missing tmux session
+is reported as a failure.
+
 ## Tmux binary: online or pre-staged
 
 With `remote_tmux_binary_path: null`, [Harbor's setup](https://github.com/laude-institute/harbor/blob/v0.22.0/src/harbor/agents/terminus_2/tmux_session.py)

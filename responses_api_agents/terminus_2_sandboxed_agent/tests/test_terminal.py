@@ -73,11 +73,14 @@ async def test_failed_input_drain_does_not_claim_interrupt_was_delivered():
 
     async def execute(command, **kwargs):
         calls.append(command)
+        if "pane_dead" in command:
+            return SimpleNamespace(return_code=0, stdout="0\n", stderr="")
         return SimpleNamespace(return_code=1, stdout="", stderr="terminal disappeared")
 
     with pytest.raises(RuntimeError, match="terminal disappeared"):
         await session(SimpleNamespace(exec=execute)).send_keys("C-c\n")
-    assert len(calls) == 1
+    assert sum("timeout 0.2 cat" in command for command in calls) == 1
+    assert not any(command.startswith("tmux send-keys") for command in calls)
 
 
 @pytest.mark.asyncio
@@ -85,8 +88,9 @@ async def test_controls_preserve_command_order():
     calls = []
 
     async def execute(command, **kwargs):
-        calls.append(command)
-        return SimpleNamespace(return_code=0, stdout="", stderr="")
+        if "pane_dead" not in command:
+            calls.append(command)
+        return SimpleNamespace(return_code=0, stdout="0\n", stderr="")
 
     await session(SimpleNamespace(exec=execute)).send_keys(["sleep 60\n", "C-c\n", "echo alive\n"])
     assert len(calls) == 4
@@ -94,6 +98,113 @@ async def test_controls_preserve_command_order():
     assert "timeout 0.2 cat" in calls[1]
     assert calls[2].endswith(" C-c")
     assert "echo alive" in calls[3]
+
+
+@pytest.mark.asyncio
+async def test_missing_session_is_not_normal_completion():
+    async def execute(command, **kwargs):
+        return SimpleNamespace(return_code=1, stdout="", stderr="no server running")
+
+    with pytest.raises(RuntimeError, match="session disappeared"):
+        await session(SimpleNamespace(exec=execute)).is_session_alive()
+
+
+@pytest.mark.asyncio
+async def test_shell_exit_during_send_is_distinguished_from_transport_failure():
+    from responses_api_agents.terminus_2_sandboxed_agent.terminal import ShellExitedError
+
+    inspected = 0
+
+    async def execute(command, **kwargs):
+        nonlocal inspected
+        if "pane_dead" in command:
+            inspected += 1
+            return SimpleNamespace(return_code=0, stdout="0" if inspected == 1 else "1", stderr="")
+        return SimpleNamespace(return_code=1, stdout="", stderr="target pane has exited")
+
+    with pytest.raises(ShellExitedError):
+        await session(SimpleNamespace(exec=execute, session_id="test")).send_keys("echo after\n")
+
+
+@pytest.mark.skipif(sys.platform != "linux" or shutil.which("tmux") is None, reason="requires Linux tmux")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_trigger", ["failure", "interrupt"])
+async def test_exited_shell_recovery_discards_pending_input_and_reports_lost_state(tmp_path, caplog, exit_trigger):
+    from responses_api_agents.terminus_2_sandboxed_agent.terminal import ShellExitedError
+
+    caplog.set_level(logging.INFO, logger="harbor.utils.logger")
+
+    class Environment:
+        session_id = "recovery"
+
+        async def exec(self, command, **kwargs):
+            process = await asyncio.create_subprocess_exec(
+                "bash",
+                "-c",
+                command,
+                cwd=tmp_path,
+                env={**os.environ, "TMUX_TMPDIR": str(tmp_path)},
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            return SimpleNamespace(
+                return_code=process.returncode,
+                stdout=stdout.decode(errors="replace"),
+                stderr=stderr.decode(errors="replace"),
+            )
+
+    environment = Environment()
+    terminal = TerminusTmuxSession(
+        "test", environment, tmp_path / "pane.log", None, None, extra_env={"TERMINUS_CONFIGURED": "preserved"}
+    )
+    try:
+        await terminal.start()
+        await asyncio.sleep(0.3)
+        initial = (await environment.exec("tmux display-message -p -t test '#{pane_current_path}'")).stdout.strip()
+        pending = tmp_path / "queued.txt"
+        forbidden = tmp_path / "must-not-execute"
+        pending.write_text(f"touch {forbidden}\n" * 32768)
+        await environment.exec(f"tmux load-buffer -b queued {pending}")
+        failing_command = "sleep 2; false" if exit_trigger == "failure" else "sleep 120"
+        await terminal.send_keys(
+            f"touch {tmp_path}/persisted; export TERMINUS_EPHEMERAL=lost; "
+            f"mkdir {tmp_path}/sub; cd {tmp_path}/sub; set -e; {failing_command}\n",
+            min_timeout_sec=0.2,
+        )
+        await environment.exec("tmux paste-buffer -d -b queued -t test")
+        if exit_trigger == "interrupt":
+            await terminal.send_keys("C-c", min_timeout_sec=0.3)
+        for _ in range(100):
+            state = await environment.exec("tmux display-message -p -t test '#{pane_dead}'")
+            if state.stdout.strip() == "1":
+                break
+            await asyncio.sleep(0.1)
+        assert state.stdout.strip() == "1"
+        assert await terminal.is_session_alive()
+        with pytest.raises(ShellExitedError):
+            await terminal.send_keys(f"touch {forbidden}\n")
+        with pytest.raises(ShellExitedError):
+            await terminal.get_incremental_output()
+        observation = await terminal.recover_shell()
+        assert "shell variables, options, and the working directory have reset" in observation
+        assert "remaining commands in the previous response were skipped" in observation
+        await terminal.send_keys(
+            'printf \'RECOVERED=%s:%s:%s\\n\' "$TERMINUS_CONFIGURED" "${TERMINUS_EPHEMERAL-unset}" "$PWD"\n',
+            min_timeout_sec=0.3,
+        )
+        expected = f"RECOVERED=preserved:unset:{initial}"
+        for _ in range(100):
+            output = await terminal.get_incremental_output()
+            if expected in output:
+                break
+            await asyncio.sleep(0.1)
+        assert expected in output
+        assert (tmp_path / "persisted").exists()
+        assert not forbidden.exists()
+        assert expected in (tmp_path / "pane.log").read_text()
+    finally:
+        await environment.exec("tmux kill-server")
 
 
 @pytest.mark.skipif(sys.platform != "linux" or shutil.which("tmux") is None, reason="requires Linux tmux")
