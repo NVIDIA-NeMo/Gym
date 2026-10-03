@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: hello-world
+version: 1.0.0
+description: Create and run your first NeMo Gym task
+tags:
+  - example
+license: Apache-2.0
+
+task:
+  id: hello-world-001
+  instruction: instruction.md
+  verifier:
+    implementation: verifier.py:verify
+
+runtime:
+  dockerfile: runtime/Dockerfile
+  workdir: /workspace
+  mcp_servers: []

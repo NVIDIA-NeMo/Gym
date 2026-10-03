@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: hello-verifier-reuse
+version: 1.0.0
+description: Combine reusable verifier utilities with task-specific verifier logic
+tags:
+  - example
+license: Apache-2.0
+
+tasksets:
+  - name: default
+    path: tasks/
+
+runtime:
+  dockerfile: runtime/Dockerfile
+  workdir: /workspace
+  mcp_servers: []

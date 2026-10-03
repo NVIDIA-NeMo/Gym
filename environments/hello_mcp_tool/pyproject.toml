@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "hello-mcp-tool"
+version = "1.0.0"
+description = "MCP tool dependency environment for the Hello MCP Tool example"
+requires-python = ">=3.13"
+dependencies = [
+  "mcp>=1.28.1,<2",
+]
