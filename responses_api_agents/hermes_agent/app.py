@@ -57,7 +57,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
-    NeMoGymResponseUsage,
     NeMoGymSummary,
 )
 from nemo_gym.responses_converter import ResponsesConverter
@@ -79,7 +78,6 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
-from responses_api_agents.hermes_agent.token_usage import HermesTokenUsage
 
 
 def _trajectory_to_output_items(messages, n_input):
@@ -185,7 +183,6 @@ _SANDBOX_RUNNER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_runner.py"
 _SANDBOX_SUPERVISOR = f"{_SANDBOX_RUNTIME_DIR}/process_supervisor.py"
 _SANDBOX_OBSERVER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_observer.py"
 _SANDBOX_MODEL_KWARGS = f"{_SANDBOX_RUNTIME_DIR}/model_kwargs.py"
-_SANDBOX_TOKEN_USAGE = f"{_SANDBOX_RUNTIME_DIR}/token_usage.py"
 
 
 class RunnerCleanup(Enum):
@@ -473,7 +470,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), _SANDBOX_RUNNER)
             await sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
             await sandbox.upload(Path(__file__).with_name("model_kwargs.py"), _SANDBOX_MODEL_KWARGS)
-            await sandbox.upload(Path(__file__).with_name("token_usage.py"), _SANDBOX_TOKEN_USAGE)
             await sandbox.upload(Path(process_supervisor.__file__), _SANDBOX_SUPERVISOR)
         except BaseException as error:
             try:
@@ -957,7 +953,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
-            usage=NeMoGymResponseUsage.model_validate(result["gym_usage"]) if result.get("gym_usage") else None,
+            # The Environment Server derives usage from shared Model Server capture.
+            usage=None,
         )
 
     async def _create_response(
@@ -1000,8 +997,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             )
 
         agent._build_api_kwargs = _patched_build_api_kwargs
-        usage = HermesTokenUsage()
-        usage.instrument(agent)
         observer = None
         if observation_collector is not None:
             try:
@@ -1057,7 +1052,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         return self._response_from_result(
             body=body,
-            result={**result, "gym_usage": usage.snapshot()},
+            result=result,
             model_name=model_name,
             interrupted_by_dispatch=interrupted_by_dispatch,
             n_input=len(params["history"]) + 1,
