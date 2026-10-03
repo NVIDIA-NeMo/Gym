@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import asyncio
-import contextlib
 import json
 import os
 import signal
@@ -816,16 +815,19 @@ class TestRunExecCancellation:
                         break
                     await asyncio.sleep(0.01)
                 assert children, "descendant process never started"
-                child_pids = [child.pid for child in children]
                 task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-                return child_pids
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=5)
+                return children
 
-        child_pids = asyncio.run(_main())
+        children = asyncio.run(_main())
 
         assert captured["proc"].returncode is not None
-        assert all(not psutil.pid_exists(pid) for pid in child_pids)
+        # Orphaned descendants are reaped asynchronously by init after SIGKILL.
+        # Require disappearance within a bound, without racing that OS cleanup.
+        _, alive = psutil.wait_procs(children, timeout=3)
+        assert not alive, f"Descendants remain after cancellation: {alive}"
+        assert all(not psutil.pid_exists(child.pid) for child in children)
 
 
 class TestSigtermSalvage:
