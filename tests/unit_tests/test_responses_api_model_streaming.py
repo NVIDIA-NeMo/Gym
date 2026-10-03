@@ -539,6 +539,20 @@ class TestSynthesizeSSE:
         assert completed["usage"]["input_tokens"] == 7
         assert len(completed["output"]) == 1
 
+    def test_unknown_usage_details_are_integers_on_the_wire(self) -> None:
+        # Gym keeps an unreported cache/reasoning breakdown as None to tell unknown from zero, but
+        # the Responses wire schema types these counts as integers; a strict client (the Codex CLI)
+        # fails to parse a null in response.completed and re-sends the request.
+        response = _build_response([_message_item("hello")]).model_dump(mode="json")
+        response["usage"]["input_tokens_details"] = {"cached_tokens": None}
+        response["usage"]["output_tokens_details"] = None
+        events = self._events("".join(synthesize_responses_sse(response)))
+        for event in (events[0], events[-1]):
+            usage = event["response"]["usage"]
+            assert usage["input_tokens_details"]["cached_tokens"] == 0
+            assert usage["output_tokens_details"]["reasoning_tokens"] == 0
+            assert usage["input_tokens"] == 7
+
     def test_namespaced_call_names_restored(self) -> None:
         response = _build_response([_function_call_item("mcp__weather__get_weather")]).model_dump(mode="json")
         ns_map = {"mcp__weather__get_weather": ("mcp__weather", "get_weather")}
