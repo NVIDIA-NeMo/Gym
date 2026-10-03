@@ -57,6 +57,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.token_id_capture import (
     CaptureContext,
@@ -1020,6 +1021,24 @@ class TestApp:
             client_indices.append(next(i for i, client in enumerate(worker._clients) if client is selected_client))
 
         assert client_indices[0] == client_indices[1]
+
+    def test_rollout_calls_share_a_client_without_session_cookies(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(16)]
+        server._session_id_to_client = {}
+
+        def _request(session_id: str) -> MagicMock:
+            request = MagicMock()
+            request.session = {SESSION_ID_KEY: session_id}
+            return request
+
+        # A client that never returns the session cookie gets a new session per call;
+        # the rollout prefix still pins every call of the rollout to one endpoint.
+        with rollout_context("rollout-a"):
+            clients = {id(server._resolve_client(_request(f"fresh-{i}"))) for i in range(8)}
+        assert len(clients) == 1
+        # Without a rollout the cookie session keeps routing as before.
+        assert server._resolve_client(_request("plain")) is server._resolve_client(_request("plain"))
 
     @mark.parametrize("forward", [False, True])
     async def test_chat_completions_forwards_session_id_as_conversation_id(

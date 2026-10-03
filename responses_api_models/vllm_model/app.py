@@ -50,6 +50,7 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
+from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
     current_capture_context,
@@ -1682,7 +1683,11 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
-        session_id = request.session[SESSION_ID_KEY]
+        # Key on the rollout when the call carries one (/ng-rollout/<id>/ prefix). A
+        # client that drops the session cookie (stock OpenCode) otherwise gets a fresh
+        # session per call, lands on a random endpoint and re-prefills its whole
+        # context there, losing prefix-cache reuse across turns and subagents.
+        session_id = current_rollout_id() or request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
             # Uvicorn workers do not share this cache. A stable assignment keeps
             # every turn in a session on the same vLLM endpoint across workers.
