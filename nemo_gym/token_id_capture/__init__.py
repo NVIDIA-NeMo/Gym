@@ -46,6 +46,7 @@ from nemo_gym.token_id_capture.builder import (
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
 from nemo_gym.token_id_capture.consumer import (
     clear_token_captures_for_rollouts,
+    mask_incomplete_when_attributed_from_config,
     token_id_capture_dirs_from_config,
     trajectories_for_rollout,
     trajectories_from_source,
@@ -170,4 +171,5 @@ __all__ = [
     "clear_token_captures_for_rollouts",
     "trajectories_from_source",
     "token_id_capture_dirs_from_config",
+    "mask_incomplete_when_attributed_from_config",
 ]
