@@ -716,6 +716,29 @@ def test_exception_http_details_tolerates_lazy_response_failure():
     assert _exception_http_details(error) == (503, b"")
 
 
+def test_context_overflow_error_message_extraction():
+    from nemo_gym.base_responses_api_model import context_overflow_error_message
+
+    # vLLM's error body is a JSON object with a top-level "message": that string is returned
+    # verbatim.
+    error = RuntimeError("400, message='Bad Request'")
+    error.response_content = json.dumps(
+        {"object": "error", "message": "maximum context length is 4096 tokens", "code": 400}
+    ).encode()
+    assert context_overflow_error_message(error) == "maximum context length is 4096 tokens"
+
+    # A non-JSON body falls back to the raw text so no information is lost.
+    error.response_content = b"upstream exploded in a non-JSON way"
+    assert context_overflow_error_message(error) == "upstream exploded in a non-JSON way"
+
+    # JSON without a top-level message string also falls back to the raw text.
+    error.response_content = b'{"error": {"message": "nested"}}'
+    assert context_overflow_error_message(error) == '{"error": {"message": "nested"}}'
+
+    # A missing body yields an empty message rather than an exception.
+    assert context_overflow_error_message(RuntimeError("bare")) == ""
+
+
 # --- capture-store config + init failure ---
 def test_model_call_capture_keys_are_reserved_global_config():
     assert {"observability_enabled", "model_call_capture_dir", "token_id_capture"} <= set(

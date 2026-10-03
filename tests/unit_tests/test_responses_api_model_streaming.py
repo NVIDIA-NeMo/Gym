@@ -22,16 +22,21 @@ strict-validation behavior.
 """
 
 import json
+import logging
 from time import time
 from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-from fastapi import Body, Request
+from fastapi import Body, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
+from nemo_gym.base_responses_api_model import (
+    CONTEXT_OVERFLOW_ERROR_ATTRIBUTE,
+    BaseResponsesAPIModelConfig,
+    SimpleResponsesAPIModel,
+)
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -619,6 +624,33 @@ class _FailingModel(_EchoModel):
         raise RuntimeError("backend exploded")
 
 
+class _ProviderErrorModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "prompt too long", "type": "invalid_request_error", "code": "context_length_exceeded"},
+        )
+
+
+class _PlainHTTPErrorModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        raise HTTPException(status_code=503, detail="upstream unavailable")
+
+
+class _ContextOverflowModel(_EchoModel):
+    """Raises a backend failure marked as a propagated context-window overflow."""
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        error = RuntimeError("400, message='Bad Request'")
+        setattr(error, CONTEXT_OVERFLOW_ERROR_ATTRIBUTE, True)
+        # The engine's error body travels on the exception, in vLLM's format: a JSON object
+        # with a top-level message string.
+        error.response_content = json.dumps(
+            {"object": "error", "message": "maximum context length is 4096 tokens", "code": 400}
+        ).encode()
+        raise error
+
+
 def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
     server = model_cls(
         config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name=""),
@@ -690,12 +722,73 @@ class TestResponsesDispatchRoute:
         assert payload["response"]["status"] == "failed"
         assert "backend exploded" in payload["response"]["error"]["message"]
 
+    def test_streaming_marked_context_overflow_carries_openai_code(self) -> None:
+        # A backend failure marked with CONTEXT_OVERFLOW_ERROR_ATTRIBUTE keeps OpenAI's
+        # context_length_exceeded code and the engine's own message in the terminal
+        # response.failed event, so streaming clients can classify the refusal as a context
+        # overflow instead of seeing a generic server error.
+        client, _ = _client(_ContextOverflowModel)
+        resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+        assert resp.status_code == 200
+        assert "event: response.failed" in resp.text
+        failed = [line for line in resp.text.splitlines() if line.startswith("data: ") and "response.failed" in line]
+        payload = json.loads(failed[0][len("data: ") :])
+        assert payload["response"]["error"] == {
+            "code": "context_length_exceeded",
+            "message": "maximum context length is 4096 tokens",
+        }
+
     def test_non_streaming_backend_error_still_raises(self) -> None:
         # Without the streaming contract, a backend failure is a normal exception (HTTP 500), not a
         # synthesized response.failed — only the stream path swallows it into a terminal event.
         client, _ = _client(_FailingModel)
         with pytest.raises(RuntimeError, match="backend exploded"):
             client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})
+
+    def test_streaming_provider_error_keeps_its_code_and_message(self) -> None:
+        # An HTTPException whose detail is an OpenAI-style error object is the server relaying a
+        # provider error (the engine's context-window refusal, for example); the terminal event
+        # carries that object's code and message rather than a generic server_error.
+        client, _ = _client(_ProviderErrorModel)
+        resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+        assert resp.status_code == 200
+        failed = [line for line in resp.text.splitlines() if line.startswith("data: ") and "response.failed" in line]
+        payload = json.loads(failed[0][len("data: ") :])
+        assert payload["response"]["error"] == {"code": "context_length_exceeded", "message": "prompt too long"}
+
+    def test_streaming_plain_http_exception_is_a_server_error(self) -> None:
+        # A string detail carries no provider error object, so it is reported the generic way.
+        client, _ = _client(_PlainHTTPErrorModel)
+        resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+        failed = [line for line in resp.text.splitlines() if line.startswith("data: ") and "response.failed" in line]
+        payload = json.loads(failed[0][len("data: ") :])
+        assert payload["response"]["error"]["code"] == "server_error"
+        assert "upstream unavailable" in payload["response"]["error"]["message"]
+
+
+class TestStreamingFailureLogging:
+    """What the server logs when the streaming path turns a failure into a terminal event."""
+
+    def test_a_refusal_is_one_warning_and_a_crash_keeps_its_traceback(self, caplog) -> None:
+        # A 4xx from the backend is a refusal the client learns about in the terminal event,
+        # so the server logs one WARNING with the code and message; any other failure keeps
+        # the ERROR with its traceback.
+        client, _ = _client(_ProviderErrorModel)
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.base_responses_api_model"):
+            client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+        refusals = [r for r in caplog.records if "refused a streaming /v1/responses request" in r.getMessage()]
+        assert [r.levelno for r in refusals] == [logging.WARNING]
+        assert "context_length_exceeded" in refusals[0].getMessage()
+        assert refusals[0].exc_info is None
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+        caplog.clear()
+        client, _ = _client(_FailingModel)
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.base_responses_api_model"):
+            client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+        crashes = [r for r in caplog.records if "failed while serving a streaming" in r.getMessage()]
+        assert [r.levelno for r in crashes] == [logging.ERROR]
+        assert crashes[0].exc_info is not None
 
 
 class TestUnionItemTypesThroughDispatch:

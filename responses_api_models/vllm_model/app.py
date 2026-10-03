@@ -24,13 +24,17 @@ from time import monotonic, time, time_ns
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Union, get_args
 
 from aiohttp.client_exceptions import ClientResponseError
-from fastapi import Request, Response
+from fastapi import Request
+from fastapi.responses import JSONResponse
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.base_responses_api_model import (
+    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    CONTEXT_OVERFLOW_ERROR_ATTRIBUTE,
     BaseResponsesAPIModelConfig,
     Body,
     SimpleResponsesAPIModel,
+    context_overflow_error_message,
     start_model_execution,
 )
 from nemo_gym.openai_utils import (
@@ -62,7 +66,6 @@ from nemo_gym.token_id_capture.external_capture import (
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
-_PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
@@ -185,6 +188,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
+    # When True, a backend 400 caused by a full context window reaches the caller as an
+    # OpenAI-style error with code "context_length_exceeded" (a terminal ``response.failed``
+    # event on a streaming /v1/responses request) instead of being absorbed into an empty
+    # completion with finish_reason "length".
     propagate_context_overflow_errors: bool = False
 
     uses_reasoning_parser: bool
@@ -339,11 +346,22 @@ class VLLMModel(SimpleResponsesAPIModel):
             try:
                 return await call_next(request)
             except ClientResponseError as error:
-                if getattr(error, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, False):
-                    return Response(
-                        content=error.response_content,
+                if getattr(error, CONTEXT_OVERFLOW_ERROR_ATTRIBUTE, False):
+                    # The engine's message is preserved verbatim, but re-wrapped in OpenAI's
+                    # error envelope with the string code "context_length_exceeded". The
+                    # envelope and the string code are what OpenAI-compatible clients classify
+                    # context overflows on, and vLLM's raw body carries neither: it has no
+                    # "error" object and its "code" is the integer 400.
+                    return JSONResponse(
+                        content={
+                            "error": {
+                                "message": context_overflow_error_message(error),
+                                "type": "invalid_request_error",
+                                "param": None,
+                                "code": CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+                            }
+                        },
                         status_code=error.status,
-                        media_type="application/json",
                     )
                 raise
 
@@ -985,19 +1003,23 @@ class VLLMModel(SimpleResponsesAPIModel):
             """
             result_content_str = e.response_content.decode()
 
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
-                if self.config.propagate_context_overflow_errors:
-                    setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
-                    raise
+            # vLLM reports two distinct conditions with the same HTTP 400. A body that mentions
+            # "context length" means the prompt already fills the model's context window, which is
+            # session-terminal, so with propagation enabled the error is marked and re-raised for
+            # the exception middleware to render. A body that only mentions "max_tokens" is a
+            # request-parameter error (the caller asked for more completion tokens than the
+            # remaining window allows) that the caller can correct, so it never propagates.
+            is_context_overflow = e.status == 400 and "context length" in result_content_str
+            is_max_tokens_error = e.status == 400 and "max_tokens" in result_content_str
+            if is_context_overflow and self.config.propagate_context_overflow_errors:
+                setattr(e, CONTEXT_OVERFLOW_ERROR_ATTRIBUTE, True)
+                raise
+            if is_context_overflow or is_max_tokens_error:
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
                 execution.update(response_source="local", local_response_reason="context_length_exceeded")
                 return res
-            else:
-                raise e
+            raise e
         except Exception as e:
             if transport_io_enabled:
                 finished_ns = time_ns()
@@ -1320,13 +1342,17 @@ class VLLMModel(SimpleResponsesAPIModel):
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
             result_content_str = e.response_content.decode()
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
-                if self.config.propagate_context_overflow_errors:
-                    setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
-                    raise
+            # Same classification as the chat-completions route: only a body that mentions
+            # "context length" is a session-terminal context-window overflow eligible for
+            # propagation; a body that only mentions "max_tokens" is a request-parameter error
+            # the caller can correct, so it always degrades to the empty completion with
+            # finish_reason "length".
+            is_context_overflow = e.status == 400 and "context length" in result_content_str
+            is_max_tokens_error = e.status == 400 and "max_tokens" in result_content_str
+            if is_context_overflow and self.config.propagate_context_overflow_errors:
+                setattr(e, CONTEXT_OVERFLOW_ERROR_ATTRIBUTE, True)
+                raise
+            if is_context_overflow or is_max_tokens_error:
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
                 execution.update(response_source="local", local_response_reason="context_length_exceeded")

@@ -766,12 +766,30 @@ PARAMETERIZE_DATA = [
 ]
 
 
+# The message vLLM produces when the prompt exceeds the model's context window.
+_ENGINE_OVERFLOW_MESSAGE = (
+    "This model's maximum context length is 32768 tokens. However, you requested 32818 tokens "
+    "in the messages, Please reduce the length of the messages. None"
+)
+
+
+def _engine_bad_request_error(message: str, status: int = 400) -> ClientResponseError:
+    """Build an engine refusal in vLLM's error format: a JSON body with a top-level message and integer code."""
+    request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+    error = ClientResponseError(request_info, (), status=status, message="Bad Request")
+    error.response_content = json.dumps(
+        {"object": "error", "message": message, "type": "BadRequestError", "param": None, "code": status}
+    ).encode()
+    return error
+
+
 class TestApp:
     def _setup_server(
         self,
         monkeypatch: MonkeyPatch,
         *,
         propagate_context_overflow_errors: bool = False,
+        use_completions_api: bool = False,
         external_staging_backend: str | None = None,
         forward_session_id_as_conversation_id: bool = False,
     ):
@@ -786,6 +804,7 @@ class TestApp:
             return_token_id_information=False,
             uses_reasoning_parser=False,
             propagate_context_overflow_errors=propagate_context_overflow_errors,
+            use_completions_api=use_completions_api,
             forward_session_id_as_conversation_id=forward_session_id_as_conversation_id,
         )
 
@@ -817,11 +836,8 @@ class TestApp:
         self, monkeypatch: MonkeyPatch, propagate: bool, responses_api: bool
     ) -> None:
         server = self._setup_server(monkeypatch, propagate_context_overflow_errors=propagate)
-        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
-        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
-        error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
-        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        mock_client.create_chat_completion = AsyncMock(side_effect=_engine_bad_request_error(_ENGINE_OVERFLOW_MESSAGE))
         server._clients = [mock_client]
 
         app = server.setup_webserver()
@@ -834,14 +850,101 @@ class TestApp:
         )
 
         if propagate:
+            # The engine's message is preserved verbatim inside OpenAI's error envelope with the
+            # string code clients classify context overflows on; vLLM's raw body carries neither
+            # the envelope nor the string code.
             assert response.status_code == 400
-            assert response.json() == {"error": {"message": "maximum context length", "code": 400}}
+            assert response.json() == {
+                "error": {
+                    "message": _ENGINE_OVERFLOW_MESSAGE,
+                    "type": "invalid_request_error",
+                    "param": None,
+                    "code": "context_length_exceeded",
+                }
+            }
         else:
             assert response.status_code == 200
             if responses_api:
                 assert response.json()["incomplete_details"] == {"reason": "max_output_tokens"}
             else:
                 assert '"finish_reason": "length"' in response.text
+
+    @mark.parametrize("propagate", [False, True])
+    @mark.parametrize("use_completions_api", [False, True])
+    def test_max_tokens_only_400_is_never_propagated(
+        self, monkeypatch: MonkeyPatch, propagate: bool, use_completions_api: bool
+    ) -> None:
+        # A 400 whose body mentions only max_tokens is a request-parameter error the caller can
+        # correct by lowering max_tokens, not a full context window, so with the knob on or off it
+        # degrades to the empty completion with finish_reason "length".
+        server = self._setup_server(
+            monkeypatch,
+            propagate_context_overflow_errors=propagate,
+            use_completions_api=use_completions_api,
+        )
+        error = _engine_bad_request_error("max_tokens must be at least 1, got 0.")
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        mock_client.create_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["choices"][0]["finish_reason"] == "length"
+
+    def test_completions_api_context_overflow_uses_openai_envelope(self, monkeypatch: MonkeyPatch) -> None:
+        # The /v1/completions transport classifies and renders a propagated overflow exactly like
+        # the chat-completions transport.
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True, use_completions_api=True)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_completion = AsyncMock(side_effect=_engine_bad_request_error(_ENGINE_OVERFLOW_MESSAGE))
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "context_length_exceeded"
+        assert response.json()["error"]["message"] == _ENGINE_OVERFLOW_MESSAGE
+
+    def test_streaming_responses_context_overflow_is_terminal_failed_event(self, monkeypatch: MonkeyPatch) -> None:
+        # On a streaming /v1/responses request the HTTP contract is already SSE, so the propagated
+        # overflow surfaces as a terminal response.failed event carrying the OpenAI code and the
+        # engine's message, not as a bare HTTP 400 mid-protocol.
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=_engine_bad_request_error(_ENGINE_OVERFLOW_MESSAGE))
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/responses",
+            json={"model": "dummy_model", "stream": True, "input": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert "event: response.failed" in response.text
+        failed = [
+            line for line in response.text.splitlines() if line.startswith("data: ") and "response.failed" in line
+        ]
+        payload = json.loads(failed[0][len("data: ") :])
+        assert payload["response"]["status"] == "failed"
+        assert payload["response"]["error"] == {
+            "code": "context_length_exceeded",
+            "message": _ENGINE_OVERFLOW_MESSAGE,
+        }
 
     def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")

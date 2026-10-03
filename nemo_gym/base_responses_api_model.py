@@ -105,6 +105,40 @@ _SSE_KEEPALIVE = b": keep-alive\n\n"
 _ANTHROPIC_CONVERTER = AnthropicConverter()
 
 
+# Marker attribute for a propagated context-window overflow. A model server sets it (value True)
+# on an exception when the backend rejected a request because the prompt no longer fits the
+# model's context window and the server's configuration asks for that condition to reach the
+# caller (see the vLLM model server's ``propagate_context_overflow_errors``). Both error
+# renderers look for the marker: the model server's HTTP exception middleware returns a marked
+# error as an OpenAI-style 400, and ``_stream_responses`` reports it as a terminal
+# ``response.failed`` event, each carrying ``CONTEXT_LENGTH_EXCEEDED_ERROR_CODE`` so
+# OpenAI-compatible clients recognize the refusal.
+CONTEXT_OVERFLOW_ERROR_ATTRIBUTE = "nemo_gym_context_overflow_error"
+
+# OpenAI's string error code for a prompt that exceeds the model's context window. Clients built
+# against the OpenAI API classify context overflows by this code, not by the HTTP status.
+CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
+
+
+def context_overflow_error_message(error: BaseException) -> str:
+    """Return the backend engine's own message from a marked context-overflow error.
+
+    The engine's error body travels on the exception as ``response_content`` (attached by
+    ``nemo_gym.server_utils.raise_for_status``). vLLM formats that body as a JSON object with a
+    top-level ``message`` string, which is returned verbatim when present; any other body is
+    returned as raw text so no information is lost.
+    """
+    body = getattr(error, "response_content", b"") or b""
+    text = body.decode(errors="replace") if isinstance(body, (bytes, bytearray)) else str(body)
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(parsed, dict) and isinstance(parsed.get("message"), str):
+        return parsed["message"]
+    return text
+
+
 class ModelExecutionOutcome(TypedDict):
     upstream_attempted: bool
     response_source: Literal["upstream", "local"] | None
@@ -181,6 +215,21 @@ def _plain(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _plain(item) for key, item in value.items()}
     return value
+
+
+def _failure_event_fields(exc: BaseException) -> tuple[str, str]:
+    """Return the ``(message, code)`` a terminal ``response.failed`` event reports for ``exc``.
+
+    An ``HTTPException`` whose detail is an OpenAI-style error object (a mapping with a
+    ``message`` and, optionally, a ``code``) is relayed with those two fields. The client then
+    sees the error the provider would have sent. The vLLM model server raises such an exception
+    for the engine's context-window refusal. Any other exception is reported as a
+    ``server_error`` whose message is the exception's string form.
+    """
+    detail = getattr(exc, "detail", None)
+    if isinstance(exc, HTTPException) and isinstance(detail, Mapping) and detail.get("message"):
+        return str(detail["message"]), str(detail.get("code") or "server_error")
+    return str(exc), "server_error"
 
 
 def _orjson_dispatch_response(content: Any) -> Any:
@@ -319,9 +368,28 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         except Exception as exc:
             # The streaming contract is already the response's shape, so a backend failure must be a
             # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.
-            logger.exception("responses() failed while serving a streaming /v1/responses request")
+            if getattr(exc, CONTEXT_OVERFLOW_ERROR_ATTRIBUTE, False):
+                # A propagated context-window overflow keeps OpenAI's error code and the engine's
+                # own message, so streaming clients can classify the refusal as a context overflow
+                # instead of reporting a generic server error.
+                message, code = context_overflow_error_message(exc), CONTEXT_LENGTH_EXCEEDED_ERROR_CODE
+                refusal_status = getattr(exc, "status", 400)
+            else:
+                message, code = _failure_event_fields(exc)
+                refusal_status = exc.status_code if isinstance(exc, HTTPException) and exc.status_code < 500 else None
+            if refusal_status is not None:
+                # The backend refused the request (a context-window overflow, for example): the
+                # client gets the reason in the terminal event, and a traceback adds nothing.
+                logger.warning(
+                    "responses() refused a streaming /v1/responses request with %s (%s): %s",
+                    refusal_status,
+                    code,
+                    message,
+                )
+            else:
+                logger.exception("responses() failed while serving a streaming /v1/responses request")
             return StreamingResponse(
-                synthesize_responses_failure_sse(str(exc)),
+                synthesize_responses_failure_sse(message, code=code),
                 media_type="text/event-stream",
             )
 
