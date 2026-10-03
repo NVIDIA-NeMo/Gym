@@ -48,6 +48,9 @@ from nemo_gym.openai_utils import (
 
 
 TOKEN_KEYS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs")
+# Optional per-token sampler top-k distribution: kept on the rollout output, never sent back
+# to the policy server in later requests (only TOKEN_KEYS pin the prompt prefix).
+TOPK_KEYS = ("generation_topk_token_ids", "generation_topk_log_probs")
 _THINK_RE = re.compile(r"<think>.*?</think>", re.S)
 
 
@@ -112,7 +115,7 @@ def attach_parent_tokens(messages: list[dict[str, Any]], calls: list[TrackedCall
         return None, _image_urls(messages)
     for index in range(len(calls) - 1, -1, -1):
         if _same_assistant(messages[last], calls[index].message):
-            messages[last].update(calls[index].tokens)
+            messages[last].update({key: calls[index].tokens[key] for key in TOKEN_KEYS})
             return index, _image_urls(messages[last + 1 :])
     return None, _image_urls(messages)
 
@@ -127,8 +130,11 @@ def record_call(
     """
     tokens = {key: message.pop(key) for key in TOKEN_KEYS if key in message}
     message.pop("routed_experts", None)
+    topk = {key: message.pop(key) for key in TOPK_KEYS if message.get(key) is not None}
     if len(tokens) != len(TOKEN_KEYS) or not tokens["generation_token_ids"]:
         return False
+    if len(topk) == len(TOPK_KEYS):
+        tokens.update(topk)
     depth = calls[parent].depth + 1 if parent is not None else 0
     calls.append(TrackedCall(parent=parent, depth=depth, tokens=tokens, message=message, new_images=new_images))
     return True
