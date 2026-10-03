@@ -1389,12 +1389,28 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         description=(
             "Set to 1 to disable both inner transport and HTTP-status retry "
             "layers when a caller owns the complete retry schedule; this overrides "
-            "max_http_attempts. None preserves NeMo Gym's default behavior."
+            "max_http_attempts and the transport's generic-error retry limit. None "
+            "preserves NeMo Gym's default behavior."
         ),
     )
 
-    request_timeout_seconds: Optional[float] = Field(default=None, gt=0)
-    connect_timeout_seconds: Optional[float] = Field(default=None, gt=0)
+    request_timeout_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Total time limit for each HTTP attempt (aiohttp ClientTimeout.total), "
+            "not a deadline for the whole retry schedule. None means no limit."
+        ),
+    )
+    connect_timeout_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Time limit for each HTTP attempt to obtain a connection, including "
+            "waiting for a free aiohttp connection-pool slot (ClientTimeout.connect). "
+            "Requires request_timeout_seconds."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_timeout_pair(self) -> "NeMoGymAsyncOpenAI":

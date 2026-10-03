@@ -415,6 +415,10 @@ async def request(
     ``ServerClient`` server name, ``remote_agent_service`` for the remote agent's external
     service, or ``None`` for the fallback label ``external``. It is retained across retries
     and redirects and is not forwarded to aiohttp.
+
+    ``_max_num_tries`` caps this call's total attempts on every exception path. It replaces the
+    default generic-error limit (``MAX_NUM_TRIES`` attempts for external calls, unbounded for
+    internal ones). A ``_max_connection_retries`` limit still applies as well.
     """
     if _max_num_tries is not None and _max_num_tries < 1:
         raise ValueError("_max_num_tries must be at least 1")

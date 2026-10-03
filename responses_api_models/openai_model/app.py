@@ -144,27 +144,46 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     upstream_max_num_tries: Optional[Literal[1]] = Field(
         default=None,
         description=(
-            "Set to 1 to disable the outbound client's inner transport and "
-            "HTTP-status retry layers; this overrides max_http_attempts. None "
-            "preserves existing behavior."
+            "Set to 1 so each provider call makes exactly one HTTP attempt. This "
+            "disables the outbound client's transport and HTTP-status retry layers, "
+            "replacing their generic-error and max_http_attempts limits. Required "
+            "by an upstream_retry_policy with multiple attempts. None preserves "
+            "existing behavior."
         ),
     )
-    upstream_request_timeout_seconds: Optional[float] = Field(default=None, gt=0)
-    upstream_connect_timeout_seconds: Optional[float] = Field(default=None, gt=0)
+    upstream_request_timeout_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Total time limit for each provider attempt, not a deadline for the "
+            "whole retry schedule. None means no limit."
+        ),
+    )
+    upstream_connect_timeout_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Time limit for each provider attempt to obtain a connection, including "
+            "waiting for a free aiohttp connection-pool slot. Requires "
+            "upstream_request_timeout_seconds."
+        ),
+    )
     upstream_pool_timeout_seconds: Optional[float] = Field(
         default=None,
         gt=0,
         description=(
-            "Optional timeout for acquiring this model server's upstream "
-            "concurrency slot. This models a provider client's pool-acquire "
-            "timeout without timing or abandoning the internal HTTP hop."
+            "Time limit for each attempt to wait for one of this server's "
+            "max_concurrent_requests slots, like a provider client's pool-acquire "
+            "timeout. It does not time the provider call itself."
         ),
     )
     propagate_upstream_http_status_codes: frozenset[int] = Field(
         default_factory=frozenset,
         description=(
-            "Upstream HTTP error statuses to preserve across this model-server "
-            "hop. Empty keeps the historical generic exception behavior."
+            "Upstream HTTP error statuses returned to the caller with that status "
+            "and the provider's error body, instead of HTTP 500. A status that "
+            "upstream_retry_policy retries until it is exhausted still returns "
+            "HTTP 500. Empty keeps the historical generic exception behavior."
         ),
     )
     upstream_retry_policy: UpstreamRetryPolicy = Field(
@@ -233,13 +252,12 @@ class SimpleModelServer(SimpleResponsesAPIModel):
 
     @asynccontextmanager
     async def _upstream_request_slot(self):
-        """Acquire one provider slot without wrapping the provider operation.
+        """Hold one of this server's provider slots for a single attempt.
 
-        A timeout on the resource-server -> model-server HTTP request cannot
-        stand in for a provider pool timeout: client disconnect does not
-        cancel the server handler, so the provider call can continue as a
-        ghost. Time only semaphore acquisition here and always release an
-        acquired slot in the serving process.
+        ``upstream_pool_timeout_seconds`` bounds only the wait for a free slot,
+        like a provider client's pool-acquire timeout; the provider call itself
+        is bounded per attempt by ``upstream_request_timeout_seconds``. An
+        acquired slot is always released here.
         """
 
         if self.config.max_concurrent_requests is None or self.config.upstream_pool_timeout_seconds is None:

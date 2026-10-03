@@ -51,7 +51,14 @@ class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
     # Some multi-turn benchmarks reconstruct history from visible text rather
     # than replaying provider-specific reasoning/output items.
     text_only_history: bool = False
-    model_server_transport_max_attempts: int | None = Field(default=None, ge=1)
+    model_server_transport_max_attempts: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Total attempts for each agent-to-model-server HTTP call. When set, it "
+            "replaces the transport's default generic-error and connection-error retry limits."
+        ),
+    )
     # Optional process-wide cap around target-model calls. This is distinct
     # from rollout concurrency: simulated-user/resource-server calls do not
     # acquire it, matching generators with target-only rate limiting.
