@@ -8,43 +8,45 @@ You can use an existing agent in NeMo Gym, integrate an external one, or build y
 
 [`SimpleAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) is a native NeMo Gym agent that handles general-purpose multi-step tool calling with configurable max steps, and works with any Resources server out of the box. NeMo Gym also includes agents that integrate external tools: for example, [`MiniSWEAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) wraps an external coding harness running in Docker containers and converts its output back into the NeMo Gym format, and [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) runs the Claude Code CLI. Because every Gym model server speaks Anthropic Messages, you can point Claude Code at any backend — see [Anthropic Messages](/model-server/anthropic-messages).
 
-## Migrate from the standalone sandboxed Hermes agent
+## Migrate standalone sandboxed agents
 
-`hermes_sandboxed_agent` and its configuration files have been removed. Use `hermes_agent`
-through an Environment Server. Include the environment and agent configuration in both
-server startup and evaluation commands so collection routes through the Environment Server.
-Direct HTTP callers must call the Environment Server's `/run`, not the agent's `/run`;
-renaming the agent in an existing `/run` call does not enable sandbox sessions.
+Use this workflow when replacing an adapter that manages task setup, execution, verification,
+and cleanup with a harness that runs through Environment Server agent sessions. Migration is
+specific to each harness: confirm that its replacement supports the required lifecycle and
+benchmark capabilities before changing a working configuration. A `*_sandboxed_agent` name
+alone does not mean the component has been deprecated.
 
-- Move model, toolset, and sampling settings to your agent deployment's
-  `responses_api_agents.hermes_agent` configuration. Remove the old `runtime_python`,
-  `remote_run_root`, `results_dir`, `sandbox_timeout`, `cleanup_timeout`, `api_timeout`,
-  `context_length`, and `chat_template_kwargs` settings. Use `sandbox_runner_timeout_seconds`
-  for the runner deadline; the Environment Server controls episode and cleanup deadlines.
-- Keep sandbox providers in the shared configuration. For Apptainer, copy the provider
-  settings into your configuration under `sandbox.apptainer`; the shared
-  [provider configuration reference](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/sandbox/providers/apptainer/README.md#selecting-and-configuring-the-provider)
-  describes the supported fields. The old agent-specific `configs/apptainer.yaml` is removed.
-- The old `prepare_runtime.sh`, libc-selecting launcher, and `/opt/hermes` mount convention
-  have been removed. The unified agent uses the Hermes revision pinned in its
-  `requirements.txt`, which differs from the old standalone upstream runtime. It installs
-  that revision at seed time, or reuses an already installed runtime at
-  `/tmp/nemo-gym-hermes-runtime-<commit>/venv`. Network-restricted deployments must preinstall
-  that runtime. The old portable glibc/musl bundles are not a drop-in replacement; validate
-  each task image's architecture and libc with the unified runtime before migrating a batch.
-- Remove request `max_output_tokens`: the unified agent rejects it with HTTP 422.
-  Agent config `max_tokens` limits each model call, not the whole response.
-  Retune budgets explicitly rather than treating the two limits as equivalent.
-- Update reporting that consumes standalone `hermes_*`, `verifier_reward`, or
-  `agent_image_provenance` fields to use the Environment Server rollout and observation
-  records. Incomplete runs, infrastructure failures, and scoring exclusions follow the
-  Environment Server's outcome policy; compare coverage as well as rewards when migrating.
+1. **Check the replacement's capabilities.** Confirm agent-session support, accepted task
+   input, required tools and MCP grants, model routing, and execution limits. Check the
+   harness documentation for supported sandbox providers and worker/concurrency restrictions.
+2. **Route execution through the Environment Server.** Configure its Resources Server and
+   agent references. Include the composed configuration in both server startup and evaluation
+   commands, including `--no-serve` runs. Direct HTTP callers use the Environment Server's
+   `/run`; changing the agent name in an existing agent `/run` call does not create a session.
+   Use the task format expected by the environment; `single_agent_turn_legacy` accepts
+   compatible prepared flat rows through the session lifecycle.
+3. **Preserve sandbox ownership.** For tasks where Resources prepares the workspace and
+   verifies its state, the agent must connect to that same sandbox. Configure agent-owned
+   sandbox creation only when both the harness and the environment support it. Check model
+   and tool endpoint reachability from the sandbox and retain required mounts and workdirs.
+4. **Map configuration explicitly.** Move harness settings into the replacement agent's
+   config namespace and provisioning settings into the appropriate provider or Resources
+   Server config. Check runtime pins, architecture/libc, offline installation, and secrets
+   delivery. Reconcile per-call token limits, total-response budgets, command timeouts, and
+   episode deadlines; similarly named settings can enforce different limits.
+5. **Validate execution and reporting.** Run representative real-model tasks, inspect tool
+   actions and verifier results, and confirm agent close precedes verification and owned
+   resources are cleaned up. Update consumers of adapter-specific artifacts and metrics to
+   the new [rollout evidence](/main/observability/rollout-evidence) and outcome format.
+   Compare failure coverage as well as rewards; changed runtimes or limits require a new
+   benchmark baseline.
+6. **Retire the old integration after migration.** Update benchmark recipes, allowed-agent
+   lists, manifests, deployment scripts, imports, and documentation before removing an
+   adapter. Keep runtime packaging and shared helpers that still have consumers.
 
-The Hermes revision, execution settings, and failure reporting differ between the adapters,
-so previous benchmark scores are not an accuracy baseline for the migrated configuration.
-Revalidate representative tasks, including Alpine/musl images and offline deployments when
-used by your configuration. For the SWE-Pro recipe and configuration mapping, see
-[Evaluate SWE-bench Pro with Hermes](/main/evaluation-tutorials/hermes-swe-bench-pro).
+For a concrete migration, see the
+[Hermes-specific configuration and runtime changes](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/hermes_agent/README.md#migrate-from-the-standalone-sandboxed-agent)
+and the [SWE-Pro recipe](/main/evaluation-tutorials/hermes-swe-bench-pro).
 
 ## Agent session hooks
 

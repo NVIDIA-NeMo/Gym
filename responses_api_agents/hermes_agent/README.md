@@ -107,9 +107,38 @@ For SWE-bench Pro, use [`hermes.yaml`](../../benchmarks/swebench/pro/hermes.yaml
 See [Evaluate SWE-bench Pro with Hermes](../../fern/versions/latest/pages/evaluation-tutorials/hermes-swe-bench-pro.mdx)
 for task preparation, Environment Server configuration, evaluation commands, and session limits.
 
-The standalone `hermes_sandboxed_agent` has been removed. Follow the
-[migration guide](../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#migrate-from-the-standalone-sandboxed-hermes-agent)
-for Environment Server routing, runtime preparation, request controls, and rollout results.
+## Migrate from the standalone sandboxed agent
+
+`hermes_sandboxed_agent` and its configuration files have been removed. Follow the
+[shared sandboxed-agent migration workflow](../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#migrate-standalone-sandboxed-agents)
+to run `hermes_agent` through an Environment Server. For Hermes specifically:
+
+- Move model, toolset, and sampling settings to your agent deployment's
+  `responses_api_agents.hermes_agent` configuration. Remove the old `runtime_python`,
+  `remote_run_root`, `results_dir`, `sandbox_timeout`, `cleanup_timeout`, `api_timeout`,
+  `context_length`, and `chat_template_kwargs` settings. Use `sandbox_runner_timeout_seconds`
+  for the runner deadline; the Environment Server controls episode and cleanup deadlines.
+- The agent-specific `configs/apptainer.yaml` has been removed. Copy its provider settings
+  into your shared configuration under `sandbox.apptainer`; see the
+  [Apptainer provider reference](../../nemo_gym/sandbox/providers/apptainer/README.md#selecting-and-configuring-the-provider).
+- The old `prepare_runtime.sh`, libc-selecting launcher, and `/opt/hermes` mount convention
+  have been removed. This agent uses the Hermes revision pinned in `requirements.txt`,
+  which differs from the standalone upstream runtime. It installs that revision at seed
+  time or reuses `/tmp/nemo-gym-hermes-runtime-<commit>/venv`. Network-restricted deployments
+  must preinstall that runtime. The old portable glibc/musl bundles are not a drop-in
+  replacement; validate each task image's architecture and libc before migrating a batch.
+- Remove request `max_output_tokens`: this agent rejects it with HTTP 422.
+  Config `max_tokens` limits each model call, not the whole response.
+  Retune budgets explicitly rather than treating the two limits as equivalent.
+- Update reporting that consumes standalone `hermes_*`, `verifier_reward`, or
+  `agent_image_provenance` fields to use Environment Server rollout and observation records.
+  Incomplete runs, infrastructure failures, and scoring exclusions follow the Environment
+  Server's outcome policy; compare coverage as well as rewards when migrating.
+
+The Hermes revision, execution settings, and failure reporting differ between the adapters,
+so previous benchmark scores are not an accuracy baseline for the migrated configuration.
+Revalidate representative tasks, including Alpine/musl images and offline deployments when
+used by your configuration.
 
 ## Sandbox-mode requirements
 
