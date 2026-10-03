@@ -31,6 +31,12 @@ API. Its returned response contains every model request and response from the
 Terminus trajectory. Set `dump_trajectory: true` to also have Harbor write its
 per-turn JSON trajectory files; it is `false` by default.
 
+Use standalone tmux key names such as `C-c` for control keys. The agent accepts
+an accidental trailing newline on a standalone key and reports the correction.
+On Linux terminals with signal handling enabled, Ctrl-C drains pending input
+before delivering the interrupt, so a long paste behind a busy foreground job
+cannot block cancellation. Raw applications retain their own Ctrl-C handling.
+
 ## Tmux binary: online or pre-staged
 
 With `remote_tmux_binary_path: null`, [Harbor's setup](https://github.com/laude-institute/harbor/blob/v0.22.0/src/harbor/agents/terminus_2/tmux_session.py)

@@ -19,6 +19,7 @@ from harbor.agents.terminus_2 import Terminus2
 from harbor.llms.base import BaseLLM, ContextLengthExceededError, LLMResponse
 from harbor.models.agent.context import AgentContext
 from harbor.models.metric.usage_info import UsageInfo
+from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.logger import logger as harbor_logger
 from pydantic import ConfigDict, Field
 
@@ -56,6 +57,11 @@ from nemo_gym.server_utils import (
     raise_for_status,
 )
 from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
+from responses_api_agents.terminus_2_sandboxed_agent.terminal import (
+    TerminusJSONParser,
+    TerminusTmuxSession,
+    TerminusXMLParser,
+)
 
 
 class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
@@ -185,7 +191,7 @@ class NeMoGymLLM(BaseLLM):
         self._model_output_limit = model_output_limit
         self._llm_request_timeout = llm_request_timeout
         self.trajectory: list[NeMoGymResponseOutputItem] = []
-        self.usages: list[NeMoGymResponseUsage] = []
+        self.usages: list[NeMoGymResponseUsage | None] = []
         self._times_spent = []
         self._last_input_items = []
         self._model_calls_gt_10min = 0
@@ -340,6 +346,31 @@ class NeMoGymTerminus2(Terminus2):
     def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
         return self._nemo_gym_llm
 
+    def _get_parser(self) -> TerminusJSONParser | TerminusXMLParser:
+        if self._parser_name == "json":
+            return TerminusJSONParser()
+        if self._parser_name == "xml":
+            return TerminusXMLParser()
+        raise ValueError(f"Unknown parser_name: {self._parser_name}. Use 'json' or 'xml'.")
+
+    async def setup(self, environment: NeMoGymSandboxEnvironment) -> None:
+        self._session = TerminusTmuxSession(
+            session_name=self.name(),
+            environment=environment,
+            logging_path=EnvironmentPaths.agent_dir / "terminus_2.pane",
+            local_asciinema_recording_path=(
+                environment.trial_paths.agent_dir / "recording.cast" if self._record_terminal_session else None
+            ),
+            remote_asciinema_recording_path=(
+                EnvironmentPaths.agent_dir / "recording.cast" if self._record_terminal_session else None
+            ),
+            pane_width=self._tmux_pane_width,
+            pane_height=self._tmux_pane_height,
+            extra_env=self._extra_env,
+            user=environment.default_user,
+        )
+        await self._session.start()
+
     def _dump_trajectory_with_continuation_index(self, continuation_index: int) -> None:
         if self._dump_trajectory_enabled:
             super()._dump_trajectory_with_continuation_index(continuation_index)
@@ -372,7 +403,9 @@ class NeMoGymTerminus2(Terminus2):
 
     def _count_total_tokens(self, *args, **kwargs):
         if self._is_check_proactive_summarization and self._nemo_gym_llm.usages:
-            return self._nemo_gym_llm.usages[-1].total_tokens
+            usage = self._nemo_gym_llm.usages[-1]
+            if usage is not None:
+                return usage.total_tokens
         return super()._count_total_tokens(*args, **kwargs)
 
     async def _check_proactive_summarization(self, *args, **kwargs):

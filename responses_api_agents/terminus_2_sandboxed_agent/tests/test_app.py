@@ -23,6 +23,7 @@ from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (
     NeMoGymLLM,
     NeMoGymSandboxEnvironment,
+    NeMoGymTerminus2,
     Terminus2Agent,
     Terminus2AgentConfig,
     _instruction,
@@ -31,6 +32,26 @@ from responses_api_agents.terminus_2_sandboxed_agent.app import (
 
 def test_instruction_joins_text_content():
     assert _instruction([{"content": [{"text": "first"}]}, {"content": "second"}]) == "first\n\nsecond"
+
+
+def test_missing_usage_falls_back_to_counting_current_chat(monkeypatch):
+    import litellm.utils
+
+    counted = []
+
+    def count_tokens(*, model, messages):
+        counted.append((model, messages))
+        return 42
+
+    monkeypatch.setattr(litellm.utils, "token_counter", count_tokens)
+    agent = object.__new__(NeMoGymTerminus2)
+    agent._model_name = "policy_model"
+    agent._is_check_proactive_summarization = True
+    agent._nemo_gym_llm = SimpleNamespace(usages=[SimpleNamespace(total_tokens=1000), None])
+    chat = SimpleNamespace(messages=[{"role": "user", "content": "current prompt"}])
+    assert agent._count_total_tokens(chat) == 42
+    assert counted == [("policy_model", chat.messages)]
+    assert agent._nemo_gym_llm.usages[-1] is None
 
 
 @pytest.mark.asyncio
