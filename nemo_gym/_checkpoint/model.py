@@ -678,19 +678,25 @@ class PolicyAdmissionMiddleware:
             await self.gate.exit(ticket)
 
 
-def generation_cut_requester(auth_token: str) -> CutRequester:
+def worker_control_root(base_url: str) -> str:
+    """The root of the control routes a worker serves beside its OpenAI base URL."""
+    return base_url.rstrip("/").removesuffix("/v1")
+
+
+def generation_cut_requester(
+    auth_token: str, *, control_root: Callable[[str], str] = worker_control_root
+) -> CutRequester:
     """Request cuts from a worker's ``/ng-control/v1/generation-cut`` endpoint.
 
-    ``backend`` is the worker's OpenAI-compatible base URL; the control route lives at its root.
+    ``backend`` is the worker's OpenAI-compatible base URL; ``control_root`` maps it to the root serving the route.
     """
 
     async def request_cut(backend: str, inventory: GenerationCutInventory) -> GenerationCutReceipt:
         from nemo_gym.server_utils import get_response_json, raise_for_status, request
 
-        root = backend.rstrip("/").removesuffix("/v1")
         response = await request(
             method="POST",
-            url=f"{root}{GENERATION_CUT_ROUTE}",
+            url=f"{control_root(backend)}{GENERATION_CUT_ROUTE}",
             json=inventory.model_dump(mode="json"),
             headers={"authorization": f"Bearer {auth_token}"},
             _internal=True,
