@@ -18,9 +18,9 @@ from pydantic import ValidationError
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox.runner import parse_cleanup_receipt
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig, _unique_usage_messages
-from responses_api_agents.openclaw_agent.sandbox import OpenClawSandboxResult
 
 
 def seed(*, session_id: str | None = None) -> AgentSeedSessionRequest:
@@ -91,9 +91,8 @@ class Sandbox:
             "timed_out": False,
             "cleanup_confirmed": True,
             "error": None,
-            "hostname": "task-container",
-            "pid": 123,
         }
+        self.runtime_info = {"hostname": "task-container", "pid": 123}
         self.events = events()
         self.blocked = False
         self.started = asyncio.Event()
@@ -145,7 +144,8 @@ class Sandbox:
 
     async def wait_exit(self):
         await self.exited.wait()
-        self.files[f"{self.directory}/result.json"] = json.dumps(self.result)
+        self.files[f"{self.directory}/cleanup.json"] = json.dumps(self.result)
+        self.files[f"{self.directory}/runtime.json"] = json.dumps(self.runtime_info)
         self.files[f"{self.directory}/stdout.log"] = ""
         self.files[f"{self.directory}/stderr.log"] = "model error"
         session_id = self.directory.rsplit("/", 1)[-1]
@@ -228,7 +228,8 @@ def test_http_native_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeout
             payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
             assert payload["prompt"] == "Fix the code"
             assert payload["command"][0].endswith("/node/bin/node")
-            assert payload["timeout"] == 900
+            assert "--timeout 900" in sandbox.launch.await_args.kwargs["command"]
+            assert "timeout" not in payload
             assert "PATH" not in payload["env"]
             models = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/openclaw.json"])
             assert models["agents"]["defaults"]["workspace"] == "/app"
@@ -508,7 +509,7 @@ async def test_disconnect_failure_retains_session_for_retry(setup):
 
 def test_cleanup_receipt_is_required():
     with pytest.raises(ValueError):
-        OpenClawSandboxResult.model_validate({"return_code": 0, "error": None})
+        parse_cleanup_receipt({"return_code": 0, "error": None})
 
 
 def test_instructions_and_text_parts_reach_openclaw_without_other_provider_credentials(setup):

@@ -64,7 +64,7 @@ from nemo_gym.rollout_observability import (
     AgentObservationBundle,
     ObservationGap,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, process_supervisor
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
@@ -541,6 +541,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     f"{installed.stderr or installed.stdout}"
                 )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+            await sandbox.upload(Path(process_supervisor.__file__), f"{directory}/process_supervisor.py")
         except BaseException as error:
             try:
                 if prepared_directory or owns_sandbox:
@@ -700,8 +701,6 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 "CLAWHUB_DISABLE_TELEMETRY": "1",
                 "OPENCLAW_EXEC_SHELL_SNAPSHOT": "0",
             },
-            "timeout": self.config.timeout,
-            "cleanup_timeout": self.config.session_close_timeout_seconds / 3,
         }
         try:
             async with self.sem:
@@ -838,20 +837,21 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 ObservationGap(code="model_call_usage_unavailable", detail="Only CLI envelope totals available")
             )
         gaps.append(ObservationGap(code="reasoning_token_usage_unavailable"))
-        result = state.result
-        error = result.error if result else "OpenClaw activation ended without a cleanup receipt"
+        result = state.cleanup
+        runtime = state.runtime_info
+        error = result["error"] if result else "OpenClaw activation ended without a cleanup receipt"
         last = assistants[-1] if assistants else {}
         if last.get("stopReason") == "error" or (
-            last.get("stopReason") == "aborted" and not (result and result.timed_out)
+            last.get("stopReason") == "aborted" and not (result and result["timed_out"])
         ):
             error = error or last.get("errorMessage") or f"OpenClaw model call {last['stopReason']}"
-        if result and result.return_code and not result.timed_out:
+        if result and result["return_code"] and not result["timed_out"]:
             try:
                 stderr = (await state.read_text("stderr.log"))[-4000:]
             except Exception:
                 stderr = "stderr unavailable"
-            error = error or f"OpenClaw exited {result.return_code}: {stderr}"
-        incomplete = bool(result and result.timed_out) or last.get("stopReason") == "length"
+            error = error or f"OpenClaw exited {result['return_code']}: {stderr}"
+        incomplete = bool(result and result["timed_out"]) or last.get("stopReason") == "length"
         if not incomplete and not error and last.get("stopReason") != "stop":
             error = "OpenClaw produced no terminal assistant result"
         status = "failed" if error else "incomplete" if incomplete else "completed"
@@ -875,8 +875,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             ),
             metadata={
                 "harness_execution": "sandbox",
-                "harness_hostname": result.hostname if result else "unknown",
-                "harness_pid": str(result.pid) if result else "unknown",
+                "harness_hostname": runtime.hostname if runtime else "unknown",
+                "harness_pid": str(runtime.pid) if runtime else "unknown",
                 "openclaw_version": self.config.openclaw_version,
             },
         )
