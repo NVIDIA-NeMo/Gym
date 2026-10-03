@@ -1,0 +1,18 @@
+agent:
+  type: kilocode
+  version: 7.4.22
+  thinking_effort: xhigh  # adaptive + effort, via --variant
+  context_limit: 1000000
+  output_limit: 65536     # >32000 is unlocked via KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX
+  # thinking_budget: 8192   # budget mode, mutually exclusive with thinking_effort
+  # todo_tool: false        # true restores todowrite (gateways without the fingerprint)
+  # session_title: mimo-rollout  # any non-empty value suppresses the title LLM call
+  # project_config: false   # true honours the graded repo's AGENTS.md / ./kilo.json,
+  #                         # at the cost of letting the repo append to the system prompt
+  # skip_install: false
+
+model:
+  model_name: "claude-opus-5"
+  model_kwargs:
+    base_url: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
+    api_key: "${ANTHROPIC_API_KEY:-}"

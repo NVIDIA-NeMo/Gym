@@ -1,0 +1,62 @@
+agent:
+  type: codex-agent
+  ptc: false             # code mode needs freeform tools; OpenAI-compatible gateways (NVIDIA inference, vLLM) drop them
+
+  # Independent Codex-RS-style compaction. It uses a normal Responses summary
+  # turn and replaces history with the recent user context plus a handoff.
+  compaction_enabled: true
+  compaction_trigger_tokens: 900000
+  compaction_user_message_tokens: 20000
+
+  # Nested/direct tools are exactly this catalogue under both ptc modes.
+  # Under ptc: true they are reachable only as tools.<name> from JavaScript
+  # (and each is documented in the exec description). Under ptc: false they
+  # are the direct tool surface. Uncomment the optional entries to restore the
+  # full coreset surface (same as the old auto-registered set).
+  tools:
+    - tool: exec_command
+      config:
+        timeout: 60
+        max_timeout: 300
+    - tool: apply_patch
+    # Optional — uncomment to enable:
+    # - tool: view_image
+    # - tool: update_plan
+
+  # Hard bound on a tool result, in characters, applied when the observation
+  # is formatted (codex-rs: history cut at model truncation policy x 1.2 =
+  # 12000 tokens for gpt-5.x, i.e. 48000 bytes). The budgets the model sees
+  # (exec_command max_output_tokens, the exec pragma, wait max_tokens) default
+  # to 10000 tokens and are uncapped, as upstream.
+  # max_observation_length: 48000
+
+  # The code-mode sandbox host (a standalone binary shipped as the
+  # codex-code-mode-host asset of the openai/codex GitHub release). If left
+  # unset, the pinned release asset is downloaded into the controller's cache
+  # on first use (override the URL with MIMOAGENT_CODE_MODE_HOST_URL). Hosts
+  # without network access copy the binary locally and point at it here or via
+  # MIMOAGENT_CODE_MODE_HOST_PATH.
+  # code_mode_host_path: /opt/codex/codex-code-mode-host
+  code_mode_exec_yield_time_ms: 300000
+  code_mode_wait_yield_time_ms: 100000
+
+  # A distilled Codex core system prompt ships as the default (see
+  # agents/codex/prompts/codex_core.txt), so system_template is left unset.
+  # Uncomment to override it for an experiment:
+  # system_template: |
+  #   ...
+
+  instance_template: |
+    Fix the following issue:
+
+    {{task}}
+
+  step_limit: 500
+
+model:
+  model_name: "${MIMOAGENT_MODEL_NAME:-gpt-5}"
+  # Chat-shaped agent messages are translated to Responses input/output items.
+  protocol: responses
+  model_kwargs:
+    base_url: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+    api_key: "${OPENAI_API_KEY:-}"
