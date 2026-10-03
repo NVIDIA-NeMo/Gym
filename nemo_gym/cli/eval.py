@@ -591,16 +591,21 @@ def export_rollouts_as_atif() -> None:  # pragma: no cover
 
 
 @exit_cleanly_on_config_error
-def reverify_rollouts():  # pragma: no cover
+def reverify_rollouts() -> None:  # pragma: no cover
     from nemo_gym.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
+
+    config = RolloutReverificationConfig.model_validate(get_global_config_dict())
 
     rh = RunHelper()
     rh.start(None)
 
-    config = RolloutReverificationConfig.model_validate(get_global_config_dict())
     rrh = RolloutReverificationHelper()
-
-    asyncio.run(rrh.run_from_config(config))
+    try:
+        asyncio.run(rrh.run_from_config(config))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        rh.shutdown()
 
 
 @exit_cleanly_on_config_error
