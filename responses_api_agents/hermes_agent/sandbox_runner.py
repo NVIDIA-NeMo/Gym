@@ -19,11 +19,9 @@ from uuid import uuid4
 try:
     from .model_kwargs import _model_api_kwargs
     from .sandbox_observer import SandboxHermesObserver
-    from .token_usage import HermesTokenUsage
 except ImportError:
     from model_kwargs import _model_api_kwargs
     from sandbox_observer import SandboxHermesObserver
-    from token_usage import HermesTokenUsage
 
 
 def _write_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -100,8 +98,6 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
         save_trajectories=False,
     )
     observer = SandboxHermesObserver().instrument(agent)
-    usage = HermesTokenUsage()
-    usage.instrument(agent)
 
     original_build_api_kwargs = agent._build_api_kwargs
 
@@ -122,7 +118,6 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
             "completed": False,
             "interrupted": True,
             "stop_reason": stop_reason,
-            "gym_usage": usage.snapshot(),
             "messages": getattr(agent, "_session_messages", [])
             or [*payload["history"], {"role": "user", "content": payload["user_message"]}],
         }
@@ -161,7 +156,7 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
         result = {**result, "completed": False, "interrupted": True, "stop_reason": stop_reason}
     return {
         "observations": observer.finish(result, error),
-        "result": {**result, "gym_usage": usage.snapshot()},
+        "result": result,
         "runtime": runtime,
     }
 

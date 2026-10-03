@@ -246,14 +246,6 @@ def test_iteration_limit_summary_reaches_the_model_server(
         ],
     }
     answers = [_completion(tool_call), _completion({"content": "summary of the work"})]
-    for answer, prompt, completion, cached, reasoning in zip(answers, [100, 180], [20, 40], [10, 30], [5, 15]):
-        answer["usage"] = {
-            "prompt_tokens": prompt,
-            "completion_tokens": completion,
-            "total_tokens": prompt + completion,
-            "prompt_tokens_details": {"cached_tokens": cached},
-            "completion_tokens_details": {"reasoning_tokens": reasoning},
-        }
 
     with _ModelServer(answers) as model_server:
         if execution == "sandbox":
@@ -262,7 +254,6 @@ def test_iteration_limit_summary_reaches_the_model_server(
                 tmp_path,
             )
             assert output["result"]["final_response"] == "summary of the work"
-            usage = output["result"]["gym_usage"]
         else:
             from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
@@ -297,17 +288,8 @@ def test_iteration_limit_summary_reaches_the_model_server(
             monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args: model_server.base_url)
             output = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="fix bug")))
             assert output.output[-1].content[0].text == "summary of the work"
-            usage = output.usage.model_dump()
 
     assert len(model_server.requests) == 2
-    # The root's summary bypasses Hermes' session counters, and neither reply has token IDs.
-    assert usage == {
-        "input_tokens": 280,
-        "output_tokens": 60,
-        "total_tokens": 340,
-        "input_tokens_details": {"cached_tokens": 40},
-        "output_tokens_details": {"reasoning_tokens": 20},
-    }
     assert all(not request.get("stream") for request in model_server.requests)
     first = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(model_server.requests[0])
     assert all("chat_template_kwargs" not in body for body in model_server.requests)
@@ -354,92 +336,6 @@ def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globa
     # Delegated children are AIAgents Hermes constructs itself; the Model Server rejects streaming.
     child = AIAgent(base_url=model_server.base_url, api_key="gym", model="m", quiet_mode=True)
     assert child.use_streaming is False
-
-
-@pytest.mark.parametrize("execution", ["sandbox", "local"])
-@pytest.mark.parametrize("finish_reason", ["stop", "length"])
-@pytest.mark.parametrize("reported_usage", [None, {"prompt_tokens": 17, "completion_tokens": 7, "total_tokens": 24}])
-def test_provider_usage_survives_truncation_without_fabricating_details(
-    tmp_path, restore_process_globals, monkeypatch, execution, finish_reason, reported_usage
-) -> None:
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-
-    answer = _completion({"content": "42" if finish_reason == "stop" else ""})
-    answer["choices"][0]["finish_reason"] = finish_reason
-    answer["usage"] = reported_usage
-    body = NeMoGymResponseCreateParamsNonStreaming(input="What is 6 times 7?")
-    agent = HermesAgent(
-        config=HermesAgentConfig(
-            host="127.0.0.1",
-            port=0,
-            name="hermes",
-            entrypoint="app.py",
-            model_server={"type": "responses_api_models", "name": "model"},
-            resources_server={"type": "resources_servers", "name": "resources"},
-            enabled_toolsets=[],
-            max_turns=2,
-        ),
-        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
-    )
-    with _ModelServer([answer]) as model_server:
-        if execution == "sandbox":
-            output = _run(
-                _payload(model_server.base_url, user_message=body.input, enabled_toolsets=[], max_turns=2), tmp_path
-            )
-            response = agent._response_from_result(body=body, result=output["result"], model_name="model", n_input=1)
-        else:
-            monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args: model_server.base_url)
-            response = asyncio.run(agent._create_response(body))
-
-    assert len(model_server.requests) == 1
-    assert response.status == ("failed" if finish_reason == "length" else "completed")
-    if reported_usage is None:
-        assert response.usage is None
-    else:
-        assert response.usage.input_tokens == 17
-        assert response.usage.output_tokens == 7
-        assert response.usage.total_tokens == 24
-        assert response.usage.input_tokens_details.cached_tokens is None
-        assert response.usage.output_tokens_details.reasoning_tokens is None
-
-
-@pytest.mark.parametrize("second_usage", [None, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}])
-def test_missing_usage_is_not_a_measured_zero(tmp_path, restore_process_globals, second_usage) -> None:
-    from responses_api_agents.hermes_agent.token_usage import HermesTokenUsage
-
-    answers = [_completion({"content": "first"}), _completion({"content": "second"})]
-    answers[0]["usage"] = {
-        "prompt_tokens": 10,
-        "completion_tokens": 5,
-        "total_tokens": 15,
-        "prompt_tokens_details": {"cached_tokens": 2},
-        "completion_tokens_details": {"reasoning_tokens": 1},
-    }
-    answers[1]["usage"] = second_usage
-    with _ModelServer(answers) as model_server:
-        agent = AIAgent(base_url=model_server.base_url, api_key="gym", model="model", quiet_mode=True)
-        usage = HermesTokenUsage()
-        usage.instrument(agent)
-        assert usage.snapshot() is None
-        agent.client.chat.completions.create(model="model", messages=[{"role": "user", "content": "first"}])
-        first = usage.snapshot()
-        assert first["input_tokens_details"]["cached_tokens"] == 2
-        # The pinned Hermes creates a separate client for each ordinary model call.
-        with agent._create_request_openai_client(reason="test") as client:
-            client.chat.completions.create(model="model", messages=[{"role": "user", "content": "second"}])
-        if second_usage is None:
-            assert usage.snapshot() is None
-        else:
-            assert usage.snapshot() == {
-                "input_tokens": 10,
-                "output_tokens": 5,
-                "total_tokens": 15,
-                "input_tokens_details": {"cached_tokens": None},
-                "output_tokens_details": {"reasoning_tokens": None},
-            }
-        # A later response cannot mutate a checkpoint already returned to the runner.
-        assert first["input_tokens_details"]["cached_tokens"] == 2
-        agent.client.close()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")

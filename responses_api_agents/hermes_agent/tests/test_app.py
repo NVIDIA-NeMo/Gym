@@ -172,7 +172,6 @@ class TestSanity:
             "sandbox_runner.py",
             "sandbox_observer.py",
             "model_kwargs.py",
-            "token_usage.py",
             "process_supervisor.py",
         }
 
