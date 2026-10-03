@@ -843,6 +843,90 @@ class TestApp:
             else:
                 assert '"finish_reason": "length"' in response.text
 
+    @staticmethod
+    def _engine_overflow_error() -> ClientResponseError:
+        """The engine's refusal of a prompt that does not fit the context window, as vLLM formats it."""
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
+        return error
+
+    @mark.parametrize("use_completions_api", [False, True])
+    def test_a_captured_rollout_records_the_propagated_refusal(
+        self, monkeypatch: MonkeyPatch, tmp_path, use_completions_api: bool
+    ) -> None:
+        # The refused call generates nothing, so it leaves no capture record; the refusal record
+        # is what tells a consumer the rollout ended at the context window rather than at the
+        # harness's own stopping point.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        server.config.use_completions_api = use_completions_api
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=self._engine_overflow_error())
+        mock_client.create_completion = AsyncMock(side_effect=self._engine_overflow_error())
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        token = set_token_sink(CaptureContext(rollout_id="r0", model_call_id="mc-1", token_sink=store))
+        try:
+            response = TestClient(app).post(
+                "/v1/chat/completions",
+                json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+        finally:
+            reset_token_sink(token)
+
+        assert response.status_code == 400
+        (record,) = store.read_refusals("r0")
+        assert (record.model_call_id, record.code) == ("mc-1", "context_length_exceeded")
+        assert record.created_at > 0
+        # The call never ran, so nothing was lost.
+        assert not store.is_incomplete("r0")
+
+    def test_the_absorbed_overflow_records_no_refusal(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # Without propagate_context_overflow_errors the caller sees an exhausted generation, so
+        # the rollout did not end at the window and no refusal is recorded.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=False)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=self._engine_overflow_error())
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        token = set_token_sink(CaptureContext(rollout_id="r0", model_call_id="mc-1", token_sink=store))
+        try:
+            response = TestClient(app).post(
+                "/v1/chat/completions",
+                json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+        finally:
+            reset_token_sink(token)
+
+        assert response.status_code == 200
+        assert store.read_refusals("r0") == []
+
+    def test_an_uncaptured_request_is_still_refused_and_records_nothing(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        # A request outside a captured rollout has no rollout to record against.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=self._engine_overflow_error())
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 400
+        assert store.read_refusals("r0") == []
+
     def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
         context = CaptureContext(

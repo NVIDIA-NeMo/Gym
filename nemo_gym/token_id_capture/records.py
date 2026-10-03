@@ -113,6 +113,29 @@ def compute_digest(token_ids: list[int]) -> str:
     return hashlib.sha256(_DIGEST_DOMAIN + encode_token_ids(token_ids)).hexdigest()
 
 
+# OpenAI's error code for a request whose prompt does not fit the model's context window: the
+# ``code`` a model server records when it refuses such a call, and the value a consumer compares
+# a refusal record against.
+CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded"
+
+
+class RefusalRecord(BaseModel):
+    """One model call the engine refused, so the rollout has no record for it.
+
+    A refusal is not a lost capture: the call never generated, and the client was told why.
+    The rollout still ends there, so the record is what tells a consumer that the trajectory
+    stops short of the harness's own ending. ``code`` is the error code the client received,
+    ``CONTEXT_LENGTH_EXCEEDED`` for a prompt that does not fit the context window.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    model_call_id: str = ""
+    code: str = ""
+    # Seconds since the epoch, stamped when the refusal is recorded.
+    created_at: float = 0.0
+
+
 class TokenEntry(BaseModel):
     """Store one model call's content and token metadata.
 

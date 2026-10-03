@@ -24,6 +24,7 @@ from nemo_gym.token_id_capture import (
     FileLineageStore,
     InMemoryLineageStore,
     ParentResolutionStatus,
+    RefusalRecord,
     TokenCaptureSnapshot,
     assert_prefix_contiguity,
     compute_digest,
@@ -653,9 +654,10 @@ HISTORY_REWRITE = [
 class _FrozenSource:
     """A ``TokenSource`` serving one pre-frozen snapshot."""
 
-    def __init__(self, entries, incomplete=False):
+    def __init__(self, entries, incomplete=False, refusals=()):
         self._entries = tuple(entries)
         self._incomplete = incomplete
+        self._refusals = tuple(refusals)
 
     async def freeze(self, rollout_id):
         return TokenCaptureSnapshot(
@@ -664,6 +666,7 @@ class _FrozenSource:
             incomplete=self._incomplete,
             snapshot_id="frozen-1",
             version=1,
+            refusals=self._refusals,
         )
 
     async def drop(self, rollout_id, *, snapshot_id, version):
@@ -757,6 +760,79 @@ def test_mask_incomplete_when_attributed_from_config_reads_the_capture_block():
         mask_incomplete_when_attributed_from_config({"token_id_capture": {"mask_incomplete_when_attributed": False}})
         is False
     )
+
+
+# --- an engine refusal ends the rollout ----------------------------------------
+
+
+REFUSAL = RefusalRecord(model_call_id="c3", code="context_length_exceeded", created_at=1700000000.0)
+
+
+def test_projection_marks_a_refused_rollout_incomplete():
+    """A refusal ends the rollout short of the harness's own stopping point.
+
+    The Responses schema has no reason for a refused prompt, so the rebuilt response reports the
+    closest one it admits. The refusal's own code travels with the refusal records.
+    """
+    out = prefix_merging([_entry("c1", [1, 2, 3], [10, 11], finish_reason="stop")])
+
+    clean = project_main_chain_response("t0-r0", out, model="m")
+    assert "status" not in clean and "incomplete_details" not in clean
+
+    refused = project_main_chain_response("t0-r0", out, model="m", refused=True)
+    assert refused["status"] == "incomplete"
+    assert refused["incomplete_details"] == {"reason": "max_output_tokens"}
+
+
+def test_a_refusal_reaches_the_build_metrics_and_the_rebuilt_response():
+    source = _FrozenSource([_entry("c1", [1, 2], [3, 4])], refusals=[REFUSAL])
+
+    built = asyncio.run(trajectories_from_source("t0-r0", source))
+
+    assert built["metrics"]["refusals"] == [
+        {"model_call_id": "c3", "code": "context_length_exceeded", "created_at": 1700000000.0}
+    ]
+    assert built["rebuilt_response"]["status"] == "incomplete"
+    assert built["rebuilt_response"]["incomplete_details"] == {"reason": "max_output_tokens"}
+
+
+def test_a_build_with_no_refusal_carries_no_refusal_metric():
+    built = asyncio.run(trajectories_from_source("t0-r0", _FrozenSource([_entry("c1", [1, 2], [3, 4])])))
+
+    assert "refusals" not in built["metrics"]
+    assert "status" not in built["rebuilt_response"]
+
+
+def test_a_masked_build_still_reports_its_refusals():
+    """A masked rollout needs the reason it ended just as much as a trainable one does."""
+    source = _FrozenSource(HISTORY_REWRITE, refusals=[REFUSAL])
+
+    built = asyncio.run(trajectories_from_source("t0-r0", source))
+
+    assert built["mask_sample"] is True
+    assert [record["code"] for record in built["metrics"]["refusals"]] == ["context_length_exceeded"]
+
+
+def test_a_failed_build_still_reports_its_refusals():
+    """Nothing was captured, so the refusal is the only account of what happened."""
+    source = _FrozenSource([], refusals=[REFUSAL])
+
+    built = asyncio.run(trajectories_from_source("t0-r0", source))
+
+    assert built["mask_sample"] is True
+    assert built["rebuilt_response"] is None
+    assert [record["code"] for record in built["metrics"]["refusals"]] == ["context_length_exceeded"]
+
+
+def test_the_local_store_path_reports_its_refusals(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    store.append(_entry("c1", [1, 2], [3, 4]))
+    asyncio.run(store.mark_refused("t0-r0", "c2", "context_length_exceeded"))
+
+    built = trajectories_for_rollout("t0-r0", [tmp_path])
+
+    assert [record["model_call_id"] for record in built["metrics"]["refusals"]] == ["c2"]
+    assert built["rebuilt_response"]["status"] == "incomplete"
 
 
 def test_the_builder_runs_once_per_rollout(tmp_path, monkeypatch):

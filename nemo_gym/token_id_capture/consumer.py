@@ -37,7 +37,7 @@ from nemo_gym.token_id_capture.builder import (
     project_main_chain_response,
     run_builder,
 )
-from nemo_gym.token_id_capture.protocols import TokenSource
+from nemo_gym.token_id_capture.protocols import TokenCaptureSnapshot, TokenSource
 from nemo_gym.token_id_capture.records import TokenEntry
 from nemo_gym.token_id_capture.store import TokenCaptureStore
 from nemo_gym.token_id_capture.terminal import TerminalAttribution, resolve_terminal
@@ -99,6 +99,7 @@ def _assemble(
     *,
     verified_response: dict | None = None,
     explicit_terminal_call_id: str | None = None,
+    refused: bool = False,
     declared_response_id: str | None = None,
 ) -> dict:
     # Attribute the verified terminal before building.
@@ -139,7 +140,7 @@ def _assemble(
     try:
         for chain in out.chains:
             chain.validate()
-        response = project_main_chain_response(rollout_id, out, model=model)
+        response = project_main_chain_response(rollout_id, out, model=model, refused=refused)
         assert_prefix_contiguity(response)
     except (AssertionError, ValueError, KeyError, IndexError, TypeError) as error:
         logger.warning(
@@ -223,6 +224,18 @@ def _incomplete_masks(built: dict, *, always: bool) -> bool:
     return attribution.get("chain") != "delivered"
 
 
+def _copy_refusals(built: dict, snapshot: TokenCaptureSnapshot) -> None:
+    """Put the snapshot's refusal records on the build's metrics.
+
+    A refused call is the rollout's ending; see ``RefusalRecord``. The records travel on every
+    build, masked or not, because a masked rollout still needs the reason it ended in aggregate
+    reporting. The key is absent when no call was refused.
+    """
+    if not snapshot.refusals:
+        return
+    built.setdefault("metrics", {})["refusals"] = [record.model_dump(mode="json") for record in snapshot.refusals]
+
+
 def mask_incomplete_when_attributed_from_config(global_config_dict) -> bool:
     """Return the ``token_id_capture.mask_incomplete_when_attributed`` setting.
 
@@ -252,6 +265,7 @@ def trajectories_for_rollout(
     ``mask_incomplete_when_attributed`` set to ``False`` it masks only when
     terminal attribution did not deliver its chain, because a delivered chain
     places the uncaptured call off the scored path.
+    A refused call is reported through ``metrics["refusals"]``; see ``_copy_refusals``.
     """
     for directory in token_capture_dirs:
         store = TokenCaptureStore(directory)
@@ -270,7 +284,9 @@ def trajectories_for_rollout(
                 model,
                 verified_response=verified_response,
                 explicit_terminal_call_id=explicit_terminal_call_id,
+                refused=bool(snapshot.refusals),
             )
+        _copy_refusals(built, snapshot)
         if snapshot.incomplete:
             built.setdefault("metrics", {})["capture_incomplete"] = True
             if _incomplete_masks(built, always=mask_incomplete_when_attributed):
@@ -304,6 +320,7 @@ async def trajectories_from_source(
     ``mask_incomplete_when_attributed`` set to ``False`` it masks only when
     terminal attribution did not deliver its chain, because a delivered chain
     places the uncaptured call off the scored path.
+    A refused call is reported through ``metrics["refusals"]``; see ``_copy_refusals``.
     """
     try:
         snapshot = await source.freeze(rollout_id)
@@ -314,6 +331,7 @@ async def trajectories_from_source(
         built = _failed_build(rollout_id, builder, "capture contains no token records")
     else:
         entries = list(snapshot.entries)
+        refused = bool(snapshot.refusals)
         built = await asyncio.to_thread(
             lambda: _assemble(
                 rollout_id,
@@ -322,9 +340,11 @@ async def trajectories_from_source(
                 model,
                 verified_response=verified_response,
                 explicit_terminal_call_id=explicit_terminal_call_id,
+                refused=refused,
                 declared_response_id=declared_response_id,
             )
         )
+    _copy_refusals(built, snapshot)
     if snapshot.incomplete:
         built.setdefault("metrics", {})["capture_incomplete"] = True
         if _incomplete_masks(built, always=mask_incomplete_when_attributed):

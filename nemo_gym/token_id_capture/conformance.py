@@ -125,6 +125,7 @@ async def run_conformance(
         ("idempotent_reput", lambda r: _check_idempotent_reput(sink(), source(), r)),
         ("conflicting_reput", lambda r: _check_conflicting_reput(sink(), source(), r)),
         ("mark_incomplete_durability", lambda r: _check_mark_incomplete(sink(), source, r)),
+        ("mark_refused_durability", lambda r: _check_mark_refused(sink(), source, r)),
         ("freeze_idempotency", lambda r: _check_freeze_idempotency(sink(), source, r)),
         ("post_freeze_write_safety", lambda r: _check_post_freeze_write(sink(), source(), r)),
         ("conditional_retirement", lambda r: _check_conditional_retirement(sink(), source(), r)),
@@ -214,6 +215,28 @@ async def _check_mark_incomplete(sink: TokenSink, source_factory: Callable[[], T
     _require(after.version != before.version, name, "mark_incomplete did not change the observable version")
     retired = await source_factory().drop(rollout_id, snapshot_id=before.snapshot_id, version=before.version)
     _require(not retired, name, "a retirement staled by mark_incomplete succeeded")
+
+
+async def _check_mark_refused(sink: TokenSink, source_factory: Callable[[], TokenSource], rollout_id: str) -> None:
+    name = "mark_refused_durability"
+    entry = _make_entry(rollout_id, "call-1", prompt=[11, 12], generation=[13, 14], request_items=_REQUEST, text="a")
+    await sink.put(entry)
+    before = await source_factory().freeze(rollout_id)
+    _require(before.refusals == (), name, "a rollout with no refusal froze with refusal records")
+    # After freeze: the record must still land and must move the version.
+    await sink.mark_refused(rollout_id, "call-2", "context_length_exceeded")
+    after = await source_factory().freeze(rollout_id)
+    _require(len(after.refusals) == 1, name, f"a fresh source instance sees {len(after.refusals)} refusals, not 1")
+    _require(
+        after.refusals[0].model_call_id == "call-2" and after.refusals[0].code == "context_length_exceeded",
+        name,
+        "the refusal record lost its model call id or its code",
+    )
+    _require(after.refusals[0].created_at > 0, name, "the refusal record carries no timestamp")
+    _require(not after.incomplete, name, "a refusal marked the rollout incomplete")
+    _require(after.version != before.version, name, "mark_refused did not change the observable version")
+    retired = await source_factory().drop(rollout_id, snapshot_id=before.snapshot_id, version=before.version)
+    _require(not retired, name, "a retirement staled by mark_refused succeeded")
 
 
 async def _check_freeze_idempotency(

@@ -9,12 +9,14 @@ These tests verify Gym's file store and an in-memory backend.
 """
 
 import asyncio
+import time
 
 import pytest
 
 from nemo_gym.token_id_capture import (
     FileLineageStore,
     InMemoryLineageStore,
+    RefusalRecord,
     TokenCaptureSnapshot,
     TokenCaptureStore,
     TokenEntry,
@@ -41,6 +43,7 @@ class _MemoryBackend:
     def __init__(self):
         self.entries: dict[str, dict[str, TokenEntry]] = {}
         self.incomplete: set[str] = set()
+        self.refusals: dict[str, list[RefusalRecord]] = {}
         self.frozen: dict[str, tuple[str, int]] = {}
         self.versions: dict[str, int] = {}
         self.lineage = InMemoryLineageStore()
@@ -71,6 +74,11 @@ class _MemorySink:
         self.backend.incomplete.add(rollout_id)
         self.backend.versions[rollout_id] = self.backend.versions.get(rollout_id, 0) + 1
 
+    async def mark_refused(self, rollout_id: str, model_call_id: str = "", code: str = "") -> None:
+        record = RefusalRecord(model_call_id=model_call_id, code=code, created_at=time.time())
+        self.backend.refusals.setdefault(rollout_id, []).append(record)
+        self.backend.versions[rollout_id] = self.backend.versions.get(rollout_id, 0) + 1
+
     async def close(self) -> None:
         pass
 
@@ -91,6 +99,7 @@ class _MemorySource:
             incomplete=rollout_id in backend.incomplete,
             snapshot_id=snapshot_id,
             version=backend.versions[rollout_id],
+            refusals=tuple(backend.refusals.get(rollout_id, ())),
         )
 
     async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:

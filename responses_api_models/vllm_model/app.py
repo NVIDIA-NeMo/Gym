@@ -52,7 +52,9 @@ from nemo_gym.responses_converter import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
+    CONTEXT_LENGTH_EXCEEDED,
     current_capture_context,
+    record_refusal,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.external_capture import (
@@ -990,6 +992,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
             if is_out_of_context_length:
                 if self.config.propagate_context_overflow_errors:
+                    # Record the refusal before it leaves the server: the refused call
+                    # generated nothing, so it leaves no capture record, and this is what
+                    # tells a consumer the rollout ended here rather than at the harness's
+                    # own stopping point.
+                    await record_refusal(CONTEXT_LENGTH_EXCEEDED)
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
                     raise
                 res = self._create_empty_chat_completion()
@@ -1325,6 +1332,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
             if is_out_of_context_length:
                 if self.config.propagate_context_overflow_errors:
+                    # Record the refusal before it leaves the server: the refused call
+                    # generated nothing, so it leaves no capture record, and this is what
+                    # tells a consumer the rollout ended here rather than at the harness's
+                    # own stopping point.
+                    await record_refusal(CONTEXT_LENGTH_EXCEEDED)
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
                     raise
                 res = self._create_empty_chat_completion()

@@ -44,7 +44,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, RefusalRecord, TokenEntry
 from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
 
 
@@ -63,13 +63,18 @@ class TokenCaptureFrozenError(RuntimeError):
 
 @dataclass(frozen=True)
 class TokenCaptureSnapshot:
-    """An immutable view of one rollout's frozen capture records."""
+    """An immutable view of one rollout's frozen capture records.
+
+    ``refusals`` holds the calls the engine refused, in the order they were recorded. An empty
+    tuple means no call of this rollout was refused.
+    """
 
     rollout_id: str
     entries: tuple[TokenEntry, ...]
     incomplete: bool
     snapshot_id: str
     version: int
+    refusals: tuple[RefusalRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -217,6 +222,23 @@ class TokenSink(Protocol):
         It must change the observable version; that is what invalidates a stale retirement.
         Make it more available than ``put``, for example through a local spill.
         ``put`` and ``mark_incomplete`` failing together is the silent-loss case.
+        """
+        ...
+
+    async def mark_refused(self, rollout_id: str, model_call_id: str = "", code: str = "") -> None:
+        """Durably record that the engine refused a call of this rollout.
+
+        See ``RefusalRecord`` for what a refusal means for the trajectory; this marker is the
+        only signal that the rollout ended there. ``code`` is the error code the client
+        received.
+
+        Repeating the same refusal appends another record; a consumer reads the list, not a
+        flag. Like ``mark_incomplete`` it must succeed after freeze and change the observable
+        version, so a retirement staled by a late refusal fails.
+
+        The refusal itself is already relayed to the client, so this method must not fail the
+        model call. A sink that does not implement it leaves consumers unable to tell a refused
+        ending from a harness that simply stopped.
         """
         ...
 

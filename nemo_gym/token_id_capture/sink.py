@@ -525,6 +525,43 @@ async def _capture_missing(context: CaptureContext, reason: str) -> None:
     await _mark_incomplete(context)
 
 
+async def record_refusal(code: str) -> None:
+    """Durably record that the engine refused the in-flight captured model call.
+
+    Call this from a model server that is relaying an engine refusal to its client, before the
+    error leaves the server; see ``RefusalRecord`` for what the record means for the trajectory.
+
+    Return without work when the request carries no capture context or its context stages records
+    elsewhere. This never raises: the client is already being told what happened.
+    """
+    context = _CAPTURE_CONTEXT.get()
+    if context is None or context.token_sink is None:
+        return
+    # Worker custody stages records through the external response hook; the
+    # local sink must not receive markers for calls it does not own.
+    if context.external_staging:
+        return
+    mark = getattr(context.token_sink, "mark_refused", None)
+    if mark is None:
+        logger.error(
+            "Sink %s does not implement mark_refused. The engine's refusal of model call %s of "
+            "rollout %s is not recorded, so the rebuilt response cannot report it.",
+            type(context.token_sink).__name__,
+            context.model_call_id,
+            context.rollout_id,
+        )
+        return
+    try:
+        await mark(context.rollout_id, context.model_call_id, code)
+    except Exception:
+        logger.warning(
+            "Could not record the engine's refusal of model call %s of rollout %s.",
+            context.model_call_id,
+            context.rollout_id,
+            exc_info=True,
+        )
+
+
 async def _mark_incomplete(context: CaptureContext) -> None:
     """Mark the rollout, or say loudly why it could not be marked.
 

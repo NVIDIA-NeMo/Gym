@@ -71,6 +71,7 @@ from nemo_gym.token_id_capture import (
     current_capture_context,
     extract_token_fields,
     install_token_sink,
+    record_refusal,
     register_call_intent,
     reset_token_sink,
     resolve_parent,
@@ -2262,6 +2263,129 @@ def test_a_rollout_that_lost_a_call_is_distinguishable_from_a_complete_one(tmp_p
     assert store.is_incomplete("r0")
 
 
+def test_a_refused_call_is_recorded_and_read_back_from_the_frozen_snapshot(tmp_path):
+    """A refused call generates nothing, so only this record says the rollout ended there.
+
+    The refusal is durable, survives the freeze, and reaches the consumer on the snapshot.
+    """
+    store = TokenCaptureStore(tmp_path)
+    asyncio.run(
+        store.put(
+            TokenEntry(
+                rollout_id="r0",
+                model_call_id="c1",
+                prompt_token_ids=[1, 2],
+                generation_token_ids=[3],
+                generation_log_probs=[-0.1],
+            )
+        )
+    )
+    assert store.read_refusals("r0") == []
+
+    asyncio.run(store.mark_refused("r0", "c2", "context_length_exceeded"))
+
+    (record,) = store.read_refusals("r0")
+    assert (record.model_call_id, record.code) == ("c2", "context_length_exceeded")
+    assert record.created_at > 0
+    assert store.refusals_path_for("r0").name == "r0.tokens.refused.jsonl"
+
+    snapshot = store.freeze_now("r0")
+    assert [r.model_call_id for r in snapshot.refusals] == ["c2"]
+    # Nothing was lost: the call never ran, so the rollout is not incomplete.
+    assert snapshot.incomplete is False
+
+
+def test_every_refusal_of_a_rollout_is_kept(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    asyncio.run(store.mark_refused("r0", "c1", "context_length_exceeded"))
+    asyncio.run(store.mark_refused("r0", "c2", "context_length_exceeded"))
+
+    assert [r.model_call_id for r in store.freeze_now("r0").refusals] == ["c1", "c2"]
+
+
+def test_a_refusal_after_the_freeze_stales_the_retirement(tmp_path):
+    """The consumer read a snapshot without the refusal, so its retirement must fail."""
+    store = TokenCaptureStore(tmp_path)
+    asyncio.run(
+        store.put(
+            TokenEntry(
+                rollout_id="r0",
+                model_call_id="c1",
+                prompt_token_ids=[1],
+                generation_token_ids=[2],
+                generation_log_probs=[-0.1],
+            )
+        )
+    )
+    consumed = store.freeze_now("r0")
+
+    asyncio.run(store.mark_refused("r0", "c2", "context_length_exceeded"))
+
+    retired = asyncio.run(store.drop("r0", snapshot_id=consumed.snapshot_id, version=consumed.version))
+    assert retired is False
+    assert store.freeze_now("r0").version != consumed.version
+
+
+def test_retiring_a_rollout_removes_its_refusal_file(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    asyncio.run(
+        store.put(
+            TokenEntry(
+                rollout_id="r0",
+                model_call_id="c1",
+                prompt_token_ids=[1],
+                generation_token_ids=[2],
+                generation_log_probs=[-0.1],
+            )
+        )
+    )
+    asyncio.run(store.mark_refused("r0", "c1", "context_length_exceeded"))
+    snapshot = store.freeze_now("r0")
+
+    assert asyncio.run(store.drop("r0", snapshot_id=snapshot.snapshot_id, version=snapshot.version)) is True
+    assert not store.refusals_path_for("r0").exists()
+
+
+def test_record_refusal_writes_through_the_in_flight_capture_context(tmp_path):
+    """A model server relaying a refusal records it against the call it was serving."""
+    store = TokenCaptureStore(tmp_path)
+    context = CaptureContext(rollout_id="r0", model_call_id="mc-9", token_sink=store)
+    token = set_token_sink(context)
+    try:
+        asyncio.run(record_refusal("context_length_exceeded"))
+    finally:
+        reset_token_sink(token)
+
+    (record,) = store.read_refusals("r0")
+    assert (record.model_call_id, record.code) == ("mc-9", "context_length_exceeded")
+
+
+def test_record_refusal_without_a_capture_context_does_nothing():
+    asyncio.run(record_refusal("context_length_exceeded"))
+
+
+def test_record_refusal_reports_a_sink_that_cannot_record_one(caplog):
+    class _NoRefusalSink:
+        async def put(self, entry) -> None:
+            pass
+
+        async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    context = CaptureContext(rollout_id="r0", model_call_id="mc-9", token_sink=_NoRefusalSink())
+    token = set_token_sink(context)
+    try:
+        with caplog.at_level(logging.ERROR, logger="nemo_gym.token_id_capture.sink"):
+            asyncio.run(record_refusal("context_length_exceeded"))
+    finally:
+        reset_token_sink(token)
+
+    assert any("does not implement mark_refused" in r.getMessage() for r in caplog.records)
+
+
 # --- where records go, and surviving multiple server workers -------------------
 
 
@@ -2274,6 +2398,9 @@ class _ConfiguredSink:
         type(self).entries.append(entry)
 
     async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+        pass
+
+    async def mark_refused(self, rollout_id: str, model_call_id: str = "", code: str = "") -> None:
         pass
 
     async def close(self) -> None:
@@ -2320,6 +2447,9 @@ class _KwargSink:
         pass
 
     async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+        pass
+
+    async def mark_refused(self, rollout_id: str, model_call_id: str = "", code: str = "") -> None:
         pass
 
     async def close(self) -> None:

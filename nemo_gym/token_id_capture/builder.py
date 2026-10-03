@@ -608,7 +608,7 @@ def project_chain_to_output_items(chain: Chain) -> list[dict]:
     return items
 
 
-def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = "") -> dict:
+def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = "", *, refused: bool = False) -> dict:
     """Rebuild the main chain as a Responses object whose output items are contiguous.
 
     The result is a Gym-native Responses payload.
@@ -616,9 +616,13 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
     Token fields describe one unbroken sequence across the rollout.
     The sequence combines items from multiple model calls.
 
-    When the delivered chain's terminal call stopped for ``length``, the payload carries
-    ``status: "incomplete"`` with ``incomplete_details.reason: "max_output_tokens"``, the
-    verdict the Responses converter gives a chat completion cut at the output-token budget.
+    Two endings make the payload incomplete, and both carry ``status: "incomplete"`` with
+    ``incomplete_details.reason: "max_output_tokens"``: the delivered chain's terminal call
+    stopped for ``length`` (the verdict the Responses converter gives a chat completion cut at
+    the output-token budget), and ``refused`` says the engine refused a later call of this
+    rollout. ``max_output_tokens`` is the closest reason the Responses schema admits for a
+    refusal, whose own code (``context_length_exceeded``, for example) is kept with the refusal
+    records rather than on the response.
     """
     if not out.chains:
         raise ValueError("capture produced no safe trainable chain")
@@ -640,9 +644,10 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
         "output": output,
         "usage": {"input_tokens": n_in, "output_tokens": n_out},
     }
-    # Only the terminal call decides: an earlier ``length`` stop did not end the delivered
-    # chain, because a later call extended it. Any other finish reason leaves ``status`` unset.
-    if mains[0].links[-1].entry.finish_reason == "length":
+    # Only the terminal call decides its finish reason: an earlier ``length`` stop did not end
+    # the delivered chain, because a later call extended it. Any other finish reason leaves
+    # ``status`` unset unless the rollout was refused.
+    if refused or mains[0].links[-1].entry.finish_reason == "length":
         response["status"] = "incomplete"
         response["incomplete_details"] = {"reason": "max_output_tokens"}
     return response

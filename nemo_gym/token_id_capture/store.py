@@ -16,6 +16,8 @@
 """Store training ``TokenEntry`` records by rollout.
 
 Each rollout uses one ``<rollout_id>.tokens.jsonl`` file.
+A rollout whose calls the engine refused also has a ``<rollout_id>.tokens.refused.jsonl``
+file, one JSON ``RefusalRecord`` per line.
 Evaluation records use a separate file.
 Every entry line is ``fsync``ed before ``put`` returns — that is the durability
 guarantee. The state index is written atomically but fsynced only on lifecycle
@@ -41,7 +43,7 @@ from uuid import uuid4
 import orjson
 
 from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenCaptureSnapshot
-from nemo_gym.token_id_capture.records import TokenEntry
+from nemo_gym.token_id_capture.records import RefusalRecord, TokenEntry
 
 
 logger = logging.getLogger(__name__)
@@ -75,6 +77,10 @@ class TokenCaptureStore:
     def intents_path_for(self, rollout_id: str) -> Path:
         """Return the durable per-call intent path."""
         return self._root / f"{validate_rollout_id(rollout_id)}.tokens.intents"
+
+    def refusals_path_for(self, rollout_id: str) -> Path:
+        """Return the path holding one JSON ``RefusalRecord`` per line for the calls the engine refused."""
+        return self._root / f"{validate_rollout_id(rollout_id)}.tokens.refused.jsonl"
 
     def state_path_for(self, rollout_id: str) -> Path:
         return self._root / f"{validate_rollout_id(rollout_id)}.tokens.state.json"
@@ -229,6 +235,46 @@ class TokenCaptureStore:
         with self._locked(rollout_id, shared=True):
             return bool(self._read_state(rollout_id).get("incomplete", False))
 
+    def _mark_refused(self, rollout_id: str, model_call_id: str, code: str) -> None:
+        """Append one refusal record and bump the version.
+
+        The record is appended after freeze as well, so a refusal that lands late stales the
+        retirement of the snapshot a consumer already read. The rollout is not marked
+        incomplete: nothing was lost, the call simply never generated.
+        """
+        record = RefusalRecord(model_call_id=model_call_id, code=code, created_at=time.time())
+        with self._locked(rollout_id):
+            state = self._read_state(rollout_id)
+            if state.get("retired", False):
+                raise RuntimeError(f"Token capture for rollout {rollout_id} is retired")
+            state["version"] = int(state.get("version", 0)) + 1
+            self._write_state(rollout_id, state)
+            with self.refusals_path_for(rollout_id).open("ab") as handle:
+                handle.write(orjson.dumps(record.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS) + b"\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._fsync_root()
+
+    async def mark_refused(self, rollout_id: str, model_call_id: str = "", code: str = "") -> None:
+        """Durably record that the engine refused a call of this rollout."""
+        await asyncio.to_thread(self._mark_refused, rollout_id, model_call_id, code)
+
+    def read_refusals(self, rollout_id: str) -> list[RefusalRecord]:
+        with self._locked(rollout_id, shared=True):
+            return self._read_refusals_unlocked(rollout_id)
+
+    def _read_refusals_unlocked(self, rollout_id: str) -> list[RefusalRecord]:
+        path = self.refusals_path_for(rollout_id)
+        if not path.exists():
+            return []
+        records: list[RefusalRecord] = []
+        with path.open("rb") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if stripped:
+                    records.append(RefusalRecord.model_validate(orjson.loads(stripped)))
+        return records
+
     def append(self, entry: TokenEntry) -> None:
         """Idempotently append one entry and fsync."""
         canonical = orjson.dumps(entry.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS)
@@ -335,6 +381,7 @@ class TokenCaptureStore:
                 incomplete=incomplete,
                 snapshot_id=str(state["snapshot_id"]),
                 version=int(state["version"]),
+                refusals=tuple(self._read_refusals_unlocked(rollout_id)),
             )
 
     async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
@@ -353,6 +400,7 @@ class TokenCaptureStore:
             self.path_for(rollout_id).unlink(missing_ok=True)
             self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
             self.intents_path_for(rollout_id).unlink(missing_ok=True)
+            self.refusals_path_for(rollout_id).unlink(missing_ok=True)
             # Keep a frozen tombstone until explicit pre-dispatch cleanup.
             # A late writer from this attempt must still observe the freeze.
             state["indexed_size"] = 0
@@ -376,6 +424,7 @@ class TokenCaptureStore:
             self.path_for(rollout_id).unlink(missing_ok=True)
             self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
             self.intents_path_for(rollout_id).unlink(missing_ok=True)
+            self.refusals_path_for(rollout_id).unlink(missing_ok=True)
             self.state_path_for(rollout_id).unlink(missing_ok=True)
             self._fsync_root()
 
@@ -384,7 +433,7 @@ class TokenCaptureStore:
 
         Callers choose the retention policy.
         ``drop`` already removed entries and JSONL payloads.
-        This removes state, locks, intents, and incomplete markers.
+        This removes state, locks, intents, refusals, and incomplete markers.
         """
         cutoff = time.time() - older_than_seconds
         removed = 0
@@ -404,6 +453,7 @@ class TokenCaptureStore:
                     continue
                 state_path.unlink(missing_ok=True)
                 self.intents_path_for(rollout_id).unlink(missing_ok=True)
+                self.refusals_path_for(rollout_id).unlink(missing_ok=True)
                 self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
                 self.lock_path_for(rollout_id).unlink(missing_ok=True)
                 removed += 1
@@ -418,7 +468,7 @@ class TokenCaptureStore:
         and the post-delivery retire leaves an unretired capture behind, the
         token JSONL and its side files, which ``sweep_retired`` deliberately
         skips. A capture counts as abandoned only when every file of it (state,
-        token records, intents, incomplete marker) is older than the cutoff, so
+        token records, intents, refusals, incomplete marker) is older than the cutoff, so
         an in-flight rollout, whose records are still being appended, is never
         touched; callers pass a cutoff above the longest possible session.
         Unlike ``sweep_retired`` this removes the token records too, because no
@@ -440,6 +490,7 @@ class TokenCaptureStore:
                     state_path,
                     self.path_for(rollout_id),
                     self.intents_path_for(rollout_id),
+                    self.refusals_path_for(rollout_id),
                     self.incomplete_path_for(rollout_id),
                 ):
                     try:
@@ -451,6 +502,7 @@ class TokenCaptureStore:
                 self.path_for(rollout_id).unlink(missing_ok=True)
                 state_path.unlink(missing_ok=True)
                 self.intents_path_for(rollout_id).unlink(missing_ok=True)
+                self.refusals_path_for(rollout_id).unlink(missing_ok=True)
                 self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
                 self.lock_path_for(rollout_id).unlink(missing_ok=True)
                 removed += 1
