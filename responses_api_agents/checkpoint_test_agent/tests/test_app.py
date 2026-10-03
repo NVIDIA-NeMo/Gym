@@ -154,13 +154,37 @@ def test_workplace_prefix_mode_rewrites_only_later_model_calls(
     assert json.loads(second.metadata["extra_body"]) == {"min_tokens": 512}
 
 
-def test_workplace_prefix_mode_rejects_invalid_min_tokens(
+def test_workplace_prefix_mode_zero_min_tokens_keeps_natural_length(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(WORKPLACE_PREFIX_AFTER_MUTATION_ENV, "1")
-    monkeypatch.setenv(PREFIX_MIN_TOKENS_ENV, "zero")
+    monkeypatch.setenv(PREFIX_MIN_TOKENS_ENV, "0")
+    request = NeMoGymResponseCreateParamsNonStreaming(
+        input="create the event, then list numbers",
+        tool_choice="auto",
+        parallel_tool_calls=True,
+        max_output_tokens=2048,
+        metadata={"existing": "value"},
+    )
 
-    with pytest.raises(ValueError, match="must be an integer"):
+    second = _agent()._prepare_model_request_for_turn(request, turn_index=2)
+
+    assert second.tool_choice == "none"
+    assert second.parallel_tool_calls is False
+    assert second.max_output_tokens == 2048
+    assert second.metadata == {"existing": "value"}
+
+
+@pytest.mark.parametrize(("value", "message"), [("zero", "must be an integer"), ("-1", "must not be negative")])
+def test_workplace_prefix_mode_rejects_invalid_min_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+    message: str,
+) -> None:
+    monkeypatch.setenv(WORKPLACE_PREFIX_AFTER_MUTATION_ENV, "1")
+    monkeypatch.setenv(PREFIX_MIN_TOKENS_ENV, value)
+
+    with pytest.raises(ValueError, match=message):
         _agent()._prepare_model_request_for_turn(
             NeMoGymResponseCreateParamsNonStreaming(input="test"),
             turn_index=2,
