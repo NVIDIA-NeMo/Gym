@@ -41,11 +41,10 @@ from openai.types.responses.response_create_params import ToolParam
 from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseInputItem
+from nemo_gym.token_id_capture.records import NAMESPACE_TOOL_DELIMITER
 
 
 LOG = logging.getLogger(__name__)
-
-NAMESPACE_TOOL_DELIMITER = "__"
 
 _PARAM_FIELDS = frozenset(NeMoGymResponseCreateParamsNonStreaming.model_fields)
 _TOOL_ADAPTER = TypeAdapter(ToolParam)
