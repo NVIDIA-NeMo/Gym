@@ -14,12 +14,13 @@
 # limitations under the License.
 import json
 import logging
+import re
 from collections.abc import Mapping
 from time import perf_counter, time
-from typing import Any, List
+from typing import Any, List, Optional
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, ValidationError
+from pydantic import ConfigDict, Field, ValidationError
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -52,17 +53,49 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.simple_agent.item_echo import EchoFormat, ItemEcho
 
 
 LOG = logging.getLogger(__name__)
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+# Tool calls are dispatched as POST /{name} on the resources server, so a name must not be able to
+# reach another route (path segments) or the server's own lifecycle endpoints.
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_RESERVED_TOOL_NAMES = frozenset({"seed_session", "verify", "aggregate_metrics"})
+# Global config keys that override echo_items / echo_file for every simple_agent in a run.
+_ECHO_ITEMS_KEY = "simple_agent_echo_items"
+_ECHO_FILE_KEY = "simple_agent_echo_file"
+
+
+def _tool_call_error(name: str, declared_function_tools: set[str]) -> str | None:
+    """Why a tool call must not be dispatched, or None. Undeclared names are allowed only when no
+    function tools are declared, preserving datasets that describe tools outside `tools`."""
+    if (
+        not _TOOL_NAME_RE.fullmatch(name)
+        or name in _RESERVED_TOOL_NAMES
+        or (declared_function_tools and name not in declared_function_tools)
+    ):
+        return f"Unknown tool: {name!r}"
+    return None
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
+    echo_items: EchoFormat = Field(
+        default="off",
+        description=(
+            "Echo each episode's items (input, model output, tool output) as they happen: `pretty` for "
+            f"readable blocks, `json` for the raw items. The global `{_ECHO_ITEMS_KEY}` overrides it."
+        ),
+    )
+    echo_file: Optional[str] = Field(
+        default=None,
+        description=f"Append the echo to this file instead of stdout. The global `{_ECHO_FILE_KEY}` overrides it.",
+    )
+    echo_max_chars: int = Field(default=2000, description="Truncate each item's text in `pretty` (0 = no limit).")
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -80,6 +113,18 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 class SimpleAgent(SimpleResponsesAPIAgent):
     ray_enabled = False
     config: SimpleAgentConfig
+
+    def _item_echo(self) -> Optional[ItemEcho]:
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        overrides = global_config if isinstance(global_config, Mapping) else {}
+        fmt = overrides.get(_ECHO_ITEMS_KEY) or self.config.echo_items
+        if fmt == "off":
+            return None
+        if fmt not in ("pretty", "json"):
+            LOG.warning("Ignoring unknown %s=%r (expected off, pretty, or json)", _ECHO_ITEMS_KEY, fmt)
+            return None
+        path = overrides.get(_ECHO_FILE_KEY) or self.config.echo_file
+        return ItemEcho(fmt, path=path, max_chars=self.config.echo_max_chars)
 
     async def _create_episode(
         self,
@@ -100,6 +145,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
+        echo = self._item_echo()
+        if echo is not None:
+            echo.items(body.input, step=0)
+        declared_function_tools = {
+            tool.get("name")
+            for tool in body.tools or []
+            if isinstance(tool, Mapping) and tool.get("type") == "function"
+        }
 
         new_outputs = []
         usage = None
@@ -132,6 +185,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             output = model_response.output
             new_outputs.extend(output)
+            if echo is not None:
+                echo.items(output, step=step)
             if collect_trajectory:
                 turn_model_calls = []
                 if model_response.id:
@@ -204,12 +259,21 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 if collect_trajectory:
                     started_at = time()
                     started_monotonic = perf_counter()
-                try:
-                    parsed_arguments = json.loads(output_function_call.arguments)
-                except (json.JSONDecodeError, TypeError) as e:
-                    tool_output = json.dumps({"error": f"Invalid tool call arguments: {e!r}"})
-                    if collect_trajectory:
+                rejection = _tool_call_error(output_function_call.name, declared_function_tools)
+                error_type = "unknown_tool" if rejection else None
+                if rejection is None:
+                    try:
+                        parsed_arguments = json.loads(output_function_call.arguments)
+                    except (json.JSONDecodeError, TypeError) as e:
+                        rejection = f"Invalid tool call arguments: {e!r}"
                         error_type = type(e).__name__
+                    else:
+                        if not isinstance(parsed_arguments, dict):
+                            rejection = "Invalid tool call arguments: expected a JSON object"
+                            error_type = "invalid_arguments"
+                if rejection is not None:
+                    tool_output = json.dumps({"error": rejection})
+                    if collect_trajectory:
                         tool_status = "failed"
                 else:
                     # Resource-server errors are valid model-visible tool outputs.
@@ -249,6 +313,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         output=tool_output,
                     )
                 )
+                if echo is not None:
+                    echo.items(new_outputs[-1:], step=step)
 
             if collect_trajectory and all_fn_calls:
                 turns[-1].step_count = len(tool_records)
@@ -258,6 +324,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 invocation_status = "incomplete"
                 break
 
+        if echo is not None:
+            echo.done(status=invocation_status, steps=step)
         model_response.output = new_outputs
         model_response.usage = usage
         trajectory = None
