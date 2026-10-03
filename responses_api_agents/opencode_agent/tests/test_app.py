@@ -78,6 +78,13 @@ def _make_agent(**kwargs) -> OpenCodeAgent:
     return agent
 
 
+def _create_session_tables(con) -> None:
+    """The subset of OpenCode's v1.17.11 sqlite schema the session adapter reads."""
+    con.execute("create table session (id text, parent_id text, time_created integer)")
+    con.execute("create table message (id text, session_id text, data text, time_created integer)")
+    con.execute("create table part (id text, message_id text, session_id text, data text, time_created integer)")
+
+
 def _session_db(tmp_path, messages, sessions=None) -> Path:
     """Build the subset of OpenCode's v1.17.11 artifact used by the adapter."""
     import sqlite3
@@ -85,9 +92,7 @@ def _session_db(tmp_path, messages, sessions=None) -> Path:
     db = tmp_path / "opencode.db"
     con = sqlite3.connect(db)
     sessions = sessions or [("root", None)]
-    con.execute("create table session (id text, parent_id text, time_created integer)")
-    con.execute("create table message (id text, session_id text, data text, time_created integer)")
-    con.execute("create table part (id text, message_id text, session_id text, data text, time_created integer)")
+    _create_session_tables(con)
     for index, (session_id, parent_id) in enumerate(sessions):
         con.execute("insert into session values (?,?,?)", (session_id, parent_id, index))
     t = 0
@@ -411,6 +416,32 @@ class TestParseOpencodeSession:
             "subagent_parent_unavailable",
             "subagent_spawn_ambiguous",
         }
+
+    def test_reads_the_root_session_in_creation_order(self, tmp_path) -> None:
+        """A sub-agent's session (stored with a parent_id) is left out, and parts
+        that share a creation millisecond keep OpenCode's (time, id) order."""
+        import sqlite3
+
+        db = tmp_path / "opencode.db"
+        con = sqlite3.connect(db)
+        _create_session_tables(con)
+        con.execute("insert into session values ('root', null, 1)")
+        con.execute("insert into session values ('child', 'root', 2)")
+        assistant = json.dumps({"role": "assistant"})
+        con.execute("insert into message values ('m-root', 'root', ?, 1)", (assistant,))
+        con.execute("insert into message values ('m-child', 'child', ?, 2)", (assistant,))
+        text = lambda t: json.dumps({"type": "text", "text": t})  # noqa: E731
+        # Two root parts created in the same millisecond, inserted out of id order.
+        con.execute("insert into part values ('p-b', 'm-root', 'root', ?, 5)", (text("second"),))
+        con.execute("insert into part values ('p-a', 'm-root', 'root', ?, 5)", (text("first"),))
+        con.execute("insert into part values ('p-c', 'm-child', 'child', ?, 3)", (text("sub-agent"),))
+        con.commit()
+        con.close()
+
+        items, _ = parse_opencode_session(db, root_session_only=True)
+        assert [item.content[0].text for item in items] == ["first", "second"]
+        everything, _ = parse_opencode_session(db)
+        assert [item.content[0].text for item in everything] == ["sub-agent", "first", "second"]
 
 
 class TestDeepMerge:
