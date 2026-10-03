@@ -42,8 +42,12 @@ Ambiguous matches remain unresolved rather than risking tokens from the wrong ca
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
+import socket
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -740,6 +744,15 @@ class FileLineageStore(IncrementalLineageStore):
         self._ledger_root = Path(root)
         self._ledger_root.mkdir(parents=True, exist_ok=True)
         self._ledger_cache: dict[str, tuple[int, int, list[dict]]] = {}
+        # Identity marker for out-of-process readers (``FileManifestReader``):
+        # a framework that reads this ledger directly, instead of through the
+        # HTTP manifest route, needs proof that it sees the *same* directory
+        # this writer commits into. Best effort: a marker failure must never
+        # fail a serving process.
+        try:
+            write_writer_identity_marker(self._ledger_root)
+        except OSError:
+            pass
 
     def _read_locked(self, rollout_id: str):
         return self._store._locked(rollout_id, shared=True)
@@ -937,3 +950,127 @@ class FileLineageStore(IncrementalLineageStore):
     def _has_rows(self, rollout_id: str) -> bool:
         with self._locked(rollout_id):
             return bool(self._read(rollout_id))
+
+
+WRITER_IDENTITY_DIRNAME = "_writers"
+
+
+class ManifestReadTimeout(TimeoutError):
+    """The manifest read exceeded its monotonic deadline."""
+
+
+class ManifestReadCancelled(RuntimeError):
+    """The caller cancelled the manifest read."""
+
+
+class LedgerRootMismatch(RuntimeError):
+    """The reader does not see the writer's ledger directory."""
+
+
+def _directory_identity(root: Path) -> dict:
+    info = root.stat()
+    return {"hostname": socket.gethostname(), "device": info.st_dev, "inode": info.st_ino}
+
+
+def write_writer_identity_marker(root: str | Path) -> None:
+    """Atomically record the writer's directory identity outside the rollout ledgers."""
+    root = Path(root)
+    markers = root / WRITER_IDENTITY_DIRNAME
+    markers.mkdir(exist_ok=True)
+    temp = markers / f".{os.getpid()}.{threading.get_ident()}.tmp"
+    temp.write_bytes(orjson.dumps(_directory_identity(root)))
+    os.replace(temp, markers / f"{os.getpid()}.json")
+
+
+def verify_ledger_root_visibility(root: str | Path, *, wait_s: float = 0.0) -> None:
+    """Require a writer marker matching this host, device and inode, or fail startup."""
+    root = Path(root)
+    deadline = time.monotonic() + wait_s
+    while True:
+        if root.is_dir():
+            expected = _directory_identity(root)
+            markers = list((root / WRITER_IDENTITY_DIRNAME).glob("*.json"))
+            for path in markers:
+                try:
+                    if orjson.loads(path.read_bytes()) == expected:
+                        return
+                except (OSError, ValueError):
+                    continue
+            if markers:
+                raise LedgerRootMismatch(f"ledger writer and reader see different directories: {root}")
+        if time.monotonic() >= deadline:
+            raise LedgerRootMismatch(f"ledger root {root} is missing or has no writer identity marker")
+        time.sleep(0.2)
+
+
+class FileManifestReader:
+    """Cache-free, synchronous manifest reader for a caller-owned thread pool.
+
+    Snapshot under the writer's shared lock, then parse after releasing it.
+    A missing ledger returns the same empty manifest as the HTTP endpoint.
+    """
+
+    def __init__(self, root: str | Path) -> None:
+        # Deferred to keep store/lineage imports independent.
+        from nemo_gym.token_id_capture.store import TokenCaptureStore
+
+        self._root = Path(root)
+        if not self._root.is_dir():
+            raise LedgerRootMismatch(f"ledger root {self._root} does not exist")
+        self._store = TokenCaptureStore(self._root)
+
+    def read_manifest(
+        self,
+        rollout_id: str,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> dict:
+        """Read committed metadata, honoring cancellation/deadline between blocking steps."""
+        # Deferred to keep store/lineage imports independent.
+        from nemo_gym.token_id_capture.store import validate_rollout_id
+
+        def check() -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ManifestReadCancelled(f"manifest read for {rollout_id} cancelled")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ManifestReadTimeout(f"manifest read for {rollout_id} exceeded its deadline")
+
+        path = self._root / f"{validate_rollout_id(rollout_id)}.lineage.jsonl"
+        check()
+        if not self._root.is_dir():
+            raise LedgerRootMismatch(f"ledger root {self._root} disappeared")
+        data = b""
+        if path.exists():
+            with self._store.lock_path_for(rollout_id).open("a+b") as lock:
+                while True:
+                    check()
+                    try:
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        time.sleep(0.002)
+                try:
+                    data = path.read_bytes()
+                except FileNotFoundError:
+                    pass
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        check()
+        rows = []
+        for line in data.splitlines():
+            if line.strip():
+                try:
+                    row = orjson.loads(line)
+                except ValueError as error:
+                    raise ValueError(f"lineage record for {rollout_id} is malformed JSON") from error
+                if not isinstance(row, dict):
+                    raise ValueError(f"lineage record for {rollout_id} is not an object")
+                rows.append(row)
+        check()
+        try:
+            manifest = _manifest_from_rows(rollout_id, rows)
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"lineage record for {rollout_id} has invalid fields: {error}") from error
+        check()
+        return manifest
