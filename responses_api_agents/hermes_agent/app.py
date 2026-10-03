@@ -54,9 +54,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
+    NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
+    NeMoGymResponseUsage,
     NeMoGymSummary,
 )
 from nemo_gym.responses_converter import ResponsesConverter
@@ -953,8 +956,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
-            # The Environment Server derives usage from shared Model Server capture.
-            usage=None,
+            usage=NeMoGymResponseUsage(
+                input_tokens=0,
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                output_tokens=0,
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                total_tokens=0,
+            ),
         )
 
     async def _create_response(
