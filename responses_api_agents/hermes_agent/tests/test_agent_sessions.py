@@ -261,8 +261,11 @@ def test_provider_failure_is_http_500_and_replays_without_rerunning(agent, state
     agent._upload_json = AsyncMock()
     agent._download_json = AsyncMock(
         side_effect=[
-            {"cleanup_confirmed": True},
-            {"result": {"failed": True, "error": "HTTP 429 Too Many Requests", "messages": []}, "runtime": {}},
+            {"cleanup_confirmed": True, "error": None},
+            {
+                "result": {"failed": True, "error": "HTTP 429 Too Many Requests", "messages": []},
+                "runtime": {"hostname": "sandbox", "pid": 123},
+            },
         ]
     )
     with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
@@ -288,7 +291,7 @@ async def test_close_failure_keeps_session_for_retry(
     agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     if runner_started:
         state.runner_cleanup = RunnerCleanup.UNCONFIRMED
-        agent._download_json = AsyncMock(return_value={"cleanup_confirmed": True})
+        agent._download_json = AsyncMock(return_value={"cleanup_confirmed": True, "error": None})
     state.sandbox.exec.side_effect = [SimpleNamespace(return_code=1), SimpleNamespace(return_code=0)]
     close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
     with pytest.raises(RuntimeError, match="session files"):
@@ -517,7 +520,7 @@ async def test_receipt_download_failure_never_signals_a_reused_pid(agent, state,
         assert await child.stdout.readline() == b"ready\n"
         (directory / "runner.pid").write_text(str(child.pid))
         (directory / "launch.claim").symlink_to("launch")
-        (directory / "cleanup.json").write_text(json.dumps({"cleanup_confirmed": confirmed}))
+        (directory / "cleanup.json").write_text(json.dumps({"cleanup_confirmed": confirmed, "error": None}))
         download = agent._download_json
         attempts = 0
 
@@ -668,6 +671,36 @@ async def test_stop_during_interpreter_startup_closes_without_starting_a_worker(
         await asyncio.gather(state.task, return_exceptions=True)
 
 
+@pytest.mark.parametrize("runtime", [None, {}, {"hostname": "sandbox", "pid": "123"}])
+async def test_invalid_runtime_keeps_cleanup_confirmed(agent, state, runtime):
+    agent._upload_json = AsyncMock()
+    agent._download_json = AsyncMock(
+        side_effect=[
+            {"cleanup_confirmed": True, "error": None},
+            {"result": {"completed": True, "messages": []}, "runtime": runtime},
+        ]
+    )
+    with pytest.raises(RuntimeError, match="invalid runtime metadata"):
+        await agent._run_sandbox_episode(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+        )
+    assert state.runner_cleanup is RunnerCleanup.CONFIRMED
+    await agent._close_agent_session_state(state)
+    state.sandbox.disconnect.assert_awaited_once()
+    state.sandbox.stop.assert_not_awaited()
+
+
+async def test_invalid_cleanup_schema_does_not_mark_runner_confirmed(agent, state):
+    state.runner_cleanup = RunnerCleanup.UNCONFIRMED
+    agent._download_json = AsyncMock(
+        return_value={"cleanup_confirmed": True, "error": None, "timed_out": False, "return_code": "0"}
+    )
+    with pytest.raises(ValidationError):
+        await agent._terminate_sandbox_runner(state)
+    assert state.runner_cleanup is RunnerCleanup.UNCONFIRMED
+    state.sandbox.disconnect.assert_not_awaited()
+
+
 @pytest.mark.parametrize("receipt", [{}, {"cleanup_confirmed": False}, {"cleanup_confirmed": "true"}])
 async def test_runner_exit_without_cleanup_receipt_blocks_close(agent, state, receipt):
     state.runner_cleanup = RunnerCleanup.UNCONFIRMED
@@ -676,7 +709,7 @@ async def test_runner_exit_without_cleanup_receipt_blocks_close(agent, state, re
         await agent._close_agent_session_state(state)
     assert state.runner_cleanup is RunnerCleanup.UNCONFIRMED
     state.sandbox.disconnect.assert_not_awaited()
-    agent._download_json.return_value = {"cleanup_confirmed": True}
+    agent._download_json.return_value = {"cleanup_confirmed": True, "error": None}
     await agent._close_agent_session_state(state)
     assert state.runner_cleanup is RunnerCleanup.CONFIRMED
     state.sandbox.disconnect.assert_awaited_once()
@@ -692,10 +725,10 @@ async def test_session_prompt_and_limits_reach_runner(agent, state, overrides, t
     agent._upload_json = AsyncMock()
     agent._download_json = AsyncMock(
         side_effect=[
-            {"cleanup_confirmed": True},
+            {"cleanup_confirmed": True, "error": None},
             {
                 "result": {"completed": True, "messages": [{"role": "assistant", "content": "done"}]},
-                "runtime": {"pid": 123},
+                "runtime": {"hostname": "sandbox", "pid": 123},
             },
         ]
     )
@@ -742,7 +775,7 @@ async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, out
     async def download(sandbox, path):
         if path.endswith("/cleanup.json"):
             events.append("cleanup")
-            return {"cleanup_confirmed": True}
+            return {"cleanup_confirmed": True, "error": None}
         assert path.endswith("/output.json")
         events.append("output")
         if not output_available:
@@ -765,7 +798,7 @@ async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, out
                     }
                 ]
             },
-            "runtime": {"pid": 123},
+            "runtime": {"hostname": "sandbox", "pid": 123},
         }
 
     agent._download_json = AsyncMock(side_effect=download)
@@ -867,7 +900,12 @@ async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypat
 
     agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     agent._upload_json = AsyncMock()
-    agent._download_json = AsyncMock(side_effect=[{"cleanup_confirmed": True}, {"result": result, "runtime": {}}])
+    agent._download_json = AsyncMock(
+        side_effect=[
+            {"cleanup_confirmed": True, "error": None},
+            {"result": result, "runtime": {"hostname": "sandbox", "pid": 123}},
+        ]
+    )
     await agent.responses(request(state), body)
     payload = agent._upload_json.await_args.args[2]
     assert payload["user_message"] == user_message == "Follow-up"
