@@ -14,4 +14,4 @@ Turn on the multimodal options of `opencode_agent`:
 The model's shell is not sandboxed (`no_sandbox_runtime`): it runs with the agent server's
 permissions.
 
-See `benchmarks/babyvision_opencode/config.yaml`.
+Environment: `resources_servers/visual_coding_opencode` (benchmark example: `benchmarks/babyvision_opencode`).

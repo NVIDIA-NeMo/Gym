@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""BabyVision correctness, decided by a GPT judge over the model's final answer.
+"""Correctness of a multi-turn visual-coding answer, decided by a GPT judge over the final answer.
 
 The grading of Python_call_gen's opencode harness (`format_judge --mode correctness`):
 - the response text is every assistant text part joined, and the judge sees its last
@@ -77,7 +77,7 @@ def parse_verdict(content: str) -> dict[str, Any]:
     return {"verdict": verdict, "reason": reason[:200]}
 
 
-class BabyVisionOpenCodeConfig(BaseResourcesServerConfig):
+class VisualCodingOpenCodeConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     judge_model_server: ModelServerRef
     judge_model: str
@@ -89,13 +89,13 @@ class BabyVisionOpenCodeConfig(BaseResourcesServerConfig):
     judge_max_text_chars: int = Field(default=4000, ge=1)
 
 
-class BabyVisionOpenCodeVerifyRequest(BaseVerifyRequest):
+class VisualCodingOpenCodeVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
     expected_answer: str
     question: str = ""
 
 
-class BabyVisionOpenCodeVerifyResponse(BaseVerifyResponse):
+class VisualCodingOpenCodeVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     extracted_answer: Optional[str] = None
     string_match_reward: float = 0.0
@@ -104,8 +104,8 @@ class BabyVisionOpenCodeVerifyResponse(BaseVerifyResponse):
     failure_reason: Optional[str] = None
 
 
-class BabyVisionOpenCodeServer(SimpleResourcesServer):
-    config: BabyVisionOpenCodeConfig
+class VisualCodingOpenCodeServer(SimpleResourcesServer):
+    config: VisualCodingOpenCodeConfig
     _judge_slots: Optional[asyncio.Semaphore] = None
 
     async def judge(self, question: str, expected: str, extracted: Optional[str], text: str) -> dict[str, Any]:
@@ -134,8 +134,8 @@ class BabyVisionOpenCodeServer(SimpleResourcesServer):
             )
         return parse_verdict(completion.choices[0].message.content or "")
 
-    async def verify(self, body: BabyVisionOpenCodeVerifyRequest) -> BabyVisionOpenCodeVerifyResponse:
-        result = BabyVisionOpenCodeVerifyResponse(**body.model_dump(), reward=0.0)
+    async def verify(self, body: VisualCodingOpenCodeVerifyRequest) -> VisualCodingOpenCodeVerifyResponse:
+        result = VisualCodingOpenCodeVerifyResponse(**body.model_dump(), reward=0.0)
         text = _extract_last_assistant_text(body)
         if not text:
             # A timed-out or failed run leaves no answer: wrong, with no judge call.
@@ -159,4 +159,4 @@ class BabyVisionOpenCodeServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
-    BabyVisionOpenCodeServer.run_webserver()
+    VisualCodingOpenCodeServer.run_webserver()

@@ -1,8 +1,17 @@
-# BabyVision under OpenCode
+# Visual coding under OpenCode
 
-BabyVision (388 visual puzzles: fine-grained discrimination, spatial perception, visual
-pattern recognition, visual tracking) solved by the OpenCode CLI with a Python shell, graded
-the way Python_call_gen's opencode harness grades it.
+A generic multi-turn visual-coding environment: the OpenCode CLI, with a Python shell that can
+crop, measure and plot images, answers a question about an image over as many tool turns as it
+needs, and a GPT judge grades the final `\boxed{}` answer. Nothing in the environment is
+dataset-specific. Rows carry the image and prompt in `responses_create_params`, plus `question`
+and `expected_answer` for the judge.
+
+Users of it:
+
+- `benchmarks/babyvision_opencode`: BabyVision (388 puzzles), graded the way Python_call_gen's
+  opencode harness grades it.
+- RL training sets in the same row format (e.g. synthetic visual-tracking puzzles: mazes,
+  metro maps, tangled lines).
 
 ## Harness
 
@@ -25,7 +34,7 @@ temperature 0). The judge sees the question text, the gold answer, string_match'
 text. It cannot see the image. Only `"equivalent"` scores 1; `"different"`, `"unsure"`, a judge
 error and an empty response score 0. `string_match_reward` is kept as a diagnostic.
 
-## Data
+## BabyVision data
 
 ```bash
 LMUData=/path/to/LMUData python benchmarks/babyvision_opencode/prepare.py
