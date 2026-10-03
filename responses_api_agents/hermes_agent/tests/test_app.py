@@ -132,7 +132,10 @@ class TestSanity:
         sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
         connect = AsyncMock(return_value=sandbox)
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.shutil.which", lambda name: "/test/uv")
-        monkeypatch.setattr("responses_api_agents.hermes_agent.app.get_global_config_dict", lambda: {"runtime": {}})
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.get_global_config_dict",
+            lambda: {"runtime": {"hostname": "sandbox", "pid": 123}},
+        )
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", resolve)
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: provider)
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.AsyncSandbox.connect", connect)
@@ -155,7 +158,7 @@ class TestSanity:
             ),
         )
 
-        resolve.assert_called_once_with("runtime", {"runtime": {}})
+        resolve.assert_called_once_with("runtime", {"runtime": {"hostname": "sandbox", "pid": 123}})
         connect.assert_awaited_once_with(
             {"sandbox_id": "sandbox"},
             provider=provider,
@@ -183,7 +186,10 @@ class TestSanity:
             return MagicMock(return_code=0, stdout="", stderr="")
 
         sandbox.exec.side_effect = exec_
-        monkeypatch.setattr("responses_api_agents.hermes_agent.app.get_global_config_dict", lambda: {"runtime": {}})
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.get_global_config_dict",
+            lambda: {"runtime": {"hostname": "sandbox", "pid": 123}},
+        )
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", MagicMock())
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: AsyncMock())
         monkeypatch.setattr(
@@ -225,7 +231,10 @@ class TestSanity:
         sandbox = AsyncMock()
         sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
         sandbox_factory = MagicMock(return_value=sandbox)
-        monkeypatch.setattr("responses_api_agents.hermes_agent.app.get_global_config_dict", lambda: {"runtime": {}})
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.get_global_config_dict",
+            lambda: {"runtime": {"hostname": "sandbox", "pid": 123}},
+        )
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.resolve_provider_config",
             MagicMock(return_value={"local": {}}),
@@ -391,7 +400,10 @@ class TestSanity:
         async def download(sandbox, remote_path):
             if remote_path.endswith("/cleanup.json"):
                 commands = getattr(sandbox, "commands", None)
-                return {"cleanup_confirmed": commands is None or any("kill -TERM" in cmd for cmd in commands)}
+                return {
+                    "cleanup_confirmed": commands is None or any("kill -TERM" in cmd for cmd in commands),
+                    "error": None,
+                }
             return await original_download(sandbox, remote_path)
 
         hermes._download_json = AsyncMock(side_effect=download)
