@@ -815,6 +815,25 @@ class TestApp:
         assert (call.status_code, call.error_category) == (400, "client_error")
         assert call.response == {"detail": provider_body}
 
+    def test_opt_in_propagation_applies_to_streaming_responses(self) -> None:
+        provider_error = ClientResponseError(
+            SimpleNamespace(real_url="https://api.openai.com/v1"),
+            (),
+            status=400,
+            message="bad request",
+        )
+        provider_error.response_content = b'{"error":{"code":"context_length_exceeded"}}'
+        server = self._setup_server(propagate_upstream_http_status_codes=[400])
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=provider_error)
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+
+        response = TestClient(app).post("/v1/responses", json={"input": "hello", "stream": True})
+
+        assert response.status_code == 400
+        assert response.json() == {"detail": {"error": {"code": "context_length_exceeded"}}}
+
     @pytest.mark.parametrize("endpoint", ["responses", "chat_completions"])
     @pytest.mark.parametrize("status_code", [429, 503])
     def test_exhausted_provider_http_retries_return_server_error(self, endpoint: str, status_code: int) -> None:
