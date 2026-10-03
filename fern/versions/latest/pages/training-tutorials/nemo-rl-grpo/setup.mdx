@@ -112,13 +112,13 @@ CONTAINER_IMAGE_PATH=./$CONTAINER_IMAGE_PATH
 </Tip>
 
 <Note>
-This tutorial trains [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2), not Nemotron 3 Ultra. Use the Nano NGC container from the [RL Framework Compatibility](/reference/rl-framework-compatibility) table (v0.1.1 / Nemotron 3 Nano row). For Nemotron 3 Ultra training with NeMo Gym v0.3.0, build the `ultra-v3` Dockerfile instead.
+This tutorial trains [Nemotron Nano 9B v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2), not Nemotron 3 Ultra. The container and NeMo RL checkout below use the same release so their Python and uv versions remain compatible. For Nemotron 3 Ultra training with NeMo Gym v0.3.0, build the `ultra-v3` Dockerfile instead.
 </Note>
 
 ```bash
-# Nano recipe container — see RL Framework Compatibility table
+# NeMo RL release container
 # https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo-rl
-CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano
+CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.7.0
 
 NUM_ACTOR_NODES=1
 ACCOUNT=<ACCOUNT_NAME>
@@ -153,7 +153,7 @@ For the first setup on your local filesystem:
 
 ```bash
 # Clone NeMo RL repository
-git clone https://github.com/NVIDIA-NeMo/RL
+git clone --branch v0.7.0 https://github.com/NVIDIA-NeMo/RL
 cd RL
 
 # Initialize all submodules (Gym, Megatron, AutoModel, etc.)

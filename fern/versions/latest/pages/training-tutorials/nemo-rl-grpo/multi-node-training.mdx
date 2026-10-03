@@ -57,14 +57,14 @@ cd /path/to/nemo/rl
 #   WANDB_API_KEY: Your Weights & Biases API key for logging
 #   EXP_NAME: Experiment name
 #   NUM_ACTOR_NODES: Number of GPU nodes to use (2, 4, 8, etc.)
-#   CONTAINER_IMAGE_PATH: Nano recipe container (see RL Framework Compatibility table)
+#   CONTAINER_IMAGE_PATH: NeMo RL release container
 #   SLURM_ACCOUNT: Slurm account
 #   SLURM_PARTITION: Slurm partition
 WANDB_API_KEY={your W&B API key} \
 EXP_NAME=nemo_gym_grpo/nemotron_nano_v2_9b/2nodes/workplace_assistant_001 \
 NUM_ACTOR_NODES=2 \
 REPO_LOCATION=$PWD \
-CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano \
+CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.7.0 \
 SLURM_ACCOUNT={your Slurm account} \
 SLURM_PARTITION={your Slurm partition} \
     examples/nemo_gym/launch_nemo_gym_multinode_training.sh \
@@ -77,7 +77,7 @@ SLURM_PARTITION={your Slurm partition} \
 If you are using enroot following the steps in the [Setup](/tutorials/training-tutorials/nemo-rl-grpo/setup) doc and downloaded the container locally, use the local container filepath instead:
 
 ```bash
-CONTAINER_IMAGE_PATH=$PWD/../nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano \
+CONTAINER_IMAGE_PATH=$PWD/../nvcr.io/nvidia/nemo-rl:v0.7.0 \
 ```
 
 </Tip>
