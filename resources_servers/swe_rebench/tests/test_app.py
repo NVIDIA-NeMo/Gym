@@ -589,3 +589,76 @@ class TestMavenMirror:
 
         merged = JVM_MIRROR_ENV | {"GRADLE_USER_HOME": "/custom"}
         assert merged["GRADLE_USER_HOME"] == "/custom"
+
+
+class _RecordingAsyncSandbox:
+    def __init__(self, provider_config) -> None:
+        self.spec = None
+        self.setup = None
+
+    async def start(self, spec) -> None:
+        self.spec = spec
+
+    async def start_with_setup(self, spec, setup) -> None:
+        self.spec = spec
+        self.setup = setup
+
+
+class TestLegacyContainerSetup:
+    """sandbox_config.legacy_container_setup gives the agent's and the evaluator's sandbox the
+    toolchain setup the Apptainer swe_agents harness applied to both of its containers."""
+
+    @staticmethod
+    async def _create(monkeypatch, sandbox_config: dict, files: dict[str, str] | None = None):
+        import resources_servers.swe_rebench.app as app
+
+        monkeypatch.setattr(app, "AsyncSandbox", _RecordingAsyncSandbox)
+        monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(app, "resolve_provider_config", lambda *_: {})
+        monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})
+        server = SimpleNamespace(
+            config=SimpleNamespace(sandbox_config=sandbox_config, sandbox_provider="sandbox", name="swe_rebench")
+        )
+        body = app.SWERebenchInstanceRequest(instance_id="o__r-1", repo="o/r", base_commit="abc", image_name="img")
+        return await app.SWERebenchResourcesServer._create_sandbox(server, body, files=files)
+
+    async def test_off_by_default(self, monkeypatch) -> None:
+        from resources_servers.swebench.legacy_container_setup import CHROME_WRAPPER_PATH
+
+        sandbox = await self._create(monkeypatch, {})
+        assert "CHROME_BIN" not in sandbox.spec.env and "_JAVA_OPTIONS" not in sandbox.spec.env
+        assert CHROME_WRAPPER_PATH not in sandbox.spec.files
+        assert sandbox.setup is None
+
+    async def test_agent_sandbox_gets_the_env_files_and_setup(self, monkeypatch) -> None:
+        from resources_servers.swebench.legacy_container_setup import (
+            LEGACY_CONTAINER_ENV,
+            apply_legacy_container_setup,
+            legacy_container_files,
+        )
+
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True})
+        assert LEGACY_CONTAINER_ENV.items() <= sandbox.spec.env.items()
+        assert sandbox.spec.files == legacy_container_files()
+        assert sandbox.setup is apply_legacy_container_setup
+
+    async def test_eval_sandbox_keeps_its_verification_files(self, monkeypatch) -> None:
+        from resources_servers.swebench.legacy_container_setup import CHROME_WRAPPER_PATH
+
+        files = verification_files(_inputs())
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True}, files=files)
+        assert files.items() <= sandbox.spec.files.items()
+        assert CHROME_WRAPPER_PATH in sandbox.spec.files
+
+    async def test_explicit_config_env_still_wins(self, monkeypatch) -> None:
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True, "env": {"CHROME_BIN": "/custom"}})
+        assert sandbox.spec.env["CHROME_BIN"] == "/custom"
+
+    def test_one_mirror_copy_per_eval_sandbox(self) -> None:
+        """Both ship the same files to the same paths; a second Gradle init script under another
+        name would add the mirror repository twice."""
+        from resources_servers.swe_rebench.verification import _mirror_files
+        from resources_servers.swebench.legacy_container_setup import legacy_container_files
+
+        legacy = legacy_container_files()
+        assert _mirror_files().items() <= legacy.items()

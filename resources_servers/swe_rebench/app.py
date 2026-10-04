@@ -58,6 +58,11 @@ from resources_servers.swe_rebench.verification import (
     verification_files,
 )
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
+from resources_servers.swebench.legacy_container_setup import (
+    LEGACY_CONTAINER_ENV,
+    apply_legacy_container_setup,
+    legacy_container_files,
+)
 from resources_servers.swebench.patch_capture import (
     PatchCapture,
     PatchCaptureMode,
@@ -197,6 +202,11 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
             # See verification._mirror_files(): Maven Central is unreachable from this network
             # while other registries are, so both build tools are pointed at the Google mirror.
             env = JVM_MIRROR_ENV | env
+        # Agent and eval sandboxes alike, as the swe_agents harness did; see legacy_container_setup.py.
+        legacy_setup = self.config.sandbox_config.get("legacy_container_setup", False)
+        if legacy_setup:
+            env = LEGACY_CONTAINER_ENV | env
+            files = legacy_container_files() | (files or {})
 
         spec = SandboxSpec(
             # The row names its own image; there is no repository template to apply.
@@ -217,7 +227,10 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
         sandbox = AsyncSandbox(provider_config)
-        await sandbox.start(spec)
+        if legacy_setup:
+            await sandbox.start_with_setup(spec, apply_legacy_container_setup)
+        else:
+            await sandbox.start(spec)
         return sandbox
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox | None) -> None:

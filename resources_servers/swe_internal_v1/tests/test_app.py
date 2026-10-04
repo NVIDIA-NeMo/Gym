@@ -344,3 +344,63 @@ class TestServerWiring:
         source = self._source()
         assert "is_nemo_gym_fastapi_entrypoint(__file__)" in source
         assert "app = SweInternalV1ResourcesServer.run_webserver()" in source
+
+
+class _RecordingAsyncSandbox:
+    def __init__(self, provider_config) -> None:
+        self.spec = None
+        self.setup = None
+
+    async def start(self, spec) -> None:
+        self.spec = spec
+
+    async def start_with_setup(self, spec, setup) -> None:
+        self.spec = spec
+        self.setup = setup
+
+
+class TestLegacyContainerSetup:
+    """sandbox_config.legacy_container_setup gives the agent's and the evaluator's sandbox the
+    toolchain setup the Apptainer swe_agents harness applied to both of its containers."""
+
+    @staticmethod
+    async def _create(monkeypatch, sandbox_config: dict, files: dict[str, str] | None = None):
+        import resources_servers.swe_internal_v1.app as app
+
+        monkeypatch.setattr(app, "AsyncSandbox", _RecordingAsyncSandbox)
+        monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(app, "resolve_provider_config", lambda *_: {})
+        monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})
+        server = SimpleNamespace(
+            config=SimpleNamespace(sandbox_config=sandbox_config, sandbox_provider="sandbox", name="swe_internal_v1")
+        )
+        body = app.SweInternalV1InstanceRequest(
+            instance_id="task-1", image_ref="img", run_script="run", parsing_script="parse"
+        )
+        return await app.SweInternalV1ResourcesServer._create_sandbox(server, body, files=files)
+
+    async def test_off_by_default(self, monkeypatch) -> None:
+        sandbox = await self._create(monkeypatch, {})
+        assert "CHROME_BIN" not in sandbox.spec.env and "_JAVA_OPTIONS" not in sandbox.spec.env
+        assert sandbox.spec.files == {}
+        assert sandbox.setup is None
+
+    async def test_agent_sandbox_gets_the_env_files_and_setup(self, monkeypatch) -> None:
+        from resources_servers.swebench.legacy_container_setup import (
+            LEGACY_CONTAINER_ENV,
+            apply_legacy_container_setup,
+            legacy_container_files,
+        )
+
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True})
+        assert LEGACY_CONTAINER_ENV.items() <= sandbox.spec.env.items()
+        assert sandbox.spec.files == legacy_container_files()
+        assert sandbox.setup is apply_legacy_container_setup
+
+    async def test_eval_sandbox_keeps_its_verification_files(self, monkeypatch) -> None:
+        from resources_servers.swebench.legacy_container_setup import CHROME_WRAPPER_PATH
+
+        files = verification_files(_inputs())
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True}, files=files)
+        assert files.items() <= sandbox.spec.files.items()
+        assert CHROME_WRAPPER_PATH in sandbox.spec.files
