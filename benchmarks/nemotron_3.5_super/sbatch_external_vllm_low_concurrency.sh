@@ -43,7 +43,9 @@ GYM="${GYM:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd 
     echo "GYM=$GYM does not look like a NeMo Gym checkout (no nemo_gym/ + benchmarks/).
 Run this from your Gym repo root, or set GYM=<path to your checkout>." >&2; exit 1; }
 
-SHARD_DIR="benchmarks/nemotron_3.5_super/split50/shards"
+# Overridable so the recipe can be smoke-tested against a small hand-built shard without
+# editing the committed 50% split.
+SHARD_DIR="${SHARD_DIR:-benchmarks/nemotron_3.5_super/split50/shards}"
 
 # C=48 on both, deliberately aligned so the two benchmarks share one operating point.
 # Set CONCURRENCY=32 for SWE when latency fidelity matters more than matching TB.
@@ -185,6 +187,8 @@ gym eval run \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
     ++port_range_high=64000 \
+    ++observability_enabled=true \
+    ++model_call_capture_dir=/opt/Gym/results/\$experiment_name/model_calls \
     $EXTRA_GYM_ARGS \
     "\${GYM_MODEL_PARAMS[@]}"
 EOF
