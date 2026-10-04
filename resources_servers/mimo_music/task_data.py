@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Task-data schema for mimo_music: the reward is computed from the response alone, these are the brief's attributes."""
 
 from typing import Optional
 

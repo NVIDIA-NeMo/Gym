@@ -5,7 +5,6 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,11 +21,6 @@ from mimoagent.environments.datasets import DATASET_REGISTRY, DatasetEnvironment
 
 
 class TerminalBenchEnvironment(DatasetEnvironment):
-    """MiMo general/terminal_bench rows: Harbor-style tests shipped base64 in tests_files.
-
-    Tests land in /tests only at reward time so the agent never sees them.
-    """
-
     REPO_PATH = "/app"
     _GIT_LEAK_PREVENTION_DEFAULT = "none"
     _ANTI_HACK_CLEANUP_DEFAULT = False
@@ -46,7 +40,6 @@ class TerminalBenchEnvironment(DatasetEnvironment):
         files = json.loads(self.instance["tests_files"])
         self.execute("rm -rf /tests /logs/verifier && mkdir -p /tests /logs/verifier", cwd="/")
         for name, data in files.items():
-            # Bytes, not text: fixtures can be binary.
             with tempfile.NamedTemporaryFile(delete=False) as f:
                 f.write(base64.b64decode(data))
             try:
@@ -64,7 +57,6 @@ class TerminalBenchEnvironment(DatasetEnvironment):
         try:
             reward = float(raw.splitlines()[-1])
         except (ValueError, IndexError):
-            # test.sh always writes the reward file, so its absence is a broken testbed.
             return (
                 0.0,
                 str(res.get("output", "")),

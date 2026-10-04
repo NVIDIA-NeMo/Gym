@@ -5,7 +5,6 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -54,8 +53,6 @@ def _final_text(response: Any) -> str:
 
 
 class MimoMusicResourcesServer(SimpleResourcesServer):
-    """MiMo-V2.6-RL-oss music: ABC notation scored for human-likeness of the rendered MIDI."""
-
     ray_enabled = False
     config: MimoMusicConfig
 

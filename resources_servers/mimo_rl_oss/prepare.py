@@ -5,17 +5,12 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Convert XiaomiMiMo/MiMo-V2.6-RL-oss parquet subsets into Gym JSONL rows.
-
-python resources_servers/mimo_rl_oss/prepare.py --subsets code cyber
-"""
 
 import argparse
 import json
@@ -63,7 +58,6 @@ def convert(subset: str, image_map: dict[str, str]) -> list[dict]:
         if subset in ("terminal_bench", "general_agent") and instance["dataset_type"] != subset:
             continue
         instance["docker_image"] = image_map[instance["docker_image"]]
-        # mimoagent's batch runner hands the agent problem_statement, not the parquet prompt.
         task = instance["problem_statement"]
         if subset == "webdev":
             task = DELIVERY_INSTRUCTIONS.format(cwd=instance["cwd"].rstrip("/"), task=task)

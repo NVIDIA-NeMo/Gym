@@ -5,7 +5,6 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,7 +23,6 @@ SOURCE = "https://github.com/sshlien/abcmidi/archive/refs/tags/2025.02.16.tar.gz
 
 
 def ensure_abc2midi() -> str:
-    """Return a working abc2midi binary, building it from source into .abcmidi/ when missing."""
     found = os.environ.get("ABC2MIDI_BIN") or shutil.which("abc2midi") or str(PREFIX / "abc2midi")
     if not Path(found).exists() and sys.platform == "darwin" and shutil.which("brew"):
         subprocess.run(["brew", "install", "abcmidi"], check=True)
