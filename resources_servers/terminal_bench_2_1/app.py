@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import tomllib
 from contextlib import contextmanager
 from copy import deepcopy
 from glob import glob
@@ -51,12 +52,29 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
 
     is_verifying_golden_patch: bool = False
     evaluation_timeout: Optional[int] = None
+    # Wall budget for `bash /tests/test.sh`: max(this floor, the task's own `[verifier] timeout_sec` in task.toml).
+    verifier_timeout_floor_sec: int = 1800
+    # Run `bash /tests/test.sh` as the row's non-root `agent_user` (the account the vendor images declare as their
+    # USER) instead of the image default (root on the `-userroot` derivatives).
+    verifier_runs_as_agent_user: bool = True
 
     # Sandbox config
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
 
     debug: bool = False
+
+
+def task_verifier_timeout_sec(task_folder: Path) -> Optional[float]:
+    """The task's own ``[verifier] timeout_sec`` from ``task.toml``, or None when missing, unreadable or invalid."""
+    try:
+        with open(task_folder / "task.toml", "rb") as stream:
+            value = tomllib.load(stream).get("verifier", {}).get("timeout_sec")
+    except (OSError, tomllib.TOMLDecodeError, AttributeError):
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return float(value)
 
 
 def uploaded_subdirectories(target_dirpath: str, remote_paths: List[str]) -> List[str]:
@@ -87,9 +105,10 @@ class TerminalBench21SeedSessionRequest(BaseModel):
     docker_image: str
     task_folder: str
     # Identity the agent harness runs as inside the task sandbox (mirrors Harbor `task.toml` `[agent] user`).
-    # `None` keeps the image default. The verifier always runs as the image default (root on the supported
-    # images), so a non-root `agent_user` requires a root-default image on which that account exists.
-    # A row value of "root" (or 0) is the explicit per-row image default and beats any lane-level setting.
+    # `None` keeps the image default. A non-root `agent_user` requires a root-default image on which that account
+    # exists. The verifier runs as the same account when `verifier_runs_as_agent_user` is on (the default), else as
+    # the image default. A row value of "root" (or 0) is the explicit per-row image default and beats any lane-level
+    # setting.
     agent_user: AgentUser = None
 
     @field_validator("agent_user", mode="before")
@@ -114,6 +133,9 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
     # Identity the agent ran as (the base response chain drops undeclared request fields, so declare it here
     # to record it in rollouts).
     agent_user: AgentUser = None
+    # Identity and wall budget `bash /tests/test.sh` actually ran with (None = the image default).
+    verifier_user: AgentUser = None
+    verifier_timeout_sec: Optional[float] = None
 
 
 GOLDEN_PATCH_SOLVE_SH_PATCHES = {
@@ -293,7 +315,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             local_dirpath = PARENT_DIR / local_dirpath
 
         remote_paths: List[str] = []
-        for file in glob("**", root_dir=str(local_dirpath), recursive=True):
+        # include_hidden: verifiers keep reference data in dot-folders such as tests/.truth/.
+        for file in glob("**", root_dir=str(local_dirpath), recursive=True, include_hidden=True):
             local_fpath = local_dirpath / file
             if not local_fpath.is_file():
                 continue
@@ -310,6 +333,15 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
         task_folder = Path(body.task_folder)
+        local_task_folder = task_folder if task_folder.is_absolute() else PARENT_DIR / task_folder
+        verifier_timeout = float(
+            max(self.config.verifier_timeout_floor_sec, task_verifier_timeout_sec(local_task_folder) or 0)
+        )
+        verifier_user = (
+            body.agent_user
+            if self.config.verifier_runs_as_agent_user and not is_root_agent_user(body.agent_user)
+            else None
+        )
 
         if self.config.is_verifying_golden_patch:
             if self.config.debug:
@@ -349,13 +381,21 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             print(f"Running tests for {body.task_name}", file=stderr)
         start_time = time()
         try:
-            # The verifier execs below (the /tests mkdir + upload and `bash /tests/test.sh`) intentionally carry
-            # no user override: they run as the image default (root on the supported images) regardless of
-            # `agent_user`, which is why a non-root agent_user requires a root-default image.
+            # /tests is uploaded as the image default (root), so the verifier account can read but not change it.
+            # `bash /tests/test.sh` then runs as `verifier_user`: the agent's account (as the vendor images declare
+            # it), or the image default when the agent ran as root or the switch is off. That account must be able
+            # to write its reports under /logs/verifier.
             await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
+            if verifier_user is not None:
+                prepare = await eval_sandbox.exec(
+                    f"mkdir -p /logs/verifier && chown -R {shlex_quote(str(verifier_user))} /logs/verifier"
+                )
+                if prepare.return_code != 0:
+                    print(f"Failed to hand /logs/verifier to {verifier_user!r}: {prepare}", file=stderr)
             eval_result = await eval_sandbox.exec(
                 "bash /tests/test.sh",
-                timeout_s=self.config.evaluation_timeout,
+                timeout_s=verifier_timeout,
+                user=verifier_user,
             )
             test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
         except:
@@ -393,6 +433,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             verification_time_taken=verification_time_taken,
             test_output=test_output,
             golden_patch_output=golden_patch_output,
+            verifier_user=verifier_user,
+            verifier_timeout_sec=verifier_timeout,
         )
 
 

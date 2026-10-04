@@ -24,6 +24,7 @@ from resources_servers.terminal_bench_2_1.app import (
     TerminalBench21ResourcesServerConfig,
     TerminalBench21SeedSessionRequest,
     TerminalBench21VerifyRequest,
+    task_verifier_timeout_sec,
     uploaded_subdirectories,
 )
 
@@ -127,10 +128,17 @@ def _exec_commands(sandbox: FakeSandbox) -> list[str]:
     return [command for command, _ in sandbox.execs]
 
 
-def _exec_user(sandbox: FakeSandbox, command: str):
+def _exec_kwargs(sandbox: FakeSandbox, command: str) -> dict:
     matches = [kwargs for cmd, kwargs in sandbox.execs if cmd == command]
     assert len(matches) == 1, (command, sandbox.execs)
-    return matches[0].get("user")
+    return matches[0]
+
+
+def _exec_user(sandbox: FakeSandbox, command: str):
+    return _exec_kwargs(sandbox, command).get("user")
+
+
+PREPARE_LOGS_FOR_AGENT = "mkdir -p /logs/verifier && chown -R agent /logs/verifier"
 
 
 def _make_task_folder(tmp_path: Path, with_solution: bool = False, nested_solution: bool = False) -> Path:
@@ -216,7 +224,7 @@ class TestSeedSession:
 
 
 class TestVerify:
-    async def test_verify_reuses_session_sandbox_and_runs_tests_as_image_default(self, tmp_path) -> None:
+    async def test_verify_reuses_session_sandbox_and_runs_tests_as_agent_user(self, tmp_path) -> None:
         server = _make_server()
         sandbox = FakeSandbox()
         server._session_id_to_sandbox[SESSION_ID] = sandbox
@@ -224,19 +232,80 @@ class TestVerify:
 
         result = await server.verify(_request(), _verify_request(task_folder, agent_user="agent"))
 
-        assert _exec_commands(sandbox) == ["mkdir -p /tests", "bash /tests/test.sh"]
-        # Verifier commands never carry a user override: they run as the image default even when the
-        # agent ran as `agent`.
+        assert _exec_commands(sandbox) == ["mkdir -p /tests", PREPARE_LOGS_FOR_AGENT, "bash /tests/test.sh"]
+        # /tests is uploaded and /logs/verifier handed over as the image default; the tests run as the agent's
+        # account, like the vendor images' USER.
         assert _exec_user(sandbox, "mkdir -p /tests") is None
-        assert _exec_user(sandbox, "bash /tests/test.sh") is None
+        assert _exec_user(sandbox, PREPARE_LOGS_FOR_AGENT) is None
+        assert _exec_user(sandbox, "bash /tests/test.sh") == "agent"
         assert sandbox.uploads == [(str(task_folder / "tests" / "test.sh"), "/tests/test.sh")]
         assert [remote for remote, _ in sandbox.downloads] == ["/logs/verifier/reward.txt"]
         assert result.reward == 1.0
         assert result.evaluation_completed is True
         assert result.golden_patch_output is None
         assert result.agent_user == "agent"
+        assert result.verifier_user == "agent"
         assert sandbox.stopped is True
         assert SESSION_ID not in server._session_id_to_sandbox
+
+    async def test_verify_switch_off_runs_tests_as_image_default(self, tmp_path) -> None:
+        server = _make_server(verifier_runs_as_agent_user=False)
+        sandbox = FakeSandbox()
+        server._session_id_to_sandbox[SESSION_ID] = sandbox
+
+        result = await server.verify(_request(), _verify_request(_make_task_folder(tmp_path), agent_user="agent"))
+
+        assert _exec_commands(sandbox) == ["mkdir -p /tests", "bash /tests/test.sh"]
+        assert _exec_user(sandbox, "bash /tests/test.sh") is None
+        assert result.agent_user == "agent"
+        assert result.verifier_user is None
+
+    @pytest.mark.parametrize("agent_user", [None, "root", 0])
+    async def test_verify_root_or_unset_agent_user_runs_tests_as_image_default(self, tmp_path, agent_user) -> None:
+        server = _make_server()
+        sandbox = FakeSandbox()
+        server._session_id_to_sandbox[SESSION_ID] = sandbox
+
+        result = await server.verify(_request(), _verify_request(_make_task_folder(tmp_path), agent_user=agent_user))
+
+        assert _exec_commands(sandbox) == ["mkdir -p /tests", "bash /tests/test.sh"]
+        assert _exec_user(sandbox, "bash /tests/test.sh") is None
+        assert result.verifier_user is None
+
+    async def test_verify_uploads_hidden_test_paths(self, tmp_path) -> None:
+        server = _make_server()
+        sandbox = FakeSandbox()
+        server._session_id_to_sandbox[SESSION_ID] = sandbox
+        task_folder = _make_task_folder(tmp_path)
+        (task_folder / "tests" / ".truth").mkdir()
+        (task_folder / "tests" / ".truth" / "vocab.json").write_text("{}\n")
+
+        await server.verify(_request(), _verify_request(task_folder))
+
+        assert sorted(remote for _, remote in sandbox.uploads) == ["/tests/.truth/vocab.json", "/tests/test.sh"]
+        assert "mkdir -p /tests/.truth" in _exec_commands(sandbox)
+
+    @pytest.mark.parametrize(
+        ("task_toml", "floor", "expected"),
+        [
+            (None, 1800, 1800.0),
+            ("[verifier]\ntimeout_sec = 300\n", 1800, 1800.0),
+            ("[verifier]\ntimeout_sec = 3600.0\n", 1800, 3600.0),
+            ("[verifier]\ntimeout_sec = 300\n", 120, 300.0),
+        ],
+    )
+    async def test_verify_timeout_is_max_of_floor_and_task_limit(self, tmp_path, task_toml, floor, expected) -> None:
+        server = _make_server(verifier_timeout_floor_sec=floor)
+        sandbox = FakeSandbox()
+        server._session_id_to_sandbox[SESSION_ID] = sandbox
+        task_folder = _make_task_folder(tmp_path)
+        if task_toml is not None:
+            (task_folder / "task.toml").write_text(task_toml)
+
+        result = await server.verify(_request(), _verify_request(task_folder))
+
+        assert _exec_kwargs(sandbox, "bash /tests/test.sh")["timeout_s"] == expected
+        assert result.verifier_timeout_sec == expected
 
     async def test_verify_records_reward_zero_when_reward_file_unparseable(self, tmp_path) -> None:
         server = _make_server()
@@ -268,11 +337,12 @@ class TestVerify:
             "chown agent /app/solve.sh",
             "bash /app/solve.sh",
             "mkdir -p /tests",
+            PREPARE_LOGS_FOR_AGENT,
             "bash /tests/test.sh",
         ]
         assert _exec_user(sandbox, "chown agent /app/solve.sh") is None
         assert _exec_user(sandbox, "bash /app/solve.sh") == "agent"
-        assert _exec_user(sandbox, "bash /tests/test.sh") is None
+        assert _exec_user(sandbox, "bash /tests/test.sh") == "agent"
         assert _exec_user(sandbox, "mkdir -p /tests") is None
         assert sandbox.uploads == [
             (str(task_folder / "solution" / "solve.sh"), "/app/solve.sh"),
@@ -300,7 +370,7 @@ class TestVerify:
         assert commands[0] == "pwd"
         assert sorted(commands[1:3]) == ["mkdir -p /app", "mkdir -p /app/pkg"]
         chown_command = commands[3]
-        assert commands[4:] == ["bash /app/solve.sh", "mkdir -p /tests", "bash /tests/test.sh"]
+        assert commands[4:] == ["bash /app/solve.sh", "mkdir -p /tests", PREPARE_LOGS_FOR_AGENT, "bash /tests/test.sh"]
         chown_argv = shlex_split(chown_command)
         # One non-recursive chown as the image default: the nested directory first, then both files.
         assert chown_argv[:3] == ["chown", "agent", "/app/pkg"]
@@ -308,7 +378,7 @@ class TestVerify:
         assert "-R" not in chown_argv
         assert _exec_user(sandbox, chown_command) is None
         assert _exec_user(sandbox, "bash /app/solve.sh") == "agent"
-        assert _exec_user(sandbox, "bash /tests/test.sh") is None
+        assert _exec_user(sandbox, "bash /tests/test.sh") == "agent"
         assert sorted(sandbox.uploads) == [
             (str(task_folder / "solution" / "pkg" / "helper.py"), "/app/pkg/helper.py"),
             (str(task_folder / "solution" / "solve.sh"), "/app/solve.sh"),
@@ -360,6 +430,27 @@ class TestVerify:
         assert not any(cmd.startswith("chown") for cmd in _exec_commands(sandbox))
         assert _exec_user(sandbox, "bash /app/solve.sh") == agent_user
         assert result.agent_user == agent_user
+
+
+class TestTaskVerifierTimeout:
+    @pytest.mark.parametrize(
+        ("content", "expected"),
+        [
+            (None, None),
+            ("[verifier]\ntimeout_sec = 300\n", 300.0),
+            ("[verifier]\ntimeout_sec = 900.5\n", 900.5),
+            ("[verifier]\ntimeout_sec = 0\n", None),
+            ("[verifier]\ntimeout_sec = true\n", None),
+            ('[verifier]\ntimeout_sec = "300"\n', None),
+            ("[agent]\ntimeout_sec = 300\n", None),
+            ("verifier = 3\n", None),
+            ("not = [valid toml\n", None),
+        ],
+    )
+    def test_reads_only_a_positive_number(self, tmp_path, content, expected) -> None:
+        if content is not None:
+            (tmp_path / "task.toml").write_text(content)
+        assert task_verifier_timeout_sec(tmp_path) == expected
 
 
 class TestSandboxSetup:
