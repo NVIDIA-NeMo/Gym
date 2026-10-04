@@ -6,9 +6,10 @@ import json
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-import yaml
+from omegaconf import OmegaConf
 
 from benchmarks.indic.ifeval import prepare as module
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from resources_servers.instruction_following.app import InstructionFollowingRunRequest
 
 
@@ -69,9 +70,9 @@ def test_duplicate_keys_empty_selection_and_invalid_quality():
         module.build_rows([source_row()], language="hi", translation_quality="ground")
 
 
-def test_prepare_downloads_only_pinned_trans_and_round_trips(tmp_path, monkeypatch):
+def test_prepare_downloads_trans_default_revision_and_round_trips(tmp_path, monkeypatch):
     parquet = tmp_path / "source.parquet"
-    pq.write_table(pa.Table.from_pylist([source_row(key) for key in range(490)]), parquet)
+    pq.write_table(pa.Table.from_pylist([source_row(key) for key in range(3)]), parquet)
     calls = []
 
     def download(**kwargs):
@@ -81,14 +82,14 @@ def test_prepare_downloads_only_pinned_trans_and_round_trips(tmp_path, monkeypat
     monkeypatch.setattr(module, "hf_hub_download", download)
     path = module.prepare(tmp_path / "out.jsonl")
     rows = [json.loads(line) for line in path.read_text().splitlines()]
-    assert len(rows) == 12 * 490
+    assert len(rows) == 12 * 3
     assert len({row["uuid"] for row in rows}) == len(rows)
+    assert all("source_revision" not in row["metadata"] for row in rows)
     assert {row["subset_for_metrics"] for row in rows} == set(module.LANGUAGES)
     assert calls == [
         {
             "repo_id": "ai4bharat/IndicIFEval",
             "repo_type": "dataset",
-            "revision": module.SOURCE_REVISION,
             "filename": f"indicifeval-trans/{language}-00000-of-00001.parquet",
         }
         for language in module.LANGUAGES
@@ -96,9 +97,25 @@ def test_prepare_downloads_only_pinned_trans_and_round_trips(tmp_path, monkeypat
 
 
 def test_config_reuses_english_server_and_simple_agent():
-    config = yaml.safe_load((module.DIRECTORY / "config.yaml").read_text())
+    config = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.merge(
+                GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                {"config_paths": [str(module.DIRECTORY / "config.yaml")]},
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    assert "instruction_following" not in config
+    assert "instruction_following_simple_agent" not in config
     server = config["indic_ifeval_instruction_following"]["resources_servers"]["instruction_following"]
     assert server["instruction_backend"] == "indicifeval_trans"
+    assert server["entrypoint"] == "app.py"
     agent = config["indic_ifeval_instruction_following_simple_agent"]["responses_api_agents"]["simple_agent"]
+    assert agent["entrypoint"] == "app.py"
     assert agent["resources_server"]["name"] == "indic_ifeval_instruction_following"
+    assert agent["model_server"]["name"] == "policy_model"
+    assert [dataset["name"] for dataset in agent["datasets"]] == ["indic_ifeval_trans", "example"]
     assert agent["datasets"][0]["prepare_script"] == "benchmarks/indic/ifeval/prepare.py"

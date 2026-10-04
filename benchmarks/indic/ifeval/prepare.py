@@ -17,7 +17,6 @@ from resources_servers.instruction_following.setup_indicifeval import HARNESS_RE
 
 DIRECTORY = Path(__file__).resolve().parent
 SOURCE_ID = "ai4bharat/IndicIFEval"
-SOURCE_REVISION = "4343c1b174322e32cc785ef89fe117038fdad7a9"
 SOURCE_CONFIG = "indicifeval-trans"
 LANGUAGE_ALIASES = {"ka": "kn", "mar": "mr", "mal": "ml"}
 TranslationQuality = Literal["correct", "all", "parallel"]
@@ -73,7 +72,7 @@ def build_rows(
         rows.append(
             {
                 "id": key,
-                "uuid": f"indic-ifeval-trans-{SOURCE_REVISION}-{language}-{key}",
+                "uuid": f"indic-ifeval-trans-{language}-{key}",
                 "subset_for_metrics": language,
                 "responses_create_params": {
                     "input": [{"role": "user", "content": metadata.prompt}],
@@ -85,7 +84,6 @@ def build_rows(
                 "verifier_metadata": metadata.model_dump(),
                 "metadata": {
                     "source": SOURCE_ID,
-                    "source_revision": SOURCE_REVISION,
                     "source_config": SOURCE_CONFIG,
                     "source_split": language,
                     "source_key": key,
@@ -107,7 +105,7 @@ def prepare(
     languages: Sequence[str] | None = None,
     translation_quality: TranslationQuality = "correct",
 ) -> Path:
-    """Download only pinned Trans parquet files and write Gym evaluation JSONL."""
+    """Download Trans parquet files from the dataset's default revision."""
     import pyarrow.parquet as pq
 
     selected = select_languages(languages)
@@ -118,12 +116,9 @@ def prepare(
         path = hf_hub_download(
             repo_id=SOURCE_ID,
             repo_type="dataset",
-            revision=SOURCE_REVISION,
             filename=f"{SOURCE_CONFIG}/{language}-00000-of-00001.parquet",
         )
         records = pq.read_table(path).to_pylist()
-        if len(records) != 490:
-            raise ValueError(f"{language}: expected 490 released Trans rows, found {len(records)}")
         language_rows = build_rows(records, language=language, translation_quality=translation_quality)
         print(f"{language}: {len(language_rows)} / {len(records)} Trans rows ({translation_quality})")
         rows.extend(language_rows)

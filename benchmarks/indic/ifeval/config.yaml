@@ -1,24 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/instruction_following/configs/instruction_following.yaml
+
 indic_ifeval_instruction_following:
+  _inherit_from: instruction_following
   resources_servers:
     instruction_following:
-      entrypoint: app.py
-      domain: instruction_following
-      verified: false
       description: IndicIFEval-Trans using the upstream language-specific checkers.
       instruction_backend: indicifeval_trans
 
 indic_ifeval_instruction_following_simple_agent:
+  _inherit_from: instruction_following_simple_agent
   responses_api_agents:
     simple_agent:
-      entrypoint: app.py
       resources_server:
-        type: resources_servers
         name: indic_ifeval_instruction_following
-      model_server:
-        type: responses_api_models
-        name: policy_model
       datasets:
         - name: indic_ifeval_trans
           type: benchmark

@@ -3,7 +3,6 @@
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from nemo_gym.server_utils import ServerClient
@@ -118,11 +117,9 @@ async def test_existing_server_routes_to_indic_and_grades(server, grading_mode, 
     assert (await server.verify(request("", output=[]))).reward == 0
 
 
-def test_http_response_preserves_all_harness_metrics(server):
-    app = server.setup_webserver()
-    response = TestClient(app).post("/verify", json=request("<<शीर्षक>>\nउत्तर").model_dump())
-    assert response.status_code == 200
-    result = response.json()
+async def test_response_serialization_preserves_all_harness_metrics(server):
+    response = await server.verify(request("<<शीर्षक>>\nउत्तर"))
+    result = response.model_dump(mode="json")
     assert result["reward"] == 1
     assert result["inst_level_strict_acc"] == [True, True]
     assert result["inst_level_loose_acc"] == [True, True]
