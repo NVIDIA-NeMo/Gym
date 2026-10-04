@@ -1512,6 +1512,39 @@ class TestDidYouMean:
 
         assert did_you_mean("eval", ["eval", "eval2"]) == " Did you mean `eval2`?"
 
+    def _isolate_roots(self, monkeypatch: MonkeyPatch, root: Path) -> None:
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", root)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", root)
+        monkeypatch.chdir(root)
+
+    def _make_agents(self, root: Path) -> None:
+        agents = root / "responses_api_agents"
+        (agents / "foo" / "configs").mkdir(parents=True)  # folder exists, but no YAML configs
+        (agents / "fooo" / "configs").mkdir(parents=True)
+        (agents / "fooo" / "configs" / "fooo.yaml").write_text("{}\n")
+
+    def test_existing_folder_without_configs_gets_no_hint(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        # `foo/` exists but has no configs: report the missing config, don't suggest `fooo`.
+        self._make_agents(tmp_path)
+        self._isolate_roots(monkeypatch, tmp_path)
+
+        with pytest.raises(ValueError) as exc_info:
+            cli_main._asset_config_path("agent-type", "foo")
+
+        message = str(exc_info.value)
+        assert "responses_api_agents/foo/configs/foo.yaml" in message
+        assert "does not exist" in message
+        assert "Did you mean" not in message
+
+    def test_typo_in_folder_name_still_gets_hint(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        self._make_agents(tmp_path)
+        self._isolate_roots(monkeypatch, tmp_path)
+
+        with pytest.raises(ValueError) as exc_info:
+            cli_main._asset_config_path("agent-type", "foooo")
+
+        assert "Did you mean `fooo`?" in str(exc_info.value)
+
     def _run_expecting_exit(self, monkeypatch: MonkeyPatch, capsys, argv: list[str]) -> str:
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
         monkeypatch.setattr(sys, "argv", ["gym", *argv])

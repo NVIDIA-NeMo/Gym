@@ -446,6 +446,10 @@ def _asset_config_path(flag: str, value: str) -> str:
                 for child in (root / parent).iterdir()
                 if child.is_dir()
             ]
+            if server_name in candidates:
+                # The folder exists but has no YAML configs, so the problem is the missing config,
+                # not the name. Suggesting a different server here would point the user elsewhere.
+                candidates = []
 
         hint = did_you_mean(typo, candidates)
 
