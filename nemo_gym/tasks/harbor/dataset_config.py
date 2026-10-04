@@ -94,16 +94,22 @@ def _scale_environment(environment: HarborEnvironment, multiplier: float) -> Har
     return environment.model_copy(update=update) if update else environment
 
 
-def _override_environment(environment: HarborEnvironment, override: dict[str, Any]) -> HarborEnvironment:
+def _override_environment(
+    environment: HarborEnvironment, override: dict[str, Any], *, task_id: str
+) -> HarborEnvironment:
     if not override:
         return environment
+    # Harbor ignores unknown task.toml keys, but an override is written by the dataset author for this
+    # loader, so a misspelt field is an error named in Harbor's own vocabulary rather than a silent no-op.
+    unknown = HarborEnvironment.unknown_keys(override)
+    if unknown:
+        raise ValueError(f'[gym.tasks."{task_id}".environment] has unknown keys: {", ".join(unknown)}')
     merged = environment.model_dump(exclude_unset=True)
     for key, value in override.items():
         if key == "env":
             merged["env"] = dict(merged.get("env") or {}) | dict(value)
         else:
             merged[key] = value
-    # Unknown keys fail here with Harbor's own field names in the message.
     return HarborEnvironment.model_validate(merged)
 
 
@@ -113,7 +119,7 @@ def apply_dataset_config(config: HarborTaskConfig, task_id: str, dataset: GymDat
         return config
     defaults = dataset.defaults
     override = dataset.tasks.get(task_id)
-    environment = _override_environment(config.environment, override.environment if override else {})
+    environment = _override_environment(config.environment, override.environment if override else {}, task_id=task_id)
     environment = _scale_environment(environment, defaults.resource_multiplier)
     verifier = config.verifier
     verifier_update: dict[str, Any] = {}

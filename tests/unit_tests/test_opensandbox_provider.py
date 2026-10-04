@@ -2576,3 +2576,61 @@ async def test_direct_create_runs_setup_commands_as_root_and_a_failure_fails_the
     assert cleaned == ["sandbox-1"]
     # The provider's environment sits under the spec's own variables.
     assert FakeSandbox.created_kwargs["env"] == {"EXECD_API_GRACE_SHUTDOWN": "50ms", "A": "spec"}
+
+
+def test_a_failed_setup_command_is_never_a_retryable_create_error() -> None:
+    # The operator's command failed; a transient-looking marker in its stderr must not re-run the create.
+    error = opensandbox_provider.OpenSandboxSetupError("setup command failed: false; stderr: gateway timeout")
+    assert opensandbox_provider._is_retryable_create_error(error) is False
+    assert opensandbox_provider._is_retryable_sdk_operation_error(error) is False
+
+
+async def test_direct_create_does_not_retry_a_failed_setup_command(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        create={"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        setup={"commands": ["false"], "timeout_s": 12},
+    )
+    calls: list[str] = []
+    cleaned: list[str] = []
+
+    async def exec_(handle, command, **kwargs):
+        calls.append(command)
+        return opensandbox_provider.SandboxExecResult(stdout="", stderr="gateway timeout", return_code=1)
+
+    async def cleanup(handle):
+        cleaned.append(handle.sandbox_id)
+
+    monkeypatch.setattr(provider, "exec", exec_)
+    monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
+    with pytest.raises(opensandbox_provider.OpenSandboxSetupError):
+        await provider.create(SandboxSpec(image="python:3.11"))
+    assert calls == ["false"] and cleaned == ["sandbox-1"]
+
+
+async def test_a_cancelled_create_still_cleans_up_the_new_sandbox(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None}, setup={"commands": ["sleep 600"]})
+    cleaned: list[str] = []
+    started = asyncio.Event()
+
+    async def exec_(handle, command, **kwargs):
+        started.set()
+        await asyncio.sleep(3600)
+
+    async def cleanup(handle):
+        # The cleanup itself is awaited to completion, not abandoned with the cancelled task.
+        await asyncio.sleep(0)
+        cleaned.append(handle.sandbox_id)
+
+    monkeypatch.setattr(provider, "exec", exec_)
+    monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
+    task = asyncio.create_task(provider.create(SandboxSpec(image="python:3.11")))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleaned == ["sandbox-1"]

@@ -225,6 +225,9 @@ def _sdk_error_attributes(
 
 def _is_retryable_create_error(exception: BaseException) -> bool:
     """Return whether a sandbox create failure is likely transient."""
+    if isinstance(exception, OpenSandboxSetupError):
+        # The operator's own command failed; its stderr may carry a transient-looking marker.
+        return False
     if isinstance(exception, SandboxCreateVerificationError):
         return True
     if isinstance(exception, SandboxCreateError):
@@ -1624,8 +1627,10 @@ class OpenSandboxProvider:
                 handle = await self._connect_after_create(created_handle, spec)
             await self._verify_created_handle(handle)
             await self._run_setup_commands(handle)
-        except Exception:
-            await self._cleanup_failed_create_handle(created_handle)
+        except BaseException:
+            # Also on cancellation (a caller's timeout, shutdown): otherwise the pod lives to its TTL.
+            # The shield lets the cleanup finish even if this task is cancelled again meanwhile.
+            await asyncio.shield(self._cleanup_failed_create_handle(created_handle))
             raise
         if self._create.renew_interval_s is not None:
             self._start_renewal(handle, spec.ttl_s)

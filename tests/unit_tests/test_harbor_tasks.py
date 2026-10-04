@@ -840,23 +840,29 @@ class TestSeparateVerifierFields:
         assert config.verifier.collect[0].service == "kafka" and config.verifier.collect[0].timeout_sec == 10
         assert not config.is_shared_verifier
 
-    def test_verifier_environment_block_alone_keeps_shared_mode(self):
-        """Sizing the verifier must not switch to separate mode, which grades a fresh container."""
+    def test_verifier_mode_is_inferred_as_harbor_does(self):
+        """A [verifier.environment] block alone selects separate mode; only an explicit "shared" keeps it."""
         config = HarborTaskConfig.model_validate({"verifier": {"environment": {"docker_image": "org/verifier:1"}}})
-        assert config.is_shared_verifier
+        assert not config.is_shared_verifier
         config = HarborTaskConfig.model_validate(
             {"verifier": {"environment_mode": "separate"}, "artifacts": ["/app/out"]}
         )
         assert not config.is_shared_verifier
+        assert HarborTaskConfig.model_validate({"verifier": {"environment_mode": "shared"}}).is_shared_verifier
+        assert HarborTaskConfig.model_validate({"verifier": {"timeout_sec": 30}}).is_shared_verifier
 
-    def test_separate_mode_without_artifacts_is_rejected_at_load(self, tmp_path):
+    def test_separate_mode_without_artifacts_loads_with_a_warning(self, tmp_path, caplog):
         separate = HELLO_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
-        with pytest.raises(HarborTaskError, match="declares no artifacts"):
-            load_task(write_task(tmp_path / "t", toml=separate))
+        with caplog.at_level("WARNING", logger="nemo_gym.tasks.harbor.task"):
+            task = load_task(write_task(tmp_path / "t", toml=separate))
+        assert not task.config.is_shared_verifier
+        assert any("declares no artifacts" in record.message for record in caplog.records)
         with_artifacts = separate.replace(
             'schema_version = "1.4"\n', 'schema_version = "1.4"\nartifacts = ["/logs/artifacts"]\n'
         )
+        caplog.clear()
         assert not load_task(write_task(tmp_path / "t", toml=with_artifacts)).config.is_shared_verifier
+        assert not any("declares no artifacts" in record.message for record in caplog.records)
 
     def test_artifact_paths_stay_contained(self):
         with pytest.raises(ValueError, match="inside"):

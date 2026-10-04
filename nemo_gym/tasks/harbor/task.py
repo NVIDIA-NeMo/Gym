@@ -117,10 +117,11 @@ def load_task(path: Path) -> HarborTask:
     except UnicodeDecodeError as exc:
         raise HarborTaskError(f"{instruction_path}: {exc}") from exc
     if not config.is_shared_verifier and not config.artifacts:
-        raise HarborTaskError(
-            f"{path / TASK_FILE} uses separate verification but declares no artifacts, so the verifier "
-            "would grade a fresh container without the agent's work. Declare `artifacts` "
-            '(`artifacts = ["/logs/artifacts"]` to grade only what the agent puts there).'
+        # Harbor accepts this shape: the separate verifier still receives /logs/artifacts.
+        logger.warning(
+            "%s uses separate verification but declares no artifacts; the verifier grades a fresh container "
+            "that receives only what the agent writes under /logs/artifacts",
+            path / TASK_FILE,
         )
 
     environment = config.environment

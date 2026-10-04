@@ -247,8 +247,8 @@ class HarborTaskConfig(HarborSettings):
     def is_shared_verifier(self) -> bool:
         """Harbor runs the verifier in the agent's container unless the task says otherwise.
 
-        Only ``[verifier].environment_mode = "separate"`` selects the separate mode. A
-        ``[verifier.environment]`` block alone does not: a task may size its verifier without meaning
-        to grade a fresh container, and a fresh container only receives the declared artifacts.
+        As in Harbor, ``[verifier].environment_mode = "separate"`` or a ``[verifier.environment]``
+        block selects the separate mode, where a fresh container receives ``/logs/artifacts`` and
+        the declared ``artifacts``. Only ``environment_mode = "shared"`` keeps a sized verifier shared.
         """
-        return self.verifier.environment_mode != "separate"
+        return self.verifier.environment_mode != "separate" and self.verifier.environment is None
