@@ -732,6 +732,11 @@ class ServerClient(BaseModel):
                 f"{head_server_url}/global_config_dict_yaml",
             )
         except ConnectionError as e:
+            # requests' ConnectionError also covers proxy and name-resolution failures; keep the real reason
+            # (with its traceback) for --verbose, since the ConfigError below is printed without its cause.
+            logger.debug(
+                "Could not fetch the global config from the head server at %s", head_server_url, exc_info=True
+            )
             # A ConfigError so the CLI prints just this message (no traceback); the cause stays chained.
             raise HeadServerUnreachableError(
                 f"Could not connect to the head server at {head_server_url}. Is the head server running? "

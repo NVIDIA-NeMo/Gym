@@ -29,6 +29,7 @@ from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
+from requests.exceptions import ProxyError
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from yarl import URL
 
@@ -350,6 +351,23 @@ class TestServerUtils:
         assert message.startswith("Could not connect to the head server at http://10.0.0.5:9500.")
         assert "Is the head server running? Start it with: `gym env start`." in message
         assert "`++head_server.host=<host>` / `++head_server.port=<port>`" in message
+
+    def test_ServerClient_load_from_global_config_unreachable_head_server_logs_the_cause_at_debug(
+        self, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+    ) -> None:
+        # A proxy or name-resolution failure is also a requests ConnectionError, and the CLI prints the
+        # ConfigError without its cause, so the real reason must still reach `--verbose` (DEBUG) output.
+        self._nothing_listening_on_the_head_server(monkeypatch, host="127.0.0.1", port=11000)
+        proxy_error = ProxyError("Tunnel connection failed: 407 Proxy Authentication Required")
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", MagicMock(side_effect=proxy_error))
+
+        with caplog.at_level(logging.DEBUG, logger="nemo_gym.server_utils"), raises(HeadServerUnreachableError):
+            ServerClient.load_from_global_config()
+
+        (record,) = [record for record in caplog.records if record.name == "nemo_gym.server_utils"]
+        assert record.levelno == logging.DEBUG
+        assert "http://127.0.0.1:11000" in record.getMessage()
+        assert record.exc_info[1] is proxy_error
 
     async def test_ServerClient_get_post_sanity(self, monkeypatch: MonkeyPatch) -> None:
         server_client = ServerClient(
