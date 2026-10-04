@@ -21,12 +21,13 @@ import sys
 import time
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, Iterator, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -337,6 +338,47 @@ def _format_upstream_error_log(server_name: str, error: ClientResponseError) -> 
     )
 
 
+# Observability hook for request attempts. Unset (None) on the hot path costs one ContextVar.get();
+# a caller that wants attempt visibility binds a list via observe_request_attempts() and every
+# HTTP attempt made by request() inside that context -- including the transport's own retries --
+# appends one record. Retries stay separate attempts, never summed into the logical call.
+_REQUEST_ATTEMPTS: ContextVar[Optional[list[dict[str, Any]]]] = ContextVar("_REQUEST_ATTEMPTS", default=None)
+
+
+@contextmanager
+def observe_request_attempts() -> Iterator[list[dict[str, Any]]]:
+    """Collect one record per HTTP attempt made by ``request()`` within this block."""
+    attempts: list[dict[str, Any]] = []
+    token = _REQUEST_ATTEMPTS.set(attempts)
+    try:
+        yield attempts
+    finally:
+        _REQUEST_ATTEMPTS.reset(token)
+
+
+def _note_request_attempt(
+    attempts: Optional[list[dict[str, Any]]],
+    started_at: float,
+    started_perf: float,
+    status: str,
+    *,
+    status_code: Optional[int] = None,
+    error_type: Optional[str] = None,
+) -> None:
+    if attempts is None:
+        return
+    attempts.append(
+        {
+            "started_at": started_at,
+            "completed_at": time.time(),
+            "duration_ms": (time.perf_counter() - started_perf) * 1000,
+            "status": status,
+            "status_code": status_code,
+            "error_type": error_type,
+        }
+    )
+
+
 async def _request_with_retries(
     method: str,
     url: str,
@@ -345,13 +387,24 @@ async def _request_with_retries(
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
+    attempts = _REQUEST_ATTEMPTS.get()
     num_tries = 1
     retries = 0
     retry_start = time.monotonic()
     while True:
+        attempt_started_at = time.time()
+        attempt_started_perf = time.perf_counter()
         try:
-            return await client.request(method=method, url=url, **kwargs)
+            response = await client.request(method=method, url=url, **kwargs)
+        except CancelledError:
+            _note_request_attempt(
+                attempts, attempt_started_at, attempt_started_perf, "cancelled", error_type="CancelledError"
+            )
+            raise
         except ServerDisconnectedError:
+            _note_request_attempt(
+                attempts, attempt_started_at, attempt_started_perf, "error", error_type="ServerDisconnectedError"
+            )
             global _NUM_SERVER_DISCONNECTED_ERROR
             _NUM_SERVER_DISCONNECTED_ERROR += 1
             retries += 1
@@ -368,6 +421,9 @@ async def _request_with_retries(
 
             await asyncio.sleep(0.5)
         except ClientOSError:
+            _note_request_attempt(
+                attempts, attempt_started_at, attempt_started_perf, "error", error_type="ClientOSError"
+            )
             global _NUM_CLIENT_OS_ERROR
             _NUM_CLIENT_OS_ERROR += 1
             retries += 1
@@ -383,6 +439,9 @@ async def _request_with_retries(
 
             await asyncio.sleep(0.5)
         except Exception as e:
+            _note_request_attempt(
+                attempts, attempt_started_at, attempt_started_perf, "error", error_type=type(e).__name__
+            )
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                 print_exc()
 
@@ -399,6 +458,18 @@ Sleeping 0.5s and retrying...
                 num_tries += 1
 
             await asyncio.sleep(0.5)
+        else:
+            # Deliberately outside the try: the _internal error path never re-raises, so an
+            # exception raised by instrumentation would spin this loop forever instead of
+            # failing. getattr keeps a response object without .status from doing that.
+            _note_request_attempt(
+                attempts,
+                attempt_started_at,
+                attempt_started_perf,
+                "completed",
+                status_code=getattr(response, "status", None),
+            )
+            return response
 
 
 async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover

@@ -4167,3 +4167,52 @@ class TestRolloutBoundaries:
             row={}, result={}, rollout_latency_ms=None, rollout_started_at=5.0, rollout_completed_at=6.0
         )
         assert (completed.rollout_started_at, completed.rollout_completed_at) == (5.0, 6.0)
+
+
+class TestModelCallAttempts:
+    def test_attempts_survive_projection_and_keep_their_order(self) -> None:
+        result = {
+            "ng_trajectory": {
+                "task_id": "2",
+                "rollout_id": "2-3",
+                "invocations": [{"invocation_id": "root"}],
+                "model_calls": [
+                    {
+                        "model_call_id": "call-1",
+                        "attempts": [
+                            {"attempt_index": 1, "status": "timeout", "error_type": "TimeoutError"},
+                            {"attempt_index": 2, "status": "completed", "status_code": 200},
+                        ],
+                    }
+                ],
+            },
+            "ng_model_call_capture": {"calls": [{"model_call_id": "call-1", "tokens_in": 5}]},
+        }
+        trajectory = _build_trajectory_record({TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}, result)
+        [call] = trajectory.model_calls
+        assert call.token_stats.prompt_tokens == 5
+        assert [(a.attempt_index, a.status) for a in call.attempts] == [(1, "timeout"), (2, "completed")]
+
+    def test_capture_merge_cannot_erase_producer_attempts(self) -> None:
+        # The capture record carries no attempts; merging it must not blank the producer's.
+        result = {
+            "ng_trajectory": {
+                "task_id": "2",
+                "rollout_id": "2-3",
+                "invocations": [{"invocation_id": "root"}],
+                "model_calls": [
+                    {"model_call_id": "call-1", "attempts": [{"attempt_index": 1, "status": "completed"}]}
+                ],
+            },
+            "ng_model_call_capture": {"calls": [{"model_call_id": "call-1", "latency_total_ms": 7.0}]},
+        }
+        trajectory = _build_trajectory_record({TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}, result)
+        [call] = trajectory.model_calls
+        assert call.duration_ms == 7.0
+        assert [a.attempt_index for a in call.attempts] == [1]
+
+    def test_an_attempt_cannot_end_before_it_starts(self) -> None:
+        from nemo_gym.rollout_observability import TrajectoryModelCallAttempt
+
+        with pytest.raises(ValidationError):
+            TrajectoryModelCallAttempt(attempt_index=1, status="completed", started_at=2.0, completed_at=1.0)

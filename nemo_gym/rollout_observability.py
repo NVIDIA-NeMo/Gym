@@ -57,6 +57,28 @@ class TrajectoryResponseMetadata(ObservationModel):
     latency_ttft_ms: Optional[float] = Field(default=None, ge=0)
 
 
+class TrajectoryModelCallAttempt(ObservationModel):
+    """One HTTP attempt inside a logical model call. Retries are separate attempts, never folded.
+
+    Durations are taken by the process that made the request. ``completed`` with a non-2xx
+    ``status_code`` is an attempt the server answered but the client then retried (e.g. 429).
+    """
+
+    attempt_index: int = Field(ge=1, description="1-based position within the logical call.")
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    duration_ms: Optional[float] = Field(default=None, ge=0)
+    status: Literal["completed", "error", "timeout", "cancelled"]
+    status_code: Optional[int] = None
+    error_type: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_timing(self) -> "TrajectoryModelCallAttempt":
+        if self.started_at is not None and self.completed_at is not None and self.completed_at < self.started_at:
+            raise ValueError("completed_at must not precede started_at")
+        return self
+
+
 class TrajectoryModelCall(ObservationModel):
     model_call_id: Optional[str] = None
     started_at: Optional[float] = None
@@ -70,6 +92,13 @@ class TrajectoryModelCall(ObservationModel):
         Literal["agent_step", "subagent_step", "compaction_summary", "compaction_question"]
     ] = None
     model_response_kind: Optional[Literal["tool_call", "text", "other"]] = None
+    attempts: list[TrajectoryModelCallAttempt] = Field(
+        default_factory=list,
+        description=(
+            "Every request attempt behind this logical call, in order. Empty means the producer had no "
+            "attempt visibility, not that there was exactly one attempt."
+        ),
+    )
 
 
 class TrajectoryTurn(ObservationModel):

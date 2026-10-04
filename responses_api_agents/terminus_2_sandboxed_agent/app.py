@@ -53,6 +53,7 @@ from nemo_gym.server_utils import (
     get_response_json,
     get_server_url,
     is_nemo_gym_fastapi_entrypoint,
+    observe_request_attempts,
     raise_for_status,
 )
 from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
@@ -163,6 +164,30 @@ def _instruction(input_value: Any) -> str:
     return "\n\n".join(messages)
 
 
+def _harness_attempt(
+    started_at: float, started_perf: float, status: str, error_type: str | None = None
+) -> dict[str, Any]:
+    """An attempt as seen by this loop, for when the transport reported nothing (e.g. a stub client)."""
+    return {
+        "started_at": started_at,
+        "completed_at": time(),
+        "duration_ms": (perf_counter() - started_perf) * 1000,
+        "status": status,
+        "status_code": None,
+        "error_type": error_type,
+    }
+
+
+def _timed_out_attempts(
+    transport_attempts: list[dict[str, Any]], started_at: float, started_perf: float
+) -> list[dict[str, Any]]:
+    """Attribute an iteration's timeout to the HTTP attempt it cancelled, or synthesize one."""
+    if transport_attempts and transport_attempts[-1]["status"] == "cancelled":
+        transport_attempts[-1] = {**transport_attempts[-1], "status": "timeout", "error_type": "TimeoutError"}
+        return transport_attempts
+    return [*transport_attempts, _harness_attempt(started_at, started_perf, "timeout", "TimeoutError")]
+
+
 class NeMoGymLLM(BaseLLM):
     """Responses-only Harbor LLM adapter backed by NeMo Gym's aiohttp client."""
 
@@ -224,25 +249,40 @@ class NeMoGymLLM(BaseLLM):
         response = None
         started_at = time()
         start_perf = perf_counter()
+        # Every request attempt behind this logical call, retries included. The transport reports
+        # its own HTTP attempts through observe_request_attempts(); this loop adds the timeout
+        # that ended an iteration, since a cancelled request never reports a completion itself.
+        attempts: list[dict[str, Any]] = []
         max_attempts = 10  # Harbor does 3 by default and Litellm does 3 by default. Hardcode 10 attempts for now.
         for _ in range(max_attempts):
-            try:
-                async with asyncio.timeout(delay=self._llm_request_timeout):
-                    response = NeMoGymResponse.model_validate(
-                        await self._client.create_response(
-                            model=self._model_name,
-                            input=request_input,
+            attempt_started_at = time()
+            attempt_started_perf = perf_counter()
+            with observe_request_attempts() as transport_attempts:
+                try:
+                    async with asyncio.timeout(delay=self._llm_request_timeout):
+                        response = NeMoGymResponse.model_validate(
+                            await self._client.create_response(
+                                model=self._model_name,
+                                input=request_input,
+                            )
                         )
+                    attempts.extend(
+                        transport_attempts or [_harness_attempt(attempt_started_at, attempt_started_perf, "completed")]
                     )
                     break
-            except TimeoutError:
-                self._model_calls_gt_10min += 1
-                if self.observations is not None:
-                    self.observations.gap("model_attempt_without_response", "TimeoutError")
-            except BaseException as exc:
-                if self.observations is not None:
-                    self.observations.gap("model_attempt_without_response", type(exc).__name__)
-                raise
+                except TimeoutError:
+                    self._model_calls_gt_10min += 1
+                    attempts.extend(_timed_out_attempts(transport_attempts, attempt_started_at, attempt_started_perf))
+                    if self.observations is not None:
+                        self.observations.gap("model_attempt_without_response", "TimeoutError")
+                except BaseException as exc:
+                    attempts.extend(
+                        transport_attempts
+                        or [_harness_attempt(attempt_started_at, attempt_started_perf, "error", type(exc).__name__)]
+                    )
+                    if self.observations is not None:
+                        self.observations.gap("model_attempt_without_response", type(exc).__name__)
+                    raise
 
         self._times_spent.append(perf_counter() - start_perf)
         if not response:
@@ -259,6 +299,7 @@ class NeMoGymLLM(BaseLLM):
                 model_call_id=model_call_id,
                 started_at=started_at,
                 model_call_purpose=model_call_purpose,
+                attempts=attempts,
             )
             if self.observations is not None
             else None

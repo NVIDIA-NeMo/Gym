@@ -358,6 +358,10 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             update = projected.model_dump(mode="json", exclude_none=True)
             for key in ("response_metadata", "token_stats"):
                 merged[key].update(update.pop(key))
+            # exclude_none keeps empty lists, so a capture record with no attempts would erase the
+            # producer's. Capture has no attempt visibility today; only let it add, never clear.
+            if not update.get("attempts"):
+                update.pop("attempts", None)
             merged.update(update)
             projected = TrajectoryModelCall.model_validate(merged)
             model_calls[position] = projected

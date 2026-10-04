@@ -16,9 +16,11 @@ import asyncio
 import multiprocessing
 import socket
 from concurrent.futures import ProcessPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from aiohttp import ClientOSError, ClientResponseError, RequestInfo
+import pytest
+from aiohttp import ClientOSError, ClientResponseError, RequestInfo, ServerDisconnectedError
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from pytest import CaptureFixture, MonkeyPatch, raises
@@ -847,3 +849,88 @@ class TestServerUtils:
         response = await nemo_gym.server_utils.request("POST", "http://flaky-host:1/v1")
         assert response is client.success_response
         assert client.request.await_count == 5
+
+
+class TestObserveRequestAttempts:
+    """Every HTTP attempt the transport makes is visible to a caller that asks, retries included."""
+
+    class _FakeClient:
+        def __init__(self, outcomes):
+            self.outcomes = list(outcomes)
+            self.calls = 0
+
+        async def request(self, **kwargs):
+            self.calls += 1
+            outcome = self.outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return SimpleNamespace(status=outcome)
+
+    @pytest.mark.asyncio
+    async def test_a_transport_retry_is_a_separate_attempt(self, monkeypatch):
+        from nemo_gym import server_utils
+
+        fake = self._FakeClient([ServerDisconnectedError(), 200])
+        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: fake)
+
+        # The transport sleeps 0.5 s between attempts; patching asyncio.sleep would stall the loop.
+        with server_utils.observe_request_attempts() as attempts:
+            response = await server_utils._request_with_retries("POST", "http://x/v1/responses")
+
+        assert response.status == 200 and fake.calls == 2
+        assert [(a["status"], a["status_code"], a["error_type"]) for a in attempts] == [
+            ("error", None, "ServerDisconnectedError"),
+            ("completed", 200, None),
+        ]
+        for attempt in attempts:
+            assert attempt["started_at"] <= attempt["completed_at"]
+            assert attempt["duration_ms"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_a_server_answered_retryable_status_is_recorded_as_completed(self, monkeypatch):
+        from nemo_gym import server_utils
+
+        fake = self._FakeClient([429])
+        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: fake)
+        with server_utils.observe_request_attempts() as attempts:
+            await server_utils._request_with_retries("POST", "http://x/v1/responses")
+        assert [(a["status"], a["status_code"]) for a in attempts] == [("completed", 429)]
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_recorded_outside_an_observing_context(self, monkeypatch):
+        from nemo_gym import server_utils
+
+        fake = self._FakeClient([200])
+        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: fake)
+        assert server_utils._REQUEST_ATTEMPTS.get() is None
+        response = await server_utils._request_with_retries("POST", "http://x/v1/responses")
+        assert response.status == 200
+
+    @pytest.mark.asyncio
+    async def test_a_response_without_status_is_returned_not_retried_forever(self, monkeypatch):
+        # ServerClient calls with _internal=True, whose error path never re-raises -- it sleeps
+        # and loops. So anything that raises inside the try becomes an infinite retry, and
+        # recording the attempt must never be that thing.
+        from nemo_gym import server_utils
+
+        class Client:
+            async def request(self, **kwargs):
+                return "a response object with no .status"
+
+        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: Client())
+        with server_utils.observe_request_attempts() as attempts:
+            response = await asyncio.wait_for(
+                server_utils._request_with_retries("GET", "http://x", _internal=True), timeout=5
+            )
+        assert response == "a response object with no .status"
+        assert [(a["status"], a["status_code"]) for a in attempts] == [("completed", None)]
+
+    @pytest.mark.asyncio
+    async def test_the_context_is_restored_after_the_block(self):
+        from nemo_gym import server_utils
+
+        with server_utils.observe_request_attempts() as outer:
+            with server_utils.observe_request_attempts() as inner:
+                assert server_utils._REQUEST_ATTEMPTS.get() is inner
+            assert server_utils._REQUEST_ATTEMPTS.get() is outer
+        assert server_utils._REQUEST_ATTEMPTS.get() is None

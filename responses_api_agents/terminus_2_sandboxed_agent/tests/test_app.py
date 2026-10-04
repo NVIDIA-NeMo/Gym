@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -27,6 +28,7 @@ from responses_api_agents.terminus_2_sandboxed_agent.app import (
     Terminus2AgentConfig,
     _instruction,
 )
+from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
 
 
 def test_instruction_joins_text_content():
@@ -161,6 +163,72 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
         "second",
         "third",
     ]
+
+
+@pytest.mark.asyncio
+async def test_nemo_gym_llm_keeps_a_timed_out_attempt_separate_from_the_retry():
+    """A retried model call is one logical call with two attempts, never one blurred span."""
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        async def create_response(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(10)  # cancelled by the LLM's request timeout
+            return NeMoGymResponse(
+                id="resp_ok",
+                created_at=0,
+                model="policy_model",
+                object="response",
+                output=[
+                    NeMoGymResponseOutputMessage(
+                        id="msg",
+                        content=[NeMoGymResponseOutputText(type="output_text", text="answer", annotations=[])],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ],
+                tool_choice="auto",
+                tools=[],
+                parallel_tool_calls=True,
+                usage=NeMoGymResponseUsage(
+                    input_tokens=1,
+                    input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                    output_tokens=1,
+                    output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                    total_tokens=2,
+                ),
+            )
+
+    observations = TerminusObservations(
+        invocation_id="inv",
+        task_id="t",
+        rollout_id="t-0",
+        model_ref=ModelServerRef(type="responses_api_models", name="policy_model"),
+    )
+    llm = NeMoGymLLM(
+        client=Client(),
+        model_name="policy_model",
+        model_context_limit=32_000,
+        model_output_limit=4_000,
+        llm_request_timeout=0.05,
+        observations=observations,
+    )
+
+    result = await llm.call("prompt")
+
+    assert result.content == "answer"
+    [call] = observations.trajectory.model_calls
+    assert [(a.attempt_index, a.status, a.error_type) for a in call.attempts] == [
+        (1, "timeout", "TimeoutError"),
+        (2, "completed", None),
+    ]
+    assert call.attempts[0].started_at <= call.attempts[0].completed_at <= call.attempts[1].started_at
+    assert call.started_at <= call.attempts[0].started_at and call.attempts[1].completed_at <= call.completed_at
+    assert "model_attempt_without_response" in {gap.code for gap in observations.trajectory.gaps}
 
 
 @pytest.mark.asyncio

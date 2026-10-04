@@ -15,6 +15,7 @@ from nemo_gym.rollout_observability import (
     ModelCallRef,
     ObservationGap,
     TrajectoryModelCall,
+    TrajectoryModelCallAttempt,
     TrajectoryRecord,
     TrajectoryResponseMetadata,
     TrajectoryTokenStats,
@@ -73,6 +74,7 @@ class TerminusObservations:
         model_call_id: str | None = None,
         started_at: float | None = None,
         model_call_purpose: str | None = None,
+        attempts: list[dict[str, Any]] | None = None,
     ) -> ObservedResponse:
         observed = ObservedResponse(
             question=question, response=response, timestamp=timestamp, model_call_id=model_call_id
@@ -124,6 +126,10 @@ class TerminusObservations:
                     token_stats=token_stats,
                     model_call_purpose=model_call_purpose,
                     model_response_kind=self._response_kind(response),
+                    attempts=[
+                        TrajectoryModelCallAttempt(attempt_index=index, **attempt)
+                        for index, attempt in enumerate(attempts or [], start=1)
+                    ],
                 )
             )
         return observed
