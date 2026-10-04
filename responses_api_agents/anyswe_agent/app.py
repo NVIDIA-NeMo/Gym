@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import base64
+import dataclasses
 import hashlib
 import json
 import shlex
@@ -87,6 +88,34 @@ def _safe_config_json(params: "AnySweInstanceConfig", indent: Optional[int] = No
     d.pop("agent_runtime_source", None)
     d.pop("agent_deps_url", None)
     return json.dumps(redact(d), indent=indent)
+
+
+def _resolve_sandbox_provider(sandbox_provider: str | Dict[str, Any], named_configs: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve the provider config; Apptainer sandboxes always start with ``--no-home``.
+
+    By default ``apptainer instance start`` bind-mounts the invoking user's home into every instance. When the Gym
+    server runs as root, the usual case inside a training container, that home is ``/root``, so the server's ``/root``
+    replaces the task image's ``/root`` in every sandbox on the node. Task images keep toolchains there: R2E-Gym
+    images symlink ``/testbed/.venv/bin/python`` into ``/root/.local/share/uv/python/...``, which then dangles for
+    both the agent and the grader ("No such file or directory"). Files the agent or grader writes under ``/root`` also
+    land in the server's home and are visible to every other sandbox on the node. anyswe never needs the host home
+    (the agent runs with ``HOME=/sandbox/home``), so ``--no-home`` is added to ``create.extra_start_args``. Other
+    providers are returned unchanged.
+    """
+    provider = resolve_provider_config(sandbox_provider, named_configs)
+    if "apptainer" not in provider:
+        return provider
+    apptainer = dict(provider["apptainer"] or {})
+    create = apptainer.get("create") or {}
+    if dataclasses.is_dataclass(create):
+        create = dataclasses.asdict(create)
+    create = dict(create)
+    start_args = list(create.get("extra_start_args") or [])
+    if "--no-home" not in start_args:
+        start_args.append("--no-home")
+    create["extra_start_args"] = start_args
+    apptainer["create"] = create
+    return {"apptainer": apptainer}
 
 
 def _classify_agent_error(error: str) -> Optional[str]:
@@ -297,7 +326,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             model_server_url=model_url,
             agent_deps_archive=agent_deps_archive,
             agent_deps_url=agent_deps_url,
-            resolved_sandbox_provider=resolve_provider_config(
+            resolved_sandbox_provider=_resolve_sandbox_provider(
                 self.config.sandbox_provider, self.server_client.global_config_dict
             ),
             sandbox_default_metadata=resolve_provider_metadata(
