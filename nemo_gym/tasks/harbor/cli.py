@@ -14,7 +14,7 @@ selected agent, environment server and model configs.
 
 import argparse
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,7 @@ import yaml
 from nemo_gym import component_search_roots
 from nemo_gym.tasks.harbor.hub import HubRef, datasets_dir, fetch_ref, is_hub_ref
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
-from nemo_gym.tasks.harbor.task import HarborTask, discover_tasks
+from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, discover_tasks
 
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,7 @@ class PreparedTaskset:
     tasks: list[HarborTask]
     rows_path: Path
     output_dir: Path
+    skipped: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -66,7 +67,11 @@ def prepare_target(
     output_root: Path = DEFAULT_OUTPUT_ROOT,
     refresh_registry: bool = False,
 ) -> PreparedTaskset:
-    """Fetch (for hub references) and load the tasks, then write the rows file."""
+    """Fetch (for hub references) and load the tasks, then write the rows file.
+
+    A task folder that does not load is skipped with a warning (and listed in
+    ``PreparedTaskset.skipped``) so the rest of the dataset still prepares.
+    """
     if is_hub_ref(target):
         taskset = HubRef.parse(target).name
         folder = fetch_ref(target, refresh_registry=refresh_registry)
@@ -74,12 +79,23 @@ def prepare_target(
     else:
         folder = Path(target).expanduser().resolve()
         taskset = folder.name
-    tasks = discover_tasks(folder)
+    errors: dict[str, HarborTaskError] = {}
+    tasks = discover_tasks(folder, skipped=errors)
+    for task_id, error in errors.items():
+        logger.warning("Skipping task %s: %s", task_id, error)
     output_dir = Path(output_root) / taskset
     rows_path = output_dir / "tasks.jsonl"
     write_rows(tasks, taskset, rows_path)
-    print(f"Materialized {len(tasks)} task(s) from {folder} into {rows_path}")
-    return PreparedTaskset(taskset=taskset, folder=folder, tasks=tasks, rows_path=rows_path, output_dir=output_dir)
+    skipped_note = f", skipped {len(errors)}" if errors else ""
+    print(f"Materialized {len(tasks)} task(s) from {folder} into {rows_path}{skipped_note}")
+    return PreparedTaskset(
+        taskset=taskset,
+        folder=folder,
+        tasks=tasks,
+        rows_path=rows_path,
+        output_dir=output_dir,
+        skipped={task_id: str(error) for task_id, error in errors.items()},
+    )
 
 
 def resolve_agent(agent: str) -> AgentSelection:

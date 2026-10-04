@@ -10,15 +10,19 @@ run time. A ``HEAD`` pin is resolved to a commit before anything is copied.
 """
 
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+
+logger = logging.getLogger(__name__)
 
 REGISTRY_URL = "https://raw.githubusercontent.com/harbor-framework/harbor/main/registry.json"
 REF_PREFIX = "harbor:"
@@ -26,6 +30,13 @@ DATASETS_DIR_ENV = "NEMO_GYM_DATASETS_DIR"
 MANIFEST_FILE = "manifest.toml"
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+_SHA = re.compile(r"[0-9a-f]{40}")
+# Registry entries may only point at network git remotes: a URL scheme git fetches over,
+# or the scp-like `user@host:path` form. Anything else (file paths, `ext::`, option-looking
+# strings) is refused before it reaches a git command line.
+_GIT_URL_SCHEME = re.compile(r"(https|ssh|git)://[A-Za-z0-9]", re.IGNORECASE)
+_GIT_URL_SCP = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:(?!-)[^:]*")
 
 
 class HubError(ValueError):
@@ -74,11 +85,30 @@ class RegistryDataset:
 
     @property
     def folder_name(self) -> str:
-        return self.name
+        """``<name>-<version>``, so two versions of one dataset never share a folder."""
+        if not self.version:
+            return self.name
+        return f"{self.name}-{_UNSAFE.sub('-', self.version)}"
+
+
+def _numeric_version(version: str) -> tuple[int, ...] | None:
+    parts = version.split(".")
+    return tuple(int(part) for part in parts) if all(part.isdigit() for part in parts) else None
 
 
 def _version_key(version: str) -> tuple:
-    return tuple(int(part) if part.isdigit() else part for part in re.split(r"[.-]", version))
+    """Total order over versions: numeric versions first (by component), then the rest by text."""
+    numeric = _numeric_version(version)
+    return (0, numeric, "") if numeric is not None else (1, (), version)
+
+
+def validate_git_url(git_url: str) -> str:
+    """Return ``git_url`` if it is an https, ssh or git URL (or ``user@host:path``); else raise."""
+    if _GIT_URL_SCHEME.match(git_url) or _GIT_URL_SCP.fullmatch(git_url):
+        return git_url
+    raise HubError(
+        f"Unsupported git_url {git_url!r} in the Harbor registry (expected https://, ssh://, git:// or git@host:path)"
+    )
 
 
 def load_registry(cache_dir: Path, *, refresh: bool = False) -> list[RegistryDataset]:
@@ -96,7 +126,10 @@ def load_registry(cache_dir: Path, *, refresh: bool = False) -> list[RegistryDat
     for entry in json.loads(cache.read_text()):
         tasks = tuple(
             RegistryTask(
-                name=task["name"], git_url=task["git_url"], git_commit_id=task["git_commit_id"], path=task["path"]
+                name=task["name"],
+                git_url=validate_git_url(task["git_url"]),
+                git_commit_id=task["git_commit_id"],
+                path=task["path"],
             )
             for task in entry.get("tasks", [])
         )
@@ -121,6 +154,14 @@ def resolve_dataset(ref: HubRef, registry: list[RegistryDataset]) -> RegistryDat
                 return dataset
         available = ", ".join(sorted(dataset.version for dataset in matches))
         raise HubError(f"Dataset {ref.name!r} has no version {ref.version!r}; available: {available}")
+    if len(matches) == 1:
+        return matches[0]
+    if any(_numeric_version(dataset.version) is None for dataset in matches):
+        versions = ", ".join(sorted((dataset.version for dataset in matches), key=_version_key))
+        raise HubError(
+            f"Dataset {ref.name!r} has versions that do not order numerically ({versions}); "
+            f"pin one with `harbor:{ref.name}@<version>`"
+        )
     return max(matches, key=lambda dataset: _version_key(dataset.version))
 
 
@@ -142,17 +183,43 @@ def _git(*args: str, cwd: Path | None = None) -> str:
     return completed.stdout
 
 
-def resolve_commit(git_url: str, git_commit_id: str) -> str:
-    """Pin ``HEAD`` (or a branch name) to the commit it points at right now."""
-    if re.fullmatch(r"[0-9a-f]{40}", git_commit_id):
+def resolve_commit(git_url: str, git_commit_id: str, cache: dict[tuple[str, str], str] | None = None) -> str:
+    """Pin ``HEAD`` (or a branch name) to the commit it points at right now.
+
+    ``cache`` memoizes the answer per ``(git_url, ref)`` so one fetch asks each remote once.
+    """
+    if _SHA.fullmatch(git_commit_id):
         return git_commit_id
     ref = "HEAD" if git_commit_id == "HEAD" else git_commit_id
-    output = _git("ls-remote", git_url, ref)
+    if cache is not None and (git_url, ref) in cache:
+        return cache[(git_url, ref)]
+    output = _git("ls-remote", "--", git_url, ref)
     for line in output.splitlines():
         sha, _, name = line.partition("\t")
         if name.strip() == ref or (ref != "HEAD" and name.strip() == f"refs/heads/{ref}"):
+            if cache is not None:
+                cache[(git_url, ref)] = sha.strip()
             return sha.strip()
     raise HubError(f"{git_url} has no ref {git_commit_id!r}")
+
+
+def _read_manifest_pins(folder: Path) -> dict[str, tuple[str, str, str]]:
+    """The ``(git_url, commit, path)`` pins a previous fetch recorded, or ``{}``."""
+    manifest = folder / MANIFEST_FILE
+    if not manifest.is_file():
+        return {}
+    try:
+        tasks = tomllib.loads(manifest.read_text()).get("tasks", {})
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        logger.warning("%s is unreadable and will be rewritten: %s", manifest, exc)
+        return {}
+    pins = {}
+    for name, pin in tasks.items():
+        if isinstance(pin, dict) and all(
+            isinstance(pin.get(key), str) for key in ("git_url", "git_commit_id", "path")
+        ):
+            pins[name] = (pin["git_url"], pin["git_commit_id"], pin["path"])
+    return pins
 
 
 def _write_manifest(folder: Path, dataset: RegistryDataset, pins: dict[str, tuple[str, str, str]]) -> None:
@@ -179,25 +246,32 @@ def _write_manifest(folder: Path, dataset: RegistryDataset, pins: dict[str, tupl
 
 
 def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
-    """Copy every task of ``dataset`` into ``root/<dataset name>/<task name>/``.
+    """Copy every task of ``dataset`` into ``root/<dataset>-<version>/<task name>/``.
 
-    Task folders that already exist are kept; only missing ones are fetched, so a
-    rerun after a partial fetch completes it. Returns the dataset folder.
+    Task folders that already exist are kept with the pins the manifest recorded for
+    them; only missing ones are resolved and fetched, so a rerun after a partial fetch
+    completes it without moving a ``HEAD`` pin. Returns the dataset folder.
     """
     folder = Path(root) / dataset.folder_name
     folder.mkdir(parents=True, exist_ok=True)
+    previous = _read_manifest_pins(folder)
+    resolved: dict[tuple[str, str], str] = {}
     pins: dict[str, tuple[str, str, str]] = {}
     by_repo: dict[tuple[str, str], list[RegistryTask]] = {}
     for task in dataset.tasks:
-        commit = resolve_commit(task.git_url, task.git_commit_id)
+        present = (folder / task.name / "task.toml").is_file()
+        if present and task.name in previous:
+            pins[task.name] = previous[task.name]
+            continue
+        commit = resolve_commit(task.git_url, task.git_commit_id, resolved)
         pins[task.name] = (task.git_url, commit, task.path)
-        if not (folder / task.name / "task.toml").is_file():
+        if not present:
             by_repo.setdefault((task.git_url, commit), []).append(task)
 
     for (git_url, commit), tasks in by_repo.items():
         with tempfile.TemporaryDirectory(prefix="nemo-gym-harbor-", dir=folder) as tmp:
             clone = Path(tmp) / "repo"
-            _git("clone", "--quiet", "--filter=blob:none", "--no-checkout", git_url, str(clone))
+            _git("clone", "--quiet", "--filter=blob:none", "--no-checkout", "--", git_url, str(clone))
             _git("sparse-checkout", "set", "--no-cone", *(task.path for task in tasks), cwd=clone)
             _git("checkout", "--quiet", commit, cwd=clone)
             for task in tasks:
