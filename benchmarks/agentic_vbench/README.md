@@ -5,7 +5,7 @@ Assembly (18), Sequencing (28), and Repurpose (36). This benchmark uses the
 `agentic_vbench_agent` adapter and Gym's `legacy_agent` environment server.
 The agent delegates execution and verification to the upstream Harbor/OpenCode runner; it does not replace the benchmark with a question-answering task.
 
-Task revision: `610c4ecc69ac56fc62e8cfbd3b28dddd88f22863`.
+Task revision: `410a75fe3dae37de4344fc9e5317da089505330a`.
 Harbor: `0.6.6`. OpenCode: `1.14.39`.
 The advertised model context is 262,144 tokens and output capability is 100,000 tokens.
 The task's own timeouts govern execution. The Factory request proxy applies sampling overrides. Run independent request seeds 201, 202, and 203 for
