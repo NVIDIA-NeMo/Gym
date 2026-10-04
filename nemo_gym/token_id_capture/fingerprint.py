@@ -35,6 +35,17 @@ harnesses regenerate them per request with volatile fields (OpenCode's system
 prompt carries today's date), and hashing their content poisoned every rollout
 that crossed a UTC day boundary. Version 3 of the digest skips their content.
 
+Text hashes as the visible text a harness echoes (version 5): inline reasoning
+blocks (``<think>…</think>`` and the other tag names below), unterminated or
+orphan reasoning tags, text-channel tool-call markup and surrounding whitespace
+are dropped first. The policy server re-inlines parsed reasoning into the served
+``content`` while a harness may strip it before replaying the turn: Hermes
+(``agent_runtime_helpers.strip_think_blocks``) stores and echoes only the
+stripped, trimmed text, so every continuation of a Hermes session hashed to a
+different value than the served completion and resolved ``unresolved_parent``.
+Standalone reasoning items were already excluded; inline reasoning is the same
+content in the Chat dialect.
+
 Chat, Responses, and Anthropic shapes normalize to the same hash input.
 The hash layout is tagged and length-delimited.
 No concatenation of fields can collide with another field boundary.
@@ -44,6 +55,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 import orjson
@@ -51,11 +63,51 @@ import orjson
 
 # Increment when fingerprint canonicalization or hash layout changes.
 # Resolvers ignore entries stamped with a different version.
-FINGERPRINT_VERSION = 4
+FINGERPRINT_VERSION = 5
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
 _INSTRUCTION_ROLES = frozenset({"system", "developer"})
+
+# Markup a harness strips from assistant text before echoing it, mirrored from
+# Hermes's ``strip_think_blocks`` (its tag names and pattern order): closed
+# reasoning pairs, closed text-channel tool-call blocks, named ``<function>``
+# blocks at a line boundary, an unterminated reasoning opener at a line boundary
+# (to the end of the text), orphan reasoning tags, stray tool-call closers, and
+# an unterminated tool-call opener or GLM-style argument markup.
+_REASONING_TAG_NAMES = ("think", "thinking", "reasoning", "REASONING_SCRATCHPAD", "thought")
+_TOOL_CALL_TAG_NAMES = ("tool_call", "tool_calls", "tool_result", "function_call", "function_calls")
+_REASONING_TAG_ALTERNATION = "|".join(_REASONING_TAG_NAMES)
+_TOOL_CALL_TAG_ALTERNATION = "|".join(_TOOL_CALL_TAG_NAMES)
+_STRIPPED_MARKUP_PATTERNS = (
+    *(re.compile(rf"<{name}>.*?</{name}>", re.DOTALL | re.IGNORECASE) for name in _REASONING_TAG_NAMES),
+    *(re.compile(rf"<{name}\b[^>]*>.*?</{name}>", re.DOTALL | re.IGNORECASE) for name in _TOOL_CALL_TAG_NAMES),
+    re.compile(
+        r"(?:(?<=^)|(?<=[\n\r.!?:]))[ \t]*<function\b[^>]*\bname\s*=[^>]*>(?:(?:(?!</function>).)*)</function>",
+        re.DOTALL | re.IGNORECASE,
+    ),
+    re.compile(rf"(?:^|\n)[ \t]*<(?:{_REASONING_TAG_ALTERNATION})\b[^>]*>.*$", re.DOTALL | re.IGNORECASE),
+    re.compile(rf"</?(?:{_REASONING_TAG_ALTERNATION})>\s*", re.IGNORECASE),
+    re.compile(rf"</(?:{_TOOL_CALL_TAG_ALTERNATION}|function)>\s*", re.IGNORECASE),
+    re.compile(
+        rf"(?:^|\n)[ \t]*<(?:{_TOOL_CALL_TAG_ALTERNATION})\b[^>]*>.*$|(?:^|\n)[^\n<]*</?arg_(?:key|value)\b.*$",
+        re.DOTALL | re.IGNORECASE,
+    ),
+)
+
+
+def visible_text(text: str) -> str:
+    """Return a text part as a harness echoes it.
+
+    Reasoning and text-channel tool-call markup is dropped and the remainder is
+    trimmed, so the served completion and its stripped echo hash identically.
+    """
+    if not text:
+        return ""
+    if "<" in text:
+        for pattern in _STRIPPED_MARKUP_PATTERNS:
+            text = pattern.sub("", text)
+    return text.strip()
 
 
 def assistant_fingerprint(messages: list[dict]) -> str:
@@ -175,14 +227,16 @@ def _content_of(content: Any) -> list[tuple[str, str]]:
     if content is None:
         return []
     if isinstance(content, str):
-        return [("text", content)] if content else []
+        text = visible_text(content)
+        return [("text", text)] if text else []
     if not isinstance(content, list):
         raise ValueError(f"unsupported message content: {type(content).__name__}")
     parts: list[tuple[str, str]] = []
     for block in content:
         if isinstance(block, str):
-            if block:
-                parts.append(("text", block))
+            text = visible_text(block)
+            if text:
+                parts.append(("text", text))
             continue
         if not isinstance(block, dict):
             raise ValueError(f"unsupported content block: {type(block).__name__}")
@@ -195,8 +249,9 @@ def _content_of(content: Any) -> list[tuple[str, str]]:
             "input_text",
             "output_text",
         }:
-            if block["text"]:
-                parts.append(("text", block["text"]))
+            text = visible_text(block["text"])
+            if text:
+                parts.append(("text", text))
             continue
         if not block_type:
             raise ValueError("content block has no supported type")
