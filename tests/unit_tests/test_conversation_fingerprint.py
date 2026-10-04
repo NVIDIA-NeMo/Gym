@@ -142,3 +142,41 @@ def test_conversation_digest_ignores_instruction_content_but_not_its_position():
     assert conversation_digest(day1) != conversation_digest([*day1[:2], dict(day1[2], content="done")])
     # The assistant fingerprint never looked at instruction items.
     assert assistant_fingerprint(day1) == assistant_fingerprint(day2)
+
+
+def test_inline_reasoning_and_surrounding_whitespace_do_not_change_the_hashes():
+    """Hermes strips ``<think>`` blocks and trims the text at its storage boundary and
+    replays that text, while the policy server re-inlines the parsed reasoning into the
+    served content. The served turn and its echo must resolve to the same call."""
+    served = {"role": "assistant", "content": "<think>\nLook around first.\n</think>\n\nI'll start by exploring.\n"}
+    echoed = {"role": "assistant", "content": "I'll start by exploring."}
+    assert assistant_fingerprint([served]) == assistant_fingerprint([echoed]) != ""
+    assert conversation_digest([served]) == conversation_digest([echoed])
+    # The visible text still tells turns apart.
+    assert assistant_fingerprint([served]) != assistant_fingerprint([dict(echoed, content="I'll start by reading.")])
+    # Responses and Anthropic text blocks normalize the same way.
+    block = {"role": "assistant", "content": [{"type": "text", "text": served["content"]}]}
+    assert assistant_fingerprint([block]) == assistant_fingerprint([echoed])
+
+
+def test_a_reasoning_only_tool_call_turn_hashes_like_its_stripped_echo():
+    call = [{"id": "c1", "function": {"name": "terminal", "arguments": '{"command": "ls"}'}}]
+    served = {"role": "assistant", "content": "<think>no visible text</think>", "tool_calls": call}
+    echoed = {"role": "assistant", "content": "", "tool_calls": call}
+    assert assistant_fingerprint([served]) == assistant_fingerprint([echoed]) != ""
+    assert assistant_fingerprint([served]) == assistant_fingerprint([dict(echoed, content=None)])
+
+
+def test_unterminated_orphan_and_tool_call_markup_is_dropped():
+    plain = assistant_fingerprint([{"role": "assistant", "content": "Done."}])
+    truncated = {"role": "assistant", "content": "Done.\n<think>cut off by max_tokens"}
+    orphan = {"role": "assistant", "content": "</think>Done."}
+    text_channel_call = {"role": "assistant", "content": 'Done.\n<tool_call>{"name": "terminal"}</tool_call>'}
+    for message in (truncated, orphan, text_channel_call):
+        assert assistant_fingerprint([message]) == plain, message
+    # Markup mentioned inside a sentence is ordinary text.
+    prose = {"role": "assistant", "content": "The <think> tag opens a reasoning block."}
+    assert assistant_fingerprint([prose]) != plain
+    assert assistant_fingerprint([prose]) == assistant_fingerprint(
+        [{"role": "assistant", "content": "The tag opens a reasoning block."}]
+    )
