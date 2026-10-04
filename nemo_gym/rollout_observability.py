@@ -96,6 +96,16 @@ class AgentInvocation(ObservationModel):
     status: Literal["completed", "failed", "incomplete", "unknown"] = Field(
         default="unknown", description="Harness-reported invocation outcome; unknown when not explicit."
     )
+    started_at: Optional[float] = Field(
+        default=None,
+        description=(
+            "Wall clock when the task prompt reached the initialized agent, for placing this invocation on a "
+            "shared timeline. Durations should come from duration_ms, which a producer measures monotonically."
+        ),
+    )
+    completed_at: Optional[float] = Field(
+        default=None, description="Wall clock when agent execution terminated and its output was available."
+    )
     duration_ms: Optional[float] = Field(default=None, ge=0)
     error_type: Optional[str] = None
     model_calls: list[ModelCallRef] = Field(default_factory=list)
@@ -103,6 +113,12 @@ class AgentInvocation(ObservationModel):
         default_factory=list,
         description="Normalized conversation items supported by this producer; gaps describe unavailable evidence.",
     )
+
+    @model_validator(mode="after")
+    def validate_timing(self) -> "AgentInvocation":
+        if self.started_at is not None and self.completed_at is not None and self.completed_at < self.started_at:
+            raise ValueError("completed_at must not precede started_at")
+        return self
 
 
 class ToolCallObservation(ObservationModel):

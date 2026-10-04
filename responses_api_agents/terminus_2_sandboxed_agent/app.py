@@ -450,6 +450,9 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         sandbox: AsyncSandbox,
     ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
         start_time = perf_counter()
+        # Wall clock alongside the monotonic start: durations stay monotonic, but the invocation
+        # also needs absolute bounds to sit on the same timeline as model and tool spans.
+        started_at = time()
         instruction = _instruction(body.input)
         run_body = await request.json()
         rollout_id = self.rollout_id_from_run(run_body)
@@ -562,6 +565,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         )
 
         total_time = perf_counter() - start_time
+        completed_at = time()
         total_command_exec_time = sum(agent._times_spent)
         total_model_call_time = sum(llm._times_spent)
         metrics = {
@@ -589,6 +593,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                     AgentInvocation(
                         invocation_id=invocation_id,
                         status=invocation_status,
+                        started_at=started_at,
+                        completed_at=completed_at,
                         duration_ms=total_time * 1000,
                         error_type=error_type,
                     ),

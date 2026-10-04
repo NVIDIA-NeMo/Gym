@@ -41,6 +41,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_observability import (
     AgentInvocation,
+    AgentObservationBundle,
     SandboxObservation,
     ToolCallObservation,
 )
@@ -53,6 +54,7 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
     OpenCodeSandboxedAgentRunRequest,
+    parse_opencode_observations,
 )
 
 
@@ -544,6 +546,7 @@ class TestOpenCodeSandboxedAgent:
         ]
         assert invocation.invocation_id == "root"
         assert invocation.status == "completed"
+        assert (invocation.started_at, invocation.completed_at) == (0.001, 0.003)
         [tool] = [record for record in result.ng_agent_observations.records if isinstance(record, ToolCallObservation)]
         assert tool.tool_call_id == "call-1"
         assert tool.sandbox_id == "connected-sandbox"
@@ -666,3 +669,77 @@ class TestSqliteSnapshotScript:
 
         assert self._contents(without_backup) == self._contents(with_backup)
         assert self._contents(with_backup)[0] == [("root", None, 0)]
+
+
+class TestInvocationSpans:
+    """agent_start/agent_end, and the same bounds for each subagent session.
+
+    Without these the analysis cannot compute e2e_agent_time, pre/post-agent time, or any
+    subagent span. OpenCode records them on its own in-sandbox clock, the same clock its tool
+    timings come from.
+    """
+
+    @staticmethod
+    def _database(tmp_path: Path, sessions: list[tuple], messages: list[tuple]) -> Path:
+        path = tmp_path / "opencode.db"
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute("create table session (id text, parent_id text, time_created integer)")
+            connection.execute("create table message (id text, session_id text, data text, time_created integer)")
+            connection.execute(
+                "create table part (id text, message_id text, session_id text, data text, time_created integer)"
+            )
+            connection.executemany("insert into session values (?, ?, ?)", sessions)
+            connection.executemany("insert into message values (?, ?, ?, ?)", messages)
+            connection.commit()
+        finally:
+            connection.close()
+        return path
+
+    @staticmethod
+    def _invocations(bundle: AgentObservationBundle) -> dict[str, AgentInvocation]:
+        return {r.invocation_id: r for r in bundle.records if isinstance(r, AgentInvocation)}
+
+    def test_span_runs_from_the_first_message_to_the_last_assistant_completion(self, tmp_path: Path) -> None:
+        messages = [
+            ("m1", "root", json.dumps({"role": "user", "time": {"created": 1_000}}), 1),
+            ("m2", "root", json.dumps({"role": "assistant", "time": {"created": 1_500, "completed": 2_000}}), 2),
+            ("m3", "root", json.dumps({"role": "assistant", "time": {"created": 2_500, "completed": 9_000}}), 3),
+        ]
+        bundle = parse_opencode_observations(self._database(tmp_path, [("root", None, 500)], messages), "fallback")
+        invocation = self._invocations(bundle)["root"]
+        assert (invocation.started_at, invocation.completed_at) == (1.0, 9.0)
+        assert invocation.status == "completed"
+
+    def test_a_subagent_session_carries_its_own_span(self, tmp_path: Path) -> None:
+        sessions = [("root", None, 500), ("child", "root", 3_000)]
+        messages = [
+            ("m1", "root", json.dumps({"role": "user", "time": {"created": 1_000}}), 1),
+            ("m2", "root", json.dumps({"role": "assistant", "time": {"created": 1_500, "completed": 9_000}}), 2),
+            ("m3", "child", json.dumps({"role": "user", "time": {"created": 3_100}}), 3),
+            ("m4", "child", json.dumps({"role": "assistant", "time": {"created": 3_200, "completed": 4_000}}), 4),
+        ]
+        invocations = self._invocations(parse_opencode_observations(self._database(tmp_path, sessions, messages), "f"))
+        assert (invocations["root"].started_at, invocations["root"].completed_at) == (1.0, 9.0)
+        assert (invocations["child"].started_at, invocations["child"].completed_at) == (3.1, 4.0)
+        assert invocations["child"].parent_invocation_id == "root"
+
+    def test_session_creation_time_is_the_fallback_start(self, tmp_path: Path) -> None:
+        messages = [("m1", "root", json.dumps({"role": "user"}), 1)]
+        bundle = parse_opencode_observations(self._database(tmp_path, [("root", None, 2_500)], messages), "fallback")
+        invocation = self._invocations(bundle)["root"]
+        assert invocation.started_at == 2.5
+        assert invocation.completed_at is None
+
+    def test_inconsistent_artifact_timestamps_are_dropped_not_raised(self, tmp_path: Path) -> None:
+        # A completion before the first message would fail AgentInvocation validation and cost
+        # the entire bundle, so it is reported as a gap instead.
+        messages = [
+            ("m1", "root", json.dumps({"role": "user", "time": {"created": 9_000}}), 1),
+            ("m2", "root", json.dumps({"role": "assistant", "time": {"created": 9_100, "completed": 1_000}}), 2),
+        ]
+        bundle = parse_opencode_observations(self._database(tmp_path, [("root", None, 8_000)], messages), "fallback")
+        invocation = self._invocations(bundle)["root"]
+        assert invocation.started_at == 9.0
+        assert invocation.completed_at is None
+        assert "agent_span_timing_inconsistent" in {gap.code for gap in bundle.gaps}

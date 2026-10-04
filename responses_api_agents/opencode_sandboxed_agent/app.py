@@ -133,6 +133,8 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
     message_sessions = {row["id"]: row["session_id"] for row in message_rows}
     conversations: dict[str, list[Any]] = {row["id"]: [] for row in session_rows}
     invocation_status: dict[str, str] = {row["id"]: "unknown" for row in session_rows}
+    session_started: dict[str, float] = {}
+    session_completed: dict[str, float] = {}
     tools: list[ToolCallObservation] = []
     child_tools: dict[str, set[str]] = {}
     child_status: dict[str, str] = {}
@@ -147,12 +149,21 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
         session_id = row["session_id"]
         if not isinstance(session_id, str) or session_id not in invocation_status:
             gaps.append(ObservationGap(code="agent_artifact_record_unowned", detail=row["id"]))
-        elif message.get("role") == "assistant":
-            if isinstance(message.get("error"), dict):
-                invocation_status[session_id] = "failed"
+        else:
             message_time = message.get("time") if isinstance(message.get("time"), dict) else {}
-            if invocation_status[session_id] != "failed" and _milliseconds(message_time.get("completed")) is not None:
-                invocation_status[session_id] = "completed"
+            # Invocation span: first message delivered to this session through the last assistant
+            # message it completed. These are OpenCode's own (in-sandbox) clock, like tool timings.
+            created = _milliseconds(message_time.get("created"))
+            if created is not None:
+                session_started[session_id] = min(session_started.get(session_id, created), created)
+            if message.get("role") == "assistant":
+                if isinstance(message.get("error"), dict):
+                    invocation_status[session_id] = "failed"
+                completed = _milliseconds(message_time.get("completed"))
+                if completed is not None:
+                    session_completed[session_id] = max(session_completed.get(session_id, completed), completed)
+                    if invocation_status[session_id] != "failed":
+                        invocation_status[session_id] = "completed"
         if message.get("summary") is True:
             summary_text[row["id"]] = []
             parent_id = message.get("parentID")
@@ -375,10 +386,20 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
                     invocation_id=invocation_id,
                 )
             )
+        started_at = session_started.get(invocation_id)
+        if started_at is None:
+            started_at = _milliseconds(row["time_created"])
+        completed_at = session_completed.get(invocation_id)
+        if started_at is not None and completed_at is not None and completed_at < started_at:
+            # Never let inconsistent artifact timestamps fail validation and cost the whole bundle.
+            gaps.append(ObservationGap(code="agent_span_timing_inconsistent", invocation_id=invocation_id))
+            completed_at = None
         invocations.append(
             AgentInvocation(
                 invocation_id=invocation_id,
                 parent_invocation_id=parent_id,
+                started_at=started_at,
+                completed_at=completed_at,
                 spawned_by_tool_call_id=next(iter(spawn_candidates)) if len(spawn_candidates) == 1 else None,
                 status=(
                     invocation_status.get(invocation_id, "unknown")
