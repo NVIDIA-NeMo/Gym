@@ -5,7 +5,7 @@ import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from fastapi import HTTPException
@@ -21,6 +21,7 @@ from resources_servers.terminal_bench_2_1.app import (
     TerminalBench21SeedSessionRequest,
     TerminalBench21SessionVerifyRequest,
     TerminalBench21VerifyRequest,
+    task_verifier_timeout_sec,
 )
 
 
@@ -229,7 +230,8 @@ async def test_seed_and_verify_both_contracts_use_original_sandbox(session_serve
         terminal_bench_app.TEST_SH_PATCHES,
         "synthetic",
     )
-    f.sandbox.exec.assert_awaited_once_with("bash /tests/test.sh", timeout_s=None, env=None)
+    # No agent_user and no task.toml: image default, floor of 1800 s.
+    f.sandbox.exec.assert_awaited_once_with("bash /tests/test.sh", timeout_s=1800.0, env=None, user=None)
     f.create.assert_awaited_once()  # Verification must use the seeded sandbox, never create another one.
     f.sandbox.stop.assert_awaited_once()
     assert not f.server._session_id_to_sandbox and not f.server._session_id_to_task
@@ -353,7 +355,80 @@ async def test_row_verifier_timeout_and_env_reach_the_test_run(session_server):
     )
     result = await f.server.verify(f.request, body)
     assert result.reward == 1
-    f.sandbox.exec.assert_awaited_once_with("bash /tests/test.sh", timeout_s=3600, env={"VERIFIER_WALL_SEC": "3600"})
+    # /logs/verifier is handed to the agent's account (as the image default), then the tests run as that account
+    # with max(1800, the row's 3600 s).
+    assert f.sandbox.exec.await_args_list == [
+        call("mkdir -p /logs/verifier && chown -R cam /logs/verifier"),
+        call("bash /tests/test.sh", timeout_s=3600.0, env={"VERIFIER_WALL_SEC": "3600"}, user="cam"),
+    ]
+    assert result.verifier_user == "cam"
+    assert result.verifier_timeout_sec == 3600.0
+
+
+async def _seed_and_verify(f, **row) -> object:
+    params = {"input": [{"role": "user", "content": "Write the answer"}]}
+    seed = await f.server.seed_session(
+        f.request, TerminalBench21RunRequest(**f.task, responses_create_params=params, **row)
+    )
+    body = TerminalBench21SessionVerifyRequest(
+        session_id=seed.session_id,
+        responses_create_params=params,
+        response=_response(),
+        termination={"reason": "completed"},
+        agent_started=True,
+    )
+    return await f.server.verify(f.request, body)
+
+
+async def test_switch_off_runs_tests_as_image_default(session_server):
+    f = session_server
+    f.server.config.verifier_runs_as_agent_user = False
+    result = await _seed_and_verify(f, agent_user="cam")
+    f.sandbox.exec.assert_awaited_once_with("bash /tests/test.sh", timeout_s=1800.0, env=None, user=None)
+    assert result.verifier_user is None
+
+
+@pytest.mark.parametrize("agent_user", ["root", 0, "0"])
+async def test_root_agent_user_runs_tests_as_image_default(session_server, agent_user):
+    f = session_server
+    result = await _seed_and_verify(f, agent_user=agent_user)
+    f.sandbox.exec.assert_awaited_once_with("bash /tests/test.sh", timeout_s=1800.0, env=None, user=None)
+    assert result.verifier_user is None
+
+
+@pytest.mark.parametrize(
+    ("task_toml", "row_limit", "expected"),
+    [
+        ("[verifier]\ntimeout_sec = 2400\n", None, 2400.0),
+        ("[verifier]\ntimeout_sec = 300\n", None, 1800.0),
+        ("[verifier]\ntimeout_sec = 2400\n", 600, 1800.0),  # the row's limit wins over task.toml
+        (None, 5000, 5000.0),
+    ],
+)
+async def test_verifier_timeout_is_max_of_floor_and_task_limit(session_server, task_toml, row_limit, expected):
+    f = session_server
+    if task_toml is not None:
+        (f.tmp_path / "task.toml").write_text(task_toml)
+    result = await _seed_and_verify(f, verifier_timeout_sec=row_limit)
+    f.sandbox.exec.assert_awaited_once_with("bash /tests/test.sh", timeout_s=expected, env=None, user=None)
+    assert result.verifier_timeout_sec == expected
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (None, None),
+        ("[verifier]\ntimeout_sec = 300\n", 300.0),
+        ("[verifier]\ntimeout_sec = 0\n", None),
+        ("[verifier]\ntimeout_sec = true\n", None),
+        ("verifier = 3\n", None),
+        ("not = [valid toml\n", None),
+    ],
+)
+def test_task_verifier_timeout_reads_only_a_positive_number(tmp_path, content, expected):
+    if content is not None:
+        (tmp_path / "task.toml").write_text(content)
+    assert task_verifier_timeout_sec(tmp_path) == expected
 
 
 async def test_missing_reward_is_masked_as_a_verifier_error(session_server):

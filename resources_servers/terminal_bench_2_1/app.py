@@ -4,11 +4,13 @@
 import json
 import os
 import tarfile
+import tomllib
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from shlex import join
+from shlex import quote as shlex_quote
 from sys import stderr
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from time import time
@@ -53,6 +55,12 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
 
     is_verifying_golden_patch: bool = False
     evaluation_timeout: Optional[int] = None
+    # Wall budget for `bash /tests/test.sh`: max(this floor, the task's own limit), where the task's limit is the
+    # row's `verifier_timeout_sec` or else `[verifier] timeout_sec` in its task.toml.
+    verifier_timeout_floor_sec: int = 1800
+    # Run `bash /tests/test.sh` as the row's non-root `agent_user` (the account the vendor images declare as their
+    # USER) instead of the image default (root on the `-userroot` derivatives).
+    verifier_runs_as_agent_user: bool = True
 
     # Sandbox config
     sandbox_provider: str
@@ -66,6 +74,23 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     session_records_dir: Optional[Path] = None
 
     debug: bool = False
+
+
+def task_verifier_timeout_sec(task_folder: Path) -> Optional[float]:
+    """The task's own ``[verifier] timeout_sec`` from ``task.toml``, or None when missing, unreadable or invalid."""
+    try:
+        with open(task_folder / "task.toml", "rb") as stream:
+            value = tomllib.load(stream).get("verifier", {}).get("timeout_sec")
+    except (OSError, tomllib.TOMLDecodeError, AttributeError):
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return float(value)
+
+
+def is_root_identity(user: str | int | None) -> bool:
+    """``None``, ``"root"`` and ``0`` all mean the image default (root on the supported images)."""
+    return user is None or user == "root" or user == 0 or user == "0"
 
 
 class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
@@ -405,11 +430,21 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 )
             body = TerminalBench21VerifyRequest.model_validate(run_request.model_dump() | body.model_dump())
         task_folder = Path(body.task_folder)
-        verifier_timeout = self.config.evaluation_timeout
+        local_task_folder = task_folder if task_folder.is_absolute() else PARENT_DIR / task_folder
+        task_limit = run_request.verifier_timeout_sec if run_request is not None else None
+        verifier_timeout = float(
+            max(
+                self.config.verifier_timeout_floor_sec, task_limit or task_verifier_timeout_sec(local_task_folder) or 0
+            )
+        )
         verifier_env: Dict[str, str] = {}
+        agent_user = getattr(body, "agent_user", None)
         if run_request is not None:
-            verifier_timeout = run_request.verifier_timeout_sec or verifier_timeout
             verifier_env = dict(run_request.verifier_env)
+            agent_user = run_request.agent_user
+        verifier_user = (
+            agent_user if self.config.verifier_runs_as_agent_user and not is_root_identity(agent_user) else None
+        )
 
         if self.config.is_verifying_golden_patch:
             if self.config.debug:
@@ -444,13 +479,23 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             if self.config.debug:
                 print(f"Running tests for {body.task_name}", file=stderr)
             try:
+                # /tests is uploaded as the image default (root), so the verifier account can read but not change
+                # it. `bash /tests/test.sh` then runs as `verifier_user`: the agent's account (as the vendor images
+                # declare it), or the image default when the agent ran as root or the switch is off.
                 await self._upload_folder(
                     eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name
                 )
+                if verifier_user is not None:
+                    prepare = await eval_sandbox.exec(
+                        f"mkdir -p /logs/verifier && chown -R {shlex_quote(str(verifier_user))} /logs/verifier"
+                    )
+                    if prepare.return_code != 0:
+                        print(f"Failed to hand /logs/verifier to {verifier_user!r}: {prepare}", file=stderr)
                 eval_result = await eval_sandbox.exec(
                     "bash /tests/test.sh",
                     timeout_s=verifier_timeout,
                     env=verifier_env or None,
+                    user=verifier_user,
                 )
                 test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
             except:
@@ -510,6 +555,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             verification_time_taken=verification_time_taken,
             test_output=test_output,
             golden_patch_output=golden_patch_output,
+            verifier_user=verifier_user,
+            verifier_timeout_sec=verifier_timeout,
         )
         self._record_session(
             session_id,
