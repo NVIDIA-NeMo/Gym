@@ -1400,7 +1400,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 content = await response.content.read()
                 if _error_body_is_permanent_auth(content):
                     self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
-                return response
+                await raise_for_status(response, content)
 
             if response.status not in RETRY_ERROR_CODES:
                 return response

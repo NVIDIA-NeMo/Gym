@@ -31,7 +31,8 @@ from unittest.mock import AsyncMock, call
 
 import openai
 import pytest
-from aiohttp import ClientResponseError
+from aiohttp import ClientResponseError, ClientSession, web
+from aiohttp.test_utils import TestServer
 from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
 from openai.types.responses import (
     EasyInputMessage,
@@ -342,21 +343,33 @@ class TestOpenAIUtils:
         request.side_effect = [later]
         assert await client._request_with_retry(url="https://example.com/v1/responses") is later
 
-    async def test_auth_without_key_marker_is_returned_once(self, monkeypatch):
-        response = SimpleNamespace(
-            status=401,
-            content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":"unauthorized"}')),
-        )
-        request = AsyncMock(return_value=response)
-        sleep = AsyncMock()
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
-        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+    @pytest.mark.parametrize("status", [400, 401, 403])
+    async def test_nonpermanent_http_error_preserves_body(self, monkeypatch, status):
+        body = b'{"error":{"code":"permission_denied","message":"Access to this model is denied"}}'
+        success = {"id": "chatcmpl-recovered", "choices": []}
+        requests = []
 
-        assert await client._request_with_retry() is response
-        assert await client._request_with_retry() is response
-        assert request.await_count == 2
-        sleep.assert_not_awaited()
+        async def reply(request):
+            requests.append(await request.json())
+            if len(requests) == 1:
+                return web.Response(status=status, body=body, content_type="application/json")
+            return web.json_response(success)
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", reply)
+        async with TestServer(app) as server, ClientSession() as session:
+            monkeypatch.setattr("nemo_gym.server_utils.get_global_aiohttp_client", lambda: session)
+            client = NeMoGymAsyncOpenAI(api_key="test-key", base_url=str(server.make_url("/v1")))
+            params = {"model": "test-model", "messages": [{"role": "user", "content": "Hello"}]}
+
+            with pytest.raises(ClientResponseError) as exc_info:
+                await client.create_chat_completion(**params)
+
+            assert exc_info.value.status == status
+            assert exc_info.value.response_content == body
+            assert requests == [params]
+            assert await client.create_chat_completion(**params) == success
+            assert requests == [params, params]
 
     async def test_request_skips_the_wire_after_permanent_trip(self, monkeypatch):
         response = SimpleNamespace(
