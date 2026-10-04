@@ -151,20 +151,30 @@ class MimoRLOSSResourcesServer(SimpleResourcesServer):
             env.cleanup()
             raise
 
-    async def seed_session(self, request: Request, body: MimoRLOSSRequest) -> MimoRLOSSSeedResponse:
-        env, descriptor = await asyncio.to_thread(self._setup, body.instance)
-        now = time.monotonic()
+    def _cleanup_later(self, env: DatasetEnvironment) -> None:
+        task = asyncio.create_task(asyncio.to_thread(env.cleanup))
+        self._evictions.add(task)
+        task.add_done_callback(self._evictions.discard)
+
+    def _evict_stale(self) -> None:
         ttl = float(self.config.sandbox_spec.get("ttl_s") or 14400)
+        now = time.monotonic()
         for key, (stale, created) in list(self._envs.items()):
             if now - created > ttl:
                 del self._envs[key]
-                task = asyncio.create_task(asyncio.to_thread(stale.cleanup))
-                self._evictions.add(task)
-                task.add_done_callback(self._evictions.discard)
-        self._envs[str(request.session[SESSION_ID_KEY])] = (env, now)
+                self._cleanup_later(stale)
+
+    async def seed_session(self, request: Request, body: MimoRLOSSRequest) -> MimoRLOSSSeedResponse:
+        env, descriptor = await asyncio.to_thread(self._setup, body.instance)
+        self._evict_stale()
+        previous = self._envs.get(str(request.session[SESSION_ID_KEY]))
+        if previous is not None:
+            self._cleanup_later(previous[0])
+        self._envs[str(request.session[SESSION_ID_KEY])] = (env, time.monotonic())
         return MimoRLOSSSeedResponse(sandbox_descriptor={**descriptor, "workdir": env.repo_path})
 
     async def verify(self, request: Request, body: MimoRLOSSVerifyRequest) -> MimoRLOSSVerifyResponse:
+        self._evict_stale()
         entry = self._envs.pop(str(request.session[SESSION_ID_KEY]), None)
         if entry is None:
             raise HTTPException(status_code=400, detail="mimo_rl_oss session is not active")
