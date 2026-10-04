@@ -187,10 +187,11 @@ class MimoAgent(SimpleResponsesAPIAgent):
         return status, result, list(agent.messages)
 
     async def responses(
-        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body(), prefix: str | None = None
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
-        if prefix is None:
-            prefix = self.url_path_for_request("", request)
+        return await self._respond(body, self.url_path_for_request("", request))
+
+    async def _respond(self, body: NeMoGymResponseCreateParamsNonStreaming, prefix: str) -> NeMoGymResponse:
         async with self.sem:
             status, result, messages = await asyncio.to_thread(self._run_agent, body, prefix)
         output = _output_items(messages)
@@ -217,7 +218,7 @@ class MimoAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(seed)
         cookies = request.cookies | seed.cookies
-        resp = await self.responses(request, body.responses_create_params, prefix=self.url_path_for_run("", body))
+        resp = await self._respond(body.responses_create_params, self.url_path_for_run("", body))
         verify = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
