@@ -1,0 +1,37 @@
+# Claude Code on Terminal Bench 2.1: opencode.yaml's derived resources server and dataset with
+# the Claude Code agent, and the custom sandbox resources sandbox_utils.yaml gives OpenCode.
+config_paths:
+- responses_api_agents/claude_code_sandboxed_agent/configs/claude_code_sandboxed_agent.yaml
+- resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml
+
+terminal_bench_2_1_claude_code_resources_server:
+  _inherit_from: terminal_bench_2_1_resources_server
+  resources_servers:
+    terminal_bench_2_1:
+      allowed_agents: [claude_code_sandboxed_agent]
+      sandbox_config:
+        metadata:
+          nemo.nvidia.com/resources: custom
+
+terminal_bench_2_1_claude_code_sandboxed_agent:
+  _inherit_from: claude_code_sandboxed_agent
+  responses_api_agents:
+    claude_code_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_2_1_claude_code_resources_server
+      auto_compact: false
+      datasets:
+        - name: terminal_bench_2_1
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
+          prepare_script: benchmarks/terminal_bench_2_1/prepare.py
+          num_repeats: 8
+
+terminal_bench_2_1_claude_code_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: terminal_bench_2_1_claude_code_sandboxed_agent

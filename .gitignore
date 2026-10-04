@@ -242,3 +242,6 @@ resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.js
 
 # Generated Terminal-Bench 4 dataset
 /benchmarks/terminal_bench_4/data/
+
+# Session artifacts the sandboxed agents write under their package directory.
+responses_api_agents/**/results/
