@@ -8,7 +8,7 @@ indic_frontiermath_simple_agent:
       datasets:
         - name: indic_frontiermath
           type: benchmark
-          jsonl_fpath: benchmarks/indic_frontiermath/data/indic_frontiermath_raw.jsonl
-          prepare_script: benchmarks/indic_frontiermath/prepare.py
-          prompt_config: benchmarks/indic_frontiermath/prompts/default.yaml
+          jsonl_fpath: benchmarks/indic/frontier_math/data/indic_frontiermath_raw.jsonl
+          prepare_script: benchmarks/indic/frontier_math/prepare.py
+          prompt_config: benchmarks/indic/frontier_math/prompts/default.yaml
           num_repeats: 1

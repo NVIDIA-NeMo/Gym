@@ -9,21 +9,21 @@ language has twelve questions; report coverage for incomplete runs.
 Run from the Gym repository root:
 
 ```bash
-python -m pip install -r benchmarks/indic_frontiermath/requirements.txt
-gym eval prepare --benchmark indic_frontiermath
+python -m pip install -r benchmarks/indic/frontier_math/requirements.txt
+gym eval prepare --benchmark indic/frontier_math
 ```
 
 The loader finds `huggingface_datasets/anushakamathofficial/indic_frontiermath`
 under an ancestor of the checkout. To specify a source directory or languages:
 
 ```bash
-python benchmarks/indic_frontiermath/prepare.py \
+python benchmarks/indic/frontier_math/prepare.py \
   --dataset-dir /path/to/indic_frontiermath --languages en hi
 ```
 
 Preparation writes raw rows for Gym's prompt system, rendered requests for
 standalone runners, per-language JSONL files, and a preparation manifest under
-`benchmarks/indic_frontiermath/data/`. Generated data is gitignored. The configured
+`benchmarks/indic/frontier_math/data/`. Generated data is gitignored. The configured
 prompt is applied exactly once; answer metadata is excluded from model input.
 
 ## Run
@@ -31,7 +31,7 @@ prompt is applied exactly once; answer metadata is excluded from model input.
 Start Gym against an existing model endpoint:
 
 ```bash
-gym env start --benchmark indic_frontiermath --model-type vllm_model \
+gym env start --benchmark indic/frontier_math --model-type vllm_model \
   --model-url http://HOST:PORT/v1 --model MODEL_NAME
 ```
 
@@ -40,12 +40,12 @@ In another terminal, run prepared requests through the simple agent and verifier
 ```bash
 gym eval run --no-serve \
   --agent indic_frontiermath_simple_agent \
-  --input benchmarks/indic_frontiermath/data/en.jsonl \
+  --input benchmarks/indic/frontier_math/data/en.jsonl \
   --output results/indic_frontiermath/en.jsonl \
   --num-repeats 1 --concurrency 1 \
   --temperature 1 --max-output-tokens 240000
 
-python benchmarks/indic_frontiermath/summarize.py \
+python benchmarks/indic/frontier_math/summarize.py \
   results/indic_frontiermath/en.jsonl
 ```
 
@@ -57,5 +57,5 @@ errors. No LLM judge is used.
 ## Test
 
 ```bash
-python -m pytest resources_servers/frontiermath/tests benchmarks/indic_frontiermath/tests
+python -m pytest resources_servers/frontiermath/tests benchmarks/indic/frontier_math/tests
 ```

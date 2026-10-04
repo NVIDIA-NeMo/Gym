@@ -87,9 +87,8 @@ def prepare(
     # Gym applies the configured prompt to raw rows. Keep the rendered requests
     # above for standalone runners and comparison with existing evaluations.
     raw_rows = [{key: value for key, value in row.items() if key != "responses_create_params"} for row in rows]
-    (destination / "indic_frontiermath_raw.jsonl").write_text(
-        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in raw_rows), encoding="utf-8"
-    )
+    raw_path = destination / "indic_frontiermath_raw.jsonl"
+    raw_path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in raw_rows), encoding="utf-8")
     audit = {
         "dataset_dir": str(source.resolve()),
         "answer_key_version": manifest["version"],
@@ -106,7 +105,7 @@ def prepare(
     }
     (destination / "preparation.json").write_text(json.dumps(audit, indent=2) + "\n")
     print(f"Prepared {len(rows)} rows ({len(answers)} problems, {len(selected)} languages): {combined}")
-    return combined
+    return raw_path
 
 
 if __name__ == "__main__":

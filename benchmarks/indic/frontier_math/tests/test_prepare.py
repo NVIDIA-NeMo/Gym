@@ -9,20 +9,29 @@ import pyarrow.parquet as pq
 import pytest
 import yaml
 
-from benchmarks.indic_frontiermath import prepare as prep
-from benchmarks.indic_frontiermath.summarize import summarize
+from benchmarks.indic.frontier_math import prepare as prep
+from benchmarks.indic.frontier_math.summarize import summarize
+from nemo_gym.benchmarks import BenchmarkConfig
+from nemo_gym.cli.main import _asset_config_path
 from nemo_gym.environment.manifest import load_manifest
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.registry import _manifest_entry
 from resources_servers.frontiermath.app import FrontierMathRunRequest
 
 
 def test_manifest_and_committed_requests() -> None:
     benchmark = Path(__file__).resolve().parents[1]
     manifest = load_manifest(benchmark / "manifest.yaml")
-    assert manifest.name == "indic_frontiermath"
+    assert manifest.name == "indic/frontier_math"
+    entry = _manifest_entry(benchmark.parents[1], benchmark / "manifest.yaml", "benchmark")
+    config_path = Path(_asset_config_path("benchmark", entry.name))
+    assert config_path == benchmark / "config.yaml"
+    config = BenchmarkConfig.from_config_path(config_path)
+    assert config.dataset.prepare_script.resolve() == benchmark / "prepare.py"
+    assert config.dataset.jsonl_fpath.resolve() == benchmark / "data/indic_frontiermath_raw.jsonl"
     assert all(dataset.jsonl_fpath.endswith("indic_frontiermath_raw.jsonl") for dataset in manifest.datasets)
     template = yaml.safe_load(prep.PROMPT_PATH.read_text())["user"]
-    examples = benchmark.parents[1] / "resources_servers/frontiermath/data/example.jsonl"
+    examples = benchmark.parents[2] / "resources_servers/frontiermath/data/example.jsonl"
     for line in examples.read_text().splitlines():
         row = json.loads(line)
         request = FrontierMathRunRequest.model_validate(row)
@@ -85,7 +94,9 @@ def snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_join_and_no_reference_in_prompt(snapshot: Path) -> None:
     output = prep.prepare(dataset_dir=str(snapshot), languages=["hi", "en"], output_dir=str(snapshot / "output"))
-    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert output == snapshot / "output/indic_frontiermath_raw.jsonl"
+    rendered = output.with_name("indic_frontiermath_benchmark.jsonl")
+    rows = [json.loads(line) for line in rendered.read_text().splitlines()]
     assert [row["language_code"] for row in rows] == ["hi", "en"]
     assert all(row["expected_answer"] == "2" for row in rows)
     assert rows[0]["human_evaluation_pending"]

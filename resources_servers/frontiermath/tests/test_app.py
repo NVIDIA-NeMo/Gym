@@ -17,9 +17,9 @@ from resources_servers.frontiermath.app import (
 from resources_servers.frontiermath.grading import extract_answer, grade_answer
 
 
-ANSWERS = json.loads((Path(__file__).resolve().parents[3] / "benchmarks/indic_frontiermath/answers.json").read_text())[
-    "answers"
-]
+ANSWERS = json.loads(
+    (Path(__file__).resolve().parents[3] / "benchmarks/indic/frontier_math/answers.json").read_text()
+)["answers"]
 BMO = ANSWERS[0]["expected_answer"]
 
 
