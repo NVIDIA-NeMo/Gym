@@ -290,7 +290,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         delegated to the same ``responses()``, and the complete response is re-emitted as a
         synthesized Responses SSE event stream. A ``responses()`` failure on this path is turned
         into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
-        still fails eagerly, before the stream is committed).
+        and an ``HTTPException`` raised by ``responses()`` still fail eagerly with their status, before
+        the stream is committed).
         """
         if not body.get("stream"):
             params = _validate_responses_params(body)
@@ -316,6 +317,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
             response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
             return await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
+        except HTTPException:
+            # A status the server chose to return, such as a propagated provider error, is raised
+            # before the stream is committed, so the client receives it like a validation error.
+            raise
         except Exception as exc:
             # The streaming contract is already the response's shape, so a backend failure must be a
             # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.
