@@ -13,6 +13,7 @@
 # limitations under the License.
 import base64
 import json
+import math
 import os
 import shlex
 import tempfile
@@ -56,6 +57,8 @@ class TerminalBenchEnvironment(DatasetEnvironment):
         raw = self.execute(f"cat {shlex.quote(self.REWARD_FILE)}", cwd="/").get("output", "").strip()
         try:
             reward = float(raw.splitlines()[-1])
+            if not (math.isfinite(reward) and 0.0 <= reward <= 1.0):
+                raise ValueError(reward)
         except (ValueError, IndexError):
             return (
                 0.0,

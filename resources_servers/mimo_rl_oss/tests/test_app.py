@@ -104,3 +104,8 @@ def test_webdev_rubric_is_pinned() -> None:
     assert hashlib.sha256(build_prompt().encode()).hexdigest() == (
         "a4d3be63029e8fb28b469bf3d188816a7fa238b415749d7ff4aad1ca360b2997"  # pragma: allowlist secret
     )
+
+
+def test_terminal_bench_out_of_range_reward_is_masked() -> None:
+    _, _, extra = TerminalBenchEnvironment(FakeEnv("5.0\n"), _instance())._do_calculate_reward()
+    assert extra["error_category"] == "testbed_corrupted"
