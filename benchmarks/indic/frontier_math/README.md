@@ -50,9 +50,11 @@ python benchmarks/indic/frontier_math/summarize.py \
 ```
 
 Configure top-p, top-k, and thinking in the model connection settings. Keep model
-and generation settings consistent across languages. Scores use exact boxed-answer
-grading; inspect `grading_status` for missing answers, parse failures, and verifier
-errors. No LLM judge is used.
+and generation settings consistent across languages. The summary reports strict
+exact boxed-answer accuracy and auxiliary normalized accuracy, which only repairs
+gold-independent formatting failures before exact re-grading. Inspect
+`grading_status` for missing answers, parse failures, and verifier errors. No LLM
+judge is used.
 
 ## Test
 
