@@ -120,6 +120,7 @@ class MimoAgent(SimpleResponsesAPIAgent):
     local environment executes commands in the box and the harness talks to Gym's model server.
     """
 
+    ray_enabled = False
     config: MimoAgentConfig
 
     def _base_url(self) -> str:
