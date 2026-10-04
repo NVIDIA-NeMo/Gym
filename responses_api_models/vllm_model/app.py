@@ -59,6 +59,7 @@ from nemo_gym.token_id_capture.external_capture import (
     ExternalCaptureHandler,
     make_external_capture_handler,
 )
+from responses_api_models.vllm_model.routing import RoutedVLLMClient
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
@@ -269,6 +270,23 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     default_headers: Dict[str, str] = Field(default_factory=dict)
 
+    routing_authority: Literal["gym", "vllm_router"] = "gym"
+    # Single-endpoint native DP without a router: Gym owns the rank assignment.
+    native_dp_size: int = Field(default=1, ge=1, strict=True)
+    routing_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_routing(self) -> "VLLMModelConfig":
+        if self.routing_authority == "vllm_router" or self.native_dp_size > 1:
+            urls = [self.base_url] if isinstance(self.base_url, str) else self.base_url
+            if len(urls) > 1 or self.endpoint_file:
+                raise ValueError("Explicit DP/router routing requires one endpoint and no endpoint_file")
+            if self.routing_authority == "vllm_router" and self.native_dp_size != 1:
+                raise ValueError("The router owns DP rank selection; do not also set native_dp_size")
+            if {key.lower() for key in self.default_headers} & {"x-session-id", "x-data-parallel-rank"}:
+                raise ValueError("Session and DP-rank headers are managed by the routing authority")
+        return self
+
     # Optional path to a file that publishes the current backend base_url.
     # Used for shared serving jobs that move hosts when they restart.
     endpoint_file: Optional[str] = None
@@ -380,6 +398,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         return super().model_post_init(context)
 
     def _post_init(self) -> None:
+        self.config.validate_routing()
         if self.config.sampling_overrides:
             LOG.info(
                 "`%s` pins sampling on every request to the engine: %s",
@@ -387,14 +406,17 @@ class VLLMModel(SimpleResponsesAPIModel):
                 self.config.sampling_overrides,
             )
 
+        routed = self.config.routing_authority == "vllm_router" or self.config.native_dp_size > 1
+        client_class = RoutedVLLMClient if routed else NeMoGymAsyncOpenAI
         self._clients = [
-            NeMoGymAsyncOpenAI(
+            client_class(
                 base_url=base_url,
                 api_key=self.config.api_key,
                 default_headers=self.config.default_headers,
                 max_connection_retries=(
                     self.config.endpoint_connection_retries if self.config.endpoint_file else None
                 ),
+                **({"inference_timeout_seconds": self.config.routing_timeout_seconds} if routed else {}),
             )
             for base_url in self.config.base_url
         ]
@@ -1699,6 +1721,19 @@ class VLLMModel(SimpleResponsesAPIModel):
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
         session_id = request.session[SESSION_ID_KEY]
+        if self.config.routing_authority == "vllm_router" or self.config.native_dp_size > 1:
+            if not isinstance(session_id, str) or not session_id:
+                raise ValueError("DP/router routing requires a nonempty Gym session ID")
+            # Request-local copies prevent headers leaking between concurrent
+            # episodes; never mutate a shared client or hash again at two layers.
+            client = self._clients[0]
+            if self.config.routing_authority == "vllm_router":
+                header = {"X-Session-ID": session_id}
+            else:
+                digest = hashlib.sha256(session_id.encode("utf-8")).digest()
+                rank = int.from_bytes(digest[:8], "big") % self.config.native_dp_size
+                header = {"X-data-parallel-rank": str(rank)}
+            return client.model_copy(update={"default_headers": client.default_headers | header})
         if session_id not in self._session_id_to_client:
             # Uvicorn workers do not share this cache. A stable assignment keeps
             # every turn in a session on the same vLLM endpoint across workers.

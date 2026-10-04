@@ -154,10 +154,15 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
             )
         elif has_pyproject_toml:
-            if is_editable_install:
-                install_cmd = (
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e .' {" ".join(head_server_deps)}"""
+            install_target = "."
+            if dir_path.parts[-2:] == ("responses_api_models", "local_vllm_model"):
+                model_config = (
+                    global_config_dict.get(prefix, {}).get("responses_api_models", {}).get("local_vllm_model", {})
                 )
+                if model_config.get("launcher", "ray") == "ray" and not model_config.get("base_url"):
+                    install_target = ".[legacy]"
+            if is_editable_install:
+                install_cmd = f"""uv pip install {verbose_flag}{uv_pip_python_flag}'-e {install_target}' {" ".join(head_server_deps)}"""
             else:
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
                 # with support for pre-releases, custom indexes, and version pinning
@@ -165,7 +170,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
                 install_cmd = (
                     f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}nemo-gym{version_spec} && """
-                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {" ".join(head_server_deps)}"""
+                    f"""uv pip install {verbose_flag}{uv_pip_python_flag}--no-sources '-e {install_target}' {" ".join(head_server_deps)}"""
                 )
         elif has_requirements_txt:
             has_overrides_txt = (dir_path / "overrides.txt").exists()
@@ -221,6 +226,7 @@ def run_command(
     global_config_dict: DictConfig | None = None,
     stdout_target: IO[Any] | None = None,
     stderr_target: IO[Any] | None = None,
+    start_new_session: bool = False,
     extra_env: Mapping[str, str] | None = None,
 ) -> Popen:
     if global_config_dict is None:
@@ -265,4 +271,5 @@ def run_command(
         env=custom_env,
         stdout=redirect_stdout,
         stderr=redirect_stderr,
+        **({"start_new_session": True} if start_new_session else {}),
     )

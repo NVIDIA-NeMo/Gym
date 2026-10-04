@@ -18,17 +18,18 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from vllm import platforms
-from vllm.platforms import resolve_obj_by_qualname
+import pytest
 
 import responses_api_models.local_vllm_model.app
 from nemo_gym.global_config import DISALLOWED_PORTS_KEY_NAME, DictConfig
 from responses_api_models.local_vllm_model.app import LocalVLLMModel, LocalVLLMModelConfig
-from responses_api_models.local_vllm_model.local_vllm_model_actor import _get_local_dp_ranks
 
 
 class TestApp:
     def test_local_dp_ranks_increment_per_worker_node(self, monkeypatch) -> None:
+        pytest.importorskip("vllm")
+        from responses_api_models.local_vllm_model.local_vllm_model_actor import _get_local_dp_ranks
+
         placement_groups = [object(), object(), object(), object()]
         node_ids = ["node-a", "node-b", "node-a", "node-b"]
         placement_group_data = {
@@ -47,7 +48,7 @@ class TestApp:
         assert ("GET", "/get_inner_vllm_config") in LocalVLLMModel.non_generating_model_routes
 
     def test_sanity_vllm_import(self) -> None:
-        import vllm
+        vllm = pytest.importorskip("vllm")
 
         print(f"Found vLLM version: {vllm.__version__}")
         assert vllm.__version__
@@ -185,7 +186,7 @@ class TestApp:
                 captured.update(kwargs)
                 return MagicMock()
 
-        monkeypatch.setattr(responses_api_models.local_vllm_model.app, "LocalVLLMModelActor", FakeActorClass)
+        monkeypatch.setattr(responses_api_models.local_vllm_model.app, "_legacy_actor_class", lambda: FakeActorClass)
         monkeypatch.setattr(responses_api_models.local_vllm_model.app.ray, "get", lambda _: "http://localhost:1234/v1")
 
         def build_dummy(vllm_serve_env_vars):
@@ -217,6 +218,9 @@ class TestApp:
         assert captured["runtime_env"]["env_vars"]["PATH"] == "/custom/bin"
 
     def test_sanity_start_vllm_server(self, monkeypatch) -> None:
+        platforms = pytest.importorskip("vllm.platforms")
+        from vllm.platforms import resolve_obj_by_qualname
+
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = DictConfig({DISALLOWED_PORTS_KEY_NAME: []})
         monkeypatch.setattr(

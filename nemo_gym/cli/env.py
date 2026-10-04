@@ -21,7 +21,7 @@ import sys
 from glob import glob
 from pathlib import Path
 from shutil import rmtree
-from signal import SIGINT
+from signal import SIGINT, SIGKILL
 from subprocess import Popen, TimeoutExpired
 from tempfile import TemporaryDirectory
 from threading import Thread
@@ -426,18 +426,21 @@ class RunHelper:  # pragma: no cover
     _telemetry_metrics_enabled: bool
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
-        """Start the head server and every configured server, and wait until all of them are ready.
+        """Start all configured servers and clean up partial startup on failure or interruption.
 
-        Any failure or interrupt before readiness shuts down everything started so far, then re-raises.
-        Callers reach their own `shutdown()` only after this returns.
-        The spawned servers have no process group or atexit handler, so nothing else would stop them.
+        Callers may reach their own cleanup region only after this returns.
         """
-        self._processes = dict()
+        self._processes = {}
+        self._owned_process_groups = {}
         self._head_server = None
+        self._head_server_thread = None
         try:
             self._start(global_config_dict_parser_config)
         except BaseException:
-            self.shutdown()
+            try:
+                self.shutdown()
+            except Exception as cleanup_error:
+                print(f"Startup cleanup failed: {cleanup_error}", file=sys.stderr)
             raise
 
     def _start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
@@ -504,12 +507,26 @@ class RunHelper:  # pragma: no cover
             print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
             command = _server_launch_command(dir_path, global_config_dict, top_level_path, entrypoint_fpath)
 
+            managed_subprocess = (
+                first_key == "responses_api_models"
+                and second_key == "local_vllm_model"
+                and server_config_dict.get("launcher") == "subprocess"
+                and not server_config_dict.get("base_url")
+            )
             extra_env = {
                 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config_dict_yaml_str,
                 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: top_level_path,
             }
-            process = run_command(command, dir_path, server_name=top_level_path, extra_env=extra_env)
+            process = run_command(
+                command,
+                dir_path,
+                server_name=top_level_path,
+                extra_env=extra_env,
+                **({"start_new_session": True} if managed_subprocess else {}),
+            )
             self._processes[top_level_path] = process
+            if managed_subprocess:
+                self._owned_process_groups[top_level_path] = process.pid
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv
             # cache size. For Nemotron's set of environments, parallel installation can produce
@@ -709,8 +726,21 @@ Process `{process_name}` stderr:
         shutdown_telemetry()
 
         print("Sending interrupt signals to servers...")
-        for process in self._processes.values():
-            process.send_signal(SIGINT)
+        owned_groups = getattr(self, "_owned_process_groups", {})
+
+        def signal_owned_group(name, sig):
+            try:
+                os.killpg(owned_groups[name], sig)
+            except ProcessLookupError:
+                pass
+
+        for name, process in self._processes.items():
+            if name in owned_groups:
+                # run_command can include bash and tee. Signal the whole owned shell
+                # group so killing the wrapper cannot leave Gym holding its lifetime pipe.
+                signal_owned_group(name, SIGINT)
+            else:
+                process.send_signal(SIGINT)
 
         print("Waiting for processes to finish...")
         killed_process_names: List[str] = []
@@ -719,13 +749,21 @@ Process `{process_name}` stderr:
             try:
                 process.wait(timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
             except TimeoutExpired:
-                process.kill()
+                if process_name in owned_groups:
+                    signal_owned_group(process_name, SIGKILL)
+                else:
+                    process.kill()
                 killed_process_names.append(process_name)
                 # Reap the child after SIGKILL to avoid leaving a <defunct> entry.
                 try:
                     process.wait(timeout=_FORCE_KILL_REAP_TIMEOUT_SEC)
                 except TimeoutExpired:
                     unreaped_process_names.append(process_name)
+            finally:
+                if process_name in owned_groups:
+                    # A shell may exit before its Gym child. vLLM's separate supervisor
+                    # survives this group kill and finishes model-worker cleanup on EOF.
+                    signal_owned_group(process_name, SIGKILL)
 
         if killed_process_names:
             print(
@@ -742,10 +780,11 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
                 "they may remain as zombies until this process exits."
             )
         self._processes = dict()
+        self._owned_process_groups = dict()
 
-        # None before the head server starts and after an earlier shutdown.
-        if self._head_server is not None:
+        if getattr(self, "_head_server", None) is not None:
             self._head_server.should_exit = True
+        if getattr(self, "_head_server_thread", None) is not None:
             self._head_server_thread.join()
 
         self._head_server = None

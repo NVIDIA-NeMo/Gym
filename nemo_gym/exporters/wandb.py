@@ -55,6 +55,12 @@ class WandbExporter(BaseExporter):
             dir=str(Path(self.global_config_dict[RESULTS_DIR_KEY_NAME]) / "wandb"),
         )
 
+        if (self.global_config_dict.get("inference_metrics") or {}).get("enabled"):
+            self.run.define_metric("progress/*", step_metric="progress/completion_pct")
+            self.run.define_metric("inference/elapsed_seconds")
+            for namespace in ("vllm", "router", "mooncake", "inference"):
+                self.run.define_metric(f"{namespace}/*", step_metric="inference/elapsed_seconds")
+
     def teardown(self) -> None:
         if self.run is not None:
             self.run.finish()
@@ -70,6 +76,10 @@ class WandbExporter(BaseExporter):
 
     def _log_metrics(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
         # @bxyu-nvidia: Commit here so the rollouts show up in W&B on the current step, rather than being flushed in the next step
+        # Periodic inference samples advance W&B's global step independently of completion percentage.
+        if step is not None and (self.global_config_dict.get("inference_metrics") or {}).get("enabled"):
+            metrics = {**metrics, "progress/completion_pct": step}
+            step = None
         self._active_run().log(metrics, step=step, commit=True)
 
     def _log_rollouts(self, rollouts: list[dict[str, Any]]) -> None:

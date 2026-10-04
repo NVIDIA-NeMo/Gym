@@ -102,6 +102,10 @@ dependencies = [
     # License: MIT https://github.com/anthropics/anthropic-sdk-python/blob/v0.109.2/LICENSE
     "anthropic<=0.109.2",
 
+    # prometheus-client: Parse complete inference/router metrics for benchmark telemetry.
+    # Updated Sep 29, 2026 with prometheus-client==0.23.1. License: Apache-2.0.
+    "prometheus-client>=0.23.1",
+
     # tqdm: Used for progress tracking on batch operations.
     # Updated Fri Jul 25, 2025 with tqdm==4.67.1
     # License: MIT https://github.com/tqdm/tqdm/blob/0ed5d7f18fa3153834cbac0aa57e8092b217cc16/LICENCE

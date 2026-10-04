@@ -525,19 +525,22 @@ class TestCLISetupCommandRunCommand:
 
         assert "UV_LOCK_TIMEOUT" not in popen.call_args.kwargs["env"]
 
-    def test_extra_env_passed_to_process_environment(self, monkeypatch: MonkeyPatch) -> None:
+    @pytest.mark.parametrize("start_new_session", [False, True])
+    def test_extra_env_passed_to_process_environment(self, monkeypatch: MonkeyPatch, start_new_session: bool) -> None:
         Popen_mock, _ = self._setup(monkeypatch)
 
         run_command(
             command="my command",
             working_dir_path=Path("/my path"),
             extra_env={"SECRET_KEY": "supersecret", "NEMO_GYM_CONFIG_PATH": "my_path"},
+            start_new_session=start_new_session,
         )
 
         env = Popen_mock.call_args.kwargs["env"]
         assert env["SECRET_KEY"] == "supersecret"
         assert env["NEMO_GYM_CONFIG_PATH"] == "my_path"
         assert env["PYTHONPATH"] == "/my path"
+        assert Popen_mock.call_args.kwargs.get("start_new_session", False) is start_new_session
 
 
 class TestGetNemoGymInstallFlags:

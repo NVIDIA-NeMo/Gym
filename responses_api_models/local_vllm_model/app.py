@@ -15,23 +15,18 @@
 import os
 import sys
 from argparse import Namespace
+from contextlib import asynccontextmanager
 from pathlib import Path
 from time import sleep
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 
 import ray
 import requests
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from ray import available_resources, cluster_resources
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from requests.exceptions import ConnectionError
-from vllm.entrypoints.openai.api_server import (
-    FlexibleArgumentParser,
-    cli_env_setup,
-    make_arg_parser,
-    validate_parsed_serve_args,
-)
 
 from nemo_gym.global_config import (
     DISALLOWED_PORTS_KEY_NAME,
@@ -39,7 +34,14 @@ from nemo_gym.global_config import (
     get_global_config_dict,
     get_hf_token,
 )
-from responses_api_models.local_vllm_model.local_vllm_model_actor import LocalVLLMModelActor
+from responses_api_models.local_vllm_model.pd_launcher import VLLMPDConfig, VLLMPDLauncher
+from responses_api_models.local_vllm_model.router_launcher import VLLMRouterConfig, VLLMRouterLauncher
+from responses_api_models.local_vllm_model.subprocess_launcher import (
+    VLLMSubprocessConfig,
+    VLLMSubprocessLauncher,
+    normalize_kwargs,
+    validate_managed_kwargs,
+)
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -53,10 +55,37 @@ class LocalVLLMModelConfig(VLLMModelConfig):
     vllm_serve_kwargs: Dict[str, Any]
     vllm_serve_env_vars: Dict[str, str]
 
+    # Preserve legacy defaults until the subprocess GPU acceptance gate has passed.
+    launcher: Literal["ray", "subprocess"] = "ray"
+    subprocess: VLLMSubprocessConfig = Field(default_factory=VLLMSubprocessConfig)
+    router: VLLMRouterConfig | None = None
+    pd: VLLMPDConfig | None = None
+
     ray_worker_py_executable: str = sys.executable
 
     show_vllm_engine_stats: bool = False
     debug: bool = False
+
+    @model_validator(mode="after")
+    def validate_launcher(self) -> "LocalVLLMModelConfig":
+        if self.pd is not None and (self.launcher != "subprocess" or self.base_url or not self.router):
+            raise ValueError("Managed PD requires launcher=subprocess and router, without base_url")
+        if self.router is not None and (self.launcher != "subprocess" or self.base_url):
+            raise ValueError("Managed router requires launcher=subprocess without base_url")
+        if self.launcher == "subprocess" and not self.base_url:
+            if (self.num_workers or 1) != 1:
+                raise ValueError(
+                    "Managed subprocess serving requires num_workers=1; use base_url for external workers"
+                )
+            validate_managed_kwargs(normalize_kwargs(self.vllm_serve_kwargs), self.vllm_serve_env_vars)
+            self.routing_authority = "vllm_router" if self.router else "gym"
+            self.native_dp_size = (
+                1 if self.router else normalize_kwargs(self.vllm_serve_kwargs).get("data_parallel_size", 1)
+            )
+            if self.router:
+                self.routing_timeout_seconds = self.router.inference_timeout_seconds
+            self.validate_routing()
+        return self
 
     def model_post_init(self, context):
         # Default to the .cache/huggingface in this directory.
@@ -71,6 +100,16 @@ class GetInnerVLLMConfigResponse(BaseModel):
     base_url: List[str]
     api_key: str
     model: str
+    routing_authority: Literal["gym", "vllm_router"] = "gym"
+    native_dp_size: int = 1
+    routing_timeout_seconds: float = 600
+
+
+def _legacy_actor_class():
+    # Keep vLLM and its private API patches out of subprocess/external deployments.
+    from responses_api_models.local_vllm_model.local_vllm_model_actor import LocalVLLMModelActor
+
+    return LocalVLLMModelActor
 
 
 class LocalVLLMModel(VLLMModel):
@@ -78,16 +117,75 @@ class LocalVLLMModel(VLLMModel):
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset({("GET", "/get_inner_vllm_config")})
     config: LocalVLLMModelConfig
 
-    _local_vllm_model_actor: LocalVLLMModelActor
+    _local_vllm_model_actor: Any = PrivateAttr(default=None)
+    _subprocess_launcher: VLLMSubprocessLauncher | VLLMPDLauncher | None = PrivateAttr(default=None)
+    _router_launcher: Optional[VLLMRouterLauncher] = PrivateAttr(default=None)
 
     def setup_webserver(self):
-        print("Starting vLLM server. This will take a few minutes...")
-        self.start_vllm_server()
+        managed_subprocess = self.config.launcher == "subprocess" and not self.config.base_url
+        if not managed_subprocess:
+            self.start_vllm_server()
 
         app = super().setup_webserver()
 
         # This route is only used to support LocalVLLMModelProxy
         app.get("/get_inner_vllm_config")(self.get_inner_vllm_config)
+
+        if managed_subprocess:
+            original_lifespan = app.router.lifespan_context
+
+            @asynccontextmanager
+            async def lifespan(application):
+                env = {"HF_HOME": self.config.hf_home, **self.config.vllm_serve_env_vars}
+                if token := get_hf_token():
+                    env.setdefault("HF_TOKEN", token)
+                launcher_class = VLLMPDLauncher if self.config.pd is not None else VLLMSubprocessLauncher
+                pd_options = {"pd": self.config.pd, "router": self.config.router} if self.config.pd is not None else {}
+                launcher = launcher_class(
+                    config=self.config.subprocess,
+                    model=self.config.model,
+                    kwargs=self.config.vllm_serve_kwargs,
+                    env=env,
+                    api_key=self.config.api_key,
+                    cache_dir=self.get_cache_dir(),
+                    show_stats=self.config.show_vllm_engine_stats,
+                    **pd_options,
+                )
+                self._subprocess_launcher = launcher
+                try:
+                    port = (
+                        self.config.subprocess.port
+                        or (self.config.pd.prefill.port if self.config.pd else None)
+                        or find_open_port(disallowed_ports=get_global_config_dict().get(DISALLOWED_PORTS_KEY_NAME, []))
+                    )
+                    base_url = await launcher.start(port)
+                    if self.config.router and self.config.pd is None:
+                        router = VLLMRouterLauncher(
+                            config=self.config.router, model=self.config.model, api_key=self.config.api_key
+                        )
+                        self._router_launcher = router
+                        router_port = self.config.router.port or find_open_port(
+                            disallowed_ports=[port, *get_global_config_dict().get(DISALLOWED_PORTS_KEY_NAME, [])]
+                        )
+                        base_url = await router.start(
+                            router_port,
+                            worker_urls=[base_url.removesuffix("/v1")],
+                            dp_size=launcher.topology["data_parallel_size"],
+                        )
+                    self.config.base_url = [base_url]
+                    self._post_init()
+                    async with original_lifespan(application) as state:
+                        yield state
+                finally:
+                    try:
+                        if self._router_launcher:
+                            await self._router_launcher.stop()
+                    finally:
+                        await launcher.stop()
+                        self.config.base_url = []
+                        self._clients = []
+
+            app.router.lifespan_context = lifespan
 
         return app
 
@@ -96,6 +194,9 @@ class LocalVLLMModel(VLLMModel):
             base_url=self.config.base_url,
             api_key=self.config.api_key,
             model=self.config.model,
+            routing_authority=self.config.routing_authority,
+            native_dp_size=self.config.native_dp_size,
+            routing_timeout_seconds=self.config.routing_timeout_seconds,
         )
 
     def get_cache_dir(self) -> str:
@@ -103,6 +204,20 @@ class LocalVLLMModel(VLLMModel):
         return str(Path(self.config.hf_home) / "hub")
 
     def _configure_vllm_serve(self) -> Tuple[Namespace, Dict[str, str]]:
+        try:
+            from vllm.entrypoints.openai.api_server import (
+                FlexibleArgumentParser,
+                cli_env_setup,
+                make_arg_parser,
+                validate_parsed_serve_args,
+            )
+        except ModuleNotFoundError as exc:
+            if exc.name == "vllm":
+                raise RuntimeError(
+                    "launcher=ray requires local-vllm-model[legacy]; alternatively select launcher=subprocess"
+                ) from exc
+            raise
+
         server_args = self.config.vllm_serve_kwargs
 
         port = find_open_port(disallowed_ports=get_global_config_dict()[DISALLOWED_PORTS_KEY_NAME])
@@ -213,6 +328,9 @@ Environment variables: {env_vars_to_print}""")
             self._post_init()
             return
 
+        if self.config.launcher == "subprocess":
+            raise RuntimeError("Subprocess startup is asynchronous; enter the app's FastAPI lifespan instead")
+
         if self.config.debug:
             print(f"""Currently available Ray cluster resources: {available_resources()}
 Total Ray cluster resources: {cluster_resources()}""")
@@ -224,27 +342,31 @@ Total Ray cluster resources: {cluster_resources()}""")
         if self.config.debug:
             print(f"Using PYTHONPATH={pythonpath}")
 
-        self._local_vllm_model_actor = LocalVLLMModelActor.options(
-            scheduling_strategy=PlacementGroupSchedulingStrategy(
-                placement_group=head_node_placement_group,
-            ),
-            runtime_env=dict(
-                py_executable=self.config.ray_worker_py_executable,
-                env_vars={
-                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                    "PYTHONPATH": pythonpath,
-                    # Listed before `env_vars` so a server config can still override PATH.
-                    "PATH": self._ray_actor_path(),
-                    **env_vars,
-                },
-            ),
-        ).remote(
-            head_node_placement_group=head_node_placement_group,
-            server_args=server_args,
-            env_vars=env_vars,
-            server_name=self.config.name,
-            debug=self.config.debug,
-            show_vllm_engine_stats=self.config.show_vllm_engine_stats,
+        self._local_vllm_model_actor = (
+            _legacy_actor_class()
+            .options(
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=head_node_placement_group,
+                ),
+                runtime_env=dict(
+                    py_executable=self.config.ray_worker_py_executable,
+                    env_vars={
+                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                        "PYTHONPATH": pythonpath,
+                        # Listed before `env_vars` so a server config can still override PATH.
+                        "PATH": self._ray_actor_path(),
+                        **env_vars,
+                    },
+                ),
+            )
+            .remote(
+                head_node_placement_group=head_node_placement_group,
+                server_args=server_args,
+                env_vars=env_vars,
+                server_name=self.config.name,
+                debug=self.config.debug,
+                show_vllm_engine_stats=self.config.show_vllm_engine_stats,
+            )
         )
 
         self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
