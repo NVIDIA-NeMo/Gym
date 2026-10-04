@@ -54,6 +54,7 @@ def _final_text(response: Any) -> str:
 class MimoMusicResourcesServer(SimpleResourcesServer):
     """MiMo-V2.6-RL-oss music: ABC notation scored for human-likeness of the rendered MIDI."""
 
+    ray_enabled = False
     config: MimoMusicConfig
 
     def model_post_init(self, context: Any, /) -> None:
