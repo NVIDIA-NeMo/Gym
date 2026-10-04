@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from shlex import quote
+from shlex import join, split
 from time import monotonic, time
 from typing import Any
 from uuid import uuid4
@@ -33,6 +33,7 @@ class HermesSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     model: str
     sandbox_provider: str = "sandbox"
+    # Interpreter of the prepared runtime, as a shell-split command line.
     runtime_python: str = "/opt/hermes/bin/hermes-python"
     remote_run_root: str = "/tmp"
     results_dir: str = "responses_api_agents/hermes_sandboxed_agent/results"
@@ -193,6 +194,8 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                 "instructions": body.instructions,
                 "sandbox_timeout": self.config.sandbox_timeout,
                 "temperature": body.temperature if body.temperature is not None else self.config.temperature,
+                # Trainers (NeMo-RL) stamp top_p on every request next to temperature.
+                "top_p": body.top_p,
                 "max_tokens": body.max_output_tokens if body.max_output_tokens is not None else self.config.max_tokens,
             }
             # Only model input goes into the task container. Benchmark gold/test metadata stays outside.
@@ -200,12 +203,21 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             await sandbox.upload(local / "request.json", f"{remote}/request.json")
             await sandbox.upload(Path(__file__).with_name("runner.py"), f"{remote}/runner.py")
             launched = True
-            executed = await sandbox.exec(
-                f"{quote(self.config.runtime_python)} -I {quote(remote + '/runner.py')} {quote(remote + '/request.json')}",
-                cwd=remote,
-                # The runner owns the model budget; leave time for process cleanup.
-                timeout_s=self.config.sandbox_timeout + 60,
-            )
+            for attempt in range(3):
+                executed = await sandbox.exec(
+                    join([*split(self.config.runtime_python), "-I", remote + "/runner.py", remote + "/request.json"]),
+                    cwd=remote,
+                    # Backstop behind the runner's own budget, with time for its shutdown.
+                    timeout_s=self.config.sandbox_timeout + 180,
+                )
+                # A network mount can fail the first open of the launcher (sh exits 2 before
+                # anything ran); retry.
+                if not (
+                    executed.return_code == 2
+                    and "Input/output error" in (executed.stdout or "") + (executed.stderr or "")
+                ):
+                    break
+                await asyncio.sleep(3)
             return_code, error_type = executed.return_code, executed.error_type
             stdout, stderr = executed.stdout or "", executed.stderr or ""
             await sandbox.download(f"{remote}/cleanup.json", local / "cleanup.json")
@@ -274,7 +286,6 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             for name in (
                 "tools",
                 "previous_response_id",
-                "top_p",
                 "reasoning",
                 "max_tool_calls",
                 "prompt",
@@ -309,10 +320,14 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                 cookies.update(seeded.cookies)
                 seed = await get_response_json(seeded)
                 descriptor = seed.get("sandbox_descriptor")
+                if not descriptor and seed.get("sandbox_handle"):
+                    # The SWE training servers return the provider's handle only; the configured
+                    # provider attaches to it, as the Pi sandboxed agent does.
+                    descriptor = {"sandbox_id": str(seed["sandbox_handle"])}
                 if not isinstance(descriptor, dict) or not descriptor:
                     raise ValueError(
-                        f"{self.config.resources_server.name} must return sandbox_descriptor from sandbox.serialize(); "
-                        "a bare sandbox_handle is not sufficient for this agent"
+                        f"{self.config.resources_server.name} must return sandbox_descriptor from "
+                        "sandbox.serialize() or a sandbox_handle"
                     )
                 provider = create_provider(
                     resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())

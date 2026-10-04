@@ -56,6 +56,15 @@ def classify_stop(result, timed_out=False):
     ):
         result["budget_exhausted"] = True
         result["stop_reason"] = "output_tokens"
+    elif (
+        result.get("partial")
+        and not result.get("failed")
+        and str(result.get("error", "")).startswith("Model generated invalid tool call")
+    ):
+        # Hermes ends the episode after three tool calls it does not have (e.g. a policy trained
+        # on other harnesses asking for `bash`). That is the policy's doing, not a harness crash:
+        # the transcript is graded like any other unfinished attempt instead of being retried.
+        result["stop_reason"] = "invalid_tool_call"
     elif result.get("completed") and str(result.get("turn_exit_reason", "")).startswith("text_response("):
         # A natural final answer can use the last allowed turn. Forced summaries
         # have a different exit reason, even when Hermes marks them completed.
@@ -179,6 +188,8 @@ def run(params):
 
     query, history, input_system = split_input(params["input"])
     request_overrides = {"temperature": params["temperature"]}
+    if params.get("top_p") is not None:
+        request_overrides["top_p"] = params["top_p"]
     if params["chat_template_kwargs"]:
         request_overrides["metadata"] = {"chat_template_kwargs": json.dumps(params["chat_template_kwargs"])}
     # Hermes saves tool calls before execution only when a session store is supplied.
