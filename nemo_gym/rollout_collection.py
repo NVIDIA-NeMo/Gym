@@ -189,6 +189,38 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
     return task_id, rollout_id
 
 
+_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call"})
+
+
+def _derive_model_response_kind(response: Any) -> Optional[str]:
+    """Classify what the model actually returned, from the captured response body.
+
+    terminus_2 reports this itself; the OpenCode agents do not, so without this every SWE model
+    call carried a null kind. Returns None when the body is not a recognised response shape --
+    an unknown kind must stay unknown rather than collapse into "other".
+    """
+    if not isinstance(response, dict):
+        return None
+    output = response.get("output")
+    if isinstance(output, list):
+        if any(isinstance(item, dict) and item.get("type") in _TOOL_CALL_ITEM_TYPES for item in output):
+            return "tool_call"
+        if any(isinstance(item, dict) and item.get("type") == "message" and item.get("content") for item in output):
+            return "text"
+        return "other"
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message")
+        message = message if isinstance(message, dict) else {}
+        if message.get("tool_calls"):
+            return "tool_call"
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return "text"
+        return "other"
+    return None
+
+
 def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> TrajectoryRecord:
     task_id, rollout_id = _trajectory_identity(row)
     gaps: list[ObservationGap] = []
@@ -338,6 +370,14 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         gaps.append(ObservationGap(code="turns_unavailable"))
     if not any(invocation.conversation for invocation in invocations):
         gaps.append(ObservationGap(code="conversation_unavailable"))
+
+    if any(call.model_response_kind is None for call in model_calls):
+        model_calls = [
+            call.model_copy(update={"model_response_kind": derived})
+            if call.model_response_kind is None and (derived := _derive_model_response_kind(call.response)) is not None
+            else call
+            for call in model_calls
+        ]
 
     if any(call.model_call_purpose is None for call in model_calls):
         compaction_ids = {

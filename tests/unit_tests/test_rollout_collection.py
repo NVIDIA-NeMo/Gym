@@ -22,6 +22,7 @@ from copy import deepcopy
 from pathlib import Path
 from threading import get_ident
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
@@ -4045,3 +4046,70 @@ class TestPreprocessExamples:
     def test_validates_knobs_like_the_cli(self) -> None:
         with pytest.raises(ValueError, match="empty list"):
             RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
+
+class TestModelResponseKind:
+    """``model_response_kind`` is classified centrally so every harness reports it.
+
+    terminus_2 sets it itself; the OpenCode agents do not, which left it null for every SWE
+    model call. The classification works off the captured response, so it applies to any
+    producer that leaves the field unset.
+    """
+
+    @staticmethod
+    def _trajectory(response: Any, *, producer_kind: str | None = None) -> Any:
+        producer_call: dict[str, Any] = {"model_call_id": "call-1"}
+        if producer_kind is not None:
+            producer_call["model_response_kind"] = producer_kind
+        result = {
+            "ng_trajectory": {
+                "task_id": "2",
+                "rollout_id": "2-3",
+                "invocations": [{"invocation_id": "root"}],
+                "model_calls": [producer_call],
+            },
+            "ng_model_call_capture": {"calls": [{"model_call_id": "call-1", "response": response}]},
+        }
+        return _build_trajectory_record({TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}, result)
+
+    def test_chat_completions_tool_call(self) -> None:
+        response = {"choices": [{"message": {"content": None, "tool_calls": [{"id": "t1"}]}}]}
+        assert self._trajectory(response).model_calls[0].model_response_kind == "tool_call"
+
+    def test_chat_completions_text(self) -> None:
+        response = {"choices": [{"message": {"content": "here is the answer"}}]}
+        assert self._trajectory(response).model_calls[0].model_response_kind == "text"
+
+    def test_chat_completions_empty_content_is_other(self) -> None:
+        response = {"choices": [{"message": {"content": "   "}}]}
+        assert self._trajectory(response).model_calls[0].model_response_kind == "other"
+
+    def test_responses_api_tool_call(self) -> None:
+        response = {"output": [{"type": "reasoning"}, {"type": "function_call", "call_id": "t1"}]}
+        assert self._trajectory(response).model_calls[0].model_response_kind == "tool_call"
+
+    def test_responses_api_text(self) -> None:
+        response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "hi"}]}]}
+        assert self._trajectory(response).model_calls[0].model_response_kind == "text"
+
+    def test_responses_api_reasoning_only_is_other(self) -> None:
+        response = {"output": [{"type": "reasoning"}]}
+        assert self._trajectory(response).model_calls[0].model_response_kind == "other"
+
+    def test_a_tool_call_wins_over_accompanying_text(self) -> None:
+        response = {
+            "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": "calling a tool"}]},
+                {"type": "function_call", "call_id": "t1"},
+            ]
+        }
+        assert self._trajectory(response).model_calls[0].model_response_kind == "tool_call"
+
+    def test_a_producer_classification_is_never_overwritten(self) -> None:
+        response = {"choices": [{"message": {"content": "text"}}]}
+        trajectory = self._trajectory(response, producer_kind="other")
+        assert trajectory.model_calls[0].model_response_kind == "other"
+
+    def test_an_unrecognised_response_stays_unknown(self) -> None:
+        assert self._trajectory("raw string body").model_calls[0].model_response_kind is None
+        assert self._trajectory(None).model_calls[0].model_response_kind is None
+
