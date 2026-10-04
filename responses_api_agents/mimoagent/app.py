@@ -48,7 +48,8 @@ class MimoAgentConfig(BaseResponsesAPIAgentConfig):
     model_kwargs: dict[str, Any] = Field(default_factory=dict)
     model: str | None = None
     protocol: str | None = None
-    cwd: str = "/testbed"
+    # Set by harness_agent from the task workdir. Falls back to the runner's cwd.
+    cwd: str | None = None
     command_timeout: int = 600
 
 
@@ -170,7 +171,7 @@ class MimoAgent(SimpleResponsesAPIAgent):
                 return create(**kwargs)
 
             model.client.responses.create = create_with_strict
-        env = LocalEnvironment(cwd=os.getcwd() or self.config.cwd, timeout=self.config.command_timeout)
+        env = LocalEnvironment(cwd=self.config.cwd or os.getcwd(), timeout=self.config.command_timeout)
         agent = make_agent(agent_type, model, env, **agent_cfg)
         if MCP_CONFIG_PATH.exists() and hasattr(agent, "tool_registry"):
             from responses_api_agents.mimoagent.mcp_proxy import discover_mcp_tools

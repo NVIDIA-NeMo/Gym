@@ -5,11 +5,11 @@ set -e
 PREFIX=${PREFIX:-/opt/mimo-rt}
 [ -x "$PREFIX/venv/bin/python" ] && "$PREFIX/venv/bin/python" -c "import mimoagent, fastapi" 2>/dev/null && exit 0
 mkdir -p "$PREFIX/bin"
-# A prebuilt tarball of this prefix (built in an x86_64 box) skips the PyPI install.
+# A prebuilt tarball of this prefix (built for the box's architecture) skips the PyPI install.
 if [ -n "${MIMO_RUNTIME_URL:-}" ]; then
     curl -fsSL "$MIMO_RUNTIME_URL" | tar xz -C / && "$PREFIX/venv/bin/python" -c "import mimoagent, fastapi" && exit 0
 fi
-URL=https://github.com/astral-sh/uv/releases/download/0.9.5/uv-x86_64-unknown-linux-musl.tar.gz
+URL=https://github.com/astral-sh/uv/releases/download/0.9.5/uv-$(uname -m)-unknown-linux-musl.tar.gz
 if command -v curl >/dev/null; then curl -fsSL "$URL" -o /tmp/uv.tgz
 elif command -v wget >/dev/null; then wget -q "$URL" -O /tmp/uv.tgz
 else python3 -c "import urllib.request,sys; urllib.request.urlretrieve(sys.argv[1], '/tmp/uv.tgz')" "$URL"; fi
