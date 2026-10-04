@@ -150,6 +150,8 @@ def test_summary_weights_problems_and_reports_coverage(tmp_path: Path) -> None:
     path.write_text("\n".join(json.dumps(row) for row in rows))
     summary = summarize(path)["languages"]
     assert summary["en"]["pass_at_1"] == 0.5
+    assert summary["en"]["normalized_pass_at_1"] == 0.5
+    assert summary["en"]["normalized_recovered_attempts"] == 0
     assert not summary["en"]["complete_12_problem_coverage"]
     assert summary["hi"]["paired_delta_vs_english"] == -1
     assert summary["hi"]["pass_at_1_translation_review_passed"] is None
