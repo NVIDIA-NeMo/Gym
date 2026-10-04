@@ -1,20 +1,11 @@
 agent:
   type: mimocode
-  # cwd defaults to the environment's working dir (/testbed below).
-  thinking_effort: max    # thinking.type=adaptive + output_config.effort
-  context_limit: 1000000  # a claude-opus-4-8 gateway channel serving a 1M context
-  output_limit: 65536     # mimo requires context/output together
-  version: 0.1.15         # 0.1.12 (mimoagent default) is no longer published
-  # protocol: anthropic   # anthropic | completions | responses
-  # thinking_budget: 8192 # budget mode, mutually exclusive with thinking_effort
-  # max_turns: 500        # agent.<primary>.steps; unset = upstream default (unlimited)
-  # extra_env:
-  #   MIMOCODE_CODEX_MODE: "true"   # harness default is "false"
-  #   MIMOCODE_RL_MODE: "false"     # on by default; false restores interactive behaviour
-  # skip_install: false
-
+  thinking_effort: max
+  context_limit: 1000000
+  output_limit: 65536
+  version: 0.1.15
 model:
-  model_name: "claude-opus-4-8"
+  model_name: claude-opus-4-8
   model_kwargs:
-    base_url: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
-    api_key: "${ANTHROPIC_API_KEY:-}"
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+    api_key: ${ANTHROPIC_API_KEY:-}

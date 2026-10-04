@@ -1,15 +1,9 @@
 agent:
   type: claude-code
-  # cwd defaults to the environment's working dir (/testbed below).
-  effort: high          # low | medium | high | max
+  effort: high
   max_turns: 200
-  # skip_install: false # set true if the image already has the SDK baked in
-  # debug: true         # SDK debug stream, copied out as claude-code-debug.log
-  # run_timeout: 18000  # the session runs detached from the exec websocket, so it may exceed the 4h connection cap
-  # stall_timeout: 1800 # kill the session after this many seconds without a write to claude-code.txt (0 = off)
-
 model:
-  model_name: "claude-opus-4-7"
+  model_name: claude-opus-4-7
   model_kwargs:
-    base_url: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
-    api_key: "${ANTHROPIC_API_KEY:-}"
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+    api_key: ${ANTHROPIC_API_KEY:-}

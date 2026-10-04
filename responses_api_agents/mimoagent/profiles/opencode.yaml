@@ -1,15 +1,11 @@
 agent:
   type: opencode
   version: 1.18.18
-  thinking_effort: xhigh  # adaptive + effort, via --variant
+  thinking_effort: xhigh
   context_limit: 1000000
-  output_limit: 65536     # >32000 is unlocked via OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX
-  # thinking_budget: 8192 # budget mode, mutually exclusive with thinking_effort
-  # todo_tool: false      # true restores todowrite (gateways without the fingerprint)
-  # skip_install: false
-
+  output_limit: 65536
 model:
-  model_name: "claude-opus-5"
+  model_name: claude-opus-5
   model_kwargs:
-    base_url: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
-    api_key: "${ANTHROPIC_API_KEY:-}"
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+    api_key: ${ANTHROPIC_API_KEY:-}

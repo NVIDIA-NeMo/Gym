@@ -2,14 +2,11 @@ agent:
   type: kimi-code
   version: 0.36.1
   thinking: true
-  effort: xhigh           # low | medium | high | xhigh | max (default high)
-  context_limit: 1000000  # model max_context_size
-  output_limit: 65536     # model max_output_size → request max_tokens
-  # thinking_keep: "off"  # anything else re-enables the ?beta=true wire
-  # skip_install: false
-
+  effort: xhigh
+  context_limit: 1000000
+  output_limit: 65536
 model:
-  model_name: "claude-opus-5"
+  model_name: claude-opus-5
   model_kwargs:
-    base_url: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
-    api_key: "${ANTHROPIC_API_KEY:-}"
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+    api_key: ${ANTHROPIC_API_KEY:-}

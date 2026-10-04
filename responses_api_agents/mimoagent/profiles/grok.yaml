@@ -1,21 +1,11 @@
 agent:
   type: grok
   version: 1.0.4
-  effort: xhigh           # low | medium | high | xhigh; "max" folds to xhigh
-                          # (1.0.4's CLI has no max) with a warning
-  context_limit: 1000000  # auto-compaction baseline
-  output_limit: 65536     # request max_tokens (grok's own unset default is 128000)
-  # max_turns: 2000       # unlimited when unset
-  # disallowed_tools: null  # default: nothing dropped (25 on the wire). grok
-  #                       # answers ask_user_question itself in headless mode
-  #                       # ("no user is available, continue with your best
-  #                       # judgment", 0.004s), so it costs nothing to keep.
-  #                       # Auxiliary title/summary roles are still routed to a
-  #                       # dead port so they never reach the gateway.
-  # skip_install: false   # true when the image pre-bakes /opt/mimo-grok
-
+  effort: xhigh
+  context_limit: 1000000
+  output_limit: 65536
 model:
-  model_name: "claude-opus-5"
+  model_name: claude-opus-5
   model_kwargs:
-    base_url: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
-    api_key: "${ANTHROPIC_API_KEY:-}"
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+    api_key: ${ANTHROPIC_API_KEY:-}

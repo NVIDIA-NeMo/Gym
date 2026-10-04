@@ -5,7 +5,6 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -33,22 +32,18 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 PROFILES_DIR = Path(__file__).parent / "profiles"
-# mimoagent's own loops call the model through the OpenAI SDK. The CLIs append their API path themselves.
 NATIVE_LOOPS = {"default", "bashonly-agent", "cc-agent", "codex-agent", "mimocode-agent"}
-# Written by resources_servers/mimo_rl_oss for tasks that ship MCP tool servers (general_agent).
 MCP_CONFIG_PATH = Path("/work/_setup/mcp_servers.json")
 
 
 class MimoAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    # A file in profiles/ (vendored from mimoagent's example_configs), e.g. claude-code, cc-agent.
     profile: str
     agent_overrides: dict[str, Any] = Field(default_factory=dict)
     model_kwargs: dict[str, Any] = Field(default_factory=dict)
     model: str | None = None
     protocol: str | None = None
-    # Set by harness_agent from the task workdir. Falls back to the runner's cwd.
     cwd: str | None = None
     command_timeout: int = 600
 
@@ -114,12 +109,6 @@ def _output_items(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 class MimoAgent(SimpleResponsesAPIAgent):
-    """Runs any mimoagent harness (native loop or blackbox CLI) where this process runs.
-
-    Meant to run inside the task box via harness_agent (agent: mimoagent), so mimoagent's
-    local environment executes commands in the box and the harness talks to Gym's model server.
-    """
-
     ray_enabled = False
     config: MimoAgentConfig
 
@@ -150,15 +139,11 @@ class MimoAgent(SimpleResponsesAPIAgent):
             model_kwargs["top_p"] = body.top_p
         model = get_model(
             config={
-                # Gym's model server substitutes its own model, so the profile's name (one every harness's
-                # model catalog knows) is the safe default. dsh and grok reject names outside their catalogs.
                 "model_name": self.config.model or model_block.get("model_name") or body.model,
                 "protocol": protocol,
                 "model_kwargs": model_kwargs,
             }
         )
-        # Gym's schemas are stricter than the OpenAI SDK: no legacy `name` on chat tool messages,
-        # and Responses function tools need `strict`.
         query = model.query
         model.query = lambda messages, **kwargs: query([_without_tool_name(m) for m in messages], **kwargs)
         if protocol == "responses" and hasattr(model, "client"):

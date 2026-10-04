@@ -1,13 +1,11 @@
 agent:
   type: openclaw
   version: 2026.7.1-2
-  thinking: xhigh         # off|minimal|low|medium|high|xhigh|adaptive|max
+  thinking: xhigh
   context_limit: 1000000
-  output_limit: 65536     # request max_tokens (also the thinking-budget ceiling)
-  # skip_install: false
-
+  output_limit: 65536
 model:
-  model_name: "claude-opus-5"
+  model_name: claude-opus-5
   model_kwargs:
-    base_url: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
-    api_key: "${ANTHROPIC_API_KEY:-}"
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+    api_key: ${ANTHROPIC_API_KEY:-}

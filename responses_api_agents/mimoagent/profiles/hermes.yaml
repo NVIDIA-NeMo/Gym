@@ -1,22 +1,10 @@
 agent:
   type: hermes
   version: 2026.8.13
-  effort: xhigh           # minimal..high | xhigh | max; unset = no thinking field
-  max_tokens: 65536       # unset uses hermes's model table (128000 for opus-5)
-  # max_turns: 90         # tool-calling iterations per turn (upstream default)
-  # toolsets: "terminal,file,todo,code_execution,delegation,debugging,memory,context_engine,clarify"
-  #                       # default (11 tools, delegate_task + clarify included);
-  #                       # session_search / skills / cronjob stay out because
-  #                       # that combination trips the subscription channel's
-  #                       # third-party fingerprint (400)
-  # clarify_timeout: 5    # seconds clarify waits before telling the model to
-  #                       # decide for itself. hermes is the one harness whose
-  #                       # yolo does NOT cover the ask tool, so this is the only
-  #                       # bound on the stall (its own default is 120s)
-  # skip_install: false
-
+  effort: xhigh
+  max_tokens: 65536
 model:
-  model_name: "claude-opus-5"
+  model_name: claude-opus-5
   model_kwargs:
-    base_url: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
-    api_key: "${ANTHROPIC_API_KEY:-}"
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+    api_key: ${ANTHROPIC_API_KEY:-}
