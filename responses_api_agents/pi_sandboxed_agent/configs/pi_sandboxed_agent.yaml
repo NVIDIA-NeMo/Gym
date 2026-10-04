@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Pi inside a resources-server-seeded task sandbox, on the terms of
+# claude_code_sandboxed_agent.yaml: the policy model behind the Gym proxy, token-id capture, one
+# task per sandbox. The resources server is bound by the wiring config that inherits this one
+# (resources_servers/<server>/configs/<server>_pi.yaml).
+pi_sandboxed_agent:
+  responses_api_agents:
+    pi_sandboxed_agent:
+      entrypoint: app.py
+      num_workers: 4
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Pi drives its own model calls and returns no token ids.
+      token_id_capture: true
+
+      model: policy
+      # With pi_version set, `<command> --version` must print exactly that.
+      command: pi
+      pi_version: null
+      env: {}
+      concurrency: 512
+      # Pi's whole-run budget in seconds; the sandbox outlives it for verification.
+      timeout: 3600
+      # Per bash tool call, so one hung command cannot consume the whole budget.
+      bash_timeout: 600
+      context_window: 262144
+      max_output_tokens: 262144
+      output_token_policy: remaining_context
+      # Compaction rewrites the history, which token capture cannot follow.
+      auto_compaction: false
+      thinking: null
+      system_prompt: null
+      extra_args: []
+      mcp_servers: {}
+      # Pi failing to start is an infrastructure error (agent_run_error), not a zero-reward sample.
+      execution_failure_reward_zero: false
+      artifacts_dir: results/pi_sandboxed
+
+      sandbox_provider: sandbox
+      network_access: inherit
+      # Used only when the agent starts its own sandbox; a seeded sandbox keeps the server's spec.
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        env:
+          EXECD_API_GRACE_SHUTDOWN: "50ms"
+        resources:
+          cpu: 0.25
+          memory_mib: 512
+          disk_gib: 30
+        provider_options: {}
+        metadata:
+          harness: pi
+
+      datasets: []

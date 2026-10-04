@@ -17,7 +17,7 @@
 
 import json
 import logging
-from asyncio import Semaphore
+from asyncio import Semaphore, sleep
 from contextvars import ContextVar
 from copy import deepcopy
 from hashlib import sha256
@@ -59,6 +59,9 @@ from responses_api_agents.pi_agent.app import (
 
 LOG = logging.getLogger(__name__)
 _RUN: ContextVar[dict[str, Any] | None] = ContextVar("pi_sandboxed_run", default=None)
+# First stderr line of a run in a task image without python3: Pi ran without capture.py and the
+# events are rebuilt from its JSON stdout, stamped with the export time instead of receipt times.
+NO_PYTHON_MARKER = "NEMO_GYM_PI_NO_PYTHON3"
 
 
 class PiSandboxedAgentConfig(PiAgentConfig):
@@ -184,21 +187,39 @@ class PiSandboxedAgent(PiAgent):
         if setup.return_code != 0 or setup.error_type:
             raise RuntimeError("Unable to protect Pi session configuration")
         if self.config.pi_version:
-            version = await sandbox.exec(
-                command=join([*self.config.command_parts, "--version"]), timeout_s=self.config.timeout
-            )
+            for attempt in range(3):
+                version = await sandbox.exec(
+                    command=join([*self.config.command_parts, "--version"]), timeout_s=self.config.timeout
+                )
+                # A network mount can fail the first open of the launcher; nothing ran, so retry.
+                if version.return_code == 0 or "Input/output error" not in (version.stdout or "") + (
+                    version.stderr or ""
+                ):
+                    break
+                await sleep(3)
             if version.return_code != 0 or (version.stdout or "").strip() != self.config.pi_version:
-                raise RuntimeError("Preinstalled Pi version does not match pi_version")
+                # The command's own output says why (an image's libc, a missing tool, a launcher
+                # error); without it every failure reads as a version mismatch.
+                raise RuntimeError(
+                    "Preinstalled Pi version does not match pi_version: "
+                    f"return_code={version.return_code} error_type={version.error_type} "
+                    f"stdout={(version.stdout or '')[-300:]!r} stderr={(version.stderr or '')[-600:]!r}"
+                )
         # Persist the native stream in the sandbox too: provider stdout may be truncated.
         stdout_path, stderr_path = remote + "/stdout.jsonl", remote + "/stderr.log"
         result = None
         error_type = None
+        # capture.py stamps each event with its receipt time but needs the image's python3. Task
+        # images without one (Node-only repositories, for instance) run Pi directly, flagged by
+        # NO_PYTHON_MARKER on stderr; the events are rebuilt from Pi's JSON stdout below.
+        captured = join(["python3", remote + "/capture.py", remote + "/events.jsonl", *cmd])
+        command = (
+            f"if command -v python3 >/dev/null 2>&1; then {captured}; "
+            f"else echo {NO_PYTHON_MARKER} >&2; {join(cmd)}; fi"
+            f" > {quote(stdout_path)} 2> {quote(stderr_path)}"
+        )
         try:
-            result = await sandbox.exec(
-                command=f"{join(['python3', remote + '/capture.py', remote + '/events.jsonl', *cmd])} > {quote(stdout_path)} 2> {quote(stderr_path)}",
-                env=env,
-                timeout_s=self.config.timeout,
-            )
+            result = await sandbox.exec(command=command, env=env, timeout_s=self.config.timeout)
         except Exception as exc:
             error_type = type(exc).__name__
             LOG.exception("Pi sandbox execution failed")
@@ -207,8 +228,19 @@ class PiSandboxedAgent(PiAgent):
         # Export failures propagate; retrying such a request must not become a scored zero.
         await sandbox.download(stdout_path, root / "stdout.jsonl")
         await sandbox.download(stderr_path, root / "stderr.log")
-        await sandbox.download(remote + "/events.jsonl", root / "events.jsonl")
         stdout = (root / "stdout.jsonl").read_text(errors="replace")
+        if (root / "stderr.log").read_text(errors="replace").startswith(NO_PYTHON_MARKER):
+            observed_at = time()
+            with (root / "events.jsonl").open("w") as events_file:
+                for line in stdout.split("\n"):
+                    try:
+                        event = json.loads(line) if line.strip() else None
+                    except (ValueError, RecursionError):
+                        continue
+                    if isinstance(event, dict):
+                        events_file.write(json.dumps([observed_at, event]) + "\n")
+        else:
+            await sandbox.download(remote + "/events.jsonl", root / "events.jsonl")
         error_type = error_type or getattr(result, "error_type", None)
         return_code = getattr(result, "return_code", None)
         if return_code == MCP_SETUP_ERROR_EXIT_CODE and mcp:
