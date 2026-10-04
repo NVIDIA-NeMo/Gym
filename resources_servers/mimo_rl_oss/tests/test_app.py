@@ -61,7 +61,7 @@ def test_terminal_bench_uploads_tests_and_reads_reward() -> None:
 def test_terminal_bench_missing_reward_is_zero() -> None:
     reward, _, extra = TerminalBenchEnvironment(FakeEnv(""), _instance())._do_calculate_reward()
     assert reward == 0.0
-    assert "no reward file" in extra["error"]
+    assert extra["reward_error"] == "no reward file"
 
 
 def test_execute_strips_opensandbox_exit_marker() -> None:
@@ -82,4 +82,28 @@ def test_infrastructure_failures_are_masked() -> None:
     assert _failure({"error_category": "testbed_corrupted", "reward_error": "mcp_backend_down"}) == (
         "verifier_error",
         "mcp_backend_down",
+    )
+
+
+def test_terminal_bench_transport_failure_is_masked() -> None:
+    env = FakeEnv("")
+    env.execute = lambda command, cwd="", timeout=None: (
+        {"output": "", "returncode": None, "reason": "transport_error"}
+        if command.startswith("sh /tests")
+        else {"output": "", "returncode": 0, "reason": "ok"}
+    )
+    env.copy_to = lambda src, dest, **_: None
+    _, _, extra = TerminalBenchEnvironment(env, _instance())._do_calculate_reward()
+    assert extra == {"transport_error": True}
+
+
+def test_webdev_rubric_is_pinned() -> None:
+    import hashlib
+
+    from resources_servers.mimo_rl_oss.webdev.eval_rubric import RUBRIC_ID, build_prompt
+
+    # The rubric text is the scoring policy. Changing it needs a new RUBRIC_ID and a new hash here.
+    assert RUBRIC_ID == "rva1:mean(visual,query,asset)"
+    assert hashlib.sha256(build_prompt().encode()).hexdigest() == (
+        "a4d3be63029e8fb28b469bf3d188816a7fa238b415749d7ff4aad1ca360b2997"
     )

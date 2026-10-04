@@ -114,6 +114,7 @@ class MimoRLOSSResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         # session id -> (task env, creation time). Sessions whose harness never reaches verify are evicted.
         self._envs: dict[str, tuple[DatasetEnvironment, float]] = {}
+        self._evictions: set[asyncio.Task] = set()
         for key, value in (
             ("WEBDEV_EVAL_JUDGE_BASE_URL", self.config.webdev_judge_base_url),
             ("WEBDEV_EVAL_JUDGE_API_KEY", self.config.webdev_judge_api_key),
@@ -167,7 +168,9 @@ class MimoRLOSSResourcesServer(SimpleResourcesServer):
         for key, (stale, created) in list(self._envs.items()):
             if now - created > ttl:
                 del self._envs[key]
-                asyncio.create_task(asyncio.to_thread(stale.cleanup))
+                task = asyncio.create_task(asyncio.to_thread(stale.cleanup))
+                self._evictions.add(task)
+                task.add_done_callback(self._evictions.discard)
         self._envs[str(request.session[SESSION_ID_KEY])] = (env, now)
         return MimoRLOSSSeedResponse(sandbox_descriptor={**descriptor, "workdir": env.repo_path})
 
