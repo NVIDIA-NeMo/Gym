@@ -13,5 +13,8 @@ and graded with mimoagent's dataset environments in a Gym sandbox.
 
 Music (1,000 rows) is `resources_servers/mimo_music`.
 
+general_agent runs MiMo's main and sidecar containers as one box, so an agent running as root can reach the MCP
+state databases that the verifier grades. Treat its rewards with that in mind until the agent runs unprivileged.
+
 `seed_session` builds the box and runs mimoagent's setup, harness_agent runs any harness in it, and `verify` grades
 in the same box. Build the data with `python -m resources_servers.mimo_rl_oss.prepare`. Results are in `RESULTS.md`.

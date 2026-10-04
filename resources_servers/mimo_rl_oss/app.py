@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -23,6 +24,7 @@ from mimoagent.environments.datasets import DatasetEnvironment
 from mimoagent.environments.utils import make_dataset_env
 from pydantic import ConfigDict
 
+from nemo_gym import failure_kinds
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -80,6 +82,17 @@ class MimoRLOSSVerifyResponse(BaseVerifyResponse):
     reward_extra_info: dict[str, Any]
 
 
+def _failure(extra: dict[str, Any]) -> tuple[str, str] | None:
+    """mimoagent's markers for rewards that are infrastructure failures, not policy failures."""
+    if extra.get("transport_error"):
+        return failure_kinds.SESSION_LOST, "sandbox transport failed during grading"
+    category = extra.get("error_category")
+    if not category:
+        return None
+    kind = failure_kinds.JUDGE_FAILED if category == "webdev_drop" else failure_kinds.VERIFIER_ERROR
+    return kind, str(extra.get("reward_error") or extra.get("error") or category)
+
+
 def _final_text(response: Any) -> str:
     texts = []
     for item in response.output or []:
@@ -99,7 +112,8 @@ class MimoRLOSSResourcesServer(SimpleResourcesServer):
     config: MimoRLOSSConfig
 
     def model_post_init(self, context: Any, /) -> None:
-        self._envs: dict[str, DatasetEnvironment] = {}
+        # session id -> (task env, creation time). Sessions whose harness never reaches verify are evicted.
+        self._envs: dict[str, tuple[DatasetEnvironment, float]] = {}
         for key, value in (
             ("WEBDEV_EVAL_JUDGE_BASE_URL", self.config.webdev_judge_base_url),
             ("WEBDEV_EVAL_JUDGE_API_KEY", self.config.webdev_judge_api_key),
@@ -110,6 +124,8 @@ class MimoRLOSSResourcesServer(SimpleResourcesServer):
         ):
             if value:
                 os.environ[key] = value
+        if self.config.general_judge_base_url and not self.config.general_judge_api_key:
+            LOG.warning("general_judge_api_key is empty, general_agent rubric grading will be masked")
 
     def _make_env(self, instance: dict[str, Any]) -> DatasetEnvironment:
         global_config = get_global_config_dict()
@@ -146,21 +162,32 @@ class MimoRLOSSResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: MimoRLOSSRequest) -> MimoRLOSSSeedResponse:
         env, descriptor = await asyncio.to_thread(self._setup, body.instance)
-        self._envs[str(request.session[SESSION_ID_KEY])] = env
+        now = time.monotonic()
+        ttl = float(self.config.sandbox_spec.get("ttl_s") or 14400)
+        for key, (stale, created) in list(self._envs.items()):
+            if now - created > ttl:
+                del self._envs[key]
+                asyncio.create_task(asyncio.to_thread(stale.cleanup))
+        self._envs[str(request.session[SESSION_ID_KEY])] = (env, now)
         return MimoRLOSSSeedResponse(sandbox_descriptor={**descriptor, "workdir": env.repo_path})
 
     async def verify(self, request: Request, body: MimoRLOSSVerifyRequest) -> MimoRLOSSVerifyResponse:
-        env = self._envs.pop(str(request.session[SESSION_ID_KEY]), None)
-        if env is None:
+        entry = self._envs.pop(str(request.session[SESSION_ID_KEY]), None)
+        if entry is None:
             raise HTTPException(status_code=400, detail="mimo_rl_oss session is not active")
+        env = entry[0]
         try:
             env.attach_rollout(task=body.instance.get("problem_statement", ""), result=_final_text(body.response))
             reward, test_output, extra = await asyncio.to_thread(env.calculate_reward)
         finally:
             await asyncio.to_thread(env.cleanup)
+        failure = _failure(extra)
         return MimoRLOSSVerifyResponse(
             **body.model_dump(),
             reward=float(reward),
+            mask_sample=failure is not None,
+            failure_kind=failure[0] if failure else None,
+            failure_reason=failure[1] if failure else None,
             instance_id=env.instance_id,
             test_output=test_output[-5000:],
             reward_extra_info={k: v for k, v in extra.items() if k != "last_poc_b64"},

@@ -71,3 +71,15 @@ def test_execute_strips_opensandbox_exit_marker() -> None:
     result = SandboxExecResult(stdout="out\n", stderr="err\nCommandExecError: 1", return_code=1)
     env._run = lambda name, factory: result
     assert env.execute("false") == {"output": "out\nerr", "returncode": 1, "reason": "ok"}
+
+
+def test_infrastructure_failures_are_masked() -> None:
+    from resources_servers.mimo_rl_oss.app import _failure
+
+    assert _failure({"model_patch": ""}) is None
+    assert _failure({"transport_error": True})[0] == "session_lost"
+    assert _failure({"error_category": "webdev_drop"})[0] == "judge_failed"
+    assert _failure({"error_category": "testbed_corrupted", "reward_error": "mcp_backend_down"}) == (
+        "verifier_error",
+        "mcp_backend_down",
+    )

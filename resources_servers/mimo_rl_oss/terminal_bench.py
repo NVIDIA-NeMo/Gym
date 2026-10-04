@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 import base64
 import json
+import os
 import shlex
+import tempfile
 
 from mimoagent.environments.datasets import DATASET_REGISTRY, DatasetEnvironment
 
@@ -43,7 +45,13 @@ class TerminalBenchEnvironment(DatasetEnvironment):
         files = json.loads(self.instance["tests_files"])
         self.execute("rm -rf /tests /logs/verifier && mkdir -p /tests /logs/verifier", cwd="/")
         for name, data in files.items():
-            self.copy_text_to(base64.b64decode(data).decode(), f"/tests/{name}")
+            # Bytes, not text: fixtures can be binary.
+            with tempfile.NamedTemporaryFile(delete=False) as f:
+                f.write(base64.b64decode(data))
+            try:
+                self.env.copy_to(f.name, f"/tests/{name}")
+            finally:
+                os.unlink(f.name)
         res = self.execute(
             "sh /tests/test.sh",
             cwd=self.repo_path,
