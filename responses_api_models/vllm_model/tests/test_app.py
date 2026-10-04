@@ -27,6 +27,12 @@ from yarl import URL
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
+from nemo_gym.global_config import (
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TARGET_WEIGHT_VERSION_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.openai_utils import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     NeMoGymAsyncOpenAI,
@@ -3813,7 +3819,8 @@ class TestVLLMConverter:
         assert captured_kwargs["chat_template_kwargs"]["some_other_param"] == "value2"
         assert captured_kwargs["chat_template_kwargs"]["new_param"] == "new"
 
-    def test_metadata_extra_body_override(self, monkeypatch: MonkeyPatch):
+    @mark.parametrize("attempt_index", [0, 2])
+    def test_metadata_extra_body_override(self, monkeypatch: MonkeyPatch, attempt_index: int) -> None:
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -3824,7 +3831,7 @@ class TestVLLMConverter:
             name="",
             return_token_id_information=False,
             uses_reasoning_parser=False,
-            extra_body={"guided_json": '{"type": "object"}', "min_tokens": 10},
+            extra_body={"guided_json": '{"type": "object"}', "min_tokens": 10, ATTEMPT_INDEX_KEY_NAME: 99},
         )
         server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         app = server.setup_webserver()
@@ -3865,7 +3872,18 @@ class TestVLLMConverter:
                     content="hello",
                 )
             ],
-            metadata={"extra_body": json.dumps({"min_tokens": 20, "new_param": "value"})},
+            metadata={
+                "extra_body": json.dumps(
+                    {
+                        "min_tokens": 20,
+                        "new_param": "value",
+                        TASK_INDEX_KEY_NAME: 12,
+                        ROLLOUT_INDEX_KEY_NAME: 3,
+                        ATTEMPT_INDEX_KEY_NAME: attempt_index,
+                        TARGET_WEIGHT_VERSION_KEY_NAME: 19,
+                    }
+                )
+            },
         )
 
         client = TestClient(app)
@@ -3878,6 +3896,10 @@ class TestVLLMConverter:
         assert captured_kwargs["guided_json"] == '{"type": "object"}'
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
+        assert captured_kwargs[TASK_INDEX_KEY_NAME] == 12
+        assert captured_kwargs[ROLLOUT_INDEX_KEY_NAME] == 3
+        assert captured_kwargs[ATTEMPT_INDEX_KEY_NAME] == attempt_index
+        assert captured_kwargs[TARGET_WEIGHT_VERSION_KEY_NAME] == 19
 
 
 # ──────────────────────────────────────────────────────────────────────────────

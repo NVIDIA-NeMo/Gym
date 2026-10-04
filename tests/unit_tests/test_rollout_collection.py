@@ -42,7 +42,9 @@ from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
+    TARGET_WEIGHT_VERSION_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
@@ -78,6 +80,7 @@ from nemo_gym.rollout_collection import (
     _get_max_rollout_attempts,
     _masking_step_metrics,
     _missing_rollout_rows_counted_as_zero,
+    _propagate_rollout_fields_to_model_request,
     _rollout_for_export,
     _rollout_order_key,
     _rollout_request_debug_summary,
@@ -272,6 +275,135 @@ class TestGetMaxRolloutAttempts:
 
 
 class TestRolloutCollection:
+    def test_propagate_rollout_fields_is_noop_without_fields(self) -> None:
+        row = {"responses_create_params": {"input": []}}
+
+        _propagate_rollout_fields_to_model_request(row)
+
+        assert row == {"responses_create_params": {"input": []}}
+
+    def test_propagate_rollout_fields_is_noop_without_model_request(self) -> None:
+        row = {TASK_INDEX_KEY_NAME: 12, ROLLOUT_INDEX_KEY_NAME: 3}
+
+        _propagate_rollout_fields_to_model_request(row)
+
+        assert row == {TASK_INDEX_KEY_NAME: 12, ROLLOUT_INDEX_KEY_NAME: 3}
+
+    def test_propagates_rollout_fields_to_native_task_input_without_aliasing(self) -> None:
+        shared_task_input = {RESPONSES_CREATE_PARAMS_KEY_NAME: {"input": [], "metadata": None}}
+        row = {
+            TASK_INDEX_KEY_NAME: 12,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            ATTEMPT_INDEX_KEY_NAME: 1,
+            "task_input": shared_task_input,
+        }
+
+        _propagate_rollout_fields_to_model_request(row)
+
+        responses_create_params = row["task_input"][RESPONSES_CREATE_PARAMS_KEY_NAME]
+        assert json.loads(responses_create_params["metadata"]["extra_body"]) == {
+            TASK_INDEX_KEY_NAME: 12,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            ATTEMPT_INDEX_KEY_NAME: 1,
+        }
+        assert row["task_input"] is not shared_task_input
+        assert shared_task_input[RESPONSES_CREATE_PARAMS_KEY_NAME]["metadata"] is None
+
+    def test_propagates_rollout_fields_to_flat_request_without_aliasing(self) -> None:
+        shared_responses_create_params = {"input": [], "metadata": None}
+        row = {
+            TASK_INDEX_KEY_NAME: 12,
+            RESPONSES_CREATE_PARAMS_KEY_NAME: shared_responses_create_params,
+        }
+
+        _propagate_rollout_fields_to_model_request(row)
+
+        assert row[RESPONSES_CREATE_PARAMS_KEY_NAME] is not shared_responses_create_params
+        assert shared_responses_create_params["metadata"] is None
+
+    @pytest.mark.parametrize("target_weight_version", [0, 19])
+    @pytest.mark.parametrize("attempt_index", [0, 2])
+    def test_propagates_rollout_fields_to_model_request(self, target_weight_version: int, attempt_index: int) -> None:
+        row = {
+            TASK_INDEX_KEY_NAME: 12,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            ATTEMPT_INDEX_KEY_NAME: attempt_index,
+            TARGET_WEIGHT_VERSION_KEY_NAME: target_weight_version,
+            "responses_create_params": {
+                "input": [],
+                "metadata": {
+                    "extra_body": json.dumps(
+                        {
+                            "min_tokens": 4,
+                            TASK_INDEX_KEY_NAME: "stale",
+                            ROLLOUT_INDEX_KEY_NAME: "stale",
+                            ATTEMPT_INDEX_KEY_NAME: "stale",
+                            TARGET_WEIGHT_VERSION_KEY_NAME: "stale",
+                        }
+                    )
+                },
+            },
+        }
+
+        _propagate_rollout_fields_to_model_request(row)
+
+        responses_create_params = row["responses_create_params"]
+        extra_body = json.loads(responses_create_params["metadata"]["extra_body"])
+        assert extra_body == {
+            "min_tokens": 4,
+            TASK_INDEX_KEY_NAME: 12,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            ATTEMPT_INDEX_KEY_NAME: attempt_index,
+            TARGET_WEIGHT_VERSION_KEY_NAME: target_weight_version,
+        }
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(responses_create_params)
+
+    def test_retry_updates_model_request_attempt_without_changing_other_identity(self) -> None:
+        row = {
+            TASK_INDEX_KEY_NAME: 12,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            TARGET_WEIGHT_VERSION_KEY_NAME: 19,
+            ATTEMPT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": []},
+        }
+        _propagate_rollout_fields_to_model_request(row)
+        initial = json.loads(row["responses_create_params"]["metadata"]["extra_body"])
+
+        row[ATTEMPT_INDEX_KEY_NAME] = 1
+        _propagate_rollout_fields_to_model_request(row)
+
+        assert json.loads(row["responses_create_params"]["metadata"]["extra_body"]) == {
+            **initial,
+            ATTEMPT_INDEX_KEY_NAME: 1,
+        }
+        assert row[ATTEMPT_INDEX_KEY_NAME] == 1
+
+    def test_propagates_rollout_fields_when_metadata_is_none(self) -> None:
+        row = {
+            TASK_INDEX_KEY_NAME: 12,
+            "responses_create_params": {"input": [], "metadata": None},
+        }
+
+        _propagate_rollout_fields_to_model_request(row)
+
+        assert json.loads(row["responses_create_params"]["metadata"]["extra_body"]) == {TASK_INDEX_KEY_NAME: 12}
+
+    @pytest.mark.parametrize(
+        ("metadata", "message"),
+        [
+            ("invalid", "metadata must be a dict or None"),
+            ({"extra_body": "[]"}, "extra_body must encode a JSON object"),
+        ],
+    )
+    def test_propagate_rollout_fields_rejects_invalid_metadata(self, metadata, message) -> None:
+        row = {
+            TASK_INDEX_KEY_NAME: 12,
+            "responses_create_params": {"input": [], "metadata": metadata},
+        }
+
+        with pytest.raises(TypeError, match=message):
+            _propagate_rollout_fields_to_model_request(row)
+
     def test_rollout_request_debug_summary_compact(self) -> None:
         row = {
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
@@ -7618,7 +7750,13 @@ class TestEnvironmentServerRouting:
         assert result == payload
         assert post.await_args.kwargs["server_name"] == "environment"
         assert AGENT_REF_KEY_NAME not in rows[0]
-        assert post.await_args.kwargs["json"] == {
+        request_body = post.await_args.kwargs["json"]
+        responses_create_params = request_body["task"]["task_input"][RESPONSES_CREATE_PARAMS_KEY_NAME]
+        assert json.loads(responses_create_params.pop("metadata")["extra_body"]) == {
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+        }
+        assert request_body == {
             "episode_id": {"rollout_id": "0-0", "attempt": 0},
             "task": {
                 "task_id": {

@@ -71,6 +71,7 @@ from nemo_gym.global_config import (
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
+    TARGET_WEIGHT_VERSION_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
@@ -215,6 +216,12 @@ NG_PERF_KEY = "ng_perf"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+_MODEL_REQUEST_ROLLOUT_KEYS = (
+    TASK_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
+    TARGET_WEIGHT_VERSION_KEY_NAME,
+)
 
 
 def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, list[str]]:
@@ -1964,6 +1971,57 @@ class _BoundedCompletionIterator:
         self._progress.close()
 
 
+def _propagate_rollout_fields_to_model_request(row: Dict[str, Any]) -> None:
+    """Mirror Gym rollout fields into vLLM's eventual Chat Completions body.
+
+    Responses request validation rejects arbitrary top-level fields. Gym's vLLM
+    model already treats ``metadata.extra_body`` as a JSON-encoded set of fields
+    to merge into the upstream Chat Completions request, so use that bridge while
+    retaining the canonical values at the top level of the rollout row.
+    """
+    rollout_fields = {key: row[key] for key in _MODEL_REQUEST_ROLLOUT_KEYS if key in row}
+    if not rollout_fields:
+        return
+
+    # Flat/agent rows keep the Responses request at the top level. Native
+    # episode rows keep it under task_input and are wrapped only after this
+    # helper runs. Some tests and non-vLLM routes intentionally have no
+    # Responses request at all; there is no model request to annotate there.
+    responses_owner: Dict[str, Any]
+    if RESPONSES_CREATE_PARAMS_KEY_NAME in row:
+        responses_owner = row
+    else:
+        task_input = row.get("task_input")
+        if not isinstance(task_input, Mapping) or RESPONSES_CREATE_PARAMS_KEY_NAME not in task_input:
+            return
+        responses_owner = dict(task_input)
+        row["task_input"] = responses_owner
+
+    raw_responses_create_params = responses_owner[RESPONSES_CREATE_PARAMS_KEY_NAME]
+    if not isinstance(raw_responses_create_params, Mapping):
+        raise TypeError("responses_create_params must be a mapping")
+
+    # Rows are shallow-copied during repeat fan-out. Copy the request before
+    # stamping per-rollout identity so concurrent repeats cannot overwrite one
+    # another through a shared nested dictionary.
+    responses_create_params = dict(raw_responses_create_params)
+    responses_owner[RESPONSES_CREATE_PARAMS_KEY_NAME] = responses_create_params
+    metadata = responses_create_params.get("metadata")
+    if metadata is None:
+        metadata = {}
+        responses_create_params["metadata"] = metadata
+    if not isinstance(metadata, dict):
+        raise TypeError("responses_create_params.metadata must be a dict or None")
+    metadata = dict(metadata)
+    responses_create_params["metadata"] = metadata
+
+    extra_body = json.loads(metadata.get("extra_body") or "{}")
+    if not isinstance(extra_body, dict):
+        raise TypeError("responses_create_params.metadata.extra_body must encode a JSON object")
+    extra_body.update(rollout_fields)
+    metadata["extra_body"] = json.dumps(extra_body)
+
+
 class RolloutCollectionHelper(BaseModel):
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
@@ -2593,6 +2651,8 @@ class RolloutCollectionHelper(BaseModel):
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+                if TARGET_WEIGHT_VERSION_KEY_NAME in row:
+                    result[TARGET_WEIGHT_VERSION_KEY_NAME] = row[TARGET_WEIGHT_VERSION_KEY_NAME]
                 if AGENT_REF_KEY_NAME in row:
                     result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
                 if TASK_SOURCE_KEY_NAME in row:
@@ -3422,6 +3482,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started_at = time.time()
                 res = None
                 try:
+                    _propagate_rollout_fields_to_model_request(row)
                     request_body = _native_episode_request_body(row) if _materialized_taskset(row) else row
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
