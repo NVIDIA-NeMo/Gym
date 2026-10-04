@@ -11,6 +11,7 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
+# limitations under the License.
 import base64
 import json
 from types import SimpleNamespace
@@ -105,5 +106,5 @@ def test_webdev_rubric_is_pinned() -> None:
     # The rubric text is the scoring policy. Changing it needs a new RUBRIC_ID and a new hash here.
     assert RUBRIC_ID == "rva1:mean(visual,query,asset)"
     assert hashlib.sha256(build_prompt().encode()).hexdigest() == (
-        "a4d3be63029e8fb28b469bf3d188816a7fa238b415749d7ff4aad1ca360b2997"
+        "a4d3be63029e8fb28b469bf3d188816a7fa238b415749d7ff4aad1ca360b2997"  # pragma: allowlist secret
     )

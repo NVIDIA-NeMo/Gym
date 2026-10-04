@@ -23,6 +23,7 @@ mimo_rl_oss_resources_server:
       general_judge_base_url: ${oc.env:MIMO_JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       general_judge_api_key: ${oc.env:MIMO_JUDGE_API_KEY,''}
       general_judge_model: ${oc.env:MIMO_GENERAL_JUDGE_MODEL,azure/openai/gpt-5.4-mini}
+      general_judge_api: ${oc.env:MIMO_GENERAL_JUDGE_API,responses}
       sandbox_spec:
         ttl_s: 14400
         ready_timeout_s: 2400

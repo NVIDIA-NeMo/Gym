@@ -59,6 +59,8 @@ class MimoRLOSSConfig(BaseResourcesServerConfig):
     general_judge_base_url: str | None = None
     general_judge_api_key: str | None = None
     general_judge_model: str | None = None
+    # "responses" for hosted APIs, "chat" for self-hosted vLLM judges.
+    general_judge_api: str | None = None
 
 
 class MimoRLOSSRequest(BaseSeedSessionRequest):
@@ -122,6 +124,7 @@ class MimoRLOSSResourcesServer(SimpleResourcesServer):
             ("GA_JUDGE_URL", self.config.general_judge_base_url),
             ("GA_JUDGE_KEY", self.config.general_judge_api_key),
             ("GA_JUDGE_MODEL", self.config.general_judge_model),
+            ("GA_JUDGE_API", self.config.general_judge_api),
         ):
             if value:
                 os.environ[key] = value

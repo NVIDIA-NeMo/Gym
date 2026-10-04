@@ -11,10 +11,7 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
-import shutil
-
-import pytest
-
+# limitations under the License.
 from resources_servers.mimo_music.scorer import compute_score, extract_abc
 
 
@@ -35,7 +32,6 @@ def test_extract_abc_from_fence() -> None:
     assert extract_abc("no music here") is None
 
 
-@pytest.mark.skipif(shutil.which("abc2midi") is None, reason="abc2midi not installed")
 def test_clean_tune_scores_and_blank_line_is_rejected() -> None:
     assert 0.0 < compute_score("music", TUNE) <= 1.0
     assert compute_score("music", TUNE.replace("V:2", "\nV:2")) == 0.0
