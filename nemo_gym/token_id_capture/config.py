@@ -158,6 +158,8 @@ class TokenIdCaptureSettings(BaseModel):
     # This avoids repeatedly storing the growing full prompt.
     # Root and unresolved records remain full-prompt reconstruction anchors.
     delta_records: bool = False
+    # Admit an unresolved continuation (e.g. rewritten harness history) as a new root instead of poisoning.
+    unresolved_as_root: bool = False
     # Abort when the finalized-rollout masked fraction exceeds this limit.
     # Enforcement begins after ``mask_fraction_min_samples`` observations.
     # ``None`` disables the kill switch.
