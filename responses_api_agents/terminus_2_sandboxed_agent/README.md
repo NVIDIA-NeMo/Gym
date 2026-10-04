@@ -69,3 +69,9 @@ terminus_2_sandboxed_agent:
 
 The agent copies the binary to `/usr/local/bin/tmux`, so its sandbox user needs write
 access there. An existing tmux earlier on `PATH` can take precedence.
+
+Installation retries transient I/O errors twice, with one- and two-second delays;
+each attempt has a 30-second timeout. Other installation errors fail immediately.
+The rollout's `sandbox_timeout` covers terminal setup and agent execution. Setup
+failures return `terminus2_completed: false` and an error for that rollout so the
+remaining benchmark rollouts can continue.
