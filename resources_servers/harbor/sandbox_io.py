@@ -25,6 +25,8 @@ def _pack(source: Path, archive: Path) -> None:
 def _unpack(archive: Path, target: Path) -> None:
     with tarfile.open(archive, "r:gz") as tar:
         tar.extractall(target, filter="data")
+
+
 # Transfers run as root: the image's default user may not be allowed to create `/tests`,
 # `/solution` or `/logs`, and the files they unpack must be readable by every user. Some
 # images run without the capability to switch users at all; those fall back to the default user.

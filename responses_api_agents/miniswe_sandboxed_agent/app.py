@@ -26,6 +26,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionResponse,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
+    assert_model_url_reachable_from_sandbox,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME, get_global_config_dict
@@ -41,6 +42,7 @@ from nemo_gym.server_utils import (
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
+from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
 from responses_api_agents.miniswe_sandboxed_agent.harness import (
     HarnessContext,
     HarnessOutcome,
@@ -117,6 +119,10 @@ class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
         if path.endswith("/v1"):
             path = path[:-3]
         return urlunsplit((parsed.scheme, parsed.netloc, path, "", "")).rstrip("/")
+
+
+# Harness outcomes that are not the agent's doing; the episode path refuses them with a 5xx.
+INFRASTRUCTURE_TERMINATIONS = frozenset({"infrastructure_error", "cancelled"})
 
 
 def now() -> str:
@@ -227,6 +233,24 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
 
     # -- episode sessions: the environment server seeds the sandbox and calls /v1/responses ------------
 
+    def _model_base_url(self) -> str:
+        """The Model Server address as the sandbox sees it, before the per-rollout prefix."""
+        return self.config.sandbox_model_base_url or get_server_url(self.config.model_server.name)
+
+    def _agent_timeout_sec(self, state: MiniSWESession, body: NeMoGymResponseCreateParamsNonStreaming) -> float:
+        """The run budget: the seed's budget and the configured ceiling, bounded by the task's own timeout."""
+        budget = min(state.seed.agent_timeout_sec, self.config.agent_max_timeout_sec or float("inf"))
+        raw = (body.metadata or {}).get(AGENT_TIMEOUT_METADATA_KEY)
+        if raw is not None:
+            try:
+                task_timeout = float(raw)
+            except (TypeError, ValueError):
+                LOGGER.warning(f"Ignoring non-numeric {AGENT_TIMEOUT_METADATA_KEY}={raw!r} in the request metadata")
+            else:
+                if task_timeout > 0:
+                    budget = min(budget, task_timeout)
+        return budget
+
     async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
         """Borrow the resources server's sandbox for this episode."""
         agent_session_id = body.agent_session_id
@@ -246,9 +270,16 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             connection = body.sandbox_access.connection
             if not isinstance(connection, DirectSandboxConnection):
                 raise HTTPException(422, "mini-SWE supports only direct sandbox connections")
-            provider = create_provider(
-                resolve_provider_config(connection.provider_config_ref, get_global_config_dict())
-            )
+            provider_config = resolve_provider_config(connection.provider_config_ref, get_global_config_dict())
+            # mini-SWE runs inside the sandbox and calls the Model Server itself, so a loopback URL (the
+            # default without use_absolute_ip) would make every model call fail and the episode score 0.
+            try:
+                assert_model_url_reachable_from_sandbox(
+                    self._model_base_url(), provider_name=next(iter(provider_config), None)
+                )
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            provider = create_provider(provider_config)
             try:
                 sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
             except BaseException:
@@ -379,9 +410,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                                 and bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)),
                                 params=params,
                                 model_base_url=self.base_url_for_run(
-                                    base_url=self.config.sandbox_model_base_url
-                                    or get_server_url(self.config.model_server.name),
-                                    body={"_ng_rollout_id": rollout_id},
+                                    base_url=self._model_base_url(), body={"_ng_rollout_id": rollout_id}
                                 )
                                 + "/v1",
                                 model_name=self.config.model_server.name,
@@ -390,8 +419,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                             await harness.setup()
                         timings["agent_setup"]["finished_at"] = now()
                         timings["agent_execution"] = {"started_at": now()}
-                        budget = min(seed.agent_timeout_sec, self.config.agent_max_timeout_sec or float("inf"))
-                        deadline = monotonic() + budget
+                        deadline = monotonic() + self._agent_timeout_sec(state, body)
                         agent_started = True
                         response, termination, extra = await harness.execute(max(0, deadline - monotonic()))
                         if monotonic() >= deadline:
@@ -439,10 +467,21 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _episode_turn_response(state: MiniSWESession, result: AgentExecutionResult) -> NeMoGymResponse:
-        """The environment server sees one response; carry the harness outcome in its metadata."""
+        """The environment server sees one response; carry the harness outcome in its metadata.
+
+        "completed", "nonzero_exit" and "timeout" are the agent's own result and are verified. An
+        "infrastructure_error" or a cancelled run is not the agent's doing and is refused with a 503 so
+        the episode is recorded as a masked failure instead of an unmasked zero. A repeated request for
+        the same turn replays the same answer.
+        """
         observations = result.harness_metadata.get("ng_agent_observations") if result.harness_metadata else None
         if observations:
             state.observations = AgentObservationBundle.model_validate(observations)
+        if result.termination.reason in INFRASTRUCTURE_TERMINATIONS:
+            detail = f"mini-SWE {result.termination.reason}"
+            if result.termination.detail:
+                detail += f": {result.termination.detail[:500]}"
+            raise HTTPException(503, detail)
         response = result.response
         metadata = dict(response.metadata or {})
         metadata["miniswe_termination"] = result.termination.reason
