@@ -1,0 +1,3 @@
+# Gym normally excludes OpenCV. SpatialClaw's native image tools require it.
+# 4.11 supports the upstream agent's numpy<2 requirement.
+opencv-python-headless==4.11.0.86

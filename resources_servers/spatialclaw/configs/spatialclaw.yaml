@@ -1,0 +1,9 @@
+spatialclaw_resources:
+  resources_servers:
+    spatialclaw:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Native scoring for SpatialClaw spatial-reasoning evaluations
+      spatialclaw_root: ${oc.env:SPATIALCLAW_ROOT,''}
+      data_root: ${oc.env:SPATIALCLAW_DATA_ROOT,''}

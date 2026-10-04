@@ -1,0 +1,17 @@
+-e nemo-gym[dev] @ ../../
+langgraph>=0.2
+langchain-core>=0.3
+openai>=1.0
+jupyter_client>=8.0
+ipykernel>=6.0
+pyzmq>=25.0
+shortuuid>=1.0
+numpy>=1.24,<2
+opencv-python-headless>=4.8,<4.13
+Pillow>=10.0
+matplotlib>=3.7
+scipy>=1.10
+pandas>=2.0
+cloudpickle>=3.0
+requests>=2.28
+imageio-ffmpeg>=0.5

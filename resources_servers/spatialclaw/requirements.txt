@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../../
+pandas>=2.0
+pyarrow>=14.0
+Pillow>=10.0
