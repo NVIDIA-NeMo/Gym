@@ -1217,6 +1217,9 @@ class NeMoGymChatCompletionAssistantMessageForTrainingParam(
 class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
     # Override the iterable which is annoying to work with.
     content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+    # Legacy OpenAI field still sent by some clients (e.g. litellm-based harnesses such as
+    # OpenHands send ``{"role": "tool", "tool_call_id", "name", "content"}``).
+    name: NotRequired[str]
 
 
 class NeMoGymFunctionToolParam(FunctionToolParam):
@@ -1243,6 +1246,11 @@ NeMoGymChatCompletionMessageParam: TypeAlias = Annotated[
 # OpenAI SDK's own field set. Tests pin the model's fields to SDK ∪ this set so
 # unknown keys keep failing validation while these documented contracts pass.
 CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS = frozenset({"chat_template_kwargs", "thinking", "output_config"})
+
+# Client-side fields some SDKs put in every request body. The strict chat request model
+# accepts them so the request is not rejected with a 422, but never serializes them, so
+# they are not forwarded to the backend.
+CHAT_REQUEST_IGNORED_CLIENT_FIELDS = frozenset({"aws_region_name"})
 
 
 class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
@@ -1297,6 +1305,11 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     thinking: Optional[Dict[str, Any]] = None
     output_config: Optional[Dict[str, Any]] = None
+
+    # Accepted and dropped (see ``CHAT_REQUEST_IGNORED_CLIENT_FIELDS``):
+    # - ``aws_region_name``: a Bedrock setting that litellm (e.g. under OpenHands) sends
+    #   on every completion call, even to OpenAI-compatible endpoints.
+    aws_region_name: Optional[str] = Field(default=None, exclude=True)
 
     # Disallow deprecated args
     # function_call: FunctionCall
