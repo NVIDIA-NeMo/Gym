@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.tasks.harbor.digest import content_hash
+from nemo_gym.tasks.harbor.hub import contained_path, validate_task_name
 
 
 logger = logging.getLogger(__name__)
@@ -180,7 +181,7 @@ class PackageStore:
                 tasks.append(
                     PackageTask(
                         org=task["package"]["org"]["name"],
-                        name=task["package"]["name"],
+                        name=validate_task_name(task["package"]["name"], error=PackageStoreError),
                         content_hash=task["content_hash"],
                     )
                 )
@@ -203,7 +204,11 @@ class PackageStore:
     # -- download --------------------------------------------------------------------------
 
     def download_task(self, task: PackageTask, target: Path) -> None:
-        """Download and unpack one task package into ``target``, checking its digest."""
+        """Download and unpack one task package into ``target``, checking its digest.
+
+        ``target`` is ``<dataset folder>/<task name>``; whatever is there is replaced, but only
+        after checking that it really resolves inside the dataset folder.
+        """
         archive = self._request(
             "GET", "/storage/v1/object/packages/" + urllib.parse.quote(self.archive_path(task), safe="/")
         )
@@ -218,6 +223,7 @@ class PackageStore:
                 raise PackageStoreError(
                     f"{task.package} content hash mismatch: expected sha256:{task.content_hash}, got sha256:{actual}"
                 )
+            contained_path(target, target.parent, error=PackageStoreError)
             if target.exists():
                 shutil.rmtree(target)
             shutil.move(str(staged), str(target))
@@ -245,11 +251,16 @@ def _write_manifest(folder: Path, dataset: ResolvedDataset) -> None:
     (folder / MANIFEST_FILE).write_text("\n".join(lines))
 
 
-def fetch_package_dataset(ref: PackageRef, root: Path, store: PackageStore | None = None) -> Path:
+def fetch_package_dataset(
+    ref: PackageRef, root: Path, store: PackageStore | None = None, *, force: bool = False
+) -> Path:
     """Fetch every task of a package-store dataset into ``root/<folder>/<task>/``.
 
     A task folder whose digest already matches is kept, so a rerun after a partial
-    fetch completes it. Returns the dataset folder.
+    fetch completes it. A task folder whose digest differs (it was edited locally, or the
+    store republished it) stops the fetch with both digests named, so edits are never
+    discarded silently; with ``force`` it is replaced with the store's copy, logged at
+    warning level. Returns the dataset folder.
     """
     store = store or PackageStore()
     dataset = store.resolve_dataset(ref)
@@ -259,8 +270,23 @@ def fetch_package_dataset(ref: PackageRef, root: Path, store: PackageStore | Non
     folder.mkdir(parents=True, exist_ok=True)
     for task in dataset.tasks:
         target = folder / task.name
-        if (target / "task.toml").is_file() and content_hash(target) == task.content_hash:
-            continue
+        if (target / "task.toml").is_file():
+            actual = content_hash(target)
+            if actual == task.content_hash:
+                continue
+            if not force:
+                raise PackageStoreError(
+                    f"{target} differs from the store: its content hash is sha256:{actual} but the store's "
+                    f"{task.package} (in {ref.package}@{ref.ref}) is sha256:{task.content_hash}. Keep your local "
+                    "copy, or pass --force to replace it with the store's copy"
+                )
+            logger.warning(
+                "Replacing %s (sha256:%s) with %s from the store (sha256:%s) because --force was passed",
+                target,
+                actual[:12],
+                task.package,
+                task.content_hash[:12],
+            )
         logger.info("Fetching %s (sha256:%s)", task.package, task.content_hash[:12])
         store.download_task(task, target)
     _write_manifest(folder, dataset)
