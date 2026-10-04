@@ -42,6 +42,22 @@ PLACEHOLDER_MODEL_OVERRIDES = [
     "+policy_model_name=oracle",
 ]
 ORACLE_AGENT = "oracle_agent"
+# Harnesses that call the Gym model server from inside the task sandbox, where 127.0.0.1 is the container
+# itself. The model server must advertise the node's IP (`use_absolute_ip`) for them. An agent whose config
+# declares `SANDBOX_MODEL_BASE_URL_KEY` runs its harness in the sandbox too; the set covers harnesses whose
+# config has no such key.
+SANDBOX_MODEL_BASE_URL_KEY = "sandbox_model_base_url"
+IN_SANDBOX_AGENTS = frozenset(
+    {
+        "hermes_agent",
+        "hermes_sandboxed_agent",
+        "miniswe_sandboxed_agent",
+        "opencode_sandboxed_agent",
+        "pi_sandboxed_agent",
+        "terminus_2_sandboxed_agent",
+    }
+)
+USE_ABSOLUTE_IP_KEY = "use_absolute_ip"
 SANDBOX_PROVIDER_CONFIG = "nemo_gym/sandbox/providers/{provider}/configs/{provider}.yaml"
 # Harness-specific settings a Harbor run needs; keyed by the agent implementation folder.
 AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
@@ -71,6 +87,8 @@ class AgentSelection:
     config_path: Path
     instance_name: str
     impl_name: str
+    # The harness calls the model server from inside the task sandbox (see ``IN_SANDBOX_AGENTS``).
+    runs_in_sandbox: bool = False
 
 
 def prepare_target(
@@ -110,6 +128,12 @@ def prepare_target(
     )
 
 
+def runs_in_sandbox(impl_name: str, impl_config: Any) -> bool:
+    """Whether the harness behind ``impl_name`` calls the model server from inside the task sandbox."""
+    declares_sandbox_url = isinstance(impl_config, dict) and SANDBOX_MODEL_BASE_URL_KEY in impl_config
+    return declares_sandbox_url or impl_name in IN_SANDBOX_AGENTS
+
+
 def resolve_agent(agent: str) -> AgentSelection:
     """Map ``--agent NAME[/FLAVOR]`` to ``responses_api_agents/<NAME>/configs/<FLAVOR>.yaml``.
 
@@ -125,10 +149,16 @@ def resolve_agent(agent: str) -> AgentSelection:
                 instances = [key for key, value in config.items() if isinstance(value, dict)]
                 if len(instances) != 1 or "responses_api_agents" not in config[instances[0]]:
                     raise ValueError(f"{path} must define exactly one responses_api_agents instance")
-                impls = list(config[instances[0]]["responses_api_agents"])
+                impls = config[instances[0]]["responses_api_agents"]
                 if len(impls) != 1:
                     raise ValueError(f"{path} must define exactly one agent implementation")
-                return AgentSelection(config_path=path.resolve(), instance_name=instances[0], impl_name=impls[0])
+                (impl_name,) = impls
+                return AgentSelection(
+                    config_path=path.resolve(),
+                    instance_name=instances[0],
+                    impl_name=impl_name,
+                    runs_in_sandbox=runs_in_sandbox(impl_name, impls[impl_name]),
+                )
     raise ValueError(f"No agent config found for `--agent {agent}` (looked for {' or '.join(candidates)})")
 
 
@@ -187,6 +217,14 @@ def build_run(
         tokens.append("+split=validation")
     if not _has_override(tokens, "output_jsonl_fpath"):
         tokens.append(f"+output_jsonl_fpath={prepared.output_dir / 'rollouts.jsonl'}")
+    if agent.runs_in_sandbox and not _has_override(tokens, USE_ABSOLUTE_IP_KEY):
+        tokens.append(f"+{USE_ABSOLUTE_IP_KEY}=true")
+        logger.info(
+            "Setting %s=true: the %s harness calls the model server from inside the sandbox, "
+            "where a loopback address is the container itself",
+            USE_ABSOLUTE_IP_KEY,
+            agent.impl_name,
+        )
     return config_path, tokens
 
 
