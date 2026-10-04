@@ -1,0 +1,54 @@
+timewarp:
+  resources_servers:
+    timewarp:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: TimeWarp web tasks on Wiki, News and Shop sites rendered in six UI eras; a Playwright browser per rollout and deterministic answer verifiers
+      value: Measure and train web-agent robustness to changes in website UI over time
+      # Where each UI version's sites are served (upstream TW_WIKI / TW_NEWS / TW_WEBSHOP).
+      # These defaults match resources_servers/timewarp/scripts/start_sites.sh.
+      site_urls:
+        1: {wiki: "http://localhost:5101", news: "http://localhost:5201", webshop: "http://localhost:5301/abc"}
+        2: {wiki: "http://localhost:5102", news: "http://localhost:5202", webshop: "http://localhost:5302/abc"}
+        3: {wiki: "http://localhost:5103", news: "http://localhost:5203", webshop: "http://localhost:5303/abc"}
+        4: {wiki: "http://localhost:5104", news: "http://localhost:5204", webshop: "http://localhost:5304/abc"}
+        5: {wiki: "http://localhost:5105", news: "http://localhost:5205", webshop: "http://localhost:5305/abc"}
+        6: {wiki: "http://localhost:5106", news: "http://localhost:5206", webshop: "http://localhost:5306/abc"}
+      headless: true
+      # Long pages (a Wiki article is ~70k characters) are split into parts of this size.
+      max_observation_chars: 12000
+      action_timeout_ms: 5000
+      navigation_timeout_ms: 30000
+      # Only the llm_judge tasks need a judge; without one they are masked. Point this at a model
+      # server other than the policy, e.g. {type: responses_api_models, name: judge_model}.
+      judge_model_server: null
+      judge_responses_create_params:
+        input: []
+
+timewarp_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      # BrowserGym runs TimeWarp with max_steps=30 (one action per step).
+      max_steps: 30
+      resources_server:
+        type: resources_servers
+        name: timewarp
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/timewarp/data/example.jsonl
+        num_repeats: 1
+        license: MIT
+
+timewarp_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: timewarp_simple_agent

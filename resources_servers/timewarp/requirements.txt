@@ -1,0 +1,6 @@
+-e nemo-gym[dev] @ ../..
+
+# Drives the browser (Apache-2.0). Pinned to a minor: `playwright install` fetches a browser
+# build tied to the driver version, and observations rely on AI-mode ARIA snapshot refs
+# resolved through the `aria-ref=` selector (see browser.py and tests/test_browser.py).
+playwright>=1.62,<1.63
