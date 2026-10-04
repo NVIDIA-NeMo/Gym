@@ -3,6 +3,7 @@
 
 """Terminus terminal controls that remain usable when a foreground job stops reading."""
 
+import logging
 import re
 import shlex
 
@@ -11,6 +12,9 @@ from harbor.agents.terminus_2.terminus_json_plain_parser import TerminusJSONPlai
 from harbor.agents.terminus_2.terminus_xml_plain_parser import ParseResult as XMLParseResult
 from harbor.agents.terminus_2.terminus_xml_plain_parser import TerminusXMLPlainParser
 from harbor.agents.terminus_2.tmux_session import TmuxSession
+
+
+logger = logging.getLogger(__name__)
 
 
 def _control_key(keys: str) -> str | None:
@@ -60,6 +64,9 @@ class ShellExitedError(RuntimeError):
 
 
 class TerminusTmuxSession(TmuxSession):
+    _interrupts_since_output: int = 0
+    _repeated_interrupts: int = 0
+
     async def start(self) -> None:
         await super().start()
         result = await self.environment.exec(
@@ -87,7 +94,64 @@ class TerminusTmuxSession(TmuxSession):
 
     async def get_incremental_output(self) -> str:
         await self._require_live_shell()
-        return await super().get_incremental_output()
+        output = await super().get_incremental_output()
+        interrupts = self._interrupts_since_output
+        self._interrupts_since_output = 0
+        self._repeated_interrupts = self._repeated_interrupts + interrupts if interrupts else 0
+        if self._repeated_interrupts < 2:
+            return output
+        try:
+            state = await self._interrupt_state()
+        except Exception:
+            # Optional diagnostics must not turn a successful terminal read into
+            # a rollout failure when a process exits or the inspection fails.
+            logger.debug("Could not inspect terminal state after repeated interrupts", exc_info=True)
+            state = None
+        return f"{output}\n\nTerminal state after repeated Ctrl-C:\n{state}" if state else output
+
+    async def _interrupt_state(self) -> str | None:
+        target = shlex.quote(self._session_name)
+        script = f"""pane=$(tmux display-message -p -t {target} '#{{pane_pid}}|#{{pane_tty}}') || exit $?
+IFS='|' read -r pane_pid tty <<< "$pane"
+IFS= read -r stat < "/proc/$pane_pid/stat" || exit 0
+rest=${{stat##*) }}
+read -r state ppid pgid sid tty_number foreground rest <<< "$rest"
+[[ "$foreground" =~ ^[1-9][0-9]*$ ]] || exit 0
+command=$(cat "/proc/$foreground/comm" 2>/dev/null) || exit 0
+ignored=0; caught=0
+while read -r name value rest; do
+  case "$name" in
+    SigIgn:) ignored=$(( (16#$value & 2) != 0 )) ;;
+    SigCgt:) caught=$(( (16#$value & 2) != 0 )) ;;
+  esac
+done < "/proc/$foreground/status" || exit 0
+settings=$(stty -F "$tty" -a) || exit $?
+signals=1
+for setting in $settings; do
+  case "$setting" in -isig|"-isig;") signals=0 ;; esac
+done
+printf '%s|%s|%s|%s|%s\\n' "$foreground" "$signals" "$ignored" "$caught" "$command"
+"""
+        result = await self.environment.exec(f"bash -c {shlex.quote(script)}", user=self._user, timeout_sec=3)
+        if result.return_code != 0:
+            return None
+        fields = (result.stdout or "").strip().split("|", 4)
+        if len(fields) != 5 or not fields[0].isdigit() or any(value not in ("0", "1") for value in fields[1:4]):
+            return None
+        pid, signals, ignored, caught, command = fields
+        command = re.sub(r"[^a-zA-Z0-9_.() -]", "?", command)[:64]
+        state = f"Foreground process group: {pid} (leader: {command}). "
+        if signals == "0":
+            return state + (
+                "Terminal-generated signals are disabled, so Ctrl-C is application input. "
+                "Use the application's exit or escape controls to return to the shell."
+            )
+        disposition = "ignored" if ignored == "1" else "handled by the application" if caught == "1" else "default"
+        return state + (
+            f"Terminal-generated signals are enabled; the group leader's SIGINT disposition is {disposition}. "
+            "If the foreground job remains active, use its exit controls or try C-z to suspend it "
+            "before entering shell commands."
+        )
 
     async def recover_shell(self) -> str:
         """Replace a dead shell, retaining its output and discarding pending input."""
@@ -104,6 +168,8 @@ class TerminusTmuxSession(TmuxSession):
         if result.return_code != 0:
             raise RuntimeError(f"Could not replace the exited terminal shell: {result.stderr}")
         self._previous_buffer = None
+        self._interrupts_since_output = 0
+        self._repeated_interrupts = 0
         fresh_output = await super().get_incremental_output()
         # Keep this notice at the end so output truncation retains it.
         return (
@@ -133,6 +199,7 @@ class TerminusTmuxSession(TmuxSession):
                     batch.clear()
                 await self._drain_pending_input()
                 await super()._send_keys_to_session([key], action)
+                self._interrupts_since_output += 1
             else:
                 batch.append(key)
         if batch:

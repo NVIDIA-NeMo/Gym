@@ -9,6 +9,7 @@ import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -54,6 +55,109 @@ def test_shell_text_and_unrelated_warnings_are_preserved():
 
 def session(environment):
     return TerminusTmuxSession("test", environment, Path("/tmp/test.pane"), None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected", "suspend_advice"),
+    [
+        ("123|1|1|0|sleep", "SIGINT disposition is ignored", True),
+        ("123|1|0|1|python3", "SIGINT disposition is handled by the application", True),
+        ("123|0|0|0|qemu-system", "Ctrl-C is application input", False),
+    ],
+)
+async def test_repeated_interrupts_report_signal_state_without_changing_keys(
+    monkeypatch, status, expected, suspend_advice
+):
+    from harbor.agents.terminus_2.tmux_session import TmuxSession
+
+    commands = []
+
+    async def execute(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(return_code=0, stdout=status if "SigIgn" in command else "0\n", stderr="")
+
+    monkeypatch.setattr(TmuxSession, "get_incremental_output", AsyncMock(return_value="Current Terminal Screen:\n^C"))
+    terminal = session(SimpleNamespace(exec=execute))
+    await terminal.send_keys("C-c")
+    assert await terminal.get_incremental_output() == "Current Terminal Screen:\n^C"
+    assert not any("SigIgn" in command for command in commands)
+    await terminal.send_keys("C-c\n")
+    output = await terminal.get_incremental_output()
+    assert expected in output, {
+        "interrupts_since_output": terminal._interrupts_since_output,
+        "repeated_interrupts": terminal._repeated_interrupts,
+        "inspection_calls": sum("SigIgn" in command for command in commands),
+        "sent_controls": sum(command.endswith(" C-c") for command in commands),
+    }
+    assert ("try C-z" in output) is suspend_advice
+    assert "Foreground process group: 123" in output
+    assert sum(command.endswith(" C-c") for command in commands) == 2
+    assert not any(command.startswith("kill ") for command in commands)
+    await terminal.send_keys("pwd\n")
+    assert await terminal.get_incremental_output() == "Current Terminal Screen:\n^C"
+    assert sum("SigIgn" in command for command in commands) == 1
+
+
+@pytest.mark.asyncio
+async def test_optional_interrupt_inspection_failure_preserves_terminal_output(monkeypatch):
+    from harbor.agents.terminus_2.tmux_session import TmuxSession
+
+    async def execute(command, **kwargs):
+        if "SigIgn" in command:
+            raise TimeoutError("diagnostic request timed out")
+        return SimpleNamespace(return_code=0, stdout="0\n", stderr="")
+
+    monkeypatch.setattr(TmuxSession, "get_incremental_output", AsyncMock(return_value="fresh terminal output"))
+    terminal = session(SimpleNamespace(exec=execute))
+    await terminal.send_keys(["C-c", "C-c"])
+    assert await terminal.get_incremental_output() == "fresh terminal output"
+
+
+@pytest.mark.skipif(sys.platform != "linux" or shutil.which("tmux") is None, reason="requires Linux tmux")
+@pytest.mark.asyncio
+async def test_ignored_interrupt_is_reported_and_native_suspend_recovers_shell(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="harbor.utils.logger")
+
+    class Environment:
+        session_id = "interrupt-state"
+
+        async def exec(self, command, **kwargs):
+            process = await asyncio.create_subprocess_exec(
+                "bash",
+                "-c",
+                command,
+                cwd=tmp_path,
+                env={**os.environ, "TMUX_TMPDIR": str(tmp_path)},
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            return SimpleNamespace(
+                return_code=process.returncode,
+                stdout=stdout.decode(errors="replace"),
+                stderr=stderr.decode(errors="replace"),
+            )
+
+    environment = Environment()
+    terminal = TerminusTmuxSession("test", environment, tmp_path / "pane.log", None, None)
+    try:
+        await terminal.start()
+        await terminal.send_keys("bash -c 'trap \"\" INT; exec sleep 60'\n", min_timeout_sec=0.3)
+        await terminal.send_keys(["C-c", "C-c"], min_timeout_sec=0.2)
+        output = await terminal.get_incremental_output()
+        assert "leader: sleep" in output
+        assert "SIGINT disposition is ignored" in output
+        state = await environment.exec("tmux display-message -p -t test '#{pane_current_command}'")
+        assert state.stdout.strip() == "sleep"
+        await terminal.send_keys("C-z", min_timeout_sec=0.2)
+        await terminal.get_incremental_output()
+        state = await environment.exec("tmux display-message -p -t test '#{pane_current_command}'")
+        assert state.stdout.strip() == "bash"
+        await terminal.send_keys("printf 'SHELL_RECOVERED\\n'\n", min_timeout_sec=0.2)
+        assert "SHELL_RECOVERED" in await terminal.get_incremental_output()
+    finally:
+        await environment.exec("tmux kill-server")
 
 
 @pytest.mark.asyncio
