@@ -1,0 +1,29 @@
+config_paths:
+  - resources_servers/spatialclaw/configs/spatialclaw.yaml
+  - responses_api_agents/spatialclaw_agent/configs/spatialclaw_agent.yaml
+
+spatialclaw_videommev2_resources_server:
+  _inherit_from: spatialclaw_resources
+
+spatialclaw_videommev2_agent:
+  _inherit_from: spatialclaw_agent
+  responses_api_agents:
+    spatialclaw_agent:
+      resources_server:
+        type: resources_servers
+        name: spatialclaw_videommev2_resources_server
+      dataset_config: videommev2.json
+      datasets:
+        - name: spatialclaw_videommev2
+          type: benchmark
+          jsonl_fpath: benchmarks/spatialclaw_videommev2/data/spatialclaw_videommev2.jsonl
+          prepare_script: benchmarks/spatialclaw_videommev2/prepare.py
+          prompt_config: null
+          num_repeats: 3
+
+spatialclaw_videommev2_environment_server:
+  _inherit_from: spatialclaw_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: spatialclaw_videommev2_agent
