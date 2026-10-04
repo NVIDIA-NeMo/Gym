@@ -4,6 +4,7 @@
 import asyncio
 import json
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -242,6 +243,39 @@ async def test_setup_uses_the_rollout_timeout(execution, monkeypatch):
     assert result["ng_agent_observations"]["records"][0]["status"] == "incomplete"
     assert not execution.calls
     execution.sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("upload_fails", [False, True])
+async def test_local_tmux_asset_bypasses_sandbox_mount(execution, tmp_path, upload_fails):
+    asset = tmp_path / "tmux binary"
+    asset.write_bytes(b"configured binary bytes")
+    execution.server.config.local_tmux_binary_path = str(asset)
+    execution.server.config.remote_tmux_binary_path = "/unreadable/mounted/tmux"
+    uploaded = []
+
+    async def upload(source, destination):
+        uploaded.append((Path(source).read_bytes(), destination))
+        if upload_fails:
+            raise OSError("sandbox upload unavailable")
+
+    execution.sandbox.upload = AsyncMock(side_effect=upload)
+    result = await execution.run()
+    assert uploaded == [(asset.read_bytes(), "/usr/local/bin/tmux")]
+    assert all("cp " not in call.args[0] for call in execution.sandbox.exec.await_args_list)
+    assert result["terminus2_completed"] is not upload_fails
+    assert len(execution.calls) == (0 if upload_fails else 2)
+    if upload_fails:
+        assert "sandbox upload unavailable" in result["error"]
+    else:
+        assert any("chmod +x /usr/local/bin/tmux" in call.args[0] for call in execution.sandbox.exec.await_args_list)
+    execution.sandbox.stop.assert_awaited_once()
+
+
+def test_missing_local_tmux_asset_fails_before_serving_rollouts(execution, tmp_path):
+    config = execution.server.config.model_copy(update={"local_tmux_binary_path": str(tmp_path / "missing-tmux")})
+    with pytest.raises(ValueError, match="Local tmux binary is not a file"):
+        Terminus2Agent(config=config, server_client=execution.client)
 
 
 @pytest.mark.asyncio

@@ -83,6 +83,7 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_timeout: float
     remote_tmux_binary_path: Optional[str]
+    local_tmux_binary_path: str | None = None
 
 
 class Terminus2AgentRunRequest(BaseRunRequest):
@@ -424,6 +425,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._session_sandboxes: dict[str, AsyncSandbox] = {}
+        if self.config.local_tmux_binary_path and not Path(self.config.local_tmux_binary_path).is_file():
+            raise ValueError(f"Local tmux binary is not a file: {self.config.local_tmux_binary_path}")
 
         if not self.config.debug:
             harbor_logger.setLevel(logging.WARNING)
@@ -433,14 +436,22 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         sandbox = await AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=provider)
         return sandbox
 
-    async def _install_tmux(self, sandbox: AsyncSandbox, binary_path: str) -> None:
+    async def _install_tmux(self, sandbox: AsyncSandbox) -> None:
         # Preserve existing PATH precedence when installing the configured binary.
-        command = (
-            "mkdir -p /usr/local/bin"
-            f" && cp {shlex.quote(binary_path)} /usr/local/bin/tmux"
-            " && chmod +x /usr/local/bin/tmux"
-            " && export PATH=$PATH:/usr/local/bin && tmux -V"
-        )
+        activate = "chmod +x /usr/local/bin/tmux && export PATH=$PATH:/usr/local/bin && tmux -V"
+        if self.config.local_tmux_binary_path:
+            result = await sandbox.exec("mkdir -p /usr/local/bin", timeout_s=30)
+            if result.return_code != 0:
+                raise RuntimeError(f"Could not create tmux installation directory: {result}")
+            await sandbox.upload(self.config.local_tmux_binary_path, "/usr/local/bin/tmux")
+            result = await sandbox.exec(activate, timeout_s=30)
+            if result.return_code != 0:
+                raise RuntimeError(f"Could not activate uploaded tmux binary: {result}")
+            return
+        binary_path = self.config.remote_tmux_binary_path
+        if not binary_path:
+            raise ValueError("A local or remote tmux binary path is required for installation")
+        command = f"mkdir -p /usr/local/bin && cp {shlex.quote(binary_path)} /usr/local/bin/tmux && {activate}"
         for attempt in range(3):
             result = await sandbox.exec(command, timeout_s=30)
             if result.return_code == 0:
@@ -518,8 +529,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                     logs_result = await environment.exec("mkdir -p /logs/agent", user="root")
                     if logs_result.return_code != 0:
                         raise RuntimeError(f"Could not create agent log directory: {logs_result}")
-                    if self.config.remote_tmux_binary_path:
-                        await self._install_tmux(sandbox, self.config.remote_tmux_binary_path)
+                    if self.config.local_tmux_binary_path or self.config.remote_tmux_binary_path:
+                        await self._install_tmux(sandbox)
                     else:
                         print(
                             "Downloading and installing tmux in the sandbox. Please consider mounting or uploading the appropriate tmux binary instead!",
