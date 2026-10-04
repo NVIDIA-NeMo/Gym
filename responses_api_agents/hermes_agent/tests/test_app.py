@@ -140,6 +140,7 @@ class TestSanity:
         provider = AsyncMock()
         sandbox = AsyncMock()
         sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
         connect = AsyncMock(return_value=sandbox)
         monkeypatch.setattr("responses_api_agents.hermes_agent.sandbox.shutil.which", lambda name: "/test/uv")
         monkeypatch.setattr(
@@ -197,6 +198,7 @@ class TestSanity:
                 return MagicMock(return_code=next(import_results), stdout="", stderr="")
             return MagicMock(return_code=0, stdout="", stderr="")
 
+        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
         sandbox.exec.side_effect = exec_
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.get_global_config_dict",
@@ -260,6 +262,7 @@ class TestSanity:
         provider = AsyncMock()
         sandbox = AsyncMock()
         sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
         sandbox_factory = MagicMock(return_value=sandbox)
         original_config = hermes.config.sandbox_config.copy()
         monkeypatch.setattr(
@@ -1282,6 +1285,7 @@ class TestSandboxUv:
             return MagicMock(return_code=0, stdout="x86_64\n" if command == "uname -m" else "", stderr="")
 
         sandbox.exec.side_effect = exec_
+        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
         monkeypatch.setattr(sandbox_module.shutil, "which", lambda name: "/usr/bin/uv")
         monkeypatch.setattr(sandbox_module.platform, "machine", lambda: "aarch64")
         monkeypatch.setattr(sandbox_module, "_host_uv_version", lambda uv: "0.12.3")

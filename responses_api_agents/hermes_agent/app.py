@@ -40,6 +40,7 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
+    assert_model_url_reachable_from_sandbox,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_global_config_dict
@@ -419,6 +420,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
             workdir = body.sandbox_access.workdir
 
         provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
+        # The runner inside the sandbox calls the Model Server itself, so a loopback URL (the default
+        # without use_absolute_ip) would make every model call fail and the episode score 0 unmasked.
+        assert_model_url_reachable_from_sandbox(
+            self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
+            provider_name=next(iter(provider_config), None),
+        )
         provider = create_provider(provider_config)
         try:
             if owns_sandbox:

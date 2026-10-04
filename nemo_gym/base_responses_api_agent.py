@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import ipaddress
+import logging
 from abc import abstractmethod
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
@@ -21,6 +23,7 @@ from dataclasses import dataclass, field
 from functools import wraps
 from time import monotonic
 from typing import Any, Optional
+from urllib.parse import urlsplit
 from warnings import warn
 
 from fastapi import Body, FastAPI, HTTPException, Request
@@ -61,6 +64,7 @@ from nemo_gym.tool_access import ToolAccess
 
 # Session cookie key that binds later activation and close requests to their agent session.
 AGENT_SESSION_COOKIE_KEY = "agent_session_id"
+LOG = logging.getLogger(__name__)
 
 
 class AgentSeedSessionRequest(BaseModel):
@@ -171,6 +175,59 @@ class _AgentSessionRecord:
     episode_id: EpisodeId | None = None
     close_response: AgentCloseSessionResponse | None = None
     expires_at: float = float("inf")
+
+
+# Sandbox providers whose processes share the host network namespace, so a loopback model URL still resolves
+# to the host. Docker only does so when the daemon runs on the host and the container uses host networking.
+_HOST_NETWORK_SANDBOX_PROVIDERS = frozenset({"local"})
+_LOCAL_DOCKER_SANDBOX_PROVIDERS = frozenset({"docker"})
+
+
+def is_loopback_host(url: str) -> bool:
+    """Whether ``url`` points at the caller's own loopback interface (127.0.0.0/8, ::1, localhost)."""
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host.lower() == "localhost" or host.lower().endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def assert_model_url_reachable_from_sandbox(url: str, *, provider_name: str | None) -> None:
+    """Refuse a model URL that a sandboxed agent could not reach.
+
+    Agents that run inside a sandbox (Hermes, mini-SWE) hand the Model Server URL to code in the
+    container. Inside a container on a remote provider (OpenSandbox, E2B, Daytona, ...), a loopback
+    host is the container itself, so every model call fails and the episode silently scores 0.
+
+    Raises:
+        ValueError: when ``url`` is loopback and ``provider_name`` is not a host-network or local
+            Docker provider. Local Docker only logs a warning: loopback works there only when the
+            daemon shares the host network.
+    """
+    if not is_loopback_host(url):
+        return
+    if provider_name in _HOST_NETWORK_SANDBOX_PROVIDERS:
+        return
+    if provider_name in _LOCAL_DOCKER_SANDBOX_PROVIDERS:
+        LOG.warning(
+            "Model Server URL %s is a loopback address; a %s sandbox reaches it only when the container shares "
+            "the host network. Set ++use_absolute_ip=true or configure a reachable model URL otherwise.",
+            url,
+            provider_name,
+        )
+        return
+    raise ValueError(
+        f"Model Server URL {url} is a loopback address, which the {provider_name or 'remote'} sandbox cannot "
+        "reach: inside the container, 127.0.0.1 is the container itself. Set ++use_absolute_ip=true so the "
+        "agent advertises the host's network address, or configure a reachable model URL."
+    )
 
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
