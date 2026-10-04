@@ -54,9 +54,10 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     evaluation_timeout: Optional[int] = None
     # Wall budget for `bash /tests/test.sh`: max(this floor, the task's own `[verifier] timeout_sec` in task.toml).
     verifier_timeout_floor_sec: int = 1800
-    # Run `bash /tests/test.sh` as the row's non-root `agent_user` (the account the vendor images declare as their
-    # USER) instead of the image default (root on the `-userroot` derivatives).
-    verifier_runs_as_agent_user: bool = True
+    # Run `bash /tests/test.sh` as the row's non-root `agent_user` instead of the image default (root on the
+    # `-userroot` derivatives). Off by default: many vendor verifiers require root (they drop candidate code to an
+    # unprivileged user themselves), and running them as the agent user fails tasks that pass as root.
+    verifier_runs_as_agent_user: bool = False
 
     # Sandbox config
     sandbox_provider: str
@@ -106,7 +107,7 @@ class TerminalBench21SeedSessionRequest(BaseModel):
     task_folder: str
     # Identity the agent harness runs as inside the task sandbox (mirrors Harbor `task.toml` `[agent] user`).
     # `None` keeps the image default. A non-root `agent_user` requires a root-default image on which that account
-    # exists. The verifier runs as the same account when `verifier_runs_as_agent_user` is on (the default), else as
+    # exists. The verifier runs as the same account when `verifier_runs_as_agent_user` is on (default off), else as
     # the image default. A row value of "root" (or 0) is the explicit per-row image default and beats any lane-level
     # setting.
     agent_user: AgentUser = None

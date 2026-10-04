@@ -8,6 +8,10 @@ terminal_bench_2_1_resources_server:          # instance name — how agents/CLI
       verified: false                   # set true once the benchmark has been baselined and reviewed
 
       evaluation_timeout: 1800
+      # `bash /tests/test.sh` gets max(this floor, the task's own [verifier] timeout_sec).
+      verifier_timeout_floor_sec: 1800
+      # true = run `bash /tests/test.sh` as the row's non-root agent_user; false = image default (root).
+      verifier_runs_as_agent_user: false
       is_verifying_golden_patch: false
 
       sandbox_provider: sandbox

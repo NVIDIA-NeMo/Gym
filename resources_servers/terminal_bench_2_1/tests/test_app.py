@@ -224,8 +224,8 @@ class TestSeedSession:
 
 
 class TestVerify:
-    async def test_verify_reuses_session_sandbox_and_runs_tests_as_agent_user(self, tmp_path) -> None:
-        server = _make_server()
+    async def test_verify_switch_on_runs_tests_as_agent_user(self, tmp_path) -> None:
+        server = _make_server(verifier_runs_as_agent_user=True)
         sandbox = FakeSandbox()
         server._session_id_to_sandbox[SESSION_ID] = sandbox
         task_folder = _make_task_folder(tmp_path)
@@ -248,8 +248,8 @@ class TestVerify:
         assert sandbox.stopped is True
         assert SESSION_ID not in server._session_id_to_sandbox
 
-    async def test_verify_switch_off_runs_tests_as_image_default(self, tmp_path) -> None:
-        server = _make_server(verifier_runs_as_agent_user=False)
+    async def test_verify_default_reuses_session_sandbox_and_runs_tests_as_image_default(self, tmp_path) -> None:
+        server = _make_server()
         sandbox = FakeSandbox()
         server._session_id_to_sandbox[SESSION_ID] = sandbox
 
@@ -262,7 +262,7 @@ class TestVerify:
 
     @pytest.mark.parametrize("agent_user", [None, "root", 0])
     async def test_verify_root_or_unset_agent_user_runs_tests_as_image_default(self, tmp_path, agent_user) -> None:
-        server = _make_server()
+        server = _make_server(verifier_runs_as_agent_user=True)
         sandbox = FakeSandbox()
         server._session_id_to_sandbox[SESSION_ID] = sandbox
 
@@ -337,12 +337,11 @@ class TestVerify:
             "chown agent /app/solve.sh",
             "bash /app/solve.sh",
             "mkdir -p /tests",
-            PREPARE_LOGS_FOR_AGENT,
             "bash /tests/test.sh",
         ]
         assert _exec_user(sandbox, "chown agent /app/solve.sh") is None
         assert _exec_user(sandbox, "bash /app/solve.sh") == "agent"
-        assert _exec_user(sandbox, "bash /tests/test.sh") == "agent"
+        assert _exec_user(sandbox, "bash /tests/test.sh") is None
         assert _exec_user(sandbox, "mkdir -p /tests") is None
         assert sandbox.uploads == [
             (str(task_folder / "solution" / "solve.sh"), "/app/solve.sh"),
@@ -370,7 +369,7 @@ class TestVerify:
         assert commands[0] == "pwd"
         assert sorted(commands[1:3]) == ["mkdir -p /app", "mkdir -p /app/pkg"]
         chown_command = commands[3]
-        assert commands[4:] == ["bash /app/solve.sh", "mkdir -p /tests", PREPARE_LOGS_FOR_AGENT, "bash /tests/test.sh"]
+        assert commands[4:] == ["bash /app/solve.sh", "mkdir -p /tests", "bash /tests/test.sh"]
         chown_argv = shlex_split(chown_command)
         # One non-recursive chown as the image default: the nested directory first, then both files.
         assert chown_argv[:3] == ["chown", "agent", "/app/pkg"]
@@ -378,7 +377,7 @@ class TestVerify:
         assert "-R" not in chown_argv
         assert _exec_user(sandbox, chown_command) is None
         assert _exec_user(sandbox, "bash /app/solve.sh") == "agent"
-        assert _exec_user(sandbox, "bash /tests/test.sh") == "agent"
+        assert _exec_user(sandbox, "bash /tests/test.sh") is None
         assert sorted(sandbox.uploads) == [
             (str(task_folder / "solution" / "pkg" / "helper.py"), "/app/pkg/helper.py"),
             (str(task_folder / "solution" / "solve.sh"), "/app/solve.sh"),
