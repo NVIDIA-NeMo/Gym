@@ -1320,6 +1320,69 @@ class TestServerUtils:
             {"type": "http.response.body", "body": b"ok", "more_body": False},
         ]
 
+    @mark.parametrize(
+        ("path", "send_partial_body", "expected"),
+        [
+            ("/v1/chat/completions", False, "before first byte (0 body bytes sent;"),
+            ("/ng-rollout/3-1/v1/messages", True, "mid-stream (7 body bytes sent;"),
+            ("/run", False, "before first byte"),
+        ],
+    )
+    async def test_cancellation_middleware_logs_every_generating_disconnect(
+        self, capsys: CaptureFixture, path: str, send_partial_body: bool, expected: str
+    ) -> None:
+        handler_waiting = asyncio.Event()
+
+        async def inner_app(scope, receive, send) -> None:
+            await receive()
+            if send_partial_body:
+                await send({"type": "http.response.start", "status": 200, "headers": []})
+                await send({"type": "http.response.body", "body": b"event: ", "more_body": True})
+            handler_waiting.set()
+            await asyncio.Event().wait()
+
+        middleware = ClientDisconnectCancellationMiddleware(inner_app)
+        incoming = asyncio.Queue()
+        await incoming.put({"type": "http.request", "body": b"{}", "more_body": False})
+
+        async def send(message):
+            pass
+
+        scope = {"type": "http", "method": "POST", "path": path, "client": ("127.0.0.1", 1234)}
+        app_task = asyncio.create_task(middleware(scope, incoming.get, send))
+        await asyncio.wait_for(handler_waiting.wait(), timeout=1)
+        await incoming.put({"type": "http.disconnect"})
+        await asyncio.wait_for(app_task, timeout=1)
+
+        assert middleware.num_cancelled == 1  # not a multiple of 100: only the per-path rule logs it
+        out = capsys.readouterr().out
+        assert f'127.0.0.1:1234 - "POST {path}" 499 CLIENT DISCONNECTED after ' in out
+        assert expected in out
+
+    async def test_cancellation_middleware_samples_disconnects_on_other_paths(self, capsys: CaptureFixture) -> None:
+        handler_waiting = asyncio.Event()
+
+        async def inner_app(scope, receive, send) -> None:
+            await receive()
+            handler_waiting.set()
+            await asyncio.Event().wait()
+
+        middleware = ClientDisconnectCancellationMiddleware(inner_app)
+        incoming = asyncio.Queue()
+        await incoming.put({"type": "http.request", "body": b"", "more_body": False})
+
+        async def send(message):
+            pass
+
+        scope = {"type": "http", "method": "POST", "path": "/seed_session", "client": ("127.0.0.1", 1234)}
+        app_task = asyncio.create_task(middleware(scope, incoming.get, send))
+        await asyncio.wait_for(handler_waiting.wait(), timeout=1)
+        await incoming.put({"type": "http.disconnect"})
+        await asyncio.wait_for(app_task, timeout=1)
+
+        assert middleware.num_cancelled == 1
+        assert "499 CLIENT DISCONNECTED" not in capsys.readouterr().out
+
     def test_upstream_error_log_has_bounded_body_and_redacted_url(self) -> None:
         request_info = RequestInfo(
             url=URL("http://policy.test/v1/responses?api_key=secret"),
