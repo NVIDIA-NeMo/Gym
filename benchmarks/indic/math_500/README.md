@@ -51,3 +51,6 @@ python -m benchmarks.indic.math_500.prepare \
     --languages en \
     --output-fpath benchmarks/indic/math_500/data/en.jsonl
 ```
+
+The preparer also accepts `--source-parquet /path/to/test.parquet` to use the local
+dataset directly without a download.

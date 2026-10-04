@@ -83,17 +83,28 @@ def build_rows(
     return rows
 
 
-def prepare(*, languages: Sequence[str] = DEFAULT_LANGUAGES, output_fpath: str | None = None) -> Path:
-    """Download the test split and write native Gym tasks."""
-    config = maybe_get_global_config_dict()
-    token = config.get(HF_TOKEN_KEY_NAME) if config is not None else None
-    source = hf_hub_download(
-        repo_id=SOURCE_ID,
-        filename="test.parquet",
-        repo_type="dataset",
-        token=token or get_token(),
-    )
-    records = load_dataset("parquet", data_files={"test": source}, split="test").to_list()
+def prepare(
+    *,
+    languages: Sequence[str] = DEFAULT_LANGUAGES,
+    output_fpath: str | None = None,
+    source_parquet: str | None = None,
+) -> Path:
+    """Read a local test split, or download it, and write native Gym tasks."""
+    source = source_parquet
+    if source is not None:
+        from pyarrow.parquet import read_table
+
+        records = read_table(source).to_pylist()
+    else:
+        config = maybe_get_global_config_dict()
+        token = config.get(HF_TOKEN_KEY_NAME) if config is not None else None
+        source = hf_hub_download(
+            repo_id=SOURCE_ID,
+            filename="test.parquet",
+            repo_type="dataset",
+            token=token or get_token(),
+        )
+        records = load_dataset("parquet", data_files={"test": source}, split="test").to_list()
     rows = build_rows(records, languages=languages)
     output = Path(output_fpath) if output_fpath else OUTPUT_FPATH
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -108,4 +119,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--languages", nargs="+", default=DEFAULT_LANGUAGES)
     parser.add_argument("--output-fpath")
+    parser.add_argument("--source-parquet", help="Local Indic MATH-500 test.parquet")
     prepare(**vars(parser.parse_args()))

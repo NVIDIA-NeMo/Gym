@@ -186,3 +186,17 @@ def test_config_changes_only_dataset_and_matches_manifest():
     assert manifest.datasets[0].model_dump(exclude_none=True) == {
         key: value for key, value in translated_agent["datasets"][0].items() if key != "license"
     }
+
+
+def test_local_parquet_preparation_never_downloads(records, monkeypatch, tmp_path):
+    source = tmp_path / "test.parquet"
+    Dataset.from_list(records).to_parquet(source)
+
+    def reject_download(**kwargs):
+        pytest.fail("Local dataset preparation attempted a download")
+
+    monkeypatch.setattr(module, "hf_hub_download", reject_download)
+    output = module.prepare(languages=["hi"], source_parquet=str(source), output_fpath=str(tmp_path / "hi.jsonl"))
+    assert [json.loads(line) for line in output.read_text().splitlines()] == module.build_rows(
+        records, languages=["hi"]
+    )
