@@ -255,6 +255,18 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
         description=("TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection."),
     )
 
+    global_aiohttp_client_timeout_s: Optional[float] = Field(
+        default=600.0,
+        description=(
+            "Total timeout (seconds) applied to every outbound request on the shared client, via "
+            "aiohttp.ClientTimeout(total=..., sock_read=...). Without this, a peer that accepts a "
+            "connection but never writes a response (e.g. a stuck proxy hop) hangs the calling "
+            "coroutine indefinitely: TCP keepalive only detects a dead socket, not a live one that's "
+            "simply silent, and `_request_with_retries` never gets a chance to retry because no "
+            "exception is ever raised. Set to None to disable (not recommended)."
+        ),
+    )
+
 
 def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
@@ -313,7 +325,10 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
                 probes=cfg.global_aiohttp_tcp_keepalive_probes,
             ),
         ),
-        timeout=ClientTimeout(),
+        timeout=ClientTimeout(
+            total=cfg.global_aiohttp_client_timeout_s,
+            sock_read=cfg.global_aiohttp_client_timeout_s,
+        ),
         cookie_jar=DummyCookieJar(),
     )
 
