@@ -5,7 +5,6 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,8 +23,6 @@ from resources_servers.mimo_rl_oss.terminal_bench import TerminalBenchEnvironmen
 
 
 class FakeEnv:
-    """Records commands and serves a canned reward file, like a box after test.sh ran."""
-
     def __init__(self, reward_file: str) -> None:
         self.config = SimpleNamespace(cwd="/app")
         self.commands: list[str] = []
@@ -103,7 +100,6 @@ def test_webdev_rubric_is_pinned() -> None:
 
     from resources_servers.mimo_rl_oss.webdev.eval_rubric import RUBRIC_ID, build_prompt
 
-    # The rubric text is the scoring policy. Changing it needs a new RUBRIC_ID and a new hash here.
     assert RUBRIC_ID == "rva1:mean(visual,query,asset)"
     assert hashlib.sha256(build_prompt().encode()).hexdigest() == (
         "a4d3be63029e8fb28b469bf3d188816a7fa238b415749d7ff4aad1ca360b2997"  # pragma: allowlist secret

@@ -5,7 +5,6 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,11 +15,6 @@ from mimoagent.environments.datasets import DATASET_REGISTRY, OpenSourceCodeEnvi
 
 
 class StrippedOpenSourceCodeEnvironment(OpenSourceCodeEnvironment):
-    """Some released code images keep commits past the task's base, so the fix is readable from git log.
-
-    Strip them in the box before mimoagent's truncation check instead of refusing the task.
-    """
-
     def _assert_history_truncated(self) -> None:
         if not self._strip_future_commits(self._base_ref):
             raise RuntimeError(f"{self.instance_id}: stripping commits past {self._base_ref[:12]} failed")

@@ -5,7 +5,6 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -48,18 +47,14 @@ LOG = logging.getLogger(__name__)
 class MimoRLOSSConfig(BaseResourcesServerConfig):
     sandbox_provider: str | dict[str, Any]
     sandbox_spec: dict[str, Any] = {}
-    # Extra keys of mimoagent's yaml `environment` block (reward_mode, judge_agent, ...).
     environment_kwargs: dict[str, Any] = {}
     exec_timeout: int = 600
-    # Vision judge for webdev rows (any OpenAI-compatible endpoint), exported as MiMo's WEBDEV_EVAL_JUDGE_* env vars.
     webdev_judge_base_url: str | None = None
     webdev_judge_api_key: str | None = None
     webdev_judge_model: str | None = None
-    # LLM judge for general_agent rubrics, exported as MiMo's GA_JUDGE_* env vars (Responses API).
     general_judge_base_url: str | None = None
     general_judge_api_key: str | None = None
     general_judge_model: str | None = None
-    # "responses" for hosted APIs, "chat" for self-hosted vLLM judges.
     general_judge_api: str | None = None
 
 
@@ -85,7 +80,6 @@ class MimoRLOSSVerifyResponse(BaseVerifyResponse):
 
 
 def _failure(extra: dict[str, Any]) -> tuple[str, str] | None:
-    """mimoagent's markers for rewards that are infrastructure failures, not policy failures."""
     if extra.get("transport_error"):
         return failure_kinds.SESSION_LOST, "sandbox transport failed during grading"
     category = extra.get("error_category")
@@ -104,17 +98,10 @@ def _final_text(response: Any) -> str:
 
 
 class MimoRLOSSResourcesServer(SimpleResourcesServer):
-    """Sets up and grades MiMo-V2.6-RL-oss tasks with mimoagent's own dataset environments.
-
-    The task box belongs to this server: seed_session builds it (mimoagent's dataset setup) and
-    hands harness_agent a descriptor; verify runs mimoagent's grader in the same box and closes it.
-    """
-
     ray_enabled = False
     config: MimoRLOSSConfig
 
     def model_post_init(self, context: Any, /) -> None:
-        # session id -> (task env, creation time). Sessions whose harness never reaches verify are evicted.
         self._envs: dict[str, tuple[DatasetEnvironment, float]] = {}
         self._evictions: set[asyncio.Task] = set()
         for key, value in (
