@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import errno
 import json
+import os
 import shlex
 import shutil
 import socket
@@ -164,6 +166,54 @@ def test_apptainer_subprocess_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert apptainer_provider._apptainer_subprocess_env("/workspace/apptainer/bin")["PATH"] == (
         "/workspace/apptainer/bin:/usr/bin"
     )
+
+
+def test_apptainer_subprocess_env_keeps_writable_default_configdir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("APPTAINER_CONFIGDIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    assert "APPTAINER_CONFIGDIR" not in apptainer_provider._apptainer_subprocess_env(None)
+    assert (tmp_path / "home" / ".apptainer").is_dir()
+    assert list((tmp_path / "home" / ".apptainer").iterdir()) == []  # probe cleaned up
+
+
+def test_apptainer_subprocess_env_keeps_explicit_configdir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    home_file = tmp_path / "home_file"
+    home_file.write_text("not a directory")
+    monkeypatch.setenv("HOME", str(home_file))
+    monkeypatch.setenv("APPTAINER_CONFIGDIR", "/explicit")
+
+    assert apptainer_provider._apptainer_subprocess_env(None)["APPTAINER_CONFIGDIR"] == "/explicit"
+
+
+def test_apptainer_subprocess_env_falls_back_when_home_unwritable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("APPTAINER_CONFIGDIR", raising=False)
+    home_file = tmp_path / "home_file"
+    home_file.write_text("not a directory")  # ~/.apptainer cannot be created under a regular file
+    monkeypatch.setenv("HOME", str(home_file))
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setattr(apptainer_provider.tempfile, "gettempdir", lambda: str(tmp_path / "tmp"))
+
+    config_dir = Path(apptainer_provider._apptainer_subprocess_env(None)["APPTAINER_CONFIGDIR"])
+
+    assert config_dir == tmp_path / "tmp" / f"nemo-gym-apptainer-config-{os.getuid()}"
+    assert config_dir.is_dir()
+    assert config_dir.stat().st_mode & 0o777 == 0o700
+
+
+def test_writable_dir_detects_full_filesystem(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # On a full filesystem an empty file can still be created; the probe must write data to notice.
+    def write_bytes_enospc(self: Path, data: bytes) -> int:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    assert apptainer_provider._writable_dir(tmp_path / "ok") is True
+    monkeypatch.setattr(Path, "write_bytes", write_bytes_enospc)
+    assert apptainer_provider._writable_dir(tmp_path / "full") is False
+    assert [p.name for p in (tmp_path / "full").iterdir()] == []  # probe dir removed
 
 
 def test_coerce_config() -> None:
