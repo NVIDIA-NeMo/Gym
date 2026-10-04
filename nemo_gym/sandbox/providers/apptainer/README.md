@@ -93,6 +93,7 @@ apptainer:
     start_timeout_s: 600
     extra_start_args: []
     apply_resource_limits: true
+    private_tmp: false
   probe:
     command: printf apptainer-sandbox-ready
     expected_stdout: apptainer-sandbox-ready
@@ -109,6 +110,7 @@ Settings for starting the instance (`apptainer instance start`).
 | `start_timeout_s` | `600` | Max seconds to wait for `instance start` (`None` = no timeout). |
 | `extra_start_args` | `[]` | Extra raw flags appended to `instance start`. |
 | `apply_resource_limits` | `true` | Add CPU/memory cgroup flags from `SandboxSpec.resources`. |
+| `private_tmp` | `false` | Give each instance its own `/tmp` (`--no-mount tmp` plus a bind of a `tmp` dir inside the instance's staging dir) instead of sharing the host `/tmp` with every other sandbox on the node. |
 
 ### `exec` — `ApptainerExecConfig`
 
