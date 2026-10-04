@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -21,6 +22,8 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgent,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
+    assert_model_url_reachable_from_sandbox,
+    is_loopback_host,
 )
 from nemo_gym.server_utils import ServerClient
 
@@ -102,3 +105,61 @@ class TestBaseResponsesAPIAgent:
         assert self._agent(gc, token_id_capture=True).rollout_id_from_run(body) == "0-0"
         # Agent opt-in alone does not enable capture.
         assert self._agent({}, token_id_capture=True).rollout_id_from_run(body) is None
+
+
+class TestAssertModelUrlReachableFromSandbox:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://127.0.0.1:8000/v1",
+            "http://127.0.0.1:8000/ng-rollout/0-0/v1",
+            "http://127.5.6.7:8000/v1",
+            "http://localhost:8000/v1",
+            "http://LOCALHOST:8000/v1",
+            "http://[::1]:8000/v1",
+        ],
+    )
+    @pytest.mark.parametrize("provider_name", ["opensandbox", "e2b", "daytona", None])
+    def test_loopback_on_remote_provider_raises_with_fix(self, url: str, provider_name: str | None) -> None:
+        with pytest.raises(ValueError, match=r"\+\+use_absolute_ip=true") as excinfo:
+            assert_model_url_reachable_from_sandbox(url, provider_name=provider_name)
+        assert url in str(excinfo.value)
+        assert "reachable model URL" in str(excinfo.value)
+
+    def test_loopback_on_docker_warns_and_passes(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.base_responses_api_agent"):
+            assert_model_url_reachable_from_sandbox("http://127.0.0.1:8000/v1", provider_name="docker")
+        warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "use_absolute_ip" in warnings[0].getMessage()
+        assert "host network" in warnings[0].getMessage()
+
+    def test_loopback_on_host_local_provider_passes_silently(self, caplog: pytest.LogCaptureFixture) -> None:
+        # The ``local`` provider runs on the host itself, so loopback is the host.
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.base_responses_api_agent"):
+            assert_model_url_reachable_from_sandbox("http://127.0.0.1:8000/v1", provider_name="local")
+        assert not caplog.records
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://10.0.0.5:8000/v1",
+            "http://model-server.internal:8000/ng-rollout/0-0/v1",
+            "https://api.example.com/v1",
+            "http://[fd00::1]:8000/v1",
+        ],
+    )
+    @pytest.mark.parametrize("provider_name", ["opensandbox", "docker", None])
+    def test_non_loopback_passes(self, url: str, provider_name: str | None, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.base_responses_api_agent"):
+            assert_model_url_reachable_from_sandbox(url, provider_name=provider_name)
+        assert not caplog.records
+
+    def test_ipv6_loopback_raises(self) -> None:
+        with pytest.raises(ValueError, match="::1"):
+            assert_model_url_reachable_from_sandbox("http://[::1]:8000/v1", provider_name="opensandbox")
+
+    @pytest.mark.parametrize("url", ["", "not a url", "http://", "http://[bad"])
+    def test_unparseable_hosts_are_not_loopback(self, url: str) -> None:
+        assert is_loopback_host(url) is False
+        assert_model_url_reachable_from_sandbox(url, provider_name="opensandbox")
