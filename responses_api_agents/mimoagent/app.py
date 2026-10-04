@@ -122,7 +122,7 @@ class MimoAgent(SimpleResponsesAPIAgent):
         cfg = get_first_server_config_dict(self.server_client.global_config_dict, self.config.model_server.name)
         return str(self.server_client._build_server_base_url(cfg)).rstrip("/").removesuffix("/v1")
 
-    def _build(self, body: NeMoGymResponseCreateParamsNonStreaming):
+    def _build(self, body: NeMoGymResponseCreateParamsNonStreaming, prefix: str = ""):
         from mimoagent.agents.factory import make_agent
         from mimoagent.config import expand_env_vars
         from mimoagent.environments.local import LocalEnvironment
@@ -133,7 +133,7 @@ class MimoAgent(SimpleResponsesAPIAgent):
         agent_type = agent_cfg.pop("type", "default")
         model_block = profile.get("model") or {}
         protocol = self.config.protocol or model_block.get("protocol") or "chat"
-        base_url = self._base_url()
+        base_url = self._base_url() + prefix
         model_kwargs = {
             "api_key": os.environ.get("MIMOAGENT_API_KEY", "dummy-key"),
             "base_url": f"{base_url}/v1" if agent_type in NATIVE_LOOPS and protocol != "anthropic" else base_url,
@@ -174,8 +174,10 @@ class MimoAgent(SimpleResponsesAPIAgent):
             agent._tool_definitions = agent.tool_registry.get_function_definitions()
         return agent
 
-    def _run_agent(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str, list[dict[str, Any]]]:
-        agent = self._build(body)
+    def _run_agent(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, prefix: str
+    ) -> tuple[str, str, list[dict[str, Any]]]:
+        agent = self._build(body, prefix)
         try:
             status, result = agent.run(_task_from_input(body))
         finally:
@@ -185,10 +187,12 @@ class MimoAgent(SimpleResponsesAPIAgent):
         return status, result, list(agent.messages)
 
     async def responses(
-        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body(), prefix: str | None = None
     ) -> NeMoGymResponse:
+        if prefix is None:
+            prefix = self.url_path_for_request("", request)
         async with self.sem:
-            status, result, messages = await asyncio.to_thread(self._run_agent, body)
+            status, result, messages = await asyncio.to_thread(self._run_agent, body, prefix)
         output = _output_items(messages)
         if result and not any(i["type"] == "message" and i["content"][0]["text"] == result for i in output):
             output += _output_items([{"role": "assistant", "content": result}])
@@ -213,7 +217,7 @@ class MimoAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(seed)
         cookies = request.cookies | seed.cookies
-        resp = await self.responses(request, body.responses_create_params)
+        resp = await self.responses(request, body.responses_create_params, prefix=self.url_path_for_run("", body))
         verify = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",

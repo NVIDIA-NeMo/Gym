@@ -63,3 +63,34 @@ def test_every_mimoagent_harness_has_a_profile() -> None:
     }
     assert types == expected
     assert {Path(p).stem for p in PROFILES_DIR.glob("*.yaml")} == expected
+
+
+def test_model_url_carries_the_rollout_capture_prefix() -> None:
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from nemo_gym.server_utils import ServerClient
+    from responses_api_agents.mimoagent.app import MimoAgent, MimoAgentConfig
+
+    config = MimoAgentConfig(
+        host="",
+        port=0,
+        entrypoint="",
+        name="a",
+        profile="cc-agent",
+        resources_server={"type": "resources_servers", "name": "r"},
+        model_server={"type": "responses_api_models", "name": "p"},
+    )
+    agent = MimoAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    seen = []
+    object.__setattr__(agent, "_run_agent", lambda body, prefix: (seen.append(prefix), ("Idle", "done", []))[1])
+    body = SimpleNamespace(model="m")
+    rollout = SimpleNamespace(
+        path_params={"rollout_id": "r1"}, url=SimpleNamespace(path="/ng-rollout/r1/v1/responses")
+    )
+    runner = SimpleNamespace(path_params={}, url=SimpleNamespace(path=""))
+    asyncio.run(agent.responses(rollout, body))
+    asyncio.run(agent.responses(runner, body))
+    assert seen[0].endswith("r1")
+    assert seen[1] == ""
