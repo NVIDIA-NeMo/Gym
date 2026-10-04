@@ -1000,6 +1000,8 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
     result = await server.run(request, body)
     limited = stop_reason == "length"
     assert result.opencode_failed is limited
+    # Only the final assistant message decides it (an earlier length stop does not).
+    assert result.opencode_context_limited is limited
     assert result.reward == (0 if limited and force_zero else 1)
     assert result.model_dump()["library_reward"] == result.reward
     assert result.response.output

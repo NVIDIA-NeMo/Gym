@@ -500,6 +500,10 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_exit_code: Optional[int] = None
     opencode_error_type: Optional[str] = None
     opencode_failed: bool = False
+    # The session ended because its context was full: the last assistant message
+    # stopped on length (the generation hit the context limit, or the next request
+    # no longer fit and the model server answered with a length stop).
+    opencode_context_limited: bool = False
     # Per-rollout phase timings (seconds), for comparing sandbox backends with
     # local-container harnesses. seed_session creates the task sandbox; the
     # OpenCode run includes its install; tool time sums the main session's
@@ -1040,6 +1044,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_stderr": result_stderr,
             "opencode_export_found": opencode_export_found,
             "opencode_finished": opencode_finished,
+            "opencode_context_limited": length_limited,
             "opencode_run_time_taken": opencode_run_time_taken,
             "opencode_export_time_taken": opencode_export_time_taken,
             "opencode_tool_time_taken": _opencode_tool_time_taken(opencode_export),
