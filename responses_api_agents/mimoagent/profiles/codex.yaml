@@ -1,21 +1,8 @@
 agent:
   type: codex
-  # cwd defaults to the environment's working dir (/testbed below).
-  # version: latest        # CDN bundle to install: "latest" or a pin like "0.153.4"
-  effort: high            # model_reasoning_effort: low | medium | high
-  # wire_api: responses   # protocol codex speaks to the gateway
-  # unified_exec: true    # codex experimental unified_exec feature
-  # skip_install: false   # set true if the image already has codex baked in
-  # run_timeout: 18000    # the session runs detached from the exec websocket, so it may exceed the 4h connection cap
-  # stall_timeout: 1800   # kill codex after this many seconds without a write to its event log (0 = off)
-  # Override codex's built-in system prompt with a file, wired via codex's
-  # ``model_instructions_file`` (which *replaces* the built-in instructions).
-  # Leave unset to keep codex's default prompt. A ready-made prompt that mirrors
-  # codex's own default (usable as a starting point to tweak) ships at:
-  # instruction_path: src/mimoagent/agents/blackbox/resources/codex.md
-
+  effort: high
 model:
-  model_name: "gpt-5.5"
+  model_name: gpt-5.5
   model_kwargs:
-    base_url: "${OPENAI_BASE_URL:-https://api.openai.com}"
-    api_key: "${OPENAI_API_KEY:-}"
+    base_url: ${OPENAI_BASE_URL:-https://api.openai.com}
+    api_key: ${OPENAI_API_KEY:-}
