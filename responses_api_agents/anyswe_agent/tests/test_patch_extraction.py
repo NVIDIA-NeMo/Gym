@@ -99,5 +99,53 @@ class TestPatchExtraction:
             resolved = asyncio.run(AnySweAgent.__new__(AnySweAgent)._grade_r2e_patch(params, diff))
 
         assert resolved == (True, None)
-        assert uploads == {"/root/patch.diff": diff}
-        assert all("/root/patch.diff" not in files for files in spec_files)
+        assert uploads == {"/sandbox/patch.diff": diff}
+        assert all("/sandbox/patch.diff" not in files for files in spec_files)
+
+    def test_grader_keeps_its_files_in_the_per_instance_sandbox_dir(self, tmp_path: Path) -> None:
+        # /tmp and /root may be bound from the host (Apptainer), so concurrent graders would share them.
+        spec_files: list[dict] = []
+        uploads: list[str] = []
+        commands: list[str] = []
+
+        class _FakeSandbox:
+            def __init__(self, provider, spec) -> None:
+                spec_files.append(dict(spec.files))
+
+            async def start(self) -> None:
+                pass
+
+            async def stop(self) -> None:
+                pass
+
+            async def upload(self, local: Path, remote: str) -> None:
+                uploads.append(remote)
+
+            async def exec(self, command: str, **kwargs):
+                commands.append(command)
+                return SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+
+        params = AnySweInstanceConfig(
+            **_config().model_dump(),
+            run_session_id="s",
+            base_results_dir=tmp_path,
+            model_server_url="http://policy:8000",
+            resolved_sandbox_provider={"opensandbox": {}},
+            sandbox_default_metadata={},
+            problem_info={"instance_id": "pkg__repo-1", "instance_dict": json.dumps({"FAIL_TO_PASS": ["t"]})},
+            body={"input": "fix it", "model": "policy"},
+            persistent_dir=tmp_path,
+            metrics_fpath=tmp_path / "metrics.json",
+            container="registry.example.com/r2e:pkg__repo-1",
+        )
+
+        with patch("responses_api_agents.anyswe_agent.app.AsyncSandbox", _FakeSandbox):
+            asyncio.run(AnySweAgent.__new__(AnySweAgent)._grade_r2e_patch(params, b"diff\n"))
+
+        (files,) = spec_files
+        assert list(files) == ["/sandbox/anyswe_eval.sh"]
+        script = files["/sandbox/anyswe_eval.sh"]
+        assert script.startswith("mkdir -p /sandbox/tmp && export TMPDIR=/sandbox/tmp\n")
+        assert "git apply --verbose /sandbox/patch.diff" in script and "/root/patch.diff" not in script
+        assert uploads == ["/sandbox/patch.diff"]
+        assert commands == ["bash /sandbox/anyswe_eval.sh"]

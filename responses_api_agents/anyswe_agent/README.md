@@ -92,3 +92,8 @@ The patch is the agent's change to the task repository since it started. Binary
 files are left out, because a "Binary files differ" stanza makes `git apply`
 reject the whole patch. The diff is kept byte for byte, so changes to CRLF or
 non-UTF-8 files apply in the grading sandbox.
+
+The grader writes its eval script, the patch and the test run's `TMPDIR` under
+`/sandbox` in the grading sandbox, not under `/tmp` or `/root`. Providers such as
+Apptainer can bind those from the host, which would let concurrent graders on one
+node overwrite each other's files.
