@@ -71,7 +71,6 @@ MISSING_REWARD_KIND = "harbor:missing_reward"
 INVALID_REWARD_KIND = "harbor:invalid_reward"
 
 
-
 class HarborVerifyRequest(BaseVerifyRequest):
     """The flat verify body the environment server posts: the row's ``task_data`` keys beside the params
     and the response. The session cookie identifies the episode; the digest, when present, must match it.
@@ -92,6 +91,7 @@ class HarborVerifyResponse(BaseVerifyResponse):
     verifier_rewards: dict[str, float] | None = None
     verifier_return_code: int | None = None
     verifier_logs_dir: str | None = None
+
 
 class HarborTasksetConfig(BaseModel):
     """Where one taskset's folders live and which digest each task was materialized with."""
@@ -125,6 +125,8 @@ class HarborSession:
     identity: tuple[EpisodeId, TaskId]
     sandbox: AsyncSandbox
     workdir: str
+    # The first verify's outcome; a retried /verify replays it instead of re-running test.sh.
+    verify_outcome: dict[str, Any] | None = None
 
 
 def parse_reward_file(directory: Path) -> tuple[dict[str, float] | None, str | None]:
@@ -132,16 +134,28 @@ def parse_reward_file(directory: Path) -> tuple[dict[str, float] | None, str | N
 
     Returns ``(rewards, problem)``: ``rewards`` is the parsed mapping (``reward.txt``
     becomes ``{"reward": value}``) or ``None``; ``problem`` names what went wrong.
+    ``reward.json`` is preferred; when it is missing or unusable, ``reward.txt`` is tried.
     """
-    json_path, text_path = directory / "reward.json", directory / "reward.txt"
-    path = json_path if json_path.is_file() else text_path
-    if not path.is_file():
+    problems: list[str] = []
+    for path in (directory / "reward.json", directory / "reward.txt"):
+        if not path.is_file():
+            continue
+        rewards, problem = _parse_one_reward_file(path)
+        if rewards is not None:
+            return rewards, None
+        problems.append(problem)
+    if not problems:
         return None, "no reward.json or reward.txt was written"
-    text = path.read_text().strip()
+    return None, "; ".join(problems)
+
+
+def _parse_one_reward_file(path: Path) -> tuple[dict[str, float] | None, str]:
+    # The verifier wrote these bytes; never let a stray non-UTF-8 byte escape as an exception.
+    text = path.read_text(errors="replace").strip()
     if not text:
         return None, f"{path.name} is empty"
     try:
-        raw = json.loads(text) if path == json_path else {"reward": float(text)}
+        raw = json.loads(text) if path.suffix == ".json" else {"reward": float(text)}
     except ValueError as exc:
         return None, f"{path.name} is not valid: {exc}"
     if not isinstance(raw, dict) or not raw:
@@ -161,6 +175,23 @@ def select_reward(rewards: dict[str, float]) -> float | None:
     if len(rewards) == 1:
         return next(iter(rewards.values()))
     return None
+
+
+def _is_root(user: str | None) -> bool:
+    return user is None or str(user).split(":")[0] in ("root", "0")
+
+
+async def _exec_as_root_user(
+    sandbox: AsyncSandbox, command: str, *, configured_user: str | None, cwd: str = "/", timeout_s: float = 60
+):
+    """Run ``command`` as root.
+
+    ``configured_user`` is the user the sandbox runs commands as by default (the image's
+    ``USER`` or ``[agent].user``). Only a non-root default needs the ``user="root"``
+    override; root images keep the plain exec path every provider supports.
+    """
+    user = None if _is_root(configured_user) else "root"
+    return await sandbox.exec(command, cwd=cwd, timeout_s=timeout_s, user=user)
 
 
 def _sandbox_resources(task: HarborTask) -> dict[str, Any]:
@@ -186,6 +217,8 @@ class HarborResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
         self._sessions: dict[str, HarborSession] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # Parsed tasks by (folder, materialized digest): hash a task folder once per server, not per episode.
+        self._tasks: dict[tuple[Path, str], HarborTask] = {}
         self._closed: set[str] = set()
         self._shutting_down = False
 
@@ -216,7 +249,7 @@ class HarborResourcesServer(SimpleResourcesServer):
 
     # -- task resolution -------------------------------------------------------------------
 
-    def _resolve_task(self, task_id: TaskId, task_data: dict[str, Any]) -> HarborTask:
+    async def _resolve_task(self, task_id: TaskId, task_data: dict[str, Any]) -> HarborTask:
         taskset = self.config.tasksets.get(task_id.taskset)
         if taskset is None:
             raise HTTPException(404, f"Taskset {task_id.taskset!r} is not served by this resources server")
@@ -230,12 +263,17 @@ class HarborResourcesServer(SimpleResourcesServer):
                 f"Row digest for {task_id.task_id!r} does not match the taskset mapping; re-materialize the taskset",
             )
         folder = Path(taskset.folder) / task_id.task_id
+        task = self._tasks.get((folder, expected))
+        if task is not None:
+            return task
         try:
-            task = load_task(folder)
+            # Parsing task.toml and hashing the folder are blocking file work.
+            task = await asyncio.to_thread(load_task, folder)
         except HarborTaskError as exc:
             raise HTTPException(422, str(exc)) from exc
         if task.digest != expected:
             raise HTTPException(409, f"Task folder {folder} changed since materialization; re-materialize the taskset")
+        self._tasks[(folder, expected)] = task
         return task
 
     # -- sandbox ---------------------------------------------------------------------------
@@ -269,7 +307,7 @@ class HarborResourcesServer(SimpleResourcesServer):
         commands = [f"mkdir -p {shlex.quote(workdir)}"]
         if task.user:
             commands.append(f"chown {shlex.quote(task.user)} {shlex.quote(workdir)}")
-        result = await sandbox.exec(" && ".join(commands), cwd="/", timeout_s=60)
+        result = await _exec_as_root_user(sandbox, " && ".join(commands), configured_user=task.user)
         if result.return_code != 0:
             raise RuntimeError(f"Could not prepare {workdir}: {result.stderr or result.stdout}")
 
@@ -301,7 +339,7 @@ class HarborResourcesServer(SimpleResourcesServer):
                     resources_session_id=session_id, sandbox_access=await self._sandbox_access(existing)
                 )
 
-            task = self._resolve_task(body.task_id, body.task_data)
+            task = await self._resolve_task(body.task_id, body.task_data)
             if not task.needs_sandbox:
                 raise HTTPException(
                     422, f"Task {task.task_id!r} declares no image; sandbox-less tasks are not supported yet"
@@ -339,9 +377,15 @@ class HarborResourcesServer(SimpleResourcesServer):
         return session
 
     async def verify(self, request: Request, body: HarborVerifyRequest) -> HarborVerifyResponse:
-        session = self._session_for(request, body.ng_digest)
-        session_id = request.session[SESSION_ID_KEY]
-        outcome = await self._run_verifier(session, session_id)
+        session_id = request.session.get(SESSION_ID_KEY)
+        if not session_id:
+            raise HTTPException(404, "Unknown Harbor resources session; seed it first")
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            session = self._session_for(request, body.ng_digest)
+            if session.verify_outcome is None:
+                session.verify_outcome = await self._run_verifier(session, session_id)
+            outcome = session.verify_outcome
         return HarborVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=body.response,
@@ -355,7 +399,9 @@ class HarborResourcesServer(SimpleResourcesServer):
         settings = task.config.verifier
         logs_dir = self.config.artifacts_dir / session_id
         try:
-            prepare = await sandbox.exec(
+            # /logs/verifier is root-owned from seed; a non-root image user cannot reset it.
+            prepare = await _exec_as_root_user(
+                sandbox,
                 " && ".join(
                     [
                         f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
@@ -363,8 +409,7 @@ class HarborResourcesServer(SimpleResourcesServer):
                         f"chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
                     ]
                 ),
-                cwd="/",
-                timeout_s=60,
+                configured_user=task.user,
             )
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")

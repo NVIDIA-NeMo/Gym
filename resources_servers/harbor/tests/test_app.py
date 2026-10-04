@@ -90,9 +90,15 @@ class FakeSandbox:
         self.stopped = True
 
 
-def make_server(tmp_path: Path, monkeypatch: MonkeyPatch, sandbox: FakeSandbox | None = None):
+def make_server(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    sandbox: FakeSandbox | None = None,
+    *,
+    dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app",
+):
     folder = tmp_path / "datasets" / "ds"
-    task = load_task(write_task(folder / "hello"))
+    task = load_task(write_task(folder / "hello", dockerfile=dockerfile))
     config = HarborResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -171,6 +177,31 @@ class TestRewardFile:
     def test_missing(self, tmp_path):
         assert parse_reward_file(tmp_path)[1] == "no reward.json or reward.txt was written"
 
+    def test_invalid_json_falls_back_to_text(self, tmp_path):
+        (tmp_path / "reward.json").write_text("{not json")
+        (tmp_path / "reward.txt").write_text("0.5\n")
+        assert parse_reward_file(tmp_path) == ({"reward": 0.5}, None)
+
+        # A well-formed but unusable reward.json also falls back.
+        (tmp_path / "reward.json").write_text("[]")
+        assert parse_reward_file(tmp_path) == ({"reward": 0.5}, None)
+
+        # When both are unusable, the problem names both files.
+        (tmp_path / "reward.txt").write_text("maybe")
+        rewards, problem = parse_reward_file(tmp_path)
+        assert rewards is None
+        assert "reward.json must hold a non-empty JSON object" in problem
+        assert "reward.txt is not valid" in problem
+
+    def test_non_utf8_bytes_do_not_raise(self, tmp_path):
+        (tmp_path / "reward.txt").write_bytes(b"\xff\xfe1\n")
+        rewards, problem = parse_reward_file(tmp_path)
+        assert rewards is None and "reward.txt is not valid" in problem
+
+        (tmp_path / "reward.json").write_bytes(b'{"reward": 1}\xff')
+        (tmp_path / "reward.txt").write_text("0.25\n")
+        assert parse_reward_file(tmp_path) == ({"reward": 0.25}, None)
+
 
 class TestSeed:
     def test_seed_starts_sandbox_and_returns_access(self, tmp_path, monkeypatch):
@@ -201,6 +232,26 @@ class TestSeed:
         other = seed_body(task)
         other["episode_id"]["rollout_id"] = "r2"
         assert client.post("/seed_session", json=other).status_code == 409
+
+    def test_seed_parses_and_hashes_the_task_once(self, tmp_path, monkeypatch):
+        server, task, _, created = make_server(tmp_path, monkeypatch)
+        client = TestClient(server.setup_webserver())
+        loads: list[Path] = []
+        real_load_task = load_task
+
+        def counting_load_task(folder):
+            loads.append(Path(folder))
+            return real_load_task(folder)
+
+        monkeypatch.setattr("resources_servers.harbor.app.load_task", counting_load_task)
+
+        assert client.post("/seed_session", json=seed_body(task)).status_code == 200
+        second = seed_body(task, session="rs-2")
+        second["episode_id"]["rollout_id"] = "r2"
+        assert client.post("/seed_session", json=second).status_code == 200
+
+        assert created == [("hello", "/app"), ("hello", "/app")]
+        assert loads == [task.path]
 
     def test_seed_rejects_bad_identity(self, tmp_path, monkeypatch):
         server, task, _, created = make_server(tmp_path, monkeypatch)
@@ -286,10 +337,58 @@ class TestVerify:
         run = next(call for call in sandbox.execs if "test.sh" in call["command"])
         assert run["command"] == "bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1"
         assert run["cwd"] == "/app" and run["timeout_s"] == 120.0
+        # A root image needs no user override for the prepare step.
+        prepare = next(
+            call for call in sandbox.execs if "chmod 777" in call["command"] and "/tests" in call["command"]
+        )
+        assert prepare["user"] is None and prepare["cwd"] == "/"
         # tests/ was uploaded as an archive and unpacked into /tests.
         assert any(remote.endswith(".tar.gz") for _, remote in sandbox.uploads)
         assert any("tar -xzf" in call["command"] and "/tests" in call["command"] for call in sandbox.execs)
         assert (Path(payload["verifier_logs_dir"]) / "reward.txt").read_text() == "1\n"
+
+    def test_prepare_runs_as_root_on_a_non_root_image(self, tmp_path, monkeypatch):
+        class NonRootSandbox(FakeSandbox):
+            """The image's default user may not touch root-owned /logs/verifier."""
+
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                result = await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+                if ("chmod" in command or "chown" in command) and user != "root":
+                    return SandboxExecResult(stdout="", stderr="chmod: Permission denied", return_code=1)
+                return result
+
+        server, task, sandbox, _ = make_server(
+            tmp_path, monkeypatch, NonRootSandbox(), dockerfile="FROM ubuntu:24.04\nWORKDIR /app\nUSER app"
+        )
+        assert task.user == "app"
+        client = TestClient(server.setup_webserver())
+        assert client.post("/seed_session", json=seed_body(task)).status_code == 200
+
+        payload = client.post("/verify", json=verify_body()).json()
+
+        assert payload["reward"] == 1.0
+        assert payload["mask_sample"] is False
+        assert payload["failure_kind"] is None
+        prepare = next(
+            call for call in sandbox.execs if "chmod 777" in call["command"] and "/tests" in call["command"]
+        )
+        assert prepare["user"] == "root"
+        # test.sh itself still runs as the verifier's user, not root.
+        run = next(call for call in sandbox.execs if "test.sh" in call["command"])
+        assert run["user"] == task.config.verifier.user
+
+    def test_verify_is_idempotent_per_session(self, tmp_path, monkeypatch):
+        _, _, sandbox, client = self.seeded_client(tmp_path, monkeypatch)
+
+        first = client.post("/verify", json=verify_body())
+        second = client.post("/verify", json=verify_body())
+
+        assert first.status_code == second.status_code == 200
+        assert first.json() == second.json()
+        assert first.json()["reward"] == 1.0
+        assert sum("test.sh" in call["command"] for call in sandbox.execs) == 1
+        # The retry did not re-run the prepare step that wipes /tests either.
+        assert sum("chmod 777" in call["command"] and "/tests" in call["command"] for call in sandbox.execs) == 1
 
     def test_json_reward_with_components(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"reward": 0.5, "tests_passed": 3})})

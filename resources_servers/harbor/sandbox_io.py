@@ -3,6 +3,7 @@
 
 """Directory transfers through sandbox exec, upload and download."""
 
+import asyncio
 import shlex
 import tarfile
 import tempfile
@@ -16,13 +17,23 @@ class SandboxTransferError(RuntimeError):
     """A transfer command failed inside the sandbox."""
 
 
+def _pack(source: Path, archive: Path) -> None:
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(source, arcname=".")
+
+
+def _unpack(archive: Path, target: Path) -> None:
+    with tarfile.open(archive, "r:gz") as tar:
+        tar.extractall(target, filter="data")
+
+
 async def upload_dir(sandbox: AsyncSandbox, source: Path, target: str, *, timeout_s: float = 600) -> None:
     """Copy the contents of ``source`` into ``target`` inside the sandbox."""
     remote = f"/tmp/.nemo-gym-upload-{uuid4().hex}.tar.gz"
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "upload.tar.gz"
-        with tarfile.open(archive, "w:gz") as tar:
-            tar.add(source, arcname=".")
+        # Archiving is blocking file work; keep it off the event loop.
+        await asyncio.to_thread(_pack, source, archive)
         await sandbox.upload(archive, remote)
     result = await sandbox.exec(
         f"mkdir -p {shlex.quote(target)} && tar -xzf {remote} -C {shlex.quote(target)}; "
@@ -44,7 +55,6 @@ async def download_dir(sandbox: AsyncSandbox, source: str, target: Path, *, time
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "download.tar.gz"
             await sandbox.download(remote, archive)
-            with tarfile.open(archive, "r:gz") as tar:
-                tar.extractall(target, filter="data")
+            await asyncio.to_thread(_unpack, archive, target)
     finally:
         await sandbox.exec(f"rm -f {remote}", timeout_s=60)
