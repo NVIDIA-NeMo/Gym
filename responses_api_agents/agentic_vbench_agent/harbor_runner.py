@@ -44,6 +44,7 @@ def job_config(
     backend: str = "podman",
     max_turns: int | None = None,
     verifier_timeout_multiplier: float = 1.0,
+    model_timeout_ms: int | None = None,
 ) -> dict:
     """Create a single-attempt Harbor job using OpenCode's compatible provider.
 
@@ -51,7 +52,9 @@ def job_config(
     after the cap OpenCode must give a final text-only response.
     ``verifier_timeout_multiplier`` scales only the task's verifier timeout: some
     single-threaded judges need longer than their 1800 s on this hardware. The agent's
-    budget and the scores are unaffected.
+    budget and the scores are unaffected. ``model_timeout_ms`` is OpenCode's per-call
+    provider timeout; Gym's model proxy replays a streamed completion only once it is
+    complete, so the timeout must cover a whole 100k-token generation.
     """
     if not 0 < output_tokens < context_tokens:
         raise ValueError("Output token limit must be positive and smaller than context")
@@ -66,14 +69,19 @@ def job_config(
         raise ValueError("Maximum agent turns must be positive")
     if verifier_timeout_multiplier < 1.0:
         raise ValueError("Verifier timeout multiplier must not shorten the task's own budget")
+    if model_timeout_ms is not None and model_timeout_ms < 1:
+        raise ValueError("Model call timeout must be positive")
+    provider_options = {
+        "baseURL": endpoint.rstrip("/") if backend == "remote" else container_endpoint(endpoint),
+        "apiKey": "unused",
+    }
+    if model_timeout_ms is not None:
+        provider_options["timeout"] = model_timeout_ms
     opencode_config = {
         "provider": {
             "openai": {
                 "npm": "@ai-sdk/openai-compatible",
-                "options": {
-                    "baseURL": endpoint.rstrip("/") if backend == "remote" else container_endpoint(endpoint),
-                    "apiKey": "unused",
-                },
+                "options": provider_options,
                 "models": {
                     model: {
                         "name": model,
@@ -187,6 +195,25 @@ def stage_judge(task_path: Path, *, staging: Path, output: Path, protocol: str) 
     return staged
 
 
+def _env_default(name: str, cast, fallback):
+    value = os.environ.get(name)
+    return cast(value) if value else fallback
+
+
+def judge_api_key(credentials: dict, environ: dict) -> str | None:
+    """The Hub key, from the credentials file or the environment.
+
+    The gym-native driver exports the shared ``INFERENCE_API_KEY``; the NEL path
+    carried a ``NVINFERENCE_API_KEY`` credentials file. Either is accepted.
+    """
+    return (
+        credentials.get("NVINFERENCE_API_KEY")
+        or environ.get("NVINFERENCE_API_KEY")
+        or environ.get("INFERENCE_API_KEY")
+        or None
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task-path", type=Path, required=True)
@@ -197,21 +224,41 @@ def main() -> None:
     parser.add_argument("--context-tokens", type=int, required=True)
     parser.add_argument("--output-tokens", type=int, required=True)
     parser.add_argument("--credentials-file", type=Path)
+    # Protocol knobs come from the agent's configuration; the environment variables
+    # remain as fallbacks for the previous launcher.
+    parser.add_argument("--backend", default=os.environ.get("AGENTIC_VBENCH_BACKEND", "podman"))
+    parser.add_argument("--judge-protocol", default=os.environ.get("AGENTIC_VBENCH_JUDGE_PROTOCOL", ""))
+    parser.add_argument("--max-turns", type=int, default=_env_default("AGENTIC_VBENCH_MAX_TURNS", int, None))
+    parser.add_argument(
+        "--verifier-timeout-multiplier",
+        type=float,
+        default=_env_default("AGENTIC_VBENCH_VERIFIER_TIMEOUT_MULTIPLIER", float, 1.0),
+    )
+    parser.add_argument("--model-timeout-ms", type=int, default=None)
     args = parser.parse_args()
     if importlib.metadata.version("harbor") != "0.6.6":
         raise RuntimeError("AgenticVBench requires upstream harbor==0.6.6")
     from harbor.models.job.config import JobConfig
 
     task_path = args.task_path.resolve(strict=True)
-    protocol = os.environ.get("AGENTIC_VBENCH_JUDGE_PROTOCOL", "")
-    if protocol:
+    env = dict(os.environ)
+    if args.judge_protocol:
         from dotenv import dotenv_values
 
         credentials = dotenv_values(args.credentials_file) if args.credentials_file else {}
-        if not (credentials.get("NVINFERENCE_API_KEY") or os.environ.get("NVINFERENCE_API_KEY")):
-            raise ValueError(f"Judge protocol {protocol} requires NVINFERENCE_API_KEY in the credentials file")
+        key = judge_api_key(credentials, os.environ)
+        if not key:
+            raise ValueError(
+                f"Judge protocol {args.judge_protocol} requires NVINFERENCE_API_KEY (credentials file or "
+                "environment) or the driver's INFERENCE_API_KEY"
+            )
+        # Harbor resolves the staged task's "${NVINFERENCE_API_KEY}" from its own environment.
+        env["NVINFERENCE_API_KEY"] = key
         task_path = stage_judge(
-            task_path, staging=args.runtime_root.resolve() / "judge-task", output=args.output, protocol=protocol
+            task_path,
+            staging=args.runtime_root.resolve() / "judge-task",
+            output=args.output,
+            protocol=args.judge_protocol,
         )
 
     config = JobConfig.model_validate(
@@ -223,11 +270,10 @@ def main() -> None:
             endpoint=args.endpoint,
             context_tokens=args.context_tokens,
             output_tokens=args.output_tokens,
-            backend=os.environ.get("AGENTIC_VBENCH_BACKEND", "podman"),
-            max_turns=int(os.environ["AGENTIC_VBENCH_MAX_TURNS"])
-            if os.environ.get("AGENTIC_VBENCH_MAX_TURNS")
-            else None,
-            verifier_timeout_multiplier=float(os.environ.get("AGENTIC_VBENCH_VERIFIER_TIMEOUT_MULTIPLIER", "1")),
+            backend=args.backend,
+            max_turns=args.max_turns,
+            verifier_timeout_multiplier=args.verifier_timeout_multiplier,
+            model_timeout_ms=args.model_timeout_ms,
         )
     )
     config_path = args.output / "harbor_job.json"
@@ -238,7 +284,6 @@ def main() -> None:
     command = [str(Path(sys.executable).with_name("harbor")), "run", "--config", str(config_path), "--yes"]
     if args.credentials_file:
         command.extend(["--env-file", str(args.credentials_file.resolve(strict=True))])
-    env = dict(os.environ)
     env[OPENCODE_OUTPUT_CAP] = str(args.output_tokens)
     gym_root = str(Path(__file__).resolve().parents[2])
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [gym_root, env.get("PYTHONPATH")]))

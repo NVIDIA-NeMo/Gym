@@ -361,3 +361,18 @@ def test_run_harbor_retries_only_the_docker_probe_failure(tmp_path: Path) -> Non
     with pytest.raises(subprocess.CalledProcessError):
         harbor_runner.run_harbor(command, env=dict(os.environ), jobs_dir=tmp_path / "nojobs", sleep=naps.append)
     assert (tmp_path / "attempts").read_text() == str(harbor_runner.HARBOR_START_ATTEMPTS)
+
+
+def test_judge_key_prefers_credentials_then_hub_then_driver_key() -> None:
+    assert harbor_runner.judge_api_key({"NVINFERENCE_API_KEY": "file"}, {"NVINFERENCE_API_KEY": "env"}) == "file"
+    assert harbor_runner.judge_api_key({}, {"NVINFERENCE_API_KEY": "env", "INFERENCE_API_KEY": "driver"}) == "env"
+    assert harbor_runner.judge_api_key({}, {"INFERENCE_API_KEY": "driver"}) == "driver"
+    assert harbor_runner.judge_api_key({}, {}) is None
+
+
+def test_model_call_timeout_reaches_opencode_provider() -> None:
+    options = make_job(model_timeout_ms=3_600_000)["agents"][0]["kwargs"]["opencode_config"]["provider"]["openai"]
+    assert options["options"]["timeout"] == 3_600_000
+    assert "timeout" not in make_job()["agents"][0]["kwargs"]["opencode_config"]["provider"]["openai"]["options"]
+    with pytest.raises(ValueError, match="timeout"):
+        make_job(model_timeout_ms=0)
