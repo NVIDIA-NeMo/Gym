@@ -381,6 +381,14 @@ class TestSeedWorkdirAndResources:
         assert (spec.resources.cpu, spec.resources.memory_mib, spec.resources.disk_gib) == (4.0, 16384, 30)
         assert spec.env["OMP_NUM_THREADS"] == "4"
 
+        # The override merges over the task's resources, so a GPU request survives a CPU/memory override.
+        task.config.environment.gpus = 1
+        task.config.environment.gpu_types = ["H100"]
+        spec = server._sandbox_spec(task, "/app")
+        assert spec.resources.gpu == 1 and spec.resources.cpu == 4.0
+        task.config.environment.gpus = None
+        task.config.environment.gpu_types = None
+
         server.config.derive_cpu_env = False
         assert "OMP_NUM_THREADS" not in server._sandbox_spec(task, "/app").env
 

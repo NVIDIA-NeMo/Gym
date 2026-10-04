@@ -48,7 +48,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
@@ -207,6 +207,8 @@ async def _exec_as_root_user(
     """
     user = None if _is_root(configured_user) else "root"
     return await sandbox.exec(command, cwd=cwd, timeout_s=timeout_s, user=user)
+
+
 def _sandbox_resources(task: HarborTask) -> dict[str, Any]:
     environment = task.config.environment
     resources: dict[str, Any] = {}
@@ -300,7 +302,8 @@ class HarborResourcesServer(SimpleResourcesServer):
             | {"nemo_gym_resources_server": self.config.name, "harbor_task": task.task_id[:63]}
         )
         ttl = task.config.agent.timeout_sec + task.config.verifier.timeout_sec + self.config.sandbox_ttl_slack_s
-        resources = self.config.sandbox_resources_override or _sandbox_resources(task)
+        # The override replaces only the keys it names, so a GPU task routed to the GPU provider keeps `gpu`.
+        resources = _sandbox_resources(task) | (self.config.sandbox_resources_override or {})
         env = dict(self.config.sandbox_env) | dict(task.env)
         if self.config.derive_cpu_env:
             env = cpu_cap_env(resources.get("cpu")) | env
