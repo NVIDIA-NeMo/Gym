@@ -58,9 +58,10 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     # Wall budget for `bash /tests/test.sh`: max(this floor, the task's own limit), where the task's limit is the
     # row's `verifier_timeout_sec` or else `[verifier] timeout_sec` in its task.toml.
     verifier_timeout_floor_sec: int = 1800
-    # Run `bash /tests/test.sh` as the row's non-root `agent_user` (the account the vendor images declare as their
-    # USER) instead of the image default (root on the `-userroot` derivatives).
-    verifier_runs_as_agent_user: bool = True
+    # Run `bash /tests/test.sh` as the row's non-root `agent_user` instead of the image default (root on the
+    # `-userroot` derivatives). Off by default: many vendor verifiers require root (they drop candidate code to an
+    # unprivileged user themselves), and running them as the agent user fails tasks that pass as root.
+    verifier_runs_as_agent_user: bool = False
 
     # Sandbox config
     sandbox_provider: str

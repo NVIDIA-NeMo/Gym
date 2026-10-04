@@ -355,13 +355,12 @@ async def test_row_verifier_timeout_and_env_reach_the_test_run(session_server):
     )
     result = await f.server.verify(f.request, body)
     assert result.reward == 1
-    # /logs/verifier is handed to the agent's account (as the image default), then the tests run as that account
-    # with max(1800, the row's 3600 s).
-    assert f.sandbox.exec.await_args_list == [
-        call("mkdir -p /logs/verifier && chown -R cam /logs/verifier"),
-        call("bash /tests/test.sh", timeout_s=3600.0, env={"VERIFIER_WALL_SEC": "3600"}, user="cam"),
-    ]
-    assert result.verifier_user == "cam"
+    # Default: the tests run as the image default (root) with max(1800, the row's 3600 s), even though the agent ran
+    # as "cam".
+    f.sandbox.exec.assert_awaited_once_with(
+        "bash /tests/test.sh", timeout_s=3600.0, env={"VERIFIER_WALL_SEC": "3600"}, user=None
+    )
+    assert result.verifier_user is None
     assert result.verifier_timeout_sec == 3600.0
 
 
@@ -380,17 +379,22 @@ async def _seed_and_verify(f, **row) -> object:
     return await f.server.verify(f.request, body)
 
 
-async def test_switch_off_runs_tests_as_image_default(session_server):
+async def test_switch_on_runs_tests_as_agent_user(session_server):
     f = session_server
-    f.server.config.verifier_runs_as_agent_user = False
+    f.server.config.verifier_runs_as_agent_user = True
     result = await _seed_and_verify(f, agent_user="cam")
-    f.sandbox.exec.assert_awaited_once_with("bash /tests/test.sh", timeout_s=1800.0, env=None, user=None)
-    assert result.verifier_user is None
+    # /logs/verifier is handed to the agent's account (as the image default), then the tests run as that account.
+    assert f.sandbox.exec.await_args_list == [
+        call("mkdir -p /logs/verifier && chown -R cam /logs/verifier"),
+        call("bash /tests/test.sh", timeout_s=1800.0, env=None, user="cam"),
+    ]
+    assert result.verifier_user == "cam"
 
 
 @pytest.mark.parametrize("agent_user", ["root", 0, "0"])
 async def test_root_agent_user_runs_tests_as_image_default(session_server, agent_user):
     f = session_server
+    f.server.config.verifier_runs_as_agent_user = True
     result = await _seed_and_verify(f, agent_user=agent_user)
     f.sandbox.exec.assert_awaited_once_with("bash /tests/test.sh", timeout_s=1800.0, env=None, user=None)
     assert result.verifier_user is None
