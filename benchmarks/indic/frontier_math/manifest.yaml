@@ -1,4 +1,4 @@
-name: indic_frontiermath
+name: indic/frontier_math
 version: 0.1.0
 experimental: true
 kind: benchmark
@@ -19,10 +19,10 @@ model_server: policy_model
 datasets:
   - name: indic_frontiermath
     type: benchmark
-    jsonl_fpath: benchmarks/indic_frontiermath/data/indic_frontiermath_raw.jsonl
-    prepare_script: benchmarks/indic_frontiermath/prepare.py
-    prompt_config: benchmarks/indic_frontiermath/prompts/default.yaml
+    jsonl_fpath: benchmarks/indic/frontier_math/data/indic_frontiermath_raw.jsonl
+    prepare_script: benchmarks/indic/frontier_math/prepare.py
+    prompt_config: benchmarks/indic/frontier_math/prompts/default.yaml
     num_repeats: 1
 canonical_split: benchmark
-standard_prompt_config: benchmarks/indic_frontiermath/prompts/default.yaml
+standard_prompt_config: benchmarks/indic/frontier_math/prompts/default.yaml
 lifecycle: active
