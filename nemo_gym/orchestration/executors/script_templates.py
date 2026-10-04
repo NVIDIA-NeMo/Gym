@@ -209,7 +209,10 @@ def render_driver_entrypoint(
             # A host driver must not install tools into the user's global environment.
             preamble += [
                 'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
-                'export UV_INSTALL_DIR="$GYM_SRC/bin" UV_NO_MODIFY_PATH=1',
+                # Unmanaged install also skips the receipt in ~/.config/uv.
+                'export UV_UNMANAGED_INSTALL="$GYM_SRC/bin"',
+                'export UV_CACHE_DIR="${UV_CACHE_DIR:-$GYM_SRC/cache}"',
+                'export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$GYM_SRC/python}"',
                 "curl -LsSf https://astral.sh/uv/install.sh | sh",
                 'export PATH="$GYM_SRC/bin:$PATH"',
             ]

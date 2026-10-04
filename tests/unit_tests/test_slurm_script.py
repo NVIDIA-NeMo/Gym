@@ -2564,6 +2564,8 @@ def test_host_driver_rejects_container_path_remapping():
 
 def test_host_driver_install_does_not_modify_user_environment():
     script = render_driver_entrypoint("https://example.com/gym", "main", None, on_host=True)
-    assert 'UV_INSTALL_DIR="$GYM_SRC/bin"' in script
+    assert 'UV_UNMANAGED_INSTALL="$GYM_SRC/bin"' in script
+    assert 'UV_CACHE_DIR="${UV_CACHE_DIR:-$GYM_SRC/cache}"' in script
+    assert 'UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$GYM_SRC/python}"' in script
     assert 'source "$HOME/.local/bin/env"' not in script
     subprocess.run(["bash", "-n"], input=script, text=True, check=True)
