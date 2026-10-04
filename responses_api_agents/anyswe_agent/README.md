@@ -87,3 +87,8 @@ after max-iteration or context-window termination set `mask_sample=true`.
 
 Each rollout includes the trajectory, patch, reward, grading fields, and
 `mask_sample`.
+
+The patch is the agent's change to the task repository since it started. Binary
+files are left out, because a "Binary files differ" stanza makes `git apply`
+reject the whole patch. The diff is kept byte for byte, so changes to CRLF or
+non-UTF-8 files apply in the grading sandbox.

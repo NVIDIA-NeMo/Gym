@@ -67,7 +67,7 @@ class TestAgentRunner:
         compile(source, "<runner>", "exec")
         assert 'os.environ["NGSWE_AGENT_MODULE"]' in source
         assert '["git", "add", "-A"]' in source
-        assert '["git", "diff", "--no-color", "--cached", baseline_tree]' in source
+        assert '["git", "diff", "--no-color", "--cached", baseline_tree, "--", ".", *excludes]' in source
 
     def test_patch_extraction_excludes_image_dirt_and_includes_agent_files(self, tmp_path) -> None:
         repo = tmp_path / "repo"
@@ -88,7 +88,7 @@ class TestAgentRunner:
 
         (repo / "agent-edited.txt").write_text("agent change\n")
         (repo / "agent-new.txt").write_text("new from agent\n")
-        patch_text = _extract_patch(repo, index_path, baseline_tree)
+        patch_text = _extract_patch(repo, index_path, baseline_tree).decode()
 
         assert "agent-edited.txt" in patch_text
         assert "agent change" in patch_text

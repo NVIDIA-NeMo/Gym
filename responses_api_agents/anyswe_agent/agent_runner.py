@@ -64,15 +64,36 @@ def _snapshot_repo(repo: Path, index_path: Path) -> str:
     ).stdout.strip()
 
 
-def _extract_patch(repo: Path, index_path: Path, baseline_tree: str) -> str:
-    """Return only changes made after the agent started, including untracked files."""
+def _binary_paths(repo: Path, baseline_tree: str, env: dict[str, str]) -> list[str]:
+    """Paths whose staged change is binary (``git diff --numstat`` reports ``-`` added and deleted lines)."""
+    numstat = subprocess.run(
+        ["git", "diff", "--cached", "--numstat", "-z", "--no-renames", baseline_tree],
+        capture_output=True,
+        check=True,
+        cwd=repo,
+        env=env,
+    ).stdout
+    paths = []
+    for record in numstat.split(b"\0"):
+        fields = record.split(b"\t", 2)
+        if len(fields) == 3 and fields[0] == b"-" and fields[1] == b"-":
+            paths.append(os.fsdecode(fields[2]))
+    return paths
+
+
+def _extract_patch(repo: Path, index_path: Path, baseline_tree: str) -> bytes:
+    """Return only changes made after the agent started, including untracked files, as the exact diff bytes.
+
+    Binary files are left out: they are scratch artifacts (an image written while reproducing a bug), not the fix,
+    and their "Binary files differ" stanza makes ``git apply`` reject the whole patch. The diff stays bytes so
+    CRLF line endings and non-UTF-8 content reach the grader unchanged.
+    """
     env = _alternate_index_env(index_path)
     subprocess.run(["git", "add", "-A"], check=True, cwd=repo, env=env)
+    excludes = [f":(exclude,literal){path}" for path in _binary_paths(repo, baseline_tree, env)]
     return subprocess.run(
-        ["git", "diff", "--no-color", "--cached", baseline_tree],
+        ["git", "diff", "--no-color", "--cached", baseline_tree, "--", ".", *excludes],
         capture_output=True,
-        text=True,
-        errors="replace",
         check=True,
         cwd=repo,
         env=env,
@@ -130,11 +151,11 @@ def main() -> None:
     Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
     print(f"agent finished: {len(response.output)} output items", flush=True)
 
-    patch = _extract_patch(repo, index_path, baseline_tree) if repo and baseline_tree else ""
+    patch = _extract_patch(repo, index_path, baseline_tree) if repo and baseline_tree else b""
     index_path.unlink(missing_ok=True)
     if repo:
-        print(f"patch: {len(patch)} chars from {repo}", flush=True)
-    Path("/trajectories_mount/patch.diff").write_text(patch)
+        print(f"patch: {len(patch)} bytes from {repo}", flush=True)
+    Path("/trajectories_mount/patch.diff").write_bytes(patch)
 
 
 if __name__ == "__main__":
