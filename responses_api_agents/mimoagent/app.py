@@ -21,7 +21,7 @@ from uuid import uuid4
 
 import yaml
 from fastapi import Request
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
@@ -46,6 +46,7 @@ class MimoAgentConfig(BaseResponsesAPIAgentConfig):
     protocol: str | None = None
     cwd: str | None = None
     command_timeout: int = 600
+    concurrency: int = 32
 
 
 def _text(content: Any) -> str:
@@ -111,6 +112,11 @@ def _output_items(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 class MimoAgent(SimpleResponsesAPIAgent):
     ray_enabled = False
     config: MimoAgentConfig
+    sem: asyncio.Semaphore = None
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def model_post_init(self, __context: Any) -> None:
+        self.sem = asyncio.Semaphore(self.config.concurrency)
 
     def _base_url(self) -> str:
         cfg = get_first_server_config_dict(self.server_client.global_config_dict, self.config.model_server.name)
@@ -181,7 +187,8 @@ class MimoAgent(SimpleResponsesAPIAgent):
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
-        status, result, messages = await asyncio.to_thread(self._run_agent, body)
+        async with self.sem:
+            status, result, messages = await asyncio.to_thread(self._run_agent, body)
         output = _output_items(messages)
         if result and not any(i["type"] == "message" and i["content"][0]["text"] == result for i in output):
             output += _output_items([{"role": "assistant", "content": result}])
@@ -198,12 +205,20 @@ class MimoAgent(SimpleResponsesAPIAgent):
         )
 
     async def run(self, request: Request, body: BaseRunRequest) -> BaseVerifyResponse:
+        seed = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/seed_session",
+            json=body.model_dump(),
+            cookies=request.cookies,
+        )
+        await raise_for_status(seed)
+        cookies = request.cookies | seed.cookies
         resp = await self.responses(request, body.responses_create_params)
         verify = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
             json=body.model_dump() | {"response": json.loads(resp.model_dump_json())},
-            cookies=request.cookies,
+            cookies=cookies,
         )
         await raise_for_status(verify)
         return BaseVerifyResponse.model_validate(await get_response_json(verify))
