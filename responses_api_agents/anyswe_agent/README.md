@@ -79,7 +79,8 @@ Private task images can pass registry credentials through
 
 SWE-bench and SWE-bench Multilingual use the official `make_test_spec` and
 `get_eval_report` path. R2E-Gym requires every fail-to-pass and pass-to-pass test
-to report `PASSED`.
+to report `PASSED`. Before running an R2E-Gym image's `run_tests.sh`, the grader
+links the image's `/r2e_tests` into `/testbed`, as R2E-Gym's own runtime does.
 
 Resolved patches receive reward `1`; other completed attempts receive `0`.
 Agent timeouts, evaluation timeouts, sandbox failures, and accidental successes
