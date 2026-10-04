@@ -117,8 +117,14 @@ class ApptainerExecConfig:
     default_binds: list[str] = field(default_factory=list)
     extra_exec_args: list[str] = field(default_factory=list)
     concurrency: int = 32
+    # Per-process data-segment cap (RLIMIT_DATA, set with ``ulimit -d`` in the sandbox shell) for every
+    # exec'd command; child processes inherit it. ``None`` leaves the limit unchanged. Rootless Apptainer
+    # usually cannot enforce cgroup memory limits, so without this one runaway command can exhaust host memory.
+    memory_limit_mib: int | None = None
 
     def __post_init__(self) -> None:
+        if self.memory_limit_mib is not None and self.memory_limit_mib <= 0:
+            raise ValueError("exec.memory_limit_mib must be > 0")
         if self.default_timeout_s is not None and self.default_timeout_s <= 0:
             raise ValueError("exec.default_timeout_s must be > 0")
         if self.timeout_grace_s < 0:
@@ -638,6 +644,11 @@ class ApptainerProvider:
         env_file_content = _serialize_env_file(merged_env)
 
         effective_command = command
+        if self._exec_config.memory_limit_mib is not None:
+            # Set inside the shell that runs the command (the inner shell under ``su``), so the
+            # limit covers the command and everything it spawns. A shell that cannot set it
+            # still runs the command.
+            effective_command = f"ulimit -d {int(self._exec_config.memory_limit_mib) * 1024} 2>/dev/null; {command}"
         is_root = user == "root" or user == 0
         if is_root:
             if self._exec_config.fakeroot_for_root:
@@ -645,7 +656,7 @@ class ApptainerProvider:
         elif user is not None:
             # Need root inside the container to switch users, then su to the target.
             flags.append("--fakeroot")
-            effective_command = f"su -s /bin/sh -c {shlex.quote(command)} {shlex.quote(str(user))}"
+            effective_command = f"su -s /bin/sh -c {shlex.quote(effective_command)} {shlex.quote(str(user))}"
 
         flags += list(self._exec_config.extra_exec_args)
 

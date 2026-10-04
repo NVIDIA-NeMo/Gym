@@ -88,6 +88,7 @@ apptainer:
     default_timeout_s: 180
     timeout_grace_s: 15
     concurrency: 32
+    memory_limit_mib: null
   create:
     mount_point: /sandbox
     start_timeout_s: 600
@@ -122,6 +123,7 @@ Settings for running commands (`apptainer exec`) and global provider behavior.
 | `default_binds` | `[]` | Extra `--bind host:container` mounts added at instance start. |
 | `extra_exec_args` | `[]` | Extra raw flags appended to every `apptainer exec` (e.g. `--no-home`, `--writable-tmpfs`, `--contain`). |
 | `concurrency` | `32` | Upper bound on concurrent `apptainer` subprocesses (shared semaphore). |
+| `memory_limit_mib` | `None` | Per-process memory cap for every exec'd command, set with `ulimit -d` (RLIMIT_DATA) in the sandbox shell and inherited by child processes. An allocation past the cap fails inside the sandbox (e.g. Python raises `MemoryError`). `None` leaves the limit unchanged. See [Limitations](#limitations). |
 
 ### `probe` — `ApptainerProbeConfig`
 
@@ -264,6 +266,10 @@ failed" rather than "the command exited 125".
   was started *without* fakeroot varies by Apptainer version and host configuration.
 - **Resource enforcement.** CPU/memory cgroup flags require cgroups v2 delegation.
   Disable them with `create.apply_resource_limits: false`.
+- **`exec.memory_limit_mib` is per process.** `ulimit -d` caps each process's heap and
+  private anonymous mappings (Linux 4.7+), not the sandbox as a whole: a command that
+  forks N workers can still use up to N times the cap. Runtimes that reserve large
+  writable address ranges at startup may fail under a low cap; size it generously.
 - **Runtime-failure detection is heuristic.** It keys off stderr markers, so a user
   command whose own output contains `FATAL:` could be misclassified as a sandbox error.
 
