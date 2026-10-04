@@ -799,6 +799,37 @@ class TestGradingModeAnswerColonMD:
             assert result.extracted_answer == expected, text
             assert result.reward == 1.0, text
 
+    async def test_terminal_localized_answer_labels(self) -> None:
+        server = self._make_server()
+        cases = [
+            ("বাংলায় ব্যাখ্যা।\n\nউত্তর: C", "C"),
+            ("ગુજરાતીમાં સમજૂતી.\n\n**જવાબ: B**", "B"),
+            ("हिंदी में व्याख्या।\n\n**उत्तर:** D।", "D"),
+            ("ಕನ್ನಡದಲ್ಲಿ ವಿವರಣೆ.\n\nಉತ್ತರ: A", "A"),
+            ("தமிழில் விளக்கம்.\n\nபதில்：C。", "C"),
+            ("اردو میں وضاحت۔\n\nجواب: B", "B"),
+        ]
+        for text, expected in cases:
+            body = _make_verify_request(text=text, expected=expected)
+            result = await server.verify(body)
+            assert result.extracted_answer == expected, text
+            assert result.reward == 1.0, text
+
+    async def test_terminal_localized_answer_rejects_unsafe_shapes(self) -> None:
+        server = self._make_server()
+        cases = [
+            "উত্তর: A/B",
+            "A: B",
+            "উত্তর: B because C is wrong",
+            "উত্তর: B\nআরও ব্যাখ্যা",
+            "A: option text",
+        ]
+        for text in cases:
+            body = _make_verify_request(text=text, expected="B")
+            result = await server.verify(body)
+            assert result.extracted_answer is None, text
+            assert result.reward == 0.0, text
+
     async def test_multilingual_ambiguous_list_rejected(self) -> None:
         server = self._make_server()
         body = _make_verify_request(
