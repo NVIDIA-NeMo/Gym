@@ -180,6 +180,7 @@ def render_driver_entrypoint(
     command: str | None = None,
     *,
     extras: tuple[str, ...] = (),
+    on_host: bool = False,
 ) -> str:
     """Render the srun entrypoint for the driver step.
 
@@ -204,10 +205,21 @@ def render_driver_entrypoint(
         # the artifacts. `cd` into it because a benchmark's prepare_script and
         # jsonl_fpath resolve against cwd; the driver's output path is absolute,
         # so nothing depends on the clone being reachable afterwards.
+        if on_host:
+            # A host driver must not install tools into the user's global environment.
+            preamble += [
+                'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
+                'export UV_INSTALL_DIR="$GYM_SRC/bin" UV_NO_MODIFY_PATH=1',
+                "curl -LsSf https://astral.sh/uv/install.sh | sh",
+                'export PATH="$GYM_SRC/bin:$PATH"',
+            ]
+        else:
+            preamble += [
+                "curl -LsSf https://astral.sh/uv/install.sh | sh",
+                'source "$HOME/.local/bin/env"',
+                'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
+            ]
         preamble += [
-            "curl -LsSf https://astral.sh/uv/install.sh | sh",
-            'source "$HOME/.local/bin/env"',
-            'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
             render_repo_checkout(repo, ref, dest='"$GYM_SRC/gym"'),
             # A real venv, not --system: --system targets whatever interpreter happens to be on
             # the container's PATH, sidestepping uv's own project-aware Python selection - `uv

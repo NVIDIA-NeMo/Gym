@@ -1,0 +1,23 @@
+config_paths:
+  - responses_api_agents/claweval_agent/configs/claweval_agent.yaml
+
+claweval_general_agent:
+  _inherit_from: claweval_agent
+  responses_api_agents:
+    claweval_agent:
+      claweval_config: ${oc.env:CLAW_EVAL_GENERAL_CONFIG,config_general.yaml}
+      datasets:
+        - name: claweval_general
+          type: benchmark
+          jsonl_fpath: benchmarks/claweval/data/general.jsonl
+          prepare_script: benchmarks/claweval/prepare_general.py
+          prompt_config: null
+          num_repeats: 3
+          license: MIT
+
+claweval_general_environment_server:
+  _inherit_from: claweval_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: claweval_general_agent

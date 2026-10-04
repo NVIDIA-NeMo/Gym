@@ -1002,6 +1002,7 @@ def build_sbatch_script(
         prepare_cmd=prepare_cmd,
         command=benchmark.command,
         extras=(GYM_TELEMETRY_EXTRA,) if instrumented else (),
+        on_host=config.driver.container is None,
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
@@ -1019,10 +1020,14 @@ def build_sbatch_script(
     # the host, which is what makes the loss so easy to miss.
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
+    driver_flags = (
+        f" --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
+        f" --container-image={shlex.quote(config.driver.container)}"
+        if config.driver.container is not None
+        else driver_node_flags
+    )
     driver_command = (f"{gym_cmd}\n" if gym_cmd else "") + (
-        f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
-        f" --container-image={shlex.quote(config.driver.container)} "
-        f"--output=logs/driver-$SLURM_JOB_ID.log {entrypoint}"
+        f"{driver_env_prefix}srun --overlap{driver_flags} --output=logs/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
     if observed:
         driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir)

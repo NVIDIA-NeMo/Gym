@@ -2539,3 +2539,31 @@ def test_a_ray_head_on_node_0_is_probed_locally(tmp_path):
     }
     script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": ray})
     assert "Waiting for ray at http://localhost:8011" in script
+
+
+def test_host_driver_keeps_native_scheduler_access(submit_config, bench_dir):
+    submit_config.driver.container = None
+    compute = next(iter(submit_config.compute.values()))
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    driver = next(line for line in script.splitlines() if "--output=logs/driver-" in line)
+    assert "srun --overlap" in driver
+    assert "--container" not in driver
+    assert "--no-container-mount-home" not in driver
+    # Policy serving still uses its configured container.
+    assert "--container-image=" in script
+    subprocess.run(["bash", "-n"], input=script, text=True, check=True)
+
+
+def test_host_driver_rejects_container_path_remapping():
+    from nemo_gym.orchestration.api import DriverConfig
+
+    with pytest.raises(ValueError, match="cannot use container mounts"):
+        DriverConfig(container=None, mounts=["/source:/destination"], benchmarks={})
+
+
+def test_host_driver_install_does_not_modify_user_environment():
+    script = render_driver_entrypoint("https://example.com/gym", "main", None, on_host=True)
+    assert 'UV_INSTALL_DIR="$GYM_SRC/bin"' in script
+    assert 'source "$HOME/.local/bin/env"' not in script
+    subprocess.run(["bash", "-n"], input=script, text=True, check=True)

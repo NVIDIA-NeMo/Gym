@@ -1,0 +1,32 @@
+claweval_agent:
+  responses_api_agents:
+    claweval_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Native Claw-Eval evaluation with Pyxis sandboxes and native graders
+      value: Evaluate general, multimodal, and multi-turn assistant tasks
+      claweval_root: ${oc.env:CLAW_EVAL_ROOT}
+      claweval_config: ${oc.env:CLAW_EVAL_CONFIG,config_multimodal.yaml}
+      python_executable: ${oc.env:CLAW_EVAL_PYTHON,python3}
+      fixture_root: ${oc.env:CLAW_EVAL_FIXTURE_ROOT,''}
+      sandbox_image: ${oc.env:CLAW_EVAL_SANDBOX_IMAGE}
+      sandbox_dependencies: ${oc.env:CLAW_EVAL_SANDBOX_DEPS}
+      workspace_root: ${oc.env:CLAW_EVAL_GYM_OUTPUT,outputs/claweval_agent}
+      concurrency: 1
+      timeout: 3600
+      no_judge: false
+      policy_base_url: ${oc.select:policy_base_url,''}
+      policy_model_name: ${oc.select:policy_model_name,''}
+      policy_api_key: ${oc.select:policy_api_key,''}
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/claweval_agent/data/example.jsonl
+
+claweval_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: claweval_agent
