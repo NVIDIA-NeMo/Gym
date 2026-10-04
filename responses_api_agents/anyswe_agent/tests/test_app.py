@@ -19,9 +19,13 @@ These exercise runner generation, image resolution, and configuration.
 import asyncio
 import base64
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from nemo_gym.openai_utils import NeMoGymResponse
 from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
@@ -251,6 +255,90 @@ class TestSetupScriptsExist:
         script = (Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh").read_text()
         assert 'PYTHON_VERSION="${PYTHON_VERSION:-3.13.14}"' in script
         assert 'PBS_RELEASE="${PBS_RELEASE:-20260805}"' in script
+
+
+def _fake_bin(tmp_path: Path, machine: str) -> Path:
+    """A PATH dir whose `uname -m` reports ``machine`` and whose `curl` logs the URL and fails."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "uname").write_text(f'#!/bin/sh\necho "{machine}"\n')
+    (bin_dir / "curl").write_text(f'#!/bin/sh\nfor a; do url="$a"; done\necho "$url" >> "{tmp_path}/urls"\nexit 1\n')
+    for tool in ("uname", "curl"):
+        (bin_dir / tool).chmod(0o755)
+    return bin_dir
+
+
+def _portable_python_arch(
+    tmp_path: Path, machine: str, arch_override: str | None = None
+) -> subprocess.CompletedProcess:
+    script = Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh"
+    env = {**os.environ, "PATH": f"{_fake_bin(tmp_path, machine)}:{os.environ['PATH']}"}
+    env.pop("ARCH", None)
+    if arch_override:
+        env["ARCH"] = arch_override
+    return subprocess.run(
+        ["bash", "-c", f'source "{script}" && echo "$ARCH"'], env=env, capture_output=True, text=True
+    )
+
+
+class TestSetupScriptsHostArch:
+    @pytest.mark.parametrize(
+        "machine,expected",
+        [
+            ("x86_64", "x86_64-unknown-linux-gnu"),
+            ("aarch64", "aarch64-unknown-linux-gnu"),
+            ("arm64", "aarch64-unknown-linux-gnu"),
+        ],
+    )
+    def test_portable_python_arch_follows_host(self, tmp_path: Path, machine: str, expected: str) -> None:
+        result = _portable_python_arch(tmp_path, machine)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == expected
+
+    def test_portable_python_arch_override_wins(self, tmp_path: Path) -> None:
+        result = _portable_python_arch(tmp_path, "aarch64", arch_override="x86_64-unknown-linux-gnu")
+        assert result.stdout.strip() == "x86_64-unknown-linux-gnu"
+
+    def test_portable_python_rejects_unknown_arch(self, tmp_path: Path) -> None:
+        result = _portable_python_arch(tmp_path, "riscv64")
+        assert result.returncode != 0
+        assert "unsupported portable python architecture" in result.stderr
+
+    @pytest.mark.parametrize(
+        "deps_script",
+        [
+            "claude_code_agent_deps.sh",
+            "cline_agent_deps.sh",
+            "opencode_agent_deps.sh",
+            "openclaw_agent_deps.sh",
+            "pi_agent_deps.sh",
+        ],
+    )
+    @pytest.mark.parametrize("machine,node_arch", [("x86_64", "linux-x64"), ("aarch64", "linux-arm64")])
+    def test_node_download_follows_host(self, tmp_path: Path, deps_script: str, machine: str, node_arch: str) -> None:
+        # Run the deps script with the portable-python helpers stubbed out; the fake curl records the Node URL.
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        shutil.copy(Path(__file__).parent.parent / "setup_scripts" / deps_script, scripts / deps_script)
+        (scripts / "_portable_python.sh").write_text(
+            "install_portable_python() { :; }\ninstall_nemo_gym_deps() { :; }\n"
+        )
+        deps_dir = tmp_path / "deps"
+        deps_dir.mkdir()
+        env = {
+            **os.environ,
+            "PATH": f"{_fake_bin(tmp_path, machine)}:{os.environ['PATH']}",
+            "DEPS_DIR": str(deps_dir),
+            "NEMO_GYM_ROOT": str(tmp_path),
+        }
+        env.pop("NODE_ARCH", None)
+
+        result = subprocess.run(["bash", str(scripts / deps_script)], env=env, capture_output=True, text=True)
+
+        assert result.returncode != 0  # the fake curl fails right after recording the URL
+        urls = (tmp_path / "urls").read_text().split()
+        assert len(urls) == 1 and urls[0].startswith("https://nodejs.org/dist/")
+        assert urls[0].endswith(f"-{node_arch}.tar.xz")
 
 
 class TestExampleData:
