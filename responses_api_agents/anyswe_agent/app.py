@@ -15,6 +15,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import re
 import shlex
 import shutil
 import tarfile
@@ -130,15 +131,101 @@ def _as_list(value: Any) -> list[str]:
     return list(value or [])
 
 
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_R2E_DECOLOR = re.compile(r"\x1b\[\d+m")
+_TEST_STATUSES = ("PASSED", "FAILED", "ERROR", "XFAIL", "SKIPPED")
+_VERBOSE_TEST_LINE = re.compile(r"^(\S+::\S.*?)\s+(PASSED|FAILED|ERROR|XFAIL|SKIPPED)(?:\s+\[\s*\d+%\])?$")
+
+
+def _r2e_test_aliases(name: str) -> list[str]:
+    """Return the spellings under which one test may be listed.
+
+    pytest's ``-rA`` summary prints node ids (``r2e_tests/test_core.py::TestMaskedArray::test_basic``) while R2E's
+    expected-output maps (and FAIL_TO_PASS lists derived from them) use unittest-style ``TestMaskedArray.test_basic``.
+    Match on the node id, the ``file::Class::method`` form without the directory, the ``Class.method`` form, and the
+    bare method name as a last resort. ANSI escapes (some R2E rows list names in bold) never decide a match.
+    """
+    name = _ANSI_ESCAPE.sub("", name).strip()
+    aliases = [name]
+    if "::" in name:
+        parts = name.split("::")
+        aliases.append("::".join([parts[0].rsplit("/", 1)[-1], *parts[1:]]))
+        aliases.append(".".join(parts[-2:]) if len(parts) >= 3 else parts[-1])
+        aliases.append(parts[-1])
+    elif "." in name:
+        aliases.append(name.rsplit(".", 1)[-1])
+    return list(dict.fromkeys(aliases))
+
+
+def _record_test_status(statuses: Dict[str, str], test: str, status: str) -> None:
+    for alias in _r2e_test_aliases(test):
+        # A more specific spelling wins over a bare-method collision, and a later failure is never hidden behind
+        # an earlier PASSED of a same-named test in another class.
+        if alias not in statuses or statuses[alias] == "PASSED":
+            statuses[alias] = status
+
+
 def _r2e_resolved(instance: Dict[str, Any], log: str) -> bool:
     statuses: Dict[str, str] = {}
-    for line in log.splitlines():
-        fields = line.strip().replace(" - ", " ").split()
-        if len(fields) > 1 and fields[0] in ("PASSED", "FAILED", "ERROR", "XFAIL", "SKIPPED"):
-            statuses[fields[1]] = fields[0]
+    for raw_line in log.splitlines():
+        # Strip ANSI escapes from the whole line first: with color on, pytest prints
+        # "\x1b[32mPASSED\x1b[0m r2e_tests/test_1.py::\x1b[1mtest_x\x1b[0m".
+        line = _ANSI_ESCAPE.sub("", raw_line).strip()
+        fields = line.replace(" - ", " ").split()
+        if len(fields) > 1 and fields[0] in _TEST_STATUSES:
+            _record_test_status(statuses, fields[1], fields[0])
+            continue
+        # pytest's verbose per-test line "<node id> STATUS [ 42%]", for runners that suppress the -rA summary.
+        verbose = _VERBOSE_TEST_LINE.match(line)
+        if verbose:
+            _record_test_status(statuses, verbose.group(1), verbose.group(2))
     required = _as_list(instance.get("FAIL_TO_PASS") or instance.get("fail_to_pass"))
     required += _as_list(instance.get("PASS_TO_PASS") or instance.get("pass_to_pass"))
-    return bool(required) and all(statuses.get(test) == "PASSED" for test in required)
+
+    def status_of(test: str) -> Optional[str]:
+        for alias in _r2e_test_aliases(test):
+            if alias in statuses:
+                return statuses[alias]
+        return None
+
+    # Like swebench's grading, an expected failure (XFAIL) counts as passing.
+    return bool(required) and all(status_of(test) in ("PASSED", "XFAIL") for test in required)
+
+
+def _r2e_parse_log_pytest(log: str) -> Dict[str, str]:
+    """R2E-Gym's own ``parse_log_pytest``: only the "short test summary info" section counts.
+
+    A key is ``Class.test`` (the node id without its file), with any `` - message`` tail dropped.
+    """
+    status: Dict[str, str] = {}
+    if not log or "short test summary info" not in log:
+        return status
+    for line in log.split("short test summary info")[1].strip().split("\n"):
+        if "PASSED" in line:
+            status[".".join(line.split("::")[1:])] = "PASSED"
+        elif "FAILED" in line:
+            status[".".join(line.split("::")[1:]).split(" - ")[0]] = "FAILED"
+        elif "ERROR" in line:
+            status[".".join(line.split("::")[1:]).split(" - ")[0]] = "ERROR"
+    return status
+
+
+def _r2e_expected_resolved(expected_output_json: Any, log: str) -> bool:
+    """R2E-Gym's own reward rule (``_calculate_reward_r2e``).
+
+    The parsed status map must equal ``expected_output_json`` key for key after decoloring and dropping
+    `` - message`` tails. Expected statuses are often FAILED or ERROR by design, so this is an exact match, not
+    "all passed".
+    """
+    if isinstance(expected_output_json, str):
+        expected_output_json = json.loads(expected_output_json)
+    parsed = {_R2E_DECOLOR.sub("", k): v for k, v in _r2e_parse_log_pytest(_ANSI_ESCAPE.sub("", log)).items()}
+    expected = {_R2E_DECOLOR.sub("", k): v for k, v in dict(expected_output_json or {}).items()}
+    parsed = {k.split(" - ")[0]: parsed[k] for k in sorted(parsed)}
+    expected = {k.split(" - ")[0]: expected[k] for k in sorted(expected)}
+    if not expected or len(parsed) != len(expected):
+        return False
+    return all((not k) or (k in expected and parsed[k] == expected[k]) for k in parsed)
 
 
 class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
@@ -419,6 +506,9 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             return False, "eval_timeout" if result.error_type == "timeout" else "sandbox"
 
         log = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        # Keep the grading transcript: a reward of 0 with a real patch is otherwise indistinguishable between
+        # failing tests and a test runner that never printed per-test results.
+        (params.persistent_dir / "eval_output.txt").write_text(log[-200_000:])
         with tempfile.NamedTemporaryFile("w", suffix=".log") as log_file:
             log_file.write(log)
             log_file.flush()
@@ -466,6 +556,13 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             return False, "eval_timeout" if result.error_type == "timeout" else "sandbox"
 
         log = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        (params.persistent_dir / "eval_output.txt").write_text(log[-200_000:])
+        has_lists = any(
+            _as_list(instance.get(key) or instance.get(key.lower())) for key in ("FAIL_TO_PASS", "PASS_TO_PASS")
+        )
+        if not has_lists and instance.get("expected_output_json"):
+            # R2E-Gym rows without test lists carry the verdict in expected_output_json; use R2E-Gym's own rule.
+            return _r2e_expected_resolved(instance["expected_output_json"], log), None
         return _r2e_resolved(instance, log), None
 
     async def _run_agent_in_sandbox(self, params: AnySweInstanceConfig) -> NeMoGymResponse:
