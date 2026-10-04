@@ -201,7 +201,7 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
     response, metrics = await agent._run_in_sandbox(
         sandbox,
         NeMoGymResponseCreateParamsNonStreaming(
-            input="fix it", instructions="Keep the public API", temperature=0, max_output_tokens=128
+            input="fix it", instructions="Keep the public API", temperature=0, top_p=0.9, max_output_tokens=128
         ),
         "id",
     )
@@ -212,6 +212,8 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
     assert params["base_url"] == "http://proxy/ng-rollout/id/v1"
     assert params["context_length"] == 262144
     assert params["temperature"] == 0
+    # Trainers stamp top_p next to temperature; it reaches the runner's request overrides.
+    assert params["top_p"] == 0.9
     assert params["max_tokens"] == 128
     assert params["instructions"] == "Keep the public API"
     assert "patch" not in params and "test_patch" not in params and "api_key" not in params
@@ -375,13 +377,15 @@ async def test_failed_connect_uses_benchmark_cleanup_with_seed_cookie(agent, mon
     )
     wire = result.model_dump(mode="json")
     assert wire["_ng_failure_class"] == "agent_run_error"
-    assert ("must return sandbox_descriptor" if bare_handle else "cannot attach") in wire["_ng_failure_message"]
+    # A bare handle is attached through the configured provider, like a descriptor.
+    module.AsyncSandbox.connect.assert_awaited_once_with({"sandbox_id": "box"}, provider=provider)
+    assert "cannot attach" in wire["_ng_failure_message"]
     assert "reward" not in wire and "response" not in wire
 
     cleanup = agent.server_client.post.call_args.kwargs
     assert cleanup["url_path"] == "/close_session"
     assert cleanup["cookies"] == {"session": "seeded"}
-    assert provider.aclose.await_count == (0 if bare_handle else 1)
+    assert provider.aclose.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -461,7 +465,6 @@ def test_timeout_preserves_tool_call_while_tool_is_blocked():
     [
         {"input": []},
         {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": "image", "detail": "auto"}]}]},
-        {"top_p": 0.9},
         {"previous_response_id": "old-response"},
         {"tool_choice": "none"},
         {"tools": [{"type": "function", "name": "custom", "parameters": {}, "strict": False}]},
