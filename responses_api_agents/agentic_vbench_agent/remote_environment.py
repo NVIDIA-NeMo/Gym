@@ -37,6 +37,18 @@ class RemoteEnvironment(DockerEnvironment):
         )
         super().__init__(environment_dir=staged, **kwargs)
 
+    async def start(self, force_build: bool) -> None:
+        await super().start(force_build)
+        # Agent installers also run apt-get in the live container, where the
+        # same single-UID namespace prevents apt's _apt privilege drop.
+        result = await self.exec(
+            "if [ -d /etc/apt/apt.conf.d ]; then "
+            "printf 'APT::Sandbox::User \"root\";\\n' > /etc/apt/apt.conf.d/99-agentic-vbench-rootless; fi",
+            user="root",
+        )
+        if result.return_code != 0:
+            raise RuntimeError(f"Failed to configure rootless APT sandbox: {result.stdout} {result.stderr}")
+
     @property
     def capabilities(self) -> EnvironmentCapabilities:
         return super().capabilities.model_copy(update={"mounted": False})

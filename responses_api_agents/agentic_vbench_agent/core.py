@@ -13,7 +13,9 @@ from collections import Counter
 from pathlib import Path
 
 
-REVISION = "610c4ecc69ac56fc62e8cfbd3b28dddd88f22863"
+# Includes upstream fixes for repurpose violation-judge semantics (#107) and
+# resolution prompts (#110). Other task families are unchanged from 610c4ec.
+REVISION = "410a75fe3dae37de4344fc9e5317da089505330a"
 FAMILIES = {"repair": 18, "assembly": 18, "sequencing": 28, "repurpose": 36}
 
 
@@ -26,7 +28,9 @@ def inventory(root: Path) -> dict[str, dict]:
     if changed.strip():
         raise ValueError("Benchmark tasks differ from the pinned checkout")
     tasks = {}
-    for path in sorted((root / "tasks").glob("*/*/task.toml")):
+    # The checkout also carries the separate "understanding" area; the benchmark is the four families.
+    paths = (root / "tasks" / f"agentic_vbench_{family}" for family in FAMILIES)
+    for path in sorted(task for family_dir in paths for task in family_dir.glob("*/task.toml")):
         family = path.parent.parent.name.removeprefix("agentic_vbench_")
         prompt = (path.parent / "steps/solve/instruction.md").read_text()
         task_id = path.parent.name
