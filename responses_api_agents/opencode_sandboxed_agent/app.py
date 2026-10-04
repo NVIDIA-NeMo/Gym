@@ -255,12 +255,16 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
                 "running": "incomplete",
                 "pending": "incomplete",
             }.get(native_status, "unknown")
+            tool_name_str = part.get("tool") if isinstance(part.get("tool"), str) else None
+            bash_command = tool_input.get("command") if tool_name_str == "bash" else None
+            operation = bash_command[:512] if isinstance(bash_command, str) else None
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
                         invocation_id=session_id,
                         tool_call_id=observed_call_id,
-                        tool_name=part.get("tool") if isinstance(part.get("tool"), str) else None,
+                        tool_name=tool_name_str,
+                        operation=operation,
                         started_at=started_at,
                         completed_at=completed_at,
                         duration_ms=duration_ms,

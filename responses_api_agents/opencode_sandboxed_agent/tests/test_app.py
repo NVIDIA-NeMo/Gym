@@ -548,6 +548,8 @@ class TestOpenCodeSandboxedAgent:
         assert tool.tool_call_id == "call-1"
         assert tool.sandbox_id == "connected-sandbox"
         assert tool.duration_ms == 1_000
+        assert tool.tool_name == "bash"
+        assert tool.operation == "true"
         sandbox_records = [
             record for record in result.ng_agent_observations.records if isinstance(record, SandboxObservation)
         ]
@@ -575,6 +577,7 @@ class TestOpenCodeSandboxedAgent:
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
+
 
 class TestSqliteSnapshotScript:
     """The snapshot runs inside the instance sandbox, on whatever ``python3`` that image ships.
