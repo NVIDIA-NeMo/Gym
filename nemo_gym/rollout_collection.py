@@ -1983,13 +1983,37 @@ def _propagate_rollout_fields_to_model_request(row: Dict[str, Any]) -> None:
     if not rollout_fields:
         return
 
-    responses_create_params = row[RESPONSES_CREATE_PARAMS_KEY_NAME]
+    # Flat/agent rows keep the Responses request at the top level. Native
+    # episode rows keep it under task_input and are wrapped only after this
+    # helper runs. Some tests and non-vLLM routes intentionally have no
+    # Responses request at all; there is no model request to annotate there.
+    responses_owner: Dict[str, Any]
+    if RESPONSES_CREATE_PARAMS_KEY_NAME in row:
+        responses_owner = row
+    else:
+        task_input = row.get("task_input")
+        if not isinstance(task_input, Mapping) or RESPONSES_CREATE_PARAMS_KEY_NAME not in task_input:
+            return
+        responses_owner = dict(task_input)
+        row["task_input"] = responses_owner
+
+    raw_responses_create_params = responses_owner[RESPONSES_CREATE_PARAMS_KEY_NAME]
+    if not isinstance(raw_responses_create_params, Mapping):
+        raise TypeError("responses_create_params must be a mapping")
+
+    # Rows are shallow-copied during repeat fan-out. Copy the request before
+    # stamping per-rollout identity so concurrent repeats cannot overwrite one
+    # another through a shared nested dictionary.
+    responses_create_params = dict(raw_responses_create_params)
+    responses_owner[RESPONSES_CREATE_PARAMS_KEY_NAME] = responses_create_params
     metadata = responses_create_params.get("metadata")
     if metadata is None:
         metadata = {}
         responses_create_params["metadata"] = metadata
     if not isinstance(metadata, dict):
         raise TypeError("responses_create_params.metadata must be a dict or None")
+    metadata = dict(metadata)
+    responses_create_params["metadata"] = metadata
 
     extra_body = json.loads(metadata.get("extra_body") or "{}")
     if not isinstance(extra_body, dict):
