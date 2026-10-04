@@ -4047,6 +4047,7 @@ class TestPreprocessExamples:
         with pytest.raises(ValueError, match="empty list"):
             RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
 
+
 class TestModelResponseKind:
     """``model_response_kind`` is classified centrally so every harness reports it.
 
@@ -4113,3 +4114,56 @@ class TestModelResponseKind:
         assert self._trajectory("raw string body").model_calls[0].model_response_kind is None
         assert self._trajectory(None).model_calls[0].model_response_kind is None
 
+
+class TestRolloutBoundaries:
+    """rollout_start / rollout_end, the outer bounds every other span is measured against.
+
+    Without them pre_agent_time (sandbox create, image pull, install) and post_agent_time
+    (verification, grading) cannot be separated from agent execution.
+    """
+
+    @staticmethod
+    def _result() -> dict[str, Any]:
+        return {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "0",
+                "rollout_id": "0-0",
+                "invocations": [{"invocation_id": "root"}],
+            }
+        }
+
+    def test_ng_perf_carries_the_attempt_bounds(self) -> None:
+        result = self._result()
+        _attach_ng_perf(
+            result,
+            observability_enabled=True,
+            rollout_latency_ms=1_500.0,
+            rollout_started_at=100.0,
+            rollout_completed_at=101.5,
+        )
+        assert result["ng_perf"]["rollout_started_at"] == 100.0
+        assert result["ng_perf"]["rollout_completed_at"] == 101.5
+        assert result["ng_perf"]["total_latency_ms"] == 1_500.0
+
+    def test_bounds_are_omitted_when_not_measured(self) -> None:
+        result = self._result()
+        _attach_ng_perf(result, observability_enabled=True, rollout_latency_ms=12.0)
+        assert "rollout_started_at" not in result["ng_perf"]
+        assert "rollout_completed_at" not in result["ng_perf"]
+
+    def test_bounds_stay_absent_when_observability_is_off(self) -> None:
+        result = self._result()
+        _attach_ng_perf(
+            result,
+            observability_enabled=False,
+            rollout_latency_ms=12.0,
+            rollout_started_at=1.0,
+            rollout_completed_at=2.0,
+        )
+        assert "ng_perf" not in result
+
+    def test_a_failed_dispatch_still_reports_when_it_started(self) -> None:
+        completed = _CompletedRollout(
+            row={}, result={}, rollout_latency_ms=None, rollout_started_at=5.0, rollout_completed_at=6.0
+        )
+        assert (completed.rollout_started_at, completed.rollout_completed_at) == (5.0, 6.0)

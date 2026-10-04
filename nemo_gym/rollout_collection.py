@@ -165,6 +165,10 @@ class _CompletedRollout:
     row: Dict[str, Any]
     result: Dict[str, Any]
     rollout_latency_ms: Optional[float]
+    # Absolute bounds of the attempt, so agent and model spans can be placed against it.
+    # The duration stays rollout_latency_ms, measured in one process around the same call.
+    rollout_started_at: Optional[float] = None
+    rollout_completed_at: Optional[float] = None
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -522,7 +526,13 @@ def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> No
         _strip_capture_payloads(result)
 
 
-def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float]) -> Optional[dict[str, Any]]:
+def _build_ng_perf(
+    result: dict[str, Any],
+    *,
+    rollout_latency_ms: Optional[float],
+    rollout_started_at: Optional[float] = None,
+    rollout_completed_at: Optional[float] = None,
+) -> Optional[dict[str, Any]]:
     """Assemble the per-rollout ``ng_perf`` summary from ``ng_trajectory``.
 
     Returns ``None`` (``ng_perf`` stays absent) unless at least one reasoning turn was
@@ -639,19 +649,36 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
 
     if isinstance(rollout_latency_ms, (int, float)):
         ng_perf["total_latency_ms"] = rollout_latency_ms
+    # rollout_start / rollout_end: Gym opening the attempt (before any sandbox setup) through the
+    # moment the result was recorded. pre_agent_time and post_agent_time are the difference
+    # between these and the agent invocation's own span.
+    if isinstance(rollout_started_at, (int, float)):
+        ng_perf["rollout_started_at"] = rollout_started_at
+    if isinstance(rollout_completed_at, (int, float)):
+        ng_perf["rollout_completed_at"] = rollout_completed_at
 
     return ng_perf
 
 
 def _attach_ng_perf(
-    result: dict[str, Any], *, observability_enabled: bool, rollout_latency_ms: Optional[float] = None
+    result: dict[str, Any],
+    *,
+    observability_enabled: bool,
+    rollout_latency_ms: Optional[float] = None,
+    rollout_started_at: Optional[float] = None,
+    rollout_completed_at: Optional[float] = None,
 ) -> None:
     if not observability_enabled:
         # ng_perf stays absent entirely when observability is off (OQ4): a caller who
         # disabled it only wants the final score, not partial/best-effort perf evidence.
         return
     try:
-        ng_perf = _build_ng_perf(result, rollout_latency_ms=rollout_latency_ms)
+        ng_perf = _build_ng_perf(
+            result,
+            rollout_latency_ms=rollout_latency_ms,
+            rollout_started_at=rollout_started_at,
+            rollout_completed_at=rollout_completed_at,
+        )
     except Exception:
         logger.warning("Could not assemble ng_perf for a rollout.", exc_info=True)
         return
@@ -1535,7 +1562,13 @@ class RolloutCollectionHelper(BaseModel):
                 _attach_trajectory_record(row, result)
 
             # Assembles ng_perf from ng_trajectory when observability is enabled.
-            _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
+            _attach_ng_perf(
+                result,
+                observability_enabled=observability_enabled,
+                rollout_latency_ms=rollout_latency_ms,
+                rollout_started_at=completed.rollout_started_at,
+                rollout_completed_at=completed.rollout_completed_at,
+            )
 
             # Freeze and rebuild tokens only for participating agents.
             # This step does not retire the frozen snapshot.
@@ -2036,8 +2069,15 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     result = await get_response_json(res)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
-                    rollout_latency_ms = (time() - started_at) * 1000
-                    return _CompletedRollout(row=row, result=result, rollout_latency_ms=rollout_latency_ms)
+                    completed_at = time()
+                    rollout_latency_ms = (completed_at - started_at) * 1000
+                    return _CompletedRollout(
+                        row=row,
+                        result=result,
+                        rollout_latency_ms=rollout_latency_ms,
+                        rollout_started_at=started_at,
+                        rollout_completed_at=completed_at,
+                    )
                 except Exception as e:
                     print(
                         "[rollout_collection] /run failed "
@@ -2053,7 +2093,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # when the body was the part that failed.
                     status = getattr(e, "status", None) or getattr(res, "status", None)
                     return _CompletedRollout(
-                        row=row, result=_agent_request_failure_row(e, status), rollout_latency_ms=None
+                        row=row,
+                        result=_agent_request_failure_row(e, status),
+                        rollout_latency_ms=None,
+                        rollout_started_at=started_at,
+                        rollout_completed_at=time(),
                     )
 
         return tqdm.as_completed(
