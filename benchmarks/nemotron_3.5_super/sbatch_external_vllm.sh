@@ -83,6 +83,13 @@ ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
 ROUTER_POLICY="${ROUTER_POLICY:-cache_aware}"
 ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
 
+# The generated command is parsed by Bash again on the evaluation node.
+# Preserve each argument, including Hydra dictionaries, as literal shell data.
+eval_arguments=""
+if (( should_run_eval )); then
+    printf -v eval_arguments '%q ' "$@"
+fi
+
 eval_command=$(cat <<EOF
 set -euo pipefail
 
@@ -96,7 +103,7 @@ export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
 GYM_MODEL_PARAMS=()
 source "$VLLM_CONFIG"
 
-gym eval prepare $@ +use_cached_prepared_benchmarks=true
+gym eval prepare $eval_arguments +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
 # export_to_csv.py derives <base>_aggregate_metrics.json from this, so the
@@ -111,7 +118,7 @@ rollouts_fpath=\${ROLLOUTS_FPATH:-results/\$experiment_name.jsonl}
 # port_range_low, port_range_high: Move into ephemeral ports
 # We add the sandbox_utils and policy_model_override yamls so users don't need to add them on every invocation
 gym eval run \
-    $@ \
+    $eval_arguments \
     --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
     --config benchmarks/nemotron_3.5_super/policy_model_override.yaml \
     +wandb_project=$USER-gym-eval \

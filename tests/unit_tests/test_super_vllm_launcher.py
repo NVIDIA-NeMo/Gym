@@ -77,19 +77,33 @@ source "$launcher_script" "$@"
         eval_command, pd_command, _, _ = self.capture_submission("--config", "benchmark.yaml", *overrides, env=env)
         return eval_command, pd_command
 
-    def eval_arguments(self, *overrides, env=None):
+    def eval_arguments(self, *overrides, env=None, stage="run"):
         command, _ = self.generate_commands(*overrides, env=env)
         command = command.replace("source /opt/Gym_venv/bin/activate", ":").replace("cd /opt/Gym\n", ":\n")
         stubs = r"""
 gym() {
-    if [[ "$2" == run ]]; then printf '%s\0' "$@"; fi
+    if [[ "$2" == "$TEST_GYM_STAGE" ]]; then printf '%s\0' "$@"; fi
 }
 date() { printf '%s\n' "${TEST_DATE:-20260909_120000}"; }
 getent() { printf '10.0.0.1 node0\n'; }
 """
-        status, stdout, stderr = self.run_shell(stubs + command, env=env)
+        status, stdout, stderr = self.run_shell(stubs + command, env=(env or {}) | {"TEST_GYM_STAGE": stage})
         self.assertEqual(status, 0, stderr)
         return stdout.rstrip("\0").split("\0")
+
+    def test_eval_arguments_survive_generated_shell(self) -> None:
+        """Both Gym stages receive structured overrides and shell characters literally."""
+        overrides = (
+            "++agent.datasets=[{name:smoke,type:benchmark,jsonl_fpath:data/smoke.jsonl,num_repeats:2}]",
+            "++description=two words, 'quotes', and \"double quotes\"",
+            "++literal=$(printf expanded)`printf expanded`$USER;*?[abc]",
+            "++multiline=first\nsecond",
+            "",
+        )
+        for stage in ("prepare", "run"):
+            with self.subTest(stage=stage):
+                args = self.eval_arguments(*overrides, stage=stage)
+                self.assertEqual(args[: 4 + len(overrides)], ["eval", stage, "--config", "benchmark.yaml", *overrides])
 
     def settings(self, args, key):
         return [arg for arg in args if arg.lstrip("+").startswith(key + "=")]
