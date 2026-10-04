@@ -188,15 +188,29 @@ Start it with: `gym env start`. If it is already running on a different host or 
 
 **When**: `gym eval run --no-serve` collects against servers that are already running, and found nothing
 listening at the head server address in its config. Either no `gym env start` is running, or it was started
-with a different `head_server.host` / `head_server.port` than this command is using.
+with a different head server address than this command is using. That address is `head_server.host` /
+`head_server.port` (default `127.0.0.1:11000`). When `head_server.host` is not set, the host is the machine's
+IP address if [`use_absolute_ip`](/reference/configuration#multi-node-configuration) is `true`, and otherwise
+`default_host` (default `127.0.0.1`), so a `gym env start` run with either setting can listen on a different
+address than a command run without it.
 
-**Fix**: Run `gym env status`. If it reports no servers, start them with `gym env start` (in another terminal
-or the background) and retry. If they are running but on another host or port, pass the same overrides to
-the collecting command:
+**Fix**: Check which head server address `gym env start` used (from its config and overrides), then run
+`gym env status` with matching overrides before concluding that nothing is running. `gym env status` only
+queries the head server address in its own config, so servers running on another host or port also show
+`No NeMo Gym servers found running.`
+
+```bash
+gym env status "++head_server.port=<port>"
+```
+
+If status lists your servers, pass the same overrides to the collecting command:
 
 ```bash
 gym eval run --no-serve "++head_server.port=<port>" ...
 ```
+
+If status finds no servers at the matching address either, start them with `gym env start` (in another
+terminal or the background) and retry.
 
 ### Gym Server Startup Timeout
 
