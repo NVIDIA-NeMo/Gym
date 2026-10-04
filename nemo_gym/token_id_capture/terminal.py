@@ -48,7 +48,10 @@ places by different agent classes, so up to five witnesses testify:
                  writer recorded one (a full-transcript response), the
                  fingerprint of the entry's own output (a final-turn-only
                  response), and the transcript's trailing model-authored
-                 block (a merged multi-turn transcript).
+                 block (a merged multi-turn transcript). When none of them
+                 matches, the trailing block's tool-call ids must equal the
+                 ids of exactly one entry's output, for harnesses that echo
+                 tool-call ids verbatim but rewrite their arguments.
 
 External staging rows omit token arrays because those tokens remain in framework storage.
 They carry a ``staging_key`` and precomputed content fingerprints instead.
@@ -82,6 +85,7 @@ from nemo_gym.token_id_capture.fingerprint import (
     _is_assistant_authored,
     assistant_fingerprint,
     canonicalize_tool_arguments,
+    tool_call_ids,
 )
 from nemo_gym.token_id_capture.records import NAMESPACE_TOOL_DELIMITER, TokenEntry
 
@@ -92,7 +96,7 @@ class TerminalAttribution:
 
     model_call_id: str | None
     # The strongest agreeing witness: "explicit", "response_id", "item_id",
-    # "content_cumulative", "content_output", or "" when unattributed.
+    # "content_cumulative", "content_output", "content_tool_ids", or "" when unattributed.
     method: str = ""
     # The abstention/disagreement trail, kept on success and failure alike,
     # plus corroboration notes when several witnesses agreed.
@@ -430,5 +434,28 @@ def _content_witness(entries: list[TokenEntry], response: dict, reasons: list[st
             # Custody manifests label all three readings as one witness.
             return ("content", winner)
         return ("content_cumulative" if cumulative_hit else "content_output", winner)
+    if not matches:
+        # Fourth reading: the trailing block's tool-call ids. Harnesses such as Claude Code rewrite tool-call
+        # *arguments* when they echo history (strip `cd <cwd> &&`, fill schema defaults), which defeats the
+        # content hashes above, but they echo tool-call ids verbatim and a served call's ids are unique.
+        trailing_ids = tool_call_ids(trailing)
+        if trailing_ids:
+            wanted = set(trailing_ids)
+            id_matches: dict[str, TokenEntry] = {}
+            for entry in entries:
+                if not entry.output_items:
+                    continue
+                try:
+                    own_ids = set(tool_call_ids(list(entry.output_items)))
+                except (TypeError, ValueError):
+                    continue
+                if own_ids and own_ids == wanted:
+                    id_matches[entry.model_call_id] = entry
+            winner = _collapse_identical(list(id_matches.values()))
+            if winner is not None:
+                return ("content_tool_ids", winner)
+            if id_matches:
+                reasons.append("tool_ids_ambiguous")
+                return None
     reasons.append("content_ambiguous" if matches else "no_content_match")
     return None
