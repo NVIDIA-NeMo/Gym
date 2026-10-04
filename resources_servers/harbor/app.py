@@ -389,11 +389,7 @@ class HarborResourcesServer(SimpleResourcesServer):
         resources = _sandbox_resources(environment, request_gpu_type=self.config.request_gpu_type) | (
             self.config.sandbox_resources_override or {}
         )
-        env = (
-            dict(self.config.sandbox_env)
-            | self.config.sandbox_env_by_task.get(task.task_id, {})
-            | dict(task_env)
-        )
+        env = dict(self.config.sandbox_env) | self.config.sandbox_env_by_task.get(task.task_id, {}) | dict(task_env)
         if self.config.derive_cpu_env:
             env = cpu_cap_env(resources.get("cpu")) | env
         provider_options = dict(self.config.sandbox_provider_options)

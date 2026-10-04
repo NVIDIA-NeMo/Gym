@@ -1,0 +1,17 @@
+# Deployment overlay for Terminal Bench 4 on the Harbor task shape (the generic `harbor` resources
+# server). Pass it after `--sandbox opensandbox`:
+#
+#   gym eval run harbor:terminal-bench/terminal-bench@4.0.0 --agent miniswe_sandboxed_agent \
+#     --sandbox opensandbox --config benchmarks/terminal_bench_4/harbor_sandbox.yaml ...
+#
+# The shipped OpenSandbox block backs its background-command status poll off to a 30 s cap, tuned
+# for about 1,500 concurrent SWE-bench samples. A TB4 run holds at most a few dozen sandboxes, and
+# that cap adds about 11 s per task between the agent's last command and the trajectory write
+# (parity trajectories: 15.4 s median against 4.6 s with this benchmark's own server, which polls at
+# the provider defaults below). Keep this overlay to the cadence; every other deployment setting
+# stays in the shipped block.
+sandbox:
+  opensandbox:
+    operations:
+      background_poll_initial_s: 0.25
+      background_poll_interval_s: 2.0
