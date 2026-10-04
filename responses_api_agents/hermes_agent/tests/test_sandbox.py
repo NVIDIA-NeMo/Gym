@@ -1186,8 +1186,9 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
     monkeypatch.setattr(module.shutil, "which", lambda name: "/test/uv")
     ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
     failed = SimpleNamespace(return_code=1, stdout="", stderr="installer failed")
-    # Prepare paths, detect a missing runtime, fail installation, then remove session files.
-    sandbox.exec.side_effect = [ok, failed, failed, ok]
+    # Prepare paths, detect a missing runtime, probe the architecture for uv, fail installation, then
+    # remove session files.
+    sandbox.exec.side_effect = [ok, failed, ok, failed, ok]
     cleanup = sandbox.stop if owns_sandbox else sandbox.disconnect
     if cleanup_fails:
         cleanup.side_effect = RuntimeError("cleanup unavailable")
