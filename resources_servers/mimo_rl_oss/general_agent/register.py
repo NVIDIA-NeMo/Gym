@@ -11,6 +11,7 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
+# limitations under the License.
 import os
 from pathlib import Path
 
@@ -31,6 +32,9 @@ class SingleBoxGeneralAgentEnvironment(GeneralAgentEnvironment):
     The task scripts need mcp 1.x in ``/opt/openai-agents-venv``, which MiMo's internal images ship. The released
     images only have mcp 2.x in the system python3, so setup builds that venv.
     """
+
+    # GA_JUDGE_API selects MiMo's chat-completions judge path, which self-hosted vLLM judges need.
+    VERIFY_ENV_FORWARD = (*GeneralAgentEnvironment.VERIFY_ENV_FORWARD, "GA_JUDGE_API")
 
     def _setup_dataset_specific(self) -> None:
         venv = os.path.dirname(os.path.dirname(self.VENV_PYTHON))
