@@ -1318,7 +1318,8 @@ RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [404, 408, 500]
 # 429 is usually a transient rate limit. Match only these spent-key codes/types;
 # generic "quota exceeded" wording is used by per-minute limits that recover.
 PERMANENT_QUOTA_CODES = ("budget_exceeded", "insufficient_quota")
-PERMANENT_AUTH_CODES = ("invalid_api_key", "invalid_api_token", "authentication_error")
+PERMANENT_AUTH_CODES = ("invalid_api_key", "invalid_api_token")
+AUTH_BACKEND_FAILURE_MARKERS = ("error querying the database", "connection slots", "too many clients")
 
 
 def _decode_error_text(content: bytes | str) -> str:
@@ -1351,13 +1352,23 @@ def _error_body_is_permanent_quota(content: bytes | str) -> bool:
     return any(code in codes for code in PERMANENT_QUOTA_CODES)
 
 
+def _error_body_has_auth_backend_failure(content: bytes | str) -> bool:
+    """Recognize gateway database failures that can be reported as 401/403."""
+    lowered = _decode_error_text(content).lower()
+    return any(marker in lowered for marker in AUTH_BACKEND_FAILURE_MARKERS)
+
+
 def _error_body_is_permanent_auth(content: bytes | str) -> bool:
     """True when a 401/403 body is a revoked or invalid key, not a one-off denial."""
     codes = {token.lower() for token in _parsed_error_codes(content)}
     if any(code in codes for code in PERMANENT_AUTH_CODES):
         return True
     lowered = _decode_error_text(content).lower()
-    return "invalid api key" in lowered or "incorrect api key" in lowered
+    if "invalid api key" in lowered or "incorrect api key" in lowered:
+        return True
+    # Gateways also use this generic type when their authentication database is
+    # temporarily unavailable. Specific invalid-key codes/text still take priority.
+    return "authentication_error" in codes and not _error_body_has_auth_backend_failure(content)
 
 
 class PermanentEndpointError(ClientResponseError):
@@ -1489,12 +1500,13 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 content = await response.content.read()
                 if _error_body_is_permanent_auth(content):
                     self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
+                if not _error_body_has_auth_backend_failure(content):
+                    return response
+            elif response.status not in RETRY_ERROR_CODES:
                 return response
+            else:
+                content = await response.content.read()
 
-            if response.status not in RETRY_ERROR_CODES:
-                return response
-
-            content = await response.content.read()
             if response.status == 429 and _error_body_is_permanent_quota(content):
                 self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
 
