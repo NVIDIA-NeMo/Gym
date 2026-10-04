@@ -43,4 +43,11 @@ install_python_packages() {
 install_nemo_gym_deps() {
     echo "Installing NeMo-Gym deps from $NEMO_GYM_ROOT"
     install_python_packages "$NEMO_GYM_ROOT"
+    # A same-version install from a local path can be treated as already satisfied, so a rebuild would keep a
+    # stale nemo_gym. Reinstall the package itself from the current checkout (its dependencies stay as installed).
+    if portable_python_can_run; then
+        install_python_packages --no-deps --force-reinstall "$NEMO_GYM_ROOT"
+    else
+        install_python_packages --no-deps --reinstall "$NEMO_GYM_ROOT"
+    fi
 }

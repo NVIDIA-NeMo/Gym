@@ -66,7 +66,8 @@ agent into each task image. `agent_runtime_source` controls other delivery modes
 
 - `baked` uses the runtime in the task image and is the default.
 - `auto` builds the portable runtime with `setup_scripts/<agent>_deps.sh` once
-  and uploads the resulting archive to each sandbox.
+  and uploads the resulting archive to each sandbox. The runtime is rebuilt when
+  the setup scripts, the agent's sources, `nemo_gym` or `pyproject.toml` change.
 - A local tarball path uploads a prebuilt runtime.
 - An HTTP(S) URL downloads a prebuilt runtime inside the sandbox.
 

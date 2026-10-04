@@ -193,6 +193,21 @@ class AnySweVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     mask_sample: bool = BaseVerifyResponse.model_fields["mask_sample"]
 
 
+def _pack_runtime(deps_dir: Path, archive_path: Path) -> None:
+    """Atomically (re)write the runtime archive.
+
+    Several servers may rebuild the archive from one checkout at once. Each writes its own temp file, so one
+    process's ``replace()`` never finds its file already moved by another; the last writer wins.
+    """
+    temporary = archive_path.with_name(f"{archive_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tarfile.open(temporary, "w:gz", compresslevel=1) as archive:
+            archive.add(deps_dir, arcname=".")
+        temporary.replace(archive_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 class GymAgentHarnessProcessor(BaseModel):
     config: Any
 
@@ -200,18 +215,25 @@ class GymAgentHarnessProcessor(BaseModel):
     def _agent_key(self) -> str:
         return self.config.agent_server_module.split(".")[-2]
 
-    def setup(self) -> Path:
-        deps_dir = Path(__file__).parent / f"anyswe_{self._agent_key}_deps"
-        sentinel = deps_dir / ".installed"
+    def _recipe(self) -> str:
+        """Hash of everything that goes into the runtime bundle; a change triggers a rebuild."""
         scripts = Path(__file__).parent / "setup_scripts"
-        script = scripts / f"{self._agent_key}_deps.sh"
         sources = (
-            script,
+            scripts / f"{self._agent_key}_deps.sh",
             scripts / "_portable_python.sh",
             PARENT_DIR / "responses_api_agents" / self._agent_key / "requirements.txt",
             *sorted((PARENT_DIR / "responses_api_agents" / self._agent_key).glob("*.py")),
+            # The bundle carries its own copy of nemo_gym, so library changes must rebuild it too.
+            *sorted((PARENT_DIR / "nemo_gym").rglob("*.py")),
+            PARENT_DIR / "pyproject.toml",
         )
-        recipe = hashlib.sha256(b"".join(path.read_bytes() for path in sources if path.exists())).hexdigest()
+        return hashlib.sha256(b"".join(path.read_bytes() for path in sources if path.exists())).hexdigest()
+
+    def setup(self) -> Path:
+        deps_dir = Path(__file__).parent / f"anyswe_{self._agent_key}_deps"
+        sentinel = deps_dir / ".installed"
+        script = Path(__file__).parent / "setup_scripts" / f"{self._agent_key}_deps.sh"
+        recipe = self._recipe()
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
             return deps_dir
 
@@ -278,10 +300,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             agent_deps_archive = workspace / f".{agent_deps_dir.name}.tar.gz"
             sentinel = agent_deps_dir / ".installed"
             if not agent_deps_archive.exists() or agent_deps_archive.stat().st_mtime < sentinel.stat().st_mtime:
-                temporary = agent_deps_archive.with_suffix(".tmp")
-                with tarfile.open(temporary, "w:gz", compresslevel=1) as archive:
-                    archive.add(agent_deps_dir, arcname=".")
-                temporary.replace(agent_deps_archive)
+                _pack_runtime(agent_deps_dir, agent_deps_archive)
         elif self.config.agent_runtime_source != "baked":
             if "://" in self.config.agent_runtime_source:
                 agent_deps_url = self.config.agent_runtime_source
