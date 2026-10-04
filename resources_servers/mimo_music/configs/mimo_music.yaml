@@ -23,6 +23,7 @@ mimo_music_simple_agent:
       - name: train
         type: train
         jsonl_fpath: resources_servers/mimo_music/data/train.jsonl
+        prepare_script: resources_servers/mimo_rl_oss/prepare.py
         license: Apache 2.0
 
 mimo_music_environment_server:
