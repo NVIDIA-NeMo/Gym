@@ -4,16 +4,53 @@
 """Pydantic mirror of Harbor's ``task.toml`` (schema 1.4).
 
 Field names are Harbor's. Deprecated spellings (``version``, ``memory``, ``storage``,
-``allow_internet``, ``image``) are read and normalized but never written back.
+``allow_internet``, ``image``) are read and normalized but never written back. Keys
+this mirror does not know are ignored, as Harbor ignores them; :meth:`HarborSettings.unknown_keys`
+lists them so the loader can say so.
 """
 
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class HarborSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    model_config = ConfigDict(extra="ignore", allow_inf_nan=False)
+
+    # Keys a `before` validator reads and renames; they are accepted, not unknown.
+    deprecated_keys: ClassVar[frozenset[str]] = frozenset()
+
+    @classmethod
+    def unknown_keys(cls, data: Any, prefix: str = "") -> list[str]:
+        """Dotted paths of the keys in ``data`` that no field of this model tree declares."""
+        if not isinstance(data, dict):
+            return []
+        unknown: list[str] = []
+        for key, value in data.items():
+            field = cls.model_fields.get(key)
+            if field is None:
+                if key not in cls.deprecated_keys:
+                    unknown.append(f"{prefix}{key}")
+                continue
+            nested = _nested_settings(field.annotation)
+            if nested is None:
+                continue
+            if isinstance(value, list):
+                for index, item in enumerate(value):
+                    unknown += nested.unknown_keys(item, f"{prefix}{key}[{index}].")
+            else:
+                unknown += nested.unknown_keys(value, f"{prefix}{key}.")
+        return unknown
+
+
+def _nested_settings(annotation: Any) -> type[HarborSettings] | None:
+    if isinstance(annotation, type) and issubclass(annotation, HarborSettings):
+        return annotation
+    for arg in get_args(annotation):
+        nested = _nested_settings(arg)
+        if nested is not None:
+            return nested
+    return None
 
 
 class HarborHealthcheck(HarborSettings):
@@ -66,6 +103,8 @@ class HarborEnvironment(HarborPhaseSettings):
     ``environment/Dockerfile`` or, when that file only names a base image, runs the
     base image directly.
     """
+
+    deprecated_keys: ClassVar[frozenset[str]] = frozenset({"image", "allow_internet", "memory", "storage"})
 
     docker_image: str | None = None
     build_timeout_sec: float = Field(default=600, gt=0)
@@ -130,6 +169,8 @@ class HarborSolution(HarborSettings):
 
 class HarborTaskConfig(HarborSettings):
     """One ``task.toml``."""
+
+    deprecated_keys: ClassVar[frozenset[str]] = frozenset({"version", "steps", "multi_step_reward_strategy"})
 
     schema_version: str = "1.4"
     task: dict[str, Any] = Field(default_factory=dict)

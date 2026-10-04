@@ -3,6 +3,7 @@
 
 """Load one task folder, or a folder of task folders, from disk."""
 
+import logging
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,8 @@ from nemo_gym.tasks.harbor.digest import content_hash
 from nemo_gym.tasks.harbor.dockerfile import base_image_only
 from nemo_gym.tasks.harbor.models import HarborTaskConfig
 
+
+logger = logging.getLogger(__name__)
 
 TASK_FILE = "task.toml"
 INSTRUCTION_FILE = "instruction.md"
@@ -61,14 +64,21 @@ def load_task(path: Path) -> HarborTask:
     if not is_task_folder(path):
         raise HarborTaskError(f"{path} has no {TASK_FILE}")
     try:
-        config = HarborTaskConfig.model_validate(tomllib.loads((path / TASK_FILE).read_text()))
-    except (tomllib.TOMLDecodeError, ValueError) as exc:
+        data = tomllib.loads((path / TASK_FILE).read_text())
+        for key in HarborTaskConfig.unknown_keys(data):
+            logger.warning("%s: ignoring unknown key `%s`", path / TASK_FILE, key)
+        config = HarborTaskConfig.model_validate(data)
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError) as exc:
         raise HarborTaskError(f"{path / TASK_FILE}: {exc}") from exc
     instruction_path = path / INSTRUCTION_FILE
     if not instruction_path.is_file():
         raise HarborTaskError(f"{path} has no {INSTRUCTION_FILE}")
     if not (path / "tests").is_dir():
         raise HarborTaskError(f"{path} has no tests/ folder")
+    try:
+        instruction = instruction_path.read_text().strip()
+    except UnicodeDecodeError as exc:
+        raise HarborTaskError(f"{instruction_path}: {exc}") from exc
 
     environment = config.environment
     image = environment.docker_image
@@ -97,7 +107,7 @@ def load_task(path: Path) -> HarborTask:
         path=path,
         task_id=path.name,
         config=config,
-        instruction=instruction_path.read_text().strip(),
+        instruction=instruction,
         digest=content_hash(path),
         image=image,
         workdir=workdir,
@@ -106,8 +116,13 @@ def load_task(path: Path) -> HarborTask:
     )
 
 
-def discover_tasks(root: Path) -> list[HarborTask]:
-    """A folder with ``task.toml`` is one task; otherwise its direct children are the tasks."""
+def discover_tasks(root: Path, *, skipped: dict[str, HarborTaskError] | None = None) -> list[HarborTask]:
+    """A folder with ``task.toml`` is one task; otherwise its direct children are the tasks.
+
+    With ``skipped``, a child that fails to load is recorded there under its folder name
+    and the others still load; without it the first failure raises. A root that is
+    itself a task always raises.
+    """
     root = Path(root).resolve()
     if not root.is_dir():
         raise HarborTaskError(f"{root} is not a directory")
@@ -116,4 +131,14 @@ def discover_tasks(root: Path) -> list[HarborTask]:
     children = sorted(child for child in root.iterdir() if child.is_dir() and is_task_folder(child))
     if not children:
         raise HarborTaskError(f"{root} is neither a task folder nor a folder of task folders (no {TASK_FILE} found)")
-    return [load_task(child) for child in children]
+    if skipped is None:
+        return [load_task(child) for child in children]
+    tasks: list[HarborTask] = []
+    for child in children:
+        try:
+            tasks.append(load_task(child))
+        except HarborTaskError as exc:
+            skipped[child.name] = exc
+    if not tasks:
+        raise HarborTaskError(f"No task under {root} loads; first error: {next(iter(skipped.values()))}")
+    return tasks

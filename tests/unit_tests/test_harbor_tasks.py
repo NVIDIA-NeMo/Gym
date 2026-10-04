@@ -2,12 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import logging
 import subprocess
+import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
+import nemo_gym.tasks.harbor.hub as hub_module
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTaskConfig, content_hash, discover_tasks, load_task
 from nemo_gym.tasks.harbor.cli import AgentSelection, PreparedTaskset, build_run, prepare_target, resolve_agent
 from nemo_gym.tasks.harbor.dockerfile import base_image_only
@@ -19,6 +23,7 @@ from nemo_gym.tasks.harbor.hub import (
     fetch_dataset,
     load_registry,
     resolve_dataset,
+    validate_git_url,
 )
 from nemo_gym.tasks.harbor.materialize import materialize_task, run_config, write_rows
 from nemo_gym.tasks.harbor.task import HarborTaskError
@@ -97,9 +102,28 @@ class TestTaskConfig:
     def test_docker_image_is_optional(self):
         assert HarborTaskConfig.model_validate({}).environment.docker_image is None
 
-    def test_unknown_keys_are_rejected(self):
-        with pytest.raises(ValueError):
-            HarborTaskConfig.model_validate({"environment": {"dockerfile": "x"}})
+    def test_unknown_keys_are_ignored_and_listed(self):
+        data = {
+            "allowlist": ["x"],
+            "version": "1.3",
+            "environment": {
+                "dockerfile": "x",
+                "image": "img",
+                "mcp_servers": [{"name": "t", "url": "http://x", "extra": 1}],
+                "healthcheck": {"command": "true", "retries_sec": 1},
+            },
+            "verifier": {"environment": {"docker_image": "v", "nope": 1}},
+        }
+        config = HarborTaskConfig.model_validate(data)
+        assert config.environment.docker_image == "img"
+        assert "dockerfile" not in config.environment.model_dump()
+        assert HarborTaskConfig.unknown_keys(data) == [
+            "allowlist",
+            "environment.dockerfile",
+            "environment.mcp_servers[0].extra",
+            "environment.healthcheck.retries_sec",
+            "verifier.environment.nope",
+        ]
 
     def test_mcp_server_needs_command_or_url(self):
         with pytest.raises(ValueError, match="stdio needs"):
@@ -199,6 +223,28 @@ class TestLoadTask:
         with pytest.raises(HarborTaskError, match="no instruction.md"):
             load_task(task)
 
+    def test_undecodable_files_are_task_errors(self, tmp_path):
+        task = write_task(tmp_path / "t")
+        (task / "task.toml").write_bytes(b"\xff\xfe not utf-8")
+        with pytest.raises(HarborTaskError, match="task.toml"):
+            load_task(task)
+        task = write_task(tmp_path / "u")
+        (task / "instruction.md").write_bytes(b"\xff\xfe")
+        with pytest.raises(HarborTaskError, match="instruction.md"):
+            load_task(task)
+
+    def test_unknown_task_toml_key_is_warned_once_per_key(self, tmp_path, caplog):
+        toml = HELLO_TOML.replace('schema_version = "1.4"', 'schema_version = "1.4"\nallowlist = ["pypi.org"]')
+        toml = toml.replace("gpus = 0", "gpus = 0\nnew_harbor_key = true")
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+            task = load_task(write_task(tmp_path / "t", toml=toml))
+        assert task.config.environment.gpus == 0
+        messages = [record.getMessage() for record in caplog.records]
+        assert len(messages) == 2
+        assert all(str(task.path / "task.toml") in message for message in messages)
+        assert any("`allowlist`" in message for message in messages)
+        assert any("`environment.new_harbor_key`" in message for message in messages)
+
 
 class TestDiscovery:
     def test_single_task_folder(self, tmp_path):
@@ -215,6 +261,34 @@ class TestDiscovery:
         (tmp_path / "empty").mkdir()
         with pytest.raises(HarborTaskError, match="neither a task folder"):
             discover_tasks(tmp_path / "empty")
+
+    def test_unknown_key_in_one_task_does_not_block_the_dataset(self, tmp_path, caplog):
+        write_task(tmp_path / "ds" / "a")
+        write_task(tmp_path / "ds" / "b", toml=HELLO_TOML + "\n[environment.allowlist]\nhosts = []\n")
+        write_task(tmp_path / "ds" / "c")
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+            tasks = discover_tasks(tmp_path / "ds")
+        assert [t.task_id for t in tasks] == ["a", "b", "c"]
+        assert [r.getMessage() for r in caplog.records] == [
+            f"{tmp_path.resolve() / 'ds' / 'b' / 'task.toml'}: ignoring unknown key `environment.allowlist`"
+        ]
+
+    def test_malformed_task_is_skipped_by_name(self, tmp_path):
+        write_task(tmp_path / "ds" / "a")
+        write_task(tmp_path / "ds" / "broken", toml="[task\nname = oops")
+        write_task(tmp_path / "ds" / "c")
+        with pytest.raises(HarborTaskError, match="broken"):
+            discover_tasks(tmp_path / "ds")
+        skipped: dict[str, HarborTaskError] = {}
+        tasks = discover_tasks(tmp_path / "ds", skipped=skipped)
+        assert [t.task_id for t in tasks] == ["a", "c"]
+        assert list(skipped) == ["broken"]
+        assert "broken/task.toml" in str(skipped["broken"])
+
+    def test_all_tasks_failing_is_still_an_error(self, tmp_path):
+        write_task(tmp_path / "ds" / "x", toml="not toml =")
+        with pytest.raises(HarborTaskError, match="No task under"):
+            discover_tasks(tmp_path / "ds", skipped={})
 
 
 class TestMaterialize:
@@ -299,6 +373,30 @@ class TestHub:
         with pytest.raises(HubError, match="not in the Harbor registry"):
             resolve_dataset(HubRef("nope", None), registry)
 
+    def test_mixed_numeric_and_named_versions_need_a_pin(self):
+        kumo = [RegistryDataset("kumo", "1.0", "", ()), RegistryDataset("kumo", "parity", "", ())]
+        with pytest.raises(HubError, match=r"1\.0, parity.*harbor:kumo@<version>"):
+            resolve_dataset(HubRef("kumo", None), kumo)
+        assert resolve_dataset(HubRef("kumo", "parity"), kumo).version == "parity"
+        assert resolve_dataset(HubRef("kumo", "1.0"), kumo).version == "1.0"
+
+    def test_named_versions_are_never_picked_arbitrarily(self):
+        lancer = [
+            RegistryDataset("swe-lancer-diamond", "diamond", "", ()),
+            RegistryDataset("swe-lancer-diamond", "latest", "", ()),
+        ]
+        with pytest.raises(HubError, match="pin one"):
+            resolve_dataset(HubRef("swe-lancer-diamond", None), lancer)
+        assert resolve_dataset(HubRef("swe-lancer-diamond", "diamond"), lancer).version == "diamond"
+        # One entry is unambiguous whatever its version is called.
+        assert resolve_dataset(HubRef("swe-lancer-diamond", None), lancer[:1]).version == "diamond"
+
+    def test_folder_name_includes_the_version(self):
+        assert RegistryDataset("kumo", "1.0", "", ()).folder_name == "kumo-1.0"
+        assert RegistryDataset("kumo", "parity", "", ()).folder_name == "kumo-parity"
+        assert RegistryDataset("kumo", "a/b c", "", ()).folder_name == "kumo-a-b-c"
+        assert RegistryDataset("kumo", "", "", ()).folder_name == "kumo"
+
     def test_load_registry_uses_cache(self, tmp_path):
         cache = tmp_path / ".harbor"
         cache.mkdir()
@@ -309,13 +407,54 @@ class TestHub:
                         "name": "hello-world",
                         "version": "1.0",
                         "description": "d",
-                        "tasks": [{"name": "hello-world", "git_url": "u", "git_commit_id": "HEAD", "path": "p"}],
+                        "tasks": [
+                            {
+                                "name": "hello-world",
+                                "git_url": "https://github.com/x/y",
+                                "git_commit_id": "HEAD",
+                                "path": "p",
+                            }
+                        ],
                     }
                 ]
             )
         )
         [dataset] = load_registry(cache)
-        assert dataset.tasks == (RegistryTask("hello-world", "u", "HEAD", "p"),)
+        assert dataset.tasks == (RegistryTask("hello-world", "https://github.com/x/y", "HEAD", "p"),)
+
+    @pytest.mark.parametrize(
+        "url",
+        ["https://github.com/x/y.git", "ssh://git@github.com/x/y", "git://host/x", "git@github.com:x/y.git"],
+    )
+    def test_registry_git_urls_that_git_fetches_over_the_network(self, url):
+        assert validate_git_url(url) == url
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "-oProxyCommand=touch /tmp/pwned",
+            "--upload-pack=touch /tmp/pwned",
+            "ext::sh -c 'touch /tmp/pwned'",
+            "file:///etc",
+            "/etc/passwd",
+            "git@-evil:x",
+            "git@host:-flag",
+            "https://",
+        ],
+    )
+    def test_registry_git_urls_that_are_refused(self, tmp_path, url):
+        with pytest.raises(HubError, match="Unsupported git_url"):
+            validate_git_url(url)
+        cache = tmp_path / ".harbor"
+        cache.mkdir()
+        entry = {
+            "name": "d",
+            "version": "1",
+            "tasks": [{"name": "t", "git_url": url, "git_commit_id": "HEAD", "path": "p"}],
+        }
+        (cache / "registry.json").write_text(json.dumps([entry]))
+        with pytest.raises(HubError, match="Unsupported git_url"):
+            load_registry(cache)
 
     def test_fetch_dataset_pins_head_and_copies_tasks(self, tmp_path):
         repo = tmp_path / "repo"
@@ -344,7 +483,7 @@ class TestHub:
 
         folder = fetch_dataset(dataset, tmp_path / "datasets")
 
-        assert folder == tmp_path / "datasets" / "hello-world"
+        assert folder == tmp_path / "datasets" / "hello-world-1.0"
         assert (folder / "hello-world" / "task.toml").is_file()
         assert (folder / "renamed" / "tests" / "test.sh").is_file()
         manifest = (folder / "manifest.toml").read_text()
@@ -355,6 +494,60 @@ class TestHub:
         # A rerun keeps existing folders and does not need the repository again.
         assert fetch_dataset(dataset, tmp_path / "datasets") == folder
 
+        # HEAD moves. Present folders keep their pin; only the new task resolves HEAD.
+        write_task(repo / "examples" / "tasks" / "third")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "more"],
+            check=True,
+        )
+        new_head = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+        assert new_head != head
+        grown = RegistryDataset(
+            dataset.name,
+            dataset.version,
+            "",
+            (*dataset.tasks, RegistryTask("third", url, "HEAD", "examples/tasks/third")),
+        )
+        assert fetch_dataset(grown, tmp_path / "datasets") == folder
+        pins = tomllib.loads((folder / "manifest.toml").read_text())["tasks"]
+        assert pins["hello-world"]["git_commit_id"] == head
+        assert pins["renamed"]["git_commit_id"] == head
+        assert pins["third"]["git_commit_id"] == new_head
+        assert (folder / "third" / "task.toml").is_file()
+
+    def test_fetch_resolves_head_once_per_repo_and_shields_urls(self, tmp_path, monkeypatch):
+        url = "https://github.com/org/tasks.git"
+        sha = "a" * 40
+        calls: list[list[str]] = []
+
+        def fake_run(argv, cwd=None, **kwargs):
+            calls.append(list(argv))
+            if argv[1] == "ls-remote":
+                return SimpleNamespace(stdout=f"{sha}\tHEAD\n", stderr="")
+            if argv[1] == "clone":
+                for task in dataset.tasks:
+                    write_task(Path(argv[-1]) / task.path)
+            return SimpleNamespace(stdout="", stderr="")
+
+        monkeypatch.setattr(hub_module.subprocess, "run", fake_run)
+        dataset = RegistryDataset(
+            "big", "2.0", "", tuple(RegistryTask(f"t{i}", url, "HEAD", f"tasks/t{i}") for i in range(12))
+        )
+
+        folder = fetch_dataset(dataset, tmp_path / "datasets")
+
+        ls_remotes = [argv for argv in calls if argv[1] == "ls-remote"]
+        clones = [argv for argv in calls if argv[1] == "clone"]
+        assert len(ls_remotes) == 1 and len(clones) == 1
+        assert ls_remotes[0][-3:] == ["--", url, "HEAD"]
+        assert clones[0][-3:-1] == ["--", url]
+        assert sorted(p.name for p in folder.iterdir() if p.is_dir()) == sorted(t.name for t in dataset.tasks)
+        pins = tomllib.loads((folder / "manifest.toml").read_text())["tasks"]
+        assert {pin["git_commit_id"] for pin in pins.values()} == {sha}
+
 
 class TestCli:
     def test_prepare_local_folder(self, tmp_path):
@@ -364,6 +557,19 @@ class TestCli:
         assert prepared.taskset == "ds"
         assert prepared.rows_path == tmp_path / "out" / "ds" / "tasks.jsonl"
         assert [t.task_id for t in prepared.tasks] == ["a"]
+        assert prepared.skipped == {}
+
+    def test_prepare_skips_tasks_that_do_not_load(self, tmp_path, caplog):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        write_task(folder / "bad", toml="[[steps]]\nname = 'x'")
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.cli"):
+            prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        assert [t.task_id for t in prepared.tasks] == ["a"]
+        assert list(prepared.skipped) == ["bad"]
+        assert "Multi-step" in prepared.skipped["bad"]
+        assert any("Skipping task bad" in r.getMessage() for r in caplog.records)
+        assert len(prepared.rows_path.read_text().splitlines()) == 1
 
     def test_resolve_agent_accepts_short_name(self):
         selection = resolve_agent("hermes")
