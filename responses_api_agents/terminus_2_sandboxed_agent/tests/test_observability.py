@@ -198,7 +198,84 @@ def execution(monkeypatch):
         client.post = post
         return json.loads((await server.run(request, body)).model_dump_json(by_alias=True))
 
-    return SimpleNamespace(run=run, calls=calls, mode=mode, client=client, agents=agents, commands=commands)
+    return SimpleNamespace(
+        run=run,
+        calls=calls,
+        mode=mode,
+        client=client,
+        agents=agents,
+        commands=commands,
+        server=server,
+        sandbox=sandbox,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exception,status", [(ValueError("setup failed"), "failed"), (asyncio.CancelledError(), "incomplete")]
+)
+async def test_setup_failure_is_a_rollout_result_and_releases_sandbox(execution, monkeypatch, exception, status):
+    monkeypatch.setattr(app_module.NeMoGymTerminus2, "setup", AsyncMock(side_effect=exception))
+    result = await execution.run()
+    assert result["terminus2_completed"] is False
+    assert type(exception).__name__ in result["error"]
+    assert result["ng_agent_observations"]["records"][0]["status"] == status
+    assert not execution.calls
+    execution.sandbox.stop.assert_awaited_once()
+    assert not execution.server._session_sandboxes
+
+
+@pytest.mark.asyncio
+async def test_setup_uses_the_rollout_timeout(execution, monkeypatch):
+    execution.server.config.sandbox_timeout = 0.01
+    started = asyncio.Event()
+
+    async def setup(*args):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(app_module.NeMoGymTerminus2, "setup", setup)
+    result = await asyncio.wait_for(execution.run(), timeout=1)
+    assert started.is_set()
+    assert result["terminus2_completed"] is False
+    assert "TimeoutError" in result["error"]
+    assert result["ng_agent_observations"]["records"][0]["status"] == "incomplete"
+    assert not execution.calls
+    execution.sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failures,message", [(2, "Input/output error"), (3, "Input/output error"), (1, "Permission denied")]
+)
+async def test_tmux_install_retries_io_errors_without_aborting_collection(execution, monkeypatch, failures, message):
+    execution.server.config.remote_tmux_binary_path = "/mounted binaries/tmux"
+    attempts = []
+    sleep = AsyncMock()
+    monkeypatch.setattr(app_module.asyncio, "sleep", sleep)
+
+    async def sandbox_exec(command, **kwargs):
+        if "&& cp " in command:
+            attempts.append((command, kwargs))
+            return SimpleNamespace(return_code=int(len(attempts) <= failures), stdout=message, stderr="")
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    execution.sandbox.exec.side_effect = sandbox_exec
+    result = await execution.run()
+    recovered = failures == 2
+    assert result["terminus2_completed"] is recovered
+    assert len(attempts) == (3 if message == "Input/output error" else 1)
+    assert all("cp '/mounted binaries/tmux' /usr/local/bin/tmux" in command for command, _ in attempts)
+    assert all(kwargs["timeout_s"] == 30 for _, kwargs in attempts)
+    assert [call.args[0] for call in sleep.await_args_list if call.args[0]] == (
+        [1, 2] if message == "Input/output error" else []
+    )
+    assert len(execution.calls) == (2 if recovered else 0)
+    if not recovered:
+        assert message in result["error"]
+        assert result["ng_agent_observations"]["records"][0]["status"] == "failed"
+    execution.sandbox.stop.assert_awaited_once()
+    assert not execution.server._session_sandboxes
 
 
 def save_and_check(execution, result, tmp_path):

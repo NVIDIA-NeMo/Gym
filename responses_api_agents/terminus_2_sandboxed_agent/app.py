@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import shlex
 import sys
 import tempfile
 from copy import deepcopy
@@ -56,6 +57,9 @@ from nemo_gym.server_utils import (
     raise_for_status,
 )
 from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
+
+
+logger = logging.getLogger(__name__)
 
 
 class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
@@ -429,6 +433,26 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         sandbox = await AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=provider)
         return sandbox
 
+    async def _install_tmux(self, sandbox: AsyncSandbox, binary_path: str) -> None:
+        # Preserve existing PATH precedence when installing the configured binary.
+        command = (
+            "mkdir -p /usr/local/bin"
+            f" && cp {shlex.quote(binary_path)} /usr/local/bin/tmux"
+            " && chmod +x /usr/local/bin/tmux"
+            " && export PATH=$PATH:/usr/local/bin && tmux -V"
+        )
+        for attempt in range(3):
+            result = await sandbox.exec(command, timeout_s=30)
+            if result.return_code == 0:
+                return
+            diagnostic = f"{result.stdout or ''}\n{result.stderr or ''}"
+            # A mounted binary can transiently fail to read. Retrying this
+            # idempotent copy is safe; missing files and permissions fail early.
+            if "Input/output error" not in diagnostic or attempt == 2:
+                raise RuntimeError(f"Could not install tmux (exit {result.return_code}): {diagnostic}")
+            logger.warning("tmux installation hit an I/O error; retrying (%s/3)", attempt + 1)
+            await asyncio.sleep(attempt + 1)
+
     async def _execute(
         self,
         request: Request,
@@ -487,26 +511,21 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 interleaved_thinking=self.config.interleaved_thinking,
             )
 
-            await environment.exec("mkdir -p /logs/agent", user="root")
-            if self.config.remote_tmux_binary_path:
-                # We add the /usr/local/bin path at the end to not supersede and pre-existing orderings.
-                tmux_install_result = await sandbox.exec(
-                    f"""mkdir -p /usr/local/bin \
-&& cp {self.config.remote_tmux_binary_path} /usr/local/bin/tmux \
-&& chmod +x /usr/local/bin/tmux \
-&& export PATH=$PATH:/usr/local/bin \
-&& tmux -V""",
-                )
-                assert tmux_install_result.return_code == 0, tmux_install_result
-            else:
-                print(
-                    "Downloading and installing tmux in the sandbox. Please consider mounting or uploading the appropriate tmux binary instead!",
-                    file=sys.stderr,
-                )
-            await agent.setup(environment)
-
             try:
                 async with asyncio.timeout(self.config.sandbox_timeout):
+                    # Setup failures belong to this rollout, just like failures
+                    # during agent execution; they must not escape as HTTP 500s.
+                    logs_result = await environment.exec("mkdir -p /logs/agent", user="root")
+                    if logs_result.return_code != 0:
+                        raise RuntimeError(f"Could not create agent log directory: {logs_result}")
+                    if self.config.remote_tmux_binary_path:
+                        await self._install_tmux(sandbox, self.config.remote_tmux_binary_path)
+                    else:
+                        print(
+                            "Downloading and installing tmux in the sandbox. Please consider mounting or uploading the appropriate tmux binary instead!",
+                            file=sys.stderr,
+                        )
+                    await agent.setup(environment)
                     await agent.run(instruction, environment, context)
                 terminus2_completed = True
                 error = None
