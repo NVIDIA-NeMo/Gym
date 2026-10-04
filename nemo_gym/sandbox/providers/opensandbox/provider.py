@@ -1698,11 +1698,10 @@ class OpenSandboxProvider:
         if status_timeout_s is None:
             status_timeout_s = poll_timeout_s
 
-        def _status_poll_is_retryable(exception: BaseException) -> bool:
-            # The short budget makes poll timeouts routine rather than fatal:
-            # re-polling a status is an idempotent GET, so unlike a submit
-            # (where a timeout stays terminal to avoid a double-run) a timed-out
-            # poll retries within the normal budget instead of killing the command.
+        def _command_read_is_retryable(exception: BaseException) -> bool:
+            # Status and log reads are idempotent GETs for the same execution.
+            # Retry timed-out reads within the normal budget; submit timeouts
+            # stay terminal because retrying could run the command twice.
             if isinstance(exception, TimeoutError):
                 return True
             return _is_retryable_sdk_operation_error(exception)
@@ -1717,7 +1716,7 @@ class OpenSandboxProvider:
                 sandbox_id=handle.sandbox_id,
                 timeout_s=status_timeout_s,
                 retries=self._operations.retries,
-                is_retryable=_status_poll_is_retryable,
+                is_retryable=_command_read_is_retryable,
             )
             # A renamed SDK field must not degrade silently: a missing `running`
             # would end the poll at once, a missing `exit_code` would score a
@@ -1744,6 +1743,7 @@ class OpenSandboxProvider:
             sandbox_id=handle.sandbox_id,
             timeout_s=poll_timeout_s,
             retries=self._operations.retries,
+            is_retryable=_command_read_is_retryable,
         )
         stdout = getattr(logs, "content", None) or None
         status_error = getattr(status, "error", None)
