@@ -165,5 +165,14 @@ A live Slurm/Pyxis comparison on 2026-10-04 (job `7175467`) ran
 Gemini 3 Flash judge. Direct native execution and `gym eval run` both returned
 `0.715`, with identical seed, runtime hash, and profile hash. Both traces called
 the mock Gmail tool and reported no execution failure. This is a one-task
-integration smoke test, not full-suite baselining. Multimodal/multi-turn and
-Factory-launched live validation remain required before certification.
+integration smoke test, not full-suite baselining.
+
+A Factory backend smoke on the same date (job `7175842`) submitted the general
+recipe with a CPU allocation and external GPT-4o mini endpoint, limited to
+`T001zh_email_triage`. Seeds 1001/1002/1003 scored 0.935/0.870/0.935; all three
+trials completed, with native mean score 0.913333 and Pass@1, Pass@3 and strict
+Pass³ of 1.0 for this single task. The pinned Gym commit was
+`e2a4a6b15a9b4be119e24275e537b8fce0c4bd5c`. Native calls are not instrumented
+by Gym's model telemetry, so rollout health reports these trials as unobserved.
+Multimodal/multi-turn smokes, the Factory Super 3.5 serving run and full-suite
+parity remain required before certification.
