@@ -79,6 +79,23 @@ def _extract_patch(repo: Path, index_path: Path, baseline_tree: str) -> str:
     ).stdout
 
 
+def _runner_global_config(model_url: str, server_name: str) -> dict:
+    """Global config for the inner agent, which has no Gym config of its own."""
+    from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT
+    from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK
+
+    if not model_url:
+        return {}
+    global_config = {server_name: {"responses_api_models": {"model": {"host": "0.0.0.0", "port": 0}}}}
+    # The outer agent hands over a model URL that already carries the rollout prefix. When that is the
+    # training-token-capture prefix, the inner agent must know capture is on so it emits a transcript that
+    # terminal attribution can join to a captured call (claude_code_agent: separate reasoning items and the
+    # served response id).
+    if f"/{TOKEN_CAPTURE_PATH_SEGMENT}" in model_url:
+        global_config[TOKEN_ID_CAPTURE_BLOCK] = {"enabled": True, "all_agents": True}
+    return global_config
+
+
 def main() -> None:
     model_url = os.environ.get("NGSWE_MODEL_URL", "")
     model_name = os.environ["NGSWE_MODEL_NAME"]
@@ -95,9 +112,7 @@ def main() -> None:
     config_class = getattr(module, os.environ["NGSWE_AGENT_CONFIG_CLASS"])
 
     server_name = "policy_model"
-    global_config = (
-        {server_name: {"responses_api_models": {"model": {"host": "0.0.0.0", "port": 0}}}} if model_url else {}
-    )
+    global_config = _runner_global_config(model_url, server_name)
     client = ServerClient.model_construct(global_config_dict=global_config)
     client._build_server_base_url = lambda config: model_url
     config_sampling = {key: value for key, value in sampling.items() if key in config_class.model_fields}
