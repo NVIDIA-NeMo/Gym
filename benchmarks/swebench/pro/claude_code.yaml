@@ -1,0 +1,35 @@
+# Claude Code on SWE Bench Pro: opencode.yaml's derived resources server and dataset with the
+# Claude Code agent. Pro mixes glibc and Alpine (musl) task images, so set both binary paths.
+config_paths:
+- responses_api_agents/claude_code_sandboxed_agent/configs/claude_code_sandboxed_agent.yaml
+- resources_servers/swebench_pro/configs/swebench_pro.yaml
+
+swebench_pro_claude_code_resources_server:
+  _inherit_from: swebench_pro_resources_server
+
+  resources_servers:
+    swebench_pro:
+      allowed_agents: [claude_code_sandboxed_agent]
+
+swebench_pro_claude_code_sandboxed_agent:
+  _inherit_from: claude_code_sandboxed_agent
+  responses_api_agents:
+    claude_code_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: swebench_pro_claude_code_resources_server
+      auto_compact: false
+      datasets:
+        - name: swebench_pro
+          type: benchmark
+          jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
+          prepare_script: benchmarks/swebench/pro/prepare.py
+          num_repeats: 3
+
+swebench_pro_claude_code_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swebench_pro_claude_code_sandboxed_agent
