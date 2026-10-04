@@ -57,11 +57,18 @@ class TerminalBenchEnvironment(DatasetEnvironment):
             cwd=self.repo_path,
             timeout=int(timeout or float(self.instance.get("verifier_timeout_sec") or 900)),
         )
+        if res.get("reason") != "ok":
+            return 0.0, str(res.get("output", "")), {"transport_error": True}
         raw = self.execute(f"cat {shlex.quote(self.REWARD_FILE)}", cwd="/").get("output", "").strip()
         try:
             reward = float(raw.splitlines()[-1])
         except (ValueError, IndexError):
-            return 0.0, str(res.get("output", "")), {"error": f"no reward file ({raw[:200]!r})"}
+            # test.sh always writes the reward file, so its absence is a broken testbed.
+            return (
+                0.0,
+                str(res.get("output", "")),
+                {"error_category": "testbed_corrupted", "reward_error": "no reward file"},
+            )
         return reward, str(res.get("output", "")), {"verifier_returncode": res.get("returncode")}
 
 

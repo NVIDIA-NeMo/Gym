@@ -16,6 +16,7 @@ from typing import Any
 
 from pydantic import ConfigDict
 
+from nemo_gym import failure_kinds
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -61,11 +62,22 @@ class MimoMusicResourcesServer(SimpleResourcesServer):
         ensure_abc2midi()
 
     async def verify(self, body: MimoMusicVerifyRequest) -> MimoMusicVerifyResponse:
-        from resources_servers.mimo_music.scorer import compute_score, extract_abc
+        from resources_servers.mimo_music.scorer import Abc2MidiMissing, compute_score, extract_abc
 
         text = _final_text(body.response)
-        reward = await asyncio.to_thread(compute_score, "music", text)
-        return MimoMusicVerifyResponse(**body.model_dump(), reward=reward, abc_found=extract_abc(text) is not None)
+        found = extract_abc(text) is not None
+        try:
+            reward = await asyncio.to_thread(compute_score, "music", text)
+        except Abc2MidiMissing as e:
+            return MimoMusicVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                abc_found=found,
+                mask_sample=True,
+                failure_kind=failure_kinds.VERIFIER_ERROR,
+                failure_reason=str(e),
+            )
+        return MimoMusicVerifyResponse(**body.model_dump(), reward=reward, abc_found=found)
 
 
 if __name__ == "__main__":
