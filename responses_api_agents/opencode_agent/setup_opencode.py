@@ -80,7 +80,10 @@ def installed_opencode_version() -> str | None:
         out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=60)  # noqa: S603
     except (OSError, subprocess.SubprocessError):
         return None
-    return (out.stdout or out.stderr).strip().splitlines()[-1].strip() if out.returncode == 0 else None
+    if out.returncode != 0:
+        return None
+    lines = (out.stdout.strip() or out.stderr.strip()).splitlines()
+    return lines[-1].strip() if lines else None
 
 
 def ensure_opencode(version: str | None = None) -> None:
