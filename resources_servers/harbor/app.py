@@ -48,7 +48,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
@@ -322,7 +322,11 @@ class HarborResourcesServer(SimpleResourcesServer):
     ) -> SandboxSpec:
         """The agent's sandbox by default; pass the verifier's environment for a separate verifier."""
         global_config_dict = get_global_config_dict()
-        environment = environment or task.config.environment
+        if environment is None:
+            # The agent's sandbox: Dockerfile ENV recorded by the loader, overridden by `[environment.env]`.
+            environment, task_env = task.config.environment, task.env
+        else:
+            task_env = environment.env
         metadata = (
             resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
             | self.config.sandbox_metadata
@@ -332,7 +336,7 @@ class HarborResourcesServer(SimpleResourcesServer):
             ttl = task.config.agent.timeout_sec + task.config.verifier.timeout_sec + self.config.sandbox_ttl_slack_s
         # The override replaces only the keys it names, so a GPU task routed to the GPU provider keeps `gpu`.
         resources = _sandbox_resources(environment) | (self.config.sandbox_resources_override or {})
-        env = dict(self.config.sandbox_env) | dict(environment.env)
+        env = dict(self.config.sandbox_env) | dict(task_env)
         if self.config.derive_cpu_env:
             env = cpu_cap_env(resources.get("cpu")) | env
         return SandboxSpec(

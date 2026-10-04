@@ -15,6 +15,7 @@ from pytest import MonkeyPatch
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
+from nemo_gym.tasks.harbor.models import HarborEnvironment
 from resources_servers.harbor.app import (
     HarborResourcesServer,
     HarborResourcesServerConfig,
@@ -693,6 +694,25 @@ class TestSeparateVerification:
             "/close_session", json={"resources_session_id": "rs-1", "episode_id": {"rollout_id": "r1", "attempt": 0}}
         )
         assert close.status_code == 200 and not agent.stopped
+
+    def test_sandbox_spec_applies_dockerfile_env(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(
+            tmp_path, monkeypatch, dockerfile="FROM ubuntu:24.04\nWORKDIR /app\nENV FOO=bar\nENV MODE=image\n"
+        )
+        (task.path / "task.toml").write_text(TASK_TOML + '\n[environment.env]\nMODE = "toml"\n')
+        task = load_task(task.path)
+        monkeypatch.setattr(
+            "resources_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+
+        spec = server._sandbox_spec(task, "/app")
+
+        # Dockerfile ENV reaches the agent's sandbox, and task.toml [environment.env] wins over it.
+        assert spec.env["FOO"] == "bar" and spec.env["MODE"] == "toml"
+
+        verifier_environment = HarborEnvironment(docker_image="org/verifier:1", env={"ONLY": "verifier"})
+        verifier_spec = server._sandbox_spec(task, None, environment=verifier_environment, role="verifier")
+        assert "FOO" not in verifier_spec.env and verifier_spec.env["ONLY"] == "verifier"
 
     def test_verifier_sandbox_spec_uses_the_verifier_environment(self, tmp_path, monkeypatch):
         server, task, _, _, _, _ = self.seeded(tmp_path, monkeypatch)
