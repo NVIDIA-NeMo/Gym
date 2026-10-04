@@ -49,6 +49,7 @@ from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.opencode_sandboxed_agent import app as app_module
 from responses_api_agents.opencode_sandboxed_agent.app import (
+    SQLITE_SNAPSHOT_SCRIPT,
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
     OpenCodeSandboxedAgentRunRequest,
@@ -574,3 +575,91 @@ class TestOpenCodeSandboxedAgent:
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
+
+class TestSqliteSnapshotScript:
+    """The snapshot runs inside the instance sandbox, on whatever ``python3`` that image ships.
+
+    SWE-bench pins django <= 3.2, scikit-learn <= 0.22 and astropy 1.3 to Python 3.6, which has
+    no ``sqlite3.Connection.backup``. Those instances lost their whole trajectory, so the script
+    must not depend on it.
+    """
+
+    @staticmethod
+    def _seed_database(path: Path) -> sqlite3.Connection:
+        """Seed a WAL database and leave it open, as OpenCode holds it when the snapshot runs."""
+        connection = sqlite3.connect(path)
+        connection.execute("pragma journal_mode=wal")
+        connection.execute("create table session (id text, parent_id text, time_created integer)")
+        connection.execute("create table part (id text, session_id text, data text, blob blob)")
+        connection.execute("create index part_session on part (session_id)")
+        connection.commit()
+        connection.execute("pragma wal_checkpoint(truncate)")
+        connection.execute("insert into session values ('root', null, 0)")
+        connection.execute(
+            "insert into part values (?, ?, ?, ?)",
+            ("p1", "root", json.dumps({"tool": "bash", "input": {"command": "ls -la 'quoted'"}}), b"\x00\xff"),
+        )
+        connection.commit()
+        return connection
+
+    @staticmethod
+    def _contents(path: Path) -> tuple[Any, ...]:
+        connection = sqlite3.connect(path)
+        try:
+            return (
+                connection.execute("select * from session").fetchall(),
+                connection.execute("select * from part").fetchall(),
+                sorted(row[0] for row in connection.execute("select name from sqlite_master where type='index'")),
+            )
+        finally:
+            connection.close()
+
+    def _run(self, script: str, source: Path, destination: Path) -> None:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(source), str(destination)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_snapshot_preserves_rows_written_only_to_the_wal(self, tmp_path: Path) -> None:
+        source = tmp_path / "opencode.db"
+        connection = self._seed_database(source)
+        try:
+            # The rows are in the -wal, not the main file: a plain copy would lose them.
+            assert source.with_name(f"{source.name}-wal").stat().st_size > 0
+            main_only = tmp_path / "main-only.db"
+            main_only.write_bytes(source.read_bytes())
+            assert self._contents(main_only)[0] == []
+
+            destination = tmp_path / "snapshot.db"
+            self._run(SQLITE_SNAPSHOT_SCRIPT, source, destination)
+        finally:
+            connection.close()
+
+        sessions, parts, indexes = self._contents(destination)
+        assert sessions == [("root", None, 0)]
+        assert json.loads(parts[0][2])["input"]["command"] == "ls -la 'quoted'"
+        assert parts[0][3] == b"\x00\xff"
+        assert "part_session" in indexes
+
+    def test_snapshot_without_connection_backup_matches_backup(self, tmp_path: Path) -> None:
+        source = tmp_path / "opencode.db"
+        connection = self._seed_database(source)
+
+        # Python 3.6 reaches the same branch by not having ``Connection.backup`` at all; forcing
+        # the guard false is the only way to exercise it from a modern interpreter.
+        fallback_script = SQLITE_SNAPSHOT_SCRIPT.replace("hasattr(source,'backup')", "False")
+        assert fallback_script != SQLITE_SNAPSHOT_SCRIPT
+        assert "iterdump" in fallback_script
+
+        with_backup = tmp_path / "with_backup.db"
+        without_backup = tmp_path / "without_backup.db"
+        try:
+            self._run(SQLITE_SNAPSHOT_SCRIPT, source, with_backup)
+            self._run(fallback_script, source, without_backup)
+        finally:
+            connection.close()
+
+        assert self._contents(without_backup) == self._contents(with_backup)
+        assert self._contents(with_backup)[0] == [("root", None, 0)]

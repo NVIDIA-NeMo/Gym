@@ -71,6 +71,21 @@ from nemo_gym.server_utils import (
 )
 
 
+# Snapshot OpenCode's SQLite database inside the sandbox before the workspace is torn down.
+# ``Connection.backup`` is Python 3.7+, but SWE-bench pins whole environments to 3.6
+# (django <= 3.2, scikit-learn <= 0.22, astropy 1.3), where it raises AttributeError and the
+# rollout loses its entire trajectory. ``iterdump`` exists on 3.6 and reproduces the database
+# faithfully, so fall back to it rather than depending on the instance's interpreter version.
+SQLITE_SNAPSHOT_SCRIPT = (
+    "import sqlite3,sys;"
+    "source=sqlite3.connect(f'file:{sys.argv[1]}?mode=ro',uri=True);"
+    "destination=sqlite3.connect(sys.argv[2]);"
+    "source.backup(destination) if hasattr(source,'backup') "
+    "else destination.executescript('\\n'.join(source.iterdump()));"
+    "destination.close();source.close()"
+)
+
+
 def _load_json(value: Any) -> dict[str, Any]:
     try:
         parsed = json.loads(value)
@@ -785,20 +800,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             observations_local_fpath = results_dir / "opencode.db"
             observations_local_fpath.unlink(missing_ok=True)
             try:
-                snapshot_script = (
-                    "import sqlite3,sys;"
-                    "source=sqlite3.connect(f'file:{sys.argv[1]}?mode=ro',uri=True);"
-                    "destination=sqlite3.connect(sys.argv[2]);"
-                    "source.backup(destination);destination.close();source.close()"
-                )
                 snapshot_result = await sandbox.exec(
                     command=(
-                        f"python3 -c {quote(snapshot_script)} "
+                        f"python3 -c {quote(SQLITE_SNAPSHOT_SCRIPT)} "
                         f"{quote(observations_remote_fpath)} {quote(snapshot_remote_fpath)}"
                     )
                 )
                 if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:
-                    raise RuntimeError("OpenCode database snapshot failed")
+                    raise RuntimeError(
+                        f"OpenCode database snapshot failed "
+                        f"(return_code={snapshot_result.return_code}, "
+                        f"error_type={snapshot_result.error_type}): {snapshot_result.stderr}"
+                    )
                 await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
                 observations = parse_opencode_observations(observations_local_fpath, observation_invocation_id)
             except Exception:
