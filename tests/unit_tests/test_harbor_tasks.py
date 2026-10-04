@@ -604,3 +604,12 @@ class TestCli:
         assert "resources_servers/harbor/configs/harbor.yaml" in config_paths
         assert "opensandbox/configs/opensandbox.yaml" in config_paths
         assert f"+output_jsonl_fpath={tmp_path / 'out' / 'rollouts.jsonl'}" in tokens
+
+
+def test_harbor_task_data_schema_names_the_digest_key():
+    """The schema module may import only pydantic, so the key is spelled out; keep it equal to DIGEST_KEY."""
+    from resources_servers.harbor.task_data import TaskData
+
+    assert TaskData.model_fields["ng_digest"].alias == DIGEST_KEY
+    data = TaskData.model_validate({DIGEST_KEY: "abc", "other": 1})
+    assert data.ng_digest == "abc" and data.model_dump(by_alias=True)[DIGEST_KEY] == "abc"
