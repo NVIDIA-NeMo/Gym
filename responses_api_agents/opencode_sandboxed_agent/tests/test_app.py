@@ -212,11 +212,18 @@ class TestOpenCodeSandboxedAgent:
         assert expected_usages == actual_usages
 
     @mark.parametrize("remaining_context", [False, True])
+    @mark.parametrize("freeze_prompt_date", [False, True])
     async def test_responses_sanity(
-        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch, remaining_context
+        self,
+        opencode_export_test_data: Dict[str, Any],
+        monkeypatch: MonkeyPatch,
+        remaining_context,
+        freeze_prompt_date: bool,
     ) -> None:
         config = self._create_config()
         config.output_token_policy = "remaining_context" if remaining_context else "fixed"
+        config.freeze_system_prompt_date = freeze_prompt_date
+        plugin_source = Path(app_module.__file__).with_name("stable_prompt_date.mjs").read_text()
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
         sandbox_mock = MagicMock()
@@ -240,7 +247,7 @@ class TestOpenCodeSandboxedAgent:
         )
         monkeypatch.setattr(
             "responses_api_agents.opencode_sandboxed_agent.app.Path.read_text",
-            lambda self: json.dumps(opencode_export_test_data),
+            lambda self: plugin_source if self.suffix == ".mjs" else json.dumps(opencode_export_test_data),
         )
         monkeypatch.setattr(
             "responses_api_agents.opencode_sandboxed_agent.app.uuid4", MagicMock(return_value=MagicMock(hex=""))
@@ -258,6 +265,11 @@ class TestOpenCodeSandboxedAgent:
                 input=[{"role": "user", "content": "hello"}],
             ),
         )
+        run_command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        assert ("stablePromptDate" in run_command) is freeze_prompt_date
+        assert ("file:///tmp/nemo-gym-prompt-date-" in run_command) is freeze_prompt_date
+        if freeze_prompt_date:
+            assert run_command.index("printf '%s'") < run_command.index("OPENCODE_CONFIG_CONTENT=")
         expected_response = NeMoGymResponse(
             id="resp_",
             created_at=0.0,

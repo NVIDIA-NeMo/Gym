@@ -159,3 +159,11 @@ Use an immutable base digest for published deployments. No API credentials, mode
 checkpoints, benchmark questions or reference answers belong in either image.
 Validate real Python and MCP rollouts, network isolation, and sandbox cleanup before
 promoting a new image.
+
+### Stable date during token capture
+
+Set `freeze_system_prompt_date: true` for training runs that require exact conversation-prefix lineage.
+An OpenCode `experimental.chat.system.transform` hook keeps only the environment's `Today's date`
+field at the first value seen by each rollout process, including across midnight. Other prompt text,
+tool results, clocks, timeouts, and capture guards are unchanged. The default is `false`; the hook
+fails if the expected single environment-date field is absent or ambiguous.

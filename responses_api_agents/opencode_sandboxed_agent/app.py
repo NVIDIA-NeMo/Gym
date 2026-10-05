@@ -433,6 +433,8 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_binary_path: Optional[str] = None
     remote_opencode_musl_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
+    # Keep the harness date stable across UTC midnight for strict token-capture lineage.
+    freeze_system_prompt_date: bool = False
     opencode_max_context_window: int
     concurrency: int = Field(default=64, gt=0)
     preinstalled_opencode: bool = False
@@ -454,6 +456,16 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
+
+
+def _prepare_prompt_date_plugin(config: Dict[str, Any], *, plugin_path: str) -> tuple[Dict[str, Any], str]:
+    """Stage a per-rollout OpenCode hook without changing other prompt content."""
+    plugins = config.get("plugin", [])
+    if not isinstance(plugins, list):
+        raise ValueError("OpenCode plugin config must be a list when freeze_system_prompt_date is enabled")
+    source = Path(__file__).with_name("stable_prompt_date.mjs").read_text()
+    updated = {**config, "plugin": [*plugins, f"file://{plugin_path}"]}
+    return updated, f"printf '%s' {quote(source)} > {quote(plugin_path)}"
 
 
 def _build_remote_opencode_install_command(
@@ -824,6 +836,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             value = getattr(body, name, None)
             if value is not None:
                 build_agent[name] = value
+        prompt_date_setup = ":"
+        if self.config.freeze_system_prompt_date:
+            effective_config, prompt_date_setup = _prepare_prompt_date_plugin(
+                effective_config, plugin_path=f"/tmp/nemo-gym-prompt-date-{uuid4().hex}.mjs"
+            )
         opencode_config_content = json.dumps(effective_config)
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
@@ -845,6 +862,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
+        && {prompt_date_setup} \
         && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
         && echo "OpenCode run finished"
