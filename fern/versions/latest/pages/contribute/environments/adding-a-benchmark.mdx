@@ -37,10 +37,6 @@ The scaffold creates `benchmarks/hello_world/` and `resources_servers/hello_worl
 {"question": "What is 6 x 7?", "expected_answer": "42"}
 ```
 
-`prepare.py` writes that row to `data/example.jsonl`. `prompt.yaml` asks the model to answer the question and return only the final answer; it does not include `expected_answer` in the prompt. The standard `simple_agent` harness produces the answer, and the generated verifier compares it with `expected_answer`, ignoring surrounding whitespace: `42` earns reward `1`, and any other answer earns `0`.
-
-Validation checks the declaration and task input. The verifier test exercises correct, incorrect, and malformed requests without calling a model. Validation may warn about unfinished scaffold metadata and an unconfigured model; complete these when adapting the example to your benchmark.
-
 To try a model, [configure its endpoint](/main/model-server), then run:
 
 ```bash
