@@ -102,6 +102,18 @@ def test_negative_step_timestamp_fails():
     assert "TE-3.rfc.timestamp" in ids(inspect(record))
 
 
+@pytest.mark.parametrize("field,check", [("request", "TE-4.rfc.request"), ("response", "TE-7.rfc.response")])
+def test_turn_content_cannot_replace_missing_canonical_call_content(field, check):
+    record = evidence_record()
+    # Content on the turn still cannot satisfy the designated model-call fields.
+    assert record["ng_trajectory"]["turns"][0]["question"]
+    assert record["ng_trajectory"]["turns"][0]["answer"]
+    record["ng_trajectory"]["model_calls"][0].pop(field)
+    result = inspect(record)
+    assert result["evidence"]["TE-3"]["verdict"] == "fulfilled"
+    assert check in ids(result)
+
+
 @pytest.mark.parametrize("value", [None, False, 42])
 def test_tool_output_must_be_saved_at_its_designated_field(value):
     record = evidence_record()

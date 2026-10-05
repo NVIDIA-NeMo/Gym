@@ -91,6 +91,9 @@ existing diagnostics but cannot satisfy these added canonical-field requirements
 New assertions use the registry's `rfc.*` names; schema fragments are attached to
 their entries in `registry.py` and defined in `schemas.py`.
 
+TE-3 checks step structure without requiring prompt, answer or reasoning copies
+on turns. TE-4/TE-7 check the saved model-call request and response content.
+
 TE-9 accepts either `model_call_id` or `model_ref` plus `response_id` on each
 turn's call reference. It must resolve to exactly one saved call in
 `ng_trajectory.model_calls`; every supplied identifier must agree with that call.

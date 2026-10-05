@@ -535,33 +535,28 @@ def test_valid_objects_at_unrecognized_paths_do_not_count(record, parent, field,
     assert verdict(record, capability) == "not_fulfilled"
 
 
-@pytest.mark.parametrize(("field", "assertion"), [("question", "turn.question"), ("resolved", "turn.resolved")])
-def test_optional_turn_fields_are_required_by_te3(record, field, assertion):
+def test_turn_resolution_is_required_by_te3(record):
     from nemo_gym.rollout_observability import TrajectoryTurn
 
     turn = record["ng_trajectory"]["turns"][0]
-    del turn[field]
+    del turn["resolved"]
     TrajectoryTurn.model_validate(turn, strict=True)
     result = inspect_record(hydrate_record(record))
     assert result["evidence"]["TE-3"]["verdict"] == "not_fulfilled"
-    assert any(f["assertion"] == assertion for f in result["findings"])
+    assert any(f["assertion"] == "turn.resolved" for f in result["findings"])
 
 
-def test_null_question_is_insufficient_even_when_turn_model_valid(record):
-    record["ng_trajectory"]["turns"][0]["question"] = None
-    assert verdict(record, "TE-3") == "not_fulfilled"
-
-
-@pytest.mark.parametrize("answer", [None, "answer", []])
-@pytest.mark.parametrize("reasoning", [None, "reasoning"])
-def test_te3_requires_answer_or_reasoning_beyond_model_validity(record, answer, reasoning):
-    from nemo_gym.rollout_observability import TrajectoryTurn
-
-    turn = record["ng_trajectory"]["turns"][0]
-    turn.update(answer=answer, reasoning_content=reasoning)
-    TrajectoryTurn.model_validate(turn, strict=True)
-    expected = "fulfilled" if answer is not None or reasoning is not None else "not_fulfilled"
-    assert verdict(record, "TE-3") == expected
+@pytest.mark.parametrize("missing", [False, True])
+def test_turns_do_not_need_copies_of_model_content(record, missing):
+    for turn in record["ng_trajectory"]["turns"]:
+        for field in ("question", "answer", "reasoning_content"):
+            if missing:
+                turn.pop(field, None)
+            else:
+                turn[field] = None
+    result = inspect_record(hydrate_record(record))
+    for te in ("TE-3", "TE-4", "TE-7", "TE-9"):
+        assert result["evidence"][te]["verdict"] == "fulfilled", result["findings"]
 
 
 @pytest.mark.parametrize("field", ["tool_name", "status"])

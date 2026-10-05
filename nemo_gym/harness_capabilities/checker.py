@@ -501,18 +501,12 @@ class _RecordInspector:
         for index, turn in enumerate(self.turns):
             location = f"/ng_trajectory/turns/{index}"
             self._require_text("TE-3", turn, ("invocation_id", "task_id", "rollout_id"), location)
-            if turn.get("question") is None:
-                self._fail(
-                    "TE-3", "turn.question", location + "/question", "non-null model-visible prompt is required"
-                )
             if "resolved" not in turn:
                 self._fail(
                     "TE-3", "turn.resolved", location + "/resolved", "resolution or explicit unknown is required"
                 )
             if any(turn.get(k) != self.trajectory.get(k) for k in ("task_id", "rollout_id")):
                 self._fail("TE-3", "turn.identity", location, "step identity differs from rollout")
-            if turn.get("answer") is None and turn.get("reasoning_content") is None:
-                self._fail("TE-3", "turn.content", location, "answer/tool or reasoning field is required")
 
     def check_step_join(self) -> None:
         """TE-9: exact policy-attempt membership, independent of invocation refs."""
