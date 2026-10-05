@@ -46,12 +46,23 @@ DECLARED = """
         name: {agent}
 """
 
+LEGACY_AGENT = "legacy_agent"
+
 # Inheriting also retires the base's server: `_inherit_from` pops what it names.
 INHERITED = """
 {server}:
   _inherit_from: {source}
   environment_servers:
-    legacy_agent:
+    {server_type}:
+      agent_server:
+        name: {agent}
+"""
+
+# The renamed agent's server already has the name this script would give it, so point it at the new name.
+RETARGETED = """
+{server}:
+  environment_servers:
+    {server_type}:
       agent_server:
         name: {agent}
 """
@@ -138,16 +149,16 @@ def load(path: Path) -> dict | None:
     return document if isinstance(document, dict) else None
 
 
-def fronted_agents(document: dict) -> set[str]:
-    """Agents that some environment server in the document already names."""
-    names = set()
-    for instance in document.values():
+def declared_servers(document: dict) -> dict[str, tuple[str, str]]:
+    """Map each agent that an environment server in the document names to that server's name and type."""
+    fronting = {}
+    for name, instance in document.items():
         servers = instance.get("environment_servers") if isinstance(instance, dict) else None
-        for server in servers.values() if isinstance(servers, dict) else ():
+        for server_type, server in servers.items() if isinstance(servers, dict) else ():
             reference = server.get("agent_server") if isinstance(server, dict) else None
             if isinstance(reference, dict) and reference.get("name"):
-                names.add(reference["name"])
-    return names
+                fronting[reference["name"]] = (name, server_type)
+    return fronting
 
 
 def agent_types_in(document: dict, known_types: dict[str, str]) -> dict[str, str]:
@@ -179,12 +190,13 @@ def server_names_for(document: dict, known_types: dict[str, str] | None = None) 
     return {name: stem if taken.count(stem) == 1 else f"{name}{SUFFIX}" for name, stem in stems.items()}
 
 
-def index(documents: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
-    """Index agent types and server names across documents.
+def index(documents: list[dict]) -> tuple[dict[str, str], dict[str, tuple[str, str]]]:
+    """Index agent types and environment servers across documents.
 
     Returns ``(agent_types, servers)``.
     ``agent_types`` maps each agent instance to its type.
-    ``servers`` maps each agent instance to the server name declared beside it, or the one this script would declare.
+    ``servers`` maps each agent instance to the name and type of the server that names it.
+    An agent no server names gets the `legacy_agent` server this script would declare.
     Renaming configs look up the agent they rename here.
     """
     agent_types: dict[str, str] = {}
@@ -193,16 +205,23 @@ def index(documents: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
     # A rename may precede the document defining its source.
     for document in documents:
         agent_types.update(agent_types_in(document, agent_types))
-    servers: dict[str, str] = {}
+    servers: dict[str, tuple[str, str]] = {}
     for document in documents:
-        servers.update(server_names_for(document, agent_types))
+        servers.update(
+            (agent, (server, LEGACY_AGENT)) for agent, server in server_names_for(document, agent_types).items()
+        )
+    # A declared server wins over the generated name, wherever it is declared.
+    for document in documents:
+        servers.update(declared_servers(document))
     return agent_types, servers
 
 
-def stanzas_for(document: dict, bound_agents: dict[str, str], known_types: dict[str, str] | None = None) -> list[str]:
+def stanzas_for(
+    document: dict, bound_agents: dict[str, tuple[str, str]], known_types: dict[str, str] | None = None
+) -> list[str]:
     blocks: list[str] = []
     declared: set[str] = set()
-    fronted = fronted_agents(document)
+    fronted = declared_servers(document)
     servers = server_names_for(document, known_types)
     for name, instance in document.items():
         server = servers.get(name)
@@ -211,10 +230,12 @@ def stanzas_for(document: dict, bound_agents: dict[str, str], known_types: dict[
         declared.add(server)
         source = instance.get("_inherit_from")
         inherited = bound_agents.get(source) if isinstance(source, str) else None
-        if inherited and inherited != server:
-            blocks.append(INHERITED.format(server=server, source=inherited, agent=name))
-        else:
+        if inherited is None:
             blocks.append(DECLARED.format(server=server, agent=name))
+        elif inherited[0] == server:
+            blocks.append(RETARGETED.format(server=server, server_type=inherited[1], agent=name))
+        else:
+            blocks.append(INHERITED.format(server=server, source=inherited[0], server_type=inherited[1], agent=name))
     return blocks
 
 
