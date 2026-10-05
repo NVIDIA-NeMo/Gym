@@ -401,10 +401,14 @@ def test_token_store_sweeps_abandoned_unretired_captures(tmp_path):
     # rollout is still running, however old its registration-time state is.
     os.utime(store.path_for("inflight"), None)
 
+    # A caller may already hold an open descriptor while waiting for the sweep.
+    # Replacing its inode would let a later writer bypass that caller's lock.
+    lock_inode = store.lock_path_for("abandoned").stat().st_ino
+
     assert store.sweep_stale(older_than_seconds=600) == 1
     assert not store.state_path_for("abandoned").exists()
     assert not store.path_for("abandoned").exists()
-    assert not store.lock_path_for("abandoned").exists()
+    assert store.lock_path_for("abandoned").stat().st_ino == lock_inode
     assert store.path_for("inflight").exists()
     # The retired tombstone is untouched here and still sweeps as retired.
     assert store.state_path_for("tombstone").exists()

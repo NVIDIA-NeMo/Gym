@@ -452,7 +452,7 @@ class TokenCaptureStore:
                 state_path.unlink(missing_ok=True)
                 self.intents_path_for(rollout_id).unlink(missing_ok=True)
                 self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-                self.lock_path_for(rollout_id).unlink(missing_ok=True)
+                # Preserve the inode so waiting and subsequent writers use the same lock.
                 removed += 1
         if removed:
             self._fsync_root()
