@@ -51,7 +51,7 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.server_utils import SESSION_ID_KEY, _redacted_url, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
     current_capture_context,
 )
@@ -171,6 +171,22 @@ class _EndpointHealth:
 
     consecutive_failures: int = 0
     failed_at: Optional[float] = None
+
+
+def _redacted_error_repr(error: ClientResponseError) -> str:
+    """Describe an upstream HTTP error for the transport log without headers or the URL query string.
+
+    `raise_for_status` keeps the request headers on the exception, and they carry
+    `Authorization: Bearer <api key>`, so `repr(error)` must not be written to the log.
+    """
+    request_info = error.request_info
+    url = getattr(request_info, "real_url", None) or getattr(request_info, "url", None)
+    if url is not None:
+        url = _redacted_url(str(url))
+    return (
+        f"{type(error).__name__}(status={error.status}, message={error.message!r}, "
+        f"method={getattr(request_info, 'method', None)!r}, url={url!r})"
+    )
 
 
 ReasoningFieldMode = Literal["both", "reasoning", "reasoning_content"]
@@ -998,7 +1014,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                         "pid": os.getpid(),
                         "http_status": e.status,
                         "raw_response_body": e.response_content.decode(errors="replace"),
-                        "error": repr(e),
+                        "error": _redacted_error_repr(e),
                     }
                 )
             """
