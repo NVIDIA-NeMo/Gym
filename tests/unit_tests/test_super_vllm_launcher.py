@@ -147,42 +147,25 @@ printf '%s\0' "${VLLM_COMMON_ARGS[@]}" ''
 printf '%s\0' "${VLLM_PREFILL_ARGS[@]}" ''
 printf '%s\0' "${VLLM_DECODE_ARGS[@]}" ''
 """
-        status, stdout, stderr = self.run_shell(setup + inspect, env={"SLURM_PROCID": str(rank)})
+        # Real jobs pass ROUTER_NODE only to evaluation workers, not serving workers.
+        status, stdout, stderr = self.run_shell(setup + inspect, env={"SLURM_PROCID": str(rank), "ROUTER_NODE": ""})
         self.assertEqual(status, 0, stderr)
         return [args.split("\0") for args in stdout.removesuffix("\0\0").split("\0\0")]
 
     def test_mooncake_preserves_every_model_connector_and_other_arguments(self) -> None:
-        """Every shipped model keeps its tuning and NIXL settings when the store is enabled."""
-        for config_path in sorted((SCRIPT.parent / "vllm_configs").glob("*.sh")):
-            with self.subTest(model=config_path.name):
-                original = self.model_arguments(config_path=config_path, enable_mooncake=False)
-                wrapped = self.model_arguments(config_path=config_path, enable_mooncake=True)
-                self.assertEqual(len(original), 3)
-                self.assertEqual(len(wrapped), 3)
-                for original_args, wrapped_args in zip(original, wrapped, strict=True):
-                    self.assertEqual(len(original_args), len(wrapped_args))
-                    for i, original_arg in enumerate(original_args):
-                        if i == 0 or original_args[i - 1] != "--kv-transfer-config":
-                            self.assertEqual(wrapped_args[i], original_arg)
-                            continue
-                        original_config = json.loads(original_arg)
-                        self.assertEqual(original_config["kv_connector"], "NixlConnector")
-                        config = json.loads(wrapped_args[i])
-                        self.assertEqual(config["kv_connector"], "MultiConnector")
-                        self.assertEqual(config["kv_role"], "kv_both")
-                        self.assertEqual(config["kv_load_failure_policy"], "recompute")
-                        connectors = config["kv_connector_extra_config"]["connectors"]
-                        self.assertEqual(connectors[0], original_config)
-                        self.assertEqual(
-                            connectors[1:],
-                            [
-                                {
-                                    "kv_connector": "MooncakeStoreConnector",
-                                    "kv_role": "kv_both",
-                                    "kv_connector_extra_config": {"load_async": True, "lookup_async": True},
-                                }
-                            ],
-                        )
+        """The store toggle starts services; recipes own their connector settings."""
+        recipes = sorted((SCRIPT.parent / "vllm_configs").glob("*.sh"))
+        self.assertTrue(recipes)
+        for config_path in recipes:
+            for rank in (0, 4):
+                with self.subTest(model=config_path.name, rank=rank):
+                    original = self.model_arguments(config_path=config_path, enable_mooncake=False, rank=rank)
+                    with_store = self.model_arguments(config_path=config_path, enable_mooncake=True, rank=rank)
+                    self.assertEqual(len(original), 3)
+                    self.assertTrue(original[0])
+                    for role_args in original[1:]:
+                        self.assertIn("--kv-transfer-config", role_args)
+                    self.assertEqual(with_store, original)
 
     def test_mooncake_handles_common_equals_form_and_existing_multiconnector(self) -> None:
         """Preserve an existing store's settings and support transfer configs in common args."""
@@ -208,46 +191,13 @@ printf '%s\0' "${VLLM_DECODE_ARGS[@]}" ''
                 f"VLLM_PREFILL_ARGS=(--kv-transfer-config {shlex.quote(json.dumps(multi))})\n"
                 "VLLM_DECODE_ARGS=(--unrelated 'value with spaces')\n"
             )
-            for rank, role, failure_policy in ((0, "kv_both", "recompute"), (4, "kv_consumer", "fail")):
+            for rank in (0, 4):
                 with self.subTest(rank=rank):
                     common, prefill, decode = self.model_arguments(
                         config_path=config_path, enable_mooncake=True, rank=rank
                     )
-                    self.assertEqual(common[0], "--kv-transfer-config")
-                    common_config = json.loads(common[1])
-                    self.assertEqual(common_config["kv_load_failure_policy"], failure_policy)
-                    connectors = common_config["kv_connector_extra_config"]["connectors"]
-                    self.assertEqual(connectors[0], nixl)
-                    self.assertEqual(len(connectors), 2)
-                    extra = {"load_async": True, "lookup_async": True}
-                    if rank == 4:
-                        extra["save_decode_cache"] = False
-                    self.assertEqual(
-                        connectors[1],
-                        {
-                            "kv_connector": "MooncakeStoreConnector",
-                            "kv_role": role,
-                            "kv_connector_extra_config": extra,
-                        },
-                    )
-                    expected_multi = {
-                        **multi,
-                        "kv_load_failure_policy": failure_policy,
-                        "kv_connector_extra_config": {
-                            "connectors": [
-                                nixl,
-                                {
-                                    "kv_connector": "MooncakeStoreConnector",
-                                    "kv_role": role,
-                                    "kv_connector_extra_config": {
-                                        "load_async": False,
-                                        "save_decode_cache": rank == 0,
-                                    },
-                                },
-                            ],
-                        },
-                    }
-                    self.assertEqual(json.loads(prefill[1]), expected_multi)
+                    self.assertEqual(common, ["--kv-transfer-config=" + json.dumps(nixl)])
+                    self.assertEqual(prefill, ["--kv-transfer-config", json.dumps(multi)])
                     self.assertEqual(decode, ["--unrelated", "value with spaces"])
 
     def serving_arguments(
@@ -588,17 +538,19 @@ sleep() { "$TEST_SLEEP" 0.01; }
                         result = subprocess.run([BASH, "-n"], input=command, text=True, capture_output=True, timeout=5)
                         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_ultra_runtime_settings_override_launcher_defaults(self) -> None:
-        """Ultra configures its model runner, state layout, and communication environment."""
+    def test_ultra_runtime_settings_preserve_launcher_network_defaults(self) -> None:
+        """Ultra sets its model runner and state layout while inheriting the network defaults."""
         expected = {
             "VLLM_USE_V2_MODEL_RUNNER": "0",
             "VLLM_SSM_CONV_STATE_LAYOUT": "DS",
-            "UCX_TLS": "rc_x,rc,cuda_copy,cuda_ipc",
-            "UCX_NET_DEVICES": "mlx5_0:1",
-            "UCX_IB_ADDR_TYPE": "eth",
-            "NCCL_CUMEM_ENABLE": "unset",
-            "NCCL_MNNVL_ENABLE": "unset",
-            "NCCL_NVLS_ENABLE": "unset",
+            "UCX_TLS": "rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc",
+            "UCX_RNDV_SCHEME": "get_zcopy",
+            "UCX_RNDV_THRESH": "0",
+            "UCX_NET_DEVICES": "mlx5_0,mlx5_1,mlx5_3,mlx5_4",
+            "UCX_IB_ADDR_TYPE": "unset",
+            "NCCL_CUMEM_ENABLE": "1",
+            "NCCL_MNNVL_ENABLE": "1",
+            "NCCL_NVLS_ENABLE": "1",
         }
         recipe = str(SCRIPT.parent / "vllm_configs/nemotron_3_ultra.sh")
         _, command = self.generate_commands(env={"VLLM_CONFIG": recipe})
