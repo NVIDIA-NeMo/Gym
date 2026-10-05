@@ -8501,6 +8501,21 @@ class TestEnvironmentServerRouting:
                 config,
             )
 
+    def test_malformed_materialized_input_still_routes_by_taskset(self) -> None:
+        row = {
+            "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+            "task_input": None,
+        }
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            environment_routing_mode="taskset",
+            environment_server_routes={"swe_pro": "environment"},
+            num_repeats=1,
+        )
+
+        assert nemo_gym.rollout_collection._environment_server_for_config_row(row, config) == "environment"
+
     async def test_routes_legacy_row_to_selected_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         payload = {
             "reward": 1.0,
