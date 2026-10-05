@@ -91,9 +91,10 @@ def _extract_instruction(body_input: Any) -> tuple[str, Optional[str]]:
 class LocalEnvironment:
     """Execute Harbor environment commands in one local workspace."""
 
-    def __init__(self, cwd: Path, command_timeout_sec: float) -> None:
+    def __init__(self, cwd: Path, command_timeout_sec: float, login_shell: bool = True) -> None:
         self.cwd = cwd.resolve()
         self.command_timeout_sec = command_timeout_sec
+        self.login_shell = login_shell
 
     async def exec(
         self,
@@ -112,7 +113,7 @@ class LocalEnvironment:
 
         proc = await asyncio.create_subprocess_exec(
             "bash",
-            "-lc",
+            "-lc" if self.login_shell else "-c",
             command,
             cwd=str(run_cwd),
             env=process_env,
@@ -293,6 +294,8 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     interleaved_thinking: bool = False
     model_timeout_sec: float = 2400
     command_timeout_sec: float = 1800
+    # Debian's /etc/profile resets PATH, so a login shell cannot find a tmux shipped outside the system dirs.
+    login_shell: bool = True
     timeout: float = 10800
     keep_logs: bool = False
     logs_root: str = "outputs/terminus_2_agent/runs"
@@ -392,7 +395,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             else:
                 workspace = temporary_workspace = Path(tempfile.mkdtemp(prefix="nemo-gym-terminus-2-workspace-"))
 
-            environment = LocalEnvironment(workspace, self.config.command_timeout_sec)
+            environment = LocalEnvironment(workspace, self.config.command_timeout_sec, self.config.login_shell)
             context = AgentContext()
             agent = self._build_agent(body, logs_dir, api_base)
             timed_out = False
