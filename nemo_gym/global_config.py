@@ -187,6 +187,19 @@ MODEL_SERVER_TYPE_KEY_NAME = "responses_api_models"
 RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
 
 
+def environment_server_agent_refs(server: Mapping[str, Any]) -> list[dict[str, Any] | DictConfig]:
+    """Return every Agent reference fronted by one Environment Server."""
+    return [
+        reference
+        for field, reference in server.items()
+        if isinstance(reference, (dict, DictConfig))
+        and (
+            reference.get("type") == AGENT_SERVER_TYPE_KEY_NAME
+            or (field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None)
+        )
+    ]
+
+
 @dataclass(frozen=True)
 class _AgentInstance:
     """A top-level agent instance, with its single agent type already unwrapped."""
@@ -851,9 +864,11 @@ Duplicate config paths:
             if not isinstance(servers, DictConfig):
                 continue
             for server in servers.values():
-                reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
-                if isinstance(reference, DictConfig) and reference.get("name") in renames:
-                    reference["name"] = renames[reference["name"]]
+                if not isinstance(server, DictConfig):
+                    continue
+                for reference in environment_server_agent_refs(server):
+                    if reference.get("name") in renames:
+                        reference["name"] = renames[reference["name"]]
 
     @staticmethod
     def _composed_instance_name(target: _AgentInstance, agent_type: str) -> str:
@@ -1102,9 +1117,11 @@ the check."""
             if not isinstance(servers, DictConfig):
                 continue
             for server in servers.values():
-                reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
-                if isinstance(reference, DictConfig):
-                    with_environment_server.add(reference.get("name"))
+                if not isinstance(server, DictConfig):
+                    continue
+                for reference in environment_server_agent_refs(server):
+                    if reference.get("name") is not None:
+                        with_environment_server.add(reference["name"])
 
         without_environment_server = sorted(
             agent.name
