@@ -163,3 +163,4 @@ gym eval run --no-serve \
 ```
 
 Example math rollouts are in `environments/hermes_math/data/example_rollouts.jsonl`.
+For the local adapter, terminal provider failures retain their response and observation evidence and reach verification. The returned rollout is always masked (`mask_sample: true`, `failure_kind: agent_request_failed`), even if the verifier awards a positive reward, so provider failures remain excluded from scores. Sandbox sessions retain their existing retryable failure path. Correlated model requests carry an invocation header through SDK retries, including attempts without a response ID.
