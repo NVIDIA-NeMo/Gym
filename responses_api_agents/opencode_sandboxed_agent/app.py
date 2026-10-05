@@ -157,6 +157,9 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
     invocation_status: dict[str, str] = {row["id"]: "unknown" for row in session_rows}
     session_started: dict[str, float] = {}
     session_completed: dict[str, float] = {}
+    # Creation times of assistant messages per session: the model call issued after a tool ran is
+    # the only artifact signal for when that tool's result was in the prompt.
+    assistant_created: dict[str, list[float]] = {}
     tools: list[ToolCallObservation] = []
     child_tools: dict[str, set[str]] = {}
     child_status: dict[str, str] = {}
@@ -179,6 +182,8 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
             if created is not None:
                 session_started[session_id] = min(session_started.get(session_id, created), created)
             if message.get("role") == "assistant":
+                if created is not None:
+                    assistant_created.setdefault(session_id, []).append(created)
                 if isinstance(message.get("error"), dict):
                     invocation_status[session_id] = "failed"
                 completed = _milliseconds(message_time.get("completed"))
@@ -293,7 +298,7 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
             operation = bash_command[:512] if isinstance(bash_command, str) else None
             # OpenCode inserts the tool part when the model emits the call (state "pending") and only
             # later stamps state.time.start when it runs, so the row's creation time is the harness
-            # holding the parsed call. No signal marks when the result reached the next prompt.
+            # holding the parsed call. response_received_at is bounded after all parts are read.
             requested_at = _milliseconds(row["time_created"])
             if observed_call_id is not None:
                 tools.append(
@@ -439,6 +444,26 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
     if not invocations:
         invocations = [AgentInvocation(invocation_id=fallback_invocation_id)]
         gaps.append(ObservationGap(code="agent_transcript_unavailable"))
+
+    # response_received_at from the artifact is an upper bound: the first assistant message
+    # created after the tool finished is the next model call, issued with the result already in
+    # its prompt. Reported as a gap so the analysis treats it as a bound, not a measurement.
+    approximated_sessions: set[str] = set()
+    for tool in tools:
+        if tool.completed_at is None:
+            continue
+        later = [t for t in assistant_created.get(tool.invocation_id, []) if t >= tool.completed_at]
+        if later:
+            tool.response_received_at = min(later)
+            approximated_sessions.add(tool.invocation_id)
+    for session_id in sorted(approximated_sessions):
+        gaps.append(
+            ObservationGap(
+                code="tool_response_boundary_approximate",
+                invocation_id=session_id,
+                detail="next_assistant_message_created",
+            )
+        )
 
     return AgentObservationBundle(
         source="opencode",

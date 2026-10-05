@@ -791,7 +791,51 @@ class TestInvocationSpans:
         bundle = parse_opencode_observations(db, "fallback")
         [tool] = [r for r in bundle.records if isinstance(r, ToolCallObservation)]
         assert (tool.requested_at, tool.started_at, tool.completed_at) == (2.0, 2.5, 4.0)
+        # No later assistant message: nothing bounds when the result reached the next prompt.
         assert tool.response_received_at is None
+        assert "tool_response_boundary_approximate" not in {g.code for g in bundle.gaps}
+
+    def test_response_received_is_bounded_by_the_next_model_call_and_flagged(self, tmp_path: Path) -> None:
+        db = self._database(
+            tmp_path,
+            [("root", None, 500)],
+            [
+                ("m1", "root", json.dumps({"role": "assistant", "time": {"created": 1_000, "completed": 2_200}}), 1),
+                ("m2", "root", json.dumps({"role": "assistant", "time": {"created": 5_000, "completed": 6_000}}), 2),
+            ],
+        )
+        connection = sqlite3.connect(db)
+        try:
+            connection.execute(
+                "insert into part values (?, ?, ?, ?, ?)",
+                (
+                    "p1",
+                    "m1",
+                    "root",
+                    json.dumps(
+                        {
+                            "type": "tool",
+                            "tool": "bash",
+                            "callID": "call-1",
+                            "state": {
+                                "status": "completed",
+                                "input": {"command": "ls"},
+                                "output": "",
+                                "time": {"start": 2_500, "end": 4_000},
+                            },
+                        }
+                    ),
+                    2_000,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        bundle = parse_opencode_observations(db, "fallback")
+        [tool] = [r for r in bundle.records if isinstance(r, ToolCallObservation)]
+        assert tool.response_received_at == 5.0
+        gaps = {(g.code, g.detail) for g in bundle.gaps}
+        assert ("tool_response_boundary_approximate", "next_assistant_message_created") in gaps
 
 
 class TestSandboxClockProbe:
