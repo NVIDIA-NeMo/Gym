@@ -394,6 +394,62 @@ class TestApp:
         with pytest.raises(ValueError, match="sessions require num_workers=1"):
             await server.seed_agent_session(MagicMock(session={}), body)
 
+    async def test_native_session_without_a_grant_refuses_tool_calls(self, monkeypatch: MonkeyPatch) -> None:
+        # The configured resources_server has no session for this episode, so a tool call must not fall back to it.
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="simple",
+            resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            # The model keeps calling the tool; a step limit ends the loop if a regression falls back.
+            max_steps=2,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client.post = AsyncMock(
+            return_value=_mock_response(
+                {
+                    "id": "resp-tool",
+                    "created_at": 1.0,
+                    "model": "model",
+                    "object": "response",
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "output": [
+                        {
+                            "id": "fc-1",
+                            "call_id": "call-1",
+                            "name": "get_weather",
+                            "arguments": '{"city":"San Francisco"}',
+                            "type": "function_call",
+                            "status": "completed",
+                        }
+                    ],
+                }
+            )
+        )
+        direct_request = AsyncMock()
+        monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", direct_request)
+        client = TestClient(SimpleAgent(config=config, server_client=server_client).setup_webserver())
+
+        seed = client.post(
+            "/v1/agent_sessions",
+            json=AgentSeedSessionRequest(
+                agent_session_id="agent-session",
+                episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+                task_id=TaskId(taskset="example", task_id="0"),
+            ).model_dump(mode="json"),
+        )
+        assert seed.status_code == 200
+
+        with pytest.raises(RuntimeError, match="no direct HTTP tool access"):
+            client.post("/v1/responses", json={"input": [{"role": "user", "content": "weather?"}]})
+        assert [call.kwargs["server_name"] for call in server_client.post.await_args_list] == ["model"]
+        direct_request.assert_not_awaited()
+
     async def test_native_session_seed_and_close_are_idempotent(self) -> None:
         server, _ = _make_agent(False)
         request = MagicMock(session={})

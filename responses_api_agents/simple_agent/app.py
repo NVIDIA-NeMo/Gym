@@ -130,6 +130,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         model_url_path: str,
         resources_server_cookies: Any = None,
         tool_access: DirectHTTPToolAccess | None = None,
+        in_session: bool = False,
         task_id: str = "unscoped",
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
@@ -266,6 +267,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             _internal=True,
                         )
                     else:
+                        if in_session:
+                            # An Environment Server episode reaches Resources only through its grants; the
+                            # configured resources_server has no session for this episode.
+                            raise RuntimeError(
+                                f"Model called tool {output_function_call.name!r}, but this agent session has no "
+                                "direct HTTP tool access"
+                            )
                         if self.config.resources_server is None:
                             raise RuntimeError(
                                 "Simple Agent received a tool call without direct HTTP tool access "
@@ -355,6 +363,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             model_url_path=self.url_path_for_request("/v1/responses", request),
             resources_server_cookies=state.resources_cookies if state is not None else request.cookies,
             tool_access=state.tool_access if state is not None else None,
+            in_session=state is not None,
             rollout_id=rollout_id or "unscoped",
             collect_trajectory=collect_trajectory,
         )
