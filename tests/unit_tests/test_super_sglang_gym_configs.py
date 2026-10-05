@@ -27,14 +27,18 @@ def _benchmark_without_experiment_name(path: Path) -> dict[str, object]:
 
 
 def test_gym_benchmark_sections_match() -> None:
-    reference_path = CONFIG_DIR / "1P1D.yaml"
-    reference = _benchmark_without_experiment_name(reference_path)
+    benchmarks = {}
     # Discover topology recipes automatically, excluding explicit serving-only recipes.
     for path in sorted(CONFIG_DIR.glob("*.yaml")):
         config = yaml.safe_load(path.read_text())
         if isinstance(config, dict) and config.get("benchmark") == {"type": "manual"}:
             continue
-        benchmark = _benchmark_without_experiment_name(path)
+        benchmarks[path] = _benchmark_without_experiment_name(path)
+
+    assert len(benchmarks) >= 2, "Expected at least two Gym recipes to check benchmark consistency"
+    # Any existing recipe can be the reference; topology names may change or disappear.
+    (reference_path, reference), *others = benchmarks.items()
+    for path, benchmark in others:
         assert benchmark == reference, (
             f"{path.name}: benchmark differs from {reference_path.name}; only benchmark.env.EXPERIMENT_NAME may differ"
         )
