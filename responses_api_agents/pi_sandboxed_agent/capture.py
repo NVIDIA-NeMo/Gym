@@ -30,8 +30,8 @@ def main() -> None:
             sys.stdout.buffer.write(line)
             sys.stdout.buffer.flush()
             try:
-                event = json.loads(line)
-            except (ValueError, RecursionError):
+                event = json.loads(line.decode("utf-8", "replace") if isinstance(line, bytes) else line)
+            except (ValueError, TypeError, RecursionError):
                 continue
             if isinstance(event, dict):
                 events.write(json.dumps([observed_at, event]) + "\n")

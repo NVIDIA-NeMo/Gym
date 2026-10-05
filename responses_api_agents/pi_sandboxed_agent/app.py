@@ -77,6 +77,9 @@ class PiSandboxedAgentConfig(PiAgentConfig):
 
 
 class PiSandboxedAgentVerifyResponse(PiAgentVerifyResponse):
+    # Gym's agent_run_error contract carries diagnostics, but no score or response.
+    reward: float | None = Field(default=None, exclude_if=lambda value: value is None)
+    response: NeMoGymResponse | None = Field(default=None, exclude_if=lambda value: value is None)
     pi_failed: bool = False
     pi_exit_code: int | None = None
     pi_error_type: str | None = None
@@ -370,6 +373,22 @@ class PiSandboxedAgent(PiAgent):
                     | {
                         "turns_used": sum(getattr(i, "type", None) == "message" for i in episode.response.output),
                         "finished_naturally": not failed,
+                    }
+                )
+            except Exception as exc:
+                LOG.exception("Pi rollout failed")
+                # A sandbox that cannot run Pi (its image's libc, a lost export, a grader error) must
+                # not end collection of the rest of the dataset: report it unscored instead.
+                execution = context.get("execution") or {}
+                return PiSandboxedAgentVerifyResponse.model_validate(
+                    body.model_dump(mode="json")
+                    | {
+                        "_ng_failure_class": "agent_run_error",
+                        "_ng_failure_message": f"{type(exc).__name__}: {exc}",
+                        "pi_failed": True,
+                        "pi_exit_code": execution.get("pi_exit_code"),
+                        "pi_error_type": execution.get("pi_error_type") or type(exc).__name__,
+                        "pi_results_dir": execution.get("pi_results_dir") or "",
                     }
                 )
             finally:
