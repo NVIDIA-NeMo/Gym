@@ -966,6 +966,45 @@ class TestApp:
             "message": _ENGINE_OVERFLOW_MESSAGE,
         }
 
+    @mark.parametrize("use_completions_api", [False, True])
+    def test_an_engine_error_the_server_does_not_handle_is_logged_with_its_body(
+        self, monkeypatch: MonkeyPatch, caplog, use_completions_api: bool
+    ) -> None:
+        # Any engine answer but the handled context-length 400 reaches the caller as a plain
+        # server error that carries only the status; the log keeps the status, the request path,
+        # the rollout id, and the engine's body.
+        server = self._setup_server(monkeypatch, use_completions_api=use_completions_api)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=422, message="Unprocessable Entity")
+        error.response_content = (
+            b'{"object":"error","message":"tools.3.type: Input should be \'function\'","type":"BadRequestError",'
+            b'"param":null,"code":422}'
+        )
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        mock_client.create_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            response = TestClient(app).post(
+                "/ng-rollout/r0/v1/chat/completions",
+                json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        assert response.status_code == 500
+        logged = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING and "engine answered" in record.getMessage()
+        ]
+        assert len(logged) == 1
+        assert "engine answered 422" in logged[0]
+        assert "/v1/chat/completions" in logged[0]
+        assert "(rollout r0)" in logged[0]
+        assert "Input should be 'function'" in logged[0]
+
     def test_transport_log_error_event_omits_request_headers(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         log_path = tmp_path / "model-io-transport.jsonl"
         monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
