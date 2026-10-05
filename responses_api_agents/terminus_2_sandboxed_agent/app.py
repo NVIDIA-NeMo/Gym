@@ -449,7 +449,9 @@ class NeMoGymTerminus2(Terminus2):
             observations.compaction = ContextCompactionObservation(
                 invocation_id=observations.invocation_id,
                 observed_at=time(),
-                trigger="harbor_summarize",
+                # Harbor summarizes from two places: the proactive check at the top of an iteration
+                # (our wrapper sets the flag around it) and _query_llm on a context-length error.
+                trigger="proactive" if self._is_check_proactive_summarization else "overflow",
                 tokens_before=tokens_before,
             )
         try:

@@ -289,6 +289,9 @@ async def test_real_harbor_decisions_survive_saved_projection(
     if mode in {"compaction", "compaction_missing_id", "short"}:
         [compaction] = [r for r in result["ng_agent_observations"]["records"] if r["kind"] == "context_compaction"]
         assert compaction["outcome"] == ("failed" if mode == "short" else "completed")
+        # The rejected call goes through harbor's context-length path in _query_llm, not the
+        # proactive check at the top of the iteration.
+        assert compaction["trigger"] == "overflow"
         assert len(compaction["model_calls"]) == ({"compaction": 3, "compaction_missing_id": 2, "short": 1}[mode])
         assert turns[1]["question"][-1]["content"] != "terminal output"
         assert turns[1]["model_calls"][0]["response_id"] == execution.calls[-1]["response"]["id"]
