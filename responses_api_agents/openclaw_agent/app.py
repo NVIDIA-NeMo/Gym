@@ -395,7 +395,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
-        ensure_openclaw(self.config.openclaw_version)
+        ensure_openclaw(self.config.openclaw_version, node_bin_dir=self.config.node_bin_dir)
         command = self.config.command_parts[0] if self.config.command_parts else ""
         if not command or shutil.which(command) is None:
             LOG.warning("openclaw command %r is not on PATH yet", self.config.command)

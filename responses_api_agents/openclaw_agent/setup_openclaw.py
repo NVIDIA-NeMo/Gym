@@ -26,14 +26,19 @@ publishes no build for it.
 Versions are pinned for reproducibility and can be overridden per process with
 environment variables:
 
-* ``OPENCLAW_VERSION`` - npm version spec of the ``openclaw`` package.
+* ``OPENCLAW_VERSION`` - exact version of the ``openclaw`` package (no npm ranges).
 * ``OPENCLAW_NODE_VERSION`` - Node.js version downloaded when ``npm`` is absent.
 
 Installed runtimes are validated before reuse: an ``openclaw`` already on
-``PATH`` is accepted only when it reports the requested version, and a Node
-toolchain (local cache or system ``npm``) is accepted only when its ``node``
-satisfies the ``engines.node`` range of the ``openclaw`` release being pinned.
-Otherwise the incompatible artifact is replaced.
+``PATH`` is accepted only when it reports exactly the requested version, and a
+Node toolchain (local cache or system ``npm``) is accepted only when its
+``node`` satisfies the ``engines.node`` range of the requested ``openclaw``
+release. Otherwise the incompatible artifact is replaced. After an install, the
+selected launcher must report the requested version or setup fails.
+
+A configured ``node_bin_dir`` is searched before ``PATH`` for every probe and
+install, the same order the agent uses at rollout time, without changing this
+process's ``PATH``.
 
 Examples:
     Install the pinned default and make it importable by the agent::
@@ -91,11 +96,17 @@ _NPM_INSTALL_ATTEMPTS = 3
 _LOCAL_PREFIX = Path(__file__).parent / ".openclaw_node"
 _USER_LOCAL_BIN = Path.home() / ".local" / "bin"
 
-# `openclaw` declares this `engines.node` range (e.g. 2026.6.11 declared
-# ">=22.19.0"). It encodes every engine constraint the installer must honour, so
-# when upstream changes it this constant — not a parsed node version — decides
-# whether an existing runtime is reusable.
-OPENCLAW_ENGINES_NODE = ">=24.16.0 <25 || >=26.1.0"
+#: ``engines.node`` declared by each pinned ``openclaw`` release, copied from
+#: registry.npmjs.org. A release missing here is looked up with ``npm view``.
+OPENCLAW_ENGINES_NODE = {
+    "2026.6.11": ">=22.19.0",
+    "2026.9.4": ">=24.16.0 <25 || >=26.1.0",
+}
+
+#: The only accepted ``openclaw`` version form: an exact semver, optionally with a
+#: prerelease tag. npm ranges are rejected so "installed == requested" is a plain
+#: string comparison.
+_EXACT_VERSION = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
 
 #: ``sys.platform`` value -> the OS token nodejs.org uses in its archive names.
 _NODE_OS = {"linux": "linux", "darwin": "darwin", "win32": "win", "cygwin": "win"}
@@ -109,8 +120,16 @@ def resolve_openclaw_version(version: str | None = None) -> str:
 
     ``OPENCLAW_VERSION`` wins over *version* so an operator can override a
     pinned config without editing it; the module default is the last resort.
+
+    Raises:
+        ValueError: the resolved value is not an exact version (e.g. ``^2026.9.0``).
     """
-    return os.environ.get(OPENCLAW_VERSION_ENV) or version or DEFAULT_OPENCLAW_VERSION
+    resolved = os.environ.get(OPENCLAW_VERSION_ENV) or version or DEFAULT_OPENCLAW_VERSION
+    if not _EXACT_VERSION.fullmatch(resolved):
+        raise ValueError(
+            f"openclaw version must be an exact version such as {DEFAULT_OPENCLAW_VERSION!r}, got {resolved!r}"
+        )
+    return resolved
 
 
 def resolve_node_version() -> str:
@@ -297,9 +316,10 @@ def _node_bin_dir(prefix: Path) -> Path:
     """Return the directory under *prefix* that holds the ``node``/``npm`` launchers.
 
     Windows distributions place them at the root of the tree; every other
-    platform uses a ``bin/`` subdirectory.
+    platform uses a ``bin/`` subdirectory. Only the OS matters here; the CPU
+    architecture is checked only when a toolchain is downloaded.
     """
-    return prefix if _node_platform()[0] == "win" else prefix / "bin"
+    return prefix if _NODE_OS.get(sys.platform) == "win" else prefix / "bin"
 
 
 def _prepend_path(bin_dir: Path | str) -> None:
@@ -307,8 +327,20 @@ def _prepend_path(bin_dir: Path | str) -> None:
     os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
 
 
-def _openclaw_on_path() -> str | None:
-    return shutil.which(_OPENCLAW_PKG)
+def _search_path(node_bin_dir: str | None) -> str:
+    """Return ``PATH`` with *node_bin_dir* first, matching ``OpenClawAgent._env()``."""
+    path = os.environ.get("PATH", "")
+    return f"{node_bin_dir}{os.pathsep}{path}" if node_bin_dir else path
+
+
+def _which(cmd: str, node_bin_dir: str | None) -> str | None:
+    return shutil.which(cmd, path=_search_path(node_bin_dir))
+
+
+def _run(cmd: list[str], node_bin_dir: str | None, **kwargs) -> subprocess.CompletedProcess:
+    """Run *cmd* so ``#!/usr/bin/env node`` shims resolve ``node`` like the rollout does."""
+    env = {**os.environ, "PATH": _search_path(node_bin_dir)} if node_bin_dir else None
+    return subprocess.run(cmd, env=env, **kwargs)
 
 
 def _adopt_user_local_bin() -> bool:
@@ -319,9 +351,9 @@ def _adopt_user_local_bin() -> bool:
     return True
 
 
-def _adopt_npm_global_bin(npm_bin: str) -> bool:
+def _adopt_npm_global_bin(npm_bin: str, node_bin_dir: str | None) -> bool:
     """Add npm's global bin directory to ``PATH`` when it exists."""
-    completed = subprocess.run([npm_bin, "prefix", "-g"], capture_output=True, text=True)
+    completed = _run([npm_bin, "prefix", "-g"], node_bin_dir, capture_output=True, text=True)
     prefix = completed.stdout.strip()
     if not prefix:
         return False
@@ -332,12 +364,12 @@ def _adopt_npm_global_bin(npm_bin: str) -> bool:
     return True
 
 
-def _npm_install(npm_bin: str, version: str) -> None:
+def _npm_install(npm_bin: str, version: str, node_bin_dir: str | None) -> None:
     """Run ``npm install -g openclaw@version``, retrying transient failures."""
     pkg = f"{_OPENCLAW_PKG}@{version}"
     for attempt in range(1, _NPM_INSTALL_ATTEMPTS + 1):
         try:
-            subprocess.run([npm_bin, "install", "-g", pkg], check=True)
+            _run([npm_bin, "install", "-g", pkg], node_bin_dir, check=True)
             return
         except subprocess.CalledProcessError:
             if attempt == _NPM_INSTALL_ATTEMPTS:
@@ -411,47 +443,80 @@ def _install_node_locally(node_version: str) -> Path:
     return bin_dir
 
 
-def _ensure_npm() -> str:
-    """Return a usable ``npm`` whose ``node`` satisfies OpenClaw's engine range.
+def _engines_node(version: str, node_bin_dir: str | None) -> str:
+    """Return the ``engines.node`` range the ``openclaw`` *version* declares.
 
-    A system ``npm`` is only reused when the ``node`` beside it satisfies
-    ``OPENCLAW_ENGINES_NODE``; anything outside the range (an older runtime,
-    or a newer major OpenClaw does not support yet) is ignored and a private
-    toolchain is provisioned instead, so the ``npm install -g`` below cannot
-    silently run against a runtime OpenClaw refuses to start on.
+    Pinned releases come from :data:`OPENCLAW_ENGINES_NODE`. Other releases are
+    asked from the configured registry with ``npm view`` (so internal mirrors
+    work); when that is impossible the newest known range is used.
     """
-    npm = shutil.which("npm")
+    known = OPENCLAW_ENGINES_NODE.get(version)
+    if known:
+        return known
+    npm = _which("npm", node_bin_dir)
     if npm:
-        node_version = _node_on_path()
-        if node_version is None or _satisfies_range(node_version, OPENCLAW_ENGINES_NODE):
-            LOG.info("using system npm (%s), node %s", npm, node_version or "unknown")
-            return npm
-        LOG.info(
-            "system npm (%s) runs node %s, which does not satisfy openclaw's engines.node %r; "
-            "provisioning a private Node.js toolchain",
-            npm,
-            node_version,
-            OPENCLAW_ENGINES_NODE,
-        )
+        try:
+            completed = _run(
+                [npm, "view", f"{_OPENCLAW_PKG}@{version}", "engines.node"],
+                node_bin_dir,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError):
+            completed = None
+        if completed is not None and completed.returncode == 0 and completed.stdout.strip():
+            return completed.stdout.strip()
+    fallback = OPENCLAW_ENGINES_NODE[DEFAULT_OPENCLAW_VERSION]
+    LOG.warning("cannot read engines.node of openclaw %s; assuming %r", version, fallback)
+    return fallback
 
-    node_version = resolve_node_version()
-    LOG.info("npm not found; installing local Node.js %s", node_version)
-    bin_dir = _install_node_locally(node_version)
+
+def _ensure_npm(version: str, node_bin_dir: str | None) -> str:
+    """Return a usable ``npm`` whose ``node`` satisfies the engine range of *version*.
+
+    An existing ``npm`` is only reused when the ``node`` it would run reports a
+    version inside the range of the requested ``openclaw`` release. A ``node``
+    that is missing, fails to run, or is out of range causes a private toolchain
+    to be provisioned, so ``npm install -g`` cannot silently target a runtime
+    OpenClaw refuses to start on.
+
+    Raises:
+        RuntimeError: the ``node`` in *node_bin_dir* is out of range. That runtime
+            is configured explicitly and precedes any private toolchain at
+            rollout time, so provisioning another one would not help.
+    """
+    engines = _engines_node(version, node_bin_dir)
+    npm = _which("npm", node_bin_dir)
+    node = _which("node", node_bin_dir)
+    node_version = _node_reported_version(node) if node else None
+    node_ok = node_version is not None and _satisfies_range(node_version, engines)
+    if npm and node_ok:
+        LOG.info("using npm %s with node %s", npm, node_version)
+        return npm
+    if not node_ok and node_bin_dir and shutil.which("node", path=node_bin_dir):
+        raise RuntimeError(
+            f"node in node_bin_dir {node_bin_dir!r} reports {node_version or 'no version'}, but openclaw "
+            f"{version} requires node {engines!r}; point node_bin_dir at a compatible Node.js"
+        )
+    LOG.info(
+        "npm %s with node %s does not satisfy openclaw %s engines.node %r; provisioning a private Node.js toolchain",
+        npm or "(missing)",
+        node_version or "(missing or broken)",
+        version,
+        engines,
+    )
+
+    bin_dir = _install_node_locally(resolve_node_version())
     _prepend_path(bin_dir)
 
-    npm = shutil.which("npm")
+    npm = _which("npm", node_bin_dir)
     if not npm:
         raise RuntimeError(f"npm not found after local Node.js install in {bin_dir}")
     return npm
 
 
-def _node_on_path() -> str | None:
-    """Return the reported version of the ``node`` first on ``PATH``, if any."""
-    found = shutil.which("node")
-    return _node_reported_version(found) if found else None
-
-
-def _openclaw_reported_version(openclaw_bin: str) -> str | None:
+def _openclaw_reported_version(openclaw_bin: str, node_bin_dir: str | None) -> str | None:
     """Return the version *openclaw_bin* prints, or ``None`` when it fails.
 
     The launcher may be a shim whose ``node`` is unusable (the exact failure
@@ -459,80 +524,71 @@ def _openclaw_reported_version(openclaw_bin: str) -> str | None:
     unknown version: not acceptable evidence of a compatible install.
     """
     try:
-        completed = subprocess.run([openclaw_bin, "--version"], capture_output=True, text=True, timeout=120)
+        completed = _run([openclaw_bin, "--version"], node_bin_dir, capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.SubprocessError):
         return None
     if completed.returncode != 0:
         return None
-    match = re.search(r"(\d+(?:\.\d+)+)", completed.stdout)
-    return match.group(1) if match else None
+    match = re.search(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", completed.stdout)
+    return match.group(0) if match else None
 
 
-def _installed_openclaw_matches(openclaw_bin: str, requested: str) -> bool:
-    """Return whether *openclaw_bin* reports the *requested* ``openclaw`` version.
-
-    npm specs (``^2026.9.0``, ``2026.9``) are compared at the precision the
-    requested spec states, mirroring npm's own resolution semantics.
-    """
-    reported = _openclaw_reported_version(openclaw_bin)
-    if reported is None:
-        return False
-    requested_match = re.match(r"[\^~>=< ]*v?(\d+(?:\.\d+){0,2})", requested)
-    if requested_match is None:
-        return False
-    precision = len(requested_match.group(1).split("."))
-    try:
-        reported_parts = _parse_version(reported)
-        requested_parts = _parse_version(requested_match.group(1))
-    except ValueError:
-        return False
-    return reported_parts[:precision] == requested_parts[:precision]
-
-
-def _expose_installed_openclaw(npm_bin: str) -> str | None:
+def _expose_installed_openclaw(npm_bin: str, node_bin_dir: str | None) -> str | None:
     """Locate ``openclaw`` after a successful install, extending ``PATH`` as needed.
 
-    ``npm install -g`` may target a prefix that is not on ``PATH`` yet, and some
-    setups link the launcher into ``~/.local/bin`` instead.
+    npm's global bin is put first, so an older launcher already on ``PATH``
+    does not shadow the one just installed; some setups link the launcher into
+    ``~/.local/bin`` instead.
     """
-    for adopt in (lambda: True, lambda: _adopt_npm_global_bin(npm_bin), _adopt_user_local_bin):
-        if adopt() and (found := _openclaw_on_path()):
+    for adopt in (lambda: _adopt_npm_global_bin(npm_bin, node_bin_dir), _adopt_user_local_bin, lambda: True):
+        if adopt() and (found := _which(_OPENCLAW_PKG, node_bin_dir)):
             return found
     return None
 
 
-def ensure_openclaw(version: str | None = None) -> None:
-    """Ensure the requested ``openclaw`` version is on ``PATH``.
+def ensure_openclaw(version: str | None = None, *, node_bin_dir: str | None = None) -> None:
+    """Ensure the requested ``openclaw`` version is the one the agent will run.
 
     An existing install is only accepted when ``openclaw --version`` reports
-    the resolved version, so changing ``OPENCLAW_VERSION`` (or the config pin)
-    takes effect instead of silently keeping whatever was installed earlier.
-    When the version differs — or the existing launcher fails to report one at
-    all — the requested release is installed over it via npm.
+    exactly the resolved version, so changing ``OPENCLAW_VERSION`` (or the
+    config pin) takes effect instead of silently keeping whatever was installed
+    earlier. Otherwise the requested release is installed via npm, and the
+    launcher selected afterwards must report it.
 
     Args:
-        version: npm version spec to pin. Overridden by ``OPENCLAW_VERSION`` and
-            defaulted to :data:`DEFAULT_OPENCLAW_VERSION`.
+        version: exact ``openclaw`` version to pin. Overridden by
+            ``OPENCLAW_VERSION`` and defaulted to :data:`DEFAULT_OPENCLAW_VERSION`.
+        node_bin_dir: directory searched before ``PATH`` for ``openclaw``,
+            ``node`` and ``npm``, as ``OpenClawAgentConfig.node_bin_dir`` does at
+            rollout time. This process's ``PATH`` is not changed for it.
 
     Raises:
-        RuntimeError: the install reported success but ``openclaw`` is still not
-            resolvable, or no ``npm`` could be provisioned.
+        ValueError: the resolved version is not an exact version.
+        RuntimeError: no compatible ``npm`` could be provisioned, or after the
+            install the selected ``openclaw`` is missing or reports another version.
     """
     requested = resolve_openclaw_version(version)
-    existing = _openclaw_on_path()
+    existing = _which(_OPENCLAW_PKG, node_bin_dir)
     if existing is None and _adopt_user_local_bin():
-        existing = _openclaw_on_path()
-    if existing and _installed_openclaw_matches(existing, requested):
-        LOG.info("openclaw %s already installed at %s", requested, existing)
-        return
+        existing = _which(_OPENCLAW_PKG, node_bin_dir)
     if existing:
-        LOG.info("openclaw at %s does not report the requested version %s; reinstalling", existing, requested)
+        reported = _openclaw_reported_version(existing, node_bin_dir)
+        if reported == requested:
+            LOG.info("openclaw %s already installed at %s", requested, existing)
+            return
+        LOG.info("openclaw at %s reports %s, not %s; reinstalling", existing, reported or "nothing", requested)
 
-    npm = _ensure_npm()
-    _npm_install(npm, requested)
+    npm = _ensure_npm(requested, node_bin_dir)
+    _npm_install(npm, requested, node_bin_dir)
 
-    found = _expose_installed_openclaw(npm)
+    found = _expose_installed_openclaw(npm, node_bin_dir)
     if not found:
         raise RuntimeError("openclaw install appeared to succeed but 'openclaw' is still not on PATH")
+    reported = _openclaw_reported_version(found, node_bin_dir)
+    if reported != requested:
+        raise RuntimeError(
+            f"installed openclaw {requested}, but the selected launcher {found} reports "
+            f"{reported or 'no version'}; remove the other install or fix PATH"
+        )
 
-    LOG.info("openclaw is ready at %s", found)
+    LOG.info("openclaw %s is ready at %s", requested, found)
