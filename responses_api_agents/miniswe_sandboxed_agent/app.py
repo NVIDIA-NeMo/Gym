@@ -5,6 +5,7 @@
 
 import asyncio
 import logging
+import socket
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -18,6 +19,11 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import Field, field_validator
 
+from nemo_gym.adapters.turn_counter_proxy import (
+    TurnConstraintConfig,
+    start_turn_counter_proxy,
+    turn_constraint_metadata,
+)
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
@@ -70,6 +76,7 @@ class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     sandbox_model_base_url: str | None = None
+    turn_constraint: TurnConstraintConfig | None = None
     harness: MiniSWEConfig = Field(default_factory=MiniSWEConfig)
     artifacts_dir: Path = Path("results/miniswe_sandboxed_agent")
     agent_max_timeout_sec: float | None = Field(default=None, gt=0)
@@ -188,6 +195,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             extra, timings = {}, {}
             agent_started = False
             harness = None
+            proxy = None
+            constraint = self.config.turn_constraint
             with rollout_context(rollout_id if state.capture_model_calls else None):
                 try:
                     if seed.termination is None:
@@ -210,20 +219,41 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                             )
                             params.input = [NeMoGymEasyInputMessage(role="user", content=context.instruction)]
 
-                            global_config = getattr(self.server_client, "global_config_dict", None)
-                            harness = MiniSWEHarness(
-                                sandbox=sandbox,
-                                context=context,
-                                config=self.config.harness,
-                                observability_enabled=isinstance(global_config, Mapping)
-                                and bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)),
-                                params=params,
-                                model_base_url=self.base_url_for_run(
+                            model_base_url = (
+                                self.base_url_for_run(
                                     base_url=self.config.sandbox_model_base_url
                                     or get_server_url(self.config.model_server.name),
                                     body={"_ng_rollout_id": rollout_id},
                                 )
-                                + "/v1",
+                                + "/v1"
+                            )
+                            if constraint is not None:
+                                host = self.config.host
+                                if host in {"0.0.0.0", "127.0.0.1", "localhost"}:
+                                    host = socket.gethostbyname(socket.gethostname())
+                                proxy = await start_turn_counter_proxy(
+                                    upstream_base_url=model_base_url,
+                                    api_key="dummy",
+                                    max_turns=constraint.limit,
+                                    position=constraint.reminder.position,
+                                    trigger=constraint.reminder.trigger,
+                                    host="0.0.0.0",
+                                    advertise_host=host,
+                                    exhaustion_status=400,
+                                )
+                                model_base_url = proxy.base_url
+
+                            global_config = getattr(self.server_client, "global_config_dict", None)
+                            harness = MiniSWEHarness(
+                                sandbox=sandbox,
+                                context=context,
+                                config=self.config.harness.model_copy(update={"step_limit": 0})
+                                if constraint is not None
+                                else self.config.harness,
+                                observability_enabled=isinstance(global_config, Mapping)
+                                and bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)),
+                                params=params,
+                                model_base_url=model_base_url,
                                 model_name=self.config.model_server.name,
                                 directory=state.artifact_directory or self.config.artifacts_dir / seed.session_id,
                             )
@@ -246,6 +276,13 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         detail=f"{type(exc).__name__}: {exc}",
                     )
                 finally:
+                    if proxy is not None:
+                        await proxy.stop()
+                        extra["turn_constraint"] = turn_constraint_metadata(
+                            constraint, proxy, harness_version="mini-swe-native"
+                        ).model_dump(mode="json")
+                        if proxy.turns_used > constraint.limit and termination.reason not in {"timeout", "cancelled"}:
+                            termination = HarnessOutcome(reason="nonzero_exit", detail="TurnBudgetExceeded")
                     if harness is not None and not agent_started:
                         try:
                             await harness.close()
