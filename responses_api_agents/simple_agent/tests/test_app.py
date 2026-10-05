@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 import orjson
 import pytest
-from fastapi import Response
+from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -411,11 +411,14 @@ class TestApp:
             agent_session_id=body.agent_session_id,
             episode_id=body.episode_id,
         )
-        await server.close_agent_session(request, close_body)
-        await server.close_agent_session(request, close_body)
+        first_close = await server.close_agent_session(request, close_body)
+        second_close = await server.close_agent_session(request, close_body)
+        assert second_close == first_close
 
-        with pytest.raises(ValueError, match="already closed"):
+        # The base session bookkeeping rejects a seed after close with a conflict, which callers do not retry.
+        with pytest.raises(HTTPException) as error:
             await server.seed_agent_session(request, body)
+        assert error.value.status_code == 409
 
     @pytest.mark.parametrize("resolved", [False, None])
     async def test_run_emits_standard_turns_and_tool_observation(self, resolved: bool | None) -> None:
