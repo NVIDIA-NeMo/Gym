@@ -14,6 +14,10 @@ example_single_tool_call_session_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
+      # Sessions take tool access from the Environment Server's grant; dataset tooling finds the task schema here.
+      resources_server:
+        type: resources_servers
+        name: example_single_tool_call
       model_server:
         type: responses_api_models
         name: policy_model
