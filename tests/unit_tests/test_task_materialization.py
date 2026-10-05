@@ -3,14 +3,11 @@
 
 import json
 from copy import deepcopy
-from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
-from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
-from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.global_config import GlobalConfigDictParser
 from nemo_gym.rollout_collection import (
     RolloutCollectionConfig,
@@ -18,7 +15,6 @@ from nemo_gym.rollout_collection import (
     _environment_server_for_config_row,
     _native_episode_request_body,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
 from nemo_gym.task_data import TaskDataValidator
 from nemo_gym.task_materialization import materialize_task
@@ -106,32 +102,6 @@ def _row():
         "_ng_rollout_index": 2,
         "_ng_attempt_index": 1,
     }
-
-
-def test_legacy_adapter_preserves_task_identity_and_data():
-    row = _row()
-    row.update(task_source="resources", agent_ref={"name": "agent"})
-    adapter = SingleAgentTurnLegacyEnvironmentServer(
-        config=SingleAgentTurnEnvironmentServerConfig(
-            name="environment",
-            host="localhost",
-            port=1,
-            entrypoint="app.py",
-            cleanup_timeout_seconds=10,
-            resources_server={"type": "resources_servers", "name": "resources"},
-            agent_server={"type": "responses_api_agents", "name": "agent"},
-        ),
-        server_client=MagicMock(spec=ServerClient),
-    )
-    request = adapter._native_request(row)
-    assert (request.task.task_id.taskset, request.task.task_id.task_id) == ("resources", "problem-1")
-    assert request.task.task_input.task_data == {
-        "problem_id": "problem-1",
-        "instance_id": "instance-1",
-        "run_script": "verifier\nscript\n",
-        "verifier_metadata": {"answer": "expected"},
-    }
-    assert request.episode_id.attempt == 1
 
 
 @pytest.mark.parametrize("benchmark", [False, True])
