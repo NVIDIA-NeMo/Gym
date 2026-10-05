@@ -65,7 +65,7 @@ def sandbox(sandbox_id: str, events: list[str]) -> AsyncMock:
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(shutil.which("git") is None, reason="Git is required for collection")
-@pytest.mark.parametrize("failure", ["git", "head", "provider", "exec_error", "missing_patch"])
+@pytest.mark.parametrize("failure", ["git", "head", "provider", "exec_error", "missing_patch", "collect_error"])
 async def test_collection_distinguishes_invalid_submission_from_infrastructure(
     task: InlineTask, tmp_path: Path, failure: str
 ) -> None:
@@ -96,11 +96,16 @@ async def test_collection_distinguishes_invalid_submission_from_infrastructure(
     elif failure == "head":
         (repo / ".git/HEAD").write_text("ref: refs/heads/missing\n")
 
+    integrity_results: list[SandboxExecResult] = []
+
     async def execute(command: str, *, timeout_s: float) -> SandboxExecResult:
         if failure == "provider":
             raise ConnectionError("sandbox transport unavailable")
         if failure == "exec_error":
             return SandboxExecResult("", "provider unavailable", 125, error_type="ProviderError")
+        if failure == "collect_error" and command == task.config.verifier.collect[0].command:
+            return SandboxExecResult("", "simulated collect failure", 1)
+        checking_integrity = command.startswith('test "$(git -C /app rev-parse --show-toplevel)"')
         command = command.replace("/app", shlex.quote(str(repo))).replace(
             "/logs/artifacts", shlex.quote(str(artifacts))
         )
@@ -112,7 +117,10 @@ async def test_collection_distinguishes_invalid_submission_from_infrastructure(
             errors="replace",
             timeout=timeout_s,
         )
-        return SandboxExecResult(completed.stdout, completed.stderr, completed.returncode)
+        result = SandboxExecResult(completed.stdout, completed.stderr, completed.returncode)
+        if checking_integrity:
+            integrity_results.append(result)
+        return result
 
     async def download(remote: str, local: Path) -> None:
         if failure == "missing_patch":
@@ -135,6 +143,12 @@ async def test_collection_distinguishes_invalid_submission_from_infrastructure(
     _, measured, masked, _ = select_measured([{}], [result.model_dump()])
     assert [row["reward"] for row in measured] == ([0] if invalid else [])
     assert len(masked) == (0 if invalid else 1)
+    if failure == "collect_error":
+        assert len(integrity_results) == 1 and integrity_results[0].return_code == 0
+        assert not integrity_results[0].error_type
+        assert (
+            result.failure_reason == "RuntimeError: DeepSWE collect hook exited with code 1: simulated collect failure"
+        )
     agent.stop.assert_awaited_once()
 
 

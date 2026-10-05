@@ -55,7 +55,11 @@ reviewed OpenCode ripgrep fix from
 part of this integration. These are representative integration checks, not a full
 benchmark accuracy estimate. Exact revisions and cleanup evidence are in the record.
 One Actionlint attempt was interrupted by a model-call timeout and retried once;
-the record preserves the original error and distinguishes the retry from first-attempt results.
+the underlying cause is unconfirmed. The record preserves the original error and
+distinguishes the retry from first-attempt results.
+The record also includes a separate final-follow-up check of isolated patch decoding:
+one golden/null pair and one three-turn model attempt, with the exact candidate
+source hash and independent cleanup checks. Earlier trajectories keep their original provenance.
 
 For another dataset, supply rows matching `task_data.py`. Keep local training data
 uncommitted. Rows are trusted controller inputs: grading files live in `files`,
@@ -76,6 +80,7 @@ tests. Each verifier image must provide Git and writable grading directories.
 File contents are provisioned through `SandboxSpec.files`, like other SWE servers.
 Candidate patches are base64-encoded for this text-only transport and decoded in B
 before grading, preserving non-UTF-8 text diffs as well as Git binary patches.
+Decoding uses isolated Python to avoid importing task-local modules.
 Before running tests or applying the candidate patch, B checks for Python and, if missing,
 installs `python3` as root through its OS package manager (APT, APK, microdnf,
 DNF or Yum), with a five-minute setup timeout. Existing Python is reused; neither

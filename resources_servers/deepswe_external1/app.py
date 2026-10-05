@@ -282,7 +282,7 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
     async def _stage_verifier(self, sandbox: AsyncSandbox, task: InlineTask, model_patch: bytes) -> None:
         # Files were supplied through SandboxSpec.files at B's creation, like Swemer.
         result = await sandbox.exec(
-            "python3 -c 'import base64; from pathlib import Path; "
+            "python3 -I -c 'import base64; from pathlib import Path; "
             'Path("/logs/artifacts/model.patch").write_bytes(base64.b64decode('
             'Path("/logs/artifacts/model.patch.b64").read_bytes(), validate=True))'
             "' && "

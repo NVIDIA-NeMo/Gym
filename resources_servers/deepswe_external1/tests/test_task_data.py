@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+import os
 import shlex
 import shutil
 import subprocess
@@ -52,8 +53,9 @@ def test_file_text_is_not_silently_normalized(task: InlineTask) -> None:
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="Git is required for the patch round-trip")
 @pytest.mark.asyncio
+@pytest.mark.parametrize("shadow_source", [None, "cwd", "pythonpath"])
 async def test_real_git_patch_preserves_binary_deletion_symlink_and_executable_mode(
-    task: InlineTask, tmp_path: Path
+    task: InlineTask, tmp_path: Path, shadow_source: str | None
 ) -> None:
     repo = tmp_path / "A"
     repo.mkdir()
@@ -110,11 +112,22 @@ async def test_real_git_patch_preserves_binary_deletion_symlink_and_executable_m
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
 
+    environment = os.environ.copy()
+    if shadow_source is not None:
+        shadow_dir = repo if shadow_source == "cwd" else tmp_path / "pythonpath"
+        shadow_dir.mkdir(exist_ok=True)
+        for name in ("base64", "pathlib"):
+            (shadow_dir / f"{name}.py").write_text('raise RuntimeError("task-local module imported")\n')
+        if shadow_source == "pythonpath":
+            environment["PYTHONPATH"] = str(shadow_dir)
+
     async def execute(command, *, timeout_s):
         command = command.replace("/logs/artifacts", shlex.quote(str(staged / "logs/artifacts"))).replace(
             "/tests", shlex.quote(str(staged / "tests"))
         )
-        completed = subprocess.run(["sh", "-c", command], capture_output=True, text=True, timeout=timeout_s)
+        completed = subprocess.run(
+            ["sh", "-c", command], cwd=repo, env=environment, capture_output=True, text=True, timeout=timeout_s
+        )
         return SimpleNamespace(return_code=completed.returncode, stderr=completed.stderr)
 
     await make_server(task)._stage_verifier(AsyncMock(exec=AsyncMock(side_effect=execute)), task, patch)
