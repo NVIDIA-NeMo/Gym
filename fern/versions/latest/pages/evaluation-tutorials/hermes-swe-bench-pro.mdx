@@ -73,17 +73,3 @@ gym eval run --no-serve \
 - This integration is evaluation-only, not suitable for producing RL training data.
 - The sandbox runner records `stop_reason=wall_time` for its deadline and
   `stop_reason=cancelled` for a close-requested stop, checkpointing available partial work before exit.
-
-## Migrate an existing SWE-Pro configuration
-
-Follow the [shared sandboxed-agent migration workflow](/main/agent-server/integrate-existing-agents#migrate-standalone-sandboxed-agents)
-and the [Hermes-specific runtime, request, and reporting changes](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/hermes_agent/README.md#migrate-from-the-standalone-sandboxed-agent).
-For this benchmark:
-
-- Replace the old agent configuration with `benchmarks/swebench/pro/hermes.yaml`, and
-  select `swebench_pro_hermes_agent` when using `--no-serve`.
-- Move agent settings under `swebench_pro_hermes_agent.responses_api_agents.hermes_agent`.
-  Move SWE-Pro `image_template` and image-cache provenance settings under
-  `swebench_pro_hermes_resources_server.resources_servers.swebench_pro`.
-- Reuse prepared SWE-Pro JSONL rows through `single_agent_turn_legacy`; no data conversion
-  is needed. The SWE-Pro verifier is unchanged by the removal.

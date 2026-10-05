@@ -110,7 +110,7 @@ for task preparation, Environment Server configuration, evaluation commands, and
 ## Migrate from the standalone sandboxed agent
 
 `hermes_sandboxed_agent` and its configuration files have been removed. Follow the
-[shared sandboxed-agent migration workflow](../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#migrate-standalone-sandboxed-agents)
+[shared sandboxed-agent migration workflow](../../resources_servers/swebench_pro/README.md#migrate-standalone-sandboxed-agents)
 to run `hermes_agent` through an Environment Server. For Hermes specifically:
 
 - Move model, toolset, and sampling settings to your agent deployment's
