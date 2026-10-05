@@ -1667,3 +1667,96 @@ async def test_incomplete_capture_policy_preserves_recovery_accounting(
         client.post.reset_mock()
         await RolloutCollectionHelper().run_from_config(runner_config)
         assert not client.post.called
+
+
+@pytest.mark.parametrize("latest_outcome", ["failure", "interrupted", "omitted", "suppressed_retry"])
+@pytest.mark.parametrize("retain_results", [False, True])
+async def test_batch_status_uses_current_journal_attempts(tmp_path, monkeypatch, latest_outcome, retain_results):
+    """Collection and offline status cannot revive an older success or failure."""
+    from nemo_gym.batch_status import observe_materialized_rows
+    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+
+    monkeypatch.setattr(collection, "get_global_config_dict", lambda: {})
+    source = tmp_path / "inputs.jsonl"
+    source.write_text(json.dumps(failing_row() | {"task_source": "my_agent_source"}) + "\n")
+    output = tmp_path / "rollouts.jsonl"
+    batch_manifest = tmp_path / "batch_manifest.json"
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(source),
+        output_jsonl_fpath=str(output),
+        batch_manifest_fpath=str(batch_manifest),
+        retain_results_in_memory=retain_results,
+        disable_aggregation=True,
+        disable_health_check=True,
+        upload_rollouts=False,
+    )
+    rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+    observed = observe_materialized_rows(rows)["my_agent"]
+    batch_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "members": {
+                    "benchmark": {
+                        "agent_name": "my_agent",
+                        "task_sources": observed.task_sources,
+                        "dataset_sha256": observed.dataset_sha256,
+                        "expected_task_count": observed.task_count,
+                        "expected_rollout_count": observed.rollout_count,
+                        "repeat_policy": observed.repeat_policy.model_dump(),
+                        "resolved_recipe_sha256": "a" * 64,
+                        "metric_keys": [],
+                    }
+                },
+            }
+        )
+    )
+    post = AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "response": {}}))
+    install_fake_server_client(monkeypatch, post)
+    await RolloutCollectionHelper().run_from_config(config)
+    success = list(read_records(output))[0]
+    original_output = output.read_bytes()
+    store = RolloutStore.read(output)
+    with RolloutStore.start_or_resume(output, lambda: (rows, store.manifest), resume=True) as writer:
+        older_failure = rows[0] | {"_ng_run_id": store.manifest.run_id, "_ng_attempt_index": 1}
+        writer.record_dispatch(older_failure)
+        writer.record_outcome(older_failure | {"_ng_failure_class": "agent_run_error"})
+        latest = older_failure | {"_ng_attempt_index": 2}
+        writer.record_dispatch(latest)
+        if latest_outcome in {"failure", "suppressed_retry"}:
+            writer.record_outcome(latest | {"_ng_failure_class": "judge_failed"})
+        elif latest_outcome == "omitted":
+            writer.record_omission(latest, "No reusable answer")
+    assert success["reward"] == 1.0
+    post.reset_mock()
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+    resumed = config.model_copy(update={"resume_from_cache": True})
+    if latest_outcome == "suppressed_retry":
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "4")
+        post.return_value = FakeResponse(200, {"_ng_no_persist": True})
+        with pytest.raises(RuntimeError, match="None of the 1 dispatched"):
+            await RolloutCollectionHelper().run_from_config(resumed)
+        post.assert_awaited_once()
+        post.reset_mock()
+    else:
+        await RolloutCollectionHelper().run_from_config(resumed)
+    expected_failures = {"judge_failed": 1} if latest_outcome == "failure" else {}
+    status = json.loads((tmp_path / "batch_status.json").read_text())["members"]["my_agent"]
+    assert status["completed_rollout_count"] == 0
+    assert status["remaining_rollout_count"] == 1
+    assert status["failures_by_class"] == expected_failures
+    await RolloutAggregationHelper().run_from_config(
+        RolloutAggregationConfig(
+            input_glob=str(output),
+            output_jsonl_fpath=str(output),
+            merge_shards=False,
+            batch_manifest_fpath=str(batch_manifest),
+            disable_health_check=True,
+        )
+    )
+    offline = json.loads((tmp_path / "batch_status.json").read_text())["members"]["my_agent"]
+    assert offline["completed_rollout_count"] == 0
+    assert offline["remaining_rollout_count"] == 1
+    assert offline["failures_by_class"] == expected_failures
+    post.assert_not_awaited()
+    assert output.read_bytes() == original_output

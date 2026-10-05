@@ -60,10 +60,12 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         task_source = row.get(TASK_SOURCE_KEY_NAME, self.config.resources_server.name)
         if not isinstance(task_source, str) or not task_source:
             raise ValueError("task_source must be a non-empty string when provided")
-        if task_source != self.config.resources_server.name:
+        # Collation sets task_source to the instance that declares the dataset: usually the agent,
+        # sometimes the Resources Server, and possibly this Environment Server.
+        bound = (self.config.resources_server.name, self.config.agent_server.name, self.config.name)
+        if task_source not in bound:
             raise ValueError(
-                f"Row task_source {task_source!r} does not match configured resources server "
-                f"{self.config.resources_server.name!r}"
+                f"Row task_source {task_source!r} names none of this Environment Server's instances: {list(bound)}"
             )
         agent_ref = row.get(AGENT_REF_KEY_NAME)
         if agent_ref is not None and (

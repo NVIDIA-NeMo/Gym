@@ -542,7 +542,7 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
 
     scored = []
 
-    async def aggregate(self, results, rows, path):
+    async def aggregate(self, results, rows, path, *, raise_on_error=True):
         scored.extend(results)
         return None
 
@@ -611,7 +611,7 @@ async def test_legacy_aggregation_cannot_claim_complete_without_inventory(tmp_pa
         orjson.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "mask_sample": masked}) + b"\n"
     )
 
-    async def aggregate(*args):
+    async def aggregate(*args, raise_on_error=True):
         return None
 
     exported = []
@@ -662,7 +662,7 @@ async def test_legacy_repeated_explicit_ids_remain_aggregatable(tmp_path, monkey
     original = output.read_bytes(), inventory.read_bytes()
     scored = []
 
-    async def aggregate(self, results, rows, path):
+    async def aggregate(self, results, rows, path, *, raise_on_error=True):
         scored.extend(results)
 
     monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", aggregate)
@@ -700,7 +700,7 @@ async def test_aggregation_reports_journal_failure_classes(run, monkeypatch, cap
             orjson.dumps(rows[0] | {"reward": 0, "response": {}}) + b"\n"
         )
 
-    async def aggregate(*args):
+    async def aggregate(*args, raise_on_error=True):
         return None
 
     monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", aggregate)
