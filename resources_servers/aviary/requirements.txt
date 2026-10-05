@@ -1,7 +1,8 @@
 -e nemo-gym[dev] @ ../../
 fhaviary[gsm8k,hotpotqa,notebook,llm]>=0.28.0
 tqdm
-datasets
+# Avoid resolver backtracking to legacy HotPotQA/datasets releases incompatible with current PyArrow.
+datasets>=4.4.1
 huggingface-hub
 pillow==12.3.0
 
