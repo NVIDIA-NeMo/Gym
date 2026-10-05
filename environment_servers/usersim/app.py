@@ -120,6 +120,14 @@ class _AgentSession:
     close_response: AgentCloseSessionResponse | None = None
 
 
+class _ParticipantActivationError(Exception):
+    """Identify which participant Agent failed to produce a response."""
+
+    def __init__(self, alias: str, error: Exception) -> None:
+        super().__init__(f"{alias} activation failed: {type(error).__name__}: {error}")
+        self.alias = alias
+
+
 class _GymModelFacade:
     """Async model facade expected by UserSim's generator."""
 
@@ -242,22 +250,33 @@ class _ConversationBridge:
         target = self.environment_server.config.target_for_alias(alias)
         if alias in _PARTICIPANT_ALIASES:
             agent_session = self.agent_sessions[alias]
-            response = await self.environment_server.server_client.post(
-                server_name=target.name,
-                url_path=self.environment_server.responses_path(target.name, self.request),
-                json=request_params,
-                cookies=agent_session.cookies,
-            )
+            try:
+                response = await self.environment_server.server_client.post(
+                    server_name=target.name,
+                    url_path=self.environment_server.responses_path(
+                        target.name,
+                        self.request,
+                        capture_training_tokens=alias == "assistant_model",
+                    ),
+                    json=request_params,
+                    cookies=agent_session.cookies,
+                )
+                await raise_for_status(response)
+                response_data = await get_response_json(response)
+                trajectory_data = response_data.pop(_INTERNAL_TRAJECTORY_KEY, None)
+                gym_response = NeMoGymResponse.model_validate(response_data)
+            except Exception as error:
+                raise _ParticipantActivationError(alias, error) from error
         else:
             response = await self.environment_server.server_client.post(
                 server_name=target.name,
                 url_path="/v1/responses",
                 json=request_params,
             )
-        await raise_for_status(response)
-        response_data = await get_response_json(response)
-        trajectory_data = response_data.pop(_INTERNAL_TRAJECTORY_KEY, None)
-        gym_response = NeMoGymResponse.model_validate(response_data)
+            await raise_for_status(response)
+            response_data = await get_response_json(response)
+            trajectory_data = response_data.pop(_INTERNAL_TRAJECTORY_KEY, None)
+            gym_response = NeMoGymResponse.model_validate(response_data)
         if alias in _PARTICIPANT_ALIASES:
             response_cookies = _cookies(response)
             if response_cookies:
@@ -313,7 +332,24 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
     ) -> UserSimEpisodeResponse:
         task = request.task.task_input
         resources_session_id = f"resources-session-{uuid4().hex}"
-        resources_cookies: dict[str, str]
+        resources_cookies: dict[str, str] = {}
+
+        async def close_resources() -> None:
+            if not resources_cookies:
+                return
+            close_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/close_session",
+                json=ResourcesCloseSessionRequest(
+                    resources_session_id=resources_session_id,
+                    episode_id=request.episode_id,
+                ),
+                cookies=resources_cookies,
+            )
+            await raise_for_status(close_response)
+            ResourcesCloseSessionResponse.model_validate(await get_response_json(close_response))
+
+        resources_cleanup = cleanup.register_cleanup("resources session", close_resources)
         try:
             seed_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -325,8 +361,8 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
                     task_data=task.model_dump(mode="json"),
                 ),
             )
+            resources_cookies.update(_cookies(seed_http_response))
             await raise_for_status(seed_http_response)
-            resources_cookies = _cookies(seed_http_response)
             if not resources_cookies:
                 raise ValueError("Resources seed did not establish a session cookie")
             seed = UserSimSeedResponse.model_validate(await get_response_json(seed_http_response))
@@ -335,20 +371,6 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         except Exception as error:
             raise self._failure("seed", error) from error
 
-        async def close_resources() -> None:
-            close_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/close_session",
-                json=ResourcesCloseSessionRequest(
-                    resources_session_id=seed.resources_session_id,
-                    episode_id=request.episode_id,
-                ),
-                cookies=resources_cookies,
-            )
-            await raise_for_status(close_response)
-            ResourcesCloseSessionResponse.model_validate(await get_response_json(close_response))
-
-        resources_cleanup = cleanup.register_cleanup("resources session", close_resources)
         tool_accesses = self._resources_tool_accesses(seed, resources_cookies)
 
         agent_sessions: dict[str, _AgentSession] = {}
@@ -357,39 +379,17 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             "assistant_model": self.config.assistant_agent,
         }
         for alias, target in agent_targets.items():
-            try:
-                agent_session_id = f"agent-session-{alias}-{uuid4().hex}"
-                session_request = AgentSeedSessionRequest(
-                    agent_session_id=agent_session_id,
-                    episode_id=request.episode_id,
-                    task_id=request.task.task_id,
-                    tool_accesses=tool_accesses if alias == "assistant_model" else [],
-                    sandbox_access=seed.sandbox_access if alias in {"user_model", "assistant_model"} else None,
-                )
-                session_http_response = await self.server_client.post(
-                    server_name=target.name,
-                    url_path="/v1/agent_sessions",
-                    json=session_request.model_dump(mode="json"),
-                )
-                await raise_for_status(session_http_response)
-                session_response = AgentSeedSessionResponse.model_validate(
-                    await get_response_json(session_http_response)
-                )
-                if session_response.agent_session_id != agent_session_id:
-                    raise ValueError(f"{alias} seed returned a different agent_session_id")
-                session = _AgentSession(
-                    alias=alias,
-                    target=target,
-                    session_id=session_response.agent_session_id,
-                    cookies=_cookies(session_http_response),
-                )
-                if not session.cookies:
-                    raise ValueError(f"{alias} seed did not establish a session cookie")
-                agent_sessions[alias] = session
-            except Exception as error:
-                raise self._failure("agent", error) from error
+            agent_session_id = f"agent-session-{alias}-{uuid4().hex}"
+            session = _AgentSession(
+                alias=alias,
+                target=target,
+                session_id=agent_session_id,
+                cookies={},
+            )
 
             async def close_agent(current: _AgentSession = session) -> None:
+                if not current.cookies:
+                    return
                 close_http_response = await self.server_client.post(
                     server_name=current.target.name,
                     url_path="/v1/agent_sessions/close",
@@ -405,6 +405,31 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
                 )
 
             session.cleanup = cleanup.register_cleanup(f"{alias} agent session", close_agent)
+            try:
+                session_request = AgentSeedSessionRequest(
+                    agent_session_id=agent_session_id,
+                    episode_id=request.episode_id,
+                    task_id=request.task.task_id,
+                    tool_accesses=tool_accesses if alias == "assistant_model" else [],
+                    sandbox_access=seed.sandbox_access if alias == "assistant_model" else None,
+                )
+                session_http_response = await self.server_client.post(
+                    server_name=target.name,
+                    url_path="/v1/agent_sessions",
+                    json=session_request.model_dump(mode="json"),
+                )
+                session.cookies.update(_cookies(session_http_response))
+                await raise_for_status(session_http_response)
+                session_response = AgentSeedSessionResponse.model_validate(
+                    await get_response_json(session_http_response)
+                )
+                if session_response.agent_session_id != agent_session_id:
+                    raise ValueError(f"{alias} seed returned a different agent_session_id")
+                if not session.cookies:
+                    raise ValueError(f"{alias} seed did not establish a session cookie")
+                agent_sessions[alias] = session
+            except Exception as error:
+                raise self._failure("agent", error) from error
 
         bridge = _ConversationBridge(
             self,
@@ -420,6 +445,20 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             _finalize_termination(bridge.invocations, result)
             if not any(invocation.role == "assistant" for invocation in bridge.invocations):
                 raise ValueError("UserSim completed without an assistant_model invocation")
+        except _ParticipantActivationError as error:
+            if error.alias != "assistant_model":
+                raise self._failure("agent", error) from error
+            result = UserSimSimulationResult(
+                conversation_messages=_participant_messages(bridge.invocations),
+                conversation_status=False,
+                simulation_outcome={
+                    "status": "failed",
+                    "failure_attribution": "assistant_model",
+                    "failure_reason": str(error)[:2000],
+                    "termination_reason": "assistant_model_activation_failed",
+                },
+            )
+            _finalize_termination(bridge.invocations, result)
         except Exception as error:
             raise self._failure("agent", error) from error
 
@@ -494,11 +533,19 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         data.update(scenario.probe_data)
         return await generator.agenerate(data)
 
-    def responses_path(self, target_name: str, request: UserSimEpisodeRequest) -> str:
+    def responses_path(
+        self,
+        target_name: str,
+        request: UserSimEpisodeRequest,
+        *,
+        capture_training_tokens: bool,
+    ) -> str:
         block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}
         target_config = get_first_server_config_dict(self.server_client.global_config_dict, target_name)
-        token_capture = bool(block.get("enabled", False)) and (
-            bool(block.get("all_agents", False)) or bool(target_config.get("token_id_capture", False))
+        token_capture = (
+            capture_training_tokens
+            and bool(block.get("enabled", False))
+            and (bool(block.get("all_agents", False)) or bool(target_config.get("token_id_capture", False)))
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
         return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}/v1/responses"
@@ -613,6 +660,14 @@ def _response_text(response: NeMoGymResponse) -> str:
     return "\n".join(chunks)
 
 
+def _participant_messages(invocations: Sequence[UserSimInvocation]) -> list[dict[str, Any]]:
+    return [
+        {"role": invocation.role, "content": _response_text(invocation.response)}
+        for invocation in invocations
+        if invocation.role in _PARTICIPANT_ROLES
+    ]
+
+
 def _finalize_termination(invocations: list[UserSimInvocation], result: UserSimSimulationResult) -> None:
     participant_indexes = [
         index for index, invocation in enumerate(invocations) if invocation.role in _PARTICIPANT_ROLES
@@ -620,14 +675,9 @@ def _finalize_termination(invocations: list[UserSimInvocation], result: UserSimS
     if not participant_indexes:
         return
     metadata = result.conversation_metadata or {}
-    reason = next(
-        (
-            invocations[index].termination_reason
-            for index in reversed(participant_indexes)
-            if invocations[index].termination_reason
-        ),
-        None,
-    )
+    reason = metadata.get("termination_reason") or result.simulation_outcome.get("termination_reason")
+    if not isinstance(reason, str) or not reason:
+        reason = None
     if reason is None and (metadata.get("early_stop") or result.simulation_outcome.get("early_stop")):
         reason = "usersim_early_stop"
     if reason is None:

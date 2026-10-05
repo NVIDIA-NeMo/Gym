@@ -203,6 +203,14 @@ def _queue_success_responses(client: _Client) -> None:
                         "personas_panel_sha256": "a" * 64,
                         "usersim_revision": "b" * 40,
                     },
+                    "sandbox_access": {
+                        "connection": {
+                            "kind": "direct",
+                            "provider_config_ref": "sandbox",
+                            "descriptor": {"sandbox_id": "sandbox-1"},
+                        },
+                        "workdir": "/workspace",
+                    },
                 },
                 cookie="resources-cookie",
             ),
@@ -291,6 +299,7 @@ async def test_usersim_environment_server_runs_native_episode(monkeypatch) -> No
             max_tokens=None,
             tools=None,
         )
+        bridge.invocations[0] = bridge.invocations[0].model_copy(update={"termination_reason": "stale_reason"})
         return {
             "conversation_messages": [
                 {"role": "user", "content": "I need dinner advice."},
@@ -325,9 +334,11 @@ async def test_usersim_environment_server_runs_native_episode(monkeypatch) -> No
         "/close_session",
     ]
     assert client.calls[1][2]["json"]["tool_accesses"] == []
+    assert client.calls[1][2]["json"]["sandbox_access"] is None
     [tool_access] = client.calls[2][2]["json"]["tool_accesses"]
     assert tool_access["name"] == "resources.direct_http"
     assert tool_access["cookies"] == {"session": "resources-cookie"}
+    assert client.calls[2][2]["json"]["sandbox_access"]["workdir"] == "/workspace"
     assert client.calls[3][2]["cookies"] == {"session": "user-cookie"}
     assert client.calls[4][2]["cookies"] == {"session": "assistant-cookie"}
     assert client.calls[5][0] == "support"
@@ -380,10 +391,89 @@ async def test_token_capture_uses_environment_episode_identity(monkeypatch) -> N
     monkeypatch.setattr(environment_server, "_run_usersim", fake_run)
     await environment_server.run_request(_request())
 
-    for call_index in (3, 4):
-        assert client.calls[call_index][1] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
+    assert client.calls[3][1] == "/ng-rollout/rollout-a2/v1/responses"
+    assert client.calls[4][1] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
     for call_index in (5, 6):
         assert client.calls[call_index][1] == "/v1/responses"
+
+
+async def test_seeded_resources_are_closed_when_seed_response_is_invalid() -> None:
+    environment_server, client = _environment_server()
+    client.responses.extend(
+        [
+            _Response({}, cookie="resources-cookie"),
+            _Response({"resources_session_id": "resources-session"}),
+        ]
+    )
+
+    response = await environment_server.run_request(_request())
+
+    assert response.failure is not None
+    assert response.failure.stage == "seed"
+    assert [path for _, path, _ in client.calls] == ["/seed_session", "/close_session"]
+
+
+async def test_seeded_agent_is_closed_when_seed_response_is_invalid() -> None:
+    environment_server, client = _environment_server()
+    _queue_success_responses(client)
+    resources_seed = client.responses[0]
+    client.responses = [
+        resources_seed,
+        _Response({"unexpected": True}, cookie="user-cookie"),
+        _Response({"agent_session_id": "user-session", "resources_cookies": {}}),
+        _Response({"resources_session_id": "resources-session"}),
+    ]
+
+    response = await environment_server.run_request(_request())
+
+    assert response.failure is not None
+    assert response.failure.stage == "agent"
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/v1/agent_sessions/close",
+        "/close_session",
+    ]
+
+
+async def test_assistant_activation_failure_is_verified_as_valid_zero_reward(monkeypatch) -> None:
+    environment_server, client = _environment_server()
+    _queue_success_responses(client)
+    client.responses[4] = _Response({"invalid": "assistant response"})
+    client.responses = [
+        *client.responses[:5],
+        client.responses[7],
+        client.responses[8],
+        _Response(
+            {
+                "reward": 0.0,
+                "reward_components": {"assistant_quality": 0.0},
+                "scenario_completed": False,
+                "verifier_data": {},
+            }
+        ),
+        client.responses[10],
+    ]
+
+    async def fake_run(bridge, _scenario):
+        await bridge.invoke("user_model", [{"role": "user", "content": "write user"}], max_tokens=None, tools=None)
+        await bridge.invoke(
+            "assistant_model",
+            [{"role": "user", "content": "I need dinner advice."}],
+            max_tokens=None,
+            tools=None,
+        )
+        raise AssertionError("assistant activation should have failed")
+
+    monkeypatch.setattr(environment_server, "_run_usersim", fake_run)
+    response = await environment_server.run_request(_request())
+
+    assert response.failure is None
+    assert response.result is not None
+    assert response.result.verification.reward == 0.0
+    assert response.result.usersim_result.simulation_outcome["failure_attribution"] == "assistant_model"
+    assert response.result.invocations[-1].termination_reason == "assistant_model_activation_failed"
+    assert [path for _, path, _ in client.calls][-2:] == ["/verify", "/close_session"]
 
 
 def test_dependency_retry_requires_transient_error() -> None:
