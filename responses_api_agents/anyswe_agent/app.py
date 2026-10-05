@@ -896,10 +896,11 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         )
         persistent_dir.mkdir(parents=True, exist_ok=True)
         server_config = self._server.model_dump()
-        if not self.config.sandbox_model_base_url:
-            server_config["model_server_url"] = _model_url_for_rollout(
-                server_config["model_server_url"], rollout_id, token_capture=self._token_id_capture_enabled()
-            )
+        # A sandbox_model_base_url (e.g. a relay in front of the Gym model server) still needs the rollout
+        # prefix, or token capture loses every model call.
+        server_config["model_server_url"] = _model_url_for_rollout(
+            server_config["model_server_url"], rollout_id, token_capture=self._token_id_capture_enabled()
+        )
         params = AnySweInstanceConfig(
             **self.config.model_dump(),
             **server_config,
