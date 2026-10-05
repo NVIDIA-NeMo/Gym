@@ -219,6 +219,20 @@ class SandboxObservation(ObservationModel):
     )
     resource_usage_source: Optional[str] = None
     error_type: Optional[str] = None
+    clock_offset_s: Optional[float] = Field(
+        default=None,
+        description=(
+            "sandbox_clock - harness_clock at sandbox start, estimated from one round trip. Add it to "
+            "artifact-timed spans (timing_source=artifact) to place them on the harness timeline."
+        ),
+    )
+    clock_offset_uncertainty_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Half the round-trip time of the probe. A cross-process gap smaller than this is not a measured delay."
+        ),
+    )
 
 
 class ContextCompactionObservation(ObservationModel):

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import shlex
 import sqlite3
@@ -22,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from pytest import MonkeyPatch, fixture, mark
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -54,6 +56,7 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
     OpenCodeSandboxedAgentRunRequest,
+    _probe_sandbox_clock,
     parse_opencode_observations,
 )
 
@@ -470,6 +473,8 @@ class TestOpenCodeSandboxedAgent:
         sandbox._handle = SandboxHandle(sandbox_id="connected-sandbox", provider_name="opensandbox", raw=None)
         sandbox.exec = AsyncMock(
             side_effect=[
+                # clock probe at sandbox start (date +%s.%N)
+                SimpleNamespace(stdout="1700000000.250000000\n", stderr="", return_code=0, error_type=None),
                 SimpleNamespace(
                     stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
                 ),
@@ -563,19 +568,22 @@ class TestOpenCodeSandboxedAgent:
         assert sandbox_records[0].provider == "opensandbox"
         assert sandbox_records[0].outcome == "completed"
         assert sandbox_records[0].wall_time_s is None
+        assert sandbox_records[0].clock_offset_s is not None
+        assert sandbox_records[0].clock_offset_uncertainty_s is not None
         gap_codes = {gap.code for gap in result.ng_agent_observations.gaps}
         assert "model_call_ownership_unavailable" not in gap_codes
         assert "sandbox_lifecycle_timing_unavailable" in gap_codes
         assert "sandbox_cleanup_failed" not in gap_codes
-        session_list_env = sandbox.exec.await_args_list[1].kwargs["env"]
-        export_env = sandbox.exec.await_args_list[2].kwargs["env"]
+        assert sandbox.exec.await_args_list[0].kwargs["command"] == "date +%s.%N"
+        session_list_env = sandbox.exec.await_args_list[2].kwargs["env"]
+        export_env = sandbox.exec.await_args_list[3].kwargs["env"]
         remote_data_home = session_list_env["XDG_DATA_HOME"]
         assert remote_data_home.startswith("/tmp/nemo-gym-opencode-")
-        assert f"XDG_DATA_HOME={remote_data_home}" in sandbox.exec.await_args_list[0].kwargs["command"]
+        assert f"XDG_DATA_HOME={remote_data_home}" in sandbox.exec.await_args_list[1].kwargs["command"]
         assert export_env["XDG_DATA_HOME"] == remote_data_home
         assert (
             "opencode export session-id > /tmp/opencode_export.json"
-            in sandbox.exec.await_args_list[2].kwargs["command"]
+            in sandbox.exec.await_args_list[3].kwargs["command"]
         )
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
@@ -784,3 +792,34 @@ class TestInvocationSpans:
         [tool] = [r for r in bundle.records if isinstance(r, ToolCallObservation)]
         assert (tool.requested_at, tool.started_at, tool.completed_at) == (2.0, 2.5, 4.0)
         assert tool.response_received_at is None
+
+
+class TestSandboxClockProbe:
+    """OpenCode times tools and messages on the sandbox clock, model calls are on the harness
+    clock; one round trip at start gives the offset and how far it can be trusted."""
+
+    @staticmethod
+    def _sandbox(stdout: str, return_code: int = 0, delay_s: float = 0.0):
+        async def exec(command: str):
+            assert command == "date +%s.%N"
+            await asyncio.sleep(delay_s)
+            return SimpleNamespace(stdout=stdout, stderr="", return_code=return_code, error_type=None)
+
+        return SimpleNamespace(exec=exec)
+
+    async def test_offset_is_measured_against_the_round_trip_midpoint(self, monkeypatch: MonkeyPatch) -> None:
+        clock = iter([1000.0, 1000.2])  # sent, received
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.time", lambda: next(clock))
+        offset, uncertainty = await _probe_sandbox_clock(self._sandbox("1003.100000000"))
+        assert offset == pytest.approx(1003.1 - 1000.1)
+        assert uncertainty == pytest.approx(0.1)
+
+    async def test_a_failed_probe_reports_nothing_rather_than_a_guess(self) -> None:
+        assert await _probe_sandbox_clock(self._sandbox("", return_code=127)) == (None, None)
+        assert await _probe_sandbox_clock(self._sandbox("date: not found")) == (None, None)
+
+    async def test_a_raising_sandbox_does_not_break_the_rollout(self) -> None:
+        async def exec(command: str):
+            raise RuntimeError("sandbox gone")
+
+        assert await _probe_sandbox_clock(SimpleNamespace(exec=exec)) == (None, None)
