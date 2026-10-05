@@ -1,12 +1,12 @@
 ---
 title: "Add or Update a Harness"
-description: "Integrate sandboxed harnesses through EnvironmentServer sessions and validate upgrades."
+description: "Integrate harnesses with explicit host and sandbox execution paths, reusable lifecycle helpers, and validated upgrades."
 position: 5
 ---
 
 # Add or Update a Harness
 
-Use this checklist to add or update a sandboxed harness. The Agent Server stays outside as an adapter; the harness and its tools run inside the task sandbox.
+Use this checklist to add or update a harness. For sandbox execution, the Agent Server stays outside as an adapter; the harness and its tools run inside the task sandbox. Adapters that also support host execution must preserve and test that path independently.
 
 <Note>
 Session support varies by adapter. Check the adapter's README for supported features and limitations.
@@ -18,7 +18,7 @@ Keep task data, preparation, verification, and sandbox requirements with the ben
 
 Bind their references through [EnvironmentServer](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/single_agent_turn) and submit episodes to its `/run`. A compatible pairing should require only composition changes, without a pair-specific launcher, adapter, or preset.
 
-The single-agent flow through EnvironmentServer `/run` is:
+The single-agent flow when Resources supplies a task sandbox through EnvironmentServer `/run` is:
 
 ```mermaid
 sequenceDiagram
@@ -32,7 +32,7 @@ sequenceDiagram
     R->>S: Create sandbox and prepare task
     R-->>E: SandboxAccess
     E->>A: Open session with SandboxAccess
-    A->>S: Install pinned runtime
+    A->>S: Reuse or install pinned runtime
     E->>A: Run agent
     A->>S: Start harness
     loop Model and tool calls
@@ -54,6 +54,79 @@ sequenceDiagram
 
 Resources owns the sandbox. The agent borrows it. **Agent close must succeed before verification.**
 
+### Select execution mode explicitly
+
+Hermes, Pi, and Codex distinguish the following paths. Check the adapter's README and configuration before selecting one.
+
+| Request path | Execution location | Cleanup owner |
+| --- | --- | --- |
+| Native session seeded with `SandboxAccess` | The supplied task sandbox | Agent stops its harness work and disconnects; Resources destroys the sandbox. |
+| Native session without `SandboxAccess`, with an explicitly configured `sandbox_provider` | A sandbox created by the agent | Agent stops the sandbox it created. Task requirements must be compatible with this mode. |
+| Native session without either sandbox access or a provider | Rejected during seed | No implicit host execution or replacement environment. |
+| `/v1/responses` without an agent-session binding | Agent-server host, when supported by the adapter | Adapter cleans up its local invocation and temporary files. |
+
+The compatibility Agent `/run` requires an explicit `resources_server` binding and uses the adapter's host path. An agent's default `resources_server: null` does not disable direct host `/v1/responses`. Configuring `sandbox_provider` enables agent-owned native sessions; it does not by itself redirect sessionless calls into a sandbox. A stale or invalid session binding must be rejected rather than treated as a host request.
+
+When a Resources-owned sandbox was supplied, setup or connection failure must propagate. Never silently run the task on the host or in a different sandbox. Host execution is a separately selected mode; it does not provide task-sandbox isolation. Initialize host CLI dependencies only for the host path, and keep native-session runtime preparation in seed.
+
+### Separate adapter, transport, and worker code
+
+Use these responsibilities when organizing a new adapter under `responses_api_agents/<harness>/`. A `sandbox.py` module runs on the Agent Server; a `sandbox_runner.py` shim runs inside the sandbox.
+
+The diagram uses the proposed shared-module names described below. Dashed boxes mark planned installation and mount helpers; the host path is selected by a sessionless request.
+
+```mermaid
+flowchart TB
+    subgraph AS["Agent Server"]
+        APP["app.py: request mapping and dispatch"]
+        LOCAL["Host harness: SDK or CLI"]
+        SESSION["sandbox.py: harness session"]
+        INSTALL["harness_install.py: ensure runtime (planned)"]
+        CLIENT["supervisor_client.py: launch, stop, confirm cleanup"]
+        APP -->|"No agent session"| LOCAL
+        APP -->|"Native session"| SESSION
+        SESSION -->|"At seed"| INSTALL
+        SESSION -->|"At activation and close"| CLIENT
+    end
+
+    MOUNTS["Provider default_mounts (planned)"]
+
+    subgraph SB["Task sandbox"]
+        RUNTIME["Pinned harness runtime"]
+        SUPERVISOR["process_supervisor.py"]
+        SHIM["sandbox_runner.py: worker shim"]
+        HARNESS["Harness SDK or CLI and its tools"]
+        CLEANUP["cleanup.json"]
+        OUTPUT["Harness output and worker metadata"]
+        SUPERVISOR -->|"Supervise worker and descendants"| SHIM
+        SHIM -->|"Invoke and collect output"| HARNESS
+        RUNTIME -->|"Provides executable and dependencies"| HARNESS
+        SUPERVISOR -->|"Write after cleanup attempt"| CLEANUP
+        SHIM -->|"Write"| OUTPUT
+    end
+
+    INSTALL -->|"Reuse runtime or upload artifacts and run installer"| RUNTIME
+    MOUNTS -->|"Optional read-only runtime at sandbox creation"| RUNTIME
+    CLIENT -->|"Launch or request stop through AsyncSandbox"| SUPERVISOR
+    CLEANUP -->|"Read and validate cleanup receipt"| CLIENT
+    OUTPUT -->|"Read through AsyncSandbox file APIs"| SESSION
+
+    classDef planned stroke-dasharray: 5 5;
+    class INSTALL,MOUNTS planned;
+```
+
+The supervisor's cleanup receipt and the worker's output return through separate contracts. A valid output does not bypass cleanup confirmation before verification.
+
+| File | Responsibility |
+| --- | --- |
+| `app.py` | Gym endpoints and configuration, request validation and mapping, session hooks, response and observation conversion, and dispatch to host or sandbox execution. |
+| `sandbox.py` | A harness-specific session object holding the sandbox connection, ownership, task workdir, runtime/session paths, activation task, and cleanup state; prepare, execute, stop, and close operations. |
+| `sandbox_runner.py` | Read staged input, invoke the harness SDK or CLI, collect native output and worker identity, and preserve partial output where supported. |
+| `install_runtime.sh` or an existing harness-specific installer | Install the pinned harness and its private dependencies, then check that they run. Keep installation out of the activation loop. |
+| `tests/` | Host dispatch, native setup, request semantics, output parsing, installation, and lifecycle regressions. |
+
+Keep harness-specific parsing and model/tool behavior in the adapter. Reuse shared file transport and process supervision. Session identity, activation retries, and retained close responses belong to the shared agent-session API; avoid duplicating that HTTP bookkeeping in each sandbox session class.
+
 ## 2. Prepare the runtime during session setup
 
 Implement the shared [agent-session API](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/base_responses_api_agent.py) using the supplied `SandboxAccess`.
@@ -64,6 +137,24 @@ Implement the shared [agent-session API](https://github.com/NVIDIA-NeMo/Gym/blob
 - Publish the session after successful setup. On failure, release connections and retain state for unfinished cleanup retries.
 
 Never fall back to a host CLI or replacement sandbox.
+
+### Installation contract
+
+Run the installation check on each seed and reuse a compatible runtime when it is already available. Keep reusable runtime files separate from writable per-session input, output, logs, HOME, and caches; session close must not remove a shared runtime.
+
+1. Detect the target sandbox's OS, CPU architecture, libc, runtime prerequisites, and execution permissions. Select artifacts for that target; an executable found on the agent-server host may be incompatible.
+2. Check a preinstalled, mounted, or previously installed runtime against the pinned version and a runnable health check. Directory existence alone does not establish readiness.
+3. Verify pinned artifact checksums on the agent-server host, upload through the sandbox file API, and invoke the harness's installer in a private directory outside the task repository. Preserve task interpreters and libraries.
+4. Publish readiness only after installation and its health check succeed. Handle partial installs and concurrent setup without exposing an incomplete runtime; retain commands, exit codes, and logs on failure.
+5. For offline support, provide the complete dependency set, including bootstrap interpreters, package dependencies, and native libraries. Uploading a CLI or ripgrep alone does not make an installer that still downloads dependencies offline-capable.
+
+The proposed shared installer must avoid system package managers and root requirements. Existing adapter installers do not all meet this target yet; declare supported images and remaining prerequisites until they migrate.
+
+<Note>
+The [shared installation proposal](https://github.com/NVIDIA-NeMo/Gym/pull/3961#issuecomment-6003983236) adds an agent-server `nemo_gym/sandbox/harness_install.py` with `ensure_harness_installed(...)`. This helper would detect the platform, reuse or stage verified artifacts, invoke the adapter's installer at seed, and return the runtime location. It is a follow-up design, not an API assumed to exist in every checkout.
+
+Provider `default_mounts` and a convention such as `/opt/nemo-gym-runtimes` are also follow-ups. Defaults must be applied when the sandbox is created, with defined destination-conflict and unsupported-provider behavior. The installer discovers an already mounted runtime at seed. Read-only runtime mounts require separate writable session state.
+</Note>
 
 ## 3. Preserve inputs, outputs, and errors
 
@@ -92,6 +183,28 @@ Confirm the harness and all tool descendants have stopped, including detached pr
 
 Serialize close requests, retain successful receipts for a documented bounded retry window, and reject stale activations. Remove only adapter-owned files and disconnect; Resources destroys the sandbox.
 
+### Reuse process supervision
+
+The shared Linux `nemo_gym/sandbox/process_supervisor.py` runs inside the sandbox using the standard library. It enforces the worker deadline, reaps tool descendants, and atomically writes `cleanup.json`; the task sandbox does not need the full Gym installation for supervision.
+
+The controller module is named `runner.py` before the [#3961 naming refactor](https://github.com/NVIDIA-NeMo/Gym/pull/3961#issuecomment-6003983236), and `supervisor_client.py` in the proposed layout. Use the names available in your checkout. Update adapter imports, text-helper call sites, test doubles, and tests together when adopting the rename: sandbox modules can be imported at startup even for host calls.
+
+| Shared helper or contract | Purpose |
+| --- | --- |
+| `AsyncSandbox.upload_text()` / `read_text()` in the proposed layout; standalone helpers before migration | Transfer text through upload/download APIs without interpolating contents into shell commands; define encoding and malformed-output handling. |
+| `supervised_launch_command()` (previously `supervisor_command()`) | Build a quoted launch command with an atomic launch claim that fences delayed execution. Preserve the adapter's supervisor path and interpreter; Hermes uses a private Python runtime. |
+| `stop_and_confirm_cleanup()` (previously `confirm_runner_cleanup()`) | Fence a pending launch or request supervisor stop and require explicit cleanup acknowledgement. Read receipts before signaling a stored PID, which may have been reused. |
+| `remove_session_directory()` in the proposed controller | Retire the session directory atomically before deletion so its launch fence remains effective; remove only adapter-owned session files after confirmed cleanup. |
+| `parse_cleanup_receipt()` | Validate the supervisor receipt independently of worker output. A fenced launch that never ran has no worker exit code. |
+| `HarnessProcessInfo` (previously `RunnerRuntimeInfo`) | Validate hostname, worker PID, and optional interpreter metadata. For a CLI launched by a Python shim, the PID identifies the shim. |
+| `process_supervisor.exec_timeout()` | Leave time beyond the worker deadline for termination grace, descendant cleanup, and receipt I/O. |
+
+Keep three contracts independent: the cleanup receipt establishes whether harness processes were cleaned up; process metadata identifies the worker; harness output carries task results and observations. A valid output file does not confirm cleanup, and confirmed cleanup does not establish task success. Parsing failures must not discard a confirmed receipt.
+
+For borrowed sandboxes, confirm remote cleanup before cancelling a provider exec whose cancellation could kill the supervisor. Preserve the launch fence while retiring session paths, and reject late activation. For agent-owned sandboxes, confirmed sandbox teardown is the cleanup authority; retain retry state if teardown fails.
+
+These receipts coordinate lifecycle behavior; files writable by the model are not a trusted channel for training trajectories. Validate training support separately.
+
 ## 5. Validate each supported pairing
 
 ### Observability
@@ -117,6 +230,8 @@ Record evidence conformance and sandbox lifecycle validation separately; the loc
 
 ### Runtime and compatibility
 
+- Test host calls with no sandbox access or provider, borrowed native sessions, explicitly configured agent-owned sessions, and rejection of native seed without either. Assert that host calls do not create a sandbox and sandbox failures never invoke a host fallback. Test compatibility `/run` with and without a Resources binding.
+- Exercise cold installation, runtime reuse, failed/partial installation, and unsupported platforms. Claim offline or read-only mounted-runtime support only after testing those deployment paths.
 - Test setup failures, request mapping, unsupported controls, isolation, retries, cancellation, close races, and cleanup failures. Use real Linux processes for detached-child cleanup.
 - Run a real model/task smoke with tools and verification. Confirm sandbox execution, agent close before verification, and owner cleanup afterward. Inspect failures, traces, artifacts, and grading coverage.
 - Demonstrate a second compatible pairing through composition alone. Record versions and unsupported combinations.
