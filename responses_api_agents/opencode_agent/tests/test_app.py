@@ -17,7 +17,9 @@ import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
+import pytest
 import yaml
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -76,6 +78,13 @@ def _make_agent(**kwargs) -> OpenCodeAgent:
     return agent
 
 
+def _create_session_tables(con) -> None:
+    """The subset of OpenCode's v1.17.11 sqlite schema the session adapter reads."""
+    con.execute("create table session (id text, parent_id text, time_created integer)")
+    con.execute("create table message (id text, session_id text, data text, time_created integer)")
+    con.execute("create table part (id text, message_id text, session_id text, data text, time_created integer)")
+
+
 def _session_db(tmp_path, messages, sessions=None) -> Path:
     """Build the subset of OpenCode's v1.17.11 artifact used by the adapter."""
     import sqlite3
@@ -83,9 +92,7 @@ def _session_db(tmp_path, messages, sessions=None) -> Path:
     db = tmp_path / "opencode.db"
     con = sqlite3.connect(db)
     sessions = sessions or [("root", None)]
-    con.execute("create table session (id text, parent_id text, time_created integer)")
-    con.execute("create table message (id text, session_id text, data text, time_created integer)")
-    con.execute("create table part (id text, message_id text, session_id text, data text, time_created integer)")
+    _create_session_tables(con)
     for index, (session_id, parent_id) in enumerate(sessions):
         con.execute("insert into session values (?,?,?)", (session_id, parent_id, index))
     t = 0
@@ -189,6 +196,58 @@ class TestParseOpencodeSession:
         assert items[1].call_id == "c1"
         assert "6" in items[1].output
         assert isinstance(items[2], NeMoGymResponseOutputMessage)
+
+    @pytest.mark.parametrize("state_status", ["error", "aborted"])
+    def test_a_failed_tool_call_keeps_its_outcome_and_error_text(self, tmp_path, state_status: str) -> None:
+        """OpenCode records a failed call with an error and no output.
+
+        The transcript must say the call did not complete and carry the error the model saw,
+        otherwise the model appears to have called a tool and received nothing at all.
+        """
+        db = _session_db(
+            tmp_path,
+            [
+                (
+                    "assistant",
+                    [
+                        {
+                            "type": "tool",
+                            "callID": "c1",
+                            "tool": "bash",
+                            "state": {
+                                "status": state_status,
+                                "input": {"command": "nope"},
+                                "error": "command not found: nope",
+                                "time": {"start": 1000, "end": 1200},
+                            },
+                        }
+                    ],
+                )
+            ],
+        )
+
+        items, _ = parse_opencode_session(db)
+
+        call, output = items
+        assert isinstance(call, NeMoGymResponseFunctionToolCall)
+        assert call.status == "incomplete"
+        assert isinstance(output, NeMoGymFunctionCallOutput)
+        assert output.call_id == "c1"
+        assert output.status == "incomplete"
+        assert output.output == "command not found: nope"
+
+    def test_a_failed_tool_call_without_an_error_yields_no_output_item(self, tmp_path) -> None:
+        """Nothing came back, so there is no output item; the call still reports the outcome."""
+        db = _session_db(
+            tmp_path,
+            [("assistant", [{"type": "tool", "callID": "c1", "tool": "bash", "state": {"status": "error"}}])],
+        )
+
+        items, _ = parse_opencode_session(db)
+
+        (call,) = items
+        assert isinstance(call, NeMoGymResponseFunctionToolCall)
+        assert call.status == "incomplete"
 
     def test_step_finish_usage(self, tmp_path) -> None:
         db = _session_db(
@@ -358,6 +417,32 @@ class TestParseOpencodeSession:
             "subagent_spawn_ambiguous",
         }
 
+    def test_reads_the_root_session_in_creation_order(self, tmp_path) -> None:
+        """A sub-agent's session (stored with a parent_id) is left out, and parts
+        that share a creation millisecond keep OpenCode's (time, id) order."""
+        import sqlite3
+
+        db = tmp_path / "opencode.db"
+        con = sqlite3.connect(db)
+        _create_session_tables(con)
+        con.execute("insert into session values ('root', null, 1)")
+        con.execute("insert into session values ('child', 'root', 2)")
+        assistant = json.dumps({"role": "assistant"})
+        con.execute("insert into message values ('m-root', 'root', ?, 1)", (assistant,))
+        con.execute("insert into message values ('m-child', 'child', ?, 2)", (assistant,))
+        text = lambda t: json.dumps({"type": "text", "text": t})  # noqa: E731
+        # Two root parts created in the same millisecond, inserted out of id order.
+        con.execute("insert into part values ('p-b', 'm-root', 'root', ?, 5)", (text("second"),))
+        con.execute("insert into part values ('p-a', 'm-root', 'root', ?, 5)", (text("first"),))
+        con.execute("insert into part values ('p-c', 'm-child', 'child', ?, 3)", (text("sub-agent"),))
+        con.commit()
+        con.close()
+
+        items, _ = parse_opencode_session(db, root_session_only=True)
+        assert [item.content[0].text for item in items] == ["first", "second"]
+        everything, _ = parse_opencode_session(db)
+        assert [item.content[0].text for item in everything] == ["sub-agent", "first", "second"]
+
 
 class TestDeepMerge:
     def test_nested_merge(self) -> None:
@@ -390,6 +475,28 @@ class TestEnv:
         assert env["OPENAI_BASE_URL"] == "http://model/v1"
         assert provider["options"]["baseURL"] == "http://model/v1"
         assert provider["models"]["Qwen3.6-35B-A3B"]["limit"]["output"] == 131072
+
+
+class TestWorkspaceRoot:
+    def test_each_rollout_gets_its_own_directory(self, tmp_path: Path) -> None:
+        agent = _make_agent(workspace_root=str(tmp_path))
+
+        first = agent._workspace_root()
+        second = agent._workspace_root()
+
+        assert first != second
+        assert first.is_dir() and second.is_dir()
+        assert first.parent == tmp_path
+
+    def test_a_name_collision_fails_the_rollout(self, tmp_path: Path) -> None:
+        """Two live rollouts must never share a tree, so a collision raises instead of merging."""
+        agent = _make_agent(workspace_root=str(tmp_path))
+        fixed = uuid4()
+        (tmp_path / f"opencode_{fixed.hex}").mkdir()
+
+        with patch("responses_api_agents.opencode_agent.app.uuid4", return_value=fixed):
+            with pytest.raises(FileExistsError):
+                agent._workspace_root()
 
 
 class TestRolloutObservability:

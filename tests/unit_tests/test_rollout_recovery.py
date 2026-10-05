@@ -1590,3 +1590,80 @@ async def test_resumed_collector_dispatches_longest_previous_failure_first(runne
     await helper.run_from_config(runner_config)
     assert dispatched == [1, 2, 0]
     assert RolloutStore.read(Path(runner_config.output_jsonl_fpath)).coverage()["complete"]
+
+
+@pytest.mark.parametrize("mask_setting", [None, True, False], ids=["default", "strict", "attributed-opt-out"])
+@pytest.mark.parametrize("judge_failed", [False, True], ids=["completed", "judge-failure"])
+async def test_incomplete_capture_policy_preserves_recovery_accounting(
+    runner_config, monkeypatch, tmp_path, mask_setting, judge_failed
+):
+    from nemo_gym.token_id_capture import ParentResolutionStatus, TokenCaptureStore, stamp_lineage
+    from nemo_gym.token_id_capture.records import TokenEntry
+
+    runner_config.limit = 1
+    captures = TokenCaptureStore(tmp_path / "tokens")
+    settings = {"enabled": True, "all_agents": True, "dir": str(tmp_path / "tokens")}
+    if mask_setting is not None:
+        settings["mask_incomplete_when_attributed"] = mask_setting
+    if judge_failed:
+        # Even a masked saved answer from a judge failure must not enter the
+        # completed-capture denominator or trip the training quality guard.
+        settings.update(max_mask_fraction=0.0, mask_fraction_min_samples=1)
+    monkeypatch.setattr(collection, "get_global_config_dict", lambda: {"token_id_capture": settings})
+    monkeypatch.setattr(collection, "installed_token_source", lambda: captures)
+    output_items = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "final answer", "annotations": []}],
+        }
+    ]
+
+    async def post(**kwargs):
+        entry = TokenEntry(
+            rollout_id="0-0",
+            model_call_id="kept-answer",
+            model="m",
+            prompt_token_ids=[1, 2, 3],
+            generation_token_ids=[4, 5],
+            generation_log_probs=[-0.1, -0.2],
+            output_items=output_items,
+            token_item_index=0,
+        )
+        stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+        captures.append(entry)
+        await captures.mark_incomplete("0-0", "uncommitted-call")
+        result = {"response": {"model": "m", "output": output_items}}
+        result.update({"_ng_failure_class": "judge_failed"} if judge_failed else {"reward": 1.0})
+        return FakeResponse(200, result)
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    if judge_failed:
+        with pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts produced a result"):
+            await RolloutCollectionHelper().run_from_config(runner_config)
+    else:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+    output = Path(runner_config.output_jsonl_fpath)
+    saved_path = collection.failures_path_for(output) if judge_failed else output
+    [saved] = read_records(saved_path)
+    assert saved.get("mask_sample", False) is (mask_setting is not False)
+    assert saved["_ng_token_capture"]["capture_incomplete"] is True
+    assert saved["_ng_token_capture"]["terminal_attribution"]["chain"] == "delivered"
+    assert saved["response"]["output"][0]["generation_token_ids"] == [4, 5]
+    history = RolloutStore.read(output)
+    coverage = history.coverage()
+    assert coverage["successful"] == int(not judge_failed)
+    assert coverage["failed"] == int(judge_failed)
+    assert coverage["masked"] == int(not judge_failed and mask_setting is not False)
+    assert bool(captures.read_entries("0-0")) is (judge_failed or mask_setting is not False)
+    if judge_failed:
+        assert "reward" not in saved
+        assert list(read_records(output)) == []
+        assert len(history.pending(3)) == 1
+    else:
+        assert saved["reward"] == 1.0
+        runner_config.resume_from_cache = True
+        client.post.reset_mock()
+        await RolloutCollectionHelper().run_from_config(runner_config)
+        assert not client.post.called

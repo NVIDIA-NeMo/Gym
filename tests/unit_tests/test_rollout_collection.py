@@ -5373,7 +5373,7 @@ class TestDispatchBudget:
         monkeypatch.setattr(nemo_gym.rollout_collection, "installed_token_source", lambda: object())
         finalized: list[dict] = []
 
-        async def finalize(result: dict, source: object) -> dict:
+        async def finalize(result: dict, source: object, **kwargs: object) -> dict:
             finalized.append(result)
             # The real finalizer masks a rollout that recorded nothing, as a drained row would.
             return {MASK_SAMPLE_KEY: NG_DISPATCH_DRAINED_KEY in result, "metrics": {}}

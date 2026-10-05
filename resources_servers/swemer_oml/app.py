@@ -222,6 +222,43 @@ class SwemerOmlResourcesServer(SimpleResourcesServer):
         if result.return_code != 0:
             print(f"Failed to init git repo at {workdir}: {result.stdout}\n{result.stderr}", file=sys.stderr)
 
+    async def _restore_missing_blobs(self, sandbox: AsyncSandbox, workdir: str) -> None:
+        """The delivery images strip every file blob from ``.git`` to keep it small ("blob-drop
+        shrink"), leaving commits and trees that point at objects which do not exist. The repo
+        works until something has to read a blob: the anti-cheat ``git reset --hard`` then deletes
+        each tracked file it cannot re-read (seen on ~10% of tasks, those whose index drifted during
+        the image build), and ``git diff <base> <tip>`` cannot read the base side of a modified file.
+        Re-adding the tree rewrites the blobs for what is on disk; a follow-up commit makes that the
+        base when the build left tracked files modified. Skipped when HEAD's blobs are readable."""
+        wd = shlex.quote(workdir)
+        probe = await sandbox.exec(
+            f'cd {wd} && for f in $(git ls-files | head -3); do git cat-file -e "HEAD:$f" || exit 3; done',
+            timeout_s=120,
+        )
+        if probe.return_code == 0:
+            return
+        print(
+            f"[swemer_oml] {workdir}: HEAD blobs missing (blob-stripped image); restoring from the working tree",
+            flush=True,
+        )
+        # Rewrite a blob for every regular tracked file (gitlinks and symlinks skipped: nested
+        # checkouts have no .git/modules in these images and would abort the batch), then stage
+        # only tracked modifications so the drifted files get a readable base too.
+        result = await sandbox.exec(
+            f"cd {wd} && git ls-files -z --stage | while IFS= read -r -d '' e; do "
+            "m=${e%% *}; p=${e#*$'\\t'}; case $m in 100644|100755) printf '%s\\0' \"$p\";; esac; done "
+            "| xargs -0 -r -n 500 git hash-object -w -- || true; git add -u && "
+            "(git -c user.email=nemo-gym@nvidia.com -c user.name=nemo-gym commit -q -m "
+            "'nemo_gym: restore blobs stripped from the image' || true)",
+            timeout_s=900,
+        )
+        if result.return_code != 0:
+            print(
+                f"[swemer_oml] blob restore failed ({result.return_code}): "
+                f"{(result.stderr or '')[-400:]} {(result.stdout or '')[-400:]}",
+                file=sys.stderr,
+            )
+
     async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
         """Files ``workdir`` holds untracked before the agent touches it."""
         try:
@@ -259,6 +296,7 @@ class SwemerOmlResourcesServer(SimpleResourcesServer):
 
         sandbox = await self._create_sandbox(body)
         await self._ensure_git_repo(sandbox, body.workdir)
+        await self._restore_missing_blobs(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
             await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swemer_oml")
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.

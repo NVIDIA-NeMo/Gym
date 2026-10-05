@@ -2613,20 +2613,17 @@ dependencies = [
     { name = "devtools" },
     { name = "fastapi" },
     { name = "fonttools" },
-    { name = "gitpython" },
     { name = "httptools" },
     { name = "hydra-core" },
     { name = "itsdangerous" },
     { name = "jinja2" },
+    { name = "jsonschema" },
     { name = "mcp" },
-    { name = "mlflow" },
-    { name = "mlflow-skinny" },
     { name = "omegaconf" },
     { name = "openai" },
     { name = "orjson" },
     { name = "packaging" },
     { name = "psutil" },
-    { name = "pyarrow" },
     { name = "pyasn1" },
     { name = "pydantic" },
     { name = "pydantic-core" },
@@ -2636,12 +2633,10 @@ dependencies = [
     { name = "ray", extra = ["default"] },
     { name = "rich" },
     { name = "scipy" },
-    { name = "sqlparse" },
     { name = "tqdm" },
     { name = "urllib3" },
     { name = "uvicorn" },
     { name = "uvloop" },
-    { name = "wandb" },
     { name = "yappi" },
 ]
 
@@ -2652,17 +2647,23 @@ all = [
     { name = "daytona" },
     { name = "defusedxml" },
     { name = "e2b" },
+    { name = "gitpython" },
     { name = "gprof2dot" },
+    { name = "mlflow" },
+    { name = "mlflow-skinny" },
     { name = "mypy" },
     { name = "opensandbox" },
     { name = "pre-commit" },
+    { name = "pyarrow" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "pytest-xdist" },
     { name = "requests-mock" },
     { name = "ruff" },
+    { name = "sqlparse" },
     { name = "tenacity" },
+    { name = "wandb" },
 ]
 dev = [
     { name = "coverage" },
@@ -2676,6 +2677,12 @@ dev = [
     { name = "pytest-xdist" },
     { name = "requests-mock" },
     { name = "ruff" },
+]
+mlflow = [
+    { name = "mlflow" },
+    { name = "mlflow-skinny" },
+    { name = "pyarrow" },
+    { name = "sqlparse" },
 ]
 openshell = [
     { name = "openshell" },
@@ -2695,6 +2702,10 @@ telemetry = [
 vllm = [
     { name = "flashinfer-python" },
     { name = "vllm" },
+]
+wandb = [
+    { name = "gitpython" },
+    { name = "wandb" },
 ]
 
 [package.dev-dependencies]
@@ -2721,17 +2732,18 @@ requires-dist = [
     { name = "fastapi" },
     { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.18" },
     { name = "fonttools", specifier = ">=4.60.2" },
-    { name = "gitpython", specifier = ">=3.1.61" },
+    { name = "gitpython", marker = "extra == 'wandb'", specifier = ">=3.1.61" },
     { name = "gprof2dot", marker = "extra == 'dev'" },
     { name = "httptools" },
     { name = "hydra-core" },
     { name = "itsdangerous" },
     { name = "jinja2", specifier = ">=3.1" },
+    { name = "jsonschema", specifier = ">=4.18,<5" },
     { name = "mcp", specifier = ">=1.28.1,<2" },
-    { name = "mlflow", specifier = ">=3.16.1" },
-    { name = "mlflow-skinny", specifier = ">=3.16.1" },
+    { name = "mlflow", marker = "extra == 'mlflow'", specifier = ">=3.16.1" },
+    { name = "mlflow-skinny", marker = "extra == 'mlflow'", specifier = ">=3.16.1" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
-    { name = "nemo-gym", extras = ["dev", "sandbox"], marker = "extra == 'all'" },
+    { name = "nemo-gym", extras = ["dev", "mlflow", "sandbox", "wandb"], marker = "extra == 'all'" },
     { name = "nemo-lens", extras = ["sdk"], marker = "extra == 'telemetry'", git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=b0f977d414b2f89938604a0b7eaa78ee08bc8700" },
     { name = "omegaconf" },
     { name = "openai", specifier = "==2.44.0" },
@@ -2743,7 +2755,7 @@ requires-dist = [
     { name = "packaging", specifier = ">=24.2" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "psutil" },
-    { name = "pyarrow", specifier = ">=23.0.1" },
+    { name = "pyarrow", marker = "extra == 'mlflow'", specifier = ">=23.0.1" },
     { name = "pyasn1", specifier = ">=0.6.4" },
     { name = "pydantic" },
     { name = "pydantic-core" },
@@ -2759,17 +2771,17 @@ requires-dist = [
     { name = "rich" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "scipy", specifier = ">=1.14.1" },
-    { name = "sqlparse", specifier = ">=0.6.0" },
+    { name = "sqlparse", marker = "extra == 'mlflow'", specifier = ">=0.6.0" },
     { name = "tenacity", marker = "extra == 'sandbox'", specifier = ">=9.1.4" },
     { name = "tqdm" },
     { name = "urllib3", specifier = ">=2.8.0" },
     { name = "uvicorn" },
     { name = "uvloop" },
     { name = "vllm", marker = "extra == 'vllm'", specifier = "==0.29.0" },
-    { name = "wandb", specifier = ">=0.30.0" },
+    { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.30.0" },
     { name = "yappi", specifier = ">=1.7.6" },
 ]
-provides-extras = ["all", "vllm", "sandbox", "openshell", "telemetry", "dev"]
+provides-extras = ["all", "mlflow", "wandb", "vllm", "sandbox", "openshell", "telemetry", "dev"]
 
 [package.metadata.requires-dev]
 codec = [
