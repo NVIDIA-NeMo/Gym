@@ -1,0 +1,94 @@
+{
+  "date_utc": "2026-10-05",
+  "runtime_commit": "ff6841f7056022758b206e41a95cd751b27237f9",
+  "scope": "Bounded integration validation on two unchanged committed public examples, not full benchmark qualification.",
+  "public_source_revision": "435ee89ec2f2e2289f33b0da4f992f0b7b7266b9",
+  "sandbox_provider": "opensandbox",
+  "resource_settings": {
+    "enforce_agent_no_network": true,
+    "agent_model_endpoint_exception": "Enabled for the live rollout only",
+    "enforce_verifier_no_network": false,
+    "clear_verifier_logs": false,
+    "include_model_patch_in_response": true,
+    "task_cpu_multiplier": 2.0,
+    "task_memory_multiplier": 4.0,
+    "sandbox_ttl_s": 1800,
+    "sandbox_ready_timeout_s": 300
+  },
+  "controls": [
+    {
+      "task_id": "abs-module-cache-flags",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh75679ajj3b8dtd7se3h7z0a1833y6r-v1.1",
+      "same_image_for_agent_and_verifier": true,
+      "golden_reward": 1.0,
+      "golden_patch_bytes": 23719,
+      "null_reward": 0.0,
+      "null_patch_bytes": 0,
+      "both_evaluations_completed": true,
+      "either_masked": false,
+      "cleanup_errors": []
+    },
+    {
+      "task_id": "adaptix-name-mapping-aliases",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh73dq4n55jdxasppe6jjmth4183d47n-v1.1",
+      "same_image_for_agent_and_verifier": true,
+      "golden_reward": 1.0,
+      "golden_patch_bytes": 33000,
+      "null_reward": 0.0,
+      "null_patch_bytes": 0,
+      "both_evaluations_completed": true,
+      "either_masked": false,
+      "cleanup_errors": []
+    }
+  ],
+  "control_concurrency": 2,
+  "python_bootstrap": {
+    "image": "debian:bookworm-slim",
+    "python_missing_initially": true,
+    "no_network_setting_refused_installation": true,
+    "no_network_check_scope": "Bootstrap configuration guard, not a separate network-isolation test",
+    "network_allowed_installation_succeeded": true,
+    "repeat_setup_succeeded": true,
+    "stdlib_imports_succeeded": true,
+    "published_image_modified": false
+  },
+  "live_model": {
+    "task_id": "abs-module-cache-flags",
+    "agent": "opencode_sandboxed_agent",
+    "model": "nvidia/nvidia/nemotron-3.5-super-text-preview",
+    "sampling_overrides": {"temperature": 1.0, "top_p": 0.95, "max_tokens": 131072},
+    "max_context_window": 262144,
+    "sandbox_timeout_s": 600,
+    "model_call_timeout_ms": 180000,
+    "assistant_turn_limit": 3,
+    "assistant_turns": 3,
+    "delegation_enabled": false,
+    "concurrency": 1,
+    "repeats": 1,
+    "completed_tools": ["bash", "bash"],
+    "commands": ["git status && git branch && ls", "git log --oneline -5"],
+    "tool_workdir": "/app",
+    "ending": "Step limit; final response accurately states no substantive implementation",
+    "opencode_finished": true,
+    "evaluation_completed": true,
+    "reward": 0.0,
+    "model_patch_bytes": 0,
+    "mask_sample": false,
+    "failure_stage": null,
+    "cleanup_errors": [],
+    "separate_ripgrep_fix_applied": false,
+    "stock_health_summary": "unobserved; acceptance comes from direct transcript, verifier and cleanup inspection"
+  },
+  "cleanup": {
+    "distinct_agent_and_verifier_sandboxes_per_attempt": true,
+    "independent_get_route": "/v1/sandboxes/{sandbox_id}",
+    "deleted_sandboxes_returning_404": 11,
+    "scope": "Eight control sandboxes, two live-rollout sandboxes and one Python bootstrap sandbox"
+  },
+  "limitations": [
+    "The short live rollout validates execution and grading, not task-solving accuracy or SFT suitability.",
+    "The historical five example rollouts were not regenerated and do not validate this runtime revision.",
+    "The missing-Python path was checked on Debian; other package managers were not exercised live.",
+    "Invalid-submission classification, non-UTF-8 patches, routing and log retention have separate regression coverage."
+  ]
+}

@@ -52,6 +52,15 @@ task fields were migrated without changing model/tool output or rewards. They us
 verifier network blocking and omitted patch text from verification responses;
 the current defaults match upstream DeepSWE.
 
+Fresh bounded validation on runtime `ff6841f7056022758b206e41a95cd751b27237f9`
+(2026-10-05) is recorded in [data/review_smoke.json](data/review_smoke.json):
+two public golden controls scored 1 and their null controls scored 0; a three-turn
+OpenCode/Super run completed both tool execution and grading (reward 0, no patch).
+A separate Python-free Debian sandbox exercised the verifier bootstrap and its
+no-network configuration guard. All 11 sandboxes were independently confirmed
+deleted. The record includes effective settings and limitations; this is not a
+new full benchmark run or evidence of live task-solving accuracy.
+
 For another dataset, supply rows matching `task_data.py`. Keep local training data
 uncommitted. Rows are trusted controller inputs: grading files live in `files`,
 not `responses_create_params.input`, and are not shown to the agent. There is no
@@ -91,7 +100,8 @@ without that evidence remain masked. Golden/null control failures are not agent
 scores. Attempts retain separate logs and sandbox IDs by default; set
 `clear_verifier_logs: true` to remove each attempt's local logs, patch and
 `result.json` after verification. This does not remove the returned response or
-the rollout collector's saved trajectories.
+the rollout collector's saved trajectories. A failed local deletion preserves the
+log path and reports a cleanup error without changing the grade.
 Responses include the candidate patch by default. Concurrency is controlled by
 the caller, with no additional server-side cap.
 
