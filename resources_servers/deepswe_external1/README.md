@@ -40,26 +40,22 @@ requires token IDs needs a compatible training model server.
 The OpenCode config includes upstream's `legacy_agent` environment server for
 rollout routing; it forwards requests without changing task rows or grading.
 
-The five public reference solutions passed A-to-B verification, and all five null
-controls scored zero. `data/example_rollouts.jsonl` contains one GLM-5.3/OpenCode
-attempt per example (three passes, two genuine failures). It retains the source
-task input and unchanged Gym-converted model/tool output, not raw per-turn model
-requests. Each row records the runtime commit and exported prompt quoting;
-operational logs, sandbox handles and the reconstructed system header are omitted.
-Those recorded runs predate this JSONL packaging change and the Python bootstrap
-below; they are historical evidence, not new validation of this refactor. Their
-task fields were migrated without changing model/tool output or rewards. They used
-verifier network blocking and omitted patch text from verification responses;
-the current defaults match upstream DeepSWE.
+`data/example_rollouts.jsonl` contains one recorded Super/OpenCode attempt per public
+example, run with inline-file provisioning on 2026-10-05. Original task fields and
+Gym-converted model/tool responses are retained, including failed and budget-limited
+attempts. Each row records the runtime revisions, effective settings and exported
+prompt encoding; operational logs and sandbox handles are omitted.
 
-Fresh bounded validation on runtime `ff6841f7056022758b206e41a95cd751b27237f9`
-(2026-10-05) is recorded in [data/review_smoke.json](data/review_smoke.json):
-two public golden controls scored 1 and their null controls scored 0; a three-turn
-OpenCode/Super run completed both tool execution and grading (reward 0, no patch).
-A separate Python-free Debian sandbox exercised the verifier bootstrap and its
-no-network configuration guard. All 11 sandboxes were independently confirmed
-deleted. The record includes effective settings and limitations; this is not a
-new full benchmark run or evidence of live task-solving accuracy.
+[data/review_smoke.json](data/review_smoke.json) records these five attempts plus
+two public golden/null pairs (golden 1, null 0) and a Python-free Debian bootstrap
+check, including the no-network configuration guard. The resource code is identical
+at the control and model-run revisions. Model runs additionally use the separately
+reviewed OpenCode ripgrep fix from
+[PR #3953](https://github.com/NVIDIA-NeMo/Gym/pull/3953); that agent change is not
+part of this integration. These are representative integration checks, not a full
+benchmark accuracy estimate. Exact revisions and cleanup evidence are in the record.
+One Actionlint attempt was interrupted by a model-call timeout and retried once;
+the record preserves the original error and distinguishes the retry from first-attempt results.
 
 For another dataset, supply rows matching `task_data.py`. Keep local training data
 uncommitted. Rows are trusted controller inputs: grading files live in `files`,

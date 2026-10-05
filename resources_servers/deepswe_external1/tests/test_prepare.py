@@ -119,5 +119,6 @@ def test_committed_rollouts_match_public_examples() -> None:
         assert not row.get("mask_sample") and not row.get("failure_kind")
         assert row["reward"] in (0.0, 1.0)
         assert row["rollout_provenance"]["num_repeats"] == 1
-        assert row["rollout_provenance"]["row_format_migration"]["runtime_rerun"] is False
+        assert row["rollout_provenance"].get("task_format") == "inline-files"
+        assert "row_format_migration" not in row["rollout_provenance"]
         assert any(item["type"] == "function_call" for item in row["response"]["output"])
