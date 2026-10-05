@@ -51,6 +51,7 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
+from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY, _redacted_url, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
     current_capture_context,
@@ -63,6 +64,25 @@ from nemo_gym.token_id_capture.external_capture import (
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
+
+
+def _log_unhandled_engine_error(request: Request, status: int, body: str, route: str) -> None:
+    """Log an engine answer the server does not handle, once, before it is re-raised.
+
+    The caller receives only the HTTP status. The engine's body names the rejected field or
+    the engine's reason, and the rollout id (set by the capture route's prefix) names the
+    caller, so both are kept here together with the request path.
+    """
+    LOG.warning(
+        "engine answered %s to a %s for %s (rollout %s): %s",
+        status,
+        route,
+        request.url.path,
+        current_rollout_id() or "none",
+        body[:500],
+    )
+
+
 _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
@@ -1058,6 +1078,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 execution.update(response_source="local", local_response_reason="context_length_exceeded")
                 return res
             else:
+                _log_unhandled_engine_error(request, e.status, result_content_str, "chat completion")
                 raise e
         except Exception as e:
             if transport_io_enabled:
@@ -1393,6 +1414,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 res.choices[0].finish_reason = "length"
                 execution.update(response_source="local", local_response_reason="context_length_exceeded")
                 return res
+            _log_unhandled_engine_error(request, e.status, result_content_str, "completion")
             raise
 
         execution["response_source"] = "upstream"
