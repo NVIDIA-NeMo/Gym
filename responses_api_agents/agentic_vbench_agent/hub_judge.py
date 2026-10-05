@@ -48,10 +48,14 @@ def post(path: str, payload: dict, headers: dict | None = None) -> dict:
             with urllib.request.urlopen(request, timeout=300) as response:
                 return json.load(response)
         except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-            # Never print request headers, media, credentials or provider error bodies.
+            # Never print request headers, media or credentials. Of the provider error
+            # body keep only the short status message so a persistent 4xx is diagnosable.
             error = f"Hub judge {type(exc).__name__}"
             if isinstance(exc, urllib.error.HTTPError):
                 error += f" HTTP {exc.code}"
+                detail = provider_error_message(exc)
+                if detail:
+                    error += f" ({detail})"
                 # Hub occasionally returns transient 400s for requests that succeed on
                 # replay; only authentication failures are treated as permanent.
                 if exc.code in (401, 403):
@@ -61,6 +65,19 @@ def post(path: str, payload: dict, headers: dict | None = None) -> dict:
     with _LOCK:
         FAILURES.append(f"{path}: {error}")
     raise RuntimeError(error)
+
+
+def provider_error_message(exc: urllib.error.HTTPError) -> str:
+    """Short, single-line provider status message; empty when the body is not a JSON error."""
+    try:
+        body = json.loads(exc.read().decode(errors="replace"))
+    except (ValueError, OSError):
+        return ""
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    message = error.get("message") if isinstance(error, dict) else None
+    if not isinstance(message, str):
+        return ""
+    return " ".join(message.split())[:160]
 
 
 class HubAnthropic:

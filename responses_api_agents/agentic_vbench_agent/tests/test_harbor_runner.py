@@ -277,3 +277,87 @@ def test_hub_post_retries_transient_400_but_not_auth_failures(hub_judge, monkeyp
     with pytest.raises(RuntimeError, match="HTTP 403"):
         module.real_post("/v1/messages", {})
     assert len(module.FAILURES) == 1
+
+
+def test_hub_post_surfaces_provider_status_message_only(hub_judge, monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    import urllib.error
+
+    module, _ = hub_judge
+    monkeypatch.setenv("AVB_JUDGE_BASE_URL", "https://hub.example")
+    monkeypatch.setenv("NVINFERENCE_API_KEY", "secret-key")
+    monkeypatch.setattr(module.time, "sleep", lambda _s: None)
+    body = {
+        "error": {
+            "code": 400,
+            "status": "INVALID_ARGUMENT",
+            "message": "Request contains an invalid argument.\n  details: " + "x" * 400,
+            "details": [{"request": "data:audio/mpeg;base64,AAAA"}],
+        }
+    }
+
+    def bad_request(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 400, "bad", {}, io.BytesIO(json.dumps(body).encode()))
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", bad_request)
+    module.FAILURES.clear()
+    with pytest.raises(RuntimeError, match=r"HTTP 400 \(Request contains an invalid argument\. details: x+\)") as info:
+        module.real_post("/v1beta/models/m:generateContent", {"contents": []})
+    message = str(info.value)
+    assert len(message) < 220  # message truncated to one short line
+    assert "\n" not in message
+    assert "AAAA" not in message and "secret-key" not in message  # no payloads, no credentials
+    assert module.FAILURES == [f"/v1beta/models/m:generateContent: {message}"]
+
+    def not_json(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 400, "bad", {}, io.BytesIO(b"<html>gateway</html>"))
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", not_json)
+    with pytest.raises(RuntimeError, match=r"HTTP 400$"):
+        module.real_post("/v1beta/models/m:generateContent", {"contents": []})
+
+
+def _fake_harbor(tmp_path: Path, failures: int, message: str) -> list[str]:
+    """A stand-in for ``harbor run`` that fails ``failures`` times with ``message``, then succeeds."""
+    counter = tmp_path / "attempts"
+    counter.write_text("0")
+    script = tmp_path / "harbor.py"
+    script.write_text(
+        "import pathlib, sys\n"
+        f"counter = pathlib.Path({str(counter)!r})\n"
+        "n = int(counter.read_text()) + 1\n"
+        "counter.write_text(str(n))\n"
+        f"if n <= {failures}:\n"
+        f"    sys.stderr.write({message!r} + chr(10)); sys.exit(1)\n"
+    )
+    return [sys.executable, str(script)]
+
+
+def test_run_harbor_retries_only_the_docker_probe_failure(tmp_path: Path) -> None:
+    import subprocess
+
+    naps: list[float] = []
+    jobs = tmp_path / "jobs"
+    command = _fake_harbor(tmp_path, failures=2, message=harbor_runner.DOCKER_CHECK_FAILURE + ". Please start Docker")
+    harbor_runner.run_harbor(command, env=dict(os.environ), jobs_dir=jobs, sleep=naps.append)
+    assert (tmp_path / "attempts").read_text() == "3"
+    assert naps == [harbor_runner.HARBOR_START_BACKOFF_SECONDS, 2 * harbor_runner.HARBOR_START_BACKOFF_SECONDS]
+
+    # Any other failure is fatal on the first attempt.
+    command = _fake_harbor(tmp_path, failures=1, message="verifier crashed")
+    with pytest.raises(subprocess.CalledProcessError):
+        harbor_runner.run_harbor(command, env=dict(os.environ), jobs_dir=jobs, sleep=naps.append)
+    assert (tmp_path / "attempts").read_text() == "1"
+
+    # Once a trial directory exists the run is never repeated, whatever the message.
+    (jobs / "trial" / "task__abc").mkdir(parents=True)
+    command = _fake_harbor(tmp_path, failures=1, message=harbor_runner.DOCKER_CHECK_FAILURE)
+    with pytest.raises(subprocess.CalledProcessError):
+        harbor_runner.run_harbor(command, env=dict(os.environ), jobs_dir=jobs, sleep=naps.append)
+    assert (tmp_path / "attempts").read_text() == "1"
+
+    # The probe failure gives up after the configured number of attempts.
+    command = _fake_harbor(tmp_path, failures=99, message=harbor_runner.DOCKER_CHECK_FAILURE)
+    with pytest.raises(subprocess.CalledProcessError):
+        harbor_runner.run_harbor(command, env=dict(os.environ), jobs_dir=tmp_path / "nojobs", sleep=naps.append)
+    assert (tmp_path / "attempts").read_text() == str(harbor_runner.HARBOR_START_ATTEMPTS)
