@@ -461,10 +461,10 @@ def _turns_from_model_calls(
     turn_counts: Counter = Counter()
     tool_counts: Counter = Counter()
     for call in model_calls:
-        if call.response is None:
-            # A call that returned nothing is not a model decision.
-            continue
         metadata = call.response_metadata
+        if call.response is None or (metadata.status_code is not None and metadata.status_code >= 400):
+            # HTTP error payloads are retained attempts, not model decisions.
+            continue
         invocation_id = invocation_by_call_id.get(call.model_call_id or "") or invocation_by_response_id.get(
             metadata.response_id or ""
         )
