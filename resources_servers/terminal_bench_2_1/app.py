@@ -135,6 +135,7 @@ TEST_SH_PATCHES = {
 
 
 class TerminalBench21ResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: TerminalBench21ResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -284,6 +285,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             golden_patch_result = await eval_sandbox.exec(
                 f"bash {cwd}/solve.sh",
                 timeout_s=self.config.evaluation_timeout,
+                preserve_background_services=True,
             )
             golden_patch_output = (golden_patch_result.stderr or "") + (golden_patch_result.stdout or "")
             if self.config.debug:
@@ -318,8 +320,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             try:
                 with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
                     await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
-                    temp_file.seek(0)
-                    reward = float(temp_file.read())
+                    # Providers such as Docker can replace the destination file during download.
+                    reward = float(Path(temp_file.name).read_text())
 
                 evaluation_completed = True
             except:

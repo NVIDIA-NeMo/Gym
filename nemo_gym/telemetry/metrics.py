@@ -47,6 +47,8 @@ papered over, so this module takes an explicit position on each of the five:
     ``http.request.method`` and ``http.response.status_code``, which is strictly better.
     Use that instead; see ``fern/versions/latest/pages/observability/metrics.mdx``.
 
+Attributed instruments (the sandbox lifecycle set) live in :mod:`nemo_gym.telemetry.gym_metrics`.
+
 Every function here is a no-op unless telemetry is initialised *and* exporting, so call
 sites do not need their own guards for correctness — though they should still sit under a
 span-group gate to stay free when disabled.

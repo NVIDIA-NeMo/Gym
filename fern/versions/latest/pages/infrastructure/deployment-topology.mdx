@@ -24,7 +24,7 @@ The deployment strategy depends on how the training framework manages its cluste
 
 #### Single Ray Cluster
 
-If `ray_head_node_address` is specified in the config, NeMo Gym connects to that existing Ray cluster instead of starting its own. Training frameworks using Ray set this address so that NeMo Gym attaches to the same cluster.
+If `ray_head_node_address` is specified in the config, Ray-enabled NeMo Gym servers connect to that existing Ray cluster instead of starting a separate cluster. Training frameworks using Ray set this address so that NeMo Gym attaches to the same cluster. Server implementations declaring `ray_enabled = False` remain ordinary processes and do not connect.
 
 ```mermaid
 %%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
@@ -88,7 +88,7 @@ flowchart LR
     style Gym fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
 ```
 
-The training framework runs its own orchestration (non-Ray). NeMo Gym spins up a separate Ray cluster.
+The training framework runs its own orchestration (non-Ray). NeMo Gym spins up a separate Ray cluster; only Ray-enabled servers connect to it.
 
 **When to use:**
 - The training framework has its own orchestration (not Ray-based)

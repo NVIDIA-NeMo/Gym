@@ -44,3 +44,11 @@ code_gen_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/code_gen/data/example.jsonl
+
+code_gen_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: code_gen_simple_agent

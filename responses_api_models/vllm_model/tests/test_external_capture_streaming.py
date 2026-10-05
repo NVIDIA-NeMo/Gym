@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
 from nemo_gym import chat_streaming, responses_streaming
@@ -19,10 +20,11 @@ from nemo_gym.token_id_capture.adapters.vllm import VLLMCaptureAdapter
 from nemo_gym.token_id_capture.lineage import FileLineageStore
 from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.sink import current_capture_context
-from nemo_gym.token_id_capture.staging import resolve_terminal
+from nemo_gym.token_id_capture.staging import resolve_terminal, select_terminal_call
 from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
 from nemo_gym.token_id_capture.staging.rebuild import verify_and_linearize
 from nemo_gym.token_id_capture.staging.records import (
+    WORKER_MISSING_COMMIT_COORDS_REASON,
     CaptureAdmission,
     RolloutManifest,
     RolloutReceipt,
@@ -44,10 +46,12 @@ class _Worker:
         self.context = None
         self.tool_call = False
         self.reasoning = False
+        self.reasoning_only = False
         self.refusal = False
         self.capture = RolloutTokenCapture(sink=self, weight_version_fn=lambda: 7, adapter=VLLMCaptureAdapter())
 
-    def stage(self, record):
+    def stage(self, record, *, attachments=None):
+        assert attachments is None
         self.records[record.staging_key] = record
         return StageResult(ok=True, staging_key=record.staging_key)
 
@@ -79,6 +83,8 @@ class _Worker:
         }
         if self.reasoning:
             payload["choices"][0]["message"]["reasoning_content"] = "Check the requested calculation."
+        if self.reasoning_only:
+            payload["choices"][0]["message"]["content"] = None
         if self.refusal:
             payload["choices"][0]["message"].update(content=None, refusal="I cannot help with that.")
         if self.tool_call and turn == 1:
@@ -96,9 +102,10 @@ class _Worker:
                     }
                 ],
             )
-        if "ng_capture" not in body:
+        capture_params = body.get("ng_capture") or (body.get("offload_params") or {}).get("ng_capture")
+        if capture_params is None:
             return payload
-        admission = CaptureAdmission.model_validate(body["ng_capture"])
+        admission = CaptureAdmission.model_validate(capture_params)
         prefix = [token for key in admission.staging_chain for token in self.records[key].token_ids_delta]
         call = self.capture.begin_call(admission, prefix_token_ids=prefix, stream=body["stream"])
         prompt = prefix + [turn * 10]
@@ -115,12 +122,13 @@ class _Worker:
 
 @pytest.fixture
 def make_harness(tmp_path, monkeypatch):
-    def make(dialect="responses", evaluation=False, reasoning=False, **overrides):
+    def make(dialect="responses", evaluation=False, reasoning=False, backend="vllm_worker", **overrides):
         root = tmp_path / dialect.replace("/", "-")
         global_config = {
             "token_id_capture": {
                 "enabled": True,
                 "external_staging": True,
+                "external_staging_backend": backend,
                 "rebuild_response": False,
                 "lineage_store": "nemo_gym.token_id_capture.lineage:FileLineageStore",
                 "lineage_store_kwargs": {"root": str(root)},
@@ -222,6 +230,13 @@ async def test_external_capture_routes(make_harness, dialect, stream, evaluation
     h = make_harness(dialect, evaluation)
 
     async def check_send(message):
+        if (
+            dialect == "chat/completions"
+            and stream
+            and (message["type"] == "http.response.start" or message.get("body") == b": keep-alive\n\n")
+        ):
+            # Headers and liveness comments can precede capture; model output cannot.
+            return
         manifest = RolloutManifest.model_validate(await h.ledger.manifest("r1"))
         assert len(manifest.records) == 1 and not manifest.failures
         assert h.worker.context.committed
@@ -261,6 +276,111 @@ async def test_external_capture_routes(make_harness, dialect, stream, evaluation
         events = _events(messages)
         if dialect in ("responses", "compaction"):
             assert events[-1]["type"] == "response.completed"
+
+
+@pytest.mark.parametrize("backend", ["vllm_worker", "megatron_worker"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "dialect,trigger,prior_call",
+    [(dialect, "overflow", prior) for dialect in DIALECTS for prior in (False, True)]
+    + [(dialect, "reasoning_guard", True) for dialect in ("responses", "compaction")],
+)
+async def test_synthetic_completion_leaves_call_uncommitted(
+    make_harness, monkeypatch, backend, stream, dialect, trigger, prior_call
+):
+    h = make_harness(dialect, reasoning=True, backend=backend, sequential_reasoning_allowed=False)
+    h.worker.reasoning_only = trigger == "reasoning_guard"
+    worker_call = AsyncMock(wraps=h.worker.create_chat_completion)
+    monkeypatch.setattr(h.worker, "create_chat_completion", worker_call)
+    body = _body(dialect, stream=False)
+    if prior_call:
+        first_messages = await _request(h.app, _path(dialect), body)
+        assert first_messages[0]["status"] == 200
+        first = json.loads(b"".join(message.get("body", b"") for message in first_messages))
+        if dialect in ("responses", "compaction"):
+            body["input"].extend(first["output"])
+            if trigger == "reasoning_guard":
+                assert [item["type"] for item in first["output"]] == ["reasoning"]
+        elif dialect == "chat/completions":
+            body["messages"].append(
+                {key: value for key, value in first["choices"][0]["message"].items() if value is not None}
+            )
+        else:
+            body["messages"].append({"role": "assistant", "content": first["content"]})
+        if trigger == "overflow":
+            body["input" if dialect in ("responses", "compaction") else "messages"].append(
+                {"role": "user", "content": "continue"}
+            )
+
+    if trigger == "overflow":
+        error = ClientResponseError(MagicMock(real_url="http://worker/v1/chat/completions"), (), status=400)
+        error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
+        worker_call.side_effect = error
+    body["stream"] = stream
+    messages = await _request(h.app, _path(dialect), body)
+    assert messages[0]["status"] == 200, messages
+    assert worker_call.await_count == int(prior_call) + int(trigger == "overflow")
+    assert h.finalize.await_count == int(prior_call) + 1
+    raw = b"".join(message.get("body", b"") for message in messages)
+    for internal in ("ng_commit_coords", "prompt_token_ids", "generation_token_ids", "generation_log_probs"):
+        assert internal.encode() not in raw
+    wire_dialect = {"chat/completions": "chat_completions", "compaction": "responses"}.get(dialect, dialect)
+    served = _reconstruct_streamed_response(raw, wire_dialect) if stream else json.loads(raw)
+    assert served is not None
+
+    manifest = RolloutManifest.model_validate(await h.ledger.manifest("r1"))
+    assert len(manifest.records) == int(prior_call)
+    assert len(h.worker.records) == int(prior_call)
+    assert [failure.reason for failure in manifest.failures] == [UNCOMMITTED_CALL_REASON]
+    selection = select_terminal_call(manifest.records)
+    if prior_call:
+        record = manifest.records[0]
+        assert record.response_id == first["id"]
+        assert manifest.failures[0].model_call_id != record.model_call_id
+        assert selection.terminal_model_call_id == record.model_call_id
+        receipt = RolloutReceipt(
+            rollout_id="r1",
+            manifest=manifest.records,
+            terminal_model_call_id=selection.terminal_model_call_id,
+            terminal_selection="heuristic",
+        )
+        row = verify_and_linearize(receipt, h.worker.fetch([record.staging_key]))
+        assert row.token_ids == [10, 11]
+        assert row.token_mask == [0.0, 1.0]
+        assert row.logprobs == [0.0, -0.25]
+    else:
+        assert selection.terminal_model_call_id is None
+        assert selection.reason == "no_records"
+    # A harness that explicitly selects the synthetic response cannot attribute
+    # it to an earlier generated turn.
+    attribution = resolve_terminal(manifest.records, served, declared_response_id=served["id"])
+    assert not attribution.attributed
+    assert "declared_terminal_not_captured" in attribution.reason
+
+
+@pytest.mark.parametrize("backend", ["vllm_worker", "megatron_worker"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_worker_completion_without_coordinates_still_fails_closed(make_harness, monkeypatch, backend, stream):
+    # A real worker completion that is missing its acknowledgement must still poison the call.
+    # It must not be treated like a synthetic completion, which is left uncommitted.
+    h = make_harness("responses", backend=backend)
+    original = h.worker.create_chat_completion
+
+    async def drop_coords(**body):
+        payload = await original(**body)
+        payload.pop("ng_commit_coords")
+        return payload
+
+    monkeypatch.setattr(h.worker, "create_chat_completion", drop_coords)
+    messages = await _request(h.app, _path("responses"), _body("responses", stream))
+    assert messages[0]["status"] == 200
+    assert h.finalize.await_count == 1
+    manifest = RolloutManifest.model_validate(await h.ledger.manifest("r1"))
+    assert manifest.records == []
+    assert [failure.reason for failure in manifest.failures] == [
+        WORKER_MISSING_COMMIT_COORDS_REASON,
+        UNCOMMITTED_CALL_REASON,
+    ]
 
 
 @pytest.mark.parametrize("override", ["extra_body", "sampling_overrides"])
@@ -453,7 +573,7 @@ async def test_response_preparation_failure_does_not_commit(
 
     async def check_send(message):
         sent.append(message)
-        if b"event: response.failed" in message.get("body", b""):
+        if any(marker in message.get("body", b"") for marker in (b"event: response.failed", b"event: error")):
             manifest = await h.ledger.manifest("r1")
             assert not manifest["records"]
             assert any(row["reason"] == UNCOMMITTED_CALL_REASON for row in manifest["failures"])
