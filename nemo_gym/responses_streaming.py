@@ -297,6 +297,26 @@ def restore_namespace_tool_calls(items: list[dict], ns_map: NamespaceMap) -> lis
     return restored
 
 
+def _wire_usage(usage: Any) -> Any:
+    """Return the usage object with integer detail counts, as the Responses wire schema types them.
+
+    Gym keeps an unreported cache or reasoning breakdown as ``None`` internally to tell unknown
+    from zero. On the wire those counts are integers, and a strict streaming client (the Codex
+    CLI) that meets ``null`` fails to parse ``response.completed``, treats the stream as
+    disconnected, and re-sends the whole request.
+    """
+    if not isinstance(usage, dict):
+        return usage
+    usage = dict(usage)
+    for group, name in (("input_tokens_details", "cached_tokens"), ("output_tokens_details", "reasoning_tokens")):
+        details = usage.get(group)
+        if details is None:
+            usage[group] = {name: 0}
+        elif isinstance(details, dict) and details.get(name) is None:
+            usage[group] = {**details, name: 0}
+    return usage
+
+
 def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[NamespaceMap] = None) -> Iterator[str]:
     """Re-emit a complete Responses API response object as an SSE event stream.
 
@@ -305,6 +325,8 @@ def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[Nam
     so those two are the required minimum; ``response.created`` is included for clients that wait
     for an acknowledgement before reading items.
     """
+    if "usage" in response_json:
+        response_json = {**response_json, "usage": _wire_usage(response_json["usage"])}
     output_items = restore_namespace_tool_calls(response_json.get("output") or [], ns_map or {})
 
     yield _sse_event(

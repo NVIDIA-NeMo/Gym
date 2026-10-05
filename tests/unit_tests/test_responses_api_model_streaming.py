@@ -337,6 +337,19 @@ class TestSanitizeStreamingBody:
         # the cleaned body validates against the strict params model
         NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
 
+    def test_keeps_replayed_assistant_message_without_annotations(self) -> None:
+        # A client replaying an output message it received may omit the annotations list (the
+        # Codex CLI does); the item must survive as the assistant turn it is, not be dropped.
+        item = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Let me inspect the workload first."}],
+        }
+        cleaned, _ = sanitize_streaming_responses_body({"input": [item], "stream": True})
+        assert cleaned["input"] == [item]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
     def test_flattens_namespace_tools(self) -> None:
         flat, ns_map = flatten_namespace_tools([NAMESPACE_TOOL])
         assert len(flat) == 1
@@ -596,6 +609,20 @@ class TestSynthesizeSSE:
         assert completed["id"] == response["id"]
         assert completed["usage"]["input_tokens"] == 7
         assert len(completed["output"]) == 1
+
+    def test_unknown_usage_details_are_integers_on_the_wire(self) -> None:
+        # Gym keeps an unreported cache/reasoning breakdown as None to tell unknown from zero, but
+        # the Responses wire schema types these counts as integers; a strict client (the Codex CLI)
+        # fails to parse a null in response.completed and re-sends the request.
+        response = _build_response([_message_item("hello")]).model_dump(mode="json")
+        response["usage"]["input_tokens_details"] = {"cached_tokens": None}
+        response["usage"]["output_tokens_details"] = None
+        events = self._events("".join(synthesize_responses_sse(response)))
+        for event in (events[0], events[-1]):
+            usage = event["response"]["usage"]
+            assert usage["input_tokens_details"]["cached_tokens"] == 0
+            assert usage["output_tokens_details"]["reasoning_tokens"] == 0
+            assert usage["input_tokens"] == 7
 
     def test_namespaced_call_names_restored(self) -> None:
         response = _build_response([_function_call_item("mcp__weather__get_weather")]).model_dump(mode="json")
