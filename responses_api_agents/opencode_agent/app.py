@@ -242,6 +242,15 @@ def _parse_opencode_session(
                 "running": "incomplete",
                 "pending": "incomplete",
             }.get(native_status, "unknown")
+            metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+            exit_code = metadata.get("exit")
+            if (
+                native_status == "completed"
+                and part.get("tool") == "bash"
+                and type(exit_code) is int
+                and exit_code != 0
+            ):
+                status = "failed"
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
@@ -253,7 +262,7 @@ def _parse_opencode_session(
                         duration_ms=duration_ms,
                         timing_source="artifact" if started_at is not None else None,
                         status=status,
-                        error_type="tool_error" if native_status == "error" else None,
+                        error_type="tool_error" if status == "failed" else None,
                     )
                 )
             else:
@@ -599,11 +608,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 {"baseURL": self._resolve_model_base_url(rollout_id), "apiKey": "EMPTY"}  # pragma: allowlist secret
             )
             model = nemo.setdefault("models", {}).get(self.config.model, {})
+            model.setdefault("interleaved", {"field": "reasoning_content"})
             self._deep_merge(
                 model,
                 {
                     "name": self.config.model,
-                    "interleaved": {"field": "reasoning"},
                     "limit": {"context": self.config.context_window, "output": self.config.max_output_tokens},
                 },
             )
@@ -725,8 +734,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
         prompt = user_message if system_prompt is None else f"{system_prompt}\n\n{user_message}"
+        # The collector can construct complete provider turns from exactly owned
+        # captures. Native SQLite turns have no provider prompt or response ID;
+        # retain that fallback only when model-call capture is unavailable.
+        capture_turns = (
+            self.config.model_server is not None and rollout_id is not None and self._model_call_capture_enabled()
+        )
         trajectory = (
-            TrajectoryRecord(task_id="unscoped", rollout_id=rollout_id or "unscoped") if collect_observations else None
+            TrajectoryRecord(task_id="unscoped", rollout_id=rollout_id or "unscoped")
+            if collect_observations and not capture_turns
+            else None
         )
 
         output_items, usage, model_name, observations = await self._run_opencode(
