@@ -50,4 +50,8 @@ VLLM_SERVE_ARGS=(
     --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
     --max-num-batched-tokens 33920
     --max-num-seqs "${MAX_NUM_SEQS:-192}"
+    # Report prompt_tokens_details.cached_tokens in usage. Without it vLLM returns null there
+    # even with prefix caching on, and prompt_cache_hit_share cannot be computed. Payload only;
+    # scheduling and sampling are unchanged.
+    --enable-prompt-tokens-details
 )
