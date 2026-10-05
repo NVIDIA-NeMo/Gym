@@ -456,7 +456,7 @@ class TrainDataProcessor(BaseModel):
             if not in_scope_datasets:
                 continue
 
-            # Validate native routing before conversion removes the declaring instance and agent pin.
+            # Validate taskset routing before conversion removes the declaring instance and agent pin.
             for dataset in in_scope_datasets:
                 if dataset.taskset is not None:
                     resolve_dataset_agent(
@@ -722,7 +722,7 @@ class TrainDataProcessor(BaseModel):
                 aggregate_metrics = state.metrics.aggregate()
 
                 aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
-                # Agent and taskset select routing, not source data. Exclude both so native
+                # Agent and taskset select routing, not source data. Exclude both so taskset
                 # and flat declarations of the same file can share its metrics sidecar.
                 aggregate_metrics_dict = (
                     d.model_dump(mode="json", exclude={"agent", "taskset"}) | aggregate_metrics_dict

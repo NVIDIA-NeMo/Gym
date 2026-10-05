@@ -28,7 +28,10 @@ class SingleAgentTurnTaskInput(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def accept_flat_task_input(cls, value: object) -> object:
-        """Accept generic flat task input while preserving the existing task_data container."""
+        """Accept flat task input while preserving the canonical ``task_data`` container.
+
+        ``task_data`` is reserved for that container; non-conflicting flat fields are merged into it.
+        """
         if not isinstance(value, Mapping):
             return value
         fields = dict(value)
