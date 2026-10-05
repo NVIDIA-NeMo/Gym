@@ -20,6 +20,7 @@ def test_compute_task_metrics_reports_usersim_input_contract() -> None:
             "responses_create_params": {
                 "assistant": {"input": []},
                 "judge": {"input": []},
+                "tool_simulation": {"input": []},
             },
         }
     )
@@ -32,4 +33,5 @@ def test_compute_task_metrics_reports_usersim_input_contract() -> None:
         "UserSim assistant Responses override coverage": True,
         "UserSim judge Responses override coverage": True,
         "UserSim summary Responses override coverage": False,
+        "UserSim tool_simulation Responses override coverage": True,
     }

@@ -351,6 +351,37 @@ def test_verify_records_context_and_requires_both_participants(tmp_path: Path) -
     assert incomplete["scenario_completed"] is False
 
 
+def test_verify_accepts_assistant_activation_failure_as_terminal_zero_reward(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def unexpected_scoring(*_args, **_kwargs):
+        pytest.fail("assistant activation failures must not invoke scorers")
+
+    monkeypatch.setattr(UserSimResourcesServer, "_score_native_result", unexpected_scoring)
+    monkeypatch.setattr(UserSimResourcesServer, "_evaluate_assistant_quality", unexpected_scoring)
+    _write_personas(tmp_path)
+    with TestClient(_app(tmp_path)) as client:
+        seed_result = client.post("/seed_session", json=_seed_body(seed=7)).json()
+        body = _verify_body(seed_result)
+        body["verification_input"]["usersim_result"] = {
+            "conversation_messages": [{"role": "user", "content": "Teach me about local ecology."}],
+            "conversation_status": False,
+            "simulation_outcome": {
+                "status": "failed",
+                "failure_attribution": "assistant_model",
+                "failure_reason": "Assistant Agent returned HTTP 500",
+            },
+        }
+        verified = client.post("/verify", json=body)
+
+    assert verified.status_code == 200
+    assert verified.json()["reward"] == 0.0
+    assert verified.json()["scenario_completed"] is False
+    assert verified.json()["reward_components"]["trajectory_evaluator_applied"] == 0.0
+    assert verified.json()["native_usersim_result"]["simulation_outcome"]["failure_attribution"] == "assistant_model"
+
+
 def test_verify_uses_usersim_assistant_quality_as_reward(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

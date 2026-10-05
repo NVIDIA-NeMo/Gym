@@ -648,6 +648,38 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 detail="Verified NeMo UserSim resolved episode does not match the seeded session",
             )
         native_result = verification_input.usersim_result
+        if native_result.simulation_outcome.get("failure_attribution") == "assistant_model":
+            participants_completed = {"user", "assistant"} <= _conversation_roles(native_result)
+            return UserSimVerification(
+                reward=0.0,
+                reward_components={
+                    "participants_completed": float(participants_completed),
+                    "native_conversation_status": float(native_result.conversation_status),
+                    "native_scorer_applied": 0.0,
+                    "native_scorer_pass": 0.0,
+                    "trajectory_evaluator_applied": 0.0,
+                    "assistant_quality": 0.0,
+                },
+                scenario_completed=False,
+                native_usersim_result=native_result,
+                verifier_data={
+                    "invocations": [
+                        invocation.model_dump(mode="json") for invocation in verification_input.invocations
+                    ],
+                    "episode_interaction_protocol": verification_input.episode_interaction_protocol,
+                    "scenario": verification_input.scenario.model_dump(mode="json"),
+                    "usersim_context": verification_input.usersim_context.model_dump(mode="json"),
+                    "usersim_result": native_result.model_dump(mode="json"),
+                    "native_scorer_name": None,
+                    "native_scores": None,
+                    "assistant_eval": {
+                        "skipped": True,
+                        "skipped_reason": "assistant_model activation failed",
+                    },
+                    "normalized_axis_scores": {},
+                    "scenario_completed": False,
+                },
+            )
         if seeded.runtime is not None:
             transcript = _external_probe_transcript(
                 verification_input.usersim_result.conversation_messages,
