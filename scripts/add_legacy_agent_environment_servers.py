@@ -3,10 +3,11 @@
 
 """Declare a legacy-agent environment server beside every bound agent instance.
 
-Rollout collection dispatches to environment servers, so every agent that still owns its episode
-through `run()` needs one in front of it. Unbound agent templates get none: they are swap sources,
-and composition replaces them before anything runs. An agent that an environment server already
-names gets none either, since a second server would make agent-routed rows ambiguous.
+Rollout collection dispatches to environment servers.
+Every agent that still owns its episode through `run()` therefore needs one in front of it.
+Unbound agent templates get none: they are swap sources, and composition replaces them before anything runs.
+An agent that an environment server already names gets none either.
+A second server in front of it would make agent-routed rows ambiguous.
 
 A server is named after the environment stem rather than the agent, so swapping the agent leaves
 the name alone.
@@ -17,8 +18,9 @@ the name alone.
     # Your own configs (files or directories)
     python scripts/add_legacy_agent_environment_servers.py my_configs/ my_run.yaml [--check]
 
-This repository's configs are always indexed, so a config that renames one of their agents with
-`_inherit_from` gets a server that inherits (and so replaces) that agent's server.
+This repository's configs are always indexed.
+A config that renames one of their agents with `_inherit_from` therefore gets a server that inherits that agent's server.
+Inheriting moves the source server, so the renamed agent ends up with exactly one server.
 """
 
 from __future__ import annotations
@@ -127,7 +129,7 @@ def config_files_in(paths: list[Path]) -> list[Path]:
 def load(path: Path) -> dict | None:
     """Load the Gym config in one file, or None when the file is not a mapping.
 
-    Raises for a file that cannot be parsed, so a migration never skips a config silently.
+    Raises for a file that cannot be read or parsed, so a migration never skips a config silently.
     """
     try:
         document = yaml.safe_load(path.read_text())
@@ -151,7 +153,8 @@ def fronted_agents(document: dict) -> set[str]:
 def agent_types_in(document: dict, known_types: dict[str, str]) -> dict[str, str]:
     """Map each agent instance in the document to its agent type.
 
-    A rename has no `responses_api_agents` body of its own; it takes its source's type.
+    A rename has no `responses_api_agents` body of its own.
+    It takes the type of the agent it renames.
     """
     types = {}
     for name, instance in document.items():
@@ -179,8 +182,10 @@ def server_names_for(document: dict, known_types: dict[str, str] | None = None) 
 def index(documents: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
     """Index agent types and server names across documents.
 
-    Returns ``(agent_types, servers)``: each agent instance's type, and the server name declared
-    (or that this script would declare) beside it. Renaming configs look their source up here.
+    Returns ``(agent_types, servers)``.
+    ``agent_types`` maps each agent instance to its type.
+    ``servers`` maps each agent instance to the server name declared beside it, or the one this script would declare.
+    Renaming configs look up the agent they rename here.
     """
     agent_types: dict[str, str] = {}
     for document in documents:

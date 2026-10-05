@@ -176,19 +176,19 @@ Bypassing validation means invalid servers won't start. Use this only for debugg
 
 ```
 DEPRECATED: agents without an environment server: `my_simple_agent`.
-Rollout collection reaches an agent only through an environment server. This run generated a
-legacy_agent environment server for each agent above, which relays /run to the agent unchanged, so
-results are not affected. A future release will reject these configs with
-AgentWithoutEnvironmentServerError.
+Rollout collection reaches an agent only through an environment server.
+This run generated a legacy_agent environment server for each agent above.
+Each one relays /run to its agent unchanged, so results are not affected.
+A future release will reject these configs with AgentWithoutEnvironmentServerError.
 ```
 
-**When**: An agent instance has no environment server naming it in `agent_server`. Rollout
-collection reaches agents only through an environment server, so Gym generates a `legacy_agent`
-relay in front of the agent and warns. Your config keeps running for now, but **a future release will
-make this an error**, so migrate it.
+**When**: An agent instance has no environment server naming it in `agent_server`.
+Rollout collection reaches agents only through an environment server.
+Gym therefore generates a `legacy_agent` relay in front of the agent and logs this warning.
+Your config keeps running for now, but a future release will make this an error, so migrate it.
 
-**Fix**: Declare the environment servers in your config. From a NeMo Gym checkout, run the migration
-script on your config files or directories:
+**Fix**: Declare the environment servers in your config.
+From a NeMo Gym checkout, run the migration script on your config files or directories:
 
 ```bash
 # Report what would change
@@ -198,14 +198,14 @@ python scripts/add_legacy_agent_environment_servers.py path/to/configs/ --check
 python scripts/add_legacy_agent_environment_servers.py path/to/configs/
 ```
 
-The script appends a block to each config that needs one and leaves the existing content unchanged,
-comments included.
-It skips agents that an environment server already names, and agents that only override fields of
-an agent defined elsewhere. Run without paths, it updates this repository's configs. It exits with
-1 under `--check` when something needs adding, and with 2 when a file cannot be read.
+The script appends a block to each config that needs one and leaves the existing content unchanged, comments included.
+It skips agents that an environment server already names.
+It also skips agents that only override fields of an agent defined elsewhere.
+Run without paths, it updates this repository's configs.
+It exits with 1 under `--check` when something needs adding, and with 2 when a file cannot be read.
 
-You can also add the block by hand. The warning prints the exact block for each agent, at the same
-level as the agents:
+You can also add the block by hand.
+The warning prints the exact block for each agent; add it at the same level as the agents:
 
 ```yaml
 my_environment_server:
@@ -217,9 +217,9 @@ my_environment_server:
         name: my_simple_agent
 ```
 
-If you rename an agent with `_inherit_from`, the agent's environment server must be renamed with it,
-because `_inherit_from` moves the source. The script writes a server that inherits the source agent's
-server. Do not add a second server in front of an agent: it makes agent-routed rows ambiguous.
+If you rename an agent with `_inherit_from`, the agent's environment server must be renamed with it, because `_inherit_from` moves the source.
+The script writes a server that inherits the source agent's server.
+Do not add a second server in front of an agent, because that makes agent-routed rows ambiguous.
 
 #### Require Declared Environment Servers
 

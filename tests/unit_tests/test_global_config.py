@@ -2143,8 +2143,9 @@ class TestConfigLoadErrors:
         )
 
     def test_agent_without_environment_server_gets_a_legacy_relay(self, caplog: LogCaptureFixture) -> None:
-        # A config written before environment servers keeps running: collection reaches the agent through a
-        # generated relay, never directly, and the warning tells the user exactly how to migrate.
+        # A config written before environment servers keeps running.
+        # Collection reaches the agent through a generated relay, never directly.
+        # The warning tells the user exactly how to migrate.
         config = self._agent_without_environment_server_config()
         with caplog.at_level("WARNING"):
             GlobalConfigDictParser()._front_agents_without_environment_server(config)
@@ -2213,8 +2214,8 @@ class TestConfigLoadErrors:
         assert _environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_simple_agent_environment_server"]}
 
     def test_parse_runs_a_config_without_environment_servers(self) -> None:
-        # End to end through parse(): the generated relay resolves its agent reference and is assigned an address
-        # like any declared server.
+        # End to end through parse(), the generated relay resolves its agent reference.
+        # It is assigned an address like any declared server.
         resolved = GlobalConfigDictParser().parse(
             GlobalConfigDictParserConfig(
                 initial_global_config_dict=OmegaConf.merge(
@@ -2248,7 +2249,7 @@ class TestConfigLoadErrors:
             ),
         )
         with raises(
-            ServerRefNotFoundError, match="renamed with `_inherit_from`.*add_legacy_agent_environment_servers"
+            ServerRefNotFoundError, match="(?s)renamed with `_inherit_from`.*add_legacy_agent_environment_servers"
         ):
             GlobalConfigDictParser().parse(
                 GlobalConfigDictParserConfig(
