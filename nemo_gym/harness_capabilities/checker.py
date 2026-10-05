@@ -15,7 +15,6 @@ from pydantic import ValidationError
 from nemo_gym.rollout_observability import ModelCallRef
 
 from .contracts import TOKEN_FIELDS, model_errors
-from .registry import ARTIFACT_CHECK_GROUPS, CHECKS
 
 
 NAMES = {
@@ -196,8 +195,6 @@ class _RecordInspector:
         self.invocation_ids = [i.get("invocation_id") for i in self.invocations]
 
     def _fail(self, capability: str, assertion: str, location: str, reason: str) -> None:
-        # A new assertion must be declared in the inventory before it can emit a finding.
-        CHECKS[f"{capability}.{assertion}"]
         self.findings.append(Finding(capability, assertion, self.source + location, reason))
 
     def check_identity(self) -> None:
@@ -776,6 +773,17 @@ def inspect_record(record: dict, *, source: str = "record", scope: EvidenceScope
         # Semantic checks require typed identities and containers. An invalid native
         # object is a record integrity failure, never partially valid evidence.
         return checks.result()
-    for group in ARTIFACT_CHECK_GROUPS:
-        getattr(checks, group.implementation)()
+    checks.check_identity()
+    checks.check_capture_presence()
+    checks.check_model_calls()
+    checks.check_token_counts()
+    checks.check_content_references()
+    checks.check_history()
+    checks.check_payloads()
+    checks.check_ownership()
+    checks.check_turns()
+    checks.check_step_join()
+    checks.check_tools()
+    checks.check_verifier()
+    checks.check_gaps()
     return checks.result()
