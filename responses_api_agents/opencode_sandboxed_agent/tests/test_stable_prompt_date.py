@@ -54,7 +54,10 @@ assert.match(edited.system[0], /Working directory: \/different/);
 const newRollout = { system: prompt('Mon Oct 05 2026') };
 await (await factory())['experimental.chat.system.transform']({}, newRollout);
 assert.deepEqual(newRollout.system, rawAfter.system);
-await assert.rejects(hook({}, { system: ['missing date'] }), /Expected one/);
+const auxiliary = { system: ['Summarize this conversation.'] };
+await hook({}, auxiliary);
+assert.deepEqual(auxiliary.system, ['Summarize this conversation.']);
+await assert.rejects(hook({}, { system: ['<env>missing date</env>'] }), /Expected one/);
 await assert.rejects(hook({}, { system: [...prompt('Mon Oct 05 2026'), ...prompt('Mon Oct 05 2026')] }), /found 2/);
 console.log(JSON.stringify({ before: before.system, rawAfter: rawAfter.system, after: after.system, edited: edited.system }));
 """

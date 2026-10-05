@@ -18,6 +18,8 @@ export default async function stablePromptDate() {
           }),
         ),
       );
+      // Auxiliary calls, including compaction, have no environment prompt.
+      if (matches === 0 && !output.system.some((text) => text.includes("<env>"))) return;
       if (matches !== 1) {
         throw new Error(`Expected one OpenCode environment date; found ${matches}`);
       }

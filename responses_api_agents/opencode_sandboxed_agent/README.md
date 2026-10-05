@@ -166,4 +166,5 @@ Set `freeze_system_prompt_date: true` for training runs that require exact conve
 An OpenCode `experimental.chat.system.transform` hook keeps only the environment's `Today's date`
 field at the first value seen by each rollout process, including across midnight. Other prompt text,
 tool results, clocks, timeouts, and capture guards are unchanged. The default is `false`; the hook
-fails if the expected single environment-date field is absent or ambiguous.
+leaves auxiliary calls with no environment prompt unchanged. An environment block with a missing or
+ambiguous date fails explicitly.
