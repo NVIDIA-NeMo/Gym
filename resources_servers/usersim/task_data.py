@@ -21,6 +21,12 @@ class UserSimSamplingRequest(BaseModel):
     probe_type: str | None = None
 
 
+class UserSimResponseCreateParams(BaseModel):
+    """Dependency-light Responses API payload retained for Environment Server dispatch."""
+
+    model_config = ConfigDict(extra="allow")
+
+
 class TaskData(BaseModel):
     """Durable input loaded from one UserSim task row."""
 
@@ -28,4 +34,4 @@ class TaskData(BaseModel):
 
     sampling: UserSimSamplingRequest
     probe_data: dict[str, Any] = Field(default_factory=dict)
-    responses_create_params: dict[UserSimAgentRole, dict[str, Any]] = Field(default_factory=dict)
+    responses_create_params: dict[UserSimAgentRole, UserSimResponseCreateParams] = Field(default_factory=dict)
