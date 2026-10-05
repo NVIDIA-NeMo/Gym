@@ -99,7 +99,8 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
 class _NativeSession:
     request: ResourcesSeedSessionRequest
     response: ResourcesSeedSessionResponse | None = None
-    verification_started: bool = False
+    verification_request: TerminalBench21VerifyRequest | None = None
+    verification_response: TerminalBench21VerifyResponse | None = None
 
 
 GOLDEN_PATCH_SOLVE_SH_PATCHES = {
@@ -228,7 +229,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 "disk_gib": resources.disk_gib,
             }
 
-    async def _create_sandbox(self, verify_request: TerminalBench21SeedSessionRequest) -> AsyncSandbox:
+    async def _create_sandbox(
+        self, verify_request: TerminalBench21SeedSessionRequest, *, session_id: str | None = None
+    ) -> AsyncSandbox:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -280,9 +283,15 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             if result.return_code != 0:
                 print(f"Failed to apt-get update: {result}")
 
-        # start_with_setup stops the container if _run_setup raises, instead of
-        # leaving it running until its TTL.
-        await eval_sandbox.start_with_setup(eval_sandbox_spec, _run_setup)
+        if session_id is None:
+            # Legacy callers have no native session to retain failed cleanup.
+            await eval_sandbox.start_with_setup(eval_sandbox_spec, _run_setup)
+        else:
+            # Native seed owns cleanup, preserving the setup error and a handle
+            # for close/shutdown retries even if the first stop fails.
+            self._session_id_to_sandbox[session_id] = eval_sandbox
+            await eval_sandbox.start(eval_sandbox_spec)
+            await _run_setup(eval_sandbox)
 
         return eval_sandbox
 
@@ -315,15 +324,14 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             if session is not None:
                 if session.request != body:
                     raise HTTPException(409, "resources_session_id is already bound to a different request")
-                if session.response is None or session.verification_started:
+                if session.response is None or session.verification_request is not None:
                     raise HTTPException(409, "Resources session is no longer available for seeding")
                 request.session[SESSION_ID_KEY] = session_id
                 return session.response
             session = _NativeSession(request=body.model_copy(deep=True))
             self._native_sessions[session_id] = session
             try:
-                sandbox = await self._create_sandbox(task)
-                self._session_id_to_sandbox[session_id] = sandbox
+                sandbox = await self._create_sandbox(task, session_id=session_id)
                 working_directory = await sandbox.exec("pwd", timeout_s=30)
                 workdir = (working_directory.stdout or "").strip()
                 if working_directory.return_code != 0 or not Path(workdir).is_absolute():
@@ -395,13 +403,22 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if session_id in self._native_sessions:
             async with self._native_session_locks[session_id]:
                 session = self._native_sessions.get(session_id)
-                if session is None or session.response is None or session.verification_started:
+                if session is None or session.response is None:
                     raise HTTPException(409, "Resources session is not available for verification")
                 task = TerminalBench21SeedSessionRequest.model_validate(session.request.task_data)
                 if task != TerminalBench21SeedSessionRequest.model_validate(body.model_dump()):
                     raise HTTPException(409, "Verification task does not match the seeded task")
-                session.verification_started = True
-                return await self._verify(request, body, native=True)
+                if session.verification_request is not None:
+                    if session.verification_request != body:
+                        raise HTTPException(409, "Verification request does not match the first request")
+                    if session.verification_response is None:
+                        # The verifier may have mutated the task before failing.
+                        raise HTTPException(503, "Previous verification did not complete; retry the episode")
+                else:
+                    session.verification_request = body.model_copy(deep=True)
+                    session.verification_response = await self._verify(request, body, native=True)
+                # Replay a lost response without grading the mutated task twice.
+                return session.verification_response.model_copy(deep=True)
         return await self._verify(request, body, native=False)
 
     async def _verify(

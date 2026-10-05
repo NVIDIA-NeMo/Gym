@@ -7,10 +7,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientOSError, ServerDisconnectedError
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+import nemo_gym.server_utils as server_utils
+import resources_servers.terminal_bench_2_1.app as terminal_bench_app
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_2_1.app import (
     TerminalBench21ResourcesServer,
@@ -37,7 +41,13 @@ def setup(tmp_path: Path):
         download=AsyncMock(side_effect=lambda remote, local: Path(local).write_text("1")),
         stop=AsyncMock(),
     )
-    server._create_sandbox = AsyncMock(return_value=sandbox)
+
+    async def create(task, *, session_id=None):
+        if session_id is not None:
+            server._session_id_to_sandbox[session_id] = sandbox
+        return sandbox
+
+    server._create_sandbox = AsyncMock(side_effect=create)
     server._upload_folder = AsyncMock()
     seed = ResourcesSeedSessionRequest(
         resources_session_id="resources-session",
@@ -103,7 +113,10 @@ def test_native_http_lifecycle_keeps_task_until_close(setup, reward: int) -> Non
         server._upload_folder.assert_awaited_once()
         assert server._upload_folder.await_args.args[2] == "/tests"
         sandbox.stop.assert_not_awaited()
-        assert client.post("/verify", json=verify_body(seed).model_dump(mode="json")).status_code == 409
+        replay = client.post("/verify", json=verify_body(seed).model_dump(mode="json"))
+        assert replay.status_code == 200
+        assert replay.json() == result.json()
+        server._upload_folder.assert_awaited_once()
         closed = client.post("/close_session", json=close_body(seed).model_dump(mode="json"))
         assert closed.status_code == 200
         assert closed.json() == {"resources_session_id": seed.resources_session_id}
@@ -180,6 +193,149 @@ async def test_seed_preserves_primary_error_and_failed_cleanup_for_close(setup) 
     assert not server._session_id_to_sandbox
 
 
+@pytest.mark.parametrize("recovery", ["close", "shutdown"])
+@pytest.mark.parametrize("stop_failure", ["error", "timeout"])
+async def test_initial_setup_failure_retains_sandbox_for_cleanup_retry(
+    setup, monkeypatch: pytest.MonkeyPatch, recovery: str, stop_failure: str
+) -> None:
+    server, _, seed, request = setup
+    server.config.session_close_timeout_seconds = 0.01
+
+    async def stop(handle):
+        if provider.close.await_count == 1:
+            if stop_failure == "timeout":
+                await asyncio.Event().wait()
+            raise RuntimeError("provider unavailable")
+
+    provider = SimpleNamespace(
+        create=AsyncMock(return_value=SimpleNamespace(sandbox_id="task-sandbox")),
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=1, stdout="", stderr="setup failed")),
+        close=AsyncMock(side_effect=stop),
+        aclose=AsyncMock(),
+    )
+    sandbox = AsyncSandbox(provider)
+    monkeypatch.setattr(terminal_bench_app, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(terminal_bench_app, "resolve_provider_config", lambda *_: provider)
+    monkeypatch.setattr(terminal_bench_app, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(terminal_bench_app, "AsyncSandbox", lambda _: sandbox)
+    # Exercise real allocation/setup, not the fixture's successful-create shortcut.
+    server._create_sandbox = TerminalBench21ResourcesServer._create_sandbox.__get__(server)
+    app = server.setup_webserver()
+    async with app.router.lifespan_context(app):
+        with pytest.raises(RuntimeError, match="Failed to prepare TerminalBench package sources"):
+            await server.seed_session(request, seed)
+        provider.create.assert_awaited_once()
+        provider.close.assert_awaited_once()
+        provider.aclose.assert_not_awaited()
+        assert server._session_id_to_sandbox[seed.resources_session_id] is sandbox
+        assert seed.resources_session_id not in server._closed_native_sessions
+        if recovery == "close":
+            await server.close_resources_session(close_body(seed))
+            await server.close_resources_session(close_body(seed))
+    assert provider.close.await_count == 2
+    provider.aclose.assert_awaited_once()
+    assert not server._session_id_to_sandbox
+
+
+@pytest.mark.parametrize("disconnect", [ServerDisconnectedError, ClientOSError])
+async def test_lost_verdict_response_replays_through_shared_http_retry(
+    setup, monkeypatch: pytest.MonkeyPatch, disconnect: type[ServerDisconnectedError] | type[ClientOSError]
+) -> None:
+    server, sandbox, seed, _ = setup
+    responses = []
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 200
+
+        async def send(**kwargs):
+            response = client.post("/verify", json=kwargs["json"])
+            responses.append(response)
+            if len(responses) == 1:
+                assert response.status_code == 200
+                raise disconnect("lost completed verdict")
+            return response
+
+        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: SimpleNamespace(request=send))
+        response = await server_utils._request_with_retries(
+            "POST",
+            "http://testserver/verify",
+            _internal=True,
+            _max_connection_retries=2,
+            json=verify_body(seed).model_dump(mode="json"),
+        )
+        assert [r.status_code for r in responses] == [200, 200]
+        assert response.json() == responses[0].json()
+        assert response.json()["reward"] == 1
+        server._upload_folder.assert_awaited_once()
+        sandbox.download.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("field", ["response", "responses_create_params", "docker_image"])
+async def test_completed_verification_rejects_changed_request(setup, field: str) -> None:
+    server, sandbox, seed, request = setup
+    await server.seed_session(request, seed)
+    body = verify_body(seed)
+    original = body.model_copy(deep=True)
+    result = await server.verify(request, body)
+    if field == "response":
+        body.response.id = "other-response"
+    elif field == "responses_create_params":
+        body.responses_create_params.input = "different input"
+    else:
+        body.docker_image = "different image"
+    with pytest.raises(HTTPException, match="does not match") as error:
+        await server.verify(request, body)
+    assert error.value.status_code == 409
+    # Neither caller mutation of the first request nor of its result changes the cache.
+    result.reward = 0
+    result.response.id = "mutated returned response"
+    replay = await server.verify(request, original)
+    assert replay.reward == 1
+    assert replay.response.id == original.response.id
+    server._upload_folder.assert_awaited_once()
+    sandbox.download.assert_awaited_once()
+
+
+async def test_concurrent_verification_replays_only_after_first_finishes(setup) -> None:
+    server, sandbox, seed, request = setup
+    await server.seed_session(request, seed)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def upload(*args):
+        entered.set()
+        await release.wait()
+
+    server._upload_folder.side_effect = upload
+    first = asyncio.create_task(server.verify(request, verify_body(seed)))
+    await entered.wait()
+    second = asyncio.create_task(server.verify(request, verify_body(seed)))
+    await asyncio.sleep(0)
+    assert not second.done()
+    release.set()
+    results = await asyncio.gather(first, second)
+    assert results[0] == results[1]
+    assert results[0].reward == 1
+    server._upload_folder.assert_awaited_once()
+    sandbox.download.assert_awaited_once()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+async def test_interrupted_verification_requires_retrying_episode(
+    setup, failure: type[RuntimeError] | type[asyncio.CancelledError]
+) -> None:
+    server, _, seed, request = setup
+    await server.seed_session(request, seed)
+    server._verify = AsyncMock(side_effect=failure("verification interrupted"))
+    with pytest.raises(failure):
+        await server.verify(request, verify_body(seed))
+    with pytest.raises(HTTPException, match="retry the episode") as error:
+        await server.verify(request, verify_body(seed))
+    assert error.value.status_code == 503
+    server._verify.assert_awaited_once()
+    await server.close_resources_session(close_body(seed))
+    assert not server._native_sessions
+
+
 @pytest.mark.parametrize("invalid", ["missing_tests", "golden_mode", "relative_workdir", "failed_pwd"])
 async def test_native_seed_rejects_invalid_setup(setup, invalid: str) -> None:
     server, sandbox, seed, request = setup
@@ -215,9 +371,10 @@ async def test_close_waits_for_inflight_seed(setup) -> None:
     server, sandbox, seed, request = setup
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def create(task):
+    async def create(task, *, session_id):
         entered.set()
         await release.wait()
+        server._session_id_to_sandbox[session_id] = sandbox
         return sandbox
 
     server._create_sandbox.side_effect = create
