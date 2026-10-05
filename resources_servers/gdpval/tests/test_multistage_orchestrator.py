@@ -138,6 +138,15 @@ class TestParseConfig:
         cfg = parse_multistage_config({"enabled": True, "stages": ["5"], "reuse_cached_deliverables": False})
         assert cfg.reuse_cached_deliverables is False
 
+    def test_transport_replacement_is_opt_in(self) -> None:
+        default = parse_multistage_config({"enabled": True, "stages": ["5"]})
+        enabled = parse_multistage_config(
+            {"enabled": True, "stages": ["5"], "replace_transport_ineligible_tasks": True}
+        )
+
+        assert default.replace_transport_ineligible_tasks is False
+        assert enabled.replace_transport_ineligible_tasks is True
+
     def test_parses_string_stages(self) -> None:
         cfg = parse_multistage_config({"enabled": True, "stages": ["5", "88:4", "100:2:9"]})
         assert [(s.num_tasks, s.num_models, s.seed) for s in cfg.stages] == [
@@ -659,6 +668,79 @@ class TestAssignmentRepairSeam:
                 _fake_run_rollouts_factory(),
                 assignment_repair=lambda stage_index, reference_ids, original: (mutate(dict(original)), {}),
             )
+
+
+class TestTransportIneligibleTaskReplacement:
+    @staticmethod
+    def _cfg(*, enabled: bool) -> MultiStageRunConfig:
+        return parse_multistage_config(
+            {
+                "enabled": True,
+                "stages": [{"num_tasks": 3}, {"num_tasks": 6, "num_models": 1}],
+                "seed": 7,
+                "replace_transport_ineligible_tasks": enabled,
+            }
+        )
+
+    async def test_replaces_strict_calibration_task_and_preserves_reference_slot(self) -> None:
+        task_ids = [f"t{i}" for i in range(6)]
+        successful_run = _fake_run_rollouts_factory()
+        stage_zero_calls: List[List[str]] = []
+        blocked_task_id: Optional[str] = None
+
+        async def run(rows: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+            nonlocal blocked_task_id
+            pairs = await successful_run(rows)
+            if rows and rows[0]["stage_index"] == 0:
+                stage_zero_calls.append([row["task_id"] for row in rows])
+                if blocked_task_id is None:
+                    blocked_task_id = rows[0]["task_id"]
+                return [
+                    (
+                        row,
+                        {
+                            NG_FAILURE_CLASS_KEY: "transport_ineligible",
+                            NG_TERMINAL_KEY: True,
+                            "task_id": row["task_id"],
+                        },
+                    )
+                    if row["task_id"] == blocked_task_id
+                    else (row, result)
+                    for row, result in pairs
+                ]
+            return pairs
+
+        resume = RecordingResume()
+        results, summaries = await run_multistage_stages(
+            self._cfg(enabled=True),
+            REF_ELOS,
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            run,
+            resume=resume,
+        )
+
+        assert blocked_task_id is not None
+        stage_zero_results = [row for row in results if row["stage_index"] == 0]
+        assert len(stage_zero_results) == 3
+        assert blocked_task_id not in {row["task_id"] for row in stage_zero_results}
+        assert [len(call) for call in stage_zero_calls] == [3, 1]
+        replacement = summaries[0]["transport_replacements"][0]
+        assert replacement["before"] == blocked_task_id
+        latest_plan = [plan for index, plan in resume.planned if index == 0][-1]
+        assert replacement["after"] in latest_plan["task_ids"]
+        assert blocked_task_id not in latest_plan["task_ids"]
+        assert latest_plan["task_reference_ids"][replacement["after"]] == replacement["reference_id"]
+        assert len([row for row in results if row["stage_index"] == 1]) == 6
+
+    async def test_opt_in_is_a_noop_without_transport_failures(self) -> None:
+        task_ids = [f"t{i}" for i in range(6)]
+        args = (REF_ELOS, _distribution(task_ids), _materialized_rows(task_ids), _fake_run_rollouts_factory())
+
+        baseline = await run_multistage_stages(self._cfg(enabled=False), *args)
+        enabled = await run_multistage_stages(self._cfg(enabled=True), *args)
+
+        assert enabled == baseline
 
 
 class TestWriteRollouts:
@@ -2511,6 +2593,15 @@ class TestFingerprint:
             "g1": {"percentage": 0.1, "task_ids": ["t2", "t3"]},
         }
         assert compute_fingerprint(cfg, REF_ELOS, dist_a) != compute_fingerprint(cfg, REF_ELOS, dist_b)
+
+    def test_transport_replacement_policy_invalidates(self) -> None:
+        dist = _distribution(["t0", "t1"])
+        strict = parse_multistage_config({"enabled": True, "stages": ["1", "2"]})
+        replacement = parse_multistage_config(
+            {"enabled": True, "stages": ["1", "2"], "replace_transport_ineligible_tasks": True}
+        )
+
+        assert compute_fingerprint(strict, REF_ELOS, dist) != compute_fingerprint(replacement, REF_ELOS, dist)
 
     def test_partial_completion_policy_preserves_rollout_cache_fingerprint(self) -> None:
         dist = _distribution(["t0", "t1"])
