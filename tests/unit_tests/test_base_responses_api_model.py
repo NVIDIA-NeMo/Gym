@@ -1806,3 +1806,34 @@ def test_observed_dialect_under_capture_prefix_is_not_marked_incomplete(tmp_path
 
     assert forwarded == ["/v1/chat/completions"]
     assert not token_store.is_incomplete("hole-2")
+
+
+def test_engine_metrics_are_lifted_from_a_vllm_response_body():
+    from nemo_gym.base_responses_api_model import build_model_call_record
+
+    exchange = {
+        "model_call_id": "c1",
+        "response": {
+            "id": "chatcmpl-1",
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "metrics": {
+                "time_to_first_token_ms": 412.5,
+                "generation_time_ms": 1800.0,
+                "queue_time_ms": 35.2,
+                "mean_itl_ms": 18.0,
+                "tokens_per_second": 55.5,
+                "speculative_decoding": {"num_drafts": 10, "num_accepted_tokens": 31},
+            },
+        },
+    }
+    record = build_model_call_record(exchange, call_index=0)
+    assert record.engine_metrics == exchange["response"]["metrics"]
+
+
+def test_engine_metrics_absent_when_the_engine_sends_none():
+    from nemo_gym.base_responses_api_model import build_model_call_record
+
+    assert build_model_call_record({"response": {"id": "x", "choices": []}}, call_index=0).engine_metrics is None
+    # vLLM emits an all-None PerRequestMetrics when timestamps were unavailable: still absent.
+    empty = {"response": {"id": "x", "metrics": {"queue_time_ms": None, "time_to_first_token_ms": None}}}
+    assert build_model_call_record(empty, call_index=0).engine_metrics is None

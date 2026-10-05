@@ -332,6 +332,8 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         response = raw_call.get("response")
         if isinstance(response, dict) and isinstance(response.get("status"), str):
             metadata.setdefault("response_status", response["status"])
+        if isinstance(raw_call.get("engine_metrics"), dict):
+            metadata["engine"] = raw_call["engine_metrics"]
         projected = TrajectoryModelCall(
             model_call_id=model_call_id,
             started_at=raw_call.get("started_at"),

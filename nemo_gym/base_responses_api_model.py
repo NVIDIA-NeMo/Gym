@@ -744,6 +744,28 @@ class ModelCallRecord(BaseModel):
     latency_total_ms: Optional[float] = None
     latency_ttft_ms: Optional[float] = None
 
+    # Engine-side timings, present when the serving engine returns per-request metrics in the body
+    # (vLLM: --enable-per-request-metrics). Durations only; see TrajectoryEngineMetrics.
+    engine_metrics: Optional[dict[str, Any]] = None
+
+
+_ENGINE_METRIC_KEYS = (
+    "queue_time_ms",
+    "time_to_first_token_ms",
+    "generation_time_ms",
+    "mean_itl_ms",
+    "tokens_per_second",
+    "speculative_decoding",
+)
+
+
+def _engine_metrics(response: dict[str, Any]) -> Optional[dict[str, Any]]:
+    metrics = response.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    picked = {key: metrics[key] for key in _ENGINE_METRIC_KEYS if metrics.get(key) is not None}
+    return picked or None
+
 
 def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> ModelCallRecord:
     """Map one captured exchange and its transport metadata into an observability record."""
@@ -798,6 +820,7 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
         error_category=exchange.get("error_category"),
         latency_total_ms=exchange.get("latency_ms"),
         latency_ttft_ms=exchange.get("latency_ttft_ms"),
+        engine_metrics=_engine_metrics(response),
         **tokens,
     )
 

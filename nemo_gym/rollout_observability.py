@@ -45,6 +45,25 @@ class TrajectoryTokenStats(ObservationModel):
     cached_tokens: Optional[int] = Field(default=None, ge=0)
 
 
+class TrajectoryEngineMetrics(ObservationModel):
+    """Serving-engine timings for one request, as the engine reports them (vLLM per-request metrics).
+
+    Durations only: vLLM does not expose the absolute queued/scheduled timestamps, so
+    model_process_start cannot be anchored exactly; model_engine_queue_time is exact.
+    """
+
+    queue_time_ms: Optional[float] = Field(default=None, ge=0, description="Admission to first scheduling.")
+    time_to_first_token_ms: Optional[float] = Field(
+        default=None, ge=0, description="First scheduling to first output token (prefill), engine-side."
+    )
+    generation_time_ms: Optional[float] = Field(default=None, ge=0, description="First to last output token.")
+    mean_itl_ms: Optional[float] = Field(default=None, ge=0)
+    tokens_per_second: Optional[float] = Field(default=None, ge=0)
+    speculative_decoding: Optional[dict[str, Any]] = Field(
+        default=None, description="Engine-reported draft/acceptance statistics; experimental shape."
+    )
+
+
 class TrajectoryResponseMetadata(ObservationModel):
     response_id: Optional[str] = None
     model_ref: Optional[ModelServerRef] = None
@@ -55,6 +74,7 @@ class TrajectoryResponseMetadata(ObservationModel):
     finish_reason: Optional[str] = None
     error_category: Optional[str] = None
     latency_ttft_ms: Optional[float] = Field(default=None, ge=0)
+    engine: Optional[TrajectoryEngineMetrics] = None
 
 
 class TrajectoryModelCallAttempt(ObservationModel):

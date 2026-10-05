@@ -4216,3 +4216,26 @@ class TestModelCallAttempts:
 
         with pytest.raises(ValidationError):
             TrajectoryModelCallAttempt(attempt_index=1, status="completed", started_at=2.0, completed_at=1.0)
+
+
+class TestEngineMetricsProjection:
+    def test_engine_timings_land_on_response_metadata(self) -> None:
+        result = {
+            "ng_trajectory": {"task_id": "2", "rollout_id": "2-3", "invocations": [{"invocation_id": "root"}]},
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "c1",
+                        "latency_ttft_ms": 900.0,
+                        "engine_metrics": {"queue_time_ms": 35.2, "time_to_first_token_ms": 412.5},
+                    }
+                ]
+            },
+        }
+        trajectory = _build_trajectory_record({TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}, result)
+        [call] = trajectory.model_calls
+        assert call.response_metadata.latency_ttft_ms == 900.0  # as the agent saw it, incl. network + queue
+        assert call.response_metadata.engine is not None
+        assert call.response_metadata.engine.queue_time_ms == 35.2
+        assert call.response_metadata.engine.time_to_first_token_ms == 412.5
+        assert call.response_metadata.engine.generation_time_ms is None
