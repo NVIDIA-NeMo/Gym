@@ -100,6 +100,8 @@ def _sanitize(value: Any) -> Optional[str]:
 class ChemReasonBenchResourcesServer(SimpleResourcesServer):
     """Scores one ChemReason-Bench instance against its gold record."""
 
+    ray_enabled = False  # pure-stdlib scorer; no Ray in the verify path
+
     config: ChemReasonBenchResourcesServerConfig
 
     async def verify(self, body: ChemReasonBenchVerifyRequest) -> ChemReasonBenchVerifyResponse:
