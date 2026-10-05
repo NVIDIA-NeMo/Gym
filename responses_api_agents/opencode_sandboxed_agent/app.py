@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 import sqlite3
 import sys
@@ -961,9 +962,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     raise RuntimeError(f"OpenCode database snapshot failed: {snapshot_result.stderr}")
                 await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
                 if session_id is not None:
-                    child_usages = self._opencode_export_to_usages(
-                        {"messages": _read_opencode_child_messages(observations_local_fpath, session_id)}
+                    child_messages = await asyncio.to_thread(
+                        _read_opencode_child_messages, observations_local_fpath, session_id
                     )
+                    child_usages = self._opencode_export_to_usages({"messages": child_messages})
                 if collect_observations:
                     observations = parse_opencode_observations(
                         observations_local_fpath,
