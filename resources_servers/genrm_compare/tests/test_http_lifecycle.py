@@ -195,7 +195,7 @@ async def test_incomplete_run_fails_without_reward(services):
     status, body = await run(services, 0)
     assert status == 500 and "reward" not in body
     assert "did not collect 4 unique rollout indices" in body
-    assert all(c.phase == "failed" and not c.rewards for c in services.resource._verify_cohorts.values())
+    assert all(c.phase == "failed" and not c.results for c in services.resource._verify_cohorts.values())
 
 
 def assert_judge_failure(status, body, reason):
@@ -228,7 +228,7 @@ async def test_judge_failure_preserves_answer_and_diagnostics_through_run(servic
         error = body["_ng_failure_judge_error"]
         assert "judge /v1/responses pair=" in error and "500" in error and "deadline=" in error
     assert len({body["response"]["id"] for _, body in results}) == 4
-    assert all(c.phase == "failed" and not c.rewards for c in services.resource._verify_cohorts.values())
+    assert all(c.phase == "failed" and not c.results for c in services.resource._verify_cohorts.values())
 
 
 async def test_empty_http_200_judge_retries_then_fails_through_run(services):
@@ -521,7 +521,7 @@ async def test_interrupted_judge_body_retries_without_regenerating_answers(servi
         for status, body in results:
             assert_judge_failure(status, body, "ClientPayloadError")
             assert body["mask_sample"] is True
-        assert all(c.phase == "failed" and not c.rewards for c in services.resource._verify_cohorts.values())
+        assert all(c.phase == "failed" and not c.results for c in services.resource._verify_cohorts.values())
 
 
 @pytest.mark.parametrize("value", ["NaN", "Infinity"])

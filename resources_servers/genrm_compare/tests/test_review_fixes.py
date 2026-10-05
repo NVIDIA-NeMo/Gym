@@ -32,6 +32,12 @@ from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
 
 
+def comparison_result(score_1=4.0, score_2=2.0, ranking=1.0, *, overall_parse_failed=0.0):
+    """Build the full comparison result expected by the server."""
+    scores = (score_1, score_2, ranking)
+    return (*scores, *scores, -1.0, -1.0, -1.0, overall_parse_failed, 0.0, 0.0)
+
+
 def failing_judge(status):
     response = MagicMock(ok=False)
     response.content.read = AsyncMock(return_value=b'{"error":"judge offline"}')
@@ -49,7 +55,7 @@ async def test_judge_http_failure_never_completes_cohort(server, status):
     results = await asyncio.gather(*(server.verify(member(i)) for i in range(2)), return_exceptions=True)
     assert all(isinstance(result, genrm.JudgeError) and "judge offline" in str(result) for result in results)
     cohort = next(iter(server._verify_cohorts.values()))
-    assert cohort.phase == "failed" and not cohort.rewards
+    assert cohort.phase == "failed" and not cohort.results
     response.read.assert_not_awaited()
     with pytest.raises(genrm.JudgeError, match="judge offline"):
         await server.verify(member(0, response_id="regenerated-answer"))
@@ -67,7 +73,7 @@ async def test_judge_transport_failure_never_defaults(server, error):
     server.server_client.post = AsyncMock(side_effect=error)
     results = await asyncio.gather(*(server.verify(member(i)) for i in range(2)), return_exceptions=True)
     assert all(isinstance(result, genrm.JudgeError) for result in results)
-    assert not next(iter(server._verify_cohorts.values())).rewards
+    assert not next(iter(server._verify_cohorts.values())).results
 
 
 @pytest.mark.parametrize(
@@ -102,12 +108,14 @@ async def test_nonempty_parse_retries_preserve_existing_fallback(server, recover
     )
     server.server_client.post = AsyncMock(return_value=response)
     result = await server._run_single_comparison([], {}, {})
-    assert result == ((4.0, 2.0, 1.0) if recovers else (3.0, 3.0, 3.5))
+    assert result == (
+        comparison_result() if recovers else comparison_result(3.0, 3.0, 3.5, overall_parse_failed=1.0)
+    )
     assert server.server_client.post.await_count == 2
 
 
 async def test_group_attempt_metadata_is_not_a_reward_metric(server):
-    server._run_single_comparison = AsyncMock(return_value=(4.0, 2.0, 1.0))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result())
     rows = [member(i, attempt=2) for i in range(2)]
     results = await asyncio.gather(*(server.verify(row) for row in reversed(rows)))
     assert [r.rollout_index for r in results] == [1, 0]
@@ -123,7 +131,7 @@ async def test_group_attempt_metadata_is_not_a_reward_metric(server):
     "input_value", ["Hello", [{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}]]
 )
 async def test_actual_judge_receives_normalized_prompt(server, input_value):
-    server._run_single_comparison = AsyncMock(return_value=(4.0, 2.0, 1.0))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result())
     params = NeMoGymResponseCreateParamsNonStreaming(input=input_value)
     await asyncio.gather(
         *(server.verify(member(i).model_copy(update={"responses_create_params": params})) for i in range(2))
@@ -136,7 +144,7 @@ async def test_shared_judging_has_no_member_capture_context(server):
 
     async def judge(*args, **kwargs):
         seen.append(current_rollout_id())
-        return (4.0, 2.0, 1.0)
+        return comparison_result()
 
     server._run_single_comparison = AsyncMock(side_effect=judge)
     with rollout_context("member-a"):
@@ -160,11 +168,16 @@ def test_migration_logging_is_bounded_and_not_a_python_warning(caplog):
 
 
 async def test_batch_compare_returns_pair_metadata_and_cancels_failed_siblings(server):
-    server._run_single_comparison = AsyncMock(return_value=(4.0, 2.0, 1.0))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result())
     server.config.debug_logging = True
     body = genrm.GenRMCompareRequest(conversation_history=[], response_objs=[{}, {}])
     result = await server.compare(body)
     assert result.rewards == [3.0, 3.0]
+    assert {
+        "mean_individual_score",
+        "std_individual_score",
+        "tiebreak_usage_rate",
+    } <= result.metrics.keys()
     assert [(p["response_i"], p["response_j"]) for p in result.comparison_results] == [(0, 1), (1, 0)]
     started, cancelled = asyncio.Event(), asyncio.Event()
 
@@ -200,7 +213,7 @@ async def test_empty_or_incomplete_judge_uses_configured_retries(server, first, 
     )
     server.server_client.post = AsyncMock(return_value=response)
     if recovers:
-        assert await server._run_single_comparison([], {}, {}) == (4, 2, 1)
+        assert await server._run_single_comparison([], {}, {}) == comparison_result()
     else:
         with pytest.raises(genrm.JudgeError, match="after 2 attempts"):
             await server._run_single_comparison([], {}, {})
@@ -247,7 +260,7 @@ async def test_null_judge_status_accepts_parseable_answer(server):
         ).encode()
     )
     server.server_client.post = AsyncMock(return_value=response)
-    assert await server._run_single_comparison([], {}, {}) == (4, 2, 1)
+    assert await server._run_single_comparison([], {}, {}) == comparison_result()
     server.server_client.post.assert_awaited_once()
 
 
@@ -263,7 +276,9 @@ async def test_parse_fallback_does_not_depend_on_retry_order(server, malformed_f
         ]
     )
     server.server_client.post = AsyncMock(return_value=response)
-    assert await server._run_single_comparison([], {}, {}) == (3, 3, 3.5)
+    assert await server._run_single_comparison([], {}, {}) == comparison_result(
+        3.0, 3.0, 3.5, overall_parse_failed=1.0
+    )
     assert server.server_client.post.await_count == 2
 
 
@@ -317,6 +332,40 @@ async def test_null_text_is_retried_as_unusable_judge_output(server):
     assert server.server_client.post.await_count == 2
 
 
+async def test_null_judge_response_is_retried(server):
+    server.config.genrm_parse_retries = 1
+    response = MagicMock(ok=True)
+    response.read = AsyncMock(return_value=b"null")
+    server.server_client.post = AsyncMock(return_value=response)
+    with pytest.raises(genrm.JudgeError, match="no completed answer after 2 attempts"):
+        await server._run_single_comparison([], {}, {})
+    assert server.server_client.post.await_count == 2
+
+
+@pytest.mark.parametrize("usage", [None, {}, [], [1], "unknown", 1, True])
+async def test_malformed_usage_keeps_valid_judge_verdict(server, usage):
+    response = MagicMock(ok=True)
+    response.read = AsyncMock(
+        return_value=json.dumps(
+            {
+                "usage": usage,
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": '{"score_1":4,"score_2":2,"ranking":1}'}],
+                    }
+                ],
+            }
+        ).encode()
+    )
+    server.server_client.post = AsyncMock(return_value=response)
+
+    result = await server._run_single_comparison([], {}, {})
+
+    assert result == comparison_result()
+    server.server_client.post.assert_awaited_once()
+
+
 @pytest.mark.parametrize("status", [408, 429, 500, 503, 599])
 async def test_transient_judge_http_error_retries_within_existing_budget(server, status):
     valid = MagicMock(ok=True)
@@ -333,7 +382,7 @@ async def test_transient_judge_http_error_retries_within_existing_budget(server,
         ).encode()
     )
     server.server_client.post = AsyncMock(side_effect=[failing_judge(status), valid])
-    assert await server._run_single_comparison([], {}, {}) == (4, 2, 1)
+    assert await server._run_single_comparison([], {}, {}) == comparison_result()
     assert server.server_client.post.await_count == 2
 
 
@@ -357,7 +406,7 @@ async def test_judge_body_transport_errors_share_the_bounded_retry_budget(server
     )
     server.server_client.post = AsyncMock(return_value=response)
     if recovers:
-        assert await server._run_single_comparison([], {}, {}) == (4, 2, 1)
+        assert await server._run_single_comparison([], {}, {}) == comparison_result()
     else:
         with pytest.raises(genrm.JudgeError, match="interrupted body"):
             await server._run_single_comparison([], {}, {})

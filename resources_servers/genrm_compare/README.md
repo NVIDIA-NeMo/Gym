@@ -141,11 +141,13 @@ for the input format, explicit group IDs, and recovery limits.
 |-----------|------|---------|-------------|
 | `genrm_model_server` | ModelServerRef | *required* | Reference to the GenRM model server (default: `genrm_model`) |
 | `genrm_responses_create_params` | object | *required* | Generation parameters for GenRM calls |
+| `comparison_mode` | string | `"rollout_cohort"` | Compare rollouts with each other (`"rollout_cohort"`) or with a fixed response (`"fixed_baseline"`) |
 | `comparison_strategy` | string | `"circular"` | Pair generation strategy: `"circular"` or `"all_pairs"` |
 | `num_judges_per_comparison` | int | `1` | Number of judge passes per pair (for majority voting) |
 | `use_principle` | bool | `false` | Enable principle-based comparison |
 | `default_principle` | string | *(see config)* | Default principle when none provided in request |
 | `aggregator_method` | string | `"simple_tiebreaker"` | Score aggregation method |
+| `score_source` | string | `"overall"` | Use the GenRM overall score (`"overall"`) or the equal-weight mean of rubric scores (`"rubric_mean"`) |
 | `reasoning_bonus` | float | `0.0` | Bonus for shortest reasoning among top performers |
 | `answer_bonus` | float | `0.0` | Bonus for shortest answer among top performers |
 | `top_percentile` | float | `0.2` | Percentile threshold for applying bonuses |
@@ -162,6 +164,22 @@ for the input format, explicit group IDs, and recovery limits.
 | `judge_request_timeout_s` | float | `1800` | Per-request deadline, including connection retries |
 | `cohort_result_ttl_s` | float or null | `3600` | Terminal-record retention; null disables time expiry, but the count cap still applies |
 | `max_terminal_cohorts` | int | `4096` | Maximum number of retained terminal groups |
+
+### Fixed-baseline and rubric-mean scoring
+
+Set `comparison_mode: fixed_baseline` to compare every rollout with a fixed reference instead of other rollouts in its cohort. Each request must provide the reference as `responses_create_params.metadata.baseline_response`.
+
+Set `score_source: rubric_mean` to reward the equal-weight mean of the GenRM rubric scores instead of its overall score. Each request must provide `expected_rubric_ids`; parsing fails if the returned rubric IDs do not match this set. The two options can be enabled independently or together. Their defaults preserve the existing cohort comparison and overall-score behavior.
+
+### Token-usage metrics
+
+When the GenRM response includes usage data, `/verify` reports:
+
+- Input and output tokens per comparison: mean, p50, and p95
+- Total output tokens per group
+- Fraction of comparisons that reached `max_output_tokens`
+
+The metrics are omitted when usage data is unavailable.
 
 ## Comparison Strategies
 
