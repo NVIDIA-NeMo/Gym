@@ -352,10 +352,13 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                 result = await get_response_json(verified)
                 result["agent_image_provenance"] = seed.get("image_provenance")
                 result["verifier_reward"] = result["reward"]
-                budget_stop = (
-                    response.status == "incomplete" and (response.metadata or {}).get("budget_exhausted") == "true"
+                metadata = response.metadata or {}
+                # A budget stop, or Hermes ending the episode on repeated unknown tool calls, is the
+                # policy's result: graded, not a harness failure.
+                graded_stop = response.status == "incomplete" and (
+                    metadata.get("budget_exhausted") == "true" or metadata.get("stop_reason") == "invalid_tool_call"
                 )
-                if response.status != "completed" and not budget_stop:
+                if response.status != "completed" and not graded_stop:
                     failure = f"Hermes response status: {response.status}"
                 elif result.get("evaluation_completed") is False:
                     failure = result.get("error") or "Verification did not complete"

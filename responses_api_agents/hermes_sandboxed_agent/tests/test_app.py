@@ -261,25 +261,36 @@ async def test_missing_result_preserves_process_failure(agent, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failed_endpoint", [None, "/verify", "/close_session", "/cleanup_timeout"])
 @pytest.mark.parametrize(
-    ("finished", "budget_exhausted", "evaluation_completed", "failure"),
+    ("finished", "budget_exhausted", "stop_reason", "evaluation_completed", "failure"),
     [
-        (False, False, True, "Hermes response status: incomplete"),
-        (True, False, False, "Verification did not complete"),
-        (True, False, True, None),
-        (False, True, True, None),
-        (False, True, False, "Verification did not complete"),
+        (False, False, None, True, "Hermes response status: incomplete"),
+        (True, False, None, False, "Verification did not complete"),
+        (True, False, None, True, None),
+        (False, True, None, True, None),
+        (False, True, None, False, "Verification did not complete"),
+        # Hermes stopping on repeated unknown tool calls is graded like a budget stop.
+        (False, False, "invalid_tool_call", True, None),
     ],
 )
 @pytest.mark.parametrize("verifier_reward", [0, 1])
 async def test_run_cookies_descriptor_reward_and_cleanup(
-    agent, monkeypatch, failed_endpoint, finished, budget_exhausted, evaluation_completed, failure, verifier_reward
+    agent,
+    monkeypatch,
+    failed_endpoint,
+    finished,
+    budget_exhausted,
+    stop_reason,
+    evaluation_completed,
+    failure,
+    verifier_reward,
 ):
     import responses_api_agents.hermes_sandboxed_agent.app as module
 
     body = HermesSandboxedRunRequest.model_validate({"responses_create_params": {"input": "fix"}, "patch": "gold"})
-    response = trajectory_response(
-        {"completed": finished, "budget_exhausted": budget_exhausted}, body.responses_create_params, "real-model"
-    )
+    result = {"completed": finished, "budget_exhausted": budget_exhausted}
+    if stop_reason:
+        result["stop_reason"] = stop_reason
+    response = trajectory_response(result, body.responses_create_params, "real-model")
     seeded = SimpleNamespace(cookies={"session": "seeded"}, data={"sandbox_descriptor": {"sandbox_id": "box"}})
     verified = SimpleNamespace(
         data=body.model_dump()
