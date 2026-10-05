@@ -53,35 +53,12 @@ def test_tool_calls_normalize_across_dialects():
     assert len(fingerprints) == 1 and fingerprints != {""}
 
 
-def test_a_call_with_an_id_keeps_its_identity_when_the_harness_rewrites_its_echo():
-    """Claude Code echoes a served call after normalizing it; the call id is echoed verbatim.
-
-    It drops a redundant ``cd <cwd> &&`` from Bash commands and maps legacy tool names
-    (``Task`` to ``Agent``). The echo is still the served call, so it must still be found.
-    """
-    served = {"type": "function_call", "call_id": "c1", "name": "Bash", "arguments": '{"command": "cd /repo && ls"}'}
-    rewritten = dict(served, arguments='{"command": "ls"}')
-    renamed = dict(served, name="Agent")
-    another_call = dict(served, call_id="c2")
-    assert assistant_fingerprint([served]) == assistant_fingerprint([rewritten]) == assistant_fingerprint([renamed])
-    assert assistant_fingerprint([served]) != assistant_fingerprint([another_call])
-
-
-def test_a_call_without_an_id_is_identified_by_name_and_arguments():
-    base = {"type": "function_call", "call_id": "", "name": "f", "arguments": '{"a": 1, "b": 2}'}
+def test_argument_reserialization_is_tolerated_but_argument_changes_are_not():
+    base = {"type": "function_call", "call_id": "c1", "name": "f", "arguments": '{"a": 1, "b": 2}'}
     reserialized = dict(base, arguments='{"b":2,"a":1}')
     changed = dict(base, arguments='{"a": 1, "b": 3}')
-    renamed = dict(base, name="g")
     assert assistant_fingerprint([base]) == assistant_fingerprint([reserialized])
     assert assistant_fingerprint([base]) != assistant_fingerprint([changed])
-    assert assistant_fingerprint([base]) != assistant_fingerprint([renamed])
-
-
-def test_the_conversation_digest_still_covers_echoed_arguments():
-    """An earlier turn rewritten between two requests still fails context verification."""
-    served = {"type": "function_call", "call_id": "c1", "name": "Bash", "arguments": '{"command": "cd /repo && ls"}'}
-    rewritten = dict(served, arguments='{"command": "ls"}')
-    assert conversation_digest([served]) != conversation_digest([rewritten])
 
 
 def test_reasoning_items_are_excluded():

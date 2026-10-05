@@ -22,12 +22,6 @@ Lineage state stays confined to the capture locus and the finalizer.
 
 ``assistant_fingerprint`` hashes only model-authored turns.
 It identifies the call that produced the last model-authored turn.
-A tool call with a call id is identified by that id alone (version 4). The id is
-issued by the serving backend and echoed verbatim, while harnesses may normalize
-the call they execute before echoing it back: Claude Code drops a redundant
-``cd <cwd> &&`` from Bash commands and maps legacy tool names to current ones.
-That is the harness executing the call, not a different call, so it must not
-orphan the conversation. Calls without an id keep name and arguments as identity.
 ``conversation_digest`` hashes every conversation turn, including tool results.
 A parent resolver uses it to verify context before reusing tokens.
 Harness instruction items (``system`` / ``developer``) count by position only:
@@ -51,7 +45,7 @@ import orjson
 
 # Increment when fingerprint canonicalization or hash layout changes.
 # Resolvers ignore entries stamped with a different version.
-FINGERPRINT_VERSION = 4
+FINGERPRINT_VERSION = 3
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
@@ -64,10 +58,6 @@ def assistant_fingerprint(messages: list[dict]) -> str:
     The fingerprint identifies the call that produced the last model-authored turn.
     User and tool content is excluded from the lookup key.
     Dialect-specific tool-call shapes normalize to the same hash input.
-    A tool call with a call id contributes only that id: the harness may rewrite the
-    name or arguments it echoes back without the call becoming a different call.
-    ``conversation_digest`` still covers the echoed name and arguments, so a rewrite
-    of an earlier turn between two requests fails context verification.
     """
     hasher = hashlib.sha256(_FINGERPRINT_DOMAIN)
     count = 0
@@ -81,9 +71,7 @@ def assistant_fingerprint(messages: list[dict]) -> str:
             _update_field(hasher, b"\x00", content_type)
             _update_field(hasher, b"\x01", payload)
         for call_id, name, arguments in _tools_of(message):
-            if call_id:
-                _update_field(hasher, b"\x05", call_id)
-                continue
+            _update_field(hasher, b"\x02", call_id)
             _update_field(hasher, b"\x03", name)
             _update_field(hasher, b"\x04", arguments)
     if count == 0:

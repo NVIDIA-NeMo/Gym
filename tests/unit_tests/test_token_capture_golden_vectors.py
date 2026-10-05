@@ -41,7 +41,7 @@ VECTORS = {
                     ],
                 },
             ],
-            "expected": "38b2a3666d35937b5df5389a2dff87c50d03adcf2156c65b169c675e71f368fc",  # pragma: allowlist secret
+            "expected": "82955bc805cccaf9d2faa840479ff6c30420d20e42bf2bc1ebef14d679ec3768",  # pragma: allowlist secret
         },
         "anthropic_tool": {
             "input": [
@@ -54,7 +54,7 @@ VECTORS = {
                     ],
                 },
             ],
-            "expected": "38b2a3666d35937b5df5389a2dff87c50d03adcf2156c65b169c675e71f368fc",  # pragma: allowlist secret
+            "expected": "82955bc805cccaf9d2faa840479ff6c30420d20e42bf2bc1ebef14d679ec3768",  # pragma: allowlist secret
         },
         "responses_tool": {
             "input": [
@@ -67,7 +67,7 @@ VECTORS = {
                     "arguments": '{"k":3,"q":"x"}',
                 },
             ],
-            "expected": "38b2a3666d35937b5df5389a2dff87c50d03adcf2156c65b169c675e71f368fc",  # pragma: allowlist secret
+            "expected": "82955bc805cccaf9d2faa840479ff6c30420d20e42bf2bc1ebef14d679ec3768",  # pragma: allowlist secret
         },
         "empty": {"input": [], "expected": ""},
     },
