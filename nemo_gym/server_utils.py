@@ -256,14 +256,21 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
     )
 
     global_aiohttp_client_timeout_s: Optional[float] = Field(
-        default=600.0,
+        default=7200.0,
         description=(
             "Total timeout (seconds) applied to every outbound request on the shared client, via "
             "aiohttp.ClientTimeout(total=..., sock_read=...). Without this, a peer that accepts a "
             "connection but never writes a response (e.g. a stuck proxy hop) hangs the calling "
             "coroutine indefinitely: TCP keepalive only detects a dead socket, not a live one that's "
             "simply silent, and `_request_with_retries` never gets a chance to retry because no "
-            "exception is ever raised. Set to None to disable (not recommended)."
+            "exception is ever raised. Set to None to disable (not recommended).\n"
+            "600s (the original value here) turned out too tight under heavy concurrent load: "
+            "observed per-request generation throughput can drop to ~11-30 tok/s when many long-"
+            "context NL2RepoBench rollouts share a vLLM engine, so a single legitimate (not stuck) "
+            "call producing a large output can genuinely take several hundred seconds on top of "
+            "real queueing delay - 600s was triggering false-positive timeouts on healthy, still-"
+            "progressing requests, adding retry traffic back into an already-saturated queue. 7200s "
+            "(2h) gives real headroom while still being a massive improvement over fully unbounded."
         ),
     )
 
