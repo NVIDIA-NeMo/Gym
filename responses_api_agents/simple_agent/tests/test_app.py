@@ -226,7 +226,7 @@ class TestApp:
         assert prefixed_response.json()["_ng_trajectory"]["rollout_id"] == "0-0"
 
     @pytest.mark.parametrize("observability_enabled", [False, True])
-    async def test_native_session_uses_seeded_direct_http_tool_access(
+    async def test_agent_session_uses_seeded_direct_http_tool_access(
         self, monkeypatch: MonkeyPatch, observability_enabled: bool
     ) -> None:
         config = SimpleAgentConfig(
@@ -360,7 +360,7 @@ class TestApp:
         else:
             assert observations is None
 
-    async def test_native_session_rejects_required_mcp_access(self) -> None:
+    async def test_agent_session_rejects_required_mcp_access(self) -> None:
         server, _ = _make_agent(False)
         request = MagicMock(session={})
         body = AgentSeedSessionRequest(
@@ -394,7 +394,7 @@ class TestApp:
         with pytest.raises(ValueError, match="sessions require num_workers=1"):
             await server.seed_agent_session(MagicMock(session={}), body)
 
-    async def test_native_session_without_a_grant_refuses_tool_calls(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_agent_session_without_a_grant_refuses_tool_calls(self, monkeypatch: MonkeyPatch) -> None:
         # The configured resources_server has no session for this episode, so a tool call must not fall back to it.
         config = SimpleAgentConfig(
             host="0.0.0.0",
@@ -450,7 +450,7 @@ class TestApp:
         assert [call.kwargs["server_name"] for call in server_client.post.await_args_list] == ["model"]
         direct_request.assert_not_awaited()
 
-    async def test_native_session_seed_and_close_are_idempotent(self) -> None:
+    async def test_agent_session_seed_and_close_are_idempotent(self) -> None:
         server, _ = _make_agent(False)
         request = MagicMock(session={})
         body = AgentSeedSessionRequest(

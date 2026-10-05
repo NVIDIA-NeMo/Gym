@@ -57,8 +57,8 @@ class SimpleWeatherVerifier:
 class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer):
     ray_enabled = False
     config: SimpleWeatherResourcesServerConfig
-    _native_sessions: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
-    _closed_native_session_ids: set[str] = PrivateAttr(default_factory=set)
+    _session_episodes: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
+    _closed_session_ids: set[str] = PrivateAttr(default_factory=set)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -76,9 +76,9 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
 
         resources_session_id = body.resources_session_id
         # Nothing below awaits, so no other request can run between the checks and the update.
-        if resources_session_id in self._closed_native_session_ids:
+        if resources_session_id in self._closed_session_ids:
             raise ValueError(f"Resources session is already closed: {resources_session_id}")
-        identity = self._native_sessions.setdefault(resources_session_id, (body.episode_id, body.task_id))
+        identity = self._session_episodes.setdefault(resources_session_id, (body.episode_id, body.task_id))
         if identity != (body.episode_id, body.task_id):
             raise ValueError("resources_session_id is already bound to another episode or task")
         return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
@@ -87,11 +87,11 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
         # Sessions are keyed by resources_session_id, not the cookie's session id, so the body names the session.
         resources_session_id = body.resources_session_id
         # Nothing below awaits, so no other request can run between the check and the update.
-        identity = self._native_sessions.get(resources_session_id)
+        identity = self._session_episodes.get(resources_session_id)
         if identity is not None and body.episode_id != identity[0]:
             raise ValueError("episode_id does not match the seeded resources session")
-        self._native_sessions.pop(resources_session_id, None)
-        self._closed_native_session_ids.add(resources_session_id)
+        self._session_episodes.pop(resources_session_id, None)
+        self._closed_session_ids.add(resources_session_id)
         return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
 
     async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:

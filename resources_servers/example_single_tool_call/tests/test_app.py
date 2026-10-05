@@ -67,7 +67,7 @@ class TestApp:
             )
         )
 
-    async def test_native_session_lifecycle_and_verification(self) -> None:
+    async def test_environment_server_session_lifecycle_and_verification(self) -> None:
         server = self._server()
         episode_id = EpisodeId(rollout_id="rollout", attempt=0)
         task_id = TaskId(taskset="example", task_id="0")
@@ -151,7 +151,7 @@ class TestApp:
             keeps_state=True,
         )
 
-    def test_native_session_routes_bind_the_native_contract(self) -> None:
+    def test_close_route_releases_the_session(self) -> None:
         server = self._server()
         client = TestClient(server.setup_webserver())
         episode_id = EpisodeId(rollout_id="rollout", attempt=0)
@@ -176,5 +176,5 @@ class TestApp:
         )
         assert close.status_code == 200
         # The route reached this server's close, not the base default, so the session was released.
-        assert resources_session_id not in server._native_sessions
-        assert resources_session_id in server._closed_native_session_ids
+        assert resources_session_id not in server._session_episodes
+        assert resources_session_id in server._closed_session_ids
