@@ -386,6 +386,12 @@ telemetry = [
 
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
 dev = [
+    # Hugging Face Hub 2.x installs httpx2, which Starlette's TestClient prefers over httpx.
+    # Keep test clients compatible with OpenAI's http_client and Gym's httpx cookie helpers.
+    # Updated Mon Oct 05, 2026; uv.lock uses huggingface-hub==1.33.0.
+    # License: Apache 2.0 https://github.com/huggingface/huggingface_hub/blob/main/LICENSE
+    "huggingface-hub<2",
+
     # gprof2dot: Used for outputting dot graphs for profiling.
     # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14
     # License: LGPLv3+ https://github.com/jrfonseca/gprof2dot/blob/master/COPYING.LESSER
