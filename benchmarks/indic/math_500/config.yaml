@@ -3,6 +3,12 @@
 config_paths:
   - benchmarks/math-500/config.yaml
 
+math_500_math_with_judge_resources_server:
+  resources_servers:
+    math_with_judge:
+      # Preserve the 500-question denominator while accepting explicit final-answer formats beyond \boxed{}.
+      format_tolerant_answer_extraction: true
+
 math_500_math_with_judge_simple_agent:
   responses_api_agents:
     simple_agent:
