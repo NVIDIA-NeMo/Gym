@@ -1169,7 +1169,10 @@ def _choice_with_tokens(tokens):
             "index": 0,
             "message": {"role": "assistant", "content": content},
             "logprobs": {
-                "content": [{"token": t, "logprob": -0.1, "bytes": None, "top_logprobs": []} for t in tokens]
+                "content": [
+                    {"token": t, "logprob": -0.1 * (i + 1), "bytes": None, "top_logprobs": []}
+                    for i, t in enumerate(tokens)
+                ]
             },
         }
     )
@@ -1181,6 +1184,24 @@ def test_postprocess_logprobs_follow_the_output_text_when_reasoning_is_extracted
     assert part.text == "NO"
     tokens = [(e["token"] if isinstance(e, dict) else e.token) for e in part.logprobs]
     assert tokens == ["NO"]
+
+
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        ["<think>", "NOT", " the right reagent.", "</think>", "NO"],  # answer is a substring of the reasoning
+        ["<think>", "NO", "</think>", "NO"],  # answer repeated verbatim inside the reasoning
+    ],
+)
+def test_postprocess_keeps_the_answer_tokens_not_a_lookalike_in_the_reasoning(converter: ResponsesConverter, tokens):
+    output = converter.postprocess_chat_response(_choice_with_tokens(tokens))
+    part = output[1].content[0]
+    assert part.text == "NO"
+    assert len(part.logprobs) == 1
+    entry = part.logprobs[0]
+    assert (entry["token"] if isinstance(entry, dict) else entry.token) == "NO"
+    # the kept entry is the LAST token of the generation, not the one inside <think>
+    assert (entry["logprob"] if isinstance(entry, dict) else entry.logprob) == pytest.approx(-0.1 * len(tokens))
 
 
 def test_postprocess_drops_logprobs_it_cannot_align(converter: ResponsesConverter):

@@ -162,26 +162,25 @@ def _chat_logprobs_to_responses(logprobs: Any) -> Optional[List[Dict[str, Any]]]
 
 
 def _align_logprobs_to_text(
-    logprobs: Optional[List[Dict[str, Any]]], original: str, text: str
+    logprobs: Optional[List[Dict[str, Any]]], original: str, removed: List[Tuple[int, int]]
 ) -> Optional[List[Dict[str, Any]]]:
-    """Keep only the token entries that produced ``text``, a substring of ``original``.
+    """Keep the token entries that survive removing the ``removed`` character spans.
 
     Reasoning extraction shortens the output text; its logprobs must shrink with it or
-    they describe different text. If the tokens do not reconstruct ``original`` the
-    alignment is unknowable and the logprobs are dropped rather than misattributed.
+    they describe different text. The kept positions come from the removal itself, never
+    from searching for the answer text, which may also occur inside the reasoning. If the
+    tokens do not reconstruct ``original`` the alignment is unknowable and the logprobs
+    are dropped rather than misattributed.
     """
-    if not logprobs or text == original:
+    if not logprobs or not removed:
         return logprobs
-    if not text or "".join(e.get("token") or "" for e in logprobs) != original:
+    if "".join(e.get("token") or "" for e in logprobs) != original:
         return None
-    start = original.find(text)
-    if start < 0:
-        return None
-    end = start + len(text)
     kept, offset = [], 0
     for entry in logprobs:
         token_end = offset + len(entry.get("token") or "")
-        if token_end > start and offset < end:
+        inside_removed = any(start <= offset and token_end <= end for start, end in removed)
+        if token_end > offset and not inside_removed:
             kept.append(entry)
         offset = token_end
     return kept or None
@@ -717,7 +716,9 @@ class ResponsesConverter(BaseModel):
         if self.uses_reasoning_parser:
             reasoning_matches, content = self._extract_reasoning_from_content(content)
             if reasoning_matches:
-                logprobs = _align_logprobs_to_text(logprobs, message_dict.get("content") or "", content)
+                original = message_dict.get("content") or ""
+                removed = [m.span() for m in self.THINK_TAG_PATTERN.finditer(original)]
+                logprobs = _align_logprobs_to_text(logprobs, original, removed)
         else:
             reasoning_matches = []
         if reasoning_matches:
