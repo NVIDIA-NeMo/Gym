@@ -169,6 +169,85 @@ async def test_log_retention_preserves_response_but_can_remove_all_attempt_files
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("git") is None, reason="Git is required for setup")
+@pytest.mark.parametrize("damaged_head", [False, True])
+async def test_seed_rejects_preexisting_invalid_head(
+    task: InlineTask, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damaged_head: bool
+) -> None:
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+    task.data.base_commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    if damaged_head:
+        (repo / ".git/HEAD").write_text("ref: refs/heads/missing\n")
+    box = sandbox("A", [])
+
+    async def execute(command: str, *, timeout_s: float) -> SandboxExecResult:
+        completed = subprocess.run(
+            ["sh", "-c", command.replace("/app", shlex.quote(str(repo)))],
+            env=os.environ | {"HOME": str(tmp_path)},
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+        return SandboxExecResult(completed.stdout, completed.stderr, completed.returncode)
+
+    async def start(spec, setup) -> None:
+        await setup(box)
+
+    box.exec.side_effect = execute
+    box.start_with_setup.side_effect = start
+    monkeypatch.setattr(module, "AsyncSandbox", MagicMock(return_value=box))
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda name, config: {})
+    monkeypatch.setattr(module, "resolve_provider_metadata", lambda name, config: {})
+    server = make_server(task, mode="agent")
+    seed = DeepsweExternal1SeedSessionRequest(**task_row(task.data, "original instruction\n"))
+    if damaged_head:
+        with pytest.raises(RuntimeError, match="agent image setup failed"):
+            await server.seed_session(request(), seed)
+        assert not server._agent_sessions
+    else:
+        await server.seed_session(request(), seed)
+        assert "session" in server._agent_sessions
+
+
+@pytest.mark.asyncio
+async def test_log_cleanup_failure_is_reported_without_losing_completed_grade(
+    task: InlineTask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = make_server(task, mode="null")
+    server.config.clear_verifier_logs = True
+    server._create_sandbox = AsyncMock(side_effect=[sandbox("A", []), sandbox("B", [])])
+    server._collect_model_patch = AsyncMock(return_value=b"candidate")
+    server._run_verifier = AsyncMock(return_value=VerifierResult(evaluation_completed=True, reward=1))
+
+    def cannot_remove(path, **kwargs):
+        raise PermissionError("attempt directory is not writable")
+
+    monkeypatch.setattr(module, "rmtree", cannot_remove)
+    result = await server.verify(request(), body(task))
+    assert result.evaluation_completed and result.reward == 1 and not result.mask_sample
+    assert result.cleanup_errors == ["verifier_logs"]
+    assert Path(result.log_dir, "model.patch").read_bytes() == b"candidate"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["golden", "null", "agent"])
 @pytest.mark.parametrize("include_patch", [None, False])
 async def test_entire_lifecycle_uses_distinct_sandboxes(

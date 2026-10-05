@@ -191,6 +191,7 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
             )
             if agent:
                 command += (
+                    "git cat-file -e HEAD^{commit}; "
                     "git config --global user.email agent@nemo-gym.local; "
                     "git config --global user.name 'NeMo Gym Agent'"
                 )
@@ -410,8 +411,15 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
             }
         )
         if self.config.clear_verifier_logs:
-            rmtree(log_dir, ignore_errors=True)
-            response.log_dir = ""
+            try:
+                rmtree(log_dir)
+            except FileNotFoundError:
+                response.log_dir = ""
+            except OSError:
+                logger.exception("Could not remove verifier logs for %s", task_id)
+                response.cleanup_errors.append("verifier_logs")
+            else:
+                response.log_dir = ""
         else:
             log_dir.mkdir(parents=True, exist_ok=True)
             (log_dir / "result.json").write_text(response.model_dump_json(indent=2) + "\n", encoding="utf-8")
