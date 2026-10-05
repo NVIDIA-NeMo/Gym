@@ -62,7 +62,6 @@ from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
-    AGENT_SERVER_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -76,6 +75,7 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
     dataset_agent_pins,
+    environment_server_agent_refs,
     get_global_config_dict,
     label_runs,
     pairing_override_enabled,
@@ -220,7 +220,7 @@ _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 
 
 def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, list[str]]:
-    """Map each agent name to the environment servers whose ``agent_server`` names it."""
+    """Map each agent name to the Environment Servers that front it."""
     servers_by_agent: dict[str, list[str]] = {}
     for name, instance in global_config_dict.items():
         if not isinstance(instance, DictConfig):
@@ -229,10 +229,12 @@ def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, l
         if not isinstance(servers, DictConfig):
             continue
         for server in servers.values():
-            reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
-            agent_name = reference.get("name") if isinstance(reference, DictConfig) else None
-            if agent_name is not None:
-                servers_by_agent.setdefault(str(agent_name), []).append(str(name))
+            if not isinstance(server, DictConfig):
+                continue
+            for reference in environment_server_agent_refs(server):
+                agent_name = reference.get("name")
+                if agent_name is not None:
+                    servers_by_agent.setdefault(str(agent_name), []).append(str(name))
     return servers_by_agent
 
 
