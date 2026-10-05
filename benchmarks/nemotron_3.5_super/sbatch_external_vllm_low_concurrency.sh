@@ -189,6 +189,7 @@ gym eval run \
     ++port_range_high=64000 \
     ++observability_enabled=true \
     ++model_call_capture_dir=/opt/Gym/results/\$experiment_name/model_calls \
+    ++route_failures_to_sidecar=true \
     $EXTRA_GYM_ARGS \
     "\${GYM_MODEL_PARAMS[@]}"
 EOF
