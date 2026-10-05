@@ -32,6 +32,7 @@ from unittest.mock import AsyncMock, call
 import openai
 import pytest
 from aiohttp import ClientResponseError
+from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
 from openai.types.responses import (
     EasyInputMessage,
@@ -46,6 +47,7 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseReasoningItem,
 )
+from openai.types.responses.response import Response
 from openai.types.responses.response_create_params import ResponseCreateParamsBase
 from openai.types.responses.response_input_item import (
     AdditionalTools as InputAdditionalTools,
@@ -1016,6 +1018,34 @@ class TestNeMoGymChatCompletionSchemas:
 
         assert round_tripped == completion
         assert isinstance(completion.choices[0].message.tool_calls[0], NeMoGymChatCompletionMessageCustomToolCall)
+
+    def test_accepts_provider_specific_service_tier(self) -> None:
+        """Third-party providers return tier strings outside the SDK's fixed enum.
+
+        The SDK ``ChatCompletion.service_tier`` is a closed ``Literal``, so a
+        non-OpenAI value would otherwise fail validation and turn the model
+        server response into a 500.
+        """
+        payload = {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-test",
+            "service_tier": "on-demand",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "hi"},
+                }
+            ],
+        }
+        with pytest.raises(ValidationError):
+            ChatCompletion.model_validate(payload)
+
+        completion = NeMoGymChatCompletion.model_validate(payload)
+
+        assert completion.service_tier == "on-demand"
 
 
 class TestNeMoGymFunctionCallOutput:
@@ -2027,3 +2057,20 @@ def test_response_field_set_is_pinned() -> None:
         f"openai {openai.__version__} changed Response's field set: added={added} removed={removed}.\n"
         f"Decide what Gym does with each, then update this list."
     )
+
+
+def test_response_accepts_provider_specific_service_tier() -> None:
+    """Third-party providers return tier strings outside the SDK's fixed enum.
+
+    The SDK ``Response.service_tier`` is a closed ``Literal``, so a
+    non-OpenAI value would otherwise fail validation and turn the model
+    server response into a 500.
+    """
+    payload = _response_with_output([]) | {"service_tier": "on-demand"}
+
+    with pytest.raises(ValidationError):
+        Response.model_validate(payload)
+
+    response = NeMoGymResponse.model_validate(payload)
+
+    assert response.service_tier == "on-demand"
