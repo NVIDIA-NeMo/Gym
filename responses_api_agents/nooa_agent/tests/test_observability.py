@@ -15,13 +15,16 @@
 
 import asyncio
 import json
+import os
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from nooa.events import ExecutionResult
 from pydantic import BaseModel
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
+    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
@@ -112,6 +115,45 @@ def test_scoped_projection_preserves_model_ownership_and_collector_tool_output_j
     )
     assert json.loads(persisted.tool_calls[0].output) == {"stdout": "7"}
     assert persisted.tool_calls[0].invocation_id == "root"
+
+
+@pytest.mark.parametrize("has_later_model_call", [False, True])
+def test_code_execution_module_locals_do_not_prevent_trace_projection(has_later_model_call: bool) -> None:
+    trace = GymTraceHooks()
+    state = RolloutLLMState(max_policy_calls=1)
+    params = NeMoGymResponseCreateParamsNonStreaming(input="task")
+    execution = trace.before_code_execution(
+        code="import os\nprint(os.name)", execution_id="exec-1", tool_call_id="call-1"
+    )
+    raw_result = ExecutionResult(stdout="posix\n", captured_locals={"os": os})
+    trace.after_code_execution(context=execution, result=raw_result, exception=None)
+    visible_output = "Stdout:\nposix\n"
+    if has_later_model_call:
+        call = GymModelCall(
+            model_ref=ModelServerRef(type="responses_api_models", name="policy"),
+            request=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymFunctionCallOutput(call_id="call-1", output=visible_output)]
+            ),
+        )
+        trace.on_model_call(call)
+        state.calls.append(call)
+
+    episode, trajectory = trace.project(create_params=params, state=state, task_id="task", rollout_id="0-0")
+
+    tool = trajectory.tool_calls[0]
+    assert tool is not execution.observation
+    if has_later_model_call:
+        assert tool.output == visible_output
+    else:
+        output = json.loads(tool.output)
+        assert output["stdout"] == "posix\n"
+        assert "captured_locals" not in output
+    assert episode.response.output[-1].output == tool.output
+    assert NeMoGymResponse.model_validate_json(episode.response.model_dump_json()) == episode.response
+    assert AgentObservationBundle.model_validate_json(episode.observations.model_dump_json()) == episode.observations
+    assert TrajectoryRecord.model_validate_json(trajectory.model_dump_json()) == trajectory
+    assert execution.observation.output is raw_result
+    assert raw_result.captured_locals["os"] is os
 
 
 def test_no_model_call_preserves_original_responses_input_with_tool_events() -> None:
