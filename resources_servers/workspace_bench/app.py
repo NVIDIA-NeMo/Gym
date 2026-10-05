@@ -76,6 +76,7 @@ class WorkspaceBenchVerifyResponse(BaseVerifyResponse):
 
 
 class WorkspaceBenchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: WorkspaceBenchConfig
 
     def model_post_init(self, context: Any, /) -> None:

@@ -4,3 +4,4 @@ mcp==1.29.0
 httpx-aiohttp==0.2.0
 opensandbox==0.1.16
 pathspec==1.1.1
+anyio>=4.15.1  # CVE mitigation; transitive via mcp, pinned explicitly

@@ -53,6 +53,12 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
+from resources_servers.swebench.patch_capture import (
+    PatchCapture,
+    PatchCaptureMode,
+    capture_model_patch,
+    prepare_git_for_commits,
+)
 from resources_servers.swemer_v1.verification import (
     VerificationInputs,
     VerificationResult,
@@ -70,6 +76,9 @@ JVM_MIRROR_ENV = {
 
 class SwemerV1ResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
+    # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
+    patch_capture_mode: PatchCaptureMode = "worktree"
+    include_model_patch_in_response: bool = True
     evaluation_timeout: int | None = 1200
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
@@ -124,9 +133,19 @@ class SwemerV1VerifyResponse(BaseVerifyResponse):
     eval_sandbox_start_time_taken: float
     patch_verification_time_taken: float
     test_patch_failed: bool = False
+    # Patch-capture provenance; see resources_servers/swebench/patch_capture.py.
+    patch_source: str = "none"
+    patch_branch: str | None = None
+    patch_commits: int = 0
+    worktree_dirty: bool = False
+    model_patch_bytes: int = 0
+    model_patch: str | None = None
+    model_patch_sha256: str = ""
+    model_patch: str | None = None
 
 
 class SwemerV1ResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: SwemerV1ResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -222,24 +241,21 @@ class SwemerV1ResourcesServer(SimpleResourcesServer):
             print("Failed to list pristine untracked files", format_exc(), file=sys.stderr)
             return frozenset()
 
-    async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> str:
-        """Diff the agent's own sandbox against ``base_commit``, then stop it.
-
-        ``git add -N`` (intent-to-add) is what makes brand-new files show up in ``git diff`` too,
-        not just edits to already-tracked files.
-        """
+    async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
+        """Capture the agent's patch per ``config.patch_capture_mode``, then stop its sandbox."""
         from resources_servers.swemer_v1.verification import drop_patch_sections
 
         original_sandbox = self._session_id_to_sandbox.pop(session_id)
         pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
         try:
-            result = await original_sandbox.exec(
-                f"git -C {shlex.quote(workdir)} add -N . "
-                f"&& git -C {shlex.quote(workdir)} --no-pager diff {shlex.quote(base_commit)}"
+            return await capture_model_patch(
+                original_sandbox,
+                workdir,
+                base_commit,
+                mode=self.config.patch_capture_mode,
+                pristine_untracked=pristine_untracked,
+                drop_sections=drop_patch_sections,
             )
-            if result.return_code != 0:
-                raise RuntimeError(result.stderr or "git diff failed")
-            return drop_patch_sections(result.stdout or "", pristine_untracked)
         finally:
             await self._stop_sandbox(original_sandbox)
 
@@ -256,6 +272,8 @@ class SwemerV1ResourcesServer(SimpleResourcesServer):
         await self._ensure_git_repo(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
             await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swemer_v1")
+        # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
+        await prepare_git_for_commits(sandbox, body.workdir, "swemer_v1")
 
         head_result = await sandbox.exec(f"git -C {shlex.quote(body.workdir)} rev-parse HEAD")
         self._session_id_to_base_commit[session_id] = (head_result.stdout or "").strip()
@@ -268,19 +286,21 @@ class SwemerV1ResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: SwemerV1VerifyRequest) -> SwemerV1VerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
         extraction_error = None
+        mode = self.config.patch_capture_mode
         if self.config.is_verifying_golden_patch:
-            patch = body.patch
+            capture = PatchCapture.static(body.patch, mode, "golden")
         else:
             base_commit = self._session_id_to_base_commit.pop(session_id, "")
             if not base_commit:
-                patch = ""
+                capture = PatchCapture.static("", mode, "none")
                 extraction_error = "Failed to extract model patch: no base commit recorded (seed_session did not run for this session)"
             else:
                 try:
-                    patch = await self._extract_model_patch(session_id, body.workdir, base_commit)
+                    capture = await self._extract_model_patch(session_id, body.workdir, base_commit)
                 except Exception as exc:
-                    patch = ""
+                    capture = PatchCapture.static("", mode, "none")
                     extraction_error = f"Failed to extract model patch: {exc}"
+        patch = capture.patch
 
         inputs = self._inputs(body, patch)
         log_dir = Path(__file__).parent / "logs" / body.instance_id
@@ -351,6 +371,7 @@ class SwemerV1ResourcesServer(SimpleResourcesServer):
                 "eval_sandbox_start_time_taken": start_time_taken,
                 "patch_verification_time_taken": verification_time_taken,
                 "test_patch_failed": result.test_patch_failed,
+                **capture.response_fields(self.config.include_model_patch_in_response),
             }
         )
 

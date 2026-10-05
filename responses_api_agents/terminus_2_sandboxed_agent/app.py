@@ -414,6 +414,7 @@ class NeMoGymTerminus2(Terminus2):
 
 
 class Terminus2Agent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: Terminus2AgentConfig
 
     def model_post_init(self, context: Any, /) -> None:

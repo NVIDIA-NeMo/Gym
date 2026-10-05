@@ -90,6 +90,7 @@ class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig
 
 
 class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: CompetitiveCodingChallengesResourcesServerConfig
 
     _evaluator: Optional[CCCEvaluator] = PrivateAttr(default=None)

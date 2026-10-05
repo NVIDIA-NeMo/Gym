@@ -2,20 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import ClientResponseError
 
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import SandboxExecResult
-from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig, MiniSWEHarness
+from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
 
 
-def make_harness(tmp_path, query, sandbox):
-    harness = MiniSWEHarness(
-        sandbox=sandbox,
+async def make_harness(tmp_path, query, runner_factory):
+    harness = await runner_factory(
         context=HarnessContext(session_id="limit-test", instruction="Inspect and submit"),
         config=MiniSWEConfig(),
         params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
@@ -24,14 +21,58 @@ def make_harness(tmp_path, query, sandbox):
         directory=tmp_path,
         observability_enabled=True,
     )
-    harness.system_info = {"system": "Linux", "release": "6", "version": "test", "machine": "x86_64"}
     return harness
+
+
+@pytest.mark.parametrize("cap", [None, 8, 16, 128])
+async def test_native_runner_preserves_output_token_cap(tmp_path, runner_factory, cap):
+    requests = []
+
+    async def query(params):
+        requests.append(params)
+        return NeMoGymResponse(
+            id="submitted",
+            created_at=0,
+            object="response",
+            model="model",
+            tools=[],
+            tool_choice="auto",
+            parallel_tool_calls=False,
+            output=[
+                {
+                    "type": "function_call",
+                    "call_id": "submit",
+                    "name": "bash",
+                    "arguments": json.dumps({"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}),
+                }
+            ],
+        )
+
+    params = NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=cap)
+    harness = await runner_factory(
+        context=HarnessContext(session_id="token-cap", instruction="Submit"),
+        config=MiniSWEConfig(step_limit=1),
+        params=params,
+        query=query,
+        model_name="model",
+        directory=tmp_path / "artifacts",
+    )
+    _, outcome, _ = await harness.execute(15)
+    assert outcome.reason == "completed"
+    assert len(requests) == 1
+    if cap is None:
+        assert "max_output_tokens" not in requests[0]
+    else:
+        assert requests[0]["max_output_tokens"] == cap
+    assert params.max_output_tokens == cap
 
 
 @pytest.mark.parametrize("recover", [True, False])
 @pytest.mark.parametrize("length_limited", [True, False])
 @pytest.mark.parametrize("malformed_call", [True, False])
-async def test_length_limit_recovery_and_terminal_classification(tmp_path, recover, length_limited, malformed_call):
+async def test_length_limit_recovery_and_terminal_classification(
+    tmp_path, runner_factory, recover, length_limited, malformed_call
+):
     requests = []
 
     async def query(params):
@@ -62,16 +103,13 @@ async def test_length_limit_recovery_and_terminal_classification(tmp_path, recov
             output=output,
         )
 
-    sandbox = SimpleNamespace(
-        exec=AsyncMock(return_value=SandboxExecResult("COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\nfinished", "", 0))
-    )
-    _, outcome, extra = await make_harness(tmp_path, query, sandbox).execute(5)
+    harness = await make_harness(tmp_path, query, runner_factory)
+    _, outcome, extra = await harness.execute(15)
     assert len(requests) == (2 if recover else 3)
-    recovery_prompt = requests[1]["input"][-1]["content"]
+    recovery_prompt = requests[1]["input"][-1]["content"][0]["text"]
     assert ("output token limit" in recovery_prompt) == length_limited
     assert ("Respond more concisely" in recovery_prompt) == length_limited
-    assert sandbox.exec.await_count == (1 if recover else 0)
-    expected = "Submitted" if recover else "OutputTokenLimitExceeded" if length_limited else "RepeatedFormatError"
+    expected = "Submitted" if recover else "RepeatedFormatError"
     assert extra["mini_swe_trajectory"]["info"]["exit_status"] == expected
     assert json.loads((tmp_path / "trajectory.json").read_text())["info"]["exit_status"] == expected
     assert outcome.reason == ("completed" if recover else "nonzero_exit")
@@ -91,17 +129,24 @@ async def test_length_limit_recovery_and_terminal_classification(tmp_path, recov
         (503, "context length service unavailable", False),
     ],
 )
-async def test_context_overflow_stops_without_format_retries(tmp_path, status, message, is_context_overflow):
+async def test_context_overflow_stops_without_format_retries(
+    tmp_path, runner_factory, status, message, is_context_overflow
+):
     error = ClientResponseError(MagicMock(real_url="http://model/v1/responses"), (), status=status)
     error.response_content = json.dumps({"error": {"message": message}}).encode()
     query = AsyncMock(side_effect=error)
-    sandbox = SimpleNamespace(exec=AsyncMock())
-    _, outcome, extra = await make_harness(tmp_path, query, sandbox).execute(5)
+    harness = await make_harness(tmp_path, query, runner_factory)
+    _, outcome, extra = await harness.execute(15)
     query.assert_awaited_once()
-    sandbox.exec.assert_not_awaited()
     assert outcome.reason == ("nonzero_exit" if is_context_overflow else "infrastructure_error")
-    expected = "ContextWindowExceeded" if is_context_overflow else "ClientResponseError"
+    expected = (
+        "ContextWindowExceededError"
+        if "maximum context length" in message
+        else "BadRequestError"
+        if status == 400
+        else "ServiceUnavailableError"
+    )
     assert extra["mini_swe_trajectory"]["info"]["exit_status"] == expected
     assert json.loads((tmp_path / "trajectory.json").read_text())["info"]["exit_status"] == expected
     if is_context_overflow:
-        assert outcome.detail == "ContextWindowExceeded"
+        assert outcome.detail == "ContextWindowExceededError"

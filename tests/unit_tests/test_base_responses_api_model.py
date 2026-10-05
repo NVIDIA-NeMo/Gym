@@ -90,6 +90,32 @@ def test_orjson_dispatch_response_serializes_json(content, expected):
     assert response.headers["content-type"] == "application/json"
 
 
+def test_orjson_dispatch_response_preserves_pydantic_aliases():
+    content = NeMoGymResponse(
+        id="resp_1",
+        created_at=0,
+        model="test-model",
+        object="response",
+        output=[],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "answer",
+                "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+            }
+        },
+    )
+
+    body = orjson.loads(_orjson_dispatch_response(content).body)
+    wire_format = body["text"]["format"]
+
+    assert "schema" in wire_format
+    assert "schema_" not in wire_format
+
+
 def test_orjson_dispatch_response_preserves_existing_response():
     existing_response = Response(content=b"already encoded", media_type="application/octet-stream", status_code=202)
 
@@ -917,6 +943,7 @@ def test_base_agent_resolve_model_base_url(monkeypatch):
 
     monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _config, _name: {"host": "h", "port": 1})
     agent = SimpleNamespace(
+        resolved_model_base_url=None,
         server_client=SimpleNamespace(
             global_config_dict={},
             _build_server_base_url=lambda _config: "http://h:1",
