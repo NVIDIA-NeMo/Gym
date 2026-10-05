@@ -15,7 +15,7 @@
 import asyncio
 import json
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -39,7 +39,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
-from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
@@ -47,15 +47,14 @@ from responses_api_agents.hermes_agent.app import (
     HermesAgent,
     HermesAgentConfig,
     HermesAgentRunRequest,
-    HermesAgentSessionState,
     ModelServerRef,
     ResourcesServerRef,
     _gym_mcp_tool_name,
-    _sandbox_hermes_install,
     _split_input_to_user_and_history,
     _trajectory_to_output_items,
 )
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver
+from responses_api_agents.hermes_agent.sandbox import HermesSandboxSession, _sandbox_hermes_install
 
 
 class _FakeResponse:
@@ -131,7 +130,7 @@ class TestSanity:
         sandbox = AsyncMock()
         sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
         connect = AsyncMock(return_value=sandbox)
-        monkeypatch.setattr("responses_api_agents.hermes_agent.app.shutil.which", lambda name: "/test/uv")
+        monkeypatch.setattr("responses_api_agents.hermes_agent.sandbox.shutil.which", lambda name: "/test/uv")
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.get_global_config_dict",
             lambda: {"runtime": {"hostname": "sandbox", "pid": 123}},
@@ -165,8 +164,8 @@ class TestSanity:
         )
         assert state.sandbox is sandbox
         assert state.workdir == "/app"
-        assert state.session_dir.startswith("/tmp/nemo-gym-hermes-sessions/")
-        assert len(state.session_dir.rsplit("/", 1)[-1]) == 32
+        assert state.directory.startswith("/tmp/nemo-gym-hermes-sessions/")
+        assert len(state.directory.rsplit("/", 1)[-1]) == 32
         assert sandbox.exec.await_count == 2
         assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
             "sandbox_runner.py",
@@ -195,7 +194,7 @@ class TestSanity:
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.AsyncSandbox.connect", AsyncMock(return_value=sandbox)
         )
-        monkeypatch.setattr("responses_api_agents.hermes_agent.app.shutil.which", lambda _name: "/usr/bin/uv")
+        monkeypatch.setattr("responses_api_agents.hermes_agent.sandbox.shutil.which", lambda _name: "/usr/bin/uv")
 
         hermes._session_records["session"] = _AgentSessionRecord()
         await hermes._initialize_agent_session_state(
@@ -388,25 +387,27 @@ class TestSanity:
             tool_accesses=list(tool_accesses),
         )
         hermes._session_records["session"] = _AgentSessionRecord(
-            state=HermesAgentSessionState(request=seed, sandbox=sandbox, workdir=None, session_dir="/session"),
+            state=HermesSandboxSession(request=seed, sandbox=sandbox, workdir=None, directory="/session"),
             episode_id=seed.episode_id,
         )
         request = SimpleNamespace(
             session={"agent_session_id": "session"},
             path_params={"rollout_id": seed.episode_id.capture_key},
         )
-        original_download = hermes._download_json
+        sandbox.upload_text = MethodType(AsyncSandbox.upload_text, sandbox)
 
-        async def download(sandbox, remote_path):
+        async def read_text(remote_path):
             if remote_path.endswith("/cleanup.json"):
                 commands = getattr(sandbox, "commands", None)
-                return {
-                    "cleanup_confirmed": commands is None or any("kill -TERM" in cmd for cmd in commands),
-                    "error": None,
-                }
-            return await original_download(sandbox, remote_path)
+                return json.dumps(
+                    {
+                        "cleanup_confirmed": commands is None or any("kill -TERM" in cmd for cmd in commands),
+                        "error": None,
+                    }
+                )
+            return await AsyncSandbox.read_text(sandbox, remote_path)
 
-        hermes._download_json = AsyncMock(side_effect=download)
+        sandbox.read_text = AsyncMock(side_effect=read_text)
         return hermes, request, seed
 
     async def test_sandbox_activation_calls_the_model_server_directly(self, monkeypatch) -> None:

@@ -14,8 +14,6 @@
 # limitations under the License.
 import asyncio
 import atexit
-import importlib.metadata
-import json
 import logging
 import os
 import shutil
@@ -23,10 +21,6 @@ import sys
 import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping
-from dataclasses import dataclass
-from enum import Enum, auto
-from pathlib import Path
-from shlex import quote
 from time import time
 from typing import Any, Callable, Optional
 from uuid import uuid4
@@ -72,15 +66,15 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, process_supervisor
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
-from nemo_gym.sandbox.runner import RunnerRuntimeInfo, parse_cleanup_receipt
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
+from responses_api_agents.hermes_agent.sandbox import HermesSandboxSession
 
 
 def _trajectory_to_output_items(messages, n_input):
@@ -158,54 +152,6 @@ def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
         if name.startswith(prefix):
             return f"mcp__{server}__{name[len(prefix) :]}"
     return name
-
-
-def _sandbox_hermes_install() -> tuple[str, str]:
-    """Return the requirement the sandbox installs and the key that names its runtime directory.
-
-    Both come from the Hermes installed with this server, so ``requirements.txt`` is the only version pin and
-    the sandbox runs the same Hermes as the host. A git install is fetched as a GitHub archive, so the sandbox
-    does not need git. The ``mcp`` extra carries Hermes' MCP client, which episode tool grants use.
-    """
-    distribution = importlib.metadata.distribution("hermes-agent")
-    direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
-    commit = (direct_url.get("vcs_info") or {}).get("commit_id")
-    if commit is None:
-        return f"hermes-agent[mcp]=={distribution.version}", distribution.version
-    url = str(direct_url.get("url") or "").removesuffix(".git")
-    if not url.startswith("https://github.com/"):
-        raise RuntimeError(f"Cannot build a sandbox install URL for hermes-agent installed from {url!r}")
-    return f"hermes-agent[mcp] @ {url}/archive/{commit}.tar.gz", commit[:12]
-
-
-_HERMES_REQUIREMENT, _HERMES_RUNTIME_KEY = _sandbox_hermes_install()
-_SANDBOX_RUNTIME_DIR = f"/tmp/nemo-gym-hermes-runtime-{_HERMES_RUNTIME_KEY}"
-_SANDBOX_UV = f"{_SANDBOX_RUNTIME_DIR}/uv"
-_SANDBOX_PYTHON = f"{_SANDBOX_RUNTIME_DIR}/venv/bin/python"
-_SANDBOX_RUNNER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_runner.py"
-_SANDBOX_SUPERVISOR = f"{_SANDBOX_RUNTIME_DIR}/process_supervisor.py"
-_SANDBOX_OBSERVER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_observer.py"
-_SANDBOX_MODEL_KWARGS = f"{_SANDBOX_RUNTIME_DIR}/model_kwargs.py"
-
-
-class RunnerCleanup(Enum):
-    """Track remote process cleanup independently of session files and connections."""
-
-    IDLE = auto()  # No remote launch has been attempted.
-    UNCONFIRMED = auto()  # A launch attempt may have succeeded without returning a handle.
-    CONFIRMED = auto()
-
-
-@dataclass
-class HermesAgentSessionState(AgentSessionState):
-    sandbox: AsyncSandbox
-    workdir: str | None
-    session_dir: str
-    owns_sandbox: bool = False
-    observations: AgentObservationBundle | None = None
-    activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
-    task: asyncio.Task[NeMoGymResponse] | None = None
-    runner_cleanup: RunnerCleanup = RunnerCleanup.IDLE
 
 
 # if ray close sys.stderr mid-request, write to the original fd
@@ -309,7 +255,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
     sigterm_installed: bool = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> HermesAgentSessionState:
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> HermesSandboxSession:
         tool_accesses = self.effective_tool_accesses(body)
         unsupported = [
             access.name for access in tool_accesses if access.required and not isinstance(access, MCPToolAccess)
@@ -328,16 +274,19 @@ class HermesAgent(SimpleResponsesAPIAgent):
             raise ValueError("MCP tool grants collide with Hermes toolsets: " + ", ".join(sorted(colliding)))
         return await self._initialize_agent_session_state(body.agent_session_id, body)
 
-    def _require_agent_session(self, agent_session_id: str) -> HermesAgentSessionState:
+    def _require_agent_session(self, agent_session_id: str) -> HermesSandboxSession:
         state = super()._require_agent_session(agent_session_id)
-        if not isinstance(state, HermesAgentSessionState):
+        if not isinstance(state, HermesSandboxSession):
             raise TypeError("Expected Hermes agent session state")
         return state
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
-        if not isinstance(state, HermesAgentSessionState):
+        if not isinstance(state, HermesSandboxSession):
             raise TypeError("Expected Hermes agent session state")
-        observations = await self._cleanup_sandbox_session(state)
+        await state.close(self.config.session_close_timeout_seconds)
+        observations = state.observations or AgentObservationBundle(
+            source="hermes", gaps=[ObservationGap(code="observation_capture_failed")]
+        )
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id, agent_observations=observations
         )
@@ -424,7 +373,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         self,
         agent_session_id: str,
         body: AgentSeedSessionRequest,
-    ) -> HermesAgentSessionState:
+    ) -> HermesSandboxSession:
         owns_sandbox = body.sandbox_access is None
         if owns_sandbox:
             if self.config.sandbox_provider is None:
@@ -453,174 +402,26 @@ class HermesAgent(SimpleResponsesAPIAgent):
             raise
 
         session_dir = f"/tmp/nemo-gym-hermes-sessions/{uuid4().hex}"
-        state = HermesAgentSessionState(
+        state = HermesSandboxSession(
             request=body,
             sandbox=sandbox,
             workdir=workdir,
-            session_dir=session_dir,
+            directory=session_dir,
             owns_sandbox=owns_sandbox,
         )
         try:
-            prepare = await sandbox.exec(
-                f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(session_dir)}",
-                cwd=workdir,
-                timeout_s=30,
-            )
-            if prepare.return_code != 0:
-                raise RuntimeError(prepare.stderr or prepare.stdout or "Failed to prepare Hermes sandbox paths")
-            if not await self._sandbox_hermes_installed(sandbox, workdir):
-                await self._install_sandbox_hermes(sandbox, workdir)
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), _SANDBOX_RUNNER)
-            await sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
-            await sandbox.upload(Path(__file__).with_name("model_kwargs.py"), _SANDBOX_MODEL_KWARGS)
-            await sandbox.upload(Path(process_supervisor.__file__), _SANDBOX_SUPERVISOR)
+            await state.prepare(install_timeout=self.config.sandbox_install_timeout_seconds)
         except BaseException as error:
             try:
-                await self._cleanup_sandbox_session(state)
+                await state.close(self.config.session_close_timeout_seconds)
             except BaseException:
                 LOG.exception("Could not clean failed Hermes setup %s; retaining session for close", agent_session_id)
                 raise AgentSessionSetupError(state, error=error) from error
             raise
         return state
 
-    @staticmethod
-    async def _sandbox_hermes_installed(sandbox: AsyncSandbox, workdir: str | None) -> bool:
-        """Whether the pinned Hermes and its MCP client import from its runtime path.
-
-        The path is keyed by the pinned commit, so a runtime baked into the image or left by an earlier
-        session in this sandbox is reused.
-        """
-        check = await sandbox.exec(
-            f"{quote(_SANDBOX_PYTHON)} -c 'import run_agent, mcp'",
-            cwd=workdir,
-            timeout_s=120,
-        )
-        return check.return_code == 0
-
-    async def _install_sandbox_hermes(self, sandbox: AsyncSandbox, workdir: str | None) -> None:
-        uv_path = shutil.which("uv")
-        if uv_path is None:
-            raise RuntimeError("Hermes agent server requires uv to install the sandbox runtime")
-        await sandbox.upload(uv_path, _SANDBOX_UV)
-        venv = quote(_SANDBOX_RUNTIME_DIR + "/venv")
-        # A runtime that failed the import check is incomplete, so rebuild it rather than reuse it.
-        install = await sandbox.exec(
-            f"chmod 755 {quote(_SANDBOX_UV)} && rm -rf {venv} && "
-            f"{quote(_SANDBOX_UV)} venv {venv} --python 3.13 && "
-            f"{quote(_SANDBOX_UV)} pip install --python {quote(_SANDBOX_PYTHON)} {quote(_HERMES_REQUIREMENT)}",
-            cwd=workdir,
-            timeout_s=self.config.sandbox_install_timeout_seconds,
-        )
-        if install.return_code != 0 or not await self._sandbox_hermes_installed(sandbox, workdir):
-            raise RuntimeError(install.stderr or install.stdout or "Hermes sandbox installation failed")
-
-    async def _terminate_sandbox_runner(self, state: HermesAgentSessionState) -> None:
-        """Fence an unstarted launch, or require the running subreaper's cleanup receipt."""
-        if state.runner_cleanup in (RunnerCleanup.IDLE, RunnerCleanup.CONFIRMED):
-            return
-        receipt_path = f"{state.session_dir}/cleanup.json"
-        try:
-            receipt = await self._download_json(state.sandbox, receipt_path)
-        except Exception:
-            receipt = {}
-        if receipt.get("cleanup_confirmed") is not True:
-            pid_path = quote(f"{state.session_dir}/runner.pid")
-            stop_path = quote(f"{state.session_dir}/runner.stop")
-            claim_path = quote(f"{state.session_dir}/launch.claim")
-            temporary_receipt = quote(f"{receipt_path}.{uuid4().hex}.tmp")
-            # The symlink atomically records who won the launch/stop race. A stop-owned claim
-            # also lets a retry finish publishing its receipt if the first close was interrupted.
-            stopped_receipt = quote(json.dumps({"cleanup_confirmed": True, "error": None}))
-            # A launch whose response was lost must still be stopped. Never kill the
-            # supervisor with SIGKILL: only it can reap detached tools and acknowledge cleanup.
-            script = (
-                f"touch {stop_path} || exit 1; "
-                f"ln -s stop {claim_path} 2>/dev/null || true; "
-                f'if [ "$(readlink {claim_path})" = stop ]; then '
-                f"printf '%s' {stopped_receipt} > {temporary_receipt} && "
-                f"mv {temporary_receipt} {quote(receipt_path)}; exit $?; fi; "
-                f"[ -f {quote(receipt_path)} ] && exit 0; "
-                f'if [ -s {pid_path} ]; then kill -TERM "$(cat {pid_path})" 2>/dev/null || true; fi; '
-                f"for _ in $(seq 1 {max(1, int(self.config.session_close_timeout_seconds))}); do "
-                f"[ -f {quote(receipt_path)} ] && exit 0; sleep 1; done; exit 1"
-            )
-            await state.sandbox.exec(
-                script, cwd=state.workdir, timeout_s=self.config.session_close_timeout_seconds + 5
-            )
-            try:
-                receipt = await self._download_json(state.sandbox, receipt_path)
-            except Exception as error:
-                raise RuntimeError("Hermes launch outcome is unknown; cannot confirm termination") from error
-            if receipt.get("cleanup_confirmed") is not True:
-                raise RuntimeError(f"Hermes descendant cleanup was not confirmed: {receipt.get('error')}")
-        parse_cleanup_receipt(receipt)
-        state.runner_cleanup = RunnerCleanup.CONFIRMED
-
-    async def _cleanup_sandbox_session(
-        self,
-        state: HermesAgentSessionState,
-    ) -> AgentObservationBundle:
-        if not state.owns_sandbox:
-            # Cancelling provider exec may kill its process group. Confirm remote cleanup first.
-            # A queued activation has not attempted launch and can be cancelled immediately.
-            await self._terminate_sandbox_runner(state)
-        if state.task is not None and not state.task.done() and not state.task.cancelling():
-            state.task.cancel()
-        if state.owns_sandbox:
-            # Container teardown is the cleanup boundary for an owned sandbox. Do not let a
-            # missing runner receipt or a stuck activation prevent stopping all its processes.
-            await state.sandbox.stop()
-            state.runner_cleanup = RunnerCleanup.CONFIRMED
-        if state.task is not None:
-            try:
-                await asyncio.wait_for(asyncio.shield(state.task), timeout=self.config.session_close_timeout_seconds)
-            except asyncio.CancelledError:
-                if not state.task.cancelled():
-                    raise
-            except Exception:
-                if not state.task.done():
-                    raise
-                # A borrowed sandbox still needs proof of cleanup after an activation error.
-        if not state.owns_sandbox:
-            # Retire the path atomically before deleting its launch fence. Otherwise a delayed
-            # exec could claim the directory between rm unlinking launch.claim and removing the directory.
-            retired_dir = f"{state.session_dir}.closed"
-            removed = await state.sandbox.exec(
-                f"if [ -d {quote(state.session_dir)} ]; then "
-                f"mv {quote(state.session_dir)} {quote(retired_dir)} || exit 1; fi; "
-                f"rm -rf {quote(retired_dir)}",
-                cwd=state.workdir,
-                timeout_s=self.config.session_close_timeout_seconds,
-            )
-            if removed.return_code != 0:
-                raise RuntimeError("Could not remove Hermes session files")
-            await state.sandbox.disconnect()
-        observations = state.observations
-        if observations is None:
-            observations = AgentObservationBundle(
-                source="hermes", gaps=[ObservationGap(code="observation_capture_failed")]
-            )
-        return observations
-
     def _model_name(self) -> str:
         return self.config.model or str(self.config.model_server.name)
-
-    @staticmethod
-    async def _upload_json(sandbox: AsyncSandbox, remote_path: str, payload: dict[str, Any]) -> None:
-        with tempfile.TemporaryDirectory(prefix="hermes_sandbox_upload_") as directory:
-            local_path = Path(directory) / "payload.json"
-            local_path.write_text(json.dumps(payload))
-            await sandbox.upload(local_path, remote_path)
-
-    @staticmethod
-    async def _download_json(sandbox: AsyncSandbox, remote_path: str) -> dict[str, Any]:
-        with tempfile.TemporaryDirectory(prefix="hermes_sandbox_download_") as directory:
-            local_path = Path(directory) / "payload.json"
-            await sandbox.download(remote_path, local_path)
-            payload = json.loads(local_path.read_text())
-        if not isinstance(payload, dict):
-            raise TypeError(f"Hermes sandbox payload at {remote_path} is not an object")
-        return payload
 
     def _sandbox_observations(
         self,
@@ -710,15 +511,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         *,
         body: NeMoGymResponseCreateParamsNonStreaming,
         agent_session_id: str,
-        state: HermesAgentSessionState,
+        state: HermesSandboxSession,
     ) -> AgentEpisode:
         params = self._conversation_params(body)
-        input_path = f"{state.session_dir}/input.json"
-        output_path = f"{state.session_dir}/output.json"
-        stdout_path = f"{state.session_dir}/stdout.log"
-        stderr_path = f"{state.session_dir}/stderr.log"
-        pid_path = f"{state.session_dir}/runner.pid"
-        claim_path = f"{state.session_dir}/launch.claim"
         mcp_accesses = [
             access for access in self.effective_tool_accesses(state.request) if isinstance(access, MCPToolAccess)
         ]
@@ -743,56 +538,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
             ),
             "terminal_timeout": self.config.terminal_timeout,
         }
-        await self._upload_json(state.sandbox, input_path, payload)
-        cleanup_timeout = self.config.session_close_timeout_seconds / 3
-        # Only the claim winner can launch. Do not recreate the session directory: a delayed exec
-        # must remain fenced even after close removes it. Ignore TERM across exec until the Python
-        # supervisor installs its handler; it checks runner.stop before starting the worker.
-        command = (
-            f"trap '' TERM; ln -s launch {quote(claim_path)} 2>/dev/null || exit 0; "
-            f"echo $$ > {quote(pid_path)} && "
-            f"exec {quote(_SANDBOX_PYTHON)} -I {quote(_SANDBOX_SUPERVISOR)} "
-            f"--timeout {self.config.sandbox_runner_timeout_seconds} --cleanup-timeout {cleanup_timeout} "
-            f"--stop-file {quote(state.session_dir + '/runner.stop')} "
-            f"--receipt {quote(state.session_dir + '/cleanup.json')} -- "
-            f"{quote(_SANDBOX_PYTHON)} {quote(_SANDBOX_RUNNER)} {quote(input_path)} {quote(output_path)} "
-            f">{quote(stdout_path)} 2>{quote(stderr_path)}"
+        output = await state.execute(
+            payload,
+            timeout=self.config.sandbox_runner_timeout_seconds,
+            close_timeout=self.config.session_close_timeout_seconds,
         )
-        state.runner_cleanup = RunnerCleanup.UNCONFIRMED
-        try:
-            await state.sandbox.exec(
-                command,
-                cwd=state.workdir,
-                timeout_s=process_supervisor.exec_timeout(
-                    timeout=self.config.sandbox_runner_timeout_seconds, cleanup_timeout=cleanup_timeout
-                ),
-            )
-        except BaseException:
-            try:
-                await self._terminate_sandbox_runner(state)
-            except Exception:
-                LOG.exception("Hermes cleanup remains unconfirmed; close must retry before verification")
-            raise
-        else:
-            await self._terminate_sandbox_runner(state)
-        try:
-            output = await self._download_json(state.sandbox, output_path)
-        except Exception as error:
-            logs = await state.sandbox.exec(
-                f"cat {quote(stderr_path)} 2>/dev/null || true",
-                cwd=state.workdir,
-                timeout_s=30,
-            )
-            raise RuntimeError(f"Hermes sandbox runner exited without output: {logs.stdout or ''}") from error
-        if output.get("error") is not None:
-            raise RuntimeError(f"Hermes sandbox runner failed: {output['error']}\n{output.get('traceback', '')}")
         result = output.get("result")
         if not isinstance(result, dict):
             raise RuntimeError("Hermes sandbox runner returned an invalid output")
-        try:
-            runtime = RunnerRuntimeInfo.model_validate(output.get("runtime"))
-        except ValueError as error:
-            raise RuntimeError("Hermes sandbox runner returned invalid runtime metadata") from error
+        runtime = state.runtime_info
         response = self._response_from_result(
             body=body,
             result=result,

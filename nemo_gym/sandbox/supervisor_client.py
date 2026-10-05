@@ -7,8 +7,6 @@ Unlike process_supervisor.py, this module is not uploaded to the task sandbox.
 """
 
 import json
-import tempfile
-from pathlib import Path
 from shlex import join, quote
 from uuid import uuid4
 
@@ -21,8 +19,12 @@ from nemo_gym.sandbox.process_supervisor import CleanupReceipt
 _CLEANUP_RECEIPT = TypeAdapter(CleanupReceipt)
 
 
-class RunnerRuntimeInfo(BaseModel):
-    """Worker identity, independent of supervisor cleanup and harness output."""
+class HarnessProcessInfo(BaseModel):
+    """Identity of the supervised worker, which may be a shim that spawns the harness CLI.
+
+    This is independent of supervisor cleanup and harness output. The PID is
+    diagnostic metadata, not the supervisor PID used to request cleanup.
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True)
     hostname: str
@@ -41,28 +43,24 @@ def parse_cleanup_receipt(payload: object) -> CleanupReceipt:
     return _CLEANUP_RECEIPT.validate_python(payload, strict=True, extra="forbid")
 
 
-async def upload_text(sandbox: AsyncSandbox, *, path: str, text: str) -> None:
-    """Upload adapter-owned text without interpolating its contents into a shell command."""
-    with tempfile.TemporaryDirectory(prefix="sandbox-runner-upload-") as directory:
-        source = Path(directory) / "payload"
-        source.write_text(text)
-        await sandbox.upload(source, path)
+def supervised_launch_command(
+    *,
+    directory: str,
+    command: list[str],
+    timeout: float,
+    cleanup_timeout: float,
+    python: str = "python3",
+    supervisor_path: str | None = None,
+) -> str:
+    """Fence delayed launches and run a harness command under the shared supervisor.
 
-
-async def read_text(sandbox: AsyncSandbox, *, path: str) -> str:
-    """Download an adapter-owned artifact, preserving non-UTF8 output with replacement."""
-    with tempfile.TemporaryDirectory(prefix="sandbox-runner-download-") as directory:
-        destination = Path(directory) / "payload"
-        await sandbox.download(path, destination)
-        return destination.read_text(errors="replace")
-
-
-def supervisor_command(*, directory: str, command: list[str], timeout: float, cleanup_timeout: float) -> str:
-    """Fence delayed launches and run a harness command under the shared supervisor."""
+    Use a private interpreter and supervisor path when the harness installs its
+    own runtime. Supervisor and worker diagnostics are combined in runner.log.
+    """
     return (
         f"trap '' TERM; ln -s launch {quote(directory + '/launch.claim')} 2>/dev/null || exit 0; "
         f"echo $$ > {quote(directory + '/runner.pid')} && "
-        f"exec python3 -I {quote(directory + '/process_supervisor.py')} "
+        f"exec {quote(python)} -I {quote(supervisor_path or directory + '/process_supervisor.py')} "
         f"--timeout {timeout} --cleanup-timeout {cleanup_timeout} "
         f"--stop-file {quote(directory + '/runner.stop')} "
         f"--receipt {quote(directory + '/cleanup.json')} -- {join(command)} "
@@ -70,8 +68,8 @@ def supervisor_command(*, directory: str, command: list[str], timeout: float, cl
     )
 
 
-async def confirm_runner_cleanup(
-    sandbox: AsyncSandbox, *, directory: str, workdir: str, timeout: float, harness: str
+async def stop_and_confirm_cleanup(
+    sandbox: AsyncSandbox, *, directory: str, workdir: str | None, timeout: float, harness: str
 ) -> CleanupReceipt:
     """Fence a pending launch or require explicit supervisor acknowledgement before teardown.
 
@@ -81,7 +79,7 @@ async def confirm_runner_cleanup(
     """
     receipt_path = f"{directory}/cleanup.json"
     try:
-        receipt = json.loads(await read_text(sandbox, path=receipt_path))
+        receipt = json.loads(await sandbox.read_text(receipt_path))
     except Exception:
         receipt = {}
     if receipt.get("cleanup_confirmed") is not True:
@@ -102,9 +100,29 @@ async def confirm_runner_cleanup(
         )
         await sandbox.exec(script, cwd=workdir, timeout_s=timeout + 5)
         try:
-            receipt = json.loads(await read_text(sandbox, path=receipt_path))
+            receipt = json.loads(await sandbox.read_text(receipt_path))
         except Exception as error:
             raise RuntimeError(f"{harness} launch outcome is unknown; cannot confirm termination") from error
         if receipt.get("cleanup_confirmed") is not True:
             raise RuntimeError(f"{harness} sandbox cleanup was not confirmed: {receipt.get('error')}")
     return parse_cleanup_receipt(receipt)
+
+
+async def remove_session_directory(
+    sandbox: AsyncSandbox, *, directory: str, workdir: str | None, timeout: float, harness: str
+) -> None:
+    """Remove adapter-owned files after cleanup, keeping delayed launches fenced.
+
+    Retire the directory atomically before unlinking its claim. Otherwise a
+    delayed launch could win the claim while recursive deletion is in progress.
+    A failed removal leaves the retired path available for a close retry.
+    """
+    retired = f"{directory}.closed"
+    result = await sandbox.exec(
+        f"if [ -d {quote(directory)} ]; then "
+        f"mv {quote(directory)} {quote(retired)} || exit 1; fi; rm -rf -- {quote(retired)}",
+        cwd=workdir,
+        timeout_s=timeout,
+    )
+    if result.return_code != 0 or result.error_type:
+        raise RuntimeError(f"Could not remove {harness} session files")
