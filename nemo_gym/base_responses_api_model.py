@@ -37,7 +37,7 @@ import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, ClassVar, Iterable, Literal, Mapping, Optional, TypedDict
+from typing import Any, AsyncIterator, ClassVar, Iterable, Literal, Mapping, NotRequired, Optional, TypedDict
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -106,6 +106,7 @@ _ANTHROPIC_CONVERTER = AnthropicConverter()
 
 
 class ModelExecutionOutcome(TypedDict):
+    error_category: NotRequired[str]
     upstream_attempted: bool
     response_source: Literal["upstream", "local"] | None
     upstream_status_code: int | None
