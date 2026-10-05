@@ -104,11 +104,13 @@ Assistant Agent. Each Agent executes its own tool loop against this Resources
 Server while the Environment Server forwards one shared Resources session
 cookie.
 
-The agents also have independent model-server references:
-`user_policy_model` and `assistant_policy_model`. Resources-owned tool-result
-synthesis uses `tool_simulation_model`, while probe scoring uses
-`probe_scorer_model`. These references can share a Model Server with another
-role when they use the same provider and model.
+The User and Assistant Agents share `policy_model`. The Environment Server
+routes UserSim's Judge and Summary calls directly to `support_model`, without
+creating support Agent sessions. Resources-owned tool-result synthesis and
+native probe scoring retain the purpose-specific `tool_simulation_model` and
+`probe_scorer_model` configuration fields, but both reference the same support
+Model Server. Its endpoint settings default to the policy settings and can be
+overridden independently.
 
 The runnable example demonstrates three idempotent endpoints:
 
@@ -190,6 +192,6 @@ selected = [
 ```
 
 Use `{"assistant"}`, `{"user"}`, or both for `requested_roles`. Judge and
-Summary Agent calls use distinct roles, while API-response synthesis remains
+Summary support-model calls use distinct roles, while API-response synthesis remains
 Resources-owned. Participant filtering provides the explicit per-invocation
 contract for downstream SFT, RL projection, or custom collation.

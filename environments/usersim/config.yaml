@@ -1,0 +1,23 @@
+# NeMo UserSim benchmark overlay. Preparation materializes the persona panel; runtime only reads it.
+config_paths:
+  - resources_servers/usersim/configs/usersim.yaml
+
+environment_server_routes:
+  "usersim:benchmark": usersim_environment
+
+usersim:
+  resources_servers:
+    usersim:
+      personas_cache_dir: environments/usersim/data/personas
+
+usersim_assistant:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: usersim
+          type: benchmark
+          jsonl_fpath: environments/usersim/data/usersim.jsonl
+          prepare_script: environments/usersim/prepare.py
+          prompt_config: null
+          num_repeats: 1
+          license: Apache 2.0
