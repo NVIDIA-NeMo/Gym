@@ -58,6 +58,7 @@ from nemo_gym._checkpoint.model import (
     merge_reports,
     retained_staging_keys,
     retire_ledgers,
+    staging_keys_by_episode,
 )
 from nemo_gym.episode_types import EpisodeId
 
@@ -364,7 +365,10 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
             raise ControlError("model restore requires freshly started policy workers; a worker has served calls")
 
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
-        return {"staging_keys": retained_staging_keys(records)}
+        return {
+            "staging_keys": retained_staging_keys(records),
+            "staging_keys_by_episode": staging_keys_by_episode(records),
+        }
 
     def status_extra(self) -> dict[str, Any]:
         return {

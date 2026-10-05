@@ -478,6 +478,43 @@ async def test_commit_reply_lists_the_staged_keys_the_checkpoint_keeps(tmp_path:
     assert reply["staging_keys"] == [row["staging_key"]]
 
 
+async def test_commit_reply_groups_the_staged_keys_by_episode(tmp_path: Path) -> None:
+    """The controller keeps only the rows of episodes it continues, so it needs each key's owner."""
+    ledger, _, controller = await _ledger_participant(tmp_path / "ledger")
+    await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r"))
+    await ledger.record(_commit(_call_record("c9"), [USER_3], [ASSISTANT_1], rollout_id="s"))
+    await controller.prepare(CheckpointRequest(**control()))
+    reply = await controller.commit(
+        _commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}, {"rollout_id": "s"}])
+    )
+    [r_row], [s_row] = ledger.export_rows("r"), ledger.export_rows("s")
+
+    assert reply["staging_keys_by_episode"] == {"r": [r_row["staging_key"]], "s": [s_row["staging_key"]]}
+    assert sorted(reply["staging_keys"]) == sorted([r_row["staging_key"], s_row["staging_key"]])
+
+
+async def test_generation_cut_keys_are_grouped_under_their_episode(tmp_path: Path) -> None:
+    """A cut's continuation keys name no rollout; only the record says whose they are."""
+    request_cut, _ = _cutting_worker()
+    participant = PolicyModelParticipant(FileLineageStore(tmp_path / "ledger"), cut_requester=request_cut)
+    _held_call(participant, "s", "c2", [USER_1])
+    await participant.close_admission(CheckpointRequest(**control()))
+    [cut] = participant.gate.snapshot().cuts
+    carried = {"model_call_id": "c1", "staging_key": "r/c1"}
+    records = [
+        ModelRecord(episode_id=EpisodeId(rollout_id="r"), rows=[carried]),
+        # A restored attempt's record carries the rows of the attempt it continues.
+        ModelRecord(episode_id=EpisodeId(rollout_id="r", attempt=1), rows=[carried]),
+        ModelRecord(episode_id=EpisodeId(rollout_id="s"), rows=[], generation_cuts=[cut.record]),
+    ]
+
+    assert participant.commit_reply(records)["staging_keys_by_episode"] == {
+        "r": ["r/c1"],
+        "r-a1": ["r/c1"],
+        "s": ["__generation_cut__/c2"],
+    }
+
+
 async def test_ledger_export_and_import_run_off_the_event_loop(tmp_path: Path) -> None:
     import threading
 

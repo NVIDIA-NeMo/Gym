@@ -486,6 +486,16 @@ def retained_staging_keys(records: Iterable[CheckpointRecord]) -> list[str]:
     return sorted(keys)
 
 
+def staging_keys_by_episode(records: Iterable[CheckpointRecord]) -> dict[str, list[str]]:
+    """Each checkpointed episode's staged keys, keyed by its capture key.
+
+    The controller keeps only the rows of episodes it continues, and a key's name does not always say whose it is:
+    generation-cut keys name no rollout. A key can belong to more than one episode, since a restored attempt's record
+    carries the rows of the attempt it continues.
+    """
+    return {record.episode_id.capture_key: retained_staging_keys([record]) for record in records}
+
+
 async def retire_ledgers(ledger: Optional[CheckpointableLedger], episode_ids: Iterable[EpisodeId]) -> None:
     """Retire the ledgers of each episode and every earlier attempt of it, in one batch.
 
@@ -631,7 +641,10 @@ class PolicyModelParticipant(CheckpointParticipant):
         return [EpisodeId.from_capture_key(key) for key in self._restored_cuts]
 
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
-        return {"staging_keys": retained_staging_keys(records)}
+        return {
+            "staging_keys": retained_staging_keys(records),
+            "staging_keys_by_episode": staging_keys_by_episode(records),
+        }
 
     def status_extra(self) -> dict[str, Any]:
         return {"restored_generation_cuts": sorted(self._restored_cuts)}
