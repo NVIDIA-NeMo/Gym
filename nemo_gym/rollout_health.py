@@ -31,6 +31,7 @@ from nemo_gym.health.checks import (
     _bind_policy_call_views,
     _canonical_trajectory,
     _ended_on_failed_call,
+    _is_context_overflow_rejection,
     _is_failed,
     _is_successful,
     _normalized_trajectory_calls,
@@ -187,7 +188,9 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             unobserved.append(spec.id)
             continue
         if spec.id == "model_call_runaway_generation" and any(
-            call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS and call.get("response") is None
+            not _is_context_overflow_rejection(call)
+            and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
+            and call.get("response") is None
             for call in bindings.matched_calls
         ):
             unobserved.append(spec.id)
