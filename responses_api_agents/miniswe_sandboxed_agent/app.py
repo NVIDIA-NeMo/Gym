@@ -16,6 +16,11 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import Field
 
+from nemo_gym.adapters.turn_counter_proxy import (
+    TurnConstraintConfig,
+    start_turn_counter_proxy,
+    turn_constraint_metadata,
+)
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
@@ -25,9 +30,13 @@ from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_con
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
+    get_server_url,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
     rollout_path_prefix,
+)
+from nemo_gym.server_utils import (
+    request as model_request,
 )
 from responses_api_agents.miniswe_sandboxed_agent.harness import (
     HarnessContext,
@@ -51,6 +60,7 @@ class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
     num_workers: Literal[1] = 1
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
+    turn_constraint: TurnConstraintConfig | None = None
     harness: MiniSWEConfig = Field(default_factory=MiniSWEConfig)
     artifacts_dir: Path = Path("results/miniswe_sandboxed_agent")
     agent_max_timeout_sec: float | None = Field(default=None, gt=0)
@@ -217,6 +227,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         extra, timings = {}, {}
         agent_started = False
         provider = None
+        proxy = None
+        constraint = self.config.turn_constraint
         with rollout_context(rollout_id if capture_model_calls else None):
             try:
                 if seed.termination is None:
@@ -240,18 +252,43 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         )
                         params.input = [NeMoGymEasyInputMessage(role="user", content=context.instruction)]
 
+                        if constraint is not None:
+                            proxy = await start_turn_counter_proxy(
+                                upstream_base_url=get_server_url(self.config.model_server.name)
+                                + rollout_path_prefix(
+                                    rollout_id if capture_model_calls else None,
+                                    token_capture=self._token_id_capture_enabled(),
+                                )
+                                + "/v1",
+                                api_key="dummy",
+                                max_turns=constraint.limit,
+                                position=constraint.reminder.position,
+                                trigger=constraint.reminder.trigger,
+                                exhaustion_status=400,
+                            )
+
                         async def query(model_params):
                             prefix = rollout_path_prefix(
                                 rollout_id if capture_model_calls else None,
                                 token_capture=self._token_id_capture_enabled(),
                             )
-                            model_response = await self.server_client.post(
-                                server_name=self.config.model_server.name,
-                                url_path=prefix + "/v1/responses",
-                                json=model_params,
-                                headers={"x-session-id": seed.session_id},
-                                cookies=cookies,
-                            )
+                            if proxy is not None:
+                                model_response = await model_request(
+                                    "POST",
+                                    proxy.base_url + "/responses",
+                                    json=model_params,
+                                    headers={"x-session-id": seed.session_id},
+                                    cookies=cookies,
+                                    _max_connection_retries=0,
+                                )
+                            else:
+                                model_response = await self.server_client.post(
+                                    server_name=self.config.model_server.name,
+                                    url_path=prefix + "/v1/responses",
+                                    json=model_params,
+                                    headers={"x-session-id": seed.session_id},
+                                    cookies=cookies,
+                                )
                             await raise_for_status(model_response)
                             return NeMoGymResponse.model_validate(await get_response_json(model_response))
 
@@ -259,7 +296,9 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         harness = MiniSWEHarness(
                             sandbox=sandbox,
                             context=context,
-                            config=self.config.harness,
+                            config=self.config.harness.model_copy(update={"step_limit": 0})
+                            if constraint is not None
+                            else self.config.harness,
                             observability_enabled=isinstance(global_config, Mapping)
                             and bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)),
                             params=params,
@@ -287,6 +326,13 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                     detail=f"{type(exc).__name__}: {exc}",
                 )
             finally:
+                if proxy is not None:
+                    await proxy.stop()
+                    extra["turn_constraint"] = turn_constraint_metadata(
+                        constraint, proxy, harness_version="mini-swe-callback"
+                    ).model_dump(mode="json")
+                    if proxy.turns_used > constraint.limit and termination.reason not in {"timeout", "cancelled"}:
+                        termination = HarnessOutcome(reason="nonzero_exit", detail="TurnBudgetExceeded")
                 for timing in timings.values():
                     timing.setdefault("finished_at", now())
                 if provider is not None:

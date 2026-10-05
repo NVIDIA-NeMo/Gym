@@ -856,3 +856,83 @@ async def test_shutdown_finishes_seeding_and_requests_cleanup_within_budget(fixt
     session = next(iter(f.server._sessions.values()))
     assert session.expiry_task.cancelled()
     f.grade.assert_not_awaited()
+
+
+async def test_proxy_budget_still_grades_partial_work(fixture, monkeypatch):
+    from aiohttp import ClientResponse, ClientResponseError, ClientSession, web
+
+    from nemo_gym.adapters.turn_counter_proxy import TurnConstraintConfig
+
+    f = fixture
+    received = []
+
+    async def policy(request):
+        received.append(await request.json())
+        return web.json_response(
+            module.empty_response(f.body.responses_create_params, "model").model_dump(mode="json")
+        )
+
+    upstream = web.Application()
+    upstream.router.add_post("/{tail:.*}", policy)
+    runner = web.AppRunner(upstream)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    monkeypatch.setattr(module, "get_server_url", lambda _: f"http://127.0.0.1:{port}")
+    f.agent.config.host = "127.0.0.1"
+    f.agent.config.turn_constraint = TurnConstraintConfig(
+        enforcement="proxy", limit=2, reminder={"trigger": "per_turn", "position": "system_message"}
+    )
+    original = module.MiniSWEHarness
+    async with ClientSession() as session:
+
+        async def status(response):
+            if isinstance(response, ClientResponse):
+                response.raise_for_status()
+
+        async def value(response):
+            return await response.json() if isinstance(response, ClientResponse) else response.value
+
+        monkeypatch.setattr(module, "raise_for_status", status)
+        monkeypatch.setattr(module, "get_response_json", value)
+
+        async def post(method, url, **kwargs):
+            kwargs.pop("_max_connection_retries", None)
+            return await session.request(method, url, **kwargs)
+
+        monkeypatch.setattr(module, "model_request", post)
+
+        def harness(**kwargs):
+            instance = original(**kwargs)
+            assert instance.config.step_limit == 0
+
+            async def execute(budget):
+                for _ in range(3):
+                    try:
+                        await kwargs["query"]({"input": [{"role": "user", "content": "solve"}]})
+                    except ClientResponseError as exc:
+                        assert exc.status == 400
+                        return (
+                            module.empty_response(kwargs["params"], "model"),
+                            HarnessOutcome(reason="infrastructure_error", detail="budget rejected"),
+                            {},
+                        )
+                raise AssertionError("third model request was not rejected")
+
+            instance.execute = execute
+            return instance
+
+        monkeypatch.setattr(module, "MiniSWEHarness", harness)
+        try:
+            result = await f.agent.run(f.request, f.body)
+            assert result.reward == 0.75 and result.evaluation_completed
+            assert result.infrastructure_error is None
+            assert result.termination["detail"] == "TurnBudgetExceeded"
+            assert result.turn_constraint["realized"]["observed_count"] == 3
+            assert result.turn_constraint["realized"]["exhausted"]
+            assert len(received) == 2
+            assert "MUST provide your final answer NOW" in str(received[-1])
+            assert f.grade.await_count == 1
+        finally:
+            await runner.cleanup()
