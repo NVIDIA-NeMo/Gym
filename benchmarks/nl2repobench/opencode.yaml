@@ -9,12 +9,6 @@ nl2repobench_opencode_resources_server:
   _inherit_from: nl2repobench_resources_server
   resources_servers:
     nl2repobench:
-      # Upstream's agent sandbox is a generic, task-agnostic image with no
-      # pre-installed deps (see _AGENT_SANDBOX_IMAGE in app.py) - it needs
-      # real network access to pip install whatever the task requires, same
-      # as upstream. The verifier sandbox is unaffected by this flag; it
-      # always uses the real pinned per-task image with no network policy.
-      enforce_agent_no_network: false
       sandbox_model_server:
         type: responses_api_models
         name: policy_model
