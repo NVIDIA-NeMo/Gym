@@ -488,3 +488,27 @@ def test_malformed_evidence_keeps_other_check_results(retained_episode, collecti
     checks = {c["id"]: c for c in result["checks"]}
     assert any(c["status"] == "fail" for c in checks.values())
     assert checks["tokens.prompt_tokens"]["status"] == "pass"
+
+
+def test_missing_tool_request_blocks_only_request_comparison(retained_episode):
+    from scripts.harness_conformance.behavior import tool_checks
+
+    directory, witness = retained_episode
+    record = json.loads((directory / "rollouts.jsonl").read_text())
+    inv = record["ng_trajectory"]["invocations"][0]
+    inv["conversation"] = [i for i in inv["conversation"] if i.get("call_id") != "tool-1"]
+    checks = {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}
+    assert checks["tools.witness_join"]["status"] == "fail"
+    assert checks["tools.witness_request"]["status"] == "not_assessed"
+    assert checks["tools.witness_status"]["status"] == "pass"
+    assert checks["tools.witness_output"]["status"] == "pass"
+
+
+def test_missing_witness_does_not_fail_retained_evidence(retained_episode):
+    directory, _ = retained_episode
+    (directory / "witness.json").unlink()
+    result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
+    assert all(
+        c["status"] in {"not_assessed", "not_applicable"} for c in result["checks"] if c["kind"] == "behavioral"
+    )
+    assert all(v["verdict"] == "fulfilled" for v in result["evidence"].values())

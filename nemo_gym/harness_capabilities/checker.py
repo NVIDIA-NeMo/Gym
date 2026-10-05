@@ -218,7 +218,7 @@ class Inspector:
             not any(_missing_content(c.get(k)) for c in self.calls for k in ("request", "response")),
             "$.ng_trajectory.model_calls",
             ("TE-4", "TE-7"),
-            depends_on=("model_calls.present",),
+            depends_on=("model_calls.present", "calls.request", "calls.response"),
             reason="external, encrypted or invalid media is unavailable to this reader",
         )
         valid = True

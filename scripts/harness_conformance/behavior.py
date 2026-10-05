@@ -20,7 +20,9 @@ def _objects(value: object) -> list[dict]:
     return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
 
 
-def tool_checks(record: dict | None, witnessed: list[dict], *, applies: bool = True) -> list[dict]:
+def tool_checks(
+    record: dict | None, witnessed: list[dict], *, applies: bool = True, available: bool = True
+) -> list[dict]:
     results = Results()
     trajectory = _mapping((record or {}).get("ng_trajectory"))
     tools = _objects(trajectory.get("tool_calls"))
@@ -37,7 +39,7 @@ def tool_checks(record: dict | None, witnessed: list[dict], *, applies: bool = T
         identities,
         evidence=("TE-5",),
         applies=applies,
-        available=record is not None,
+        available=record is not None and available,
         location="$.ng_trajectory.tool_calls",
         reason="retained tool identities differ from the independent tool witness",
     )
@@ -55,6 +57,9 @@ def tool_checks(record: dict | None, witnessed: list[dict], *, applies: bool = T
             ]
             requests = [i for i in items if i.get("type") == "function_call"]
             values["join"].append(len(requests) == 1)
+            values["status"].append(tool.get("status") == ("failed" if expected["exit_code"] else "completed"))
+            observed = expected.get("outputs", [])
+            values["output"].append(bool(observed) and all(o == tool.get("output") for o in observed))
             if len(requests) != 1:
                 continue
             request = requests[0]
@@ -70,11 +75,8 @@ def tool_checks(record: dict | None, witnessed: list[dict], *, applies: bool = T
                 and arguments == expected["arguments"]
                 and tool.get("tool_name") == request.get("name")
             )
-            values["status"].append(tool.get("status") == ("failed" if expected["exit_code"] else "completed"))
-            observed = expected.get("outputs", [])
-            values["output"].append(bool(observed) and all(o == tool.get("output") for o in observed))
     for name, description in (
-        ("join", "request/result does not join uniquely"),
+        ("join", "request does not join uniquely"),
         ("request", "name or arguments differ"),
         ("status", "status differs"),
         ("output", "output differs"),
@@ -86,7 +88,7 @@ def tool_checks(record: dict | None, witnessed: list[dict], *, applies: bool = T
             evidence=("TE-5",),
             applies=applies,
             available=bool(values[name]),
-            depends_on=("tools.witness_ids",),
+            depends_on=("tools.witness_ids", "tools.witness_join") if name == "request" else ("tools.witness_ids",),
             reason="retained tool " + description + " from the independent tool witness",
         )
     return results.dump()
@@ -176,12 +178,12 @@ def inspect_behavior(
         lambda: record.get("reward") == scenario.expected_reward,
         evidence=("TE-6",),
         applies=not scenario.terminal_error,
-        present=record is not None,
+        present=record is not None and available,
         reason="rollout reward differs from the verifier witness",
     )
     for row in model_checks(record, attempts, fingerprint=fingerprint, available=available):
         results.rows[row["id"]] = CheckResult(**row)
-    for row in tool_checks(record, tools, applies=scenario.tool_steps > 0):
+    for row in tool_checks(record, tools, applies=scenario.tool_steps > 0, available=available):
         results.rows[row["id"]] = CheckResult(**row)
     return results.dump()
 
