@@ -53,6 +53,8 @@ materialization script is needed. Collection does not call the agent's compatibi
 Pass the same configuration to startup and `--no-serve` collection; collection does not
 inherit routing settings from the running servers.
 
+For Terminal-Bench 2.1, use the [native task-sandbox recipe](../../benchmarks/terminal_bench_2_1/README.md#codex-in-a-task-sandbox).
+
 ### Switch harness or benchmark
 
 To change a compatible harness, replace its config import, harness-specific settings,
@@ -75,7 +77,7 @@ tools are rejected; Codex supplies its own tools. The task sandbox supplies isol
 `sandbox_mode` must be `danger-full-access`. No Codex CLI is required on the agent-server host.
 
 The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine with Python 3.8+.
-It installs missing bootstrap prerequisites using apt-get or apk when running as root;
+It installs Python 3 when absent and missing bootstrap prerequisites using apt-get or apk when running as root;
 otherwise the image must provide them. The pinned Node 22.19.0 build has no arm64 musl binary.
 Older Alpine images use a checksum-verified private C++ library for Node. Runtime files live
 under `/tmp/nemo-gym-codex-node-*`, and session HOME/cache/config live under
