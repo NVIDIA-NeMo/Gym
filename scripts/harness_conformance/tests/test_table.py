@@ -93,8 +93,8 @@ def test_evidence_failures_publish_commit_runtime_and_test_provenance(generation
     text = page.read_text()
     assert text.startswith("Introduction\n") and text.endswith("\nDeprecated C-table\n")
     assert COMMIT in text and "synthetic-runtime-v1" in text
-    assert "## pi" in text and "Schema: `calls.outcome` | Fail" in text
-    assert "## hermes" in text and "No check results available | Not assessed" in text
+    assert "## pi" in text and "| **Schema** |" in text and "`calls.outcome` | ✗" in text
+    assert "## hermes" in text and "No check results available | ?" in text
     (asset,) = (root / table.ASSETS).glob("*.json")
     assert asset.name in text
     report = json.loads(asset.read_text())
