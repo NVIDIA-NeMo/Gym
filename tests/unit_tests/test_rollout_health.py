@@ -391,7 +391,7 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
                 futures.append(future)
             return futures
 
-        async def _call_aggregate_metrics(self, results, rows, output_fpath):
+        async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
             metrics_path = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
             metrics_path.write_bytes(orjson.dumps([{"key_metrics": {"reward": 1.0}}]))
             return metrics_path
