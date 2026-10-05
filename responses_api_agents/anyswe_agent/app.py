@@ -267,6 +267,8 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
     sandbox_model_base_url: Optional[str] = None
     agent_runtime_source: str = "baked"
+    # Where per-rollout artifacts go. Defaults to the agent source dir, which fills the Gym tree.
+    results_dir: Optional[str] = None
     swebench_tests_timeout: int = 1800
     swebench_agent_timeout: int = 2700
     concurrency: int = 256
@@ -421,7 +423,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
 
         self._server = AnySweServerConfig(
             run_session_id=session_id,
-            base_results_dir=workspace / f"anyswe_results_{session_id}",
+            base_results_dir=Path(self.config.results_dir or workspace).expanduser() / f"anyswe_results_{session_id}",
             model_server_url=model_url,
             agent_deps_archive=agent_deps_archive,
             agent_deps_url=agent_deps_url,
