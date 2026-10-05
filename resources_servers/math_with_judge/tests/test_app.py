@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from math_verify.errors import TimeoutException
 from pytest import approx, fixture, raises, skip
 
+from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
@@ -166,6 +167,10 @@ class TestApp:
         assert _extract_last_boxed_answer(r"\boxed{\frac{1}{2}}") == r"\frac{1}{2}"
         assert _extract_last_boxed_answer(r"\boxed{ exact text }") == " exact text "
         assert _extract_last_boxed_answer(r"\boxed{unclosed") is None
+
+    async def test_reverify_mode(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
+        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        assert await resources_server.get_reverify_mode() == ReverifyMode.STATELESS
 
     async def test_verify(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
