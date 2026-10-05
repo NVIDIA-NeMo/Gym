@@ -20,6 +20,8 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 
+from .registry import NATIVE_CHECKS
+
 
 SCHEMA_VERSION = "gym-p0-evidence/v2"
 TOKEN_FIELDS = ("tokens_in", "tokens_out", "tokens_reasoning", "tokens_total", "cached_tokens")
@@ -35,7 +37,9 @@ PATH_MODELS = {
 
 def model_errors(record: dict) -> Iterator[tuple[str, str]]:
     """Yield JSON pointers and error codes without copying source payloads."""
-    for path, adapter in PATH_MODELS.items():
+    for check in NATIVE_CHECKS:
+        path = check.locations[0].removeprefix("$.")
+        adapter = PATH_MODELS[path]
         parent, field = path.split(".")
         if parent not in record:
             continue
