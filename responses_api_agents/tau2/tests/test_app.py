@@ -22,7 +22,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_responses_api_agent import AggregateMetricsRequest
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_collection import (
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
+    _build_trajectory_record,
+)
+from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.server_utils import ServerClient
 
 
@@ -358,6 +364,8 @@ class TestApp:
                 m.pop("generation_time_seconds", None)
 
             d["response"].pop("created_at")
+            d["response"].pop("usage", None)
+            d.pop("ng_trajectory", None)
 
             for o in d["response"]["output"]:
                 o.pop("id", None)
@@ -373,6 +381,112 @@ class TestApp:
             return _drop_nulls(d)
 
         assert _clean(expected_response_dict) == _clean(actual_response_dict)
+
+    async def test_run_preserves_policy_call_evidence_for_rollout_health(self, tmp_path: Path) -> None:
+        _, server = self._dummy_server()
+        body = Tau2RunRequest.model_validate(
+            {
+                **self._example_run_request().model_dump(mode="json"),
+                "_ng_task_index": 4,
+                "_ng_rollout_index": 7,
+                "_ng_rollout_id": "rollout-7",
+            }
+        )
+        messages = [
+            AssistantMessage.text("Welcome").model_copy(update={"turn_idx": 0}),
+            UserMessage.text("start"),
+            AssistantMessage.text(
+                "hello",
+                raw_data={"id": "chatcmpl-first"},
+                usage={"prompt_tokens": 10, "completion_tokens": 2},
+            ),
+            UserMessage.text("hi"),
+            AssistantMessage.text(
+                "done",
+                raw_data={"id": "chatcmpl-last"},
+                usage={"prompt_tokens": 14, "completion_tokens": 3},
+            ),
+        ]
+
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
+            patch(
+                "responses_api_agents.tau2.app.run_single_task",
+                AsyncMock(return_value=self._fake_simulation_run(messages=messages)),
+            ),
+        ):
+            result = await server.run(body)
+
+        assert result.reward == 1.0
+        assert result.response.output[-1].content[0].text == "done"
+        assert result.ng_trajectory.task_id == "4"
+        assert result.ng_trajectory.rollout_id == "rollout-7"
+        assert [turn.turn_no for turn in result.ng_trajectory.turns] == [1, 2, 3]
+        assert [turn.answer["content"] for turn in result.ng_trajectory.turns] == ["Welcome", "hello", "done"]
+        assert result.ng_trajectory.turns[0].model_calls == []
+        assert [ref.response_id for ref in result.ng_trajectory.invocations[0].model_calls] == [
+            "chatcmpl-first",
+            "chatcmpl-last",
+        ]
+        assert [turn.model_calls[0].response_id for turn in result.ng_trajectory.turns[1:]] == [
+            "chatcmpl-first",
+            "chatcmpl-last",
+        ]
+        assert all(
+            ref.model_ref == server.config.model_server for ref in result.ng_trajectory.invocations[0].model_calls
+        )
+        assert [gap.code for gap in result.ng_trajectory.gaps] == ["synthetic_opening_turn_without_model_call"]
+        assert result.response.usage.input_tokens == 24
+        assert result.response.usage.output_tokens == 5
+        assert result.response.usage.total_tokens == 29
+
+        row = {"_ng_task_index": 4, "_ng_rollout_index": 7, "_ng_rollout_id": "rollout-7"}
+        record = result.model_dump(mode="json")
+        model_ref = server.config.model_server.model_dump(mode="json")
+        record["ng_model_call_capture"] = {
+            "calls": [
+                {
+                    "model_call_id": f"capture-{index}",
+                    "model_ref": model_ref,
+                    "response_id": response_id,
+                    "status_code": 200,
+                    "response_status": "completed",
+                    "finish_reason": "stop",
+                    "tokens_in": prompt,
+                    "tokens_out": completion,
+                    "response": {"output_text": answer},
+                }
+                for index, (response_id, prompt, completion, answer) in enumerate(
+                    [("chatcmpl-first", 10, 2, "hello"), ("chatcmpl-last", 14, 3, "done")]
+                )
+            ]
+        }
+        record["ng_trajectory"] = _build_trajectory_record(row, record).model_dump(mode="json")
+        rollout_path = tmp_path / "rollouts.jsonl"
+        rollout_path.write_text(json.dumps({**row, **record}) + "\n")
+
+        [digest] = run_health_checks(rollout_path, workers=1).rollouts
+        assert digest.verdict == "healthy"
+        assert digest.findings == []
+        assert digest.unobserved == []
+
+    async def test_run_marks_missing_policy_call_id_as_gap(self) -> None:
+        _, server = self._dummy_server()
+        body = self._example_run_request()
+        messages = [AssistantMessage.text("done", usage={"prompt_tokens": 5, "completion_tokens": 2})]
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
+            patch(
+                "responses_api_agents.tau2.app.run_single_task",
+                AsyncMock(return_value=self._fake_simulation_run(messages=messages)),
+            ),
+        ):
+            result = await server.run(body)
+
+        assert result.reward == 1.0
+        assert result.ng_trajectory.turns[0].model_calls == []
+        assert [gap.code for gap in result.ng_trajectory.gaps] == ["turn_model_call_scope_incomplete"]
+        assert result.response.usage is None
 
     async def test_run_passes_agent_step_budget_config(self) -> None:
         _, server = self._dummy_server(max_agent_steps=3, turns_remaining_interval=2)
