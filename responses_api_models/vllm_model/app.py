@@ -1005,6 +1005,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
+                execution["error_category"] = "context_length_exceeded"
                 if self.config.propagate_context_overflow_errors:
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
                     raise
@@ -1340,6 +1341,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
+                execution["error_category"] = "context_length_exceeded"
                 if self.config.propagate_context_overflow_errors:
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
                     raise
