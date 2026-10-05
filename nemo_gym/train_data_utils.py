@@ -46,7 +46,7 @@ from nemo_gym.dataset_metrics import (
     DatasetMetricValue,
     load_dataset_metrics_hook,
 )
-from nemo_gym.episode_types import TaskId
+from nemo_gym.episode_types import TaskId, is_materialized_task_row
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
     HF_TOKEN_KEY_NAME,
@@ -358,10 +358,11 @@ def postprocess_other_metrics(metrics: DatasetMetrics, other_metrics: Dict[str, 
 
 
 def _native_task_parts(sample: Mapping[str, Any]) -> tuple[TaskId, Mapping[str, Any]] | None:
+    if not is_materialized_task_row(sample):
+        return None
     task_id = sample.get("task_id")
     task_input = sample.get("task_input")
-    if not isinstance(task_id, Mapping) or not isinstance(task_input, Mapping):
-        return None
+    assert isinstance(task_id, Mapping) and isinstance(task_input, Mapping)
     return TaskId.model_validate(task_id), task_input
 
 

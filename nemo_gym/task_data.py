@@ -49,6 +49,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from pydantic import BaseModel, TypeAdapter
 
+from nemo_gym.episode_types import is_materialized_task_row
+
 
 TASK_DATA_MODULE_NAME = "task_data"
 TASK_DATA_EXPORT_NAME = "TaskData"
@@ -229,8 +231,9 @@ class TaskDataValidator:
         # A materialized task carries its task data under task_input.task_data, already in its final
         # position, so that object is what the schema describes.
         task_input = row.get("task_input")
-        materialized = isinstance(row.get("task_id"), Mapping) and isinstance(task_input, Mapping)
+        materialized = is_materialized_task_row(row)
         if materialized:
+            assert isinstance(task_input, Mapping)
             task_data = task_input.get("task_data")
             if not isinstance(task_data, Mapping):
                 self.report.error_rows += 1

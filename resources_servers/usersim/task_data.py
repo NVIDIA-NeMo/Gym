@@ -8,7 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-UserSimAgentRole = Literal["user", "assistant", "judge", "summary"]
+UserSimAgentRole = Literal["user", "assistant", "judge", "summary", "tool_simulation"]
 
 
 class UserSimSamplingRequest(BaseModel):

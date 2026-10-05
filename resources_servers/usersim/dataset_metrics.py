@@ -4,9 +4,12 @@
 """Prepared-input metrics for native NeMo UserSim tasks."""
 
 from collections.abc import Mapping
+from typing import get_args
+
+from resources_servers.usersim.task_data import UserSimAgentRole
 
 
-AGENT_ROLES = ("user", "assistant", "judge", "summary")
+AGENT_ROLES = get_args(UserSimAgentRole)
 
 
 def compute_task_metrics(task_input: Mapping[str, object]) -> dict[str, bool | str | None]:
