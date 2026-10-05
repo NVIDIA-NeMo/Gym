@@ -1188,6 +1188,17 @@ class DispatchLatencyTracker:
         if seconds > 0:
             bisect.insort(self._durations, seconds)
 
+    def record_failure(self, seconds: float) -> None:
+        """Record a failed attempt only when it ran at least as long as the median so far.
+
+        A task that timed out or died late shows how long tasks can run, so it can raise the
+        drain margin. One that failed at once says nothing about duration and would drag the
+        p75 toward zero, so it is ignored, as is any failure before a real completion exists.
+        """
+        median = self.quantile(0.5)
+        if median is not None and seconds >= median:
+            self.record(seconds)
+
     def record_drained(self) -> None:
         self._drained += 1
 
@@ -1222,12 +1233,12 @@ class DispatchLatencyTracker:
         else:
             total = sum(self._durations)
             lines = [
-                f"Per-task latency over {len(self._durations)} completed rollout(s): "
+                f"Per-task latency over {len(self._durations)} finished attempt(s): "
                 f"median {self.quantile(0.5) / 60:.1f} min, "
                 f"p90 {self.quantile(0.9) / 60:.1f} min, "
                 f"p99 {self.quantile(0.99) / 60:.1f} min, "
                 f"max {max(self._durations) / 60:.1f} min",
-                f"Task-time delivered: {total / 3600:.1f} task-hours",
+                f"Task-time observed: {total / 3600:.1f} task-hours",
             ]
         if self._drained:
             lines.append(
@@ -1500,9 +1511,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     @model_validator(mode="after")
     def _validate_dispatch_concurrency(self) -> "RolloutCollectionConfig":
-        if self.dispatch_budget_s is not None and self.num_samples_in_parallel is None:
+        if (
+            self.dispatch_budget_s is not None
+            and self.num_samples_in_parallel is None
+            and self.max_resident_rollout_tasks is None
+        ):
             raise ValueError(
-                "dispatch_budget_s requires a finite positive num_samples_in_parallel; "
+                "dispatch_budget_s requires num_samples_in_parallel or max_resident_rollout_tasks; "
                 "unbounded dispatch can POST the entire queue before the budget is re-checked"
             )
         return self
@@ -3769,6 +3784,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 stage = "request"
                 if on_dispatch is not None:
                     on_dispatch(row)
+                succeeded = False
                 try:
                     request_body = _native_episode_request_body(row) if _materialized_taskset(row) else row
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
@@ -3786,7 +3802,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000
-                    tracker.record(time.monotonic() - started)
+                    succeeded = True
                     return _CompletedRollout(
                         row=row,
                         result=result,
@@ -3821,6 +3837,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server=server_name,
                         environment_server_type=server_type,
                     )
+                finally:
+                    # Failed and timed-out tasks inform the adaptive margin too, but only by
+                    # raising it: see ``DispatchLatencyTracker.record_failure``.
+                    elapsed = time.monotonic() - started
+                    if succeeded:
+                        tracker.record(elapsed)
+                    else:
+                        tracker.record_failure(elapsed)
 
         if max_resident_tasks is not None:
             return _BoundedCompletionIterator(
