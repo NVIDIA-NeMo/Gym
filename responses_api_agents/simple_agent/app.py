@@ -122,7 +122,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             # We raise for status here since we expect model calls to always work.
             await raise_for_status(model_response)
             model_response_json = await get_response_json(model_response)
-            model_server_cookies = model_response.cookies
+            model_server_cookies = {**(model_server_cookies or {}), **model_response.cookies}
             try:
                 model_response = NeMoGymResponse.model_validate(model_response_json)
             except ValidationError as e:
@@ -220,7 +220,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         cookies=resources_server_cookies,
                     )
                     tool_output = (await api_response.content.read()).decode()
-                    resources_server_cookies = api_response.cookies
+                    # Set-Cookie is a delta; tool errors may send no cookies.
+                    resources_server_cookies = {**(resources_server_cookies or {}), **api_response.cookies}
                     if collect_trajectory:
                         completed = 200 <= api_response.status < 400
                         tool_status = "completed" if completed else "failed"
@@ -313,7 +314,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(seed_session_response)
-        cookies = seed_session_response.cookies
+        cookies = {**cookies, **seed_session_response.cookies}
 
         response = await self.server_client.post(
             server_name=self.config.name,
@@ -323,7 +324,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(response)
         model_response_json = await get_response_json(response)
-        cookies = response.cookies
+        cookies = {**cookies, **response.cookies}
 
         trajectory = None
         expected_rollout_id = self.rollout_id_from_run(body)
