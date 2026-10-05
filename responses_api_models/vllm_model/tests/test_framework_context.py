@@ -284,8 +284,8 @@ def test_failed_call_keeps_intent_without_claiming_worker_custody(monkeypatch, t
     [
         ("chat/completions", {"messages": [{"role": "user", "content": "hi"}], "stream": True}),
         ("chat/completions", {"messages": [{"role": "user", "content": "hi"}], "n": 2}),
-        ("responses", {"input": "hi", "stream": True}),
         ("responses", {"input": "hi", "previous_response_id": "opaque"}),
+        ("responses", {"input": "hi", "stream": True, "previous_response_id": "opaque"}),
     ],
 )
 def test_unsupported_request_does_not_reach_generation(monkeypatch, tmp_path, dialect, body):
@@ -293,6 +293,110 @@ def test_unsupported_request_does_not_reach_generation(monkeypatch, tmp_path, di
     response = harness.client.post(f"/ng-rollout/attempt/training-token-capture/v1/{dialect}", json=body)
     assert response.status_code == 422, response.text
     assert not harness.worker_calls
+
+
+def test_tool_arguments_beyond_the_64_bit_range_still_admit(monkeypatch, tmp_path):
+    """A tool call whose arguments carry an integer beyond 64 bits (a kernel
+    task's bitmask) must canonicalize for the replay digest instead of failing
+    the call's capture and poisoning the rest of the attempt."""
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    history = HISTORY + [
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "shell",
+            "arguments": '{"mask": 340282366920938463463374607431768211455}',
+        },
+        {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
+    ]
+    first = assert_clean(harness.post("attempt", history))
+    assert_clean(harness.post("attempt", history + first["output"] + [{"role": "user", "content": "next"}]))
+    manifest = harness.manifest("attempt")
+    assert len(manifest.records) == 2 and not manifest.failures and not manifest.pending_call_ids
+
+
+def test_an_unexplained_history_rewrite_roots_a_new_segment(monkeypatch, tmp_path):
+    """A request whose items extend a stored prefix with something other than
+    user/tool observations (a harness compaction that keeps the leading
+    context, or an echo shape no candidate explains) still admits as a
+    candidate proposing the latest record; the worker decides it cannot
+    splice and roots a new segment, and the ledger ends clean with a
+    parentless second record instead of a failed call."""
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    first = assert_clean(harness.post("attempt", HISTORY))
+    rewritten = HISTORY + [
+        {"role": "assistant", "content": "summary of earlier work (compacted)"},
+        {"role": "user", "content": "continue from the summary"},
+    ]
+    assert first["output"]
+    assert_clean(harness.post("attempt", rewritten))
+    manifest = harness.manifest("attempt")
+    assert len(manifest.records) == 2 and not manifest.failures and not manifest.pending_call_ids
+    # The gateway proposed its latest record; rooting is the worker's decision.
+    assert harness.worker_calls[1][0].mode == "candidate"
+    assert harness.worker_calls[1][0].parent_call_id == manifest.records[0].model_call_id
+    # The rewrite rooted a new segment instead of chaining onto the first call.
+    assert manifest.records[1].parent_call_id is None
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("status", [400, 429, 500])
+def test_engine_errors_preserve_unacknowledged_intents(monkeypatch, tmp_path, stream, status):
+    """An HTTP error alone does not acknowledge that staging stopped."""
+    import json as _json
+
+    from aiohttp import ClientResponseError
+
+    async def refusing_worker(client, **body):
+        request_info = MagicMock(real_url="http://worker.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=status, message="Engine error")
+        error.response_content = _json.dumps(
+            {"object": "error", "message": "maximum context length is 32768 tokens", "code": status}
+        ).encode()
+        raise error
+
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", refusing_worker)
+    response = harness.client.post(
+        "/ng-rollout/attempt/training-token-capture/v1/responses",
+        json={"input": HISTORY, "stream": stream},
+    )
+    if stream:
+        # The streaming contract reports the refusal as a terminal event.
+        assert response.status_code == 200, response.text
+        assert "response.failed" in response.text
+    else:
+        # Without propagate_context_overflow_errors the refusal surfaces as a
+        # plain server error; the ledger contract below is what matters.
+        assert response.status_code >= 400, response.text
+    manifest = harness.manifest("attempt")
+    assert len(manifest.pending_call_ids) == 1, manifest
+    assert [f.reason for f in manifest.failures] == ["request_finished_without_staged_coordinates"]
+
+
+def test_streaming_responses_capture_like_their_non_streaming_twin(monkeypatch, tmp_path):
+    """SSE-only Responses harnesses (the Codex CLI) send ``stream: true``. The dispatch
+    makes exactly one non-streaming worker call through capture and replays the finished
+    response as synthesized SSE, so the ledger records the call like any other."""
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    response = harness.client.post(
+        "/ng-rollout/attempt/training-token-capture/v1/responses",
+        json={"input": HISTORY, "stream": True},
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "response.completed" in response.text
+    # Capture transport fields never reach the served stream.
+    assert NG_CAPTURE_FIELD not in response.text
+    assert NG_COMMIT_COORDS_FIELD not in response.text
+    assert "prompt_token_ids" not in response.text
+    # One admitted worker call, retries off, recorded in the manifest.
+    assert len(harness.worker_calls) == 1
+    admission, retry_requests = harness.worker_calls[0]
+    assert admission is not None
+    assert retry_requests is False
+    manifest = harness.manifest("attempt")
+    assert len(manifest.records) == 1 and not manifest.failures and not manifest.pending_call_ids
 
 
 @pytest.mark.parametrize("failure", ["request", "read"])

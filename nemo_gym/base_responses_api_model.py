@@ -301,10 +301,15 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """
         context = current_capture_context()
         if context is not None and context.framework_owned_context:
-            if body.get("stream") or body.get("previous_response_id") or body.get("conversation"):
-                raise HTTPException(
-                    status_code=422, detail="Framework context requires explicit non-streaming history"
-                )
+            # ``stream: true`` is allowed: the streaming branch below makes exactly one
+            # non-streaming ``responses()`` call and re-emits the completed response as
+            # synthesized SSE, so the engine-bound request stays non-streaming (external
+            # capture refuses a streamed backend request) and ``_stream_served_response``
+            # finalizes the capture before the stream is committed. SSE-only harnesses
+            # such as the Codex CLI thereby run under framework-owned context. Server-held
+            # history is still refused: it hides part of the context from capture.
+            if body.get("previous_response_id") or body.get("conversation"):
+                raise HTTPException(status_code=422, detail="Framework context requires explicit history")
         if not body.get("stream"):
             params = _validate_responses_params(body)
             response = await self._invoke_responses(request, params)
