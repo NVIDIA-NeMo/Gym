@@ -108,9 +108,7 @@ async def test_nonempty_parse_retries_preserve_existing_fallback(server, recover
     )
     server.server_client.post = AsyncMock(return_value=response)
     result = await server._run_single_comparison([], {}, {})
-    assert result == (
-        comparison_result() if recovers else comparison_result(3.0, 3.0, 3.5, overall_parse_failed=1.0)
-    )
+    assert result == (comparison_result() if recovers else comparison_result(3.0, 3.0, 3.5, overall_parse_failed=1.0))
     assert server.server_client.post.await_count == 2
 
 

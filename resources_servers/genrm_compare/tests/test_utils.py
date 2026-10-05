@@ -166,8 +166,7 @@ class TestParseGenRMOutput:
         output = json.dumps(
             {
                 "rubric_evaluations": [
-                    {"rubric_id": rubric_id, "score_1": 4, "score_2": 2, "ranking": 2}
-                    for rubric_id in rubric_ids
+                    {"rubric_id": rubric_id, "score_1": 4, "score_2": 2, "ranking": 2} for rubric_id in rubric_ids
                 ]
             }
         )
@@ -184,11 +183,7 @@ class TestParseGenRMOutput:
     @pytest.mark.parametrize("rubric_id", [True, 1.9])
     def test_rubric_mean_rejects_non_integral_ids(self, rubric_id) -> None:
         output = json.dumps(
-            {
-                "rubric_evaluations": [
-                    {"rubric_id": rubric_id, "score_1": 4, "score_2": 2, "ranking": 2}
-                ]
-            }
+            {"rubric_evaluations": [{"rubric_id": rubric_id, "score_1": 4, "score_2": 2, "ranking": 2}]}
         )
         with pytest.raises(GenRMOutputParseError):
             parse_genrm_output(
