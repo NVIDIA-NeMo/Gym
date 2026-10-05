@@ -828,18 +828,25 @@ class _RecordInspector:
             self._schema(f"TE-8.rfc.{field}", self.trajectory, "/ng_trajectory")
         if not self.scope.steps:
             return
-        call_ids = {call.get("model_call_id") for call in _objects(self.trajectory.get("model_calls"))}
+        calls = [
+            {
+                "model_call_id": call.get("model_call_id"),
+                "model_ref": _mapping(call.get("response_metadata")).get("model_ref"),
+                "response_id": _mapping(call.get("response_metadata")).get("response_id"),
+            }
+            for call in _objects(self.trajectory.get("model_calls"))
+        ]
         for index, turn in enumerate(self.turns):
             location = f"/ng_trajectory/turns/{index}"
             self._schema("TE-9.rfc.references", turn, location)
             for ref_index, ref in enumerate(_objects(turn.get("model_calls"))):
-                call_id = ref.get("model_call_id")
-                if isinstance(call_id, str) and call_id.strip() and call_id not in call_ids:
+                if len(_resolve(ref, calls)) != 1:
                     self._fail(
                         "TE-9",
                         "rfc.reference_target",
-                        f"{location}/model_calls/{ref_index}/model_call_id",
-                        "model-call reference has no target in ng_trajectory.model_calls",
+                        f"{location}/model_calls/{ref_index}",
+                        "model-call reference must resolve to exactly one target in ng_trajectory.model_calls; "
+                        "all supplied identifiers must agree",
                     )
 
     def result(self) -> dict:

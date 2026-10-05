@@ -102,4 +102,16 @@ SANDBOX_ERROR = {
     "if": required_object(outcome={"enum": ["failed", "oom", "sandbox_error"]}),
     "then": required_object(error_type=NONBLANK),
 }
-TURN_CALLS = required_object(model_calls={**NONEMPTY, "items": required_object(model_call_id=NONBLANK)})
+MODEL_CALL_REF = {
+    "type": "object",
+    "properties": {
+        "model_call_id": {"anyOf": [NONBLANK, {"type": "null"}]},
+        "model_ref": {"anyOf": [MODEL_REF, {"type": "null"}]},
+        "response_id": {"anyOf": [NONBLANK, {"type": "null"}]},
+    },
+    "anyOf": [
+        required_object(model_call_id=NONBLANK),
+        required_object(model_ref=MODEL_REF, response_id=NONBLANK),
+    ],
+}
+TURN_CALLS = required_object(model_calls={**NONEMPTY, "items": MODEL_CALL_REF})

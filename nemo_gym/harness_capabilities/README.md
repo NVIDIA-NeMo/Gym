@@ -91,6 +91,10 @@ existing diagnostics but cannot satisfy these added canonical-field requirements
 New assertions use the registry's `rfc.*` names; schema fragments are attached to
 their entries in `registry.py` and defined in `schemas.py`.
 
+TE-9 accepts either `model_call_id` or `model_ref` plus `response_id` on each
+turn's call reference. It must resolve to exactly one saved call in
+`ng_trajectory.model_calls`; every supplied identifier must agree with that call.
+
 Saved sandbox records are checked under TE-6 (the RFC's combined TE-6/TE-10
 section). Pass `--require-sandbox` to `inspect` or `matrix` to require at least
 one; leaving it unset does not establish sandbox coverage.

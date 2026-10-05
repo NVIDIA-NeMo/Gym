@@ -173,22 +173,88 @@ def test_supported_sandbox_outcomes(outcome):
     assert inspect(record, require_sandbox=True)["evidence"]["TE-6"]["verdict"] == "fulfilled"
 
 
-def test_references_require_nonempty_canonical_ids():
+def test_turns_require_nonempty_call_references():
     record = evidence_record()
     turn = record["ng_trajectory"]["turns"][0]
     turn["model_calls"] = []
     assert "TE-9.rfc.references" in ids(inspect(record))
-    turn["model_calls"] = [copy.deepcopy(record["ng_trajectory"]["invocations"][0]["model_calls"][0])]
-    turn["model_calls"][0].pop("model_call_id")
-    # Native model permits model_ref + response_id; the RFC requires model_call_id.
-    assert "TE-9.rfc.references" in ids(inspect(record))
 
 
-def test_call_target_must_exist_in_the_same_saved_trajectory():
+@pytest.mark.parametrize("form", ["call_id", "response_id", "response_id_null_call_id", "all"])
+def test_supported_call_reference_forms_resolve(form):
+    record = evidence_record()
+    for turn in record["ng_trajectory"]["turns"]:
+        ref = turn["model_calls"][0]
+        if form == "call_id":
+            ref["model_ref"] = ref["response_id"] = None
+        elif form == "response_id":
+            del ref["model_call_id"]
+        elif form == "response_id_null_call_id":
+            ref["model_call_id"] = None
+    result = inspect(record)
+    assert result["evidence"]["TE-9"]["verdict"] == "fulfilled", result["findings"]
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        {},
+        {"response_id": "response-1"},
+        {"model_ref": {"type": "responses_api_models", "name": "synthetic-model"}},
+        {"model_call_id": " \t"},
+        {"model_ref": {"type": "responses_api_models", "name": " "}, "response_id": "response-1"},
+        {"model_ref": {"type": "responses_api_models", "name": "synthetic-model"}, "response_id": " "},
+        {"model_call_id": "attempt-1", "response_id": ""},
+    ],
+)
+def test_incomplete_or_blank_call_reference_fails_schema(ref):
+    validator = Draft202012Validator(CHECKS["TE-9.rfc.references"].schema)
+    assert not validator.is_valid({"model_calls": [ref]})
+
+
+@pytest.mark.parametrize("response_reference", [False, True])
+def test_call_target_must_exist_in_the_same_saved_trajectory(response_reference):
     record = hydrate_record(evidence_record())
+    if response_reference:
+        for turn in record["ng_trajectory"]["turns"]:
+            turn["model_calls"][0].pop("model_call_id")
     record["ng_trajectory"]["model_calls"].pop()
     assert len(record["ng_model_call_capture"]["calls"]) == 2
     assert "TE-9.rfc.reference_target" in ids(inspect(record))
+
+
+@pytest.mark.parametrize("field", ["model_call_id", "response_id", "model_ref"])
+def test_conflicting_supplied_call_identifiers_do_not_fall_back(field):
+    record = evidence_record()
+    ref = record["ng_trajectory"]["turns"][0]["model_calls"][0]
+    ref[field] = {"type": "responses_api_models", "name": "other-model"} if field == "model_ref" else "missing"
+    result = inspect(record)
+    assert "TE-9.rfc.references" not in ids(result)
+    assert "TE-9.rfc.reference_target" in ids(result)
+
+
+@pytest.mark.parametrize("response_reference", [False, True])
+def test_ambiguous_canonical_call_reference_fails(response_reference):
+    record = hydrate_record(evidence_record())
+    trajectory = record["ng_trajectory"]
+    if response_reference:
+        trajectory["turns"][0]["model_calls"][0].pop("model_call_id")
+    duplicate = copy.deepcopy(trajectory["model_calls"][0])
+    if response_reference:
+        duplicate["model_call_id"] = "another-attempt-with-same-response-id"
+    trajectory["model_calls"].append(duplicate)
+    assert "TE-9.rfc.reference_target" in ids(inspect(record))
+
+
+def test_response_id_is_scoped_to_the_model_server():
+    record = hydrate_record(evidence_record())
+    trajectory = record["ng_trajectory"]
+    trajectory["turns"][0]["model_calls"][0].pop("model_call_id")
+    other = copy.deepcopy(trajectory["model_calls"][0])
+    other["model_call_id"] = "other-server-call"
+    other["response_metadata"]["model_ref"]["name"] = "other-model"
+    trajectory["model_calls"].append(other)
+    assert "TE-9.rfc.reference_target" not in ids(inspect(record))
 
 
 @pytest.mark.parametrize("dialect", ["chat", "responses", "messages"])
