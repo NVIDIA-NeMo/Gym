@@ -589,14 +589,15 @@ Duplicate config paths:
                         available = ", ".join(repr(n) for n in sorted(same_type_names)) or "(none)"
                         hint = f"Available {maybe_server_ref.type}: {available}"
                     if (
-                        field_name == AGENT_SERVER_REF_KEY_NAME
+                        maybe_server_ref.type == AGENT_SERVER_TYPE_KEY_NAME
                         and server_instance_config.get_server_ref().type == ENVIRONMENT_SERVER_TYPE_KEY_NAME
                     ):
                         hint += (
-                            "\nIf the agent was renamed with `_inherit_from`, its environment server must be renamed with it."
+                            "\nIf the agent was renamed with `_inherit_from`, this environment server must reference "
+                            "the agent's new name."
                             "\nTo fix this automatically, run "
                             "`python scripts/add_legacy_agent_environment_servers.py <your config paths>` from a NeMo Gym checkout."
-                            "\nOr point this server's agent_server.name at the agent's new name."
+                            f"\nOr point this server's {field_name}.name at the agent's new name."
                         )
                     raise ServerRefNotFoundError(
                         f"""In server instance '{server_instance_config.name}', field '{field_name}' references {maybe_server_ref.type}/'{maybe_server_ref.name}', which is not defined in the merged config.
