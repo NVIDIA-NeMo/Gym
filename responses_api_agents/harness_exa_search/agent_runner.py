@@ -114,57 +114,73 @@ async def main() -> None:
         "entrypoint": "app.py",
         **settings["agent_kwargs"],
     }
-    exa_api_key = settings.get("exa_api_key")
-    if exa_api_key:
-        os.environ["EXA_API_KEY"] = exa_api_key
+    search_provider = settings.get("search_provider", "exa")
+    budget_env = {
+        "SEARCH_MAX_RESULTS": str(settings.get("search_max_results", 20)),
+        "SEARCH_MAX_CHARS_PER_RESULT": str(settings.get("search_max_chars_per_result", 30000)),
+        "SEARCH_MAX_CHARS_TOTAL": str(settings.get("search_max_chars_total", 65000)),
+    }
+    if search_provider == "exa":
+        api_key = settings.get("exa_api_key")
+        mcp_command = sys.executable
+        mcp_args = [settings["search_mcp_path"]]
+        mcp_env = {"EXA_API_KEY": api_key, **budget_env}
+    elif search_provider == "parallel":
+        api_key = settings.get("parallel_api_key")
+        mcp_command = sys.executable
+        mcp_args = [settings["search_mcp_path"]]
+        mcp_env = {"PARALLEL_API_KEY": api_key, **budget_env}
+    elif search_provider == "brave":
+        api_key = settings.get("brave_api_key")
+        mcp_command = sys.executable
+        mcp_args = [settings["search_mcp_path"]]
+        mcp_env = {"BRAVE_API_KEY": api_key, **budget_env}
+    else:
+        raise ValueError(f"unsupported search_provider: {search_provider}")
     if "model_server" in config_class.model_fields:
         config_values["model_server"] = ModelServerRef(name=model_name, type="responses_api_models")
     if "resources_server" in config_class.model_fields:
         config_values["resources_server"] = ResourcesServerRef(name="unused", type="resources_servers")
-    if "mcp_config" in config_class.model_fields and exa_api_key:
-        mcp_path = Path(settings["input_path"]).with_name("exa_mcp.json")
+    if "mcp_config" in config_class.model_fields and api_key:
+        mcp_path = Path(settings["input_path"]).with_name("search_mcp.json")
         mcp_path.write_text(
             json.dumps(
                 {
                     "mcpServers": {
-                        "exa": {
-                            "command": "npx",
-                            "args": ["-y", "exa-mcp-server"],
-                            "env": {"EXA_API_KEY": exa_api_key},
-                        }
+                        search_provider: {"command": mcp_command, "args": mcp_args, "env": mcp_env},
                     }
                 }
             )
         )
         config_values["mcp_config"] = str(mcp_path)
-    if "extra_config" in config_class.model_fields and exa_api_key:
-        config_values.setdefault("extra_config", {}).setdefault("mcp_servers", {})["exa"] = {
-            "command": "npx",
-            "args": ["-y", "exa-mcp-server"],
-            "env": {"EXA_API_KEY": exa_api_key},
+    if "extra_config" in config_class.model_fields and api_key:
+        config_values.setdefault("extra_config", {}).setdefault("mcp_servers", {})[search_provider] = {
+            "command": mcp_command,
+            "args": mcp_args,
+            "env": mcp_env,
         }
     for config_field in ("opencode_config", "kilo_config"):
-        if config_field in config_class.model_fields and exa_api_key:
-            config_values.setdefault(config_field, {}).setdefault("mcp", {})["exa"] = {
+        if config_field in config_class.model_fields and api_key:
+            config_values.setdefault(config_field, {}).setdefault("mcp", {})[search_provider] = {
                 "type": "local",
-                "command": ["npx", "-y", "exa-mcp-server"],
-                "environment": {"EXA_API_KEY": exa_api_key},
+                "command": [mcp_command, *mcp_args],
+                "environment": mcp_env,
                 "enabled": True,
             }
-    if "fabric_config" in config_class.model_fields and exa_api_key:
-        config_values.setdefault("fabric_config", {}).setdefault("mcp", {}).setdefault("servers", {})["exa"] = {
+    if "fabric_config" in config_class.model_fields and api_key:
+        config_values.setdefault("fabric_config", {}).setdefault("mcp", {}).setdefault("servers", {})[
+            search_provider
+        ] = {
             "transport": "stdio",
-            "url": "npx",
-            "args": ["-y", "exa-mcp-server"],
-            "env": {"EXA_API_KEY": exa_api_key},
+            "url": mcp_command,
+            "args": mcp_args,
+            "env": mcp_env,
             "exposure": "harness_native",
         }
-    if "openclaw_config" in config_class.model_fields and exa_api_key:
-        config_values.setdefault("openclaw_config", {}).setdefault("mcp", {}).setdefault("servers", {})["exa"] = {
-            "command": "npx",
-            "args": ["-y", "exa-mcp-server"],
-            "env": {"EXA_API_KEY": exa_api_key},
-        }
+    if "openclaw_config" in config_class.model_fields and api_key:
+        config_values.setdefault("openclaw_config", {}).setdefault("mcp", {}).setdefault("servers", {})[
+            search_provider
+        ] = {"command": mcp_command, "args": mcp_args, "env": mcp_env}
     if settings.get("pi_extension_path") and settings["agent"] == "pi":
         config_values.setdefault("extra_args", []).extend(["--extension", settings["pi_extension_path"]])
     try:

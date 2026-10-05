@@ -156,7 +156,13 @@ class HarnessExaSearchConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str | dict[str, Any] = "sandbox"
     sandbox_spec: dict[str, Any] = Field(default_factory=dict)
     sandbox_model_base_url: str | None = None
+    search_provider: str = "exa"
     exa_api_key: SecretStr | None = None
+    parallel_api_key: SecretStr | None = None
+    brave_api_key: SecretStr | None = None
+    search_max_results: int = 20
+    search_max_chars_per_result: int = 30000
+    search_max_chars_total: int = 65000
 
 
 class HarnessExaSearchRunRequest(BaseRunRequest):
@@ -190,6 +196,7 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
         input_path, output_path = f"{root}/input.json", f"{root}/response.json"
         runner_path, config_path = f"{root}/agent_runner.py", f"{root}/runner.json"
         pi_extension_path = f"{root}/exa_pi_extension.ts"
+        search_mcp_path = f"{root}/search_mcp.py"
         values = dict(self.config.sandbox_spec)
         provider = create_provider(self._provider)
         use_model_relay = self.config.sandbox_model_base_url is None and isinstance(provider, SupportsSandboxEndpoint)
@@ -228,6 +235,15 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
             "output_path": output_path,
             "exa_api_key": self.config.exa_api_key.get_secret_value() if self.config.exa_api_key else None,
             "pi_extension_path": pi_extension_path,
+            "search_provider": self.config.search_provider,
+            "search_mcp_path": search_mcp_path,
+            "parallel_api_key": (
+                self.config.parallel_api_key.get_secret_value() if self.config.parallel_api_key else None
+            ),
+            "brave_api_key": self.config.brave_api_key.get_secret_value() if self.config.brave_api_key else None,
+            "search_max_results": self.config.search_max_results,
+            "search_max_chars_per_result": self.config.search_max_chars_per_result,
+            "search_max_chars_total": self.config.search_max_chars_total,
         }
         sandbox = AsyncSandbox(provider, spec)
         try:
@@ -238,6 +254,9 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
                 (local / "runner.json").write_text(json.dumps(runner_config))
                 await sandbox.upload(Path(__file__).with_name("agent_runner.py"), runner_path)
                 await sandbox.upload(Path(__file__).with_name("exa_pi_extension.ts"), pi_extension_path)
+                await sandbox.upload(
+                    Path(__file__).with_name(f"{self.config.search_provider}_search_mcp.py"), search_mcp_path
+                )
                 await sandbox.upload(local / "input.json", input_path)
                 await sandbox.upload(local / "runner.json", config_path)
                 python = self.config.python
