@@ -325,7 +325,18 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             # (see benchmarks/nl2repobench/opencode.yaml) - upload() avoids that
             # class of failure entirely rather than relying on staying under some
             # untested ARG_MAX threshold.
-            await sandbox.exec(command="mkdir -p /workspace", timeout_s=60)
+            # cwd="/" is required here, not just defensive: exec()'s default cwd is
+            # SandboxSpec.workdir ("/workspace" above), and at least one provider
+            # (OpenSandbox) validates the cwd exists before running the command at
+            # all - so letting this call default to /workspace, the very directory
+            # it's trying to create, fails with "working directory does not exist"
+            # before mkdir ever runs. "/" is guaranteed to exist in any image.
+            mkdir_result = await sandbox.exec(command="mkdir -p /workspace", cwd="/", timeout_s=60)
+            if mkdir_result.return_code != 0:
+                raise RuntimeError(
+                    f"Failed to create /workspace in agent sandbox for {task_id(task)!r}: "
+                    f"{mkdir_result.stderr or mkdir_result.stdout or '(no output)'}"
+                )
             with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
                 f.write(task.start_md)
                 local_start_md_path = Path(f.name)
