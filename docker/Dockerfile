@@ -107,12 +107,6 @@ apt-get update
 apt-get install -y --no-install-recommends "nsight-systems-cli-${nsys_release}=${NSYS_VERSION}"
 rm -f /etc/apt/sources.list.d/nvidia-devtools.list /usr/share/keyrings/nvidia-devtools.asc
 
-# The EFA NIC sampler plugin ships a prebuilt Go binary (go1.26.5) with open
-# stdlib CVEs (CVE-2026-56853/56859/56862/56864/56865, CVE-2026-46600,
-# CVE-2026-33818). Nsight 2026.5.1 is the newest release, so drop the plugin;
-# it only samples EFA NICs, which Gym does not use.
-find /opt/nvidia/nsight-systems-cli -type d -name efa_metrics -prune -exec rm -rf {} +
-
 # The base image's cuda/bin dir can precede /usr/local/bin on PATH; if it
 # already symlinks nsys (pointing at the old bundled copy), repoint it.
 if [ -L /usr/local/cuda/bin/nsys ]; then
