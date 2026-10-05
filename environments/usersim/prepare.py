@@ -13,11 +13,11 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 
-BENCHMARK_DIR = Path(__file__).parent
-DATA_DIR = BENCHMARK_DIR / "data"
+ENVIRONMENT_DIR = Path(__file__).parent
+DATA_DIR = ENVIRONMENT_DIR / "data"
 PERSONAS_CACHE_DIR = DATA_DIR / "personas"
 OUTPUT_FPATH = DATA_DIR / "usersim.jsonl"
-EXAMPLE_FPATH = BENCHMARK_DIR.parents[1] / "resources_servers/usersim/data/example.jsonl"
+EXAMPLE_FPATH = ENVIRONMENT_DIR.parents[1] / "resources_servers/usersim/data/example.jsonl"
 DEFAULT_PERSONAS_DATASET_VERSION = "0.0.2"
 DEFAULT_PERSONAS_LOCALES = ("en_US",)
 DEFAULT_PERSONAS_PANEL_SIZE = 1_000

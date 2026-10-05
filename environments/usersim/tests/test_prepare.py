@@ -9,7 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from benchmarks.usersim import prepare as prepare_module
+from environments.usersim import prepare as prepare_module
 
 
 def _write_parquet(path: Path) -> None:

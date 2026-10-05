@@ -101,8 +101,8 @@ usersim_assistant:
       datasets:
         - name: usersim
           type: benchmark
-          jsonl_fpath: benchmarks/usersim/data/usersim.jsonl
-          prepare_script: benchmarks/usersim/prepare.py
+          jsonl_fpath: environments/usersim/data/usersim.jsonl
+          prepare_script: environments/usersim/prepare.py
           license: Apache 2.0
 
 usersim_environment:

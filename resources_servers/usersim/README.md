@@ -11,7 +11,7 @@ The benchmark configuration pins the persona dataset version to `0.0.2` and
 uses:
 
 ```text
-benchmarks/usersim/data/personas/
+environments/usersim/data/personas/
 └── 0.0.2/
     └── panels/
         ├── en_US.parquet
