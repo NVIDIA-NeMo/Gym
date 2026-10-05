@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shlex
 import sys
 import tempfile
 from copy import deepcopy
@@ -58,14 +59,6 @@ _WORKSPACE_EXCLUDES = "--exclude=.git --exclude=__pycache__ --exclude=.venv --ex
 # positional args (-C DIR .) — it must precede them or it's silently ignored
 # (older tar) or rejected outright (newer tar, exit code 2).
 _COLLECT_COMMAND = f"tar czf /tmp/workspace.tar.gz {_WORKSPACE_EXCLUDES} -C /workspace ."
-
-# Upstream NL2RepoBench runs the agent in a generic, task-agnostic OpenHands
-# sandbox image - no pre-installed deps, no existing scaffold, nothing but
-# start.md. The paper's grading image (task_image() below) is only ever
-# pulled at grading time, layering the agent's finished workspace on top of
-# it. Match that here: the agent gets this generic image, the verifier gets
-# the real pinned one.
-_AGENT_SANDBOX_IMAGE = "docker.all-hands.dev/all-hands-ai/runtime:0.56-nikolaik"
 
 _PASSED_RE = re.compile(r"(\d+)\s+passed")
 _FAILED_RE = re.compile(r"(\d+)\s+failed")
@@ -217,20 +210,13 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
 
     def _provider_options(self, *, phase: str) -> dict[str, Any]:
         options = deepcopy(self.config.sandbox_config.get("provider_options", {}))
-        if phase != "agent" or not self.config.enforce_agent_no_network:
-            # Non-agent phases never restrict network. Same for the agent phase when
-            # enforce_agent_no_network is off: upstream's agent has real internet access
-            # (it must pip install whatever the generic image doesn't already have), so
-            # leave provider_options' network_policy untouched/absent rather than forcing
-            # a deny-all-plus-one-allow-rule policy regardless of this flag (the previous
-            # bug here - the model-egress branch below used to run unconditionally).
+        if phase != "agent":
             options.pop("network_policy", None)
-            return options
-
-        model_egress_target = self._model_egress_target()
-        options.setdefault("network_policy", {"defaultAction": "deny", "egress": []})
-        if model_egress_target is not None:
-            network_policy = options["network_policy"]
+        model_egress_target = self._model_egress_target() if phase == "agent" else None
+        if phase == "agent" and self.config.enforce_agent_no_network:
+            options.setdefault("network_policy", {"defaultAction": "deny", "egress": []})
+        if phase == "agent" and model_egress_target is not None:
+            network_policy = options.setdefault("network_policy", {"defaultAction": "deny", "egress": []})
             if not isinstance(network_policy, dict):
                 raise TypeError("NL2RepoBench sandbox network_policy must be a mapping")
             egress = network_policy.setdefault("egress", [])
@@ -269,7 +255,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         current_task_id = task_id(task)
         resources = dict(self.config.sandbox_config.get("resources", {}))
         spec = SandboxSpec(
-            image=_AGENT_SANDBOX_IMAGE if phase == "agent" else task_image(task),
+            image=task_image(task),
             ttl_s=self.config.sandbox_config.get("ttl_s"),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir="/workspace",
@@ -292,6 +278,16 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         )
         sandbox = AsyncSandbox(provider)
         await sandbox.start(spec)
+        if phase == "agent":
+            # The pinned image is shared with the verifier sandbox and ships the real,
+            # graded test suite baked in (task_image() returns the same reference for
+            # both phases). Strip it from the agent's own copy so "hidden pytest suite"
+            # is actually hidden from the agent, not just undocumented in start.md — the
+            # verifier rebuilds its sandbox from this same image independently, so this
+            # has no effect on grading.
+            test_paths = " ".join(shlex.quote(f"/workspace/{p}") for p in task.test_files.files)
+            if test_paths:
+                await sandbox.exec(command=f"rm -rf {test_paths}", timeout_s=60)
         return sandbox
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
