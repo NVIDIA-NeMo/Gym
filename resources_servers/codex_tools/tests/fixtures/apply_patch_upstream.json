@@ -1,0 +1,823 @@
+{
+ "upstream": {
+  "repository": "openai/codex (codex-rs/apply-patch, standalone apply_patch binary)",
+  "note": "File contents use Python's surrogateescape for non-UTF-8 bytes; <ROOT> is the case directory."
+ },
+ "cases": [
+  {
+   "name": "add",
+   "files": {},
+   "patch": "*** Begin Patch\n*** Add File: a.txt\n+hello\n+world\n*** End Patch\n",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nA a.txt\n",
+    "stderr": "",
+    "files": {
+     "a.txt": "hello\nworld\n"
+    }
+   }
+  },
+  {
+   "name": "add_nested",
+   "files": {},
+   "patch": "*** Begin Patch\n*** Add File: x/y/z.txt\n+deep\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nA x/y/z.txt\n",
+    "stderr": "",
+    "files": {
+     "x/y/z.txt": "deep\n"
+    }
+   }
+  },
+  {
+   "name": "add_overwrite",
+   "files": {
+    "a.txt": "old\n"
+   },
+   "patch": "*** Begin Patch\n*** Add File: a.txt\n+new\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nA a.txt\n",
+    "stderr": "",
+    "files": {
+     "a.txt": "new\n"
+    }
+   }
+  },
+  {
+   "name": "delete",
+   "files": {
+    "a.txt": "x\n"
+   },
+   "patch": "*** Begin Patch\n*** Delete File: a.txt\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nD a.txt\n",
+    "stderr": "",
+    "files": {}
+   }
+  },
+  {
+   "name": "delete_missing",
+   "files": {},
+   "patch": "*** Begin Patch\n*** Delete File: nope.txt\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Failed to delete file <ROOT>/nope.txt\n",
+    "files": {}
+   }
+  },
+  {
+   "name": "delete_dir",
+   "files": {
+    "d/f": "x\n"
+   },
+   "patch": "*** Begin Patch\n*** Delete File: d\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Failed to delete file <ROOT>/d\n",
+    "files": {
+     "d/f": "x\n"
+    }
+   }
+  },
+  {
+   "name": "update_simple",
+   "files": {
+    "f.py": "a\nb\nc\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f.py\n@@\n a\n-b\n+B\n c\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f.py\n",
+    "stderr": "",
+    "files": {
+     "f.py": "a\nB\nc\n"
+    }
+   }
+  },
+  {
+   "name": "update_no_at",
+   "files": {
+    "f.py": "import foo\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f.py\n import foo\n+bar\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f.py\n",
+    "stderr": "",
+    "files": {
+     "f.py": "import foo\nbar\n"
+    }
+   }
+  },
+  {
+   "name": "update_ctx",
+   "files": {
+    "f.py": "def f():\n    pass\ndef g():\n    pass\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f.py\n@@ def g():\n-    pass\n+    return 1\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f.py\n",
+    "stderr": "",
+    "files": {
+     "f.py": "def f():\n    pass\ndef g():\n    return 1\n"
+    }
+   }
+  },
+  {
+   "name": "update_multi_chunk",
+   "files": {
+    "f": "1\n2\n3\n4\n5\n6\n7\n8\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n 1\n-2\n+two\n@@\n 6\n-7\n+seven\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "1\ntwo\n3\n4\n5\n6\nseven\n8\n"
+    }
+   }
+  },
+  {
+   "name": "update_eof",
+   "files": {
+    "f": "a\nb\na\nb\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n a\n-b\n+END\n*** End of File\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "a\nb\na\nEND\n"
+    }
+   }
+  },
+  {
+   "name": "update_append",
+   "files": {
+    "f": "a\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n+z\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "a\nz\n"
+    }
+   }
+  },
+  {
+   "name": "update_append_blank_tail",
+   "files": {
+    "f": "a\n\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n+z\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "a\nz\n"
+    }
+   }
+  },
+  {
+   "name": "update_no_trailing_nl",
+   "files": {
+    "f": "a\nb"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n-b\n+c\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "a\nc\n"
+    }
+   }
+  },
+  {
+   "name": "update_crlf",
+   "files": {
+    "f": "a\r\nb\r\nc\r\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n a\n-b\n+B\n c\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "a\nB\nc\n"
+    }
+   }
+  },
+  {
+   "name": "update_ws_fuzz",
+   "files": {
+    "f": "x = 1   \n  y = 2\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n-x = 1\n-y = 2\n+z = 3\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "z = 3\n"
+    }
+   }
+  },
+  {
+   "name": "update_unicode_fuzz",
+   "files": {
+    "f": "msg = \u201chi\u201d \u2014 ok\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n-msg = \"hi\" - ok\n+msg = 'bye'\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "msg = 'bye'\n"
+    }
+   }
+  },
+  {
+   "name": "update_move",
+   "files": {
+    "src/a.py": "x\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: src/a.py\n*** Move to: dst/b.py\n@@\n-x\n+y\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM dst/b.py\n",
+    "stderr": "",
+    "files": {
+     "dst/b.py": "y\n"
+    }
+   }
+  },
+  {
+   "name": "update_blank_ctx_line",
+   "files": {
+    "f": "a\n\nb\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n a\n\n-b\n+c\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "a\n\nc\n"
+    }
+   }
+  },
+  {
+   "name": "update_trailing_empty_pattern",
+   "files": {
+    "f": "a\nb\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n-b\n-\n+c\n+\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "a\nc\n"
+    }
+   }
+  },
+  {
+   "name": "update_missing_file",
+   "files": {},
+   "patch": "*** Begin Patch\n*** Update File: nope\n@@\n-a\n+b\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Failed to read file to update <ROOT>/nope: No such file or directory (os error 2)\n",
+    "files": {}
+   }
+  },
+  {
+   "name": "update_ctx_not_found",
+   "files": {
+    "f": "a\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@ class Nope\n-a\n+b\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Failed to find context 'class Nope' in <ROOT>/f\n",
+    "files": {
+     "f": "a\n"
+    }
+   }
+  },
+  {
+   "name": "update_lines_not_found",
+   "files": {
+    "f": "a\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n-zzz\n-yyy\n+b\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Failed to find expected lines in <ROOT>/f:\nzzz\nyyy\n",
+    "files": {
+     "f": "a\n"
+    }
+   }
+  },
+  {
+   "name": "update_empty",
+   "files": {
+    "f": "a\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Invalid patch hunk on line 2: Update file hunk for path 'f' is empty\n",
+    "files": {
+     "f": "a\n"
+    }
+   }
+  },
+  {
+   "name": "update_empty_chunk_end",
+   "files": {
+    "f": "a\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Invalid patch hunk on line 4: Update hunk does not contain any lines\n",
+    "files": {
+     "f": "a\n"
+    }
+   }
+  },
+  {
+   "name": "update_bad_line",
+   "files": {
+    "f": "a\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n-a\n+b\nbad line\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Invalid patch hunk on line 6: Expected update hunk to start with a @@ context marker, got: 'bad line'\n",
+    "files": {
+     "f": "a\n"
+    }
+   }
+  },
+  {
+   "name": "update_bad_first_line",
+   "files": {
+    "f": "a\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\nbad\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Invalid patch hunk on line 3: Unexpected line found in update hunk: 'bad'. Every line should start with ' ' (context line), '+' (added line), or '-' (removed line)\n",
+    "files": {
+     "f": "a\n"
+    }
+   }
+  },
+  {
+   "name": "update_after_eof_bad",
+   "files": {
+    "f": "a\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n-a\n+b\n*** End of File\n c\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Invalid patch hunk on line 7: Expected update hunk to start with a @@ context marker, got: ' c'\n",
+    "files": {
+     "f": "a\n"
+    }
+   }
+  },
+  {
+   "name": "update_double_at",
+   "files": {
+    "f": "a\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n@@\n-a\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Invalid patch hunk on line 4: Unexpected line found in update hunk: '@@'. Every line should start with ' ' (context line), '+' (added line), or '-' (removed line)\n",
+    "files": {
+     "f": "a\n"
+    }
+   }
+  },
+  {
+   "name": "bad_first",
+   "files": {},
+   "patch": "hello\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Invalid patch: The first line of the patch must be '*** Begin Patch'\n",
+    "files": {}
+   }
+  },
+  {
+   "name": "missing_end",
+   "files": {},
+   "patch": "*** Begin Patch\n*** Add File: a\n+x\n",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Invalid patch: The last line of the patch must be '*** End Patch'\n",
+    "files": {}
+   }
+  },
+  {
+   "name": "empty_patch",
+   "files": {},
+   "patch": "*** Begin Patch\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "No files were modified.\n",
+    "files": {}
+   }
+  },
+  {
+   "name": "bad_header",
+   "files": {},
+   "patch": "*** Begin Patch\n*** Frobnicate: a\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Invalid patch hunk on line 2: '*** Frobnicate: a' is not a valid hunk header. Valid hunk headers: '*** Add File: {path}', '*** Delete File: {path}', '*** Update File: {path}'\n",
+    "files": {}
+   }
+  },
+  {
+   "name": "add_bad_line",
+   "files": {},
+   "patch": "*** Begin Patch\n*** Add File: a\n+x\ny\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Invalid patch hunk on line 4: 'y' is not a valid hunk header. Valid hunk headers: '*** Add File: {path}', '*** Delete File: {path}', '*** Update File: {path}'\n",
+    "files": {}
+   }
+  },
+  {
+   "name": "heredoc",
+   "files": {},
+   "patch": "<<'EOF'\n*** Begin Patch\n*** Add File: h.txt\n+hi\n*** End Patch\nEOF\n",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nA h.txt\n",
+    "stderr": "",
+    "files": {
+     "h.txt": "hi\n"
+    }
+   }
+  },
+  {
+   "name": "heredoc_short",
+   "files": {},
+   "patch": "<<EOF\n*** Begin Patch\n*** End Patch\nEOF",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "No files were modified.\n",
+    "files": {}
+   }
+  },
+  {
+   "name": "whitespace_markers",
+   "files": {
+    "f": "a\n"
+   },
+   "patch": "  *** Begin Patch  \n*** Update File: f\n@@\n-a\n+b\n  *** End Patch  ",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "b\n"
+    }
+   }
+  },
+  {
+   "name": "multi_ops",
+   "files": {
+    "d.txt": "bye\n",
+    "u.txt": "1\n"
+   },
+   "patch": "*** Begin Patch\n*** Add File: n.txt\n+new\n*** Delete File: d.txt\n*** Update File: u.txt\n@@\n-1\n+2\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nA n.txt\nM u.txt\nD d.txt\n",
+    "stderr": "",
+    "files": {
+     "n.txt": "new\n",
+     "u.txt": "2\n"
+    }
+   }
+  },
+  {
+   "name": "partial_failure",
+   "files": {
+    "u.txt": "1\n"
+   },
+   "patch": "*** Begin Patch\n*** Add File: n.txt\n+new\n*** Update File: u.txt\n@@\n-nomatch\n+2\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Failed to find expected lines in <ROOT>/u.txt:\nnomatch\n",
+    "files": {
+     "n.txt": "new\n",
+     "u.txt": "1\n"
+    }
+   }
+  },
+  {
+   "name": "env_id",
+   "files": {},
+   "patch": "*** Begin Patch\n*** Environment ID: dev\n*** Add File: a\n+x\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nA a\n",
+    "stderr": "",
+    "files": {
+     "a": "x\n"
+    }
+   }
+  },
+  {
+   "name": "env_id_empty",
+   "files": {},
+   "patch": "*** Begin Patch\n*** Environment ID:   \n*** Add File: a\n+x\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Invalid patch: apply_patch environment_id cannot be empty\n",
+    "files": {}
+   }
+  },
+  {
+   "name": "move_only_no_chunks",
+   "files": {
+    "a": "x\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: a\n*** Move to: b\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Invalid patch hunk on line 2: Update file hunk for path 'a' is empty\n",
+    "files": {
+     "a": "x\n"
+    }
+   }
+  },
+  {
+   "name": "crlf_patch",
+   "files": {
+    "f": "a\n"
+   },
+   "patch": "*** Begin Patch\r\n*** Update File: f\r\n@@\r\n-a\r\n+b\r\n*** End Patch\r\n",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "b\n"
+    }
+   }
+  },
+  {
+   "name": "non_utf8",
+   "files": {
+    "f": "\udcff\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n-a\n+b\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Failed to read file to update <ROOT>/f: invalid utf-8 sequence of 1 bytes from index 0\n",
+    "files": {
+     "f": "\udcff\n"
+    }
+   }
+  },
+  {
+   "name": "add_empty_content",
+   "files": {},
+   "patch": "*** Begin Patch\n*** Add File: e.txt\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nA e.txt\n",
+    "stderr": "",
+    "files": {
+     "e.txt": ""
+    }
+   }
+  },
+  {
+   "name": "eof_marker_then_blank",
+   "files": {
+    "f": "a\nb\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n-b\n+c\n*** End of File\n\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "a\nc\n"
+    }
+   }
+  },
+  {
+   "name": "dup_ops",
+   "files": {
+    "f": "a\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n-a\n+b\n*** Update File: f\n@@\n-b\n+c\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "c\n"
+    }
+   }
+  },
+  {
+   "name": "non_utf8_mid",
+   "files": {
+    "f": "ok\n\udce2\udc82x\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n-a\n+b\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Failed to read file to update <ROOT>/f: invalid utf-8 sequence of 2 bytes from index 3\n",
+    "files": {
+     "f": "ok\n\udce2\udc82x\n"
+    }
+   }
+  },
+  {
+   "name": "non_utf8_truncated",
+   "files": {
+    "f": "ok\udce2\udc82"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n-a\n+b\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Failed to read file to update <ROOT>/f: incomplete utf-8 byte sequence from index 2\n",
+    "files": {
+     "f": "ok\udce2\udc82"
+    }
+   }
+  },
+  {
+   "name": "non_utf8_delete",
+   "files": {
+    "f": "\udcff"
+   },
+   "patch": "*** Begin Patch\n*** Delete File: f\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nD f\n",
+    "stderr": "",
+    "files": {}
+   }
+  },
+  {
+   "name": "dotdot_path",
+   "files": {
+    "sub/x": "1\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: sub/../sub/x\n@@\n-1\n+2\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM sub/../sub/x\n",
+    "stderr": "",
+    "files": {
+     "sub/x": "2\n"
+    }
+   }
+  },
+  {
+   "name": "ctx_then_eof",
+   "files": {
+    "f": "a\nb\nc\nb\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@ a\n-b\n+B\n*** End of File\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "a\nb\nc\nB\n"
+    }
+   }
+  },
+  {
+   "name": "insert_only_after_ctx",
+   "files": {
+    "f": "a\nb\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@ a\n+ins\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "a\nb\nins\n"
+    }
+   }
+  },
+  {
+   "name": "space_only_line",
+   "files": {
+    "f": "a\n  \nb\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n a\n   \n-b\n+c\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "a\n  \nc\n"
+    }
+   }
+  },
+  {
+   "name": "tab_indent_fuzz",
+   "files": {
+    "f": "\tif x:\n\t\treturn 1\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: f\n@@\n     if x:\n-        return 1\n+        return 2\n*** End Patch",
+   "expected": {
+    "exit": 0,
+    "stdout": "Success. Updated the following files:\nM f\n",
+    "stderr": "",
+    "files": {
+     "f": "    if x:\n        return 2\n"
+    }
+   }
+  },
+  {
+   "name": "dotdot_missing",
+   "files": {
+    "sub/x": "1\n"
+   },
+   "patch": "*** Begin Patch\n*** Update File: sub/../nope\n@@\n-1\n+2\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Failed to read file to update <ROOT>/nope: No such file or directory (os error 2)\n",
+    "files": {
+     "sub/x": "1\n"
+    }
+   }
+  },
+  {
+   "name": "dot_missing",
+   "files": {},
+   "patch": "*** Begin Patch\n*** Delete File: ./a/./b\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Failed to delete file <ROOT>/a/b\n",
+    "files": {}
+   }
+  },
+  {
+   "name": "trailing_slash_missing",
+   "files": {},
+   "patch": "*** Begin Patch\n*** Update File: a//b\n@@\n-1\n+2\n*** End Patch",
+   "expected": {
+    "exit": 1,
+    "stdout": "",
+    "stderr": "Failed to read file to update <ROOT>/a/b: No such file or directory (os error 2)\n",
+    "files": {}
+   }
+  }
+ ]
+}

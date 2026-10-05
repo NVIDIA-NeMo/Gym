@@ -1,0 +1,34 @@
+# Codex-style coding tools on a git working tree, driven by simple_agent.
+# Commands run unsandboxed with the server's permissions: use a trusted model and repository.
+codex_tools_resources_server:
+  resources_servers:
+    codex_tools:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Codex-style exec_command/write_stdin/apply_patch/update_plan tools on a git worktree
+      # Repository to work on, in order: +codex_tools_repo_path, the harness cwd (set by
+      # examples/simple_agent.py to the directory it runs from), else "." (this server's directory,
+      # i.e. the Gym checkout). Rows may override it via verifier_metadata.repo_path.
+      repo_path: ${oc.select:codex_tools_repo_path,${oc.select:harness_cwd,.}}
+      base_ref: HEAD
+      isolation: worktree
+      keep_workspace: false
+      check_timeout_s: 1800
+      session_idle_timeout_s: 3600
+codex_tools_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: codex_tools_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 200
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/codex_tools/data/example.jsonl
+          license: Apache 2.0
