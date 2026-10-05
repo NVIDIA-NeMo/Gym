@@ -1,0 +1,40 @@
+# The example through the single-agent-turn Environment Server. The Environment Server seeds the counter from the
+# task's initial_count, grants Simple Agent direct HTTP access to the counter tools, runs one agent turn, then verifies.
+config_paths:
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+example_session_state_mgmt_resources_server:
+  resources_servers:
+    example_session_state_mgmt:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Session state management (in-memory)
+example_session_state_mgmt_session_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      # Sessions take tool access from the Environment Server's grant; dataset tooling finds the task schema here.
+      resources_server:
+        type: resources_servers
+        name: example_session_state_mgmt_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/example_session_state_mgmt/data/example.jsonl
+
+example_session_state_mgmt_single_agent_turn:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: example_session_state_mgmt_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: example_session_state_mgmt_session_agent
+      resources_tool_transports:
+      - direct_http

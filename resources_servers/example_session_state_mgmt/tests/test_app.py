@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.example_session_state_mgmt.app import (
     StatefulCounterResourcesServer,
     StatefulCounterResourcesServerConfig,
@@ -71,6 +72,18 @@ class TestApp:
     def _server() -> StatefulCounterResourcesServer:
         config = StatefulCounterResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="counter")
         return StatefulCounterResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_follows_the_session_contract(self) -> None:
+        check_resources_session_contract(
+            self._server().setup_webserver(),
+            ResourcesSeedSessionRequest(
+                resources_session_id="contract-session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="example", task_id="0"),
+                task_data={"initial_count": 3, "expected_count": 6},
+            ),
+            keeps_state=True,
+        )
 
     def test_environment_server_session_counts_from_the_seeded_value(self) -> None:
         server = self._server()
