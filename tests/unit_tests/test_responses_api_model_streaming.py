@@ -385,6 +385,64 @@ class TestSanitizeStreamingBody:
         )
         assert cleaned["tools"] == []
 
+    HOSTED_TOOL_BODY = {
+        "input": [],
+        "stream": True,
+        "tools": [
+            {"type": "web_search"},
+            {"type": "function", "name": "exec_command", "parameters": {"type": "object"}, "strict": False},
+        ],
+    }
+
+    def test_keeps_hosted_tools_by_default(self) -> None:
+        # A hosted tool spec is a valid Responses tool, so it reaches a provider that serves it.
+        cleaned, _ = sanitize_streaming_responses_body(self.HOSTED_TOOL_BODY)
+
+        assert [tool["type"] for tool in cleaned["tools"]] == ["web_search", "function"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_drops_hosted_tools_when_asked(self) -> None:
+        # Only the provider executes a hosted tool. With the switch on it is dropped, so a backend
+        # that serves none of them offers the model only the tools the client executes.
+        cleaned, _ = sanitize_streaming_responses_body(self.HOSTED_TOOL_BODY, drop_hosted_tools=True)
+
+        assert [tool["type"] for tool in cleaned["tools"]] == ["function"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_drops_hosted_tools_keeps_custom_tools(self) -> None:
+        """The two tool switches are independent: a client-executed custom tool is not hosted."""
+        body = {
+            "input": [],
+            "stream": True,
+            "tools": [
+                {"type": "web_search"},
+                {"type": "custom", "name": "apply_patch", "description": "Apply a patch."},
+            ],
+        }
+
+        cleaned, _ = sanitize_streaming_responses_body(body, drop_hosted_tools=True)
+
+        assert [tool["type"] for tool in cleaned["tools"]] == ["custom"]
+
+    def test_drops_custom_tools_only_when_asked(self) -> None:
+        # A free-form custom tool converts to a Chat Completions custom tool, which a backend
+        # that expresses function tools only refuses; with the switch on it is dropped and the
+        # functions stay, and by default it is kept for backends that support it.
+        body = {
+            "input": [],
+            "stream": True,
+            "tools": [
+                {"type": "custom", "name": "apply_patch", "description": "Apply a patch."},
+                {"type": "function", "name": "exec_command", "parameters": {"type": "object"}, "strict": False},
+            ],
+        }
+        cleaned, _ = sanitize_streaming_responses_body(body, drop_custom_tools=True)
+        assert [tool["type"] for tool in cleaned["tools"]] == ["function"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+        kept, _ = sanitize_streaming_responses_body(body)
+        assert [tool["type"] for tool in kept["tools"]] == ["custom", "function"]
+
     def test_rewrites_namespaced_calls_in_input_history(self) -> None:
         cleaned, _ = sanitize_streaming_responses_body(
             {

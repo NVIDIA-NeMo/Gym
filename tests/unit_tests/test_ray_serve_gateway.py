@@ -19,7 +19,9 @@ from unittest.mock import call, patch
 import pytest
 
 from nemo_gym.orchestration.ray_serve_gateway import (
+    MAX_ONGOING_REQUESTS_PER_INSTANCE,
     build_instance_command,
+    deployment_options,
     free_local_port,
     max_replicas_per_node,
     parse_args,
@@ -132,6 +134,30 @@ def test_max_replicas_per_node_one_when_footprint_exactly_fills_a_node():
 def test_max_replicas_per_node_one_when_footprint_exceeds_a_node():
     # TP8 x PP2 = 16 GPUs/instance, spans 2 nodes - no other instance's driver may share either node.
     assert max_replicas_per_node(tensor_parallel_size=8, pipeline_parallel_size=2, gpus_per_node=8) == 1
+
+
+# ---------------------------------------------------------------------------
+# deployment_options
+# ---------------------------------------------------------------------------
+
+
+def test_deployment_options_lifts_the_per_instance_request_cap():
+    # Ray Serve defaults max_ongoing_requests to 5, which would cap each vLLM instance at 5
+    # concurrent requests no matter how large its own batch is.
+    args = parse_args(["--model", "/m", "--port", "8000", "--number-of-instances", "6", "--tensor-parallel-size", "8"])
+    options = deployment_options(args)
+    assert options["max_ongoing_requests"] == MAX_ONGOING_REQUESTS_PER_INSTANCE
+    assert MAX_ONGOING_REQUESTS_PER_INSTANCE >= 16384
+
+
+def test_deployment_options_carries_replica_count_and_placement():
+    args = parse_args(
+        ["--model", "/m", "--port", "8000", "--number-of-instances", "4", "--tensor-parallel-size", "2"]
+        + ["--gpus-per-node", "8"]
+    )
+    options = deployment_options(args)
+    assert options["num_replicas"] == 4
+    assert options["max_replicas_per_node"] == 4
 
 
 # ---------------------------------------------------------------------------
