@@ -29,7 +29,7 @@ from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_LOST
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
-from nemo_gym.session_conformance import check_resources_session_contract
+from nemo_gym.testing.session_conformance import check_resources_session_contract
 
 
 def _resources_server() -> SimpleResourcesServer:

@@ -4,7 +4,7 @@
 
 Servers run in their own environments, so these checks read source instead of importing each server. Behavior is
 tested where it lives: the base agent's session bookkeeping in the base agent tests, and a Resources Server's seed and
-close through ``nemo_gym.session_conformance`` in that server's tests.
+close through ``nemo_gym.testing.session_conformance`` in that server's tests.
 """
 
 import ast

@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Check that a Resources Server's routes follow the Environment Server session contract.
+"""Integration test for a Resources Server's Environment Server session lifecycle.
 
-A server's own tests call :func:`check_resources_session_contract` with the app its server builds. The check goes
-through the HTTP routes, so it also catches a route that another registration shadows.
+:func:`check_resources_session_contract` drives the app a server builds through its real HTTP routes and middleware,
+in process, the way an Environment Server calls a deployed server: typed seed, repeated seed, close, repeated close,
+close of a never-seeded session, and a seed after close. Call it from the server's own tests. Because it goes through
+the routes, it also catches a route that another registration shadows.
 """
 
 from fastapi import FastAPI
