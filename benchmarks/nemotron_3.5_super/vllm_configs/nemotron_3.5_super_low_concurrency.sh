@@ -54,4 +54,8 @@ VLLM_SERVE_ARGS=(
     # even with prefix caching on, and prompt_cache_hit_share cannot be computed. Payload only;
     # scheduling and sampling are unchanged.
     --enable-prompt-tokens-details
+    # Return engine-side per-request timings (queue_time_ms, engine TTFT, generation_time_ms,
+    # speculative-decoding acceptance) in the response body. Payload only. Requires engine stats
+    # logging, i.e. must not be combined with --disable-log-stats.
+    --enable-per-request-metrics
 )
