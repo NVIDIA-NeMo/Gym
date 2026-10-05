@@ -101,6 +101,67 @@ server_id:                    # Your unique name for this server
       # ... additional fields vary by server type
 ```
 
+### HTTP Connection Pool
+
+Gym uses one shared aiohttp connection pool per process. Each top-level limit is a budget for
+one server process group (or the rollout CLI), divided across that server's FastAPI workers. It
+is not a deployment-wide budget: every agent, model, and resources server gets its own pool.
+
+```yaml
+global_aiohttp_connector_limit: 102400
+global_aiohttp_connector_limit_per_host: 1024
+
+# Optional sizing checks. Set these when the expected outbound concurrency is known.
+global_aiohttp_intended_concurrency: 4096
+global_aiohttp_intended_concurrency_per_host: 1024
+```
+
+At startup, Gym logs the configured and effective per-worker limits once per server. An explicit
+connector limit of `0` keeps aiohttp's existing meaning of unlimited. Gym rejects a positive
+limit that becomes zero after worker division, because that would accidentally turn a bounded
+pool into an unlimited one. The optional intended-concurrency values also apply separately to
+each server or CLI pool. When intended demand is larger than effective capacity or can exhaust the
+file-descriptor budget, Gym logs an actionable warning. The connector limit and file-descriptor
+soft limit remain in the startup information line, but the connector ceiling alone does not trigger
+a file-descriptor warning because it is not an allocation.
+
+The total aiohttp limit is a scheduling limit, not a strict open-socket cap across multiple
+hosts. Idle-connection reuse and aiohttp's waiter wake-up order can exceed the total limit for
+as long as requests to more than one host are in flight. Pool waits are also not first come, first
+served: a new request that can reuse an idle pooled connection skips requests that are already
+waiting, and aiohttp wakes waiting hosts in random order, so a few requests can wait much longer than
+the backend latency. When sizing pools, keep file-descriptor, ephemeral-port, and downstream
+connection budgets in mind.
+
+Pool metrics require an active metrics exporter before the shared client is constructed.
+Gym server processes and the orchestrator used by `gym eval run` initialize telemetry
+automatically. When Gym telemetry is enabled and another library, such as NeMo RL, already set
+up nemo-lens in the same process, Gym reuses its providers, and pool metrics follow that library's
+metrics setting.
+Standalone `gym eval run --no-serve` and library calls to `setup_server_client()`
+do not initialize telemetry; callers must initialize it explicitly before creating the client.
+Initializing telemetry later does not replace an existing connector. Missing metrics from
+these standalone processes do not mean that no requests queued.
+
+When this instrumentation is installed, Gym records one histogram sample per queued aiohttp
+connection acquisition. This metric is independent of the `http_client` tracing span group:
+
+| Metric or attribute | Meaning |
+| --- | --- |
+| `gym.http.connection_pool.queue_duration_ms` | Histogram of wait time for queued connects; immediate connects do not record a sample |
+| `gym.http.connection_pool.connect_total` | Observable counter of all connection attempts (`connect()` calls), including attempts that later fail or are abandoned; use it as the denominator for the queued fraction |
+| `nemo.gym.http.connection_pool.queue_constraint` | Binding limit: `total`, `per_host`, or `unknown` |
+| `nemo.gym.http.connection_pool.queue_outcome` | Queue outcome: `ok`, or `abandoned` when the wait ends before a slot is available, including timeout and cancellation |
+| `nemo.gym.http.destination.server.name` | Configured destination server name for `ServerClient` calls, `remote_agent_service` for the remote agent's external service, or `external` for unlabeled direct calls |
+
+The destination attribute identifies the configured or fixed request destination, including
+across redirects. The resource attribute `nemo.gym.server.name` identifies the Gym process
+recording the metric; they are not the same.
+
+When metrics export is active at client construction, Gym uses `QueueTimedTCPConnector` to count
+connection attempts and measure queue waits. Otherwise, Gym uses aiohttp's `TCPConnector` directly
+without collecting these metrics.
+
 ### Reverse Proxy Headers
 
 Gym disables Uvicorn proxy-header processing by default. Direct Gym traffic does not pass through a reverse proxy, so
@@ -260,6 +321,16 @@ wandb_api_key: your-wandb-key
 Gym exports the resolved config, aggregate metrics, and rollouts to any tracking backend you
 configure. Weights & Biases and MLflow are both supported, and both can be on at once. A backend
 is used only when every key it needs is set; otherwise it is silently skipped.
+
+Both SDKs are optional extras, not part of the core install.
+
+```bash
+uv sync --extra wandb   # Weights & Biases
+uv sync --extra mlflow  # MLflow
+```
+
+If a backend is configured but its extra isn't installed, Gym logs an error naming the missing
+extra and continues the run without that backend.
 
 ### Weights & Biases
 

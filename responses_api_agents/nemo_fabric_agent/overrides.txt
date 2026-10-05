@@ -1,1 +1,5 @@
 openai==2.44.0
+# hermes-agent pins pyjwt[crypto]==2.13.0 exactly, which conflicts with the
+# root nemo-gym pin (>=2.15.1, CVE mitigation). Force the version the root
+# project resolves to elsewhere in the repo.
+pyjwt==2.15.1
