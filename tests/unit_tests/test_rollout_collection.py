@@ -4239,3 +4239,63 @@ class TestEngineMetricsProjection:
         assert call.response_metadata.engine.queue_time_ms == 35.2
         assert call.response_metadata.engine.time_to_first_token_ms == 412.5
         assert call.response_metadata.engine.generation_time_ms is None
+
+
+class TestHarnessAndCaptureRecordsMerge:
+    """terminus_2 records each model call itself (own model_call_id, attempts, purpose) and the
+    model server captures the same request under its own id. Seen on TB: 23 + 23 records with
+    identical response ids and identical token counts -- every sum doubled."""
+
+    @staticmethod
+    def _result(producer_id: str, capture_id: str, response_id: str, capture_response_id: str) -> dict:
+        return {
+            "ng_trajectory": {
+                "task_id": "2",
+                "rollout_id": "2-3",
+                "invocations": [{"invocation_id": "root"}],
+                "model_calls": [
+                    {
+                        "model_call_id": producer_id,
+                        "model_call_purpose": "agent_step",
+                        "response_metadata": {"response_id": response_id},
+                        "attempts": [{"attempt_index": 1, "status": "completed", "status_code": 200}],
+                    }
+                ],
+            },
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": capture_id,
+                        "response_id": capture_response_id,
+                        "tokens_in": 809,
+                        "response": {"id": capture_response_id, "choices": [{"message": {"content": "x"}}]},
+                    }
+                ]
+            },
+        }
+
+    def test_same_response_id_merges_into_one_call(self) -> None:
+        trajectory = _build_trajectory_record(
+            {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3},
+            self._result("harness-uuid", "server-uuid", "resp_1", "resp_1"),
+        )
+        [call] = trajectory.model_calls
+        assert call.model_call_purpose == "agent_step"  # harness evidence kept
+        assert call.token_stats.prompt_tokens == 809  # capture evidence merged in
+        assert [a.attempt_index for a in call.attempts] == [1]
+        assert call.model_response_kind == "text"
+
+    def test_different_response_ids_stay_separate(self) -> None:
+        trajectory = _build_trajectory_record(
+            {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3},
+            self._result("harness-uuid", "server-uuid", "resp_1", "resp_2"),
+        )
+        assert len(trajectory.model_calls) == 2
+
+    def test_an_ambiguous_response_id_is_not_guessed(self) -> None:
+        result = self._result("harness-a", "server-uuid", "resp_dup", "resp_dup")
+        result["ng_trajectory"]["model_calls"].append(
+            {"model_call_id": "harness-b", "response_metadata": {"response_id": "resp_dup"}}
+        )
+        trajectory = _build_trajectory_record({TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}, result)
+        assert len(trajectory.model_calls) == 3  # two producer calls + the unmatched capture record

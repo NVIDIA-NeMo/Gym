@@ -310,6 +310,15 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     model_call_positions = {
         call.model_call_id: index for index, call in enumerate(model_calls) if call.model_call_id is not None
     }
+    # A harness that records its own model calls mints its own model_call_id, and the model
+    # server mints another for the same request. The response id is the join key both saw, so
+    # fall back to it -- only when it points at exactly one producer call -- else the same call
+    # lands twice and every token sum doubles.
+    response_id_positions: dict[str, Optional[int]] = {}
+    for index, call in enumerate(model_calls):
+        response_id = call.response_metadata.response_id
+        if response_id:
+            response_id_positions[response_id] = None if response_id in response_id_positions else index
     for raw_call in raw_calls:
         if not isinstance(raw_call, dict):
             continue
@@ -353,6 +362,8 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             ),
         )
         position = model_call_positions.pop(model_call_id, None) if model_call_id is not None else None
+        if position is None and isinstance(metadata.get("response_id"), str):
+            position = response_id_positions.pop(metadata["response_id"], None)
         if position is None:
             model_calls.append(projected)
         else:
