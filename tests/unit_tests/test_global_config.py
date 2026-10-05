@@ -2297,32 +2297,37 @@ class TestConfigLoadErrors:
 
     def test_multi_agent_environment_server_satisfies_agent_routing(self) -> None:
         parser = GlobalConfigDictParser()
-        config = DictConfig(
+        config = OmegaConf.load(Path(__file__).parents[2] / "resources_servers/usersim/configs/usersim.yaml")
+        config.merge_with(
             {
-                name: {
-                    "responses_api_agents": {
-                        "simple_agent": {
-                            "entrypoint": "app.py",
-                            "resources_server": {"type": "resources_servers", "name": "usersim"},
-                        }
-                    }
-                }
-                for name in ("usersim_user", "usersim_assistant", "usersim_judge", "usersim_summary")
+                "policy_base_url": "http://policy.example",
+                "policy_api_key": "test-key",
+                "policy_model_name": "test-model",
             }
         )
-        config["usersim_environment"] = {
-            "environment_servers": {
-                "usersim": {
-                    "entrypoint": "app.py",
-                    "user_agent": {"type": "responses_api_agents", "name": "usersim_user"},
-                    "assistant_agent": {"type": "responses_api_agents", "name": "usersim_assistant"},
-                    "judge_agent": {"type": "responses_api_agents", "name": "usersim_judge"},
-                    "summary_agent": {"type": "responses_api_agents", "name": "usersim_summary"},
-                }
-            }
+
+        parser._front_agents_without_environment_server(config)
+
+        assert _environment_servers_by_agent(config) == {
+            "usersim_user": ["usersim_environment"],
+            "usersim_assistant": ["usersim_environment"],
         }
 
-        parser._raise_on_agent_without_environment_server(config)
+    def test_multi_agent_environment_server_requires_every_participant(self) -> None:
+        parser = GlobalConfigDictParser()
+        config = OmegaConf.load(Path(__file__).parents[2] / "resources_servers/usersim/configs/usersim.yaml")
+        config.merge_with(
+            {
+                "policy_base_url": "http://policy.example",
+                "policy_api_key": "test-key",
+                "policy_model_name": "test-model",
+            }
+        )
+        del config["usersim_environment"]["environment_servers"]["usersim"]["assistant_agent"]
+        config["error_on_agent_without_environment_server"] = True
+
+        with raises(AgentWithoutEnvironmentServerError, match="usersim_assistant"):
+            parser._front_agents_without_environment_server(config)
 
     def test_all_repo_configs_load_without_duplicate_keys(self) -> None:
         # OmegaConf.load (the loader `gym env start` actually uses) rejects duplicate YAML keys,

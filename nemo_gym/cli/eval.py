@@ -247,22 +247,6 @@ def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
         ) from exc
 
 
-def _is_preparable_dataset(dataset: DictConfig | dict) -> bool:
-    """Return whether `gym eval prepare` should run this dataset's prepare script."""
-
-    return dataset.get("type") == "benchmark" or (
-        dataset.get("type") == "example" and dataset.get("prepare_script") is not None
-    )
-
-
-def _preparation_dataset_config(dataset: DictConfig | dict) -> BenchmarkDatasetConfig:
-    """Adapt a preparable dataset without changing its runtime dataset type."""
-
-    preparation_config = dict(dataset)
-    preparation_config["type"] = "benchmark"
-    return BenchmarkDatasetConfig.model_validate(preparation_config)
-
-
 @exit_cleanly_on_config_error
 def prepare_benchmark() -> None:
     """CLI command: prepare benchmark data."""
@@ -291,20 +275,19 @@ def prepare_benchmark() -> None:
 
         datasets: List[BenchmarkDatasetConfig] = []
         for dataset in inner_server_config.get("datasets") or []:
-            if not _is_preparable_dataset(dataset):
+            if dataset["type"] != "benchmark":
                 continue
 
-            datasets.append(_preparation_dataset_config(dataset))
+            datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
 
         if len(datasets) < 1:
             continue
 
         if len(datasets) != 1:
             raise ConfigError(
-                f"Expected exactly 1 preparable benchmark or example dataset for server instance "
-                f"`{server_instance_name}`, "
+                f"Expected exactly 1 benchmark dataset for server instance `{server_instance_name}`, "
                 f"but found {len(datasets)}: {[d.name for d in datasets]}. "
-                "A config must define a single preparable dataset."
+                "A benchmark config must define a single benchmark dataset."
             )
 
         dataset = datasets[0]
@@ -326,10 +309,9 @@ def prepare_benchmark() -> None:
 
     if not benchmarks_dict:
         raise ConfigError(
-            "No preparable benchmark or example dataset found. "
+            "No benchmark config found. "
             + (
-                f"Inspected server instances {inspected_server_instances}, but none declared a `benchmark` dataset "
-                "or an `example` dataset with a prepare script."
+                f"Inspected server instances {inspected_server_instances}, but none declared a `benchmark` dataset."
                 if inspected_server_instances
                 else "No server instances with `responses_api_agents` were found in the resolved config."
             )
@@ -432,7 +414,14 @@ def _validate_split_datasets_declared(split: str, server_instance_configs: Seque
         f"Declared datasets:\n{declared_str}"
     )
     if example_fpaths:
-        message += "\nExample datasets are available in this config. To run them end-to-end, use `--split example`."
+        example_fpaths_str = "\n".join(
+            f"  gym eval run --no-serve --input {fpath} --output <out>.jsonl" for fpath in example_fpaths
+        )
+        message += (
+            "\nExample datasets are committed smoke-test samples and are not runnable via --split. "
+            "To run one, start the servers (gym env start ...) and collect against the file directly:\n"
+            f"{example_fpaths_str}"
+        )
     raise ConfigError(message)
 
 
@@ -445,12 +434,6 @@ def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, ou
         f"Data preparation did not produce `{input_jsonl_fpath}` for split `{split}`. "
         f"Files prepared under `{output_dirpath}`: {prepared if prepared else 'none'}."
     )
-
-
-def _data_processor_mode_for_split(split: str) -> str:
-    """Select collation behavior for an end-to-end rollout split."""
-
-    return "example_validation" if split == "example" else "train_preparation"
 
 
 @exit_cleanly_on_config_error
@@ -471,7 +454,7 @@ def e2e_rollout_collection():  # pragma: no cover
     data_processor_config_dict = deepcopy(global_config_dict)
     with open_dict(data_processor_config_dict):
         data_processor_config_dict["should_download"] = True
-        data_processor_config_dict["mode"] = _data_processor_mode_for_split(e2e_rollout_collection_config.split)
+        data_processor_config_dict["mode"] = "train_preparation"
 
         output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
         data_process_output_dir = output_fpath.with_suffix("") / "preprocessed_datasets"

@@ -92,12 +92,12 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
     personas_cache_dir: Path = Path("~/.cache/nemo-gym/usersim/personas")
     personas_dataset_version: str = Field("0.0.2", pattern=r"^[A-Za-z0-9._-]+$")
     usersim_revision: str = Field(
-        "44c39daf481a23a87742c3c456852aca910653ce",  # pragma: allowlist secret
+        "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee",  # pragma: allowlist secret
         pattern=r"^[0-9a-f]{40}$",
     )
     personas_locales: list[str] = Field(default_factory=lambda: ["en_US"])
     tool_simulation_model: ModelServerRef | None = None
-    probe_scorer_model: ModelServerRef | None = None
+    probe_scorer_model: ModelServerRef
     model_call_timeout_seconds: float = Field(300.0, gt=0)
     probe_mix: dict[str, float] = Field(
         default_factory=lambda: {
@@ -331,6 +331,7 @@ class _ResourcesModelFacade:
 class UserSimResourcesServer(SimpleResourcesServer):
     """Resolve one replayable persona and general-purpose probe per episode."""
 
+    ray_enabled = False
     config: UserSimResourcesServerConfig
     session_id_to_seed: dict[str, SeededUserSimEpisode] = Field(default_factory=dict)
     locale_to_personas: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
@@ -496,11 +497,10 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 self,
                 self.config.tool_simulation_model,
             )
-        if self.config.probe_scorer_model is not None:
-            models["judge_model"] = _ResourcesModelFacade(
-                self,
-                self.config.probe_scorer_model,
-            )
+        models["judge_model"] = _ResourcesModelFacade(
+            self,
+            self.config.probe_scorer_model,
+        )
         data = {
             **task.probe_data,
             "persona": scenario.persona,
@@ -550,15 +550,13 @@ class UserSimResourcesServer(SimpleResourcesServer):
         }
         if seeded.runtime is not None:
             scorer_models = {alias: model for alias, model in seeded.runtime.models.items() if alias == "judge_model"}
-        elif self.config.probe_scorer_model is not None:
+        else:
             scorer_models = {
                 "judge_model": _ResourcesModelFacade(
                     self,
                     self.config.probe_scorer_model,
                 )
             }
-        else:
-            scorer_models = {}
 
         try:
             from usersim.engine.evaluator.scorers import get_scorer
@@ -581,18 +579,6 @@ class UserSimResourcesServer(SimpleResourcesServer):
         from usersim.engine.core.behavioral import get_conversation_language
         from usersim.engine.evaluator.runtime import TrajectoryEvaluatorRuntime
         from usersim.taxonomy.eval_cell import normalize_axis_score, score_from_eval_cell
-
-        if self.config.probe_scorer_model is None:
-            return (
-                {
-                    "axes": {},
-                    "scorers": {},
-                    "skipped": True,
-                    "skipped_reason": "missing_probe_scorer_model",
-                },
-                {},
-                None,
-            )
 
         model = (
             seeded.runtime.models["judge_model"]

@@ -87,7 +87,6 @@ def _app(
     cache_dir: Path,
     *,
     educational_only: bool = False,
-    with_probe_scorer_model: bool = False,
 ) -> FastAPI:
     config = UserSimResourcesServerConfig(
         host="127.0.0.1",
@@ -95,9 +94,7 @@ def _app(
         entrypoint="app.py",
         name="usersim",
         personas_cache_dir=cache_dir,
-        probe_scorer_model=(
-            {"type": "responses_api_models", "name": "support_model"} if with_probe_scorer_model else None
-        ),
+        probe_scorer_model={"type": "responses_api_models", "name": "support_model"},
         probe_mix=(
             {"general_open_ended": 0.0, "general_educational": 1.0}
             if educational_only
@@ -168,7 +165,7 @@ def test_seed_session_resolves_replayable_scenario(tmp_path: Path) -> None:
     assert first.json()["usersim_context"]["personas_dataset_version"] == "0.0.2"
     assert len(first.json()["usersim_context"]["personas_panel_sha256"]) == 64
     assert first.json()["usersim_context"]["usersim_revision"] == (
-        "44c39daf481a23a87742c3c456852aca910653ce"  # pragma: allowlist secret
+        "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
     )
     scenario = first.json()["scenario"]
     assert scenario["persona"]["first_name"] in {"Morgan", "Avery"}
@@ -198,12 +195,23 @@ def test_probe_scorers_cover_every_probe_with_a_dedicated_scorer() -> None:
     assert set(PROBE_SCORERS) == SUPPORTED_PROBES - {"general_open_ended", "general_educational"}
 
 
+def test_probe_scorer_model_is_required() -> None:
+    with pytest.raises(ValueError, match="probe_scorer_model"):
+        UserSimResourcesServerConfig(
+            host="127.0.0.1",
+            port=12345,
+            entrypoint="app.py",
+            name="usersim",
+        )
+
+
 def test_persona_derived_probe_does_not_require_a_theme() -> None:
     config = UserSimResourcesServerConfig(
         host="127.0.0.1",
         port=12345,
         entrypoint="app.py",
         name="usersim",
+        probe_scorer_model={"type": "responses_api_models", "name": "support_model"},
         probe_mix={"sov_ai_facts": 1.0},
         probe_themes={},
     )
@@ -366,7 +374,7 @@ def test_verify_uses_usersim_assistant_quality_as_reward(
     monkeypatch.setattr(UserSimResourcesServer, "_evaluate_assistant_quality", _ORIGINAL_EVALUATE_ASSISTANT_QUALITY)
     monkeypatch.setattr(evaluator.TrajectoryEvaluatorRuntime, "evaluate", evaluate_quality)
     _write_personas(tmp_path)
-    with TestClient(_app(tmp_path, with_probe_scorer_model=True)) as client:
+    with TestClient(_app(tmp_path)) as client:
         seed = client.post("/seed_session", json=_seed_body(seed=7)).json()
         verified = client.post("/verify", json=_verify_body(seed)).json()
 
