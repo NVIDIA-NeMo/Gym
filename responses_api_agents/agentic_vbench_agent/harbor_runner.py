@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -241,7 +242,36 @@ def main() -> None:
     env[OPENCODE_OUTPUT_CAP] = str(args.output_tokens)
     gym_root = str(Path(__file__).resolve().parents[2])
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [gym_root, env.get("PYTHONPATH")]))
-    subprocess.run(command, check=True, env=env, stdin=subprocess.DEVNULL)
+    run_harbor(command, env=env, jobs_dir=args.output.resolve() / "jobs")
+
+
+DOCKER_CHECK_FAILURE = "Docker daemon is not running"
+HARBOR_START_ATTEMPTS = 4
+HARBOR_START_BACKOFF_SECONDS = 30.0
+
+
+def run_harbor(command: list[str], *, env: dict, jobs_dir: Path, sleep=time.sleep) -> None:
+    """Run Harbor, retrying only its start-up Docker probe failure.
+
+    Harbor checks the daemon with a single ``docker info`` under a 10 s timeout before
+    any trial starts; on a loaded remote backend that probe times out and Harbor exits
+    with ``Docker daemon is not running`` although the backend is healthy. The retry is
+    limited to that message while no trial directory exists, so a trial is never run twice.
+    """
+    for attempt in range(1, HARBOR_START_ATTEMPTS + 1):
+        result = subprocess.run(
+            command, env=env, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace"
+        )
+        if result.stderr:
+            sys.stderr.write(result.stderr)
+            sys.stderr.flush()
+        if result.returncode == 0:
+            return
+        trial_started = jobs_dir.is_dir() and any(jobs_dir.glob("*/*__*"))
+        if DOCKER_CHECK_FAILURE not in result.stderr or trial_started or attempt == HARBOR_START_ATTEMPTS:
+            raise subprocess.CalledProcessError(result.returncode, command)
+        print(f"Harbor Docker probe failed before any trial started; retry {attempt}/{HARBOR_START_ATTEMPTS - 1}")
+        sleep(HARBOR_START_BACKOFF_SECONDS * attempt)
 
 
 if __name__ == "__main__":
