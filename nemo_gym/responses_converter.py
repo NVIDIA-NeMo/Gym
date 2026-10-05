@@ -814,6 +814,13 @@ class ResponsesConverter(BaseModel):
             {"native_finish_reason": str(native_finish_reason)} if native_finish_reason is not None else {}
         )
 
+        # vLLM's per-request engine metrics ride on the chat completion as an extra field (the
+        # OpenAI models allow extras); carry them onto the Response so the capture sees them on
+        # the Responses dialect too.
+        engine_metrics = getattr(chat_completion, "metrics", None)
+        if engine_metrics is None and isinstance(getattr(chat_completion, "model_extra", None), dict):
+            engine_metrics = chat_completion.model_extra.get("metrics")
+
         # Chat Completion -> Response
         return NeMoGymResponse(
             # Under external token capture the chat completion's envelope id is
@@ -828,6 +835,7 @@ class ResponsesConverter(BaseModel):
             model=responses_create_params.model,
             object="response",
             output=response_output_dicts,
+            **({"metrics": engine_metrics} if isinstance(engine_metrics, dict) else {}),
             tool_choice=responses_create_params.tool_choice
             if responses_create_params.tool_choice is not None
             else "auto",

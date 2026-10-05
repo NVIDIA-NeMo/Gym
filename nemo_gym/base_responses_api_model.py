@@ -1080,6 +1080,7 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     reasoning_parts: list[str] = []
     tool_calls: dict[int, dict[str, Any]] = {}
     usage: Optional[dict[str, Any]] = None
+    metrics: Optional[dict[str, Any]] = None
     model: Optional[str] = None
     response_id: Optional[str] = None
     role = "assistant"
@@ -1091,6 +1092,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
             response_id = chunk["id"]
         if chunk.get("usage"):
             usage = chunk["usage"]
+        if isinstance(chunk.get("metrics"), dict):
+            metrics = chunk["metrics"]
         for choice in chunk.get("choices") or []:
             if not isinstance(choice, dict):
                 continue
@@ -1131,6 +1134,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
         result["id"] = response_id
     if usage:
         result["usage"] = usage
+    if metrics:
+        result["metrics"] = metrics
     return result
 
 

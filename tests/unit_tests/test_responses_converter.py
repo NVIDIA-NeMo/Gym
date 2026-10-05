@@ -1680,3 +1680,25 @@ def test_training_variant_of_raises_a_named_error_for_an_unregistered_class():
 
     with pytest.raises(NotImplementedError, match="has no ForTraining variant"):
         training_variant_of(_NotAnItem)
+
+
+def test_chat_completion_to_response_carries_engine_metrics():
+    from nemo_gym.openai_utils import NeMoGymChatCompletion, NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.responses_converter import ResponsesConverter
+
+    completion = NeMoGymChatCompletion.model_validate(
+        {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+            "metrics": {"queue_time_ms": 12.5, "generation_time_ms": 40.0},
+        }
+    )
+    params = NeMoGymResponseCreateParamsNonStreaming(model="m", input="hi")
+    response = ResponsesConverter(return_token_id_information=False).chat_completion_to_response(
+        responses_create_params=params, chat_completion=completion
+    )
+    assert response.model_dump(mode="json")["metrics"] == {"queue_time_ms": 12.5, "generation_time_ms": 40.0}

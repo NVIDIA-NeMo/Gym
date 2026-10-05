@@ -1837,3 +1837,45 @@ def test_engine_metrics_absent_when_the_engine_sends_none():
     # vLLM emits an all-None PerRequestMetrics when timestamps were unavailable: still absent.
     empty = {"response": {"id": "x", "metrics": {"queue_time_ms": None, "time_to_first_token_ms": None}}}
     assert build_model_call_record(empty, call_index=0).engine_metrics is None
+
+
+def test_engine_metrics_survive_a_synthesized_stream_and_its_reconstruction():
+    """The model server fabricates an SSE stream for streaming clients and the capture parses it
+    back; vLLM's metrics must come out the other side, on the final usage chunk as vLLM does it."""
+    from nemo_gym.base_responses_api_model import _parse_sse_events, _reconstruct_chat_sse
+    from nemo_gym.chat_streaming import synthesize_chat_completion_sse
+
+    completion = {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+        "metrics": {"queue_time_ms": 12.5, "time_to_first_token_ms": 80.0},
+    }
+    raw = "".join(synthesize_chat_completion_sse(completion, include_usage=True)).encode()
+    events = _parse_sse_events(raw)
+    assert events[-1].get("metrics") == completion["metrics"] and events[-1]["choices"] == []
+    rebuilt = _reconstruct_chat_sse(events)
+    assert rebuilt["metrics"] == completion["metrics"]
+    assert rebuilt["usage"] == completion["usage"]
+    # Without usage in the stream there is no final chunk to carry metrics: none are invented.
+    raw_no_usage = "".join(synthesize_chat_completion_sse(completion, include_usage=False)).encode()
+    assert "metrics" not in _reconstruct_chat_sse(_parse_sse_events(raw_no_usage))
+
+
+def test_engine_metrics_survive_chat_completion_validation():
+    from nemo_gym.openai_utils import NeMoGymChatCompletion
+
+    completion = NeMoGymChatCompletion.model_validate(
+        {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "metrics": {"queue_time_ms": 12.5},
+        }
+    )
+    assert completion.model_dump(mode="json")["metrics"] == {"queue_time_ms": 12.5}

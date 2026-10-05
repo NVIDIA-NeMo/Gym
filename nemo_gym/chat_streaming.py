@@ -152,6 +152,11 @@ def synthesize_chat_completion_sse(completion: dict[str, Any], include_usage: bo
 
     usage = completion.get("usage")
     if include_usage and usage is not None:
-        yield _sse_data(_chunk(completion, [], usage=usage))
+        final = _chunk(completion, [], usage=usage)
+        # vLLM puts its per-request engine metrics beside usage on the final chunk; keep that
+        # shape so a capture reading this synthetic stream sees the same thing a real one has.
+        if completion.get("metrics") is not None:
+            final["metrics"] = completion["metrics"]
+        yield _sse_data(final)
 
     yield "data: [DONE]\n\n"
