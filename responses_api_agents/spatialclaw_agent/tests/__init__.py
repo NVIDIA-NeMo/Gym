@@ -1,3 +1,3 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""SpatialClaw agent tests."""
+"""Tests for the SpatialClaw agent."""
