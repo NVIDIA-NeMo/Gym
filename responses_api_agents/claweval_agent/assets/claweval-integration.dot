@@ -1,0 +1,117 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// Render with: dot -Tsvg claweval-integration.dot -o claweval-integration.svg
+//              dot -Tpng -Gdpi=150 claweval-integration.dot -o claweval-integration.png
+digraph ClawEvalIntegration {
+  graph [rankdir=TB, bgcolor="white", pad=0.30, nodesep=0.45, ranksep=0.60,
+    compound=true, fontname="Arial", fontsize=26, labelloc=t,
+    label=<<B>ClawEval Integration: Eval Factory + NeMo Gym</B><BR/>
+      <FONT POINT-SIZE="14">Original ClawEval agent, tools and graders · three task splits · three seeded trials</FONT>>];
+  node [shape=box, style="rounded,filled", fontname="Arial", fontsize=12,
+    fontcolor="#0f172a", margin="0.18,0.14", penwidth=1.6];
+  edge [fontname="Arial", fontsize=10, fontcolor="#475569", color="#64748b", penwidth=1.5, arrowsize=0.75];
+
+  subgraph cluster_factory {
+    label=<<B>NVIDIA Eval Factory repository</B><BR/>
+      <FONT POINT-SIZE="12">Recipe registration and cluster / model selection</FONT>>;
+    style="rounded,filled"; color="#64748b"; fillcolor="#f8fafc"; penwidth=2; fontsize=18;
+    factory [fillcolor="#f1f5f9", color="#64748b", label=<
+      <B>configs/benchmarks/claweval-*/</B><BR/>
+      General · multimodal · multi-turn recipes<BR/>
+      gym_native backend → gym eval submit<BR/>
+      <FONT POINT-SIZE="11">Pins Gym; forwards native paths, profiles and policy endpoint</FONT>>];
+  }
+
+  subgraph cluster_gym {
+    label=<<B>NeMo Gym repository</B><BR/>
+      <FONT POINT-SIZE="12">Preparation, trial scheduling, process isolation and result collection</FONT>>;
+    style="rounded,filled"; color="#7c3aed"; fillcolor="#faf5ff"; penwidth=2.2; fontsize=18;
+    prepare [fillcolor="#f5f3ff", color="#7c3aed", label=<
+      <B>benchmarks/claweval/</B><BR/>
+      General: 161 · multimodal: 101 · multi-turn: 38<BR/>
+      Native task catalog + TaskDefinition loader<BR/>
+      <FONT POINT-SIZE="11">Gym JSONL: public prompt, task ID, split, task.yaml hash</FONT>>];
+    core [fillcolor="#f5f3ff", color="#7c3aed", label=<
+      <B>NeMo Gym evaluation core</B><BR/>
+      Server lifecycle · schedule task / trial rows<BR/>
+      Rollout indices 0 / 1 / 2 → seeds 1001 / 1002 / 1003<BR/>
+      <FONT POINT-SIZE="11">Slurm driver runs on the host: container: null</FONT>>];
+    adapter [fillcolor="#f5f3ff", color="#7c3aed", label=<
+      <B>responses_api_agents/claweval_agent/</B><BR/>
+      app.py: one native trial per /run<BR/>
+      worker.py: separate native Python process<BR/>
+      <FONT POINT-SIZE="11">Validate task / prompt · forward settings · timeout / cancellation cleanup</FONT>>];
+    projection [fillcolor="#f5f3ff", color="#7c3aed", label=<
+      <B>Trajectory projection + aggregation</B><BR/>
+      Native score → Gym reward<BR/>
+      Text / tool pairs → Gym response<BR/>
+      <FONT POINT-SIZE="11">Mean score · Pass@1 · Pass@3 · strict Pass³</FONT>>];
+    prepare -> core [color="#7c3aed", label="prepared task references"];
+    core -> adapter [color="#7c3aed", label="/run with task metadata"];
+    adapter -> projection [color="#7c3aed", style=dashed, label="collect completed trial", constraint=false];
+  }
+
+  subgraph cluster_native {
+    label=<<B>Original ClawEval repository · CLAW_EVAL_ROOT</B><BR/>
+      <FONT POINT-SIZE="12">Supplied NVIDIA fork; existing agent behavior and scoring</FONT>>;
+    style="rounded,filled"; color="#16a34a"; fillcolor="#f0fdf4"; penwidth=2.2; fontsize=18;
+    runner [fillcolor="#ecfdf5", color="#16a34a", label=<
+      <B>evaluation/run_multimodal.py · run_one()</B><BR/>
+      Original agent loop + native model provider<BR/>
+      Task prompts · tools · media · simulated user<BR/>
+      <FONT POINT-SIZE="11">Task-specific turn limits and native configuration preserved</FONT>>];
+    grade [fillcolor="#ecfdf5", color="#16a34a", label=<
+      <B>Native task grader + scoring</B><BR/>
+      Grader fixtures staged after the agent finishes<BR/>
+      safety × (0.8 × completion + 0.2 × robustness)<BR/>
+      <FONT POINT-SIZE="11">Round to 4 decimals · pass when score ≥ 0.75</FONT>>];
+    runner -> grade [color="#16a34a", label="completed agent trace"];
+  }
+
+  subgraph cluster_services {
+    label=<<B>Runtime services</B><BR/>
+      <FONT POINT-SIZE="12">Called by the original ClawEval runner</FONT>>;
+    style="rounded,filled"; color="#ea580c"; fillcolor="#fff7ed"; penwidth=2; fontsize=18;
+    sandbox [fillcolor="#fff7ed", color="#ea580c", label=<
+      <B>Slurm / Pyxis sandbox + mock services</B><BR/>
+      Native tool execution and per-trial workspace<BR/>
+      <FONT POINT-SIZE="11">Task assets, media and installed sandbox packages</FONT>>];
+    policy [fillcolor="#fff7ed", color="#ea580c", label=<
+      <B>Policy model endpoint</B><BR/>
+      Factory-served model or native profile endpoint<BR/>
+      <FONT POINT-SIZE="11">Original OpenAI-compatible provider</FONT>>];
+    judge [fillcolor="#fff7ed", color="#ea580c", label=<
+      <B>Judge + simulated-user endpoints</B><BR/>
+      Selected by the native configuration<BR/>
+      <FONT POINT-SIZE="11">Simulated user for enabled multi-turn tasks</FONT>>];
+    sandbox -> policy -> judge [style=invis];
+  }
+
+  output [fillcolor="#f0fdfa", color="#0f766e", penwidth=2, label=<
+    <B>Collected evaluation artifacts</B><BR/>
+    Gym rollouts + aggregate metrics<BR/>
+    Native JSONL traces, media, logs and workspaces<BR/>
+    <FONT POINT-SIZE="11">Task / runtime / profile hashes retained for provenance</FONT><BR/>
+    <FONT POINT-SIZE="11">Pass@3 and strict Pass³ require three completed trials per represented task</FONT>>];
+  legend [shape=plain, style="", margin=0, label=<
+    <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="7"><TR>
+      <TD><FONT COLOR="#64748b">● Factory</FONT></TD>
+      <TD><FONT COLOR="#7c3aed">● Gym</FONT></TD>
+      <TD><FONT COLOR="#16a34a">● Native ClawEval</FONT></TD>
+      <TD><FONT COLOR="#ea580c">● Runtime services</FONT></TD>
+      <TD><FONT COLOR="#0f766e">● Outputs</FONT></TD>
+    </TR><TR><TD COLSPAN="5"><FONT POINT-SIZE="10">Color identifies ownership. Solid arrows: execution / results. Dashed arrows: configuration / collection.</FONT></TD></TR></TABLE>>];
+
+  factory -> core [color="#64748b", style=dashed, label="submit + configure"];
+  factory -> prepare [style=invis];
+  adapter -> runner [color="#16a34a", lhead=cluster_native, label="worker invokes original runner"];
+  runner -> sandbox [color="#ea580c", dir=both, label="tools / results"];
+  runner -> policy [color="#ea580c", dir=both, label="policy calls", constraint=false];
+  runner -> judge [color="#ea580c", dir=both, label="simulated-user calls", constraint=false];
+  grade -> judge [color="#ea580c", dir=both, label="judge calls", constraint=false];
+  grade -> projection [color="#16a34a", label="native score + trace", constraint=false];
+  projection -> output [color="#0f766e", label="rewards + metrics", minlen=3];
+  grade -> output [color="#0f766e", label="retain native artifacts"];
+  judge -> output [style=invis];
+  output -> legend [style=invis];
+}

@@ -5,6 +5,16 @@ native reward, and aggregates the results. The local Claw-Eval runner owns the
 agent loop, multimodal inputs, simulated user, tools, Pyxis sandbox, mock services,
 and task-specific grader. Grader fixtures are staged only after the agent finishes.
 
+![ClawEval integration across Eval Factory, NeMo Gym, the original ClawEval runner and runtime services](../../responses_api_agents/claweval_agent/assets/claweval-integration.png)
+
+Color identifies source ownership. Factory registers recipes and selects the
+cluster and policy endpoint; Gym prepares task references and schedules trials;
+the original ClawEval runner owns agent execution and grading. Native traces
+remain available alongside Gym rewards and aggregate metrics.
+The editable [Graphviz source](../../responses_api_agents/claweval_agent/assets/claweval-integration.dot)
+and [SVG](../../responses_api_agents/claweval_agent/assets/claweval-integration.svg)
+are included with the figure.
+
 | Benchmark | Tasks | Default trials per task |
 | --- | ---: | ---: |
 | `claweval/general` | 161 | 3 |
