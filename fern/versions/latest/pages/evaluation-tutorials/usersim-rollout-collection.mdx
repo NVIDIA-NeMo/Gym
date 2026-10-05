@@ -67,8 +67,8 @@ At a conceptual level, a NeMo User Sim rollout has four stages:
 4. **Verify the result:** Gym stores the complete episode and NeMo User Sim's probe-specific evidence and score.
 
 In this tutorial, a **task** specifies what to simulate, and an **episode** is one attempt to run that task. The
-included NeMo User Sim environment contains an example suite with one task for each of NeMo User Sim's 14 first-party
-probes. The suite demonstrates and tests the integration.
+included NeMo User Sim benchmark contains one task for each of NeMo User Sim's 14 first-party probes.
+The benchmark demonstrates and tests the integration.
 
 ## Prerequisites
 
@@ -147,12 +147,12 @@ gym eval prepare --config environments/usersim/config.yaml
 ```
 
 Preparation calls `usersim.engine.external.materialize_episode_inputs(...)` in the isolated environment and
-writes `environments/usersim/data/example.jsonl`. It produces one deterministic row for every registered
+writes `environments/usersim/data/usersim.jsonl`. It produces one deterministic row for every registered
 probe. NeMo User Sim—not Gym—owns all sampled content and provenance.
 
 In practical terms:
 
-- There is one generated Gym task file: `environments/usersim/data/example.jsonl`.
+- There is one generated Gym task file: `environments/usersim/data/usersim.jsonl`.
 - Each of its 14 rows is already a complete task. NeMo User Sim has resolved the persona, scenario/probe, theme,
   tools, locale, random seed, trajectory identity, and provenance for that row.
 - At runtime, the Resources Server checks that the task is the same immutable, provenance-pinned row that was
@@ -173,15 +173,15 @@ usersim simulate \
 Inspect the prepared inputs:
 
 ```bash
-wc -l environments/usersim/data/example.jsonl
+wc -l environments/usersim/data/usersim.jsonl
 jq '.task_input.resolved_row | {
   probe_type, trajectory_id, usersim_provenance, usersim_config
-}' environments/usersim/data/example.jsonl
+}' environments/usersim/data/usersim.jsonl
 ```
 
 ## Collect one rollout
 
-`--environment usersim --split example` selects the included 14-task example suite described above. Start
+`--environment usersim --split benchmark` selects the included 14-task benchmark described above. Start
 with only the first task and one repeat:
 
 ```bash
@@ -190,7 +190,7 @@ capture_dir="$(pwd)/results/usersim/model-calls"
 
 gym eval run \
   --environment usersim \
-  --split example \
+  --split benchmark \
   --output results/usersim/rollouts.jsonl \
   --limit 1 \
   --num-repeats 1 \
@@ -505,12 +505,12 @@ The concrete Pydantic contracts are defined in
 
 ## Run more probes
 
-After inspecting the smoke rollout, remove `--limit 1` to run the 14 prepared examples:
+After inspecting the smoke rollout, remove `--limit 1` to run all 14 prepared tasks:
 
 ```bash
 gym eval run \
   --environment usersim \
-  --split example \
+  --split benchmark \
   --output results/usersim/all-probes.jsonl \
   --num-repeats 1 \
   +user_model_uses_reasoning_parser=true \
