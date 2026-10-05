@@ -68,3 +68,32 @@ The staged binary determines the installed version and must match the sandbox's
 architecture and libc. Keep `remote_opencode_musl_binary_path: null` with the upstream
 installer; the dual-binary mode requires a custom installer supporting
 `--glibc-binary` and `--musl-binary`.
+
+## Turn constraints
+
+Set `turn_constraint` in the agent configuration to cap policy-model requests and
+send the model a reminder of its remaining budget:
+
+```yaml
+turn_constraint:
+  enforcement: proxy
+  limit: 31
+  scope: session
+  reminder:
+    trigger: per_turn
+    position: system_message
+```
+
+Each rollout has an independent budget. One turn is an attempted policy-model
+HTTP POST, including retries, compaction, and subagent requests routed through the
+same provider. Multiple tool calls from one response consume one turn. The first
+`limit` requests reach the model; the next receives a non-retryable
+`session_budget_exhausted` error. The sandbox's partial work is still verified.
+The rollout records the requested constraint, observed attempt count, and whether
+the budget was exhausted. An exhausted count includes the rejected request.
+
+Reminders use `per_turn`, `threshold` (80% and 95% of the budget), or `auto`.
+No additional turn is reserved for a final answer. Omit `turn_constraint` to keep
+the existing behavior. Native `steps`/`maxSteps` limits and provider/model overrides
+cannot be combined with the proxy constraint.
+

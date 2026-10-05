@@ -22,8 +22,11 @@ from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+from aiohttp import ClientSession, web
 from pytest import MonkeyPatch, fixture, mark
 
+from nemo_gym.adapters.turn_counter_proxy import TurnConstraintConfig, start_turn_counter_proxy
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -57,6 +60,65 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 
 
 class TestOpenCodeSandboxedAgent:
+    @mark.parametrize("limit", [28, 41, 60])
+    async def test_policy_route_enforces_budget_and_delivers_reminders(self, monkeypatch: MonkeyPatch, limit: int):
+        received = []
+
+        async def policy(request: web.Request) -> web.Response:
+            received.append(await request.json())
+            return web.json_response({"choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+        upstream = web.Application()
+        upstream.router.add_post("/v1/chat/completions", policy)
+        runner = web.AppRunner(upstream)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        constraint = TurnConstraintConfig(
+            enforcement="proxy", limit=limit, reminder={"trigger": "per_turn", "position": "system_message"}
+        )
+        proxy = await start_turn_counter_proxy(
+            upstream_base_url=f"http://127.0.0.1:{port}/v1",
+            api_key="dummy",
+            max_turns=constraint.limit,
+            position=constraint.reminder.position,
+            trigger=constraint.reminder.trigger,
+            exhaustion_status=400,
+        )
+        try:
+            client = MagicMock(spec=ServerClient)
+            client.global_config_dict = {}
+            config = self._create_config()
+            config.turn_constraint = constraint
+            server = OpenCodeSandboxedAgent(config=config, server_client=client)
+            monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model-server")
+            request = SimpleNamespace(
+                json=AsyncMock(return_value={}), state=SimpleNamespace(_ng_turn_proxy_base_url=proxy.base_url)
+            )
+            opencode_config = await server._create_opencode_config(request)
+            url = opencode_config["provider"]["nemo_gym"]["options"]["baseURL"] + "/chat/completions"
+            payload = {"model": "dummy_model", "messages": [{"role": "user", "content": "solve"}]}
+            async with ClientSession() as session:
+                for _ in range(limit):
+                    async with session.post(url, json=payload) as response:
+                        assert response.status == 200
+                        await response.read()
+                async with session.post(url, json=payload) as response:
+                    assert response.status == 400
+                    assert (await response.json())["error"]["code"] == "session_budget_exhausted"
+            assert len(received) == limit
+            for turn, body in enumerate(received, start=1):
+                assert body["messages"][0] == payload["messages"][0]
+                assert body["messages"][-1]["role"] == "system"
+                assert f"{limit - turn} turn(s) left" in body["messages"][-1]["content"]
+            assert "MUST provide your final answer NOW" in received[-1]["messages"][-1]["content"]
+            assert proxy.turns_used == limit + 1
+            assert len(payload["messages"]) == 1
+        finally:
+            await proxy.stop()
+            await runner.cleanup()
+
     def test_import_only_loads_shared_opencode_observability(self) -> None:
         code = (
             "import sys; import responses_api_agents.opencode_sandboxed_agent.app; "
@@ -344,6 +406,7 @@ class TestOpenCodeSandboxedAgent:
         assert observation.outcome == "sandbox_error"
         assert observation.exit_code is None
 
+    @mark.parametrize("constrained", [False, True])
     @mark.parametrize(
         ("observability_enabled", "token_capture_enabled", "expected_base_url"),
         [
@@ -360,6 +423,7 @@ class TestOpenCodeSandboxedAgent:
         observability_enabled: bool,
         token_capture_enabled: bool,
         expected_base_url: str,
+        constrained: bool,
     ) -> None:
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {
@@ -380,15 +444,21 @@ class TestOpenCodeSandboxedAgent:
             }
         )
 
+        if constrained:
+            server.config.turn_constraint = TurnConstraintConfig(enforcement="proxy", limit=2)
+            request.state._ng_turn_proxy_base_url = "http://proxy:123/v1"
+            expected_base_url = "http://proxy:123/v1"
         config = await server._create_opencode_config(request)
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
 
+    @mark.parametrize("constrained", [False, True])
     async def test_run_builds_observations_from_live_wal_snapshot(
         self,
         tmp_path: Path,
         opencode_export_test_data: Dict[str, Any],
         monkeypatch: MonkeyPatch,
+        constrained: bool,
     ) -> None:
         class Response:
             ok = True
@@ -467,6 +537,13 @@ class TestOpenCodeSandboxedAgent:
             "token_id_capture": {"enabled": False, "all_agents": False},
         }
         server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
+        if constrained:
+            server.config.turn_constraint = TurnConstraintConfig(enforcement="proxy", limit=2)
+        proxy = SimpleNamespace(base_url="http://turn-proxy/v1", turns_used=3, stop=AsyncMock())
+        start_proxy = AsyncMock(return_value=proxy)
+        monkeypatch.setattr(app_module, "start_turn_counter_proxy", start_proxy)
+        monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model-server")
+        monkeypatch.setattr(app_module, "gethostbyname", lambda _: "192.0.2.1")
         server._create_opencode_config = AsyncMock(return_value={})
 
         sandbox = MagicMock()
@@ -544,6 +621,17 @@ class TestOpenCodeSandboxedAgent:
             connection.close()
 
         assert result.ng_agent_observations is not None
+        assert result.reward == 1.0  # The verifier still grades work when the proxy budget is exhausted.
+        if constrained:
+            start_proxy.assert_awaited_once()
+            assert start_proxy.call_args.kwargs["upstream_base_url"] == "http://model-server/ng-rollout/7-2/v1"
+            assert start_proxy.call_args.kwargs["exhaustion_status"] == 400
+            proxy.stop.assert_awaited_once()
+            assert result.turn_constraint["realized"]["exhausted"] is True
+            assert result.turn_constraint["realized"]["observed_count"] == 3
+            assert not hasattr(request.state, "_ng_turn_proxy_base_url")
+        else:
+            start_proxy.assert_not_awaited()
         [turn] = TrajectoryRecord.model_validate(result.ng_trajectory).turns
         assert (turn.task_id, turn.rollout_id, turn.invocation_id) == ("7", "7-2", "root")
         assert turn.answer[0]["call_id"] == "call-1"
@@ -584,3 +672,10 @@ class TestOpenCodeSandboxedAgent:
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
+
+    @mark.parametrize("override", [{"model": "other/model"}, {"agent": {"build": {"steps": 2}}}])
+    def test_constraint_rejects_native_limits_and_routing_bypasses(self, override):
+        config = self._create_config().model_dump()
+        config.update(turn_constraint={"enforcement": "proxy", "limit": 2}, opencode_config=override)
+        with pytest.raises(ValueError):
+            OpenCodeSandboxedAgentConfig.model_validate(config)
