@@ -1331,6 +1331,9 @@ def _parsed_error_codes(content: bytes | str) -> list[str]:
         return []
     if not isinstance(payload, dict):
         return []
+    if "error" not in payload and isinstance(payload.get("detail"), dict):
+        # A NeMo Gym model server returns a propagated provider error body as FastAPI's `detail`.
+        payload = payload["detail"]
     error = payload.get("error")
     if isinstance(error, str):
         return [error]

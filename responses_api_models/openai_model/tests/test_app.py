@@ -718,6 +718,43 @@ class TestApp:
         transport.assert_awaited_once()
         assert backoff_sleeps == []
 
+    @pytest.mark.parametrize("endpoint", ["responses", "chat_completions"])
+    async def test_propagated_spent_key_stops_an_internal_receiving_client(
+        self, endpoint: str, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = self._setup_server(propagate_upstream_http_status_codes=[429])
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        model_server = TestClient(app)
+        provider_calls = model_server_replies = 0
+
+        async def transport(*, url, json=None, **kwargs):
+            nonlocal provider_calls, model_server_replies
+            if url.startswith("https://api.openai.com/v1"):
+                provider_calls += 1
+                status, body = 429, b'{"error":{"type":"insufficient_quota"}}'
+            else:
+                model_server_replies += 1
+                assert model_server_replies <= 3, "the receiving client kept retrying a spent key"
+                reply = model_server.post(url.removeprefix("http://model-server"), json=json)
+                status, body = reply.status_code, reply.content
+            return SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=body)))
+
+        monkeypatch.setattr("nemo_gym.openai_utils.request", transport)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        receiving_client = NeMoGymAsyncOpenAI(base_url="http://model-server/v1", api_key="dummy", internal=True)
+
+        # The first call stops after one model-server reply; the second never reaches the model server.
+        for _ in range(2):
+            with pytest.raises(PermanentEndpointError) as exc_info:
+                if endpoint == "responses":
+                    await receiving_client.create_response(input="hello")
+                else:
+                    await receiving_client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+            assert exc_info.value.status == 429
+
+        assert (provider_calls, model_server_replies) == (1, 1)
+
     @pytest.mark.asyncio
     async def test_responses_preserves_provider_http_400_across_server_hop(
         self,

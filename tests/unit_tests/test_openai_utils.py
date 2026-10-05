@@ -321,6 +321,8 @@ class TestOpenAIUtils:
             (b'{"error":{"code":"budget_exceeded"}}', True),
             (b'{"error":{"type":"insufficient_quota"}}', True),
             (b'{"error":{"code":"rate_limit_exceeded"}}', False),
+            (b'{"detail":{"error":{"type":"insufficient_quota"}}}', True),
+            (b'{"detail":{"error":{"code":"rate_limit_exceeded"}}}', False),
             (b"Quota exceeded for quota metric requests per minute. Retry in 30 seconds.", False),
             (b'{"error":{"message":"quota exceeded"}}', False),
             (b"budget_exceeded", False),
@@ -334,6 +336,7 @@ class TestOpenAIUtils:
         [
             (b'{"error":{"code":"invalid_api_key"}}', True),
             (b'{"error":{"type":"authentication_error"}}', True),
+            (b'{"detail":{"error":{"code":"invalid_api_key"}}}', True),
             (b"Incorrect API key provided", True),
             (b'{"error":"unauthorized"}', False),
             (b'{"error":{"message":"model not available"}}', False),
