@@ -258,6 +258,43 @@ def _is_retryable_create_error(exception: BaseException) -> bool:
     return _has_retryable_error_marker(exception)
 
 
+def _is_retryable_connect_error(exception: BaseException, seen: set[int] | None = None) -> bool:
+    """Return whether attaching to an existing sandbox can be retried.
+
+    Attach is idempotent (look the sandbox up, health-check it), so anything that says the
+    service was unreachable or busy is worth another go: the SDK's connection errors, the
+    transport's connect/read failures, and every create-path transient. The per-attempt
+    ``TimeoutError`` raised by ``_await_sdk_call`` stays terminal so the total stays bounded.
+    """
+    seen = set() if seen is None else seen
+    if id(exception) in seen:
+        return False
+    seen.add(id(exception))
+    if type(exception) is TimeoutError:
+        return False
+    if isinstance(exception, (ConnectionError, OSError)):
+        return True
+    if _is_retryable_create_error(exception):
+        return True
+    try:
+        from opensandbox.exceptions import SandboxConnectionException
+    except (ModuleNotFoundError, ImportError):
+        SandboxConnectionException = None  # noqa: N806
+    if SandboxConnectionException is not None and isinstance(exception, SandboxConnectionException):
+        return True
+    try:
+        import httpx
+
+        if isinstance(exception, httpx.TransportError):
+            return True
+    except ModuleNotFoundError:
+        pass
+    for linked in (exception.__cause__, exception.__context__):
+        if isinstance(linked, BaseException) and _is_retryable_connect_error(linked, seen):
+            return True
+    return False
+
+
 def _is_retryable_sdk_operation_error(exception: BaseException, seen: set[int] | None = None) -> bool:
     """Return whether an SDK operation can be retried."""
     if isinstance(exception, TimeoutError):
@@ -1034,14 +1071,20 @@ class OpenSandboxProvider:
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         sandbox_id = str(descriptor["sandbox_id"])
         timeout_s = self._create.connect_attempt_timeout_s
-        sandbox = await asyncio.wait_for(
-            Sandbox.connect(
+        # Retried like create: a transient connect failure to the sandbox service used to be a
+        # single unrecoverable attempt here, which turned one TCP timeout into a failed rollout.
+        sandbox = await self._await_sdk_operation(
+            lambda: Sandbox.connect(
                 sandbox_id,
                 connection_config=self._connection_config(request_timeout_s=timeout_s),
                 connect_timeout=timedelta(seconds=timeout_s),
                 skip_health_check=self._create.skip_health_check,
             ),
-            timeout=timeout_s,
+            operation="connect",
+            sandbox_id=sandbox_id,
+            timeout_s=timeout_s,
+            retries=self._create.retries,
+            is_retryable=_is_retryable_connect_error,
         )
         return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
 

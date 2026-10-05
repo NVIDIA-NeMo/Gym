@@ -1965,3 +1965,83 @@ async def test_shared_memory_metadata_reaches_create_api(fake_opensandbox_sdk, s
     provider = OpenSandboxProvider(attribution={"enabled": False}, probe={"command": None})
     await provider.create(SandboxSpec(image="image:tag", metadata={"nemo.nvidia.com/shm": size}))
     assert FakeSandbox.created_kwargs["metadata"]["nemo.nvidia.com/shm"] == size
+
+
+class _FlakyConnectSandbox(FakeSandbox):
+    """Attach fails transiently N times before the sandbox answers."""
+
+    failures: list[BaseException] = []
+    attempts = 0
+
+    @classmethod
+    async def connect(cls, *args: Any, **kwargs: Any) -> "FakeSandbox":
+        cls.attempts += 1
+        if cls.failures:
+            raise cls.failures.pop(0)
+        return cls("sandbox-1")
+
+
+def _flaky_sdk(monkeypatch: pytest.MonkeyPatch, failures: list[BaseException]) -> type[_FlakyConnectSandbox]:
+    _FlakyConnectSandbox.failures = list(failures)
+    _FlakyConnectSandbox.attempts = 0
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (_FlakyConnectSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
+    return _FlakyConnectSandbox
+
+
+def _connect_provider() -> Any:
+    # Zero waits so the retry loop is exercised without sleeping through the test.
+    return opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        create={"retries": 3, "connect_attempt_timeout_s": 5},
+        operations={"retry_delay_s": 0.0, "retry_max_delay_s": 0.0},
+    )
+
+
+@pytest.mark.asyncio
+async def test_connect_retries_transient_transport_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Seen in production: one httpx.ConnectTimeout attaching to a seeded sandbox became a
+    failed rollout, because connect() was a single unretried attempt while create() retried."""
+    httpx = pytest.importorskip("httpx")
+    wrapped = ConnectionError("sandbox service unreachable")
+    wrapped.__cause__ = httpx.ConnectTimeout("timed out")
+    sdk = _flaky_sdk(monkeypatch, [httpx.ConnectTimeout("timed out"), wrapped])
+
+    handle = await _connect_provider().connect({"sandbox_id": "sandbox-1"})
+
+    assert handle.sandbox_id == "sandbox-1"
+    assert sdk.attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_connect_gives_up_after_the_configured_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk = _flaky_sdk(monkeypatch, [ConnectionError("down")] * 10)
+    with pytest.raises(ConnectionError):
+        await _connect_provider().connect({"sandbox_id": "sandbox-1"})
+    assert sdk.attempts == 4  # retries=3 -> 4 attempts
+
+
+@pytest.mark.asyncio
+async def test_connect_does_not_retry_a_per_attempt_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The attempt budget already ran out once; retrying it would multiply an unbounded wait.
+    sdk = _flaky_sdk(monkeypatch, [TimeoutError("Timed out during OpenSandbox connect after 5s")])
+    with pytest.raises(TimeoutError):
+        await _connect_provider().connect({"sandbox_id": "sandbox-1"})
+    assert sdk.attempts == 1
+
+
+def test_connect_retry_classification() -> None:
+    is_retryable = opensandbox_provider._is_retryable_connect_error
+    assert is_retryable(ConnectionError("x")) is True
+    assert is_retryable(OSError("x")) is True
+    assert is_retryable(TimeoutError("per-attempt budget")) is False
+    assert is_retryable(ValueError("bad descriptor")) is False
+    chained = RuntimeError("sdk wrapper")
+    chained.__cause__ = ConnectionRefusedError("refused")
+    assert is_retryable(chained) is True
+    loop = RuntimeError("a")
+    loop.__cause__ = loop  # a cycle must not recurse forever
+    assert is_retryable(loop) is False
