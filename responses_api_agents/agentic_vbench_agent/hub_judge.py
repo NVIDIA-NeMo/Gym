@@ -6,7 +6,9 @@ Rubric prompts, evidence, deterministic checks and aggregation are the original 
 Opus items keep the original Anthropic Messages request and change only the model
 name to Hub's Claude Opus 4.7. Gemini items keep the original prompts and media but
 use Hub's Gemini model, sent as inline native generateContent parts.
-Repeated transport failures reject the verification instead of becoming zero rewards.
+Repeated transport or authentication failures reject the verification instead of becoming zero
+rewards; a 4xx that persists for one request (e.g. Gemini refusing empty audio) is raised to the judge,
+which scores that rubric item as a judge error exactly as it does with the native SDK.
 """
 
 import base64
@@ -43,6 +45,7 @@ def post(path: str, payload: dict, headers: dict | None = None) -> dict:
         },
     )
     error = "unknown"
+    request_error = False
     for attempt in range(ATTEMPTS):
         try:
             with urllib.request.urlopen(request, timeout=300) as response:
@@ -51,17 +54,26 @@ def post(path: str, payload: dict, headers: dict | None = None) -> dict:
             # Never print request headers, media or credentials. Of the provider error
             # body keep only the short status message so a persistent 4xx is diagnosable.
             error = f"Hub judge {type(exc).__name__}"
+            request_error = False
             if isinstance(exc, urllib.error.HTTPError):
                 error += f" HTTP {exc.code}"
                 detail = provider_error_message(exc)
                 if detail:
                     error += f" ({detail})"
-                # Hub occasionally returns transient 400s for requests that succeed on
-                # replay; only authentication failures are treated as permanent.
+                # Authentication failures are permanent and mean the run is misconfigured.
                 if exc.code in (401, 403):
                     break
+                # Other 4xx are about this request (e.g. Gemini rejecting an empty audio
+                # extract). Hub occasionally returns transient ones, so they are retried,
+                # but when they persist the native SDK would raise the same error to the
+                # judge, which scores that rubric item as a judge error and carries on.
+                request_error = exc.code not in (408, 429) and 400 <= exc.code < 500
             if attempt < ATTEMPTS - 1:
                 time.sleep(2 ** (attempt + 1))
+    if request_error:
+        raise RuntimeError(error)
+    # Transport or authentication failures must not silently become zero scores: record
+    # them so the verification is rejected and the trial is retried as infrastructure.
     with _LOCK:
         FAILURES.append(f"{path}: {error}")
     raise RuntimeError(error)
