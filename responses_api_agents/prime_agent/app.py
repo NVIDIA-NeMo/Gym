@@ -253,6 +253,8 @@ class PrimeAgentConfig(BaseResponsesAPIAgentConfig):
     model: str = "policy/model"
     env: dict[str, str] = Field(default_factory=dict)
     workspace_root: str = "outputs/prime_agent/workspaces"
+    # Run in this directory instead of the scratch workspace, e.g. the task repo.
+    repo_dir: Optional[str] = None
     kernel_venv: Optional[str] = "outputs/prime_agent/kernel-venv"
     thinking: Optional[str] = None
     system_prompt: Optional[str] = None
@@ -380,9 +382,10 @@ class PrimeAgent(SimpleResponsesAPIAgent):
                 (agent_dir / "models.json").write_text(json.dumps(models_config, indent=2))
             env = self._env(home)
             cmd = self._build_command(instruction, system_prompt, socket_dir / "daemon.sock")
+            project_dir = Path(self.config.repo_dir).expanduser() if self.config.repo_dir else work_dir
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                cwd=str(work_dir),
+                cwd=str(project_dir),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
