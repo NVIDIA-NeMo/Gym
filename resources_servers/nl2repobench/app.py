@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shlex
 import sys
 import tempfile
 from copy import deepcopy
@@ -277,6 +278,16 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         )
         sandbox = AsyncSandbox(provider)
         await sandbox.start(spec)
+        if phase == "agent":
+            # The pinned image is shared with the verifier sandbox and ships the real,
+            # graded test suite baked in (task_image() returns the same reference for
+            # both phases). Strip it from the agent's own copy so "hidden pytest suite"
+            # is actually hidden from the agent, not just undocumented in start.md — the
+            # verifier rebuilds its sandbox from this same image independently, so this
+            # has no effect on grading.
+            test_paths = " ".join(shlex.quote(f"/workspace/{p}") for p in task.test_files.files)
+            if test_paths:
+                await sandbox.exec(command=f"rm -rf {test_paths}", timeout_s=60)
         return sandbox
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
