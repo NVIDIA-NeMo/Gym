@@ -84,6 +84,10 @@ from nemo_gym.server_utils import (
 from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
 
 
+_ASSISTANT_MESSAGE_PLUGIN = Path(__file__).with_name("assistant_message_header.js")
+_REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
+
+
 def _load_json(value: Any) -> dict[str, Any]:
     try:
         parsed = json.loads(value)
@@ -794,6 +798,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             value = getattr(body, name, None)
             if value is not None:
                 build_agent[name] = value
+        if self._model_call_capture_enabled():
+            # Keep the plugin outside the task repo so it cannot enter a generated patch.
+            await sandbox.upload(_ASSISTANT_MESSAGE_PLUGIN, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
+            effective_config["plugin"] = [
+                *effective_config.get("plugin", []),
+                f"file://{_REMOTE_ASSISTANT_MESSAGE_PLUGIN}",
+            ]
         opencode_config_content = json.dumps(effective_config)
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None

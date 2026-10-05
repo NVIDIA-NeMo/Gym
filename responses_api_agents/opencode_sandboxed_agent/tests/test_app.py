@@ -245,12 +245,19 @@ class TestOpenCodeSandboxedAgent:
         assert combined.total_tokens == combined.input_tokens + combined.output_tokens
 
     @mark.parametrize("remaining_context", [False, True])
+    @mark.parametrize("observability_enabled", [False, True])
     async def test_responses_sanity(
-        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch, remaining_context
+        self,
+        opencode_export_test_data: Dict[str, Any],
+        monkeypatch: MonkeyPatch,
+        remaining_context: bool,
+        observability_enabled: bool,
     ) -> None:
         config = self._create_config()
         config.output_token_policy = "remaining_context" if remaining_context else "fixed"
-        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": observability_enabled}
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
 
         sandbox_mock = MagicMock()
         sandbox_mock.exec = AsyncMock(
@@ -265,7 +272,9 @@ class TestOpenCodeSandboxedAgent:
         sandbox_mock.download = AsyncMock()
         sandbox_mock.upload = AsyncMock()
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
-        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+        monkeypatch.setattr(
+            server, "_create_opencode_config", AsyncMock(return_value={"plugin": ["file:///user-plugin.js"]})
+        )
 
         monkeypatch.setattr(
             "responses_api_agents.opencode_sandboxed_agent.app.Path.exists",
@@ -291,6 +300,22 @@ class TestOpenCodeSandboxedAgent:
                 input=[{"role": "user", "content": "hello"}],
             ),
         )
+        command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        command_config = next(
+            arg.split("=", 1)[1] for arg in shlex.split(command) if arg.startswith("OPENCODE_CONFIG_CONTENT=")
+        )
+        plugins = json.loads(command_config)["plugin"]
+        assert plugins[0] == "file:///user-plugin.js"
+        if observability_enabled:
+            sandbox_mock.upload.assert_any_await(
+                app_module._ASSISTANT_MESSAGE_PLUGIN, app_module._REMOTE_ASSISTANT_MESSAGE_PLUGIN
+            )
+            assert plugins == ["file:///user-plugin.js", f"file://{app_module._REMOTE_ASSISTANT_MESSAGE_PLUGIN}"]
+        else:
+            assert plugins == ["file:///user-plugin.js"]
+
+        assert sandbox_mock.upload.await_count == len(server._runtime_plugins()) + int(observability_enabled)
+
         expected_response = NeMoGymResponse(
             id="resp_",
             created_at=0.0,
@@ -371,11 +396,9 @@ class TestOpenCodeSandboxedAgent:
         assert expected_response == actual_response
         # Execution uploads plugins even when a resource supplied this sandbox.
         if remaining_context:
-            sandbox_mock.upload.assert_awaited_once_with(
+            sandbox_mock.upload.assert_any_await(
                 Path(app_module.__file__).with_name("remaining-context.js"), "/tmp/nemo-gym-remaining-context.js"
             )
-        else:
-            sandbox_mock.upload.assert_not_awaited()
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
         assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["command"]
 
@@ -548,6 +571,7 @@ class TestOpenCodeSandboxedAgent:
         server._create_opencode_config = AsyncMock(return_value={})
 
         sandbox = MagicMock()
+        sandbox.upload = AsyncMock()
         sandbox._handle = SandboxHandle(sandbox_id="connected-sandbox", provider_name="opensandbox", raw=None)
         sandbox.exec = AsyncMock(
             side_effect=[
@@ -1075,3 +1099,12 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
     assert receipt["response"]["output"]
     assert receipt["response"]["status"] == result.response.status
     sandbox.stop.assert_awaited_once()
+
+
+@mark.skipif(shutil.which("node") is None, reason="Node.js is needed to exercise the OpenCode plugin hooks")
+def test_assistant_message_plugin_hooks() -> None:
+    subprocess.run(
+        [shutil.which("node"), "--test", str(Path(__file__).with_name("assistant_message_header.test.mjs"))],
+        check=True,
+        timeout=30,
+    )
