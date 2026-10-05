@@ -284,13 +284,13 @@ class ResponsesConverter(BaseModel):
             if text_format is not None:
                 format_type = text_format.get("type")
                 if format_type == "json_schema":
+                    json_schema = {"name": text_format["name"], "schema": text_format["schema"]}
+                    for key in ("strict", "description"):
+                        if text_format.get(key) is not None:
+                            json_schema[key] = text_format[key]
                     responses_create_params["response_format"] = {
                         "type": "json_schema",
-                        "json_schema": {
-                            "name": text_format["name"],
-                            "schema": text_format["schema"],
-                            "strict": text_format.get("strict", True),
-                        },
+                        "json_schema": json_schema,
                     }
                 elif format_type == "json_object":
                     responses_create_params["response_format"] = {"type": "json_object"}

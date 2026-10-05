@@ -4,7 +4,7 @@
 """Wire contracts for the NeMo UserSim episode protocol."""
 
 import json
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -15,9 +15,17 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
+from resources_servers.usersim.task_data import (
+    TaskData as UserSimTaskInput,
+)
+from resources_servers.usersim.task_data import (
+    UserSimAgentRole,
+)
+from resources_servers.usersim.task_data import (
+    UserSimSamplingRequest as UserSimSamplingRequest,
+)
 
 
-UserSimAgentRole = Literal["user", "assistant", "judge", "summary"]
 USERSIM_EPISODE_PROTOCOL = "usersim.ConversationLoop"
 
 
@@ -43,16 +51,6 @@ class UserSimTheme(BaseModel):
     goal: str = Field(min_length=1)
 
 
-class UserSimSamplingRequest(BaseModel):
-    """Dataset-owned inputs used to select one replayable scenario."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    locale: str = Field("en_US", pattern=r"^[A-Za-z0-9_]+$")
-    seed: int
-    probe_type: str | None = None
-
-
 class UserSimProtocolConfig(BaseModel):
     """Run-wide subset of ``ConversationSimulatorConfig`` owned by the Environment Server."""
 
@@ -70,18 +68,6 @@ class UserSimProtocolConfig(BaseModel):
     store_reasoning: bool = True
     random_seed: int | None = None
     verbosity: int = Field(1, ge=0, le=2)
-
-
-class UserSimTaskInput(BaseModel):
-    """Durable input loaded from one UserSim task row."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    sampling: UserSimSamplingRequest
-    probe_data: dict[str, Any] = Field(default_factory=dict)
-    responses_create_params: dict[UserSimAgentRole, NeMoGymResponseCreateParamsNonStreaming] = Field(
-        default_factory=dict
-    )
 
 
 class ResolvedUserSimContext(BaseModel):
@@ -181,9 +167,7 @@ class UserSimEpisodeResult(BaseModel):
 
 
 class UserSimEpisodeFailure(EpisodeFailure):
-    """Add the failing UserSim protocol stage."""
-
-    stage: Literal["seed", "participant", "simulation", "verification", "cleanup"] | None = None
+    """Use the shared episode failure-stage vocabulary."""
 
 
 class UserSimEpisodeRequest(BaseEpisodeRequest[UserSimTaskInput]):

@@ -242,6 +242,7 @@ async def test_single_agent_turn_with_direct_resources_tools() -> None:
     assert str(tool_access.base_url) == "http://resources:8000/"
     assert tool_access.cookies == {"session": "cookie-value"}
     assert client.calls[1][2]["json"]["tool_accesses"][0]["kind"] == "direct_http"
+    assert client.calls[1][2]["cookies"] == {"session": "cookie-value"}
     assert client.calls[2][2]["cookies"] == {"session": "cookie-value"}
     assert client.calls[3][2]["cookies"] == {"session": "cookie-value"}
     assert agent_close_body.episode_id == EpisodeId(rollout_id="rollout", attempt=2)

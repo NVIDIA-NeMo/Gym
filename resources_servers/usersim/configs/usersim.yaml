@@ -1,6 +1,7 @@
 environment_routing_mode: taskset
 environment_server_routes:
   "usersim:example": usersim_environment
+  "usersim:benchmark": usersim_environment
 
 assistant_policy_base_url: ${policy_base_url}
 assistant_policy_api_key: ${policy_api_key}
@@ -50,7 +51,7 @@ usersim_resources:
       description: Deterministic NeMo UserSim persona and general-probe initialization.
       personas_cache_dir: ~/.cache/nemo-gym/usersim/personas
       personas_dataset_version: 0.0.2
-      usersim_revision: 44c39daf481a23a87742c3c456852aca910653ce  # pragma: allowlist secret
+      usersim_revision: a5f676bf6dc5a73914c8a0860f97c10dd2c214ee  # pragma: allowlist secret
       tool_simulation_model:
         type: responses_api_models
         name: tool_simulation_model
@@ -98,9 +99,10 @@ usersim_assistant:
         name: usersim_resources
       max_steps: 10
       datasets:
-        - name: example
-          type: example
-          jsonl_fpath: resources_servers/usersim/data/example.jsonl
+        - name: usersim
+          type: benchmark
+          jsonl_fpath: benchmarks/usersim/data/usersim.jsonl
+          prepare_script: benchmarks/usersim/prepare.py
           license: Apache 2.0
 
 usersim_environment:

@@ -1685,6 +1685,34 @@ def test_downconverting_json_schema_text_format(converter: ResponsesConverter):
     }
 
 
+def test_downconverting_json_schema_preserves_description_without_defaulting_strict(
+    converter: ResponsesConverter,
+):
+    schema = {"type": "object", "properties": {"score": {"type": "integer"}}}
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="hi",
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "evaluation",
+                "description": "Score the response.",
+                "schema": schema,
+            }
+        },
+    )
+
+    converted = converter.responses_to_chat_completion_create_params(params)
+
+    assert converted.response_format == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "evaluation",
+            "description": "Score the response.",
+            "schema": schema,
+        },
+    }
+
+
 @pytest.mark.parametrize("field", ["context", "generate_summary", "summary"])
 def test_downconverting_responses_only_reasoning_fields_fails_explicitly(converter: ResponsesConverter, field: str):
     params = NeMoGymResponseCreateParamsNonStreaming(input="hi", reasoning={field: "auto"})

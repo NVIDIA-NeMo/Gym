@@ -207,6 +207,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     tool_accesses=tool_accesses,
                     sandbox_access=seed.sandbox_access,
                 ).model_dump(mode="json"),
+                cookies=resources_cookies,
             )
             await raise_for_status(agent_create_http_response)
             agent_session = AgentSeedSessionResponse.model_validate(

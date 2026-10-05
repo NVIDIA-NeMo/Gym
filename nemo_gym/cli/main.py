@@ -1031,7 +1031,7 @@ COMMANDS = {
             ),
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
-            _value_flag("split", "split", "Dataset split to use (train, validation, benchmark, or example)."),
+            _value_flag("split", "split", "Dataset split to use (train, validation, or benchmark)."),
             MODEL,
             MODEL_URL,
             MODEL_API_KEY,
