@@ -184,5 +184,20 @@ trials completed, with native mean score 0.913333 and Pass@1, Pass@3 and strict
 Pass³ of 1.0 for this single task. The pinned Gym commit was
 `e2a4a6b15a9b4be119e24275e537b8fce0c4bd5c`. Native calls are not instrumented
 by Gym's model telemetry, so rollout health reports these trials as unobserved.
-Multimodal/multi-turn smokes, the Factory Super 3.5 serving run and full-suite
-parity remain required before certification.
+
+The 303 saved native Nano 3 Omni multimodal traces (101 tasks, three trials)
+also pass Gym's trace conversion and native-score checks, including 1,334 tool
+calls. This checks historical trace compatibility; it is not a new model run.
+
+A fresh Nano 3 Omni multimodal comparison was submitted through Factory's
+`gym_native` backend on 2026-10-05 UTC: Slurm jobs `7184062`, `7184058`, and
+`7184071`, with seeds 1001, 1002, and 1003 respectively. The run uses the native
+checkpoint, serving arguments and model/judge profile, preserves each task's
+turn limit, and explicitly selects the native harness. All 101 task definitions
+match the reference snapshot; media validation and a real Serper preflight
+passed. Each job runs one trial of all 101 tasks; the three outputs must be
+combined by task ID and trial seed before reporting Pass@3 or strict Pass³.
+At submission the jobs were queued for GPU resources, so no new scores or
+parity result are claimed. Historical runtime versions and live search/judge
+responses may differ. Multi-turn rollout validation, the Super 3.5 serving run,
+and benchmark certification remain pending.
