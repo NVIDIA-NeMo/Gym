@@ -8201,6 +8201,19 @@ class TestTurnsFromModelCalls:
 
         assert [(turn.model_calls[0].model_call_id, turn.turn_no) for turn in turns] == [("answered", 1)]
 
+    @pytest.mark.parametrize("status", [400, 429, 500])
+    def test_http_error_payload_is_retained_without_becoming_a_turn(self, status: int) -> None:
+        failed = self._call("failed", {"error": {"message": "try again"}}, started_at=1.0)
+        failed.response_metadata.status_code = status
+        answered = self._call("answered", {"output": []}, started_at=2.0)
+        invocation = self._invocation("root", ["failed", "answered"])
+        turns = nemo_gym.rollout_collection._turns_from_model_calls(
+            "task", "rollout", [invocation], [failed, answered], None
+        )
+        assert [(turn.model_calls[0].model_call_id, turn.turn_no) for turn in turns] == [("answered", 1)]
+        assert [ref.model_call_id for ref in invocation.model_calls] == ["failed", "answered"]
+        assert failed.response == {"error": {"message": "try again"}}
+
     @pytest.mark.parametrize("invocation_count", [1, 2])
     def test_a_call_no_invocation_references_is_skipped(self, invocation_count: int) -> None:
         calls = [
