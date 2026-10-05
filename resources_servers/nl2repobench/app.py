@@ -122,6 +122,7 @@ class NL2RepoBenchSeedSessionRequest(NL2RepoBenchInstanceRequest, BaseSeedSessio
 class NL2RepoBenchSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str
     sandbox_descriptor: dict[str, Any]
+    workdir: str | None = None
 
 
 class NL2RepoBenchVerifyRequest(NL2RepoBenchInstanceRequest, BaseVerifyRequest):
@@ -285,11 +286,19 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir="/workspace",
             env=dict(self.config.sandbox_config.get("env", {})),
-            # Upstream NL2RepoBench copies start.md into the task workspace at launch
-            # (shutil.copy2 onto a host bind-mount); this is our equivalent for the
-            # sandbox-provider path. Agent-only: the verifier sandbox just runs tests
-            # against whatever the agent produced and has no use for the spec file.
-            files={"/workspace/start.md": task.start_md} if phase == "agent" else {},
+            # NOT using SandboxSpec.files here: it uploads into the container
+            # AFTER the image's own entrypoint has already started (AsyncSandbox.start()
+            # calls provider.create() first, then uploads), and `workdir` above is only
+            # ever used later as an exec cwd - it never creates the directory. So
+            # `files` silently drops anything targeting a path whose parent doesn't
+            # already exist in the booted image. The per-task pinned images happen to
+            # have /workspace pre-created by their own Dockerfile WORKDIR, which made
+            # this work before switching the agent sandbox to a generic image whose
+            # own WORKDIR is elsewhere (e.g. /openhands/code) and never creates
+            # /workspace at all - confirmed via `find / -name start.md` finding
+            # nothing in that container. start.md is written explicitly below instead,
+            # after an explicit `mkdir -p`, so it doesn't depend on the image's layout.
+            files={},
             metadata=provider_metadata
             | dict(self.config.sandbox_config.get("metadata", {}))
             | {
@@ -303,6 +312,27 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         )
         sandbox = AsyncSandbox(provider)
         await sandbox.start(spec)
+        if phase == "agent":
+            # Upstream NL2RepoBench copies start.md into the task workspace at launch
+            # (shutil.copy2 onto a host bind-mount); this is our equivalent for the
+            # sandbox-provider path. mkdir first (see the comment on `files=` above for
+            # why SandboxSpec.files alone silently drops this on images that don't
+            # already have /workspace), then upload via the dedicated file-transfer API
+            # rather than inlining content into a sandbox.exec() shell command: some
+            # start.md specs run up to ~375KB, and the opencode_sandboxed_agent install
+            # path hit a real `fork/exec ... argument list too long` failure the last
+            # time large NL2RepoBench content was inlined into an exec command string
+            # (see benchmarks/nl2repobench/opencode.yaml) - upload() avoids that
+            # class of failure entirely rather than relying on staying under some
+            # untested ARG_MAX threshold.
+            await sandbox.exec(command="mkdir -p /workspace", timeout_s=60)
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+                f.write(task.start_md)
+                local_start_md_path = Path(f.name)
+            try:
+                await sandbox.upload(local_start_md_path, "/workspace/start.md")
+            finally:
+                local_start_md_path.unlink(missing_ok=True)
         return sandbox
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
@@ -344,6 +374,16 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             return NL2RepoBenchSeedSessionResponse(
                 sandbox_handle=sandbox_handle,
                 sandbox_descriptor=sandbox_descriptor,
+                # OpenCodeSandboxedAgent reconnects to this sandbox by sandbox_handle
+                # alone and otherwise defaults to the container's own image-baked
+                # WORKDIR (opencode_sandboxed_agent/app.py:496) when running opencode -
+                # which is /workspace for the per-task pinned images (their own
+                # Dockerfile WORKDIR) but NOT for the generic agent-sandbox image
+                # (_AGENT_SANDBOX_IMAGE), whose own WORKDIR is elsewhere. Return it
+                # explicitly so opencode actually runs from where start.md was written,
+                # regardless of what the booted image's default happens to be. This
+                # sandbox is always phase="agent" (see _create_sandbox call above).
+                workdir="/workspace",
             )
         except Exception:
             if sandbox is not None:
