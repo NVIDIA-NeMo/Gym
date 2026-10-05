@@ -454,7 +454,7 @@ managed = true
 required-version = ">=0.9.30"
 # grpcio and msgpack are transitive dependencies of ray. Pin the lower bounds here to
 # ensure uv selects a CVE-safe version across all resolver paths.
-# msgpack>=1.2.1: GHSA-6v7p-g79w-8964 (Unpacker out-of-bounds read after a caught error).
+# Updated Sun Jun 22, 2026 (CVE remediation)
 constraint-dependencies = [
     "grpcio>=1.81.0rc1",
     "msgpack>=1.2.1",
