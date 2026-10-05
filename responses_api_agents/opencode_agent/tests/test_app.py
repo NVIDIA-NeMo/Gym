@@ -1485,3 +1485,39 @@ class TestProcessGroupCleanup:
 
         _kill_process_group(0)
         _kill_process_group(os.getpgrp())
+
+
+class TestRemoteSessionTask:
+    def test_runs_session_and_returns_database(self, tmp_path: Path) -> None:
+        from responses_api_agents.opencode_agent.app import _remote_session_task
+
+        run_session = _remote_session_task()._function
+        work = tmp_path / "opencode_x"
+        data_home = work / ".opencode-data"
+        inputs = {str(work / "image_0.png"): b"png", str(work / "opencode.json"): b"{}"}
+        cmd = [
+            "sh",
+            "-c",
+            'test -f image_0.png && mkdir -p "$XDG_DATA_HOME/opencode" && echo db > "$XDG_DATA_HOME/opencode/opencode.db"',
+        ]
+        rc, stderr, timed_out, outputs = run_session(
+            cmd, str(work), str(work), {"PATH": "/usr/bin:/bin", "XDG_DATA_HOME": str(data_home)}, inputs, 30.0
+        )
+        assert (rc, timed_out) == (0, False), stderr
+        assert outputs == {str(data_home / "opencode" / "opencode.db"): b"db\n"}
+        assert not work.exists()
+
+    def test_timeout_kills_session(self, tmp_path: Path) -> None:
+        from responses_api_agents.opencode_agent.app import _remote_session_task
+
+        run_session = _remote_session_task()._function
+        work = tmp_path / "opencode_y"
+        rc, _, timed_out, outputs = run_session(
+            ["sh", "-c", "sleep 30"],
+            str(work),
+            str(work),
+            {"PATH": "/usr/bin:/bin", "XDG_DATA_HOME": str(work / "d")},
+            {},
+            1.0,
+        )
+        assert timed_out and outputs == {}
