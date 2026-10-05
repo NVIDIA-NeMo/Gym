@@ -5,6 +5,32 @@ TODO: Describe this benchmark and replace the sample data.
 - Integration profile: `custom-gym-verifier`
 - Scorer: `terminal_bench_2_1`
 
+## Harness and benchmark contract
+
+Use the same composition as SWE-bench Pro: import an independent Resources config,
+an independent harness config, and the single-agent EnvironmentServer config.
+The EnvironmentServer binds `resources_server` and `agent_server`; the harness does
+not need a benchmark-specific runner or another combined preset.
+
+| Responsibility | SWE-bench Pro and Terminal-Bench 2.1 |
+| --- | --- |
+| Dataset | The benchmark prepares flat JSONL with `responses_create_params` and its task fields. |
+| Collection | `single_agent_turn_legacy` adapts flat request/result rows to the shared `single_agent_turn` execution. |
+| Task state | Resources receives `ResourcesSeedSessionRequest`, owns the sandbox, and returns `SandboxAccess` with an absolute workdir. |
+| Harness | Receives `AgentSeedSessionRequest`, borrows the sandbox, and runs its own tools/model loop. |
+| Verification | EnvironmentServer closes the agent before calling Resources `/verify`. |
+| Cleanup | EnvironmentServer calls Resources `/close_session`; Resources destroys the sandbox and retains failed cleanup for retry. |
+
+Here `legacy` describes only the collector's flat-row input/output contract.
+It does not select the agent's old direct `/run` path. Moving to materialized taskset
+input and `single_agent_turn` is a separate migration for both benchmarks; changing
+only the EnvironmentServer config is insufficient.
+
+TB's `_ResourcesSessionState` is private Resources bookkeeping for request identity
+and seed/verdict replay. Its state fields reflect TB's verification needs; the public
+session protocol and sandbox ownership match SWE-Pro. Shared state helpers can be
+extracted later without changing how harnesses and benchmarks connect.
+
 ## Codex in a task sandbox
 
 Compose the independent benchmark, Codex, and single-agent Environment Server configs.
@@ -19,8 +45,6 @@ config_paths:
   - resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml
   - responses_api_agents/codex_agent/configs/codex_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
-  - nemo_gym/sandbox/providers/docker/configs/docker.yaml
-  - responses_api_models/vllm_model/configs/vllm_model.yaml
 
 single_agent_turn_legacy:
   environment_servers:
@@ -29,6 +53,7 @@ single_agent_turn_legacy:
         name: terminal_bench_2_1_resources_server
       agent_server:
         name: codex_agent
+      resources_tool_transports: []
 
 codex_agent:
   responses_api_agents:
@@ -36,6 +61,20 @@ codex_agent:
       model_context_window: 32768
       model_auto_compact_token_limit: 28672
       timeout: 600
+
+terminal_bench_2_1_resources_server:
+  resources_servers:
+    terminal_bench_2_1:
+      evaluation_timeout: 300
+```
+
+Save the independent model/provider settings as `model-provider.yaml`, as in the
+SWE-Pro recipe. The task container must be able to reach the Gym Model Server.
+
+```yaml
+config_paths:
+  - nemo_gym/sandbox/providers/docker/configs/docker.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
 
 policy_model:
   responses_api_models:
@@ -45,11 +84,6 @@ policy_model:
       sampling_overrides:
         temperature: 0.0
         max_tokens: 8192
-
-terminal_bench_2_1_resources_server:
-  resources_servers:
-    terminal_bench_2_1:
-      evaluation_timeout: 300
 ```
 
 This example uses a non-reasoning Chat Completions endpoint; the Gym vLLM Model
@@ -57,7 +91,7 @@ Server adapts it to Codex's streaming Responses API. Configure the parser flags 
 your model, or use the OpenAI Model Server for a native Responses endpoint.
 These are single-task smoke limits, not full-benchmark settings. Set the context window
 to the served model limit. Keep sampling and per-call output limits on the Gym Model
-Server; Codex native sessions reject request-level sampling/output overrides. Put `policy_base_url`,
+Server; Codex task-sandbox sessions reject request-level sampling/output overrides. Put `policy_base_url`,
 `policy_api_key`, and `policy_model_name` in your private `env.yaml`. The task container
 must reach the Gym model proxy; use `++use_absolute_ip=true` for Docker on a reachable host.
 Both servers use one worker because sessions are process-local.
@@ -80,19 +114,19 @@ assert len(rows) == 1
 assert (Path(rows[0]["task_folder"]) / "tests/test.sh").is_file()
 Path("results/codex-tb21-input.jsonl").write_text(json.dumps(rows[0]) + "\n")
 PY
-gym env start --config run.yaml ++use_absolute_ip=true
+gym env start --config run.yaml --config model-provider.yaml ++use_absolute_ip=true
 ```
 
 In a second terminal, in the same checkout and Python environment:
 
 ```bash
-gym eval run --no-serve --config run.yaml ++use_absolute_ip=true \
+gym eval run --no-serve --config run.yaml --config model-provider.yaml ++use_absolute_ip=true \
   --agent codex_agent --input results/codex-tb21-input.jsonl \
   --output results/codex-tb21-rollouts.jsonl --limit 1 --num-repeats 1 --concurrency 1
 ```
 
 Keep task tests/solutions on the host; do not mount the benchmark checkout into the task
-sandbox. Only verifier assets are uploaded, after Codex closes. Native seed fails early if
+sandbox. Only verifier assets are uploaded, after Codex closes. Resources session setup fails early if
 the host task's `tests/test.sh` is missing. Do not enable golden-patch mode for model runs.
 Codex installs its pinned CLI and private Node runtime and, if absent, Python 3 and
 bootstrap packages using apt/apk as root;

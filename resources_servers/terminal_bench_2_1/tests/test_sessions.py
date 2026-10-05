@@ -83,7 +83,7 @@ def verify_body(seed: ResourcesSeedSessionRequest) -> TerminalBench21VerifyReque
 
 
 @pytest.mark.parametrize("reward", [0, 1])
-def test_native_http_lifecycle_keeps_task_until_close(setup, reward: int) -> None:
+def test_resources_session_http_lifecycle_keeps_task_until_close(setup, reward: int) -> None:
     server, sandbox, seed, _ = setup
     sandbox.download.side_effect = lambda remote, local: Path(local).write_text(str(reward))
     with TestClient(server.setup_webserver()) as client:
@@ -125,7 +125,7 @@ def test_native_http_lifecycle_keeps_task_until_close(setup, reward: int) -> Non
         assert client.post("/verify", json=verify_body(seed).model_dump(mode="json")).status_code == 409
     sandbox.stop.assert_awaited_once()
     assert not server._session_id_to_sandbox
-    assert not server._native_sessions
+    assert not server._session_id_to_state
 
 
 async def test_concurrent_seed_retries_create_only_one_sandbox(setup) -> None:
@@ -173,7 +173,7 @@ async def test_failed_close_retains_owner_for_retry(setup) -> None:
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await server.close_resources_session(close_body(seed))
     assert server._session_id_to_sandbox[seed.resources_session_id] is sandbox
-    assert seed.resources_session_id not in server._closed_native_sessions
+    assert seed.resources_session_id not in server._closed_sessions
     await server.close_resources_session(close_body(seed))
     await server.close_resources_session(close_body(seed))
     assert sandbox.stop.await_count == 2
@@ -228,7 +228,7 @@ async def test_initial_setup_failure_retains_sandbox_for_cleanup_retry(
         provider.close.assert_awaited_once()
         provider.aclose.assert_not_awaited()
         assert server._session_id_to_sandbox[seed.resources_session_id] is sandbox
-        assert seed.resources_session_id not in server._closed_native_sessions
+        assert seed.resources_session_id not in server._closed_sessions
         if recovery == "close":
             await server.close_resources_session(close_body(seed))
             await server.close_resources_session(close_body(seed))
@@ -333,11 +333,11 @@ async def test_interrupted_verification_requires_retrying_episode(
     assert error.value.status_code == 503
     server._verify.assert_awaited_once()
     await server.close_resources_session(close_body(seed))
-    assert not server._native_sessions
+    assert not server._session_id_to_state
 
 
 @pytest.mark.parametrize("invalid", ["missing_tests", "golden_mode", "relative_workdir", "failed_pwd"])
-async def test_native_seed_rejects_invalid_setup(setup, invalid: str) -> None:
+async def test_resources_session_seed_rejects_invalid_setup(setup, invalid: str) -> None:
     server, sandbox, seed, request = setup
     if invalid == "missing_tests":
         (Path(seed.task_data["task_folder"]) / "tests/test.sh").unlink()

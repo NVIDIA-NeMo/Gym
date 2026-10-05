@@ -96,7 +96,13 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
 
 
 @dataclass
-class _NativeSession:
+class _ResourcesSessionState:
+    """Resources-owned request identity and replay results for one episode.
+
+    EnvironmentServer supplies the session ID and closes it after verification.
+    Sandbox ownership is retained separately in ``_session_id_to_sandbox``.
+    """
+
     request: ResourcesSeedSessionRequest
     response: ResourcesSeedSessionResponse | None = None
     verification_request: TerminalBench21VerifyRequest | None = None
@@ -165,9 +171,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             raise ValueError("Terminal-Bench process-local sessions require num_workers=1")
 
         self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
-        self._native_sessions: dict[str, _NativeSession] = {}
-        self._native_session_locks: dict[str, asyncio.Lock] = {}
-        self._closed_native_sessions: dict[str, EpisodeId] = {}
+        self._session_id_to_state: dict[str, _ResourcesSessionState] = {}
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._closed_sessions: dict[str, EpisodeId] = {}
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -199,16 +205,16 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         """Stop an owner-managed sandbox, including after failed or lost seed calls."""
         session_id = body.resources_session_id
-        async with self._native_session_locks.setdefault(session_id, asyncio.Lock()):
-            closed_episode = self._closed_native_sessions.get(session_id)
-            session = self._native_sessions.get(session_id)
+        async with self._session_locks.setdefault(session_id, asyncio.Lock()):
+            closed_episode = self._closed_sessions.get(session_id)
+            session = self._session_id_to_state.get(session_id)
             expected = closed_episode or (session.request.episode_id if session is not None else None)
             if expected is not None and expected != body.episode_id:
                 raise HTTPException(409, "episode_id does not match the resources session")
             await self._stop_session_sandbox(session_id)
-            self._native_sessions.pop(session_id, None)
+            self._session_id_to_state.pop(session_id, None)
             # A close that arrives before seed also fences a delayed seed request.
-            self._closed_native_sessions[session_id] = body.episode_id
+            self._closed_sessions[session_id] = body.episode_id
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     def _patch_sandbox_provider_options_for_instances(
@@ -284,10 +290,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 print(f"Failed to apt-get update: {result}")
 
         if session_id is None:
-            # Legacy callers have no native session to retain failed cleanup.
+            # Direct-agent callers have no Resources session to retain failed cleanup.
             await eval_sandbox.start_with_setup(eval_sandbox_spec, _run_setup)
         else:
-            # Native seed owns cleanup, preserving the setup error and a handle
+            # Resources session setup owns cleanup, preserving the error and a handle
             # for close/shutdown retries even if the first stop fails.
             self._session_id_to_sandbox[session_id] = eval_sandbox
             await eval_sandbox.start(eval_sandbox_spec)
@@ -299,15 +305,16 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         self, request: Request, body: ResourcesSeedSessionRequest | TerminalBench21SeedSessionRequest
     ) -> ResourcesSeedSessionResponse | TerminalBench21SeedSessionResponse:
         if isinstance(body, ResourcesSeedSessionRequest):
-            return await self._seed_native_session(request, body)
+            return await self._seed_resources_session(request, body)
         eval_sandbox = await self._create_sandbox(body)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
         return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
-    async def _seed_native_session(
+    async def _seed_resources_session(
         self, request: Request, body: ResourcesSeedSessionRequest
     ) -> ResourcesSeedSessionResponse:
+        """Bind an EnvironmentServer episode to its benchmark-owned sandbox."""
         if self.config.is_verifying_golden_patch:
             raise HTTPException(422, "Golden-patch mode cannot be used with agent sandbox sessions")
         task = TerminalBench21SeedSessionRequest.model_validate(body.task_data)
@@ -317,10 +324,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if not (task_folder / "tests/test.sh").is_file():
             raise HTTPException(422, f"Missing local task verifier: {task_folder / 'tests/test.sh'}")
         session_id = body.resources_session_id
-        async with self._native_session_locks.setdefault(session_id, asyncio.Lock()):
-            if session_id in self._closed_native_sessions:
+        async with self._session_locks.setdefault(session_id, asyncio.Lock()):
+            if session_id in self._closed_sessions:
                 raise HTTPException(409, "Resources session is already closed")
-            session = self._native_sessions.get(session_id)
+            session = self._session_id_to_state.get(session_id)
             if session is not None:
                 if session.request != body:
                     raise HTTPException(409, "resources_session_id is already bound to a different request")
@@ -328,8 +335,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                     raise HTTPException(409, "Resources session is no longer available for seeding")
                 request.session[SESSION_ID_KEY] = session_id
                 return session.response
-            session = _NativeSession(request=body.model_copy(deep=True))
-            self._native_sessions[session_id] = session
+            session = _ResourcesSessionState(request=body.model_copy(deep=True))
+            self._session_id_to_state[session_id] = session
             try:
                 sandbox = await self._create_sandbox(task, session_id=session_id)
                 working_directory = await sandbox.exec("pwd", timeout_s=30)
@@ -398,11 +405,11 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
         session_id = request.session.get(SESSION_ID_KEY)
-        if session_id in self._closed_native_sessions:
+        if session_id in self._closed_sessions:
             raise HTTPException(409, "Resources session is already closed")
-        if session_id in self._native_sessions:
-            async with self._native_session_locks[session_id]:
-                session = self._native_sessions.get(session_id)
+        if session_id in self._session_id_to_state:
+            async with self._session_locks[session_id]:
+                session = self._session_id_to_state.get(session_id)
                 if session is None or session.response is None:
                     raise HTTPException(409, "Resources session is not available for verification")
                 task = TerminalBench21SeedSessionRequest.model_validate(session.request.task_data)
@@ -416,13 +423,13 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                         raise HTTPException(503, "Previous verification did not complete; retry the episode")
                 else:
                     session.verification_request = body.model_copy(deep=True)
-                    session.verification_response = await self._verify(request, body, native=True)
+                    session.verification_response = await self._verify(request, body, keep_sandbox_for_close=True)
                 # Replay a lost response without grading the mutated task twice.
                 return session.verification_response.model_copy(deep=True)
-        return await self._verify(request, body, native=False)
+        return await self._verify(request, body, keep_sandbox_for_close=False)
 
     async def _verify(
-        self, request: Request, body: TerminalBench21VerifyRequest, *, native: bool
+        self, request: Request, body: TerminalBench21VerifyRequest, *, keep_sandbox_for_close: bool
     ) -> TerminalBench21VerifyResponse:
         task_folder = Path(body.task_folder)
 
@@ -483,7 +490,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 if self.config.debug:
                     print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
 
-        if not native:
+        if not keep_sandbox_for_close:
             try:
                 if self.config.is_verifying_golden_patch:
                     await eval_sandbox.stop()
