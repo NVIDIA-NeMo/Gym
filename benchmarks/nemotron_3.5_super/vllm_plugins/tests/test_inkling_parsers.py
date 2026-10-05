@@ -8,7 +8,6 @@ Set INKLING_TOKENIZER_PATH to also run against an installed Inkling tokenizer.
 
 import json
 import os
-import runpy
 import string
 from collections import Counter
 from pathlib import Path
@@ -71,10 +70,14 @@ def normalize(value):
     return value
 
 
-@pytest.fixture(scope="module", autouse=True)
-def register_plugins():
+def load_plugins() -> None:
     ToolParserManager.import_tool_parser(str(TOOL_PLUGIN))
     ReasoningParserManager.import_reasoning_parser(str(REASONING_PLUGIN))
+
+
+@pytest.fixture(scope="module", autouse=True)
+def register_plugins():
+    load_plugins()
 
 
 @pytest.fixture(
@@ -263,9 +266,25 @@ def test_conversion_flag_restored_after_failure(tokenizer, request_body, monkeyp
     assert engine._stream_arg_deltas is previous
 
 
-@pytest.mark.parametrize("path", [TOOL_PLUGIN, REASONING_PLUGIN])
 @pytest.mark.parametrize("version", ["0.29.1", "0.30.0", "0.29.0rc1"])
-def test_unvalidated_versions_rejected(monkeypatch, path, version):
+def test_unvalidated_versions_fall_back_to_stock_parsers(monkeypatch, version):
     monkeypatch.setattr(vllm, "__version__", version)
-    with pytest.raises(RuntimeError, match="validated vLLM 0.29.0"):
-        runpy.run_path(str(path))
+    try:
+        load_plugins()
+        assert ToolParserManager.get_tool_parser("inkling_complete_fast") is ToolParserManager.get_tool_parser(
+            "inkling"
+        )
+        assert ReasoningParserManager.get_reasoning_parser(
+            "inkling_count_fast"
+        ) is ReasoningParserManager.get_reasoning_parser("inkling")
+    finally:
+        monkeypatch.undo()
+        # The real reasoning plugin registers lazily, so clear the eager stock entry that would shadow it.
+        ReasoningParserManager.reasoning_parsers.pop("inkling_count_fast", None)
+        load_plugins()
+    assert ToolParserManager.get_tool_parser("inkling_complete_fast") is not ToolParserManager.get_tool_parser(
+        "inkling"
+    )
+    assert ReasoningParserManager.get_reasoning_parser(
+        "inkling_count_fast"
+    ) is not ReasoningParserManager.get_reasoning_parser("inkling")

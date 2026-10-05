@@ -4,7 +4,7 @@
 # Inkling evaluation settings and pinned task inputs; select a sandbox deployment separately.
 # For the shared-mount OpenSandbox service, also load deployments/opensandbox_shared_mounts.yaml
 # and provide the remote_tmux_binary_path available on that service.
-# Serving configuration: benchmarks/nemotron_3.5_super/vllm_configs/inkling_small_fast_parsers.sh
+# Serving configuration: benchmarks/nemotron_3.5_super/vllm_configs/inkling_small.sh
 config_paths:
   - benchmarks/terminal_bench_2_1/terminus_2.yaml
   - responses_api_models/vllm_model/configs/vllm_model.yaml
