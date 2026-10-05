@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import os
 import shlex
 import shutil
 import sqlite3
@@ -25,6 +26,7 @@ from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock, call
 
 import anyio
+from fastapi import Request
 from pydantic import ValidationError
 from pytest import MonkeyPatch, fixture, mark, raises
 
@@ -227,10 +229,12 @@ class TestOpenCodeSandboxedAgent:
         config.output_token_policy = "remaining_context" if remaining_context else "fixed"
         if stage_ripgrep:
             binary = tmp_path / "rg with spaces"
-            binary.write_bytes(b"test executable")
+            binary.write_text("#!/bin/sh\necho 'ripgrep test'\n")
             config = OpenCodeSandboxedAgentConfig.model_validate(
                 config.model_dump() | {"local_ripgrep_binary_path": str(binary)}
             )
+            config.preinstalled_opencode = True
+            config.opencode_version = "test"
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
         sandbox_mock = MagicMock()
@@ -367,9 +371,42 @@ class TestOpenCodeSandboxedAgent:
         assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["command"]
         command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
         if stage_ripgrep:
-            assert 'mv /tmp/nemo-gym-ripgrep- "$HOME/.opencode/bin/rg"' in command
-            assert 'chmod 0755 "$HOME/.opencode/bin/rg"' in command
-            assert command.index('"$HOME/.opencode/bin/rg" --version') < command.index("opencode run")
+            # Run the generated launch command: a readable upload may not be movable.
+            upload_dir = tmp_path / "uploads"
+            upload_dir.mkdir()
+            uploaded = upload_dir / "rg"
+            shutil.copyfile(binary, uploaded)
+            uploaded.chmod(0o444)
+            upload_dir.chmod(0o555)
+            home = tmp_path / "agent home"
+            bin_dir = home / ".opencode/bin"
+            bin_dir.mkdir(parents=True)
+            opencode = bin_dir / "opencode"
+            opencode.write_text(
+                '#!/bin/sh\nif [ "$1" = --version ]; then echo test; '
+                'else rg --version && touch "$HOME/agent-started"; fi\n'
+            )
+            opencode.chmod(0o755)
+            local_command = command.replace("/tmp/nemo-gym-ripgrep-", shlex.quote(str(uploaded))).replace(
+                "/tmp/nemo-gym-mcp-setup-error", shlex.quote(str(tmp_path / "mcp-error"))
+            )
+            try:
+                completed = subprocess.run(
+                    ["sh", "-c", local_command],
+                    env={"HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{os.defpath}"},
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=10,
+                )
+            finally:
+                upload_dir.chmod(0o755)
+            assert completed.returncode == 0, completed.stderr
+            installed = bin_dir / "rg"
+            assert installed.read_bytes() == uploaded.read_bytes() == binary.read_bytes()
+            assert installed.stat().st_mode & 0o777 == 0o755
+            assert installed.stat().st_uid == os.getuid()
+            assert (home / "agent-started").is_file()
         else:
             assert "nemo-gym-ripgrep" not in command
 
@@ -378,6 +415,45 @@ class TestOpenCodeSandboxedAgent:
             OpenCodeSandboxedAgentConfig.model_validate(
                 self._create_config().model_dump() | {"local_ripgrep_binary_path": str(tmp_path / "missing-rg")}
             )
+
+    @mark.parametrize("error_type", [PermissionError, FileNotFoundError])
+    async def test_ripgrep_upload_failure_propagates_without_export_and_cleans_up(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, error_type: type[OSError]
+    ) -> None:
+        binary = tmp_path / "rg"
+        binary.write_bytes(b"readable upload")
+        config = OpenCodeSandboxedAgentConfig.model_validate(
+            self._create_config().model_dump() | {"local_ripgrep_binary_path": str(binary)}
+        )
+        seed = SimpleNamespace(ok=True, cookies={}, json=AsyncMock(return_value={"sandbox_handle": "seed"}))
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(return_value=seed)
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        upload_error = error_type("ripgrep upload failed")
+        sandbox = MagicMock(
+            upload=AsyncMock(side_effect=upload_error),
+            exec=AsyncMock(return_value=SimpleNamespace(stdout="[]", stderr="", return_code=0, error_type=None)),
+            download=AsyncMock(),
+            stop=AsyncMock(),
+        )
+        monkeypatch.setattr(server, "_start_sandbox", AsyncMock(return_value=sandbox))
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+        request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "upload-failure"}})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
+
+        with raises(error_type) as caught:
+            await server.run(request, body)
+
+        assert caught.value is upload_error
+        sandbox.exec.assert_not_awaited()
+        sandbox.download.assert_not_awaited()
+        sandbox.stop.assert_awaited_once()
+        assert client.post.await_count == 1  # Seed only; no verification of an unstarted agent.
+        assert server._sandbox_id_to_sandbox == server._sandbox_id_to_run_result == {}
+        assert not hasattr(request.state, "_ng_observation_invocation_id")
+        assert not hasattr(request.state, "_ng_opencode_mcp")
 
     @mark.parametrize("return_code,error_type", [(125, "TimeoutError"), (124, "timeout"), (124, None)])
     def test_agent_sandbox_observation_classifies_timeout_errors(self, return_code, error_type) -> None:

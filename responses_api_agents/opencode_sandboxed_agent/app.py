@@ -803,9 +803,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         ripgrep_install_str = ""
         if self.config.local_ripgrep_binary_path is not None:
             ripgrep_remote_path = f"/tmp/nemo-gym-ripgrep-{uuid4().hex}"
+            # Uploads may be root-owned: copy as the execution user; teardown removes the source.
             ripgrep_install_str = (
                 '&& mkdir -p "$HOME/.opencode/bin" '
-                f'&& mv {quote(ripgrep_remote_path)} "$HOME/.opencode/bin/rg" '
+                f'&& cp {quote(ripgrep_remote_path)} "$HOME/.opencode/bin/rg" '
                 '&& chmod 0755 "$HOME/.opencode/bin/rg" '
                 '&& "$HOME/.opencode/bin/rg" --version'
             )
@@ -830,10 +831,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.debug:
             print("Starting OpenCode (runtime configuration omitted to protect credentials)", file=sys.stderr)
 
+        if ripgrep_remote_path is not None:
+            await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
+
         run_error_type = None
         try:
-            if ripgrep_remote_path is not None:
-                await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
             result = await sandbox.exec(
                 command=command,
                 timeout_s=self.config.sandbox_timeout,
