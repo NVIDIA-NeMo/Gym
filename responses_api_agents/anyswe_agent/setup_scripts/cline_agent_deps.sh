@@ -29,5 +29,7 @@ if [ ! -x "$DEPS_DIR/bin/node" ]; then
 fi
 
 export PATH="$DEPS_DIR/bin:$PATH"
+# Without this, `cline --version` below self-updates to @latest before the runtime is packed.
+export CLINE_NO_AUTO_UPDATE=1
 npm install -g --prefix "$DEPS_DIR" "cline@${CLINE_VERSION}"
-"$DEPS_DIR/bin/cline" --version
+"$DEPS_DIR/bin/cline" --version | grep -qF "$CLINE_VERSION"
