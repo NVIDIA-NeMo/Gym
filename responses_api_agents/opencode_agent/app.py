@@ -369,6 +369,69 @@ exec "$@"
 """
 
 
+_REMOTE_SESSION_TASK = None
+
+
+def _remote_session_task():
+    """The Ray task that runs one OpenCode session on a session node (created once).
+
+    The body is defined inside this function so Ray pickles it by value: workers on other
+    nodes need not import this module. It recreates the run dir from `inputs` (the image and
+    OpenCode config), runs OpenCode in its own process group, returns the session database
+    files, and removes the run dir.
+    """
+    global _REMOTE_SESSION_TASK
+    if _REMOTE_SESSION_TASK is not None:
+        return _REMOTE_SESSION_TASK
+    import ray
+
+    def run_session(cmd, work_dir, project_dir, env, inputs, timeout):
+        import os
+        import shutil
+        import signal
+        import subprocess
+        from pathlib import Path
+
+        for path, data in inputs.items():
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(data)
+        Path(project_dir).mkdir(parents=True, exist_ok=True)
+        data_home = Path(env["XDG_DATA_HOME"])
+        data_home.mkdir(parents=True, exist_ok=True)
+        timed_out = False
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=project_dir,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            try:
+                _, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                os.killpg(proc.pid, signal.SIGKILL)
+                _, stderr = proc.communicate()
+            finally:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            outputs = {
+                str(path): path.read_bytes()
+                for path in (data_home / "opencode").glob("opencode.db*")
+                if path.is_file()
+            }
+            return proc.returncode, stderr[-4000:], timed_out, outputs
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    _REMOTE_SESSION_TASK = ray.remote(num_cpus=0, max_retries=0)(run_session)
+    return _REMOTE_SESSION_TASK
+
+
 def _kill_process_group(pgid: int) -> None:
     """SIGKILL a run's whole process group (OpenCode and anything the model left running)."""
     # Never our own group: killpg(0) or our own pgid would kill this server.
@@ -482,6 +545,13 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # prompt to the tokens sampled before and returns the calls' token IDs and logprobs as the
     # rollout output (see token_tracking.py). Requires model_server and a single server worker.
     track_token_ids: bool = False
+    # Spread OpenCode sessions over this many cluster nodes (this server's node first, then other
+    # Ray nodes), each session a Ray task pinned round-robin to one of them, so the session
+    # count is not bound by one host's CPUs and RAM. A session runs entirely on its node:
+    # its run dir (workspace_root, best node-local) is recreated there, and only the small
+    # OpenCode session database comes back. Needs Ray and identical paths on every node
+    # (OpenCode, this venv). 1 = run locally as a subprocess.
+    session_nodes: int = 1
 
     @property
     def command_parts(self) -> list[str]:
@@ -553,6 +623,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         super().model_post_init(__context)
         self.sem = Semaphore(self.config.concurrency)
         self._tracked_runs: dict[str, list[TrackedCall]] = {}
+        self._session_nodes: Optional[list[str]] = None
+        self._next_session_node = 0
         if self.config.track_token_ids and self.config.model_server is None:
             raise ValueError("track_token_ids requires model_server")
         if self.config.track_token_ids and (self.config.num_workers or 1) > 1:
@@ -784,29 +856,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             ]
 
         try:
-            timed_out = False
-            # Own process group: the model's shell commands (python scripts, background jobs)
-            # are OpenCode's descendants and must die with the run, or they pile up on the host.
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(project_dir),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                start_new_session=True,
-            )
-            try:
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            except asyncio.TimeoutError:
-                _kill_process_group(proc.pid)
-                _, stderr = await proc.communicate()
-                timed_out = True
+            if self.config.session_nodes > 1:
+                returncode, stderr, timed_out = await self._run_remote_session(
+                    cmd, work_dir, project_dir, env, timeout
+                )
+            else:
+                returncode, stderr, timed_out = await self._run_local_session(cmd, project_dir, env, timeout)
+            if timed_out:
                 LOG.warning("opencode timed out after %ss", timeout)
-            finally:
-                _kill_process_group(proc.pid)
-
-            if proc.returncode not in (0, None):
-                LOG.warning("opencode exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
+            if returncode not in (0, None):
+                LOG.warning("opencode exited %d: %s", returncode, stderr.decode(errors="replace")[:500])
 
             db_path = data_home / "opencode" / "opencode.db"
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"
@@ -838,7 +897,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                             ObservationGap(code="model_call_ownership_unavailable"),
                         ],
                     )
-            run_status = "incomplete" if timed_out else "completed" if proc.returncode == 0 else "failed"
+            run_status = "incomplete" if timed_out else "completed" if returncode == 0 else "failed"
             for invocation in observations.records:
                 if not isinstance(invocation, AgentInvocation):
                     continue
@@ -851,6 +910,66 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if run_key is not None:
                 self._tracked_runs.pop(run_key, None)
             shutil.rmtree(work_dir, ignore_errors=True)
+
+    async def _run_local_session(
+        self, cmd: list[str], project_dir: Path, env: dict[str, str], timeout: float
+    ) -> tuple[Optional[int], bytes, bool]:
+        """Run one OpenCode session as a local subprocess: (returncode, stderr, timed_out)."""
+        timed_out = False
+        # Own process group: the model's shell commands (python scripts, background jobs)
+        # are OpenCode's descendants and must die with the run, or they pile up on the host.
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(project_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            start_new_session=True,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            _kill_process_group(proc.pid)
+            _, stderr = await proc.communicate()
+            timed_out = True
+        finally:
+            _kill_process_group(proc.pid)
+        return proc.returncode, stderr, timed_out
+
+    def _session_node_ids(self) -> list[str]:
+        """This server's Ray node, then other alive nodes (sorted by IP), up to session_nodes."""
+        if self._session_nodes is None:
+            import ray
+
+            own = ray.get_runtime_context().get_node_id()
+            others = sorted(
+                (node for node in ray.nodes() if node["Alive"] and node["NodeID"] != own),
+                key=lambda node: node["NodeManagerAddress"],
+            )
+            self._session_nodes = [own] + [node["NodeID"] for node in others][: self.config.session_nodes - 1]
+            LOG.warning("OpenCode sessions spread over %d Ray nodes", len(self._session_nodes))
+        return self._session_nodes
+
+    async def _run_remote_session(
+        self, cmd: list[str], work_dir: Path, project_dir: Path, env: dict[str, str], timeout: float
+    ) -> tuple[Optional[int], bytes, bool]:
+        """Run one OpenCode session on a session node; copy its session database back here."""
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+        nodes = self._session_node_ids()
+        node_id = nodes[self._next_session_node % len(nodes)]
+        self._next_session_node += 1
+        inputs = {str(path): path.read_bytes() for path in work_dir.rglob("*") if path.is_file()}
+        task = _remote_session_task().options(
+            scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=True)
+        )
+        returncode, stderr, timed_out, outputs = await task.remote(
+            cmd, str(work_dir), str(project_dir), env, inputs, float(timeout)
+        )
+        for path, data in outputs.items():
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(data)
+        return returncode, stderr, timed_out
 
     async def _create_episode(
         self,
