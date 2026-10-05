@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Black-box parity between Gym's Option B driver and the pinned native runtime."""
+"""Black-box parity between Gym's environment driver and the pinned native runtime."""
 
 import json
 from pathlib import Path
