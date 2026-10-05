@@ -65,7 +65,18 @@ _COLLECT_COMMAND = f"tar czf /tmp/workspace.tar.gz {_WORKSPACE_EXCLUDES} -C /wor
 # pulled at grading time, layering the agent's finished workspace on top of
 # it. Match that here: the agent gets this generic image, the verifier gets
 # the real pinned one.
-_AGENT_SANDBOX_IMAGE = "docker.all-hands.dev/all-hands-ai/runtime:0.56-nikolaik"
+#
+# Pulled from ghcr.io, not the upstream docker.all-hands.dev host: the latter
+# isn't on this cluster's DNS allowlist (github.com/ghcr.io/Docker Hub all
+# resolve; docker.all-hands.dev doesn't), so the OpenSandbox cluster's path to
+# it goes through something slow enough that even a single, uncontended pull
+# exceeded 30 minutes (confirmed via an isolated concurrency=1 probe).
+# ghcr.io/all-hands-ai/runtime:0.56-nikolaik is the same image (~3.1GB,
+# confirmed via registry manifest) on infrastructure this cluster already
+# treats as fast - the per-task grading images already live there. A probe
+# run against this reference completed sandbox creation and reached real
+# model calls within ~8 minutes, with zero timeout/retry activity.
+_AGENT_SANDBOX_IMAGE = "ghcr.io/all-hands-ai/runtime:0.56-nikolaik"
 
 _PASSED_RE = re.compile(r"(\d+)\s+passed")
 _FAILED_RE = re.compile(r"(\d+)\s+failed")
