@@ -12,7 +12,7 @@ When onboarding a benchmark, it is important to keep the task contract independe
 
 ## Overview
 
-Onboarding has five steps:
+Onboarding can be done in the following order:
 
 1. **Reuse and scaffold:** choose an existing harness and scorer, or scaffold a verifier for your task.
 2. **Prepare and declare:** convert source data reproducibly, define prompts, and complete the manifest and measurement contract.
@@ -20,7 +20,7 @@ Onboarding has five steps:
 4. **Evaluate:** run a small sample with a configured model and inspect the trajectories and scores.
 5. **Check local publication:** for workloads with verifier fixtures, finish metadata and run `gym env publish` to confirm validation, verifier tests, and catalog discovery.
 
-## Hello world: one question, one verifier
+## Onboarding Example: Hello World
 
 Use a [development checkout](/main/contribute/development-setup), activate its environment, and run commands from the repository root. This example uses the scaffold's built-in sample task unchanged:
 
@@ -49,7 +49,7 @@ gym eval run --benchmark hello_world --model-type openai_model \
     --output results/hello_world_smoke.jsonl
 ```
 
-Inspect the output's answer and reward. The scaffold is a starting point: replace its sample data and scoring as needed, document the measurement contract, and complete the manifest's placeholder metadata before running local publication checks.
+The scaffold is the starting point: the sample data and scoring should be replaced as needed, the measurement contract documented, and the manifest's placeholder metadata completed before running local publication checks.
 
 ## Before implementation
 
@@ -76,8 +76,6 @@ gym env init --benchmark my_benchmark --profile custom-gym-verifier
 ```
 
 The scaffold creates these files under `benchmarks/my_benchmark/`:
-
-{/* Maintainers: update this file and responsibility mapping as the shared task definition is finalized (PR #3713). */}
 
 | File | What to complete |
 | --- | --- |
