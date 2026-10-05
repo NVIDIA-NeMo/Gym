@@ -46,7 +46,11 @@ def generation(tmp_path, monkeypatch):
             "harnesses": {
                 harness: {
                     "verdict": "not_fulfilled",
-                    "evidence": {key: {"passed": 0, "observed": 1, "required": 7} for key in table.NAMES},
+                    "scenarios": [
+                        {"scenario": s.name, "checks": [{"id": "calls.outcome", "kind": "schema", "status": "fail"}]}
+                        for s in scenarios
+                    ],
+                    "evidence": {key: {"passed": 0, "observed": 1, "required": 7} for key in table.checker.NAMES},
                 }
                 for harness in harnesses
             },
@@ -89,8 +93,8 @@ def test_evidence_failures_publish_commit_runtime_and_test_provenance(generation
     text = page.read_text()
     assert text.startswith("Introduction\n") and text.endswith("\nDeprecated C-table\n")
     assert COMMIT in text and "synthetic-runtime-v1" in text
-    assert "| `pi` | FAIL 0/1/7" in text
-    assert "| `hermes` | Not run" in text
+    assert "## pi" in text and "Schema: `calls.outcome` | Fail" in text
+    assert "## hermes" in text and "No check results available | Not assessed" in text
     (asset,) = (root / table.ASSETS).glob("*.json")
     assert asset.name in text
     report = json.loads(asset.read_text())

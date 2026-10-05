@@ -88,8 +88,8 @@ def test_ambiguous_directory_requires_explicit_file(record, tmp_path):
     for name in ("rollouts.jsonl", "evaluator_rollouts.jsonl"):
         (tmp_path / name).write_text(json.dumps(record) + "\n")
     with pytest.raises(ValueError, match="exactly one"):
-        cli.inspect_bundle(tmp_path, output=tmp_path / "reports", profile="gym-p0/v2")
-    _, summary = cli.inspect_bundle(tmp_path / "rollouts.jsonl", output=tmp_path / "reports", profile="gym-p0/v2")
+        cli.inspect_bundle(tmp_path, output=tmp_path / "reports", profile="gym-p0/v3")
+    _, summary = cli.inspect_bundle(tmp_path / "rollouts.jsonl", output=tmp_path / "reports", profile="gym-p0/v3")
     assert summary["verdict"] == "fulfilled"
 
 
@@ -143,7 +143,7 @@ def test_changing_input_publishes_no_report(record, tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "json_rows", mutate_after_read)
     with pytest.raises(ValueError, match="source changed"):
-        cli.inspect_bundle(path, output=tmp_path / "reports", profile="gym-p0/v2")
+        cli.inspect_bundle(path, output=tmp_path / "reports", profile="gym-p0/v3")
     assert list((tmp_path / "reports").iterdir()) == []
 
 
@@ -151,7 +151,7 @@ def test_reports_do_not_include_payload_values(record, tmp_path, capsys):
     secret = "PRIVATE-PAYLOAD-MARKER"
     call = record["ng_trajectory"]["model_calls"][0]
     call["request"]["input"] = secret
-    call["response"]["usage"]["total_tokens"] = secret
+    call["token_stats"]["total_tokens"] = secret
     path = tmp_path / "rollouts.jsonl"
     path.write_text(json.dumps(record) + "\n")
     assert cli.run_inspection(bundle=path, output=tmp_path / "reports") == 1

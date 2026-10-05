@@ -252,7 +252,7 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
 
     # Inspect the emitted records, not a reconstructed copy of the expected evidence.
     report_dir, conformance = inspect_bundle(
-        path, output=tmp_path / "capabilities", profile="gym-p0/v1", capture_dir=capture_dir
+        path, output=tmp_path / "capabilities", profile="gym-p0/v3", capture_dir=capture_dir
     )
     # Known mini-SWE gap: submission exits before saving the final tool observation.
     # Fix the native submission evidence before expecting TE-5 and the P0 gate to pass.
@@ -268,7 +268,7 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         assert trajectory["tool_calls"][-1]["status"] == "incomplete"
         assert trajectory["tool_calls"][-1]["output"] is None
         location = f"evaluator_rollouts.jsonl:1/ng_trajectory/tool_calls/{len(trajectory['tool_calls']) - 1}"
-        assert tool_findings == {("tool.terminal", location + "/status"), ("tool.outcome", location)}
+        assert tool_findings == {("tools.status", location + "/status"), ("tools.output", location)}
     else:
         assert tool_findings == set()
     # Provider omission is faithful evidence; health still evaluates missing usage.

@@ -15,9 +15,8 @@ from string import ascii_letters, digits
 
 from . import __version__
 from .checker import NAMES, PROFILE, EvidenceScope, inspect_record
-from .contracts import PATH_MODELS, SCHEMA_VERSION
+from .contracts import SCHEMA_VERSION
 from .reader import digest_file, hydrate_record, json_rows
-from .registry import check_catalog
 
 
 def _json(value: object) -> str:
@@ -58,20 +57,10 @@ def inspect_bundle(
             raise ValueError("capture directory does not exist")
         sources.extend(sorted(capture_dir.glob("*.capture.*")))
     hashes = {str(path.resolve()): digest_file(path) for path in sources}
-    registry = {path: adapter.json_schema() for path, adapter in PATH_MODELS.items()}
-    registry_hash = hashlib.sha256(
-        _json({"path_models": registry, "checks": check_catalog(), "profile": PROFILE}).encode()
-    ).hexdigest()
-    # Include model validators as well as generated shapes in report identity.
-    gym = Path(__file__).parent.parent
-    checker_sources = sorted(Path(__file__).parent.glob("*.py")) + [
-        gym / name
-        for name in ("rollout_observability.py", "base_responses_api_model.py", "config_types.py", "openai_utils.py")
-    ]
+    checker_sources = sorted(Path(__file__).parent.glob("*.py"))
     checker_hash = hashlib.sha256("".join(digest_file(p) for p in checker_sources).encode()).hexdigest()
     manifest = {
         "sources": hashes,
-        "registry_sha256": registry_hash,
         "checker_sha256": checker_hash,
         "profile": profile,
         "applicability": asdict(scope),
@@ -79,21 +68,17 @@ def inspect_bundle(
     report_id = hashlib.sha256(_json(manifest).encode()).hexdigest()
     output.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=".capabilities-", dir=output))
-    totals = {key: {"records": 0, "fulfilled": 0, "not_fulfilled": 0, "not_applicable": 0} for key in NAMES}
+    totals = {
+        key: {"records": 0, "fulfilled": 0, "not_fulfilled": 0, "not_applicable": 0, "not_assessed": 0}
+        for key in NAMES
+    }
     token_availability = {}
     passing_records = 0
-    identities: set[object] = set()
     count = 0
     try:
         with (temporary / "evidence_results.jsonl").open("w") as handle:
             for line, raw in json_rows(bundle):
                 record = hydrate_record(raw, capture_dir=capture_dir)
-                identity = (record.get("_ng_task_index"), record.get("_ng_rollout_index"))
-                if identity == (None, None):
-                    identity = (record.get("ng_trajectory") or {}).get("rollout_id")
-                if identity in identities:
-                    record.setdefault("_capability_reader_issues", []).append("duplicate rollout identity in input")
-                identities.add(identity)
                 result = inspect_record(record, source=f"{bundle.name}:{line}", scope=scope)
                 count += 1
                 passing_records += result["verdict"] == "fulfilled"
@@ -114,6 +99,8 @@ def inspect_bundle(
                 **counts,
                 "verdict": "not_fulfilled"
                 if counts["not_fulfilled"]
+                else "not_assessed"
+                if counts["not_assessed"]
                 else "not_applicable"
                 if counts["not_applicable"] == count
                 else "fulfilled",
@@ -213,7 +200,12 @@ def inspect_matrix(
             "| Harness | " + " | ".join(NAMES) + " | P0 |",
             "|---|" + "---|" * (len(NAMES) + 1),
         ]
-        labels = {"fulfilled": "PASS", "not_fulfilled": "FAIL", "not_applicable": "N/A"}
+        labels = {
+            "fulfilled": "PASS",
+            "not_fulfilled": "FAIL",
+            "not_applicable": "N/A",
+            "not_assessed": "Not assessed",
+        }
         for name, summary in rows.items():
             table.append(
                 "| "
@@ -230,7 +222,7 @@ def inspect_matrix(
                 *[f"- {key}: {name}" for key, name in NAMES.items()],
                 "",
                 "P0 requires all applicable TE-1–TE-7 and TE-8 or TE-9 on every record.",
-                "TE-2 PASS means usage was preserved, not that every provider metric was available.",
+                "TE-2 PASS means saved counts have valid types and ranges; availability is reported separately.",
                 "See each evidence_summary.json for input hashes, applicability, token availability and limitations.",
             ]
         )
@@ -253,7 +245,9 @@ def main(argv: list[str] | None = None) -> int:
     inspect = subparsers.add_parser("inspect")
     inspect.add_argument("--bundle", required=True, type=Path)
     inspect.add_argument(
-        "--capture-dir", type=Path, help="cross-check original captures; missing JSONL payloads still fail"
+        "--capture-dir",
+        type=Path,
+        help="include capture sidecars in input provenance; checks use designated rollout fields",
     )
     inspect.add_argument("--profile", choices=[PROFILE], default=PROFILE)
     matrix = subparsers.add_parser("matrix")

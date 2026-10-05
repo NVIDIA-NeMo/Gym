@@ -3,8 +3,8 @@
 
 """JSON Schema fragments for additional RFC requirements at the saved locations.
 
-Native Gym validation still runs first. These fragments add requiredness and
-protocol structure; they do not certify payload completeness or execution coverage.
+These fragments validate selected evidence fields without revalidating entire
+Gym Python objects. They do not establish execution coverage.
 """
 
 NONBLANK = {"type": "string", "pattern": r"\S"}
@@ -60,36 +60,34 @@ REQUEST = {
     ]
 }
 RESPONSE = {
-    **required_object(response={"type": ["object", "string", "null"]}),
-    "if": required_object(
-        response_metadata={
-            **required_object(status_code={"type": "integer", "minimum": 200, "maximum": 299}),
-            "not": required_object(error_category=NONBLANK),
-        },
-        response={"not": {"type": "null"}},
-    ),
-    "then": {
-        "anyOf": [
-            protocol_branch("responses", response=required_object(output=OBJECT_ARRAY)),
-            protocol_branch(
-                "chat",
-                response=required_object(
-                    choices={
-                        "type": "array",
-                        "items": required_object(message=required_object(role={"const": "assistant"})),
-                    }
-                ),
-            ),
-            protocol_branch("messages", response=required_object(content=OBJECT_ARRAY)),
-        ]
-    },
-}
-RESPONSE_PRESENCE = {
     "anyOf": [
-        required_object(response_metadata=required_object(status_code=HTTP_STATUS)),
+        {
+            **required_object(response={"type": ["object", "string"]}),
+            "if": required_object(
+                response_metadata={
+                    **required_object(status_code={"type": "integer", "minimum": 200, "maximum": 299}),
+                    "not": required_object(error_category=NONBLANK),
+                }
+            ),
+            "then": {
+                "anyOf": [
+                    protocol_branch("responses", response=required_object(output=OBJECT_ARRAY)),
+                    protocol_branch(
+                        "chat",
+                        response=required_object(
+                            choices={
+                                "type": "array",
+                                "items": required_object(message=required_object(role={"const": "assistant"})),
+                            }
+                        ),
+                    ),
+                    protocol_branch("messages", response=required_object(content=OBJECT_ARRAY)),
+                ]
+            },
+        },
         required_object(
-            response_metadata=required_object(status_code={"type": "null"}, error_category=NONBLANK),
             response={"type": "null"},
+            response_metadata=required_object(status_code={"type": "null"}, error_category=NONBLANK),
         ),
     ]
 }

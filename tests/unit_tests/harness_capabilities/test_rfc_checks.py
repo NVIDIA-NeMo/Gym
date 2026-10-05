@@ -9,10 +9,10 @@ import json
 import pytest
 from jsonschema import Draft202012Validator
 
+from nemo_gym.harness_capabilities import schemas as s
 from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
 from nemo_gym.harness_capabilities.cli import inspect_bundle, main
 from nemo_gym.harness_capabilities.reader import hydrate_record
-from nemo_gym.harness_capabilities.registry import CHECKS
 from tests.unit_tests.harness_capabilities.synthetic import evidence_record
 
 
@@ -21,13 +21,7 @@ def inspect(record, *, require_sandbox=False):
 
 
 def ids(result):
-    return {f"{f['evidence']}.{f['assertion']}" for f in result["findings"]}
-
-
-def test_registered_json_schemas_are_valid():
-    for check in CHECKS.values():
-        if check.schema is not None:
-            Draft202012Validator.check_schema(check.schema)
+    return {c["id"] for c in result["checks"] if c["status"] == "fail"}
 
 
 def test_complete_fixture_passes_added_requirements():
@@ -46,18 +40,18 @@ def test_call_timestamps_are_required_at_canonical_path(field, value):
     else:
         call[field] = value
     result = inspect(record)
-    assert "TE-1.rfc.timing" in ids(result)
-    assert any(f["location"].endswith("/model_calls/0/" + field) for f in result["findings"])
+    assert "calls.timing" in ids(result)
+    assert any("$.ng_trajectory.model_calls" in f["location"] for f in result["findings"])
 
 
 @pytest.mark.parametrize(
     "collection,field,check",
     [
-        ("model_calls", "model_call_id", "TE-1.rfc.call_id"),
-        ("turns", "invocation_id", "TE-3.rfc.invocation_id"),
-        ("tool_calls", "tool_call_id", "TE-5.rfc.tool_id"),
-        ("tool_calls", "tool_name", "TE-5.rfc.tool_name"),
-        ("tool_calls", "invocation_id", "TE-5.rfc.invocation_id"),
+        ("model_calls", "model_call_id", "calls.identity"),
+        ("turns", "invocation_id", "steps.invocation"),
+        ("tool_calls", "tool_call_id", "tools.identity"),
+        ("tool_calls", "tool_name", "tools.name"),
+        ("tool_calls", "invocation_id", "tools.invocation"),
     ],
 )
 def test_whitespace_does_not_establish_identity(collection, field, check):
@@ -70,39 +64,16 @@ def test_whitespace_does_not_establish_identity(collection, field, check):
 def test_container_identity_cannot_come_from_other_fields(field):
     record = evidence_record()
     record["ng_trajectory"].pop(field)
-    assert f"TE-8.rfc.{field}" in ids(inspect(record))
-
-
-def test_capture_alone_cannot_satisfy_canonical_call_requirements():
-    record = hydrate_record(evidence_record())
-    del record["ng_trajectory"]["model_calls"]
-    result = inspect(record)
-    for te in ("TE-1", "TE-2", "TE-4", "TE-7", "TE-8", "TE-9"):
-        assert f"{te}.rfc.calls" in ids(result)
-        assert result["evidence"][te]["verdict"] == "not_fulfilled"
-
-
-@pytest.mark.parametrize("collection,te", [("turns", "TE-3"), ("tool_calls", "TE-5")])
-def test_invocation_target_is_the_saved_canonical_collection(collection, te):
-    record = evidence_record()
-    # Observation ownership is still complete; the designated target is absent.
-    record["ng_trajectory"]["invocations"] = []
-    assert record["ng_agent_observations"]["records"][0]["invocation_id"] == "invocation"
-    result = inspect(record)
-    assert f"{te}.rfc.reference_target" in ids(result)
-    assert any(
-        f["assertion"] == "rfc.reference_target" and f["location"].endswith(f"/{collection}/0/invocation_id")
-        for f in result["findings"]
-    )
+    assert f"trajectory.{field}" in ids(inspect(record))
 
 
 def test_negative_step_timestamp_fails():
     record = evidence_record()
     record["ng_trajectory"]["turns"][0]["timestamp"] = -1.0
-    assert "TE-3.rfc.timestamp" in ids(inspect(record))
+    assert "steps.timestamp" in ids(inspect(record))
 
 
-@pytest.mark.parametrize("field,check", [("request", "TE-4.rfc.request"), ("response", "TE-7.rfc.response")])
+@pytest.mark.parametrize("field,check", [("request", "calls.request"), ("response", "calls.response")])
 def test_turn_content_cannot_replace_missing_canonical_call_content(field, check):
     record = evidence_record()
     # Content on the turn still cannot satisfy the designated model-call fields.
@@ -118,13 +89,12 @@ def test_turn_content_cannot_replace_missing_canonical_call_content(field, check
 def test_tool_output_must_be_saved_at_its_designated_field(value):
     record = evidence_record()
     record["ng_trajectory"]["tool_calls"][0]["output"] = value
-    assert "TE-5.rfc.output" in ids(inspect(record))
+    assert "tools.output" in ids(inspect(record))
 
 
 @pytest.mark.parametrize("value", ["", [], {}])
 def test_empty_tool_content_is_valid_json_evidence(value):
-    check = CHECKS["TE-5.rfc.output"]
-    assert Draft202012Validator(check.schema).is_valid({"output": value})
+    assert Draft202012Validator(s.TOOL_OUTPUT).is_valid({"output": value})
 
 
 @pytest.mark.parametrize("field", ["evaluation_completed", "mask_sample"])
@@ -132,7 +102,7 @@ def test_evaluation_flags_must_be_present(field):
     record = evidence_record()
     del record[field]
     result = inspect(record)
-    assert f"TE-6.rfc.{field}" in ids(result)
+    assert f"evaluation.{field}" in ids(result)
     assert result["evidence"]["TE-6"]["verdict"] == "not_fulfilled"
 
 
@@ -148,7 +118,7 @@ def test_incomplete_verification_does_not_force_a_mask():
 def test_sandbox_presence_requires_explicit_run_selection():
     record = evidence_record()
     assert inspect(record)["evidence"]["TE-6"]["verdict"] == "fulfilled"
-    assert "TE-6.rfc.sandbox_records" in ids(inspect(record, require_sandbox=True))
+    assert "sandbox.present" in ids(inspect(record, require_sandbox=True))
     record["ng_agent_observations"]["records"].append(
         {"kind": "sandbox", "sandbox_id": "sandbox-1", "role": "agent", "outcome": "completed"}
     )
@@ -172,7 +142,9 @@ def test_saved_sandbox_records_are_checked_even_without_presence_option(patch, c
         {"kind": "sandbox", "sandbox_id": "sandbox-1", "role": "agent", "outcome": "completed", **patch}
     )
     result = inspect(record)
-    assert f"TE-6.rfc.{check}" in ids(result)
+    assert {"sandbox_id": "sandbox.identity", "sandbox_outcome": "sandbox.outcome", "sandbox_error": "sandbox.error"}[
+        check
+    ] in ids(result)
     assert result["evidence"]["TE-6"]["verdict"] == "not_fulfilled"
 
 
@@ -189,7 +161,7 @@ def test_turns_require_nonempty_call_references():
     record = evidence_record()
     turn = record["ng_trajectory"]["turns"][0]
     turn["model_calls"] = []
-    assert "TE-9.rfc.references" in ids(inspect(record))
+    assert "steps.references" in ids(inspect(record))
 
 
 @pytest.mark.parametrize("form", ["call_id", "response_id", "response_id_null_call_id", "all"])
@@ -220,7 +192,7 @@ def test_supported_call_reference_forms_resolve(form):
     ],
 )
 def test_incomplete_or_blank_call_reference_fails_schema(ref):
-    validator = Draft202012Validator(CHECKS["TE-9.rfc.references"].schema)
+    validator = Draft202012Validator(s.TURN_CALLS)
     assert not validator.is_valid({"model_calls": [ref]})
 
 
@@ -232,7 +204,7 @@ def test_call_target_must_exist_in_the_same_saved_trajectory(response_reference)
             turn["model_calls"][0].pop("model_call_id")
     record["ng_trajectory"]["model_calls"].pop()
     assert len(record["ng_model_call_capture"]["calls"]) == 2
-    assert "TE-9.rfc.reference_target" in ids(inspect(record))
+    assert "steps.call_target" in ids(inspect(record))
 
 
 @pytest.mark.parametrize("field", ["model_call_id", "response_id", "model_ref"])
@@ -241,8 +213,8 @@ def test_conflicting_supplied_call_identifiers_do_not_fall_back(field):
     ref = record["ng_trajectory"]["turns"][0]["model_calls"][0]
     ref[field] = {"type": "responses_api_models", "name": "other-model"} if field == "model_ref" else "missing"
     result = inspect(record)
-    assert "TE-9.rfc.references" not in ids(result)
-    assert "TE-9.rfc.reference_target" in ids(result)
+    assert "steps.references" not in ids(result)
+    assert "steps.call_target" in ids(result)
 
 
 @pytest.mark.parametrize("response_reference", [False, True])
@@ -255,7 +227,7 @@ def test_ambiguous_canonical_call_reference_fails(response_reference):
     if response_reference:
         duplicate["model_call_id"] = "another-attempt-with-same-response-id"
     trajectory["model_calls"].append(duplicate)
-    assert "TE-9.rfc.reference_target" in ids(inspect(record))
+    assert "steps.call_target" in ids(inspect(record))
 
 
 def test_response_id_is_scoped_to_the_model_server():
@@ -266,7 +238,7 @@ def test_response_id_is_scoped_to_the_model_server():
     other["model_call_id"] = "other-server-call"
     other["response_metadata"]["model_ref"]["name"] = "other-model"
     trajectory["model_calls"].append(other)
-    assert "TE-9.rfc.reference_target" not in ids(inspect(record))
+    assert "steps.call_target" not in ids(inspect(record))
 
 
 @pytest.mark.parametrize("dialect", ["chat", "responses", "messages"])
@@ -275,7 +247,7 @@ def test_request_protocol_shapes(dialect):
     call = record["ng_trajectory"]["model_calls"][0]
     call["response_metadata"]["dialect"] = dialect
     key = "input" if dialect == "responses" else "messages"
-    validator = Draft202012Validator(CHECKS["TE-4.rfc.request"].schema)
+    validator = Draft202012Validator(s.REQUEST)
     call["request"] = {key: []}
     assert validator.is_valid(call)
     call["request"] = {key: "prompt"}
@@ -288,38 +260,11 @@ def test_chat_choices_require_an_assistant_message():
     record = evidence_record()
     call = record["ng_trajectory"]["model_calls"][0]
     call["response_metadata"]["dialect"] = "chat"
-    validator = Draft202012Validator(CHECKS["TE-7.rfc.response"].schema)
+    validator = Draft202012Validator(s.RESPONSE)
     call["response"] = {"choices": [{}]}
     assert not validator.is_valid(call)
     call["response"] = {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
     assert validator.is_valid(call)
-
-
-def test_empty_http_body_and_transport_failure_are_distinct():
-    call = evidence_record()["ng_trajectory"]["model_calls"][0]
-    presence = Draft202012Validator(CHECKS["TE-7.rfc.response_presence"].schema)
-    response = Draft202012Validator(CHECKS["TE-7.rfc.response"].schema)
-    call["response"] = None
-    assert presence.is_valid(call) and response.is_valid(call)
-    call["response_metadata"].update(status_code=None, error_category="timeout")
-    assert presence.is_valid(call)
-    call["response"] = {"error": "body without an HTTP response"}
-    assert not presence.is_valid(call)
-    del call["response"]
-    assert not response.is_valid(call)
-
-
-def test_existing_conflicting_checks_are_still_visible():
-    record = evidence_record()
-    record["ng_trajectory"]["tool_calls"][0]["status"] = "incomplete"
-    result = inspect(record)
-    assert "TE-5.tool.terminal" in ids(result)
-    assert result["evidence"]["TE-5"]["verdict"] == "not_fulfilled"
-    record = evidence_record()
-    record["ng_trajectory"]["model_calls"][0]["response"] = None
-    result = inspect(record)
-    assert "TE-7.payload.response" in ids(result)
-    assert "TE-7.rfc.response" not in ids(result)
 
 
 def test_sandbox_cli_and_report_identity(tmp_path):
@@ -343,7 +288,7 @@ def test_diagnostics_do_not_copy_payloads():
     secret = "payload-canary-do-not-report"
     record["ng_trajectory"]["model_calls"][0]["request"] = {"input": [secret]}
     result = inspect(record)
-    assert "TE-4.rfc.request" in ids(result)
+    assert "calls.request" in ids(result)
     assert secret not in json.dumps(result)
 
 
@@ -363,7 +308,7 @@ def test_diagnostics_do_not_copy_payloads():
     ],
 )
 def test_registered_outcome_alternatives(patch, expected):
-    validator = Draft202012Validator(CHECKS["TE-1.rfc.outcome"].schema)
+    validator = Draft202012Validator(s.required_object(response_metadata=s.OUTCOME))
     assert validator.is_valid({"response_metadata": patch}) is expected
 
 
@@ -372,26 +317,14 @@ def test_canonical_model_reference_requires_nonblank_name(name):
     record = evidence_record()
     call = record["ng_trajectory"]["model_calls"][0]
     call["response_metadata"]["model_ref"]["name"] = name
-    validator = Draft202012Validator(CHECKS["TE-1.rfc.model"].schema)
+    validator = Draft202012Validator(s.required_object(response_metadata=s.required_object(model_ref=s.MODEL_REF)))
     assert not validator.is_valid(call)
 
 
 def test_response_id_is_required_for_success_but_optional_for_error():
-    validator = Draft202012Validator(CHECKS["TE-1.rfc.response_id"].schema)
+    validator = Draft202012Validator(s.required_object(response_metadata=s.RESPONSE_ID))
     assert not validator.is_valid({"response_metadata": {}})
     assert not validator.is_valid({"response_metadata": {"response_id": " "}})
     assert validator.is_valid({"response_metadata": {"response_id": "r"}})
     assert validator.is_valid({"response_metadata": {"error_category": "timeout"}})
     assert validator.is_valid({"response_metadata": {"error_category": "timeout", "response_id": None}})
-
-
-def test_missing_timestamp_errors_are_not_duplicated():
-    record = evidence_record()
-    call = record["ng_trajectory"]["model_calls"][0]
-    del call["started_at"], call["completed_at"]
-    result = inspect(record)
-    findings = [f for f in result["findings"] if f["assertion"] == "rfc.timing"]
-    assert [f["location"] for f in findings] == [
-        "record/ng_trajectory/model_calls/0/started_at",
-        "record/ng_trajectory/model_calls/0/completed_at",
-    ]

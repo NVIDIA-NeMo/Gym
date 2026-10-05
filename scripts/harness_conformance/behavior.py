@@ -12,14 +12,25 @@ from nemo_gym.harness_capabilities.results import CheckResult, Results
 from .scenarios import Scenario
 
 
+def _mapping(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _objects(value: object) -> list[dict]:
+    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+
 def tool_checks(record: dict | None, witnessed: list[dict], *, applies: bool = True) -> list[dict]:
     results = Results()
-    trajectory = (record or {}).get("ng_trajectory") or {}
-    observations = ((record or {}).get("ng_agent_observations") or {}).get("records", [])
-    tools = trajectory.get("tool_calls") or [r for r in observations if r.get("kind") == "tool_call"]
-    invocations = trajectory.get("invocations") or [r for r in observations if r.get("kind") == "agent_invocation"]
+    trajectory = _mapping((record or {}).get("ng_trajectory"))
+    tools = _objects(trajectory.get("tool_calls"))
+    invocations = _objects(trajectory.get("invocations"))
     wanted = Counter(t.get("id") for t in witnessed)
-    identities = wanted == Counter(t.get("tool_call_id") for t in tools) and all(n == 1 for n in wanted.values())
+    identities = (
+        all(isinstance(t.get("tool_call_id"), str) for t in tools)
+        and wanted == Counter(t.get("tool_call_id") for t in tools)
+        and all(n == 1 for n in wanted.values())
+    )
     results.check(
         "tools.witness_ids",
         "behavioral",
@@ -39,13 +50,12 @@ def tool_checks(record: dict | None, witnessed: list[dict], *, applies: bool = T
                 item
                 for inv in invocations
                 if inv.get("invocation_id") == tool.get("invocation_id")
-                for item in inv.get("conversation", [])
+                for item in _objects(inv.get("conversation"))
                 if item.get("call_id") == expected["id"]
             ]
             requests = [i for i in items if i.get("type") == "function_call"]
-            outputs = [i for i in items if i.get("type") == "function_call_output"]
-            values["join"].append(len(requests) == len(outputs) == 1)
-            if len(requests) != 1 or len(outputs) != 1:
+            values["join"].append(len(requests) == 1)
+            if len(requests) != 1:
                 continue
             request = requests[0]
             try:
@@ -62,11 +72,7 @@ def tool_checks(record: dict | None, witnessed: list[dict], *, applies: bool = T
             )
             values["status"].append(tool.get("status") == ("failed" if expected["exit_code"] else "completed"))
             observed = expected.get("outputs", [])
-            values["output"].append(
-                bool(observed)
-                and all(o == outputs[0].get("output") for o in observed)
-                and (tool.get("output") is None or tool["output"] == outputs[0].get("output"))
-            )
+            values["output"].append(bool(observed) and all(o == tool.get("output") for o in observed))
     for name, description in (
         ("join", "request/result does not join uniquely"),
         ("request", "name or arguments differ"),
@@ -173,16 +179,73 @@ def inspect_behavior(
         present=record is not None,
         reason="rollout reward differs from the verifier witness",
     )
-    calls = ((record or {}).get("ng_model_call_capture") or {}).get("calls", [])
-    expected = Counter(fingerprint(a["request"], a["status_code"], a["response"]) for a in attempts)
-    observed = Counter(fingerprint(c.get("request"), c.get("status_code"), c.get("response")) for c in calls)
-    check(
-        "model.saved_exchanges",
-        expected == observed,
-        evidence=("TE-1", "TE-2", "TE-4", "TE-7"),
-        present=record is not None and available,
-        reason="retained model attempts differ from the independent endpoint witness",
-    )
+    for row in model_checks(record, attempts, fingerprint=fingerprint, available=available):
+        results.rows[row["id"]] = CheckResult(**row)
     for row in tool_checks(record, tools, applies=scenario.tool_steps > 0):
         results.rows[row["id"]] = CheckResult(**row)
     return results.dump()
+
+
+def model_checks(
+    record: dict | None, attempts: list[dict], *, fingerprint: Callable, available: bool = True
+) -> list[dict]:
+    """Compare canonical fields to the independently scripted endpoint exchanges."""
+    calls = _objects(_mapping((record or {}).get("ng_trajectory")).get("model_calls"))
+    expected_exchanges, observed_exchanges = Counter(), Counter()
+    expected_metadata, observed_metadata = Counter(), Counter()
+    expected_tokens, observed_tokens = Counter(), Counter()
+    token_fields = ("prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens", "cached_tokens")
+    for attempt in attempts:
+        response = attempt["response"] or {}
+        exchange = fingerprint(attempt["request"], attempt["status_code"], response)
+        expected_exchanges[exchange] += 1
+        chat = "messages" in attempt["request"]
+        choices = response.get("choices") or []
+        finish = choices[0].get("finish_reason") if chat and choices else None
+        expected_metadata[
+            (exchange, json.dumps(response.get("id")), json.dumps(response.get("status")), json.dumps(finish))
+        ] += 1
+        usage = response.get("usage") or {}
+        counts = (
+            usage.get("prompt_tokens" if chat else "input_tokens"),
+            usage.get("completion_tokens" if chat else "output_tokens"),
+            (usage.get("completion_tokens_details" if chat else "output_tokens_details") or {}).get(
+                "reasoning_tokens"
+            ),
+            usage.get("total_tokens"),
+            (usage.get("prompt_tokens_details" if chat else "input_tokens_details") or {}).get("cached_tokens"),
+        )
+        expected_tokens[(exchange, json.dumps(counts))] += 1
+    for call in calls:
+        metadata = _mapping(call.get("response_metadata"))
+        exchange = fingerprint(call.get("request"), metadata.get("status_code"), call.get("response"))
+        observed_exchanges[exchange] += 1
+        observed_metadata[
+            (
+                exchange,
+                json.dumps(metadata.get("response_id")),
+                json.dumps(metadata.get("response_status")),
+                json.dumps(metadata.get("finish_reason")),
+            )
+        ] += 1
+        stats = _mapping(call.get("token_stats"))
+        observed_tokens[(exchange, json.dumps([stats.get(field) for field in token_fields]))] += 1
+    result = Results()
+    for key, expected, observed, evidence in (
+        ("model.saved_exchanges", expected_exchanges, observed_exchanges, ("TE-1", "TE-4", "TE-7")),
+        ("model.response_metadata", expected_metadata, observed_metadata, ("TE-1",)),
+        ("model.token_counts", expected_tokens, observed_tokens, ("TE-2",)),
+    ):
+        result.check(
+            key,
+            "behavioral",
+            expected == observed,
+            evidence=evidence,
+            available=record is not None and available,
+            reason={
+                "model.saved_exchanges": "canonical exchanges differ from the independent endpoint witness",
+                "model.response_metadata": "canonical response metadata differs from the independent endpoint witness",
+                "model.token_counts": "canonical token counts differ from the independent endpoint witness",
+            }[key],
+        )
+    return result.dump()

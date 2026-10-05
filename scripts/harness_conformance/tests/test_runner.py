@@ -183,7 +183,9 @@ def retained_episode(tmp_path):
     # Contract fixture only: used to prove a green artifact cannot hide a missing live probe.
     raw = evidence_record()
     record = hydrate_record(raw)
-    calls = record["ng_model_call_capture"]["calls"]
+    calls = [
+        {**c, "status_code": c["response_metadata"]["status_code"]} for c in record["ng_trajectory"]["model_calls"]
+    ]
     witness = {
         "seeded": 1,
         "finished": True,
@@ -222,7 +224,7 @@ def test_behavior_failure_does_not_erase_artifact_success(retained_episode):
     assert result["verdict"] == "not_fulfilled"
     assert result["behavioral_status"] == "fail"
     assert all(v["verdict"] == "fulfilled" for v in result["evidence"].values())
-    assert "retained model attempts differ" in " ".join(result["issues"])
+    assert "canonical" in " ".join(result["issues"])
 
 
 def test_execution_status_does_not_erase_retained_results(retained_episode):
@@ -278,7 +280,7 @@ def test_tool_witness_rejects_lost_or_changed_evidence(retained_episode, mutatio
 
 
 @pytest.mark.parametrize("surface", ["trajectory", "observations"])
-def test_tool_witness_supports_retained_surface_fallbacks(retained_episode, surface):
+def test_tool_witness_uses_only_designated_surface(retained_episode, surface):
     directory, _ = retained_episode
     bundle = directory / "rollouts.jsonl"
     record = json.loads(bundle.read_text())
@@ -289,7 +291,7 @@ def test_tool_witness_supports_retained_surface_fallbacks(retained_episode, surf
         del record["ng_trajectory"]["invocations"]
     bundle.write_text(json.dumps(record) + "\n")
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
-    assert not result["issues"]  # The original independent tool witness still accepts both surfaces.
+    assert bool(result["issues"]) == (surface == "observations")
     assert result["verdict"] == ("fulfilled" if surface == "trajectory" else "not_fulfilled")
 
 
@@ -357,7 +359,7 @@ def test_witness_detects_changed_payload_even_when_attempt_identity_matches(reta
     (directory / "witness.json").write_text(json.dumps(witness))
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
     assert result["verdict"] == "not_fulfilled"
-    assert "retained model attempts differ" in " ".join(result["issues"])
+    assert "canonical" in " ".join(result["issues"])
 
 
 def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch):
@@ -470,3 +472,19 @@ def test_canonical_counts_cannot_be_swapped_between_calls(retained_episode):
     assert _canonical_witness_issues(record, witness["attempts"]) == [
         "canonical token counts differ from the independent endpoint witness"
     ]
+
+
+@pytest.mark.parametrize(
+    "collection,field,value",
+    [("turns", "resolved", "wrong"), ("model_calls", "response_metadata", False), ("tool_calls", "tool_call_id", [])],
+)
+def test_malformed_evidence_keeps_other_check_results(retained_episode, collection, field, value):
+    directory, _ = retained_episode
+    path = directory / "rollouts.jsonl"
+    record = json.loads(path.read_text())
+    record["ng_trajectory"][collection][0][field] = value
+    path.write_text(json.dumps(record) + "\n")
+    result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
+    checks = {c["id"]: c for c in result["checks"]}
+    assert any(c["status"] == "fail" for c in checks.values())
+    assert checks["tokens.prompt_tokens"]["status"] == "pass"
