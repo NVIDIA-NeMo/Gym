@@ -198,6 +198,7 @@ async def main() -> None:
         diagnostics.update(
             agent_module=settings["agent_module"],
             agent_class=settings["agent_class"],
+            search_provider=search_provider,
             runner_status="returned",
             runner_duration_ms=(monotonic() - started_at) * 1000,
         )
