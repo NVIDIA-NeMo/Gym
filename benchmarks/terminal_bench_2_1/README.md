@@ -17,10 +17,10 @@ Save as `run.yaml` in the Gym checkout:
 ```yaml
 config_paths:
   - resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml
-  - responses_acodex_agents/codex_agent/configs/codex_agent.yaml
+  - responses_api_agents/codex_agent/configs/codex_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
   - nemo_gym/sandbox/providers/docker/configs/docker.yaml
-  - responses_api_models/openai_model/configs/openai_model.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
 
 single_agent_turn_legacy:
   environment_servers:
@@ -31,11 +31,20 @@ single_agent_turn_legacy:
         name: codex_agent
 
 codex_agent:
-  responses_acodex_agents:
+  responses_api_agents:
     codex_agent:
       model_context_window: 32768
       model_auto_compact_token_limit: 28672
       timeout: 600
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      uses_reasoning_parser: false
+      uses_interleaved_reasoning: false
+      sampling_overrides:
+        temperature: 0.0
+        max_tokens: 8192
 
 terminal_bench_2_1_resources_server:
   resources_servers:
@@ -43,6 +52,9 @@ terminal_bench_2_1_resources_server:
       evaluation_timeout: 300
 ```
 
+This example uses a non-reasoning Chat Completions endpoint; the Gym vLLM Model
+Server adapts it to Codex's streaming Responses API. Configure the parser flags for
+your model, or use the OpenAI Model Server for a native Responses endpoint.
 These are single-task smoke limits, not full-benchmark settings. Set the context window
 to the served model limit. Keep sampling and per-call output limits on the Gym Model
 Server; Codex native sessions reject request-level sampling/output overrides. Put `policy_base_url`,
@@ -85,7 +97,7 @@ the host task's `tests/test.sh` is missing. Do not enable golden-patch mode for 
 Codex installs its pinned CLI and private Node runtime and, if absent, Python 3 and
 bootstrap packages using apt/apk as root;
 non-root images must contain bootstrap dependencies. Existing task runtimes are not replaced.
-See [Codex requirements and lifecycle](../../responses_acodex_agents/codex_agent/README.md).
+See [Codex requirements and lifecycle](../../responses_api_agents/codex_agent/README.md).
 
 Inspect the rollout's `response.metadata.harness_execution` (`sandbox`), nonempty output,
 `ng_agent_observations`, `evaluation_completed`, reward, and verifier `test_output`.
