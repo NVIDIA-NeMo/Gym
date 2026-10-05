@@ -19,6 +19,7 @@ import psutil
 from nemo_gym.harness_capabilities.checker import NAMES
 from nemo_gym.harness_capabilities.cli import inspect_bundle
 from nemo_gym.harness_capabilities.reader import digest_file, hydrate_record, json_rows
+from nemo_gym.harness_capabilities.registry import CHECKS, behavioral_issue
 
 from .episode import HARNESSES
 from .scenarios import SCENARIOS, SUITE, Scenario, suite_manifest
@@ -105,7 +106,7 @@ def _tool_witness_issues(record: dict, witnessed: list[dict]) -> list[str]:
     invocations = [r for r in observations if r.get("kind") == "agent_invocation"] or trajectory.get("invocations", [])
     expected_ids = Counter(t["id"] for t in witnessed)
     if any(count != 1 for count in expected_ids.values()) or expected_ids != Counter(t["tool_call_id"] for t in tools):
-        return ["retained tool identities differ from the independent tool witness"]
+        return [behavioral_issue("probe.tools.identities")]
 
     issues = []
     by_id = {t["tool_call_id"]: t for t in tools}
@@ -121,7 +122,7 @@ def _tool_witness_issues(record: dict, witnessed: list[dict]) -> list[str]:
         requests = [i for i in items if i.get("type") == "function_call"]
         results = [i for i in items if i.get("type") == "function_call_output"]
         if len(requests) != 1 or len(results) != 1:
-            issues.append("retained tool request/result does not join uniquely to the witnessed execution")
+            issues.append(behavioral_issue("probe.tools.join"))
             continue
         request = requests[0]
         try:
@@ -136,12 +137,12 @@ def _tool_witness_issues(record: dict, witnessed: list[dict]) -> list[str]:
             or arguments != expected["arguments"]
             or tool.get("tool_name") != request.get("name")
         ):
-            issues.append("retained tool name or arguments differ from the independent tool witness")
+            issues.append(behavioral_issue("probe.tools.request"))
         # Each probe command terminates with its prescribed code. A nonzero exit
         # must remain a failed execution even when its stdout was retained.
         status = "failed" if expected["exit_code"] else "completed"
         if tool.get("status") != status:
-            issues.append("retained tool status differs from the independent tool witness")
+            issues.append(behavioral_issue("probe.tools.status"))
         output = results[0].get("output")
         outputs = expected.get("outputs", [])
         if (
@@ -149,7 +150,7 @@ def _tool_witness_issues(record: dict, witnessed: list[dict]) -> list[str]:
             or any(observed != output for observed in outputs)
             or (tool.get("output") is not None and tool["output"] != output)
         ):
-            issues.append("retained tool output differs from the independent tool witness")
+            issues.append(behavioral_issue("probe.tools.output"))
     return issues
 
 
@@ -157,54 +158,56 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     """Require witnessed exercise and a real rollout before counting a TE as passing."""
     issues = []
     if execution["timed_out"]:
-        issues.append("episode exceeded its timeout")
+        issues.append(behavioral_issue("probe.execution.timeout"))
     if execution["returncode"] != 0:
-        issues.append("episode process failed; see episode.log")
+        issues.append(behavioral_issue("probe.execution.returncode"))
     witness_path = directory / "witness.json"
     witness = json.loads(witness_path.read_text()) if witness_path.exists() else {}
     attempts = witness.get("attempts", [])
+    # Provider violations keep their detailed messages under one registered check.
+    CHECKS["probe.model.protocol"]
     issues.extend(witness.get("violations", []))
     statuses = [attempt["status_code"] for attempt in attempts]
     if witness.get("seeded") != 1:
-        issues.append("expected one fresh episode initialization")
+        issues.append(behavioral_issue("probe.episode.seeded"))
     if not attempts:
-        issues.append("the harness never reached the controlled model endpoint")
+        issues.append(behavioral_issue("probe.model.reached"))
     if statuses[: len(scenario.http_errors)] != list(scenario.http_errors):
-        issues.append("not all prescribed model failures were observed")
+        issues.append(behavioral_issue("probe.model.failures"))
     if len(scenario.http_errors) > 1 and len(attempts) >= len(scenario.http_errors):
         if any(a["request"] != attempts[0]["request"] for a in attempts[1 : len(scenario.http_errors)]):
-            issues.append("retry scenario did not repeat the same request body")
+            issues.append(behavioral_issue("probe.model.retry_request"))
     if scenario.terminal_error:
         if not statuses or any(status != scenario.http_errors[-1] for status in statuses):
-            issues.append("terminal model failure was not observed")
+            issues.append(behavioral_issue("probe.model.terminal_error"))
     elif not witness.get("finished"):
-        issues.append("the harness did not finish the scripted model exchange")
+        issues.append(behavioral_issue("probe.model.finished"))
     tools = witness.get("tool_calls", [])
     if len(tools) != scenario.tool_steps or any(
         not tool.get("executed") or not tool.get("result_seen") for tool in tools
     ):
-        issues.append("prescribed tool executions and their returned results were not all witnessed")
+        issues.append(behavioral_issue("probe.tools.executed"))
     verifications = witness.get("verifications", [])
     if len(verifications) != 1 or verifications[0]["reward"] != scenario.expected_reward:
-        issues.append("expected verifier outcome was not observed")
+        issues.append(behavioral_issue("probe.verifier.outcome"))
     elif not scenario.terminal_error and not verifications[0]["answer_seen"]:
-        issues.append("the verifier did not receive the scripted final answer")
+        issues.append(behavioral_issue("probe.verifier.answer"))
     bundle = directory / "rollouts.jsonl"
     records = list(json_rows(bundle)) if bundle.exists() else []
     summary = None
     report = None
     if len(records) != 1:
-        issues.append("expected exactly one collected rollout")
+        issues.append(behavioral_issue("probe.episode.rollout"))
     else:
         record = hydrate_record(records[0][1])
         calls = record.get("ng_model_call_capture", {}).get("calls", [])
         expected = Counter(_fingerprint(a["request"], a["status_code"], a["response"]) for a in attempts)
         observed = Counter(_fingerprint(c.get("request"), c.get("status_code"), c.get("response")) for c in calls)
         if expected != observed:
-            issues.append("retained model attempts differ from the independent endpoint witness")
+            issues.append(behavioral_issue("probe.model.exchanges"))
         issues.extend(_tool_witness_issues(record, tools))
         if record.get("reward") != scenario.expected_reward:
-            issues.append("rollout reward differs from the verifier witness")
+            issues.append(behavioral_issue("probe.verifier.reward"))
         destination, summary = inspect_bundle(bundle, output=directory / "evidence", capture_dir=directory / "capture")
         report = str(destination.relative_to(directory) / "evidence_summary.json")
     exercised = not issues
