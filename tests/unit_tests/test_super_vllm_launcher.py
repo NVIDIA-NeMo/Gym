@@ -147,7 +147,8 @@ printf '%s\0' "${VLLM_COMMON_ARGS[@]}" ''
 printf '%s\0' "${VLLM_PREFILL_ARGS[@]}" ''
 printf '%s\0' "${VLLM_DECODE_ARGS[@]}" ''
 """
-        status, stdout, stderr = self.run_shell(setup + inspect, env={"SLURM_PROCID": str(rank)})
+        # Real jobs pass ROUTER_NODE only to evaluation workers, not serving workers.
+        status, stdout, stderr = self.run_shell(setup + inspect, env={"SLURM_PROCID": str(rank), "ROUTER_NODE": ""})
         self.assertEqual(status, 0, stderr)
         return [args.split("\0") for args in stdout.removesuffix("\0\0").split("\0\0")]
 
