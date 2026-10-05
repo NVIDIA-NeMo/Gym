@@ -269,6 +269,10 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
             tool_name_str = part.get("tool") if isinstance(part.get("tool"), str) else None
             bash_command = tool_input.get("command") if tool_name_str == "bash" else None
             operation = bash_command[:512] if isinstance(bash_command, str) else None
+            # OpenCode inserts the tool part when the model emits the call (state "pending") and only
+            # later stamps state.time.start when it runs, so the row's creation time is the harness
+            # holding the parsed call. No signal marks when the result reached the next prompt.
+            requested_at = _milliseconds(row["time_created"])
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
@@ -276,6 +280,7 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
                         tool_call_id=observed_call_id,
                         tool_name=tool_name_str,
                         operation=operation,
+                        requested_at=requested_at,
                         started_at=started_at,
                         completed_at=completed_at,
                         duration_ms=duration_ms,

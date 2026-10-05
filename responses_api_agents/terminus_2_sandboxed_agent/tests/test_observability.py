@@ -21,6 +21,7 @@ from responses_api_agents.terminus_2_sandboxed_agent.app import (
     Terminus2AgentConfig,
     Terminus2AgentRunRequest,
 )
+from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
 
 
 @pytest.fixture
@@ -372,3 +373,48 @@ async def test_proactive_summarization_flag_resets_on_cancellation(execution, mo
     assert result["ng_agent_observations"]["records"][0]["status"] == "incomplete"
     assert not result["ng_trajectory"]["turns"]
     assert not execution.agents[0]._is_check_proactive_summarization
+
+
+def test_tool_batch_boundaries_follow_the_decision_cycle():
+    """requested_at is when the decision finished parsing; response_received_at is when the next
+    decision begins with that output in its prompt. Both on the harness clock."""
+    from nemo_gym.config_types import ModelServerRef
+    from nemo_gym.rollout_observability import TrajectoryToolCall
+
+    observations = TerminusObservations(
+        invocation_id="inv",
+        task_id="t",
+        rollout_id="t-0",
+        model_ref=ModelServerRef(type="responses_api_models", name="policy_model"),
+    )
+    assert observations.decision_parsed_at is None
+
+    observations.begin_decision()
+    observations.finish_decision(step_count=0)  # no response: records a gap, still marks parse time
+    parsed_at = observations.decision_parsed_at
+    assert parsed_at is not None
+
+    tool = TrajectoryToolCall(
+        invocation_id="inv",
+        tool_call_id="cmd_1",
+        tool_name="terminal",
+        requested_at=parsed_at,
+        started_at=parsed_at + 0.1,
+        completed_at=parsed_at + 0.5,
+        duration_ms=400.0,
+        timing_source="harness",
+        status="completed",
+    )
+    observations.trajectory.tool_calls.append(tool)
+    observations.pending_tool_calls.append(tool)
+    assert tool.response_received_at is None
+
+    # The summarization check runs before the decision; whichever hook fires first closes the batch,
+    # so a compaction model call in between is not charged to tool_observation_delay.
+    observations.mark_tool_results_observed()
+    received_at = tool.response_received_at
+    assert received_at is not None
+    assert observations.pending_tool_calls == []
+
+    observations.begin_decision()  # nothing pending: must not move the already-recorded boundary
+    assert tool.response_received_at == received_at

@@ -403,19 +403,21 @@ class NeMoGymTerminus2(Terminus2):
             batch_completed_at = time()
             timeout_occurred = res[0]
             for command in commands:
-                observations.trajectory.tool_calls.append(
-                    TrajectoryToolCall(
-                        invocation_id=observations.invocation_id,
-                        tool_call_id=f"cmd_{uuid4().hex[:12]}",
-                        tool_name="terminal",
-                        operation=command.keystrokes.rstrip("\r\n")[:512] if command.keystrokes else None,
-                        started_at=batch_started_at,
-                        completed_at=batch_completed_at,
-                        duration_ms=(batch_completed_at - batch_started_at) * 1000,
-                        timing_source="harness",
-                        status="timeout" if timeout_occurred else "completed",
-                    )
+                tool_call = TrajectoryToolCall(
+                    invocation_id=observations.invocation_id,
+                    tool_call_id=f"cmd_{uuid4().hex[:12]}",
+                    tool_name="terminal",
+                    operation=command.keystrokes.rstrip("\r\n")[:512] if command.keystrokes else None,
+                    # The whole batch was parsed from one decision; its output goes back as one prompt.
+                    requested_at=observations.decision_parsed_at,
+                    started_at=batch_started_at,
+                    completed_at=batch_completed_at,
+                    duration_ms=(batch_completed_at - batch_started_at) * 1000,
+                    timing_source="harness",
+                    status="timeout" if timeout_occurred else "completed",
                 )
+                observations.trajectory.tool_calls.append(tool_call)
+                observations.pending_tool_calls.append(tool_call)
 
         return res
 
@@ -425,6 +427,10 @@ class NeMoGymTerminus2(Terminus2):
         return super()._count_total_tokens(*args, **kwargs)
 
     async def _check_proactive_summarization(self, *args, **kwargs):
+        # First harness activity of the next iteration: the previous command batch's output is
+        # already in the prompt, so its tool calls are observed before any compaction call runs.
+        if self._nemo_gym_llm.observations is not None:
+            self._nemo_gym_llm.observations.mark_tool_results_observed()
         self._is_check_proactive_summarization = True
         try:
             res = await super()._check_proactive_summarization(*args, **kwargs)

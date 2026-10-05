@@ -162,8 +162,23 @@ class ToolCallObservation(ObservationModel):
     )
     tool_name: Optional[str] = None
     operation: Optional[str] = None
+    requested_at: Optional[float] = Field(
+        default=None,
+        description=(
+            "When the harness held the complete, parsed tool call. tool_dispatch_delay = started_at - requested_at. "
+            "Same clock as started_at (see timing_source); not range-validated so odd artifact clocks report "
+            "rather than fail the bundle."
+        ),
+    )
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
+    response_received_at: Optional[float] = Field(
+        default=None,
+        description=(
+            "When the tool result was available for the next model call. "
+            "tool_observation_delay = response_received_at - completed_at."
+        ),
+    )
     duration_ms: Optional[float] = Field(default=None, ge=0)
     timing_source: Optional[Literal["executor", "artifact", "harness"]] = None
     status: Literal["completed", "failed", "timeout", "cancelled", "incomplete", "unknown"] = "unknown"

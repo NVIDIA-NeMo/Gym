@@ -743,3 +743,44 @@ class TestInvocationSpans:
         assert invocation.started_at == 9.0
         assert invocation.completed_at is None
         assert "agent_span_timing_inconsistent" in {gap.code for gap in bundle.gaps}
+
+    def test_tool_call_requested_at_is_the_part_creation_time(self, tmp_path: Path) -> None:
+        # OpenCode writes the tool part when the model emits the call and stamps state.time.start
+        # only when it runs; the row's creation time is therefore tool_call_requested, and the
+        # gap to started_at is the dispatch delay the analysis wants.
+        db = self._database(
+            tmp_path,
+            [("root", None, 500)],
+            [("m1", "root", json.dumps({"role": "assistant", "time": {"created": 1_000, "completed": 9_000}}), 1)],
+        )
+        connection = sqlite3.connect(db)
+        try:
+            connection.execute(
+                "insert into part values (?, ?, ?, ?, ?)",
+                (
+                    "p1",
+                    "m1",
+                    "root",
+                    json.dumps(
+                        {
+                            "type": "tool",
+                            "tool": "bash",
+                            "callID": "call-1",
+                            "state": {
+                                "status": "completed",
+                                "input": {"command": "pytest -x"},
+                                "output": "",
+                                "time": {"start": 2_500, "end": 4_000},
+                            },
+                        }
+                    ),
+                    2_000,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        bundle = parse_opencode_observations(db, "fallback")
+        [tool] = [r for r in bundle.records if isinstance(r, ToolCallObservation)]
+        assert (tool.requested_at, tool.started_at, tool.completed_at) == (2.0, 2.5, 4.0)
+        assert tool.response_received_at is None

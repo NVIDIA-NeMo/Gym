@@ -4,6 +4,7 @@
 """Evidence recorded at Terminus model-response and decision boundaries."""
 
 from dataclasses import dataclass
+from time import time
 from typing import Any
 
 from harbor.llms.base import LLMResponse
@@ -19,6 +20,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
     TrajectoryResponseMetadata,
     TrajectoryTokenStats,
+    TrajectoryToolCall,
     TrajectoryTurn,
 )
 
@@ -42,6 +44,10 @@ class TerminusObservations:
         self.compaction: ContextCompactionObservation | None = None
         self.decision_no = 0
         self.decision_response: LLMResponse | None = None
+        # Wall clock when the latest decision finished parsing; the next command batch was requested then.
+        self.decision_parsed_at: float | None = None
+        # Tool calls whose result has not yet been handed to a model call.
+        self.pending_tool_calls: list[TrajectoryToolCall] = []
         self.selected_response_ids: set[str] = set()
         # The shared HTTP transport can retry after server admission without notifying
         # this adapter. Invocation ownership remains exact; full turn-call scope does not.
@@ -134,11 +140,28 @@ class TerminusObservations:
             )
         return observed
 
+    def mark_tool_results_observed(self) -> None:
+        """The previous batch's output is in the prompt for the next model call.
+
+        Harbor forms the prompt right after _execute_commands returns and then, at the top of the
+        next iteration, runs the proactive-summarization check before the decision. Calling this
+        from both hooks and clearing the list means the earliest one wins, so a compaction call in
+        between is not folded into tool_observation_delay. Same clock as the batch timings.
+        """
+        if not self.pending_tool_calls:
+            return
+        received_at = time()
+        for tool in self.pending_tool_calls:
+            tool.response_received_at = received_at
+        self.pending_tool_calls = []
+
     def begin_decision(self) -> None:
+        self.mark_tool_results_observed()
         self.decision_no += 1
         self.decision_response = None
 
     def finish_decision(self, step_count: int) -> None:
+        self.decision_parsed_at = time()
         response = self.decision_response
         candidates = (
             self.responses.get(response.response_id, []) if response is not None and response.response_id else []
