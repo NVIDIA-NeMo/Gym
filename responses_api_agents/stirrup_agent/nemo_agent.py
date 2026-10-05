@@ -147,6 +147,46 @@ class NeMoAgent(Agent):
         self._skip_input_file_listing = skip_input_file_listing
         self._min_compaction_summary_words = min_compaction_summary_words
 
+    async def step(self, messages, run_metadata, **kwargs):
+        # Retain accepted output if the next call (including compaction) hits the proxy cap.
+        self._turn_budget_messages = list(messages)
+        self._turn_budget_metadata = None
+        result = await super().step(messages, run_metadata, **kwargs)
+        assistant, tools, _ = result
+        self._turn_budget_messages = [*messages, assistant, *tools]
+        self._turn_budget_metadata = (assistant.id, dict(run_metadata))
+        return result
+
+    async def run(self, *args, **kwargs):
+        from nemo_gym.adapters.turn_counter_proxy import is_turn_budget_exhausted
+        from stirrup.core.agent import (
+            _merge_run_metadata,
+            _get_total_token_usage,
+            _get_tool_durations,
+            _get_model_speed_stats,
+        )
+
+        try:
+            return await super().run(*args, **kwargs)
+        except Exception as exc:
+            if not is_turn_budget_exhausted(exc):
+                raise
+            state = self._current_run_state
+            if state is None:
+                raise
+            history = [*state.full_msg_history, self._turn_budget_messages]
+            by_turn = dict(state.run_metadata_by_turn)
+            if self._turn_budget_metadata is not None:
+                turn_id, turn_metadata = self._turn_budget_metadata
+                by_turn[turn_id] = turn_metadata
+            metadata = _merge_run_metadata(by_turn)
+            metadata["token_usage"] = _get_total_token_usage(history)
+            metadata["_tool_durations"] = _get_tool_durations(history)
+            metadata["_model_speed"] = _get_model_speed_stats(history, self._client.model_slug)
+            self._last_finish_params = None
+            self._last_run_metadata = metadata
+            return None, history, metadata
+
     def _build_system_prompt(self) -> str:
         """Override to optionally skip the input file listing."""
         if not self._skip_input_file_listing:
