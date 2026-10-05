@@ -444,10 +444,17 @@ calculator_agent:
 
 The Agent Server's `resources_server.name` must match the top-level Resources Server instance name.
 
-For a `single_agent_turn` Environment Server, add `taskset: <name>` to the dataset
+For an Environment Server, add `taskset: <name>` to the dataset
 declaration and map that name in `environment_server_routes`. The normal
 `gym dataset collate` and `gym eval run --benchmark ...` paths then convert prepared
 flat rows to `task_id` and `task_input`; no separate conversion command is needed.
+Collation leaves task-owned fields flat inside `task_input`; each Environment Server
+validates its own input when dispatched. The built-in `single_agent_turn` server
+also accepts the existing `{responses_create_params, task_data}` shape. Its
+`task_data` key is reserved as that container; additional flat fields are merged
+into it, with conflicting values rejected. Dataset metrics count custom rows
+without requiring Responses API fields; response-specific metrics are collected
+only when those fields validate.
 The source JSONL stays unchanged and can still be shared with flat-row recipes.
 Omit `taskset` to keep the current flat-row format. This option accepts flat input
 only; already materialized input should be passed directly with `--input`.

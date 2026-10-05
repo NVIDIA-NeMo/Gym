@@ -1,26 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Convert flat dataset rows into the built-in single-agent-turn task contract."""
+"""Wrap flat dataset rows with environment-neutral task identity."""
 
 from collections.abc import Mapping
 
 from pydantic import JsonValue
 
-from nemo_gym.episode_types import MaterializedTask, TaskId
+from nemo_gym.episode_types import TaskId
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
-    RESPONSES_CREATE_PARAMS_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.single_agent_turn_types import SingleAgentTurnTaskInput
 
 
-def materialize_single_agent_task(
+def materialize_task(
     row: Mapping[str, JsonValue], *, taskset: str, task_index: int | None = None
-) -> MaterializedTask[SingleAgentTurnTaskInput]:
+) -> dict[str, JsonValue]:
     """Preserve legacy task identity and task fields without embedding runtime routing.
 
     Rows without an explicit ID use the collector's ``_ng_task_index``, or a source-row
@@ -39,11 +37,8 @@ def materialize_single_agent_task(
         if not isinstance(index, int) or isinstance(index, bool) or index < 0:
             raise ValueError("A flat row without a task ID requires a non-negative task_index")
         task_id = str(index)
-    excluded = {RESPONSES_CREATE_PARAMS_KEY_NAME, AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME, SKILLS_REF_KEY_NAME}
-    return MaterializedTask[SingleAgentTurnTaskInput](
-        task_id=TaskId(taskset=taskset, task_id=task_id),
-        task_input=SingleAgentTurnTaskInput(
-            responses_create_params=row[RESPONSES_CREATE_PARAMS_KEY_NAME],
-            task_data={key: value for key, value in row.items() if key not in excluded and not key.startswith("_ng_")},
-        ),
-    )
+    excluded = {AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME, SKILLS_REF_KEY_NAME}
+    return {
+        "task_id": TaskId(taskset=taskset, task_id=task_id).model_dump(mode="json"),
+        "task_input": {key: value for key, value in row.items() if key not in excluded and not key.startswith("_ng_")},
+    }

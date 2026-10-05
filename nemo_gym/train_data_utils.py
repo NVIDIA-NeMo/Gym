@@ -55,13 +55,13 @@ from nemo_gym.hf_utils import (
     download_hf_dataset_as_jsonl,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.single_agent_turn_task import materialize_single_agent_task
 from nemo_gym.task_data import (
     TaskDataSchemaError,
     TaskDataValidator,
     find_server_dir,
     load_task_data_schema,
 )
+from nemo_gym.task_materialization import materialize_task
 
 
 class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
@@ -295,7 +295,7 @@ def postprocess_other_metrics(metrics: DatasetMetrics, other_metrics: Dict[str, 
             setattr(metrics, k, StringMetrics(unique_count=len(v), total_count=sum(v.values())))
 
 
-def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
+def compute_sample_metrics(sample_dict_str: str, *, require_responses: bool = True) -> Tuple[DatasetMetrics, bool]:
     try:
         sample_dict = json.loads(sample_dict_str)
     except json.JSONDecodeError:
@@ -304,6 +304,10 @@ def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
     try:
         sample = BaseRunRequest.model_validate(sample_dict)
     except ValidationError:
+        if not require_responses and isinstance(sample_dict, dict):
+            # The selected Environment Server owns task-input validation. Response-specific
+            # metrics are unavailable for these rows, but they are still dataset examples.
+            return DatasetMetrics(number_of_examples=1), False
         return DatasetMetrics(), True
 
     responses_create_params = sample.responses_create_params
@@ -573,9 +577,9 @@ class TrainDataProcessor(BaseModel):
     ########################################
 
     def _validate_samples_and_aggregate_metrics_single_sample(
-        self, state: DatasetValidatorState, sample_idx: int, sample_dict_str: str
+        self, state: DatasetValidatorState, sample_idx: int, sample_dict_str: str, *, require_responses: bool = True
     ) -> None:
-        metrics, is_offending = compute_sample_metrics(sample_dict_str)
+        metrics, is_offending = compute_sample_metrics(sample_dict_str, require_responses=require_responses)
         if is_offending:
             state.offending_example_idxs.append(sample_idx)
             return
@@ -608,7 +612,7 @@ class TrainDataProcessor(BaseModel):
 
         map_fn = self._validate_samples_and_aggregate_metrics_single_sample
         for sample_idx, sample_dict_str in enumerate(self._iter_dataset_lines(dataset_config)):
-            map_fn(state, sample_idx, sample_dict_str)
+            map_fn(state, sample_idx, sample_dict_str, require_responses=dataset_config.taskset is None)
 
         postprocess_other_metrics(state.metrics, state.other_metrics)
 
@@ -911,9 +915,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                                 )
                                 if key in row
                             }
-                            row = materialize_single_agent_task(
-                                row, taskset=d.taskset, task_index=source_task_index
-                            ).model_dump(mode="json", exclude_unset=True)
+                            row = materialize_task(row, taskset=d.taskset, task_index=source_task_index)
                             row.update(identity)
                         target.write(f"{json.dumps(row)}\n")
 

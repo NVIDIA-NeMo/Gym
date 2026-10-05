@@ -1023,7 +1023,7 @@ class TestNativeTasksetBenchmark:
             )
         )
         assert loaded["_ng_environment_server"] == "environment"
-        assert loaded["task_input"]["task_data"]["answer"] == "expected"
+        assert loaded["task_input"]["answer"] == "expected"
         assert source.read_bytes() == original
 
     @pytest.mark.parametrize(
