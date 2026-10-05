@@ -595,11 +595,22 @@ class TestRolloutCorrelation:
         return FakeProc()
 
     def _run_and_capture_base_url(self, agent, tmp_path: Path, **run_kwargs) -> str:
+        from contextlib import asynccontextmanager
+
         captured: dict = {}
+
+        @asynccontextmanager
+        async def proxy(base_url, invocation_id):
+            assert invocation_id == run_kwargs["rollout_id"]
+            captured["upstream"] = base_url
+            yield base_url
 
         async def fake_exec(*cmd, **kwargs):
             config = tomllib.loads((Path(kwargs["env"]["CODEX_HOME"]) / "config.toml").read_text())
             captured["base_url"] = config["model_providers"]["gym"]["base_url"]
+            if run_kwargs.get("rollout_id"):
+                assert "--ephemeral" not in cmd
+                assert config["model_providers"]["gym"]["http_headers"]["x-session-id"] == run_kwargs["rollout_id"]
             return self._fake_proc()
 
         def fake_resolve(name, rollout_id=None):
@@ -610,8 +621,10 @@ class TestRolloutCorrelation:
             patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
             patch.object(type(agent), "resolve_model_base_url", side_effect=fake_resolve),
             patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
+            patch("responses_api_agents.codex_agent.app.rate_limit_proxy", proxy),
         ):
             asyncio.run(agent._run_codex("hi", **run_kwargs))
+        assert captured["upstream"] == captured["base_url"]
         return captured["base_url"]
 
     def test_base_url_correlation(self, tmp_path: Path) -> None:
