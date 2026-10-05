@@ -310,6 +310,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         The default seed does not tie the session cookie to ``resources_session_id``. A server that keys state
         by the cookie's ``SESSION_ID_KEY`` releases it by that key, from ``request.session``, or sets
         ``request.session[SESSION_ID_KEY] = body.resources_session_id`` in its own seed.
+
+        ``nemo_gym.session_conformance.check_resources_session_contract`` checks these rules from a server's tests.
         """
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
