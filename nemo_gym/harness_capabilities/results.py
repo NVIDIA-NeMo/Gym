@@ -91,11 +91,11 @@ class Results:
 
 def render_matrices(harnesses: dict) -> str:
     """Render saved check results; never infer a pass from an absent failure message."""
-    labels = {"pass": "Pass", "fail": "Fail", "not_assessed": "Not assessed", "not_applicable": "n.a."}
+    labels = {"pass": "✓", "fail": "✗", "not_assessed": "?", "not_applicable": "—"}
     lines = [
         "# Harness checks by scenario",
         "",
-        "Pass / Fail; Not assessed = blocked or unavailable; n.a. = not applicable.",
+        "✓ Pass · ✗ Fail · ? Not assessed (blocked or unavailable) · — Not applicable.",
         "",
     ]
     for harness, row in harnesses.items():
@@ -107,12 +107,18 @@ def render_matrices(harnesses: dict) -> str:
             "| Check | " + " | ".join(s["scenario"] for s in scenarios) + " |",
             "|---|" + "---|" * len(scenarios),
         ]
-        for key in keys:
-            found = [next((c for c in s.get("checks", []) if c["id"] == key), None) for s in scenarios]
-            kind = next(c["kind"] for c in found if c)
-            cells = [labels[c["status"]] if c else "Not assessed" for c in found]
-            lines.append(f"| {kind.title()}: `{key}` | " + " | ".join(cells) + " |")
+        for kind in ("schema", "semantic", "behavioral"):
+            group = []
+            for key in keys:
+                found = [next((c for c in s.get("checks", []) if c["id"] == key), None) for s in scenarios]
+                if next(c["kind"] for c in found if c) != kind:
+                    continue
+                cells = [labels[c["status"]] if c else "?" for c in found]
+                group.append(f"| `{key}` | " + " | ".join(cells) + " |")
+            if group:
+                lines.append(f"| **{kind.title()}** |" + " |" * len(scenarios))
+                lines.extend(group)
         if not keys:
-            lines.append("| No check results available | " + " | ".join("Not assessed" for _ in scenarios) + " |")
+            lines.append("| No check results available | " + " | ".join("?" for _ in scenarios) + " |")
         lines.append("")
     return "\n".join(lines)

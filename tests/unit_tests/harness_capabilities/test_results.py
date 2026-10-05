@@ -36,6 +36,6 @@ def test_matrix_reports_independent_results_and_absence():
     text = render_matrices(
         {"example": {"scenarios": [{"scenario": "normal", "checks": a.dump()}, {"scenario": "error", "checks": []}]}}
     )
-    assert "Schema: `call.id` | Pass | Not assessed" in text
-    assert "Behavioral: `tool.status` | Fail | Not assessed" in text
+    assert "| **Schema** | | |\n| `call.id` | ✓ | ? |" in text
+    assert "| **Behavioral** | | |\n| `tool.status` | ✗ | ? |" in text
     assert "Gate" not in text
