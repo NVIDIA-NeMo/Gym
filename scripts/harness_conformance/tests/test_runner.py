@@ -210,7 +210,7 @@ def retained_episode(tmp_path):
     return tmp_path, witness
 
 
-def test_artifact_success_requires_independent_exercise(retained_episode):
+def test_behavior_failure_does_not_erase_artifact_success(retained_episode):
     directory, witness = retained_episode
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
     assert result["verdict"] == "fulfilled", result["issues"]
@@ -218,16 +218,17 @@ def test_artifact_success_requires_independent_exercise(retained_episode):
     (directory / "witness.json").write_text(json.dumps(witness))
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
     assert result["verdict"] == "not_fulfilled"
-    assert not result["exercised"]
-    assert all(v["verdict"] == "not_fulfilled" for v in result["evidence"].values())
+    assert result["behavioral_status"] == "fail"
+    assert all(v["verdict"] == "fulfilled" for v in result["evidence"].values())
     assert "retained model attempts differ" in " ".join(result["issues"])
 
 
-def test_execution_failure_cannot_pass_even_with_artifacts(retained_episode):
+def test_execution_status_does_not_erase_retained_results(retained_episode):
     directory, _ = retained_episode
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 1, "timed_out": True})
-    assert result["verdict"] == "not_fulfilled" and not result["exercised"]
-    assert "episode exceeded its timeout" in result["issues"]
+    assert result["verdict"] == "fulfilled" and result["behavioral_status"] == "pass"
+    assert result["execution"] == {"returncode": 1, "timed_out": True}
+    assert not any(c["id"].startswith("execution") for c in result["checks"])
 
 
 @pytest.mark.parametrize(
@@ -265,7 +266,7 @@ def test_tool_witness_rejects_lost_or_changed_evidence(retained_episode, mutatio
         tools[0]["invocation_id"] = "other-invocation"
     bundle.write_text(json.dumps(record) + "\n")
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
-    assert result["verdict"] == "not_fulfilled" and not result["exercised"]
+    assert result["verdict"] == "not_fulfilled" and result["behavioral_status"] == "fail"
     assert any("retained tool" in issue for issue in result["issues"])
     assert not any("retained model attempts differ" in issue for issue in result["issues"])
     if mutation in {"missing", "arguments", "name", "output", "status"}:
@@ -300,7 +301,7 @@ def test_tool_witness_requires_prescribed_failure_status(retained_episode, faile
         record["ng_trajectory"]["tool_calls"][0]["status"] = "failed"
     bundle.write_text(json.dumps(record) + "\n")
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
-    assert result["exercised"] == failed
+    assert (result["behavioral_status"] == "pass") == failed
     assert ("retained tool status differs from the independent tool witness" in result["issues"]) != failed
 
 
@@ -309,7 +310,7 @@ def test_missing_output_witness_cannot_qualify_artifacts(retained_episode):
     del witness["tool_calls"][0]["outputs"]
     (directory / "witness.json").write_text(json.dumps(witness))
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
-    assert not result["exercised"]
+    assert result["behavioral_status"] == "fail"
     assert "retained tool output differs from the independent tool witness" in result["issues"]
 
 
