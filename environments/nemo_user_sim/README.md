@@ -62,7 +62,7 @@ may match when one provider satisfies multiple roles.
 ```bash
 gym eval run \
   --environment usersim \
-  --split example \
+  --split benchmark \
   --output results/usersim.jsonl \
   +user_model_uses_reasoning_parser=false \
   +policy_uses_reasoning_parser=true \
