@@ -59,7 +59,7 @@ from responses_api_agents.spatialclaw_agent.kernel_transport import _kernel_tran
 
 
 SPATIALCLAW_URL = "ssh://git@gitlab-master.nvidia.com:12051/ehosseiniasl/spatial_claw.git"
-SPATIALCLAW_COMMIT = "946ac114dfcabf9df997629bfa8b6f2f66da1425"
+SPATIALCLAW_COMMIT = "946ac114dfcabf9df997629bfa8b6f2f66da1425"  # pragma: allowlist secret
 
 
 class SpatialClawAgentConfig(BaseResponsesAPIAgentConfig):
