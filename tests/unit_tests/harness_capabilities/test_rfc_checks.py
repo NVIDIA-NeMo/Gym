@@ -328,3 +328,23 @@ def test_response_id_is_required_for_success_but_optional_for_error():
     assert validator.is_valid({"response_metadata": {"response_id": "r"}})
     assert validator.is_valid({"response_metadata": {"error_category": "timeout"}})
     assert validator.is_valid({"response_metadata": {"error_category": "timeout", "response_id": None}})
+
+
+def test_no_response_transport_error_and_returned_body_are_distinct():
+    call = evidence_record()["ng_trajectory"]["model_calls"][0]
+    validator = Draft202012Validator(s.RESPONSE)
+    call["response"] = None
+    assert not validator.is_valid(call)
+    call["response_metadata"].update(status_code=None, error_category="timeout")
+    assert validator.is_valid(call)
+    call["response"] = {"error": "body without status"}
+    assert not validator.is_valid(call)
+    call["response_metadata"]["status_code"] = 500
+    assert validator.is_valid(call)
+
+
+@pytest.mark.parametrize("field", ["error_category", "response_status", "finish_reason"])
+def test_supplied_optional_outcome_strings_are_nonblank(field):
+    metadata = {"status_code": 200, "dialect": "responses", "response_status": "completed"}
+    metadata[field] = " "
+    assert not Draft202012Validator(s.OUTCOME).is_valid(metadata)

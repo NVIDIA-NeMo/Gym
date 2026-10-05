@@ -34,7 +34,13 @@ RETURNED_OUTCOME = {
 }
 OUTCOME = {
     "type": "object",
-    "properties": {"status_code": {"anyOf": [HTTP_STATUS, {"type": "null"}]}},
+    "properties": {
+        "status_code": {"anyOf": [HTTP_STATUS, {"type": "null"}]},
+        **{
+            field: {"anyOf": [NONBLANK, {"type": "null"}]}
+            for field in ("error_category", "response_status", "finish_reason")
+        },
+    },
     "anyOf": [required_object(error_category=NONBLANK), RETURNED_OUTCOME],
 }
 RESPONSE_ID = {
@@ -62,7 +68,9 @@ REQUEST = {
 RESPONSE = {
     "anyOf": [
         {
-            **required_object(response={"type": ["object", "string"]}),
+            **required_object(
+                response={"type": ["object", "string"]}, response_metadata=required_object(status_code=HTTP_STATUS)
+            ),
             "if": required_object(
                 response_metadata={
                     **required_object(status_code={"type": "integer", "minimum": 200, "maximum": 299}),
