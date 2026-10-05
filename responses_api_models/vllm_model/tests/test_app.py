@@ -19,9 +19,11 @@ from copy import deepcopy
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
-from aiohttp import ClientResponseError
+from aiohttp import ClientResponseError, RequestInfo
 from fastapi.testclient import TestClient
+from multidict import CIMultiDict, CIMultiDictProxy
 from pytest import MonkeyPatch, mark, raises
+from yarl import URL
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
@@ -56,8 +58,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
+    PermanentEndpointError,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
     CaptureContext,
     InMemoryLineageStore,
@@ -73,6 +76,7 @@ from responses_api_models.vllm_model.app import (
     VLLMModel,
     VLLMModelConfig,
     _append_transport_io,
+    _redacted_error_repr,
     _transport_images,
     _transport_log_context,
 )
@@ -163,6 +167,15 @@ def test_transport_log_context_reads_generic_headers_without_body_fields() -> No
         "step": 3,
         "parse_attempt": 1,
     }
+
+
+def test_redacted_error_repr_without_request_info() -> None:
+    # NeMoGymAsyncOpenAI raises this with no request details after a permanent auth or quota failure.
+    error = PermanentEndpointError(request_info=None, history=(), status=401, message="spent key", headers=None)
+
+    assert _redacted_error_repr(error) == (
+        "PermanentEndpointError(status=401, message='spent key', method=None, url=None)"
+    )
 
 
 class FakeUUID:
@@ -945,6 +958,47 @@ class TestApp:
             "code": "context_length_exceeded",
             "message": _ENGINE_OVERFLOW_MESSAGE,
         }
+
+    def test_transport_log_error_event_omits_request_headers(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        log_path = tmp_path / "model-io-transport.jsonl"
+        monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
+        fake_api_key = "sk-FAKE-transport-log-key"  # pragma: allowlist secret
+        server = self._setup_server(monkeypatch)
+        # A failed model call with the bearer token in its request headers. The key is in the URL query too, so
+        # that logging `str(e)` (which includes the URL) also fails this test.
+        url = URL(f"http://vllm.test/v1/chat/completions?api-key={fake_api_key}")
+        request_info = RequestInfo(
+            url=url,
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict({"Authorization": f"Bearer {fake_api_key}"})),
+            real_url=url,
+        )
+        response = MagicMock(ok=False, request_info=request_info)
+        response.raise_for_status.side_effect = ClientResponseError(
+            request_info=request_info, history=(), status=400, message="Bad Request"
+        )
+
+        async def failed_call(**kwargs: Any) -> None:
+            # The real `raise_for_status` keeps the request headers on the exception it raises.
+            await raise_for_status(response, b'{"error":{"message":"invalid request","code":400}}')
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=failed_call)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        TestClient(app).post(
+            "/v1/chat/completions", json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]}
+        )
+
+        log_text = log_path.read_text(encoding="utf-8")
+        assert fake_api_key not in log_text
+        (error_event,) = [json.loads(line) for line in log_text.splitlines() if "transport_error_response" in line]
+        assert error_event["error"] == (
+            "ClientResponseError(status=400, message='Bad Request', method='POST', "
+            "url='http://vllm.test/v1/chat/completions')"
+        )
 
     def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
