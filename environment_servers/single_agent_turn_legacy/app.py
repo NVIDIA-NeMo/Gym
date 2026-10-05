@@ -45,12 +45,12 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         request = (
             SingleAgentTurnRequest.model_validate(row)
             if "episode_id" in row and "task" in row
-            else self._native_request(row)
+            else self._episode_request_from_row(row)
         )
         response = await self.run_request(request)
         return self._legacy_result(response)
 
-    def _native_request(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
+    def _episode_request_from_row(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
         task_source = row.get(TASK_SOURCE_KEY_NAME, self.config.resources_server.name)
         if not isinstance(task_source, str) or not task_source:
             raise ValueError("task_source must be a non-empty string when provided")
