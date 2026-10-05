@@ -17,8 +17,6 @@ terminal_bench_2_1_terminus_2_sandboxed_agent:
       sandbox_timeout: 10800
       llm_request_timeout: 3600
       recover_stalled_interrupts: true
-      # Retain reasoning history in both the agent and model adapter.
-      interleaved_thinking: true
       datasets:
         - name: terminal_bench_2_1_inkling_small
           type: benchmark
@@ -39,7 +37,6 @@ policy_model:
   responses_api_models:
     vllm_model:
       num_workers: 4
-      uses_interleaved_reasoning: true
       chat_template_kwargs:
         reasoning_effort: max
       sampling_overrides:
