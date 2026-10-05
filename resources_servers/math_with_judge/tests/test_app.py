@@ -40,6 +40,8 @@ from resources_servers.math_with_judge.app import (
     LibraryJudgeMathResourcesServerConfig,
     LibraryJudgeMathVerifyRequest,
     _extract_last_boxed_answer,
+    _extract_unboxed_answer_candidate,
+    _prepare_format_tolerant_response,
     _run_math_verify,
 )
 
@@ -166,6 +168,46 @@ class TestApp:
         assert _extract_last_boxed_answer(r"\boxed{\frac{1}{2}}") == r"\frac{1}{2}"
         assert _extract_last_boxed_answer(r"\boxed{ exact text }") == " exact text "
         assert _extract_last_boxed_answer(r"\boxed{unclosed") is None
+
+    def test_extract_unboxed_answer_candidate(self) -> None:
+        assert _extract_unboxed_answer_candidate("Work\n**Answer:** 18") == "18"
+        assert _extract_unboxed_answer_candidate("Work\n### Final answer\n\\(\\frac{1}{2}\\)") == r"\frac{1}{2}"
+        assert _extract_unboxed_answer_candidate("गणना\n**उत्तर:** 42") == "42"
+        assert _extract_unboxed_answer_candidate("इसलिए उत्तर है 1।") == "1"
+        assert _extract_unboxed_answer_candidate("इस प्रकार न्यूनतम मान 9 है।") == "इस प्रकार न्यूनतम मान 9 है"
+        assert _extract_unboxed_answer_candidate("<|THINK|>work</|THINK|>\n18") == "18"
+        assert _extract_unboxed_answer_candidate("A long response with no separately stated value at all.") is None
+
+    def test_prepare_format_tolerant_response(self) -> None:
+        assert _prepare_format_tolerant_response(r"\boxed{१८}") == r"\boxed{18}"
+        assert _prepare_format_tolerant_response("Final answer\n$$\n\\boxed{\\dfrac{९}{२५६}\n$$") == (
+            "Final answer\n$$\n\\boxed{\\dfrac{9}{256}}$$"
+        )
+        assert _prepare_format_tolerant_response(r"\boxed{\frac{1}{2}}") == r"\boxed{\frac{1}{2}}"
+
+    async def test_unboxed_answer_fallback_is_opt_in(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
+        strict_server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False}),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        assert await strict_server._verify_answer("question", "18", "**उत्तर:** 18") == (
+            approx(0.0),
+            None,
+            approx(0.0),
+            None,
+        )
+
+        fallback_server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False, "format_tolerant_answer_extraction": True}),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        reward, extracted_answer, library_reward, judge_evaluations = await fallback_server._verify_answer(
+            "question", "18", "**उत्तर:** १८"
+        )
+        assert reward == approx(1.0)
+        assert extracted_answer == "18"
+        assert library_reward == approx(1.0)
+        assert judge_evaluations is None
 
     async def test_verify(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)

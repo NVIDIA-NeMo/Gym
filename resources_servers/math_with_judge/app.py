@@ -16,6 +16,8 @@ import asyncio
 import contextlib
 import logging
 import multiprocessing as mp
+import re
+import unicodedata
 from io import StringIO
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
@@ -47,6 +49,7 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True
+    format_tolerant_answer_extraction: bool = False
     library_verifier_timeout_seconds: PositiveFloat = 10.0
     library_verifier_max_concurrency: PositiveInt = 32
 
@@ -89,6 +92,136 @@ def _extract_last_boxed_answer(response: str) -> Optional[str]:
                 return response[content_start:index]
 
     return None
+
+
+_ANSWER_LABELS = (
+    r"final[ \t]+answer",
+    r"answer",
+    r"final[ \t]+result",
+    r"result",
+    r"अंतिम[ \t]+उत्तर",
+    r"उत्तर",
+    r"চূড়ান্ত[ \t]+উত্তর",
+    r"উত্তর",
+    r"উত্তৰ",
+    r"અંતિમ[ \t]+જવાબ",
+    r"જવાબ",
+    r"ಅಂತಿಮ[ \t]+ಉತ್ತರ",
+    r"ಉತ್ತರ",
+    r"അന്തിമ[ \t]+ഉത്തരം",
+    r"ഉത്തരം",
+    r"अन्तिम[ \t]+उत्तर",
+    r"ଅନ୍ତିମ[ \t]+ଉତ୍ତର",
+    r"ଉତ୍ତର",
+    r"ਅੰਤਿਮ[ \t]+ਉੱਤਰ",
+    r"ਉੱਤਰ",
+    r"ਜਵਾਬ",
+    r"இறுதி[ \t]+விடை",
+    r"விடை",
+    r"பதில்",
+    r"తుది[ \t]+సమాధానం",
+    r"సమాధానం",
+    r"జవాబు",
+    r"حتمی[ \t]+جواب",
+    r"جواب",
+)
+_ANSWER_LABEL_RE = re.compile(
+    rf"(?i)(?<!\w)(?:\*\*|__)?(?:the[ \t]+)?(?:{'|'.join(_ANSWER_LABELS)})(?!\w)"
+    r"[ \t]*(?:\*\*|__)?[ \t]*(?:(?:is|है|আছে|છે|ಆಗಿದೆ|ആണ്|आहे|ਹੈ|ہے)[ \t]*)?(?:[:：=]|-[ \t]+)?[ \t]*"
+)
+_OUTER_MATH_DELIMITERS = ((r"\(", r"\)"), (r"\[", r"\]"), ("$$", "$$"), ("$", "$"))
+
+
+def _clean_answer_candidate(candidate: str) -> Optional[str]:
+    """Remove presentation-only wrappers from one final-answer line."""
+    candidate = candidate.strip()
+    candidate = re.sub(r"^(?:\*\*|__|`)+", "", candidate)
+    candidate = re.sub(r"(?:\*\*|__|`)+$", "", candidate).strip()
+    candidate = re.sub(r"^[ \t]*(?:[:：=]|-[ \t]+)[ \t]*", "", candidate)
+    candidate = re.sub(r"[ \t]*(?:\*\*|__)+$", "", candidate).strip()
+
+    for opening, closing in _OUTER_MATH_DELIMITERS:
+        if (
+            candidate.startswith(opening)
+            and candidate.endswith(closing)
+            and len(candidate) > len(opening) + len(closing)
+        ):
+            candidate = candidate[len(opening) : -len(closing)].strip()
+            break
+
+    candidate = candidate.rstrip(".|।۔").strip()
+    return candidate or None
+
+
+def _extract_unboxed_answer_candidate(response: str) -> Optional[str]:
+    """Extract an explicitly marked or concise final answer without using the reference answer."""
+    matches = list(_ANSWER_LABEL_RE.finditer(response))
+    if matches:
+        tail = response[matches[-1].end() :]
+        for line in tail.splitlines():
+            candidate = _clean_answer_candidate(line)
+            if candidate:
+                return candidate
+
+    nonempty_lines = [line for line in response.splitlines() if line.strip()]
+    if not nonempty_lines:
+        return None
+
+    candidate = _clean_answer_candidate(nonempty_lines[-1])
+    if candidate is None or len(candidate) > 512 or candidate.startswith(("#", "- ", "* ")):
+        return None
+
+    # A standalone final line may be a number, LaTeX expression, equation,
+    # coordinate/interval, or short textual answer such as "east".
+    has_math_signal = re.search(r"\d|\\|[{}\[\]()+\-*/^=<>]", candidate)
+    short_text_answer = re.fullmatch(r"[\w\s'\"]+", candidate) and len(candidate.split()) <= 8
+    if (has_math_signal and len(candidate.split()) <= 50) or short_text_answer:
+        return candidate
+    return None
+
+
+def _normalize_unicode_digits(response: str) -> str:
+    """Convert Unicode decimal digits to ASCII while preserving all other text."""
+    normalized = []
+    for character in response:
+        try:
+            normalized.append(str(unicodedata.decimal(character)))
+        except (TypeError, ValueError):
+            normalized.append(character)
+    return "".join(normalized)
+
+
+def _repair_final_unclosed_box(response: str) -> str:
+    """Close one missing outer brace in the final boxed answer."""
+    boxed_start = response.rfind("\\boxed{")
+    if boxed_start < 0 or _extract_last_boxed_answer(response) is not None:
+        return response
+
+    stripped = response.rstrip()
+    suffix = ""
+    for delimiter in ("$$", r"\]", "$", r"\)"):
+        if stripped.endswith(delimiter):
+            stripped = stripped[: -len(delimiter)].rstrip()
+            suffix = delimiter
+            break
+
+    brace_depth = 0
+    for character in stripped[boxed_start:]:
+        if character == "{":
+            brace_depth += 1
+        elif character == "}":
+            brace_depth -= 1
+            if brace_depth < 0:
+                return response
+
+    if brace_depth != 1:
+        return response
+    return f"{stripped}}}{suffix}"
+
+
+def _prepare_format_tolerant_response(response: str) -> str:
+    """Apply reference-independent repairs used by Indic MATH-500."""
+    return _repair_final_unclosed_box(_normalize_unicode_digits(response))
 
 
 def _run_math_verify(
@@ -223,17 +356,25 @@ Example output: "My final verdict is different [[A!=B]]"."""
         specified question in comparison with the specified expected answer.
         """
 
-        boxed_answer = _extract_last_boxed_answer(generated_answer)
-        if boxed_answer is None or not boxed_answer.strip():
+        verification_response = generated_answer
+        if self.config.format_tolerant_answer_extraction:
+            verification_response = _prepare_format_tolerant_response(generated_answer)
+
+        answer_candidate = _extract_last_boxed_answer(verification_response)
+        if answer_candidate is None and self.config.format_tolerant_answer_extraction:
+            answer_candidate = _extract_unboxed_answer_candidate(verification_response)
+        if answer_candidate is None or not answer_candidate.strip():
             return 0.0, None, 0.0, None
 
         library_reward, extracted_answer = await self._verify_answer_with_library_async(
-            expected_answer, generated_answer
+            expected_answer, verification_response
         )
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
-        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, boxed_answer)
+        judge_reward, judge_evaluations = await self._verify_answer_with_judge(
+            question, expected_answer, answer_candidate
+        )
         return judge_reward, extracted_answer, library_reward, judge_evaluations
 
     @classmethod
