@@ -125,19 +125,16 @@ def test_input_drift_is_rejected(pinned_tasks: list[dict], monkeypatch: pytest.M
     assert output.read_bytes() == original
 
 
-def _resolve_profile(*, shared_mounts: bool, tmux_path: str | None = None) -> dict:
+def _resolve_profile(*, deployment: bool) -> dict:
     initial = {
         "config_paths": ["benchmarks/terminal_bench_2_1/inkling_small.yaml"],
         "policy_base_url": "http://127.0.0.1:1/v1",
         "policy_api_key": "unused",
         "policy_model_name": "offline-model",
     }
-    if shared_mounts:
-        initial["config_paths"].append("benchmarks/terminal_bench_2_1/deployments/opensandbox_shared_mounts.yaml")
-    if tmux_path is not None:
-        initial["terminal_bench_2_1_terminus_2_sandboxed_agent"] = {
-            "responses_api_agents": {"terminus_2_sandboxed_agent": {"remote_tmux_binary_path": tmux_path}}
-        }
+    if deployment:
+        # sbatch_external_vllm.sh loads this after the recipe.
+        initial["config_paths"].append("benchmarks/nemotron_3.5_super/sandbox_utils.yaml")
     config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             skip_load_from_cli=True,
@@ -149,18 +146,17 @@ def _resolve_profile(*, shared_mounts: bool, tmux_path: str | None = None) -> di
     return OmegaConf.to_container(config, resolve=True)
 
 
-@pytest.mark.parametrize("shared_mounts", [False, True])
-def test_profile_preserves_evaluation_settings_and_separates_deployment(
-    monkeypatch: pytest.MonkeyPatch, shared_mounts: bool
+@pytest.mark.parametrize("deployment", [False, True])
+def test_profile_preserves_evaluation_settings_and_adds_deployment_from_sandbox_utils(
+    monkeypatch: pytest.MonkeyPatch, deployment: bool
 ) -> None:
-    if shared_mounts:
+    if deployment:
         monkeypatch.setenv("OPENSANDBOX_DOMAIN", "unused.example")
         monkeypatch.setenv("OPENSANDBOX_API_KEY", "unused")
     else:
         monkeypatch.delenv("OPENSANDBOX_DOMAIN", raising=False)
         monkeypatch.delenv("OPENSANDBOX_API_KEY", raising=False)
-    tmux_path = "/deployment/tools/tmux" if shared_mounts else None
-    config = _resolve_profile(shared_mounts=shared_mounts, tmux_path=tmux_path)
+    config = _resolve_profile(deployment=deployment)
     agent = config["terminal_bench_2_1_terminus_2_sandboxed_agent"]["responses_api_agents"][
         "terminus_2_sandboxed_agent"
     ]
@@ -169,8 +165,8 @@ def test_profile_preserves_evaluation_settings_and_separates_deployment(
     assert agent["entrypoint"] == "app.py"
     assert agent["interleaved_thinking"] is model["uses_interleaved_reasoning"] is True
     assert agent["recover_stalled_interrupts"] is True
-    assert agent["terminal_hidden_mounts"] == (["/mnt/s3-data", "/mnt/.s3-gate"] if shared_mounts else [])
-    assert agent["remote_tmux_binary_path"] == tmux_path
+    assert agent["terminal_hidden_mounts"] == (["/mnt/s3-data", "/mnt/.s3-gate"] if deployment else [])
+    assert bool(agent["remote_tmux_binary_path"]) is deployment
     assert agent["model_context_limit"] == 1048576
     assert agent["sandbox_timeout"] == 10800
     assert agent["llm_request_timeout"] == 3600
@@ -184,7 +180,7 @@ def test_profile_preserves_evaluation_settings_and_separates_deployment(
     assert config["num_samples_in_parallel"] == 256
     assert config["observability_enabled"] is True
     assert config["upload_rollouts"] is False
-    if shared_mounts:
+    if deployment:
         assert "opensandbox" in config["sandbox"]
         assert resources["sandbox_config"]["metadata"]["nemo.nvidia.com/resources"] == "custom"
     else:

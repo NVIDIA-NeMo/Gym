@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Inkling evaluation settings and pinned task inputs; select a sandbox deployment separately.
-# For the shared-mount OpenSandbox service, also load deployments/opensandbox_shared_mounts.yaml
-# and provide the remote_tmux_binary_path available on that service.
+# Inkling evaluation settings and pinned task inputs. Sandbox deployment settings (tmux binary, hidden
+# service mounts, resource metadata) come from benchmarks/nemotron_3.5_super/sandbox_utils.yaml, which
+# sbatch_external_vllm.sh loads automatically; add it with --config when running without that launcher.
 # Serving configuration: benchmarks/nemotron_3.5_super/vllm_configs/inkling_small.sh
 config_paths:
   - benchmarks/terminal_bench_2_1/terminus_2.yaml

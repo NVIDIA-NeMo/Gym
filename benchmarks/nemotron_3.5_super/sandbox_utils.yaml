@@ -42,6 +42,11 @@ terminal_bench_2_1_terminus_2_sandboxed_agent:
   responses_api_agents:
     terminus_2_sandboxed_agent:
       remote_tmux_binary_path: /mnt/s3-data/data/bxyu/tmux/tmux-3.7c-linux-x86_64
+      # Hide these unrelated service mounts from task terminals; a find / over them stalls the shell.
+      # Needs Linux root and user/mount namespaces in the sandbox, and the tmux binary above.
+      terminal_hidden_mounts:
+        - /mnt/s3-data
+        - /mnt/.s3-gate
 terminal_bench_2_1_terminus_2_sandboxed_resources_server:
   resources_servers:
     terminal_bench_2_1:
