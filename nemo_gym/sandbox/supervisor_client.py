@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Controller-side transport for the shared sandbox process supervisor.
 
-Session ownership, cancellation, and harness output parsing stay with the adapter.
+Session ownership and cancellation live in session.py; output parsing stays with the adapter.
 Unlike process_supervisor.py, this module is not uploaded to the task sandbox.
 """
 

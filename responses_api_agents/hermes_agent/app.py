@@ -70,6 +70,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
+from nemo_gym.sandbox.session import SandboxSession
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs
@@ -284,6 +285,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if not isinstance(state, HermesSandboxSession):
             raise TypeError("Expected Hermes agent session state")
         await state.close(self.config.session_close_timeout_seconds)
+        # Errors/cancellation can bypass response parsing. The common session
+        # still captures available output before releasing the sandbox.
+        output = state.session.artifacts
+        if state.observations is None and output is not None:
+            result = output.get("result")
+            state.observations = self._sandbox_observations(
+                result if isinstance(result, dict) else {"failed": True}, output.get("observations")
+            )
         observations = state.observations or AgentObservationBundle(
             source="hermes", gaps=[ObservationGap(code="observation_capture_failed")]
         )
@@ -404,10 +413,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
         session_dir = f"/tmp/nemo-gym-hermes-sessions/{uuid4().hex}"
         state = HermesSandboxSession(
             request=body,
-            sandbox=sandbox,
-            workdir=workdir,
-            directory=session_dir,
-            owns_sandbox=owns_sandbox,
+            session=SandboxSession(
+                sandbox=sandbox,
+                workdir=workdir,
+                directory=session_dir,
+                owns_sandbox=owns_sandbox,
+                harness="Hermes",
+            ),
         )
         try:
             await state.prepare(install_timeout=self.config.sandbox_install_timeout_seconds)

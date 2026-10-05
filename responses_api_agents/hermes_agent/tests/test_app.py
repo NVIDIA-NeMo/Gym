@@ -41,6 +41,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox.session import SandboxSession
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.hermes_agent.app import (
@@ -162,10 +163,10 @@ class TestSanity:
             {"sandbox_id": "sandbox"},
             provider=provider,
         )
-        assert state.sandbox is sandbox
-        assert state.workdir == "/app"
-        assert state.directory.startswith("/tmp/nemo-gym-hermes-sessions/")
-        assert len(state.directory.rsplit("/", 1)[-1]) == 32
+        assert state.session.sandbox is sandbox
+        assert state.session.workdir == "/app"
+        assert state.session.directory.startswith("/tmp/nemo-gym-hermes-sessions/")
+        assert len(state.session.directory.rsplit("/", 1)[-1]) == 32
         assert sandbox.exec.await_count == 2
         assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
             "sandbox_runner.py",
@@ -253,9 +254,9 @@ class TestSanity:
 
         sandbox_factory.assert_called_once_with(provider)
         sandbox.start.assert_awaited_once_with(SandboxSpec(workdir="/fallback"))
-        assert state.sandbox is sandbox
-        assert state.workdir == "/fallback"
-        assert state.owns_sandbox is True
+        assert state.session.sandbox is sandbox
+        assert state.session.workdir == "/fallback"
+        assert state.session.owns_sandbox is True
         await hermes._close_agent_session_state(state)
         sandbox.stop.assert_awaited_once()
         sandbox.disconnect.assert_not_awaited()
@@ -387,7 +388,10 @@ class TestSanity:
             tool_accesses=list(tool_accesses),
         )
         hermes._session_records["session"] = _AgentSessionRecord(
-            state=HermesSandboxSession(request=seed, sandbox=sandbox, workdir=None, directory="/session"),
+            state=HermesSandboxSession(
+                request=seed,
+                session=SandboxSession(sandbox=sandbox, workdir=None, directory="/session", harness="Hermes"),
+            ),
             episode_id=seed.episode_id,
         )
         request = SimpleNamespace(
@@ -516,7 +520,7 @@ class TestSanity:
         sandbox = _Sandbox()
         hermes, request, _ = self._sandbox_session(monkeypatch, sandbox)
 
-        with pytest.raises(RuntimeError, match="runner exited without output"):
+        with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
             await hermes.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="fix bug"))
 
         stop = [command for command in sandbox.commands if "runner.stop" in command and "kill -TERM" in command]
