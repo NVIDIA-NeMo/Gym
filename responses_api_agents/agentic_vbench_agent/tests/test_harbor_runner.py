@@ -307,7 +307,7 @@ def test_hub_post_surfaces_provider_status_message_only(hub_judge, monkeypatch: 
     assert len(message) < 220  # message truncated to one short line
     assert "\n" not in message
     assert "AAAA" not in message and "secret-key" not in message  # no payloads, no credentials
-    assert module.FAILURES == [f"/v1beta/models/m:generateContent: {message}"]
+    assert module.FAILURES == []  # a persistent 4xx is this request's error, not an infrastructure rejection
 
     def not_json(request, timeout):
         raise urllib.error.HTTPError(request.full_url, 400, "bad", {}, io.BytesIO(b"<html>gateway</html>"))
@@ -376,3 +376,49 @@ def test_model_call_timeout_reaches_opencode_provider() -> None:
     assert "timeout" not in make_job()["agents"][0]["kwargs"]["opencode_config"]["provider"]["openai"]["options"]
     with pytest.raises(ValueError, match="timeout"):
         make_job(model_timeout_ms=0)
+
+
+def test_hub_post_persistent_request_error_raises_without_rejecting_verification(
+    hub_judge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 4xx that persists across retries is this request's fault (e.g. empty audio): the judge
+    scores that rubric item as a judge error, as it would with the native SDK, and the
+    verification is not rejected. Transport failures still reject it."""
+    import io
+    import urllib.error
+
+    module, _ = hub_judge
+    monkeypatch.setenv("AVB_JUDGE_BASE_URL", "https://hub.example")
+    monkeypatch.setenv("NVINFERENCE_API_KEY", "k")
+    monkeypatch.setattr(module.time, "sleep", lambda _s: None)
+    body = b'{"error": {"code": 400, "message": "Unable to submit request because it has an empty inlineData"}}'
+    calls = {"n": 0}
+
+    def empty_media(request, timeout):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(request.full_url, 400, "bad", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", empty_media)
+    module.FAILURES.clear()
+    with pytest.raises(
+        RuntimeError, match=r"HTTP 400 \(Unable to submit request because it has an empty inlineData\)"
+    ):
+        module.real_post("/v1beta/models/m:generateContent", {"contents": []})
+    assert calls["n"] == module.ATTEMPTS  # still retried, in case the 400 was transient
+    assert module.FAILURES == []  # request-specific: not an infrastructure rejection
+
+    def unavailable(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 503, "unavailable", {}, io.BytesIO(b"{}"))
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", unavailable)
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        module.real_post("/v1beta/models/m:generateContent", {"contents": []})
+    assert len(module.FAILURES) == 1  # transport failure: rejected
+
+    def too_many(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 429, "slow down", {}, io.BytesIO(b"{}"))
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", too_many)
+    with pytest.raises(RuntimeError, match="HTTP 429"):
+        module.real_post("/v1beta/models/m:generateContent", {"contents": []})
+    assert len(module.FAILURES) == 2  # rate limiting is transport, not this request's content
