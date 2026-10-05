@@ -198,8 +198,11 @@ async def test_partial_event_tail_only_recovers_failed_execution(agent, failure,
         assert (Path(result.pi_results_dir) / "events.jsonl").read_text().endswith(tail)
         assert "Ignoring incomplete trailing Pi event" in caplog.text
     else:
-        with pytest.raises(json.JSONDecodeError):
-            await server.run(SimpleNamespace(cookies={}), request_body())
+        # An event stream that cannot be recovered is reported unscored, not as a request failure.
+        result = await server.run(SimpleNamespace(cookies={}), request_body())
+        wire = result.model_dump(mode="json")
+        assert wire["_ng_failure_class"] == "agent_run_error" and result.pi_failed
+        assert "JSONDecodeError" in wire["_ng_failure_message"]
     assert server.server_client.post.await_count == (2 if recover else 1)
     if recover:
         assert server.server_client.post.await_args.kwargs["json"]["response"]["output"] == []
@@ -241,9 +244,38 @@ async def test_failures_preserve_cleanup_and_zero_reward_boundary(agent, failure
         assert invocation.status == ("failed" if failure == "exit" else "incomplete")
         assert server.server_client.post.await_count == 2
         assert server.server_client.post.await_args.kwargs["json"]["response"]["output"] == []
-    else:
-        with pytest.raises((OSError, RuntimeError, asyncio.CancelledError)):
+    elif failure == "cancel":
+        with pytest.raises(asyncio.CancelledError):
             await server.run(SimpleNamespace(cookies={}), request_body())
+    else:
+        # A lost export or an unavailable grader is reported unscored, not as a request failure.
+        result = await server.run(SimpleNamespace(cookies={}), request_body())
+        wire = result.model_dump(mode="json")
+        assert wire["_ng_failure_class"] == "agent_run_error" and result.pi_failed
+        assert ("export unavailable" if failure == "export" else "judge unavailable") in wire["_ng_failure_message"]
+        assert "reward" not in wire and "response" not in wire
+    sandbox.stop.assert_awaited_once()
+    assert _RUN.get() is None
+
+
+async def test_unrunnable_pi_binary_is_reported_unscored(agent, monkeypatch):
+    server, sandbox = agent
+    monkeypatch.setattr(server.config, "pi_version", "0.85.1")
+    sandbox.exec.side_effect = [
+        SimpleNamespace(return_code=0, error_type=None),
+        SimpleNamespace(
+            return_code=1,
+            error_type=None,
+            stdout="/opt/pi/bin/node: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.28' not found",
+            stderr="exit status 1",
+        ),
+    ]
+    result = await server.run(SimpleNamespace(cookies={}), request_body())
+    wire = result.model_dump(mode="json")
+    assert wire["_ng_failure_class"] == "agent_run_error" and result.pi_failed
+    assert "GLIBC_2.28" in wire["_ng_failure_message"]
+    assert "reward" not in wire and "response" not in wire
+    assert server.server_client.post.await_count == 1  # seeded, never verified
     sandbox.stop.assert_awaited_once()
     assert _RUN.get() is None
 
@@ -307,15 +339,17 @@ def test_capture_preserves_multiline_unicode_and_process_exit(tmp_path):
     assert observed > 0 and event == payload
 
 
-async def test_mcp_initialization_failure_is_a_request_failure(agent):
+async def test_mcp_initialization_failure_is_reported_unscored(agent):
     server, sandbox = agent
     server.config.mcp_servers = {"search": PiMCPServerConfig(url="http://tools/mcp")}
     sandbox.exec.side_effect = [
         SimpleNamespace(return_code=0, error_type=None),
         SimpleNamespace(return_code=78, error_type=None),
     ]
-    with pytest.raises(RuntimeError, match="MCP tools could not be initialized"):
-        await server.run(SimpleNamespace(cookies={}), request_body())
+    result = await server.run(SimpleNamespace(cookies={}), request_body())
+    wire = result.model_dump(mode="json")
+    assert wire["_ng_failure_class"] == "agent_run_error" and result.pi_failed
+    assert "MCP tools could not be initialized" in wire["_ng_failure_message"]
     assert server.server_client.post.await_count == 1
     sandbox.stop.assert_awaited_once()
     assert _RUN.get() is None
