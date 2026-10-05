@@ -132,13 +132,7 @@ gym dev test
 
 `--extra all` is not a substitute: it includes `dev`, `mlflow`, `sandbox`, and
 `wandb`, but not `telemetry` or `openshell`. The `vllm` extra is not required for
-these unit tests. OpenShell wheels are platform-specific; omit that extra only
-when its SDK is unsupported, in which case its provider tests will skip.
-
-CI runs on Linux. Use a Linux development environment for the complete suite:
-process-tree memory accounting and Enroot tests rely on `/proc`, and some
-connection-pool tests bind additional loopback addresses. Installing extras
-alone does not resolve those platform differences on macOS.
+these unit tests.
 
 Cloning a public repository over HTTPS needs no GitHub credentials. If you have
 an SSH key registered with GitHub, you can use `git@github.com:OWNER/Gym.git`
