@@ -259,7 +259,11 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir="/workspace",
             env=dict(self.config.sandbox_config.get("env", {})),
-            files={},
+            # Upstream NL2RepoBench copies start.md into the task workspace at launch
+            # (shutil.copy2 onto a host bind-mount); this is our equivalent for the
+            # sandbox-provider path. Agent-only: the verifier sandbox just runs tests
+            # against whatever the agent produced and has no use for the spec file.
+            files={"/workspace/start.md": task.start_md} if phase == "agent" else {},
             metadata=provider_metadata
             | dict(self.config.sandbox_config.get("metadata", {}))
             | {
