@@ -69,6 +69,10 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
 
 
 GOLDEN_PATCH_SOLVE_SH_PATCHES = {
+    # This install is in solution/solve.sh, not tests/test.sh.
+    "terminal-bench/mcmc-sampling-stan": [
+        ("sudo apt-get install -y \\\n    gfortran", "sudo apt-get install -y \\\n    cmake \\\n    gfortran"),
+    ],
     "terminal-bench/build-cython-ext": [
         (
             "pip install setuptools==80.9.0 cython==3.1.3",
@@ -131,9 +135,6 @@ TEST_SH_PATCHES = {
     ],
     "terminal-bench/qemu-alpine-ssh": [
         ("apt-get update", QEMU_VERIFIER_APT_UPDATE),
-    ],
-    "terminal-bench/mcmc-sampling-stan": [
-        ("sudo apt-get install -y \\\n    gfortran", "sudo apt-get install -y \\\n    cmake \\\n    gfortran"),
     ],
     "terminal-bench/pytorch-model-recovery": [
         ("-w torch==2.7.1", "-w torch==2.7.1 --index https://download.pytorch.org/whl/cpu"),
@@ -235,7 +236,11 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
     @contextmanager
     def _patch_golden_patch_solve_sh(
-        self, task_name: str, local_fpath: Path, patches: Dict[str, List[Tuple[str, str]]]
+        self,
+        task_name: str,
+        local_fpath: Path,
+        patches: Dict[str, List[Tuple[str, str]]],
+        unmatched: set[str],
     ):
         if task_name not in patches or local_fpath.suffix != ".sh":
             yield local_fpath
@@ -243,7 +248,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         content = local_fpath.read_text()
         for old, new in patches[task_name]:
-            content = content.replace(old, new)
+            if old in content:
+                unmatched.discard(old)
+                content = content.replace(old, new)
 
         with NamedTemporaryFile(mode="w+", suffix=".sh", delete_on_close=False) as temp_file:
             temp_file.write(content)
@@ -262,6 +269,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if not local_dirpath.is_absolute():
             local_dirpath = PARENT_DIR / local_dirpath
 
+        # A patch may match any one script in the folder, but must match at least one: an exact-string
+        # patch that matches nothing means the task's scripts changed and the repair is silently not applied.
+        unmatched = {old for old, _ in patches.get(task_name, [])}
         for file in glob("**", root_dir=str(local_dirpath), recursive=True):
             local_fpath = local_dirpath / file
             if not local_fpath.is_file():
@@ -271,8 +281,14 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             mkdir_result = await sandbox.exec(f"mkdir -p {Path(target_fpath).parent}")
             assert mkdir_result.return_code == 0, mkdir_result
 
-            with self._patch_golden_patch_solve_sh(task_name, local_fpath, patches) as new_local_fpath:
+            with self._patch_golden_patch_solve_sh(task_name, local_fpath, patches, unmatched) as new_local_fpath:
                 await sandbox.upload(local_path=new_local_fpath, remote_path=target_fpath)
+
+        if unmatched:
+            raise ValueError(
+                f"{task_name}: patches matched no .sh file under {local_dirpath}; the task scripts may have "
+                f"changed. Unmatched: {sorted(unmatched)}"
+            )
 
     async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
         task_folder = Path(body.task_folder)
