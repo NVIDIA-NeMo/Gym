@@ -394,9 +394,191 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
         self.assertNotIn("unexpected-submission", stdout)
         self.assertIn("VLLM_MODE=aggregated does not support VLLM_PD_DEPLOYMENT_MODE=coupled", stderr)
 
+    def run_tp1_services(
+        self,
+        *,
+        mode: str,
+        rank: int = 0,
+        exit_role: str = "engine-GPU-b",
+        exit_status: int = 7,
+        visible_gpus: str = "GPU-d,GPU-b,GPU-a,GPU-c",
+        shutdown_signal: str = "",
+    ) -> tuple[int, str, str, dict[str, list[str]]]:
+        """Execute generated commands with mock services, recording argv and GPU assignments."""
+        with TemporaryDirectory(prefix="gym-tp1-") as directory:
+            root = Path(directory)
+            config = root / "model.sh"
+            config.write_text(
+                "VLLM_COMMON_ARGS=(--tensor-parallel-size=4 --pipeline-parallel-size 2 "
+                "--data-parallel-size=8 --data-parallel-size-local 4 --api-server-count=2 "
+                "--common-test 'value with spaces')\n"
+                'VLLM_PREFILL_ARGS=(--prefill-test producer --kv-transfer-config \'{"kv_role":"kv_producer"}\')\n'
+                'VLLM_DECODE_ARGS=(--decode-test consumer \'--kv-transfer-config={"kv_role":"kv_consumer"}\')\n'
+            )
+            env = {
+                "VLLM_MODE": mode,
+                "VLLM_ENGINES_PER_NODE": "4",
+                "NUM_NODES": "1" if mode == "aggregated" else "2",
+                "NUM_PREFILL_NODES": "1",
+                "NUM_DECODE_NODES": "1",
+                "ALL_NODES": "node0" if mode == "aggregated" else "node0 node1",
+                "SLURM_PROCID": str(rank),
+                "VLLM_CONFIG": str(config),
+                "CUDA_VISIBLE_DEVICES": visible_gpus,
+                "TEST_STATE_DIR": directory,
+                "TEST_EXIT_ROLE": exit_role,
+                "TEST_EXIT_STATUS": str(exit_status),
+                "TEST_SHUTDOWN_SIGNAL": shutdown_signal,
+            }
+            _, command, _, submissions = self.capture_submission(env=env)
+            self.assertIn(f"--nodes={env['NUM_NODES']}", submissions[0])
+            stubs = r"""
+run_service() {
+    local role=$1
+    trap 'printf "%s-stopped\n" "$role"; exit 0' TERM
+    touch "$TEST_STATE_DIR/$role-ready"
+    if [[ "$role" == "$TEST_EXIT_ROLE" ]]; then
+        for gpu in GPU-d GPU-b GPU-a GPU-c; do
+            while [[ ! -f "$TEST_STATE_DIR/engine-$gpu-ready" ]]; do "$TEST_SLEEP" 0.01; done
+        done
+        if [[ -z "$TEST_SHUTDOWN_SIGNAL" ]]; then
+            return "$TEST_EXIT_STATUS"
+        fi
+        kill -s "$TEST_SHUTDOWN_SIGNAL" "$$"
+    fi
+    while true; do "$TEST_SLEEP" 0.01; done
+}
+vllm() {
+    printf '%s\0' "$CUDA_VISIBLE_DEVICES" "$VLLM_NIXL_SIDE_CHANNEL_HOST" \
+        "$VLLM_NIXL_SIDE_CHANNEL_PORT" "$@" > "$TEST_STATE_DIR/engine-$CUDA_VISIBLE_DEVICES.args"
+    run_service "engine-$CUDA_VISIBLE_DEVICES"
+}
+vllm-router() {
+    printf '%s\0' "$@" > "$TEST_STATE_DIR/router.args"
+    run_service router
+}
+hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
+sleep() { "$TEST_SLEEP" 0.01; }
+"""
+            status, stdout, stderr = self.run_shell(stubs + command, env=env)
+            recorded = {p.stem: p.read_text().rstrip("\0").split("\0") for p in root.glob("*.args")}
+            return status, stdout, stderr, recorded
+
+    def test_tp1_engines_have_distinct_gpus_ports_and_router_endpoints(self) -> None:
+        for mode in ("aggregated", "pd"):
+            for rank in (0,) if mode == "aggregated" else (0, 1):
+                with self.subTest(mode=mode, rank=rank):
+                    status, stdout, stderr, recorded = self.run_tp1_services(mode=mode, rank=rank)
+                    self.assertEqual(status, 7, stderr)
+                    for index, gpu in enumerate(("GPU-d", "GPU-b", "GPU-a", "GPU-c")):
+                        device, host, nixl_port, *args = recorded[f"engine-{gpu}"]
+                        self.assertEqual((device, host), (gpu, f"node{rank}"))
+                        self.assertEqual(nixl_port, str((5700 if mode == "pd" and rank == 1 else 5600) + index))
+                        self.assertEqual(args[args.index("--port") + 1], str(8001 + index))
+                        for flag in (
+                            "--tensor-parallel-size",
+                            "--pipeline-parallel-size",
+                            "--data-parallel-size",
+                            "--data-parallel-size-local",
+                            "--api-server-count",
+                        ):
+                            self.assertEqual(args.count(flag), 1)
+                            self.assertEqual(args[args.index(flag) + 1], "1")
+                            self.assertFalse(any(arg.startswith(flag + "=") for arg in args))
+                        self.assertEqual(args[args.index("--common-test") + 1], "value with spaces")
+                        if mode == "aggregated":
+                            self.assertFalse(any(arg.startswith("--kv-transfer-config") for arg in args))
+                        elif rank == 0:
+                            self.assertIn("--prefill-test", args)
+                            self.assertEqual(
+                                json.loads(args[args.index("--kv-transfer-config") + 1])["kv_role"], "kv_producer"
+                            )
+                        else:
+                            self.assertIn("--decode-test", args)
+                            self.assertIn('--kv-transfer-config={"kv_role":"kv_consumer"}', args)
+                        if gpu != "GPU-b":
+                            self.assertIn(f"engine-{gpu}-stopped", stdout)
+                    if rank == 0:
+                        router = recorded["router"]
+                        if mode == "pd":
+                            self.assert_router_arguments(
+                                router,
+                                [f"http://node0:{port}" for port in range(8001, 8005)],
+                                [f"http://node1:{port}" for port in range(8001, 8005)],
+                            )
+                        else:
+                            self.assertEqual(
+                                router[router.index("--worker-urls") + 1 :],
+                                [f"http://node0:{port}" for port in range(8001, 8005)],
+                            )
+                        self.assertIn("router-stopped", stdout)
+                    else:
+                        self.assertNotIn("router", recorded)
+
+    def test_tp1_engine_and_router_exits_stop_all_peers(self) -> None:
+        for role, exit_status in (("engine-GPU-b", 0), ("router", 9), ("router", 0)):
+            with self.subTest(role=role, exit_status=exit_status):
+                status, stdout, stderr, recorded = self.run_tp1_services(
+                    mode="pd", exit_role=role, exit_status=exit_status
+                )
+                self.assertEqual(status, exit_status or 1, stderr)
+                for service in recorded:
+                    if service != role:
+                        self.assertIn(f"{service}-stopped", stdout)
+
+    def test_tp1_shutdown_stops_all_services(self) -> None:
+        status, stdout, stderr, recorded = self.run_tp1_services(mode="pd", shutdown_signal="TERM")
+        self.assertEqual(status, 143, stderr)
+        for service in recorded:
+            self.assertIn(f"{service}-stopped", stdout)
+
+    def test_tp1_requires_four_visible_gpus(self) -> None:
+        for visible in ("0,1", ""):
+            with self.subTest(visible=visible):
+                status, _, stderr, recorded = self.run_tp1_services(mode="pd", rank=1, visible_gpus=visible)
+                self.assertEqual(status, 1, stderr)
+                self.assertIn("require at least four visible GPUs", stderr)
+                self.assertEqual(recorded, {})
+
+    def test_tp1_metrics_include_every_engine(self) -> None:
+        for mode in ("aggregated", "pd"):
+            with self.subTest(mode=mode):
+                env = {"VLLM_MODE": mode, "VLLM_ENGINES_PER_NODE": "4", "ALL_NODES": "node0 node1"}
+                command, _ = self.generate_commands(env=env)
+                start = 'read -r -a nodes <<< "$ALL_NODES"'
+                setup = start + command.split(start, 1)[1].split("gym_config_args+=(--config", 1)[0]
+                path = Path(self.workdir) / "metrics.yaml"
+                status, _, stderr = self.run_shell(setup, env=env | {"inference_metrics_config": str(path)})
+                self.assertEqual(status, 0, stderr)
+                self.assertEqual(
+                    yaml.safe_load(path.read_text())["inference_metrics"]["endpoints"],
+                    {
+                        f"node{node * 4 + engine}": f"http://node{node}:{8001 + engine}/metrics"
+                        for node in range(2)
+                        for engine in range(4)
+                    },
+                )
+
+    def test_tp1_incompatible_controls_fail_before_submission(self) -> None:
+        for extra in ({"VLLM_PD_DEPLOYMENT_MODE": "coupled"}, {"ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE": "4"}):
+            with self.subTest(extra=extra):
+                status, stdout, stderr = self.run_shell(
+                    'sbatch() { printf "unexpected-submission\\n"; }; source "$@"',
+                    str(SCRIPT),
+                    env={"VLLM_ENGINES_PER_NODE": "4"} | extra,
+                )
+                self.assertEqual(status, 1, stderr)
+                self.assertNotIn("unexpected-submission", stdout)
+
     def test_generated_scripts_have_valid_syntax(self) -> None:
         """Parse the generated scripts too: outer bash -n cannot validate heredoc contents."""
-        for env in ({}, {"VLLM_PD_DEPLOYMENT_MODE": "coupled"}, {"VLLM_MODE": "aggregated"}):
+        for env in (
+            {},
+            {"VLLM_PD_DEPLOYMENT_MODE": "coupled"},
+            {"VLLM_MODE": "aggregated"},
+            {"VLLM_ENGINES_PER_NODE": "4"},
+            {"VLLM_MODE": "aggregated", "VLLM_ENGINES_PER_NODE": "4"},
+        ):
             with self.subTest(env=env):
                 evaluation, serving, batch, _ = self.capture_submission("--config", "benchmark.yaml", env=env)
                 for name, command in (("evaluation", evaluation), ("serving", serving), ("batch", batch)):
@@ -660,6 +842,7 @@ sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
         cases = {
             "VLLM_PD_DEPLOYMENT_MODE": (("bad", "COUPLED"), 1),
             "VLLM_MODE": (("bad", "PD"), 1),
+            "VLLM_ENGINES_PER_NODE": (("0", "2", "bad"), 1),
         }
         for name, (values, expected_status) in cases.items():
             for value in values:
