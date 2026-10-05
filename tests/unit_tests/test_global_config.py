@@ -2280,6 +2280,15 @@ class TestConfigLoadErrors:
         with raises(AgentWithoutEnvironmentServerError, match="participant_b"):
             parser._front_agents_without_environment_server(config)
 
+    def test_composition_retargets_only_the_swapped_participant(self) -> None:
+        config = self._multi_agent_environment_config()
+
+        GlobalConfigDictParser._retarget_environment_servers(config, {"participant_b": "participant_b_swapped"})
+
+        server = config["multi_agent_environment"]["environment_servers"]["multi_agent"]
+        assert server["participant_a"]["name"] == "participant_a"
+        assert server["participant_b"]["name"] == "participant_b_swapped"
+
     @staticmethod
     def _multi_agent_environment_config() -> DictConfig:
         return OmegaConf.create(

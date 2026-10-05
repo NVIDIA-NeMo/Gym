@@ -24,6 +24,7 @@ from omegaconf import OmegaConf
 from nemo_gym.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
+    environment_server_agent_refs,
     legacy_environment_server_name,
 )
 from nemo_gym.rollout_collection import _environment_servers_by_agent
@@ -221,9 +222,11 @@ def test_migrated_renames_point_a_multi_agent_server_at_the_new_names(tmp_path: 
     # One block retargets both fields, so the server's key is not repeated.
     assert set(yaml.safe_load(overlay.read_text())) == {"renamed_user", "renamed_assistant", "my_conversation"}
     # Parsing fails on a reference to a retired agent, so this checks both fields followed the rename.
-    server = _parse(base, overlay, strict=False)["my_conversation"]["environment_servers"]["conversation"]
-    assert server["user_agent"]["name"] == "renamed_user"
-    assert server["assistant_agent"]["name"] == "renamed_assistant"
+    resolved = _parse(base, overlay, strict=True)
+    assert _environment_servers_by_agent(resolved) == {
+        "renamed_user": ["my_conversation"],
+        "renamed_assistant": ["my_conversation"],
+    }
 
 
 def test_reports_a_rename_beside_the_server_it_would_retarget(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
@@ -247,6 +250,21 @@ def test_reports_an_unreadable_config(tmp_path: Path, capsys: pytest.CaptureFixt
     assert migration.main([str(tmp_path)]) == 2
 
     assert "broken.yaml" in capsys.readouterr().err
+
+
+def test_finds_the_agent_references_gym_finds() -> None:
+    # The script depends only on PyYAML, so it keeps its own copy of the rule.
+    server = {
+        "entrypoint": "app.py",
+        "agent_server": {"name": "untyped_agent_server"},
+        "user_agent": {"type": "responses_api_agents", "name": "typed_field"},
+        "helper": {"name": "untyped_other_field"},
+        "resources_server": {"type": "resources_servers", "name": "not_an_agent"},
+    }
+
+    expected = [reference["name"] for reference in environment_server_agent_refs(OmegaConf.create(server))]
+    assert expected == ["untyped_agent_server", "typed_field"]
+    assert [agent for _, agent in migration.agent_references(server)] == expected
 
 
 @pytest.mark.parametrize(

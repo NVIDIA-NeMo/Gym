@@ -187,12 +187,18 @@ MODEL_SERVER_TYPE_KEY_NAME = "responses_api_models"
 RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
 
 
-def environment_server_agent_refs(server: Mapping[str, Any]) -> list[dict[str, Any] | DictConfig]:
-    """Return every Agent reference fronted by one Environment Server."""
+def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
+    """Return the agent references in one environment server's config.
+
+    An environment server can front several agents, such as a user and an assistant.
+    Any top-level field whose value has `type: responses_api_agents` references an agent.
+    So does `agent_server`, whose type may be left out.
+    `scripts/add_legacy_agent_environment_servers.py` applies the same rule.
+    """
     return [
         reference
         for field, reference in server.items()
-        if isinstance(reference, (dict, DictConfig))
+        if isinstance(reference, DictConfig)
         and (
             reference.get("type") == AGENT_SERVER_TYPE_KEY_NAME
             or (field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None)
@@ -856,7 +862,7 @@ Duplicate config paths:
         """Point each environment server at the agent composition put in place of the one it named.
 
         The server is named after the environment, not the agent, so a swap leaves its own name
-        alone and only its `agent_server` reference has to follow.
+        alone and only its references to the swapped agent have to follow.
         """
         for instance in global_config_dict.values():
             if not isinstance(instance, DictConfig):
