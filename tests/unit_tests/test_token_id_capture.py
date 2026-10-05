@@ -449,6 +449,48 @@ def test_token_store_sweeps_only_old_retired_tombstones(tmp_path):
     assert store.path_for("live").exists()
 
 
+def test_token_store_sweeps_abandoned_unretired_captures(tmp_path):
+    """A capture whose rollout was cancelled before the retire is reclaimed
+    with its token records once every file of it is older than the cutoff; a
+    capture with any fresh file is in flight and stays, and retired tombstones
+    are sweep_retired's, not sweep_stale's."""
+    store = TokenCaptureStore(tmp_path)
+    for rollout_id in ("abandoned", "inflight", "tombstone"):
+        entry = TokenEntry(
+            rollout_id=rollout_id,
+            model_call_id=f"{rollout_id}-c1",
+            prompt_token_ids=PTOKS,
+            generation_token_ids=GTOKS,
+            generation_log_probs=LPS,
+        )
+        stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+        store.append(entry)
+    snapshot = store.freeze_now("tombstone")
+    assert asyncio.run(store.drop("tombstone", snapshot_id=snapshot.snapshot_id, version=snapshot.version))
+
+    old = time() - 3600
+    for rollout_id in ("abandoned", "inflight", "tombstone"):
+        for path in (store.state_path_for(rollout_id), store.path_for(rollout_id)):
+            if path.exists():
+                os.utime(path, (old, old))
+    # One fresh file keeps the in-flight capture: a recent append means the
+    # rollout is still running, however old its registration-time state is.
+    os.utime(store.path_for("inflight"), None)
+
+    # A caller may already hold an open descriptor while waiting for the sweep.
+    # Replacing its inode would let a later writer bypass that caller's lock.
+    lock_inode = store.lock_path_for("abandoned").stat().st_ino
+
+    assert store.sweep_stale(older_than_seconds=600) == 1
+    assert not store.state_path_for("abandoned").exists()
+    assert not store.path_for("abandoned").exists()
+    assert store.lock_path_for("abandoned").stat().st_ino == lock_inode
+    assert store.path_for("inflight").exists()
+    # The retired tombstone is untouched here and still sweeps as retired.
+    assert store.state_path_for("tombstone").exists()
+    assert store.sweep_retired(older_than_seconds=600) == 1
+
+
 def test_token_store_recovers_state_lag_from_the_durable_jsonl_tail(tmp_path):
     store = TokenCaptureStore(tmp_path)
     first = TokenEntry(
