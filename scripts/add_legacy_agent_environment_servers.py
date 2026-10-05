@@ -161,7 +161,10 @@ def load(path: Path) -> dict | None:
 
 
 def agent_references(server: dict) -> list[tuple[str, str]]:
-    """Return each ``(field, agent)`` that one environment server's config references."""
+    """Return each ``(field, agent)`` that one environment server's config references.
+
+    Matches `environment_server_agent_refs` in `nemo_gym/global_config.py`.
+    """
     return [
         (field, value["name"])
         for field, value in server.items()
