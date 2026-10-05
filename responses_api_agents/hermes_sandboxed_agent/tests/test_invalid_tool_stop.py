@@ -6,9 +6,14 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.hermes_sandboxed_agent.app import trajectory_response
 from responses_api_agents.hermes_sandboxed_agent.runner import classify_stop
 
+
 MESSAGES = [
     {"role": "user", "content": "fix the bug"},
-    {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "function": {"name": "bash", "arguments": "{}"}}]},
+    {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"id": "c1", "function": {"name": "bash", "arguments": "{}"}}],
+    },
     {"role": "tool", "tool_call_id": "c1", "content": "Unknown tool 'bash'"},
 ]
 
