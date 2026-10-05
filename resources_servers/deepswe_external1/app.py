@@ -10,6 +10,7 @@ import logging
 from contextlib import asynccontextmanager
 from math import ceil
 from pathlib import Path
+from shutil import rmtree
 from time import monotonic
 from typing import Any, Literal
 from uuid import uuid4
@@ -44,6 +45,11 @@ from resources_servers.deepswe_external1.task_data import TaskData
 
 
 logger = logging.getLogger(__name__)
+
+
+class InvalidSubmissionError(RuntimeError):
+    """The seeded repository no longer contains a collectable submission."""
+
 
 VERIFIER_PYTHON_SETUP = """\
 set -eu
@@ -89,7 +95,7 @@ class DeepsweExternal1ResourcesServerConfig(BaseResourcesServerConfig):
     enforce_agent_no_network: bool = True
     sandbox_model_server: ModelServerRef | None = None
     logs_dir: Path = Path("resources_servers/deepswe_external1/logs")
-    clear_verifier_logs: Literal[False] = False
+    clear_verifier_logs: bool = False
     include_model_patch_in_response: bool = True
     is_verifying_null_patch: bool = False
     enforce_verifier_no_network: bool = False
@@ -256,11 +262,34 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
     async def verify(self, request: Request, body: DeepsweExternal1VerifyRequest) -> DeepsweExternal1VerifyResponse:
         return await self._verify_task(request, body, InlineTask(body))
 
+    async def _collect_model_patch(self, sandbox: AsyncSandbox, task: InlineTask) -> bytes:
+        try:
+            return await super()._collect_model_patch(sandbox, task)
+        except RuntimeError as error:
+            # Setup already validated this repository/base. Confirm submission damage
+            # rather than blaming the agent for a transport failure or missing artifact.
+            integrity = await sandbox.exec(
+                'test "$(git -C /app rev-parse --show-toplevel)" = /app && '
+                f"git -C /app cat-file -e {task.data.base_commit}^{{commit}} && "
+                "git -C /app cat-file -e HEAD^{commit}",
+                timeout_s=30,
+            )
+            if integrity.return_code != 0 and not integrity.error_type:
+                raise InvalidSubmissionError("Submission repository, base commit or HEAD is unavailable") from error
+            raise
+
     async def _stage_verifier(self, sandbox: AsyncSandbox, task: InlineTask, model_patch: bytes) -> None:
         # Files were supplied through SandboxSpec.files at B's creation, like Swemer.
-        result = await sandbox.exec("chmod 0755 /tests/test.sh /tests/grader.py", timeout_s=60)
+        result = await sandbox.exec(
+            "python3 -c 'import base64; from pathlib import Path; "
+            'Path("/logs/artifacts/model.patch").write_bytes(base64.b64decode('
+            'Path("/logs/artifacts/model.patch.b64").read_bytes(), validate=True))'
+            "' && "
+            "chmod 0755 /tests/test.sh /tests/grader.py",
+            timeout_s=60,
+        )
         if result.return_code != 0:
-            raise RuntimeError(f"Failed to make DeepSWE verifier executable: {result.stderr or ''}")
+            raise RuntimeError(f"Failed to prepare DeepSWE verifier: {result.stderr or ''}")
 
     async def _verify_task(
         self, request: Request, body: DeepsweExternal1VerifyRequest, task: InlineTask
@@ -281,6 +310,7 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
         collect_time = start_time = verify_time = golden_time = 0.0
         result = VerifierResult(evaluation_completed=False, reward=0.0)
         cleanup_errors: list[str] = []
+        invalid_submission = False
         failure_stage: str | None = "agent_setup"
         try:
             if mode == "agent":
@@ -339,6 +369,7 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
             if result.evaluation_completed:
                 failure_stage = None
         except Exception as error:
+            invalid_submission = mode == "agent" and isinstance(error, InvalidSubmissionError)
             logger.exception("Task %s failed during %s", task_id, failure_stage)
             result = VerifierResult(
                 evaluation_completed=False, reward=0.0, verifier_error=f"{type(error).__name__}: {error}"
@@ -369,15 +400,21 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
                 "patch_collection_time_s": collect_time,
                 "sandbox_start_time_s": start_time,
                 "verification_time_s": verify_time,
-                "mask_sample": not result.evaluation_completed,
-                "failure_kind": VERIFIER_ERROR if not result.evaluation_completed else None,
+                "mask_sample": not result.evaluation_completed and not invalid_submission,
+                "failure_kind": "deepswe_external1:invalid_submission"
+                if invalid_submission
+                else (VERIFIER_ERROR if not result.evaluation_completed else None),
                 "failure_reason": result.verifier_error,
                 "failure_stage": failure_stage,
                 "cleanup_errors": cleanup_errors,
             }
         )
-        log_dir.mkdir(parents=True, exist_ok=True)
-        (log_dir / "result.json").write_text(response.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        if self.config.clear_verifier_logs:
+            rmtree(log_dir, ignore_errors=True)
+            response.log_dir = ""
+        else:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / "result.json").write_text(response.model_dump_json(indent=2) + "\n", encoding="utf-8")
         return response
 
 

@@ -15,7 +15,7 @@ optionally run `python -m resources_servers.deepswe_external1.prepare_examples`.
 
 ```bash
 gym dataset collate \
-  --config resources_servers/deepswe_external1/configs/deepswe_external1.yaml \
+  --config resources_servers/deepswe_external1/configs/deepswe_external1_opencode.yaml \
   --output-dir resources_servers/deepswe_external1/data/cache/collated \
   --mode example_validation
 gym env start \
@@ -27,6 +27,9 @@ gym env start \
 
 Collation generates `data/example_metrics.json` with Gym's standard dataset
 statistics; it does not run a model or verifier.
+Use the same OpenCode config for collation and runtime so the rows route to the
+running resources server. The base `deepswe_external1.yaml` config is for
+standalone golden/null validation without an agent.
 
 Configure the sandbox connection and model credentials privately. The model-server
 address must be reachable from the sandbox. The OpenCode configuration is inherited
@@ -66,6 +69,8 @@ Only the patch crosses from agent to verifier. Trusted test files are staged
 separately in the fresh verifier; its original grader applies the patch and held-out
 tests. Each verifier image must provide Git and writable grading directories.
 File contents are provisioned through `SandboxSpec.files`, like other SWE servers.
+Candidate patches are base64-encoded for this text-only transport and decoded in B
+before grading, preserving non-UTF-8 text diffs as well as Git binary patches.
 Before running tests or applying the candidate patch, B checks for Python and, if missing,
 installs `python3` as root through its OS package manager (APT, APK, microdnf,
 DNF or Yum), with a five-minute setup timeout. Existing Python is reused; neither
@@ -79,8 +84,14 @@ metadata. This is filesystem isolation, not proof against all grader exploits.
 
 `is_verifying_golden_patch: true` runs the original solution in A before collection;
 `is_verifying_null_patch: true` collects from an untouched A. They are mutually
-exclusive. Missing artifacts and setup failures are masked infrastructure errors,
-not completed task failures. Attempts retain separate logs and sandbox IDs.
+exclusive. A failed collection followed by confirmation that the seeded Git
+repository, base commit or HEAD is unavailable is an invalid submission: in agent
+mode it remains an unmasked zero. Transport/setup failures and missing artifacts
+without that evidence remain masked. Golden/null control failures are not agent
+scores. Attempts retain separate logs and sandbox IDs by default; set
+`clear_verifier_logs: true` to remove each attempt's local logs, patch and
+`result.json` after verification. This does not remove the returned response or
+the rollout collector's saved trajectories.
 Responses include the candidate patch by default. Concurrency is controlled by
 the caller, with no additional server-side cap.
 

@@ -2,6 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import os
+import shlex
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -10,6 +14,8 @@ import pytest
 from fastapi import Request
 
 import resources_servers.deepswe_external1.app as module
+from nemo_gym.reward_profile import select_measured
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.deepswe.app import AgentSandboxSession, VerifierResult
 from resources_servers.deepswe.validate_golden import _empty_response
@@ -55,6 +61,111 @@ def sandbox(sandbox_id: str, events: list[str]) -> AsyncMock:
 
     box.stop.side_effect = stop
     return box
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("git") is None, reason="Git is required for collection")
+@pytest.mark.parametrize("failure", ["git", "head", "provider", "exec_error", "missing_patch"])
+async def test_collection_distinguishes_invalid_submission_from_infrastructure(
+    task: InlineTask, tmp_path: Path, failure: str
+) -> None:
+    repo, artifacts = tmp_path / "repo", tmp_path / "artifacts"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+    base = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    task.data.base_commit = base
+    task = InlineTask(task.data)
+    if failure == "git":
+        shutil.rmtree(repo / ".git")
+    elif failure == "head":
+        (repo / ".git/HEAD").write_text("ref: refs/heads/missing\n")
+
+    async def execute(command: str, *, timeout_s: float) -> SandboxExecResult:
+        if failure == "provider":
+            raise ConnectionError("sandbox transport unavailable")
+        if failure == "exec_error":
+            return SandboxExecResult("", "provider unavailable", 125, error_type="ProviderError")
+        command = command.replace("/app", shlex.quote(str(repo))).replace(
+            "/logs/artifacts", shlex.quote(str(artifacts))
+        )
+        completed = subprocess.run(
+            ["sh", "-c", command],
+            env=os.environ | {"HOME": str(tmp_path)},
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout_s,
+        )
+        return SandboxExecResult(completed.stdout, completed.stderr, completed.returncode)
+
+    async def download(remote: str, local: Path) -> None:
+        if failure == "missing_patch":
+            raise FileNotFoundError(remote)
+        shutil.copyfile(artifacts / Path(remote).name, local)
+
+    agent = sandbox("A", [])
+    agent.exec.side_effect = execute
+    agent.download.side_effect = download
+    server = make_server(task, mode="agent")
+    server._agent_sessions["session"] = AgentSandboxSession(task.data.task_id, task.data.image, agent, "A", {})
+    server._create_sandbox = AsyncMock(side_effect=AssertionError("No verifier for failed collection"))
+    result = await server.verify(request(), body(task))
+
+    invalid = failure in {"git", "head"}
+    assert result.reward == 0 and not result.evaluation_completed
+    assert result.mask_sample is not invalid
+    assert result.failure_kind == ("deepswe_external1:invalid_submission" if invalid else "verifier_error")
+    assert result.failure_stage == "patch_collection"
+    _, measured, masked, _ = select_measured([{}], [result.model_dump()])
+    assert [row["reward"] for row in measured] == ([0] if invalid else [])
+    assert len(masked) == (0 if invalid else 1)
+    agent.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+@pytest.mark.parametrize("clear", [False, True])
+async def test_log_retention_preserves_response_but_can_remove_all_attempt_files(
+    task: InlineTask, failed: bool, clear: bool
+) -> None:
+    server = make_server(task, mode="null")
+    server.config = type(server.config).model_validate(server.config.model_dump() | {"clear_verifier_logs": clear})
+    server._create_sandbox = AsyncMock(side_effect=[sandbox("A", []), sandbox("B", [])])
+    server._collect_model_patch = AsyncMock(return_value=b"")
+
+    async def grade(box, inline_task, patch, log_dir):
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "run.log").write_text("verifier output")
+        if failed:
+            raise RuntimeError("provider failed while grading")
+        return VerifierResult(evaluation_completed=True, reward=1)
+
+    server._run_verifier = AsyncMock(side_effect=grade)
+    result = await server.verify(request(), body(task))
+    assert result.reward == (0 if failed else 1)
+    assert result.mask_sample is failed
+    if clear:
+        assert result.log_dir == ""
+        assert not list((server.config.logs_dir / task.data.task_id).iterdir())
+    else:
+        assert Path(result.log_dir, "result.json").is_file()
+        assert Path(result.log_dir, "run.log").read_text() == "verifier output"
 
 
 @pytest.mark.asyncio
@@ -373,15 +484,16 @@ async def test_verifier_cleanup_error_does_not_replace_completed_grade(task: Inl
 
 
 @pytest.mark.asyncio
-async def test_stage_only_sets_modes_and_does_not_use_local_files(task: InlineTask) -> None:
+async def test_stage_prepares_inline_files_without_local_uploads(task: InlineTask) -> None:
     server = make_server(task)
     box = AsyncMock()
     box.exec.return_value = SimpleNamespace(return_code=0, stderr="")
     await server._stage_verifier(box, task, b"candidate")
-    box.exec.assert_awaited_once_with("chmod 0755 /tests/test.sh /tests/grader.py", timeout_s=60)
+    assert box.exec.await_count == 1
+    assert box.exec.await_args.kwargs == {"timeout_s": 60}
     box.upload.assert_not_awaited()
     box.exec.return_value.return_code = 1
-    with pytest.raises(RuntimeError, match="executable"):
+    with pytest.raises(RuntimeError, match="prepare DeepSWE verifier"):
         await server._stage_verifier(box, task, b"candidate")
 
 

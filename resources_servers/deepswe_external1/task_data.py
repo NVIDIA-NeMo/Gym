@@ -3,6 +3,7 @@
 
 """Self-contained task rows; grading assets stay outside the model input."""
 
+from base64 import b64encode
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,7 +33,7 @@ class TaskFiles(BaseModel):
             "/tests/test.patch": self.test_patch,
             "/tests/grader.py": self.grader,
             "/tests/config.json": self.grader_config,
-            "/logs/artifacts/model.patch": model_patch.decode("utf-8"),
+            "/logs/artifacts/model.patch.b64": b64encode(model_patch).decode("ascii"),
         }
 
     def solution_files(self) -> dict[str, str]:

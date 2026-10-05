@@ -1,15 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 import shlex
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from resources_servers.deepswe_external1.inline_task import InlineTask
 from resources_servers.deepswe_external1.task_data import TaskData, TaskFiles
+from resources_servers.deepswe_external1.tests.test_app import make_server
 
 
 def test_row_is_self_contained_and_preserves_file_text(task: InlineTask) -> None:
@@ -25,9 +29,9 @@ def test_row_is_self_contained_and_preserves_file_text(task: InlineTask) -> None
         "/tests/test.patch",
         "/tests/grader.py",
         "/tests/config.json",
-        "/logs/artifacts/model.patch",
+        "/logs/artifacts/model.patch.b64",
     }
-    assert verifier["/logs/artifacts/model.patch"] == "candidate patch\n"
+    assert base64.b64decode(verifier["/logs/artifacts/model.patch.b64"], validate=True) == b"candidate patch\n"
     assert restored.data.files.solution_files() == {
         "/solution/solve.sh": task.data.files.solve_script,
         "/solution/solution.patch": task.data.files.solution_patch,
@@ -43,12 +47,12 @@ def test_required_identifiers_are_validated(task: InlineTask, field: str, value:
 def test_file_text_is_not_silently_normalized(task: InlineTask) -> None:
     files = TaskFiles.model_validate(task.data.files.model_dump() | {"test_patch": "é\r\n"})
     assert files.verification_files(b"")["/tests/test.patch"].encode() == b"\xc3\xa9\r\n"
-    with pytest.raises(UnicodeDecodeError):
-        files.verification_files(b"\xff")
+    assert base64.b64decode(files.verification_files(b"\xff")["/logs/artifacts/model.patch.b64"]) == b"\xff"
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="Git is required for the patch round-trip")
-def test_real_git_patch_preserves_binary_deletion_symlink_and_executable_mode(
+@pytest.mark.asyncio
+async def test_real_git_patch_preserves_binary_deletion_symlink_and_executable_mode(
     task: InlineTask, tmp_path: Path
 ) -> None:
     repo = tmp_path / "A"
@@ -68,6 +72,7 @@ def test_real_git_patch_preserves_binary_deletion_symlink_and_executable_mode(
     (repo / "deleted.txt").write_text("remove me\n")
     (repo / "executable.sh").write_text("#!/bin/sh\nexit 0\n")
     (repo / "binary.dat").write_bytes(b"\x00base\xff")
+    (repo / "latin1.txt").write_bytes(b"caf\xe9\n")
     (repo / "link").symlink_to("tracked.txt")
     git("add", ".")
     git("commit", "-qm", "base")
@@ -76,6 +81,7 @@ def test_real_git_patch_preserves_binary_deletion_symlink_and_executable_mode(
     (repo / "deleted.txt").unlink()
     (repo / "executable.sh").chmod(0o755)
     (repo / "binary.dat").write_bytes(b"\x00changed\xff")
+    (repo / "latin1.txt").write_bytes(b"caf\xe9 au lait\n")
     (repo / "new.txt").write_text("new\n")
     (repo / "link").unlink()
     (repo / "link").symlink_to("new.txt")
@@ -94,12 +100,33 @@ def test_real_git_patch_preserves_binary_deletion_symlink_and_executable_mode(
     diff = command[command.index("git diff") :].split(" > ", 1)[0].replace(task.data.base_commit, base)
     patch = subprocess.run(shlex.split(diff), cwd=repo, check=True, capture_output=True).stdout
     assert b"GIT binary patch" in patch and b"new mode 100755" in patch
+    with pytest.raises(UnicodeDecodeError):
+        patch.decode("utf-8")
+    # Exercise inline provisioning and the real staging command, not just an
+    # independent base64 round trip that could miss a broken consumer.
+    staged = tmp_path / "staged"
+    for path, content in task.data.files.verification_files(patch).items():
+        target = staged / path.lstrip("/")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+
+    async def execute(command, *, timeout_s):
+        command = command.replace("/logs/artifacts", shlex.quote(str(staged / "logs/artifacts"))).replace(
+            "/tests", shlex.quote(str(staged / "tests"))
+        )
+        completed = subprocess.run(["sh", "-c", command], capture_output=True, text=True, timeout=timeout_s)
+        return SimpleNamespace(return_code=completed.returncode, stderr=completed.stderr)
+
+    await make_server(task)._stage_verifier(AsyncMock(exec=AsyncMock(side_effect=execute)), task, patch)
+    transported = (staged / "logs/artifacts/model.patch").read_bytes()
+    assert transported == patch
     fresh = tmp_path / "B"
     git("clone", "--quiet", "--no-hardlinks", str(repo), str(fresh), cwd=tmp_path)
     git("checkout", "--quiet", "--detach", base, cwd=fresh)
-    subprocess.run(["git", "apply", "--binary", "-"], cwd=fresh, input=patch, check=True, capture_output=True)
+    subprocess.run(["git", "apply", "--binary", "-"], cwd=fresh, input=transported, check=True, capture_output=True)
     assert (fresh / "tracked.txt").read_text() == "committed\n"
     assert (fresh / "binary.dat").read_bytes() == b"\x00changed\xff"
+    assert (fresh / "latin1.txt").read_bytes() == b"caf\xe9 au lait\n"
     assert not (fresh / "deleted.txt").exists()
     assert (fresh / "executable.sh").stat().st_mode & 0o111
     assert (fresh / "link").is_symlink() and (fresh / "link").readlink() == Path("new.txt")
