@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: chemeval
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: ChemEval zero-shot textual chemistry tasks with rule-based and model
+  judging
+modality: text
+licensing: Apache-2.0 AND CC-BY-NC-4.0 AND CC-BY-NC-SA-4.0
+authors:
+- gnalbandyan
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: chemeval
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+- name: chemeval
+  type: benchmark
+  jsonl_fpath: benchmarks/chemeval/data/test.jsonl
+  prepare_script: benchmarks/chemeval/prepare.py
+  num_repeats: 1
+canonical_split: text
+prompt_source: prepared
+lifecycle: active

@@ -1,0 +1,10 @@
+*train.jsonl
+*validation.jsonl
+*_prepare.jsonl
+*_prepare.*.jsonl
+test.jsonl
+human_subset.jsonl
+*rollouts*.jsonl
+*metrics*.json
+!example_metrics.json
+!example_rollouts.jsonl
