@@ -85,9 +85,8 @@ from nemo_gym.token_id_capture.lineage import (
     LineageIndex,
     RolloutLineage,
 )
-from nemo_gym.token_id_capture.protocols import TokenSource
-from nemo_gym.token_id_capture.records import response_finish_reason
 from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenSource
+from nemo_gym.token_id_capture.records import response_finish_reason
 from nemo_gym.token_id_capture.store import make_token_store
 
 
