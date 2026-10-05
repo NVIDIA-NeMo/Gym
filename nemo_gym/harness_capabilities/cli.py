@@ -17,6 +17,7 @@ from . import __version__
 from .checker import NAMES, PROFILE, EvidenceScope, inspect_record
 from .contracts import PATH_MODELS, SCHEMA_VERSION
 from .reader import digest_file, hydrate_record, json_rows
+from .registry import check_catalog
 
 
 def _json(value: object) -> str:
@@ -58,7 +59,9 @@ def inspect_bundle(
         sources.extend(sorted(capture_dir.glob("*.capture.*")))
     hashes = {str(path.resolve()): digest_file(path) for path in sources}
     registry = {path: adapter.json_schema() for path, adapter in PATH_MODELS.items()}
-    registry_hash = hashlib.sha256(_json({"path_models": registry, "profile": PROFILE}).encode()).hexdigest()
+    registry_hash = hashlib.sha256(
+        _json({"path_models": registry, "checks": check_catalog(), "profile": PROFILE}).encode()
+    ).hexdigest()
     # Include model validators as well as generated shapes in report identity.
     gym = Path(__file__).parent.parent
     checker_sources = sorted(Path(__file__).parent.glob("*.py")) + [
@@ -137,7 +140,9 @@ def inspect_bundle(
             "limits": [
                 "retained artifacts only; no live qualification or health certification",
                 "TE-6 checks shipped Gym reward/resolution; extended verifier provenance is not certified",
-                "TE-10 and P1 evidence are outside this profile",
+                "sandbox rows are reported under TE-6; record presence is enforced only with require_sandbox",
+                "existing stricter checks and ownership gate remain; this is not exact RFC alignment",
+                "P1 evidence is outside this profile",
             ],
             **manifest,
         }
@@ -260,8 +265,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         command.add_argument("--no-verifier", action="store_true", help="this pair has no verifier")
         command.add_argument("--no-steps", action="store_true", help="this pair has no policy step structure")
+        command.add_argument(
+            "--require-sandbox", action="store_true", help="require saved sandbox outcomes for this pair"
+        )
     args = parser.parse_args(argv)
-    scope = EvidenceScope(tools=not args.no_tools, verifier=not args.no_verifier, steps=not args.no_steps)
+    scope = EvidenceScope(
+        tools=not args.no_tools,
+        verifier=not args.no_verifier,
+        steps=not args.no_steps,
+        require_sandbox=args.require_sandbox,
+    )
     if args.command == "inspect":
         return run_inspection(
             bundle=args.bundle, output=args.output, profile=args.profile, capture_dir=args.capture_dir, scope=scope

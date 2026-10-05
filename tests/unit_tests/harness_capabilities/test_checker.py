@@ -181,9 +181,9 @@ def test_empty_and_duplicate_rollouts_fail(record, tmp_path):
     bundle = tmp_path / "input.jsonl"
     bundle.write_text("")
     with pytest.raises(ValueError, match="no rollout records"):
-        inspect_bundle(bundle, output=tmp_path / "out", profile="gym-p0/v1")
+        inspect_bundle(bundle, output=tmp_path / "out", profile="gym-p0/v2")
     bundle.write_text((json.dumps(record) + "\n") * 2)
-    _, report = inspect_bundle(bundle, output=tmp_path / "out", profile="gym-p0/v1")
+    _, report = inspect_bundle(bundle, output=tmp_path / "out", profile="gym-p0/v2")
     assert report["verdict"] == "not_fulfilled"
 
 
@@ -235,6 +235,8 @@ def test_truthful_failure_is_evidence_not_a_health_verdict(record):
     t["response_metadata"].update(status_code=503, response_status=None, finish_reason=None)
     # Preserve usage reported on the failed attempt, as well as its error body.
     t["response"] = {"error": {"message": "failed"}, "usage": t["response"]["usage"]}
+    assert verdict(record, "TE-1") == "not_fulfilled"
+    c["error_category"] = t["response_metadata"]["error_category"] = "http_error"
     assert verdict(record, "TE-1") == "fulfilled"
     assert verdict(record, "TE-2") == "fulfilled"
     c["tokens_in"] += 1
@@ -379,9 +381,12 @@ def test_binary_resolution_does_not_replace_reward(record):
 def test_canonical_only_delivery_does_not_require_capture_middleware():
     record = evidence_record()
     del record["ng_model_call_capture"]
+    assert inspect_record(hydrate_record(record))["verdict"] == "fulfilled"
     for call in record["ng_trajectory"]["model_calls"]:
         call["started_at"] = call["completed_at"] = call["duration_ms"] = None
-    assert inspect_record(hydrate_record(record))["verdict"] == "fulfilled"
+    result = inspect_record(hydrate_record(record))
+    assert result["verdict"] == "not_fulfilled"
+    assert any(f["assertion"] == "rfc.timing" for f in result["findings"])
 
 
 def test_missing_prior_response_history_fails(record):
@@ -395,6 +400,8 @@ def test_failed_response_without_response_id_preserves_status(record):
     call = record["ng_trajectory"]["model_calls"][0]
     call["response_metadata"].update(response_id=None, response_status="failed")
     call["response"].update(id=None, status="failed", error={"code": "server_error"})
+    assert verdict(record, "TE-1") == "not_fulfilled"
+    capture["error_category"] = call["response_metadata"]["error_category"] = "server_error"
     assert verdict(record, "TE-1") == "fulfilled"
 
 
@@ -408,6 +415,12 @@ def test_retry_and_compaction_attempts_have_distinct_accounting():
     # A retry does not create a new step; its own attempt ref belongs on the existing one.
     assert inspect_record(record)["evidence"]["TE-9"]["verdict"] == "not_fulfilled"
     record["ng_trajectory"]["turns"][0]["model_calls"].append({"model_call_id": "retry"})
+    assert inspect_record(record)["evidence"]["TE-9"]["verdict"] == "not_fulfilled"
+    canonical_retry = copy.deepcopy(record["ng_trajectory"]["model_calls"][0])
+    canonical_retry["model_call_id"] = "retry"
+    canonical_retry["response_metadata"]["response_id"] = "retry-response"
+    canonical_retry["response"]["id"] = "retry-response"
+    record["ng_trajectory"]["model_calls"].append(canonical_retry)
     assert inspect_record(record)["evidence"]["TE-9"]["verdict"] == "fulfilled"
     helper = copy.deepcopy(retry)
     helper.update(model_call_id="helper", response_id="helper-response")
@@ -561,10 +574,13 @@ def test_optional_tool_fields_remain_required_by_te5(record, field):
     assert verdict(record, "TE-5") == "not_fulfilled"
 
 
-def test_invocation_and_tool_fallbacks_use_observation_paths(record):
+def test_fallback_diagnostics_remain_but_cannot_satisfy_canonical_requirements(record):
     record["ng_trajectory"].pop("invocations")
     record["ng_trajectory"].pop("tool_calls")
-    assert inspect_record(hydrate_record(record))["verdict"] == "fulfilled"
+    result = inspect_record(hydrate_record(record))
+    assert result["verdict"] == "not_fulfilled"
+    assert any(f["assertion"] == "rfc.reference_target" for f in result["findings"])
+    assert any(f["assertion"] == "rfc.tools" for f in result["findings"])
     record["ng_agent_observations"]["records"][1]["status"] = "unknown"
     result = inspect_record(hydrate_record(record))
     assert any(

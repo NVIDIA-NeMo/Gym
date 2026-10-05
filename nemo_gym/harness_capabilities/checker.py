@@ -10,6 +10,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from typing import Iterable, TypeGuard
 
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from nemo_gym.rollout_observability import ModelCallRef
@@ -28,7 +29,7 @@ NAMES = {
     "TE-8": "run_join",
     "TE-9": "step_join",
 }
-PROFILE = "gym-p0/v1"
+PROFILE = "gym-p0/v2"
 P0 = ("TE-1", "TE-2", "TE-3", "TE-4", "TE-5", "TE-6", "TE-7")
 
 
@@ -39,6 +40,7 @@ class EvidenceScope:
     tools: bool = True
     verifier: bool = True
     steps: bool = True
+    require_sandbox: bool = False
 
 
 def gate_passes(evidence: dict) -> bool:
@@ -153,6 +155,11 @@ def _provider_usage(usage: dict) -> dict:
             usage.get("cached_input_tokens"),
         ),
     }
+
+
+_SCHEMA_VALIDATORS = {
+    key: Draft202012Validator(check.schema) for key, check in CHECKS.items() if check.schema is not None
+}
 
 
 class _RecordInspector:
@@ -727,6 +734,113 @@ class _RecordInspector:
                 self._fail("TE-3", "turn.gap", "/gaps", "producer declares unavailable step evidence")
             if self.scope.steps and code == "turn_model_call_scope_incomplete":
                 self._fail("TE-9", "accounting.gap", "/gaps", "producer declares incomplete step-call membership")
+
+    def _schema(self, check_id: str, value: object, location: str) -> None:
+        check = CHECKS[check_id]
+        capability, assertion = check_id.split(".", 1)
+        reported = set()
+        for error in _SCHEMA_VALIDATORS[check_id].iter_errors(value):
+            parts = list(error.absolute_path)
+            # jsonschema messages can contain raw payloads. Report the rule and
+            # pointer only, including the missing key for required-field errors.
+            if error.validator == "required" and isinstance(error.instance, dict):
+                missing = [key for key in error.validator_value if key not in error.instance]
+                pointers = [parts + [key] for key in missing]
+            else:
+                pointers = [parts]
+            for pointer in pointers:
+                suffix = "".join("/" + str(key).replace("~", "~0").replace("/", "~1") for key in pointer)
+                key = (suffix, error.validator)
+                if key not in reported:
+                    reported.add(key)
+                    self._fail(capability, assertion, location + suffix, f"{check.requirement} ({error.validator})")
+
+    def _canonical_invocation(self, capability: str, item: dict, location: str) -> None:
+        reference = item.get("invocation_id")
+        if isinstance(reference, str) and reference.strip():
+            ids = {invocation.get("invocation_id") for invocation in _objects(self.trajectory.get("invocations"))}
+            if reference not in ids:
+                self._fail(
+                    capability,
+                    "rfc.reference_target",
+                    location + "/invocation_id",
+                    "invocation reference has no target in ng_trajectory.invocations",
+                )
+
+    def check_rfc_model_calls(self) -> None:
+        """Require the RFC's saved locations; reader projections cannot supply them."""
+        calls = self.trajectory.get("model_calls")
+        for te in ("TE-1", "TE-2", "TE-4", "TE-7", "TE-8", "TE-9"):
+            if te != "TE-9" or self.scope.steps:
+                self._schema(f"{te}.rfc.calls", calls, "/ng_trajectory/model_calls")
+        rules = (
+            "TE-1.rfc.call_id",
+            "TE-1.rfc.model",
+            "TE-1.rfc.dialect",
+            "TE-1.rfc.timing",
+            "TE-1.rfc.outcome",
+            "TE-1.rfc.response_id",
+            "TE-4.rfc.request",
+            "TE-7.rfc.response",
+            "TE-7.rfc.response_presence",
+        )
+        for index, call in enumerate(_objects(calls)):
+            for rule in rules:
+                self._schema(rule, call, f"/ng_trajectory/model_calls/{index}")
+
+    def check_rfc_steps(self) -> None:
+        """Add nonblank invocation references, timestamps and canonical target lookup."""
+        if not self.scope.steps:
+            return
+        for index, turn in enumerate(self.turns):
+            location = f"/ng_trajectory/turns/{index}"
+            self._schema("TE-3.rfc.invocation_id", turn, location)
+            self._schema("TE-3.rfc.timestamp", turn, location)
+            self._canonical_invocation("TE-3", turn, location)
+
+    def check_rfc_tools(self) -> None:
+        """Require the canonical execution output and its invocation association."""
+        if not self.scope.tools:
+            return
+        tools = self.trajectory.get("tool_calls")
+        self._schema("TE-5.rfc.tools", tools, "/ng_trajectory/tool_calls")
+        for index, tool in enumerate(_objects(tools)):
+            location = f"/ng_trajectory/tool_calls/{index}"
+            for rule in ("tool_id", "tool_name", "invocation_id", "output"):
+                self._schema(f"TE-5.rfc.{rule}", tool, location)
+            self._canonical_invocation("TE-5", tool, location)
+
+    def check_rfc_evaluation(self) -> None:
+        """Add required flags and the sandbox rows of the combined TE-6/TE-10 contract."""
+        if self.scope.verifier:
+            for field in ("evaluation_completed", "mask_sample"):
+                self._schema(f"TE-6.rfc.{field}", self.record, "")
+        if self.scope.require_sandbox:
+            self._schema("TE-6.rfc.sandbox_records", self.bundle, "/ng_agent_observations")
+        for index, record in enumerate(self.observations):
+            if record.get("kind") == "sandbox":
+                for rule in ("sandbox_id", "sandbox_outcome", "sandbox_error"):
+                    self._schema(f"TE-6.rfc.{rule}", record, f"/ng_agent_observations/records/{index}")
+
+    def check_rfc_ownership(self) -> None:
+        """Check container identities and explicit turn-to-call references at canonical paths."""
+        for field in ("task_id", "rollout_id"):
+            self._schema(f"TE-8.rfc.{field}", self.trajectory, "/ng_trajectory")
+        if not self.scope.steps:
+            return
+        call_ids = {call.get("model_call_id") for call in _objects(self.trajectory.get("model_calls"))}
+        for index, turn in enumerate(self.turns):
+            location = f"/ng_trajectory/turns/{index}"
+            self._schema("TE-9.rfc.references", turn, location)
+            for ref_index, ref in enumerate(_objects(turn.get("model_calls"))):
+                call_id = ref.get("model_call_id")
+                if isinstance(call_id, str) and call_id.strip() and call_id not in call_ids:
+                    self._fail(
+                        "TE-9",
+                        "rfc.reference_target",
+                        f"{location}/model_calls/{ref_index}/model_call_id",
+                        "model-call reference has no target in ng_trajectory.model_calls",
+                    )
 
     def result(self) -> dict:
         """Report evidence correctness, metric availability and delivery independently."""

@@ -9,14 +9,14 @@ python scripts/inspect_harness_conformance.py \
 ```
 
 Use `matrix --harness NAME=PATH` to compare multiple harnesses. The checker uses
-TE-1–TE-9 and the `gym-p0/v1` profile. Reports are `evidence_summary.json`,
+TE-1–TE-9 and the `gym-p0/v2` profile. Reports are `evidence_summary.json`,
 `evidence_results.jsonl`, and `evidence_report.md`.
 
 For example, this excerpt from `evidence_report.md` shows retained model-call
 evidence passing while one tool record is missing its name:
 
 ```markdown
-Profile: `gym-p0/v1`. Gate: **not_fulfilled**. Records: 1.
+Profile: `gym-p0/v2`. Gate: **not_fulfilled**. Records: 1.
 
 | Evidence | Artifact verdict | Passing / applicable records |
 |---|---|---|
@@ -83,3 +83,18 @@ For live harness checks and regenerating the capability table, see the
 
 See [Harness Conformance](../../fern/versions/latest/pages/observability/harness-conformance.mdx)
 for contracts, applicability, matrix usage, producer onboarding, and limitations.
+
+
+The v2 profile adds the RFC's required canonical fields, direct invocation/call
+lookups and evaluation flags. Capture/observation fallbacks remain available to
+existing diagnostics but cannot satisfy these added canonical-field requirements.
+New assertions use the registry's `rfc.*` names; schema fragments are attached to
+their entries in `registry.py` and defined in `schemas.py`.
+
+Saved sandbox records are checked under TE-6 (the RFC's combined TE-6/TE-10
+section). Pass `--require-sandbox` to `inspect` or `matrix` to require at least
+one; leaving it unset does not establish sandbox coverage.
+
+Existing stricter checks and the TE-8 OR TE-9 gate remain. Tool `incomplete`
+and empty HTTP bodies can still fail older assertions even though the RFC
+permits them. This profile does not yet claim exact RFC alignment.

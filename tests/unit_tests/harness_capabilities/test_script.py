@@ -88,8 +88,8 @@ def test_ambiguous_directory_requires_explicit_file(record, tmp_path):
     for name in ("rollouts.jsonl", "evaluator_rollouts.jsonl"):
         (tmp_path / name).write_text(json.dumps(record) + "\n")
     with pytest.raises(ValueError, match="exactly one"):
-        cli.inspect_bundle(tmp_path, output=tmp_path / "reports", profile="gym-p0/v1")
-    _, summary = cli.inspect_bundle(tmp_path / "rollouts.jsonl", output=tmp_path / "reports", profile="gym-p0/v1")
+        cli.inspect_bundle(tmp_path, output=tmp_path / "reports", profile="gym-p0/v2")
+    _, summary = cli.inspect_bundle(tmp_path / "rollouts.jsonl", output=tmp_path / "reports", profile="gym-p0/v2")
     assert summary["verdict"] == "fulfilled"
 
 
@@ -143,7 +143,7 @@ def test_changing_input_publishes_no_report(record, tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "json_rows", mutate_after_read)
     with pytest.raises(ValueError, match="source changed"):
-        cli.inspect_bundle(path, output=tmp_path / "reports", profile="gym-p0/v1")
+        cli.inspect_bundle(path, output=tmp_path / "reports", profile="gym-p0/v2")
     assert list((tmp_path / "reports").iterdir()) == []
 
 
