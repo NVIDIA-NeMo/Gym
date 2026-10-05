@@ -42,6 +42,7 @@ from nemo_gym.config_types import (
     ModelServerRef,
     ResourcesServerRef,
 )
+from nemo_gym.failure_kinds import FailureStage
 from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -386,7 +387,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
                     raise ValueError(f"{alias} seed did not establish a session cookie")
                 agent_sessions[alias] = session
             except Exception as error:
-                raise self._failure("participant", error) from error
+                raise self._failure("agent", error) from error
 
             async def close_agent(current: _AgentSession = session) -> None:
                 close_http_response = await self.server_client.post(
@@ -420,7 +421,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             if not any(invocation.role == "assistant" for invocation in bridge.invocations):
                 raise ValueError("UserSim completed without an assistant_model invocation")
         except Exception as error:
-            raise self._failure("simulation", error) from error
+            raise self._failure("agent", error) from error
 
         for alias in reversed(tuple(agent_targets)):
             session = agent_sessions[alias]
@@ -545,7 +546,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
 
     @staticmethod
     def _failure(
-        stage: str,
+        stage: FailureStage,
         error: Exception,
         *,
         terminal: bool | None = None,
@@ -553,7 +554,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         return HandledEpisodeError(
             UserSimEpisodeFailure(
                 stage=stage,
-                message=f"{type(error).__name__}: {error}"[:2000],
+                failure_reason=f"{type(error).__name__}: {error}"[:2000],
                 terminal=not _is_retryable_dependency_error(error) if terminal is None else terminal,
             )
         )
