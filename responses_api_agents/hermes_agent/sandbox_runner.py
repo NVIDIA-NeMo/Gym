@@ -17,10 +17,10 @@ from uuid import uuid4
 
 
 try:
-    from .model_kwargs import _model_api_kwargs
+    from .model_kwargs import _model_api_kwargs, install_summary_compat
     from .sandbox_observer import SandboxHermesObserver
 except ImportError:
-    from model_kwargs import _model_api_kwargs
+    from model_kwargs import _model_api_kwargs, install_summary_compat
     from sandbox_observer import SandboxHermesObserver
 
 
@@ -108,6 +108,7 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
         )
 
     agent._build_api_kwargs = build_api_kwargs
+    install_summary_compat(agent, preserve_reasoning_history=payload["chat_template_kwargs_enabled"])
     result = None
     error = None
     stop_reason = None
@@ -143,6 +144,8 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
             payload["history"],
             task_id=payload["agent_session_id"],
         )
+        if getattr(agent, "_gym_iteration_limit_reached", False):
+            result.setdefault("stop_reason", "max_iterations")
     except BaseException as exception:
         if stop_reason is not None:
             result = progress()

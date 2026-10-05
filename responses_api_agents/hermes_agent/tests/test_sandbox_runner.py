@@ -246,6 +246,8 @@ def test_iteration_limit_summary_reaches_the_model_server(
         ],
     }
     answers = [_completion(tool_call), _completion({"content": "summary of the work"})]
+    answers[0]["id"] = "chatcmpl-tool"
+    answers[1]["id"] = "chatcmpl-summary"
 
     with _ModelServer(answers) as model_server:
         if execution == "sandbox":
@@ -254,6 +256,11 @@ def test_iteration_limit_summary_reaches_the_model_server(
                 tmp_path,
             )
             assert output["result"]["final_response"] == "summary of the work"
+            assert output["result"]["stop_reason"] == "max_iterations"
+            assert output["observations"]["invocations"][0]["model_response_ids"] == [
+                "chatcmpl-tool",
+                "chatcmpl-summary",
+            ]
         else:
             from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
@@ -286,12 +293,25 @@ def test_iteration_limit_summary_reaches_the_model_server(
                 ),
             )
             monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args: model_server.base_url)
-            output = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="fix bug")))
+            observations = []
+            output = asyncio.run(
+                agent._create_response(
+                    NeMoGymResponseCreateParamsNonStreaming(input="fix bug"),
+                    observation_collector=observations.append,
+                )
+            )
             assert output.output[-1].content[0].text == "summary of the work"
+            assert output.status == "incomplete"
+            assert output.metadata["stop_reason"] == "max_iterations"
+            assert [call.response_id for call in observations[0].records[0].model_calls] == [
+                "chatcmpl-tool",
+                "chatcmpl-summary",
+            ]
 
     assert len(model_server.requests) == 2
     assert all(not request.get("stream") for request in model_server.requests)
     first = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(model_server.requests[0])
+    NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(model_server.requests[1])
     assert all("chat_template_kwargs" not in body for body in model_server.requests)
     if template_enabled:
         assert json.loads(first.metadata["chat_template_kwargs"]) == {
