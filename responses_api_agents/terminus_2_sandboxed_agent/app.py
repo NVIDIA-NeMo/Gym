@@ -76,7 +76,7 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     model_context_limit: int
     model_output_limit: int | None
     interleaved_thinking: bool
-    recover_stalled_interrupts: bool = False
+    recover_stalled_interrupts: bool = True
     terminal_hidden_mounts: list[str] = Field(default_factory=list)
 
     llm_request_timeout: int

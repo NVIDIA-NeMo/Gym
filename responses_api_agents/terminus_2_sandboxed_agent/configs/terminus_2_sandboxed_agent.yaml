@@ -22,8 +22,8 @@ terminus_2_sandboxed_agent:
       model_output_limit: null
       llm_request_timeout: 600  # 10 mins, Litellm default
       interleaved_thinking: true
-      # Experimental: drain queued terminal input after an exact C-c request.
-      recover_stalled_interrupts: false
+      # Drain queued terminal input after an exact C-c request so the interrupt can take effect.
+      recover_stalled_interrupts: true
       # Opt-in mount points to hide from terminal sessions. Requires Linux root,
       # tmux installed before setup, and user/mount namespace support.
       terminal_hidden_mounts: []

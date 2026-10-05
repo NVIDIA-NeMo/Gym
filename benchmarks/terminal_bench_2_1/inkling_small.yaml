@@ -16,7 +16,6 @@ terminal_bench_2_1_terminus_2_sandboxed_agent:
       model_context_limit: 1048576
       sandbox_timeout: 10800
       llm_request_timeout: 3600
-      recover_stalled_interrupts: true
       datasets:
         - name: terminal_bench_2_1_inkling_small
           type: benchmark
