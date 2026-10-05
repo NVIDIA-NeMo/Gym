@@ -686,3 +686,57 @@ class TestConfigYaml:
         assert inner["concurrency"] == 8
         assert inner["command"] == "opencode"
         assert inner["execution_mode"] == "local"
+
+
+@pytest.mark.parametrize("exit_code,status", [(0, "completed"), (7, "failed"), (None, "completed")])
+def test_bash_exit_code_is_execution_outcome(tmp_path: Path, exit_code, status: str) -> None:
+    from nemo_gym.rollout_observability import ToolCallObservation
+
+    db = _session_db(
+        tmp_path,
+        [
+            (
+                "assistant",
+                [
+                    {
+                        "type": "tool",
+                        "callID": "shell",
+                        "tool": "bash",
+                        "state": {
+                            "status": "completed",
+                            "input": {"command": "exit 7"},
+                            "output": "stdout",
+                            "metadata": {"exit": exit_code},
+                        },
+                    }
+                ],
+            )
+        ],
+    )
+    bundle = _parse_opencode_session(db, "fallback")
+    [tool] = [record for record in bundle.records if isinstance(record, ToolCallObservation)]
+    assert tool.status == status
+    assert tool.error_type == ("tool_error" if status == "failed" else None)
+    assert _invocations(bundle)[0].conversation[-1].output == "stdout"
+
+
+@pytest.mark.parametrize("capture", [False, True])
+async def test_captured_turns_use_collector_prompts_and_native_turns_remain_fallback(capture: bool) -> None:
+    agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy"))
+    agent.server_client.global_config_dict = {"observability_enabled": capture}
+    agent._run_opencode = AsyncMock(return_value=([], {}, "model", AgentObservationBundle(source="opencode")))
+    episode = await agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="task"), rollout_id="1-2")
+    assert (agent._run_opencode.await_args.kwargs["trajectory"] is None) is capture
+    assert ("_ng_trajectory" in (episode.response.model_extra or {})) is not capture
+
+
+@pytest.mark.parametrize("override,expected", [({}, {"field": "reasoning_content"}), ({"interleaved": True}, True)])
+def test_gym_provider_uses_supported_reasoning_history_field(override, expected) -> None:
+    agent = _make_agent(
+        model="policy",
+        model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        opencode_config={"provider": {"nemo": {"models": {"policy": override}}}},
+    )
+    with patch.object(OpenCodeAgent, "resolve_model_base_url", return_value="http://model/v1"):
+        config = agent._build_opencode_config("1-2")
+    assert config["provider"]["nemo"]["models"]["policy"]["interleaved"] == expected

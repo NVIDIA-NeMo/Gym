@@ -26,3 +26,5 @@ provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
 Native sessions are selected by the session cookie, regardless of `execution_mode`.
 That setting still controls unseeded local/legacy calls; `sandbox` rejects unseeded calls.
+
+With `observability_enabled: true` and a Gym `model_server`, the collector builds canonical turns from invocation-owned model captures, retaining full provider prompts and answers. A turn is one provider response rather than one persisted assistant message; HTTP errors remain invocation-owned attempts without becoming turns. Without model capture, the native SQLite turn evidence remains available. Bash exit codes determine execution success even when OpenCode records the tool lifecycle as completed.

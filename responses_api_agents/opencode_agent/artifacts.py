@@ -231,6 +231,10 @@ def _parse_opencode_session(
                 "running": "incomplete",
                 "pending": "incomplete",
             }.get(native_status, "unknown")
+            metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+            exit_code = metadata.get("exit")
+            if native_status == "completed" and part.get("tool") == "bash" and type(exit_code) is int and exit_code != 0:
+                status = "failed"
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
@@ -242,7 +246,7 @@ def _parse_opencode_session(
                         duration_ms=duration_ms,
                         timing_source="artifact" if started_at is not None else None,
                         status=status,
-                        error_type="tool_error" if native_status == "error" else None,
+                        error_type="tool_error" if status == "failed" else None,
                     )
                 )
             else:

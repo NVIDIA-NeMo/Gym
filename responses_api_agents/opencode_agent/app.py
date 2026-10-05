@@ -265,11 +265,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 {"baseURL": self._resolve_model_base_url(rollout_id), "apiKey": "EMPTY"}  # pragma: allowlist secret
             )
             model = nemo.setdefault("models", {}).get(self.config.model, {})
+            model.setdefault("interleaved", {"field": "reasoning_content"})
             self._deep_merge(
                 model,
                 {
                     "name": self.config.model,
-                    "interleaved": {"field": "reasoning"},
                     "limit": {"context": self.config.context_window, "output": self.config.max_output_tokens},
                 },
             )
@@ -394,8 +394,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
         prompt = user_message if system_prompt is None else f"{system_prompt}\n\n{user_message}"
+        capture_turns = (
+            self.config.model_server is not None and rollout_id is not None and self._model_call_capture_enabled()
+        )
         trajectory = (
-            TrajectoryRecord(task_id="unscoped", rollout_id=rollout_id or "unscoped") if collect_observations else None
+            TrajectoryRecord(task_id="unscoped", rollout_id=rollout_id or "unscoped")
+            if collect_observations and not capture_turns
+            else None
         )
 
         output_items, usage, model_name, observations = await self._run_opencode(
