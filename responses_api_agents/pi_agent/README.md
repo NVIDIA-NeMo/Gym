@@ -53,8 +53,11 @@ gym eval run --no-serve \
 
 The collector calls Environment Server `/run`: seed Resources, seed the agent, call its
 rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
-flat rows use `single_agent_turn_legacy` with this native session lifecycle; no additional
-materialization script is needed. Collection does not call the agent's compatibility `/run`.
+flat rows use `single_agent_turn_legacy`, an input/output adapter over `single_agent_turn`.
+This is the same composition for SWE-bench Pro and Terminal-Bench 2.1: Resources owns the
+task sandbox, the harness borrows it, and EnvironmentServer owns the episode sequence.
+The adapter converts row formats; execution uses Resources/Agent session APIs. Collection
+does not call the agent's compatibility `/run`. No additional materializer is needed.
 Pass the same configuration to startup and `--no-serve` collection; collection does not
 inherit routing settings from the running servers.
 
