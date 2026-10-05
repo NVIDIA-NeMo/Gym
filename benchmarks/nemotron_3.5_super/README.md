@@ -203,6 +203,10 @@ bash benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh
 
 ### Automatic cached continuation
 
+The adjacent `sbatch_external_vllm.capabilities.json` declares
+`cached_continuation: 1` for callers that need to reject unsupported launcher
+revisions before submission. This version covers the controls and exit codes below.
+
 For evaluations that may exceed one allocation, set
 `GYM_MAX_AUTO_CONTINUATIONS` to the maximum number of additional allocations
 (default `0`, disabled), and set `ROLLOUTS_FPATH` to a unique, fixed `.jsonl`
