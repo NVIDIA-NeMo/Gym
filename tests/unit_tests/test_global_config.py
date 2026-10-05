@@ -2232,8 +2232,10 @@ class TestConfigLoadErrors:
         assert relay["agent_server"] == {"type": "responses_api_agents", "name": "mcqa_simple_agent"}
         assert "host" in relay and "port" in relay
 
-    def test_dangling_environment_server_agent_reference_suggests_migration(self) -> None:
-        # Renaming an agent with `_inherit_from` moves it, stranding the environment server that named it.
+    # `user_agent` is one of several agents a multi-agent environment server can reference.
+    @mark.parametrize("field", ["agent_server", "user_agent"])
+    def test_dangling_environment_server_agent_reference_suggests_migration(self, field: str) -> None:
+        # Renaming an agent with `_inherit_from` moves it, stranding the environment server that referenced it.
         config = OmegaConf.merge(
             GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
             self._agent_without_environment_server_config(
@@ -2242,14 +2244,18 @@ class TestConfigLoadErrors:
                     "environment_servers": {
                         "legacy_agent": {
                             "entrypoint": "app.py",
-                            "agent_server": {"type": "responses_api_agents", "name": "mcqa_simple_agent"},
+                            field: {"type": "responses_api_agents", "name": "mcqa_simple_agent"},
                         }
                     }
                 },
             ),
         )
         with raises(
-            ServerRefNotFoundError, match="(?s)renamed with `_inherit_from`.*add_legacy_agent_environment_servers"
+            ServerRefNotFoundError,
+            match=(
+                "(?s)renamed with `_inherit_from`, this environment server must reference the agent's new name"
+                f".*add_legacy_agent_environment_servers.*point this server's {field}.name at the agent's new name"
+            ),
         ):
             GlobalConfigDictParser().parse(
                 GlobalConfigDictParserConfig(
