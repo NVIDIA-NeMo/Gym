@@ -2144,12 +2144,13 @@ class TestConfigLoadErrors:
 
     def test_agent_without_environment_server_gets_a_legacy_relay(self, caplog: LogCaptureFixture) -> None:
         # A config written before environment servers keeps running: collection reaches the agent through a
-        # generated relay, never directly, and the user is told what was generated and how to stop relying on it.
+        # generated relay, never directly, and the warning tells the user exactly how to migrate.
         config = self._agent_without_environment_server_config()
         with caplog.at_level("WARNING"):
             GlobalConfigDictParser()._front_agents_without_environment_server(config)
 
-        assert OmegaConf.to_container(config["mcqa_simple_agent_environment_server"]) == {
+        # Named as the migration script would declare it, so pasting the logged block matches the script.
+        assert OmegaConf.to_container(config["mcqa_environment_server"]) == {
             "environment_servers": {
                 "legacy_agent": {
                     "entrypoint": "app.py",
@@ -2157,16 +2158,21 @@ class TestConfigLoadErrors:
                 }
             }
         }
-        assert _environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_simple_agent_environment_server"]}
-        assert "`mcqa_simple_agent` -> `mcqa_simple_agent_environment_server`" in caplog.text
-        assert "error_on_agent_without_environment_server=true" in caplog.text
+        assert _environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_environment_server"]}
+        assert "DEPRECATED: agents without an environment server: `mcqa_simple_agent`" in caplog.text
+        assert "AgentWithoutEnvironmentServerError" in caplog.text
+        assert "python scripts/add_legacy_agent_environment_servers.py path/to/config.yaml" in caplog.text
+        assert "mcqa_environment_server:\n" in caplog.text
+        assert "name: mcqa_simple_agent" in caplog.text
+        assert "error_on_agent_without_environment_server: true" in caplog.text
 
     def test_agent_without_environment_server_is_rejected_when_strict(self) -> None:
         config = self._agent_without_environment_server_config(error_on_agent_without_environment_server=True)
         with raises(AgentWithoutEnvironmentServerError) as exc_info:
             GlobalConfigDictParser()._front_agents_without_environment_server(config)
         assert "mcqa_simple_agent" in str(exc_info.value)
-        assert "mcqa_simple_agent_environment_server" not in config
+        assert "scripts/add_legacy_agent_environment_servers.py" in str(exc_info.value)
+        assert "mcqa_environment_server" not in config
 
         config["mcqa_environment_server"] = {
             "environment_servers": {
@@ -2181,7 +2187,7 @@ class TestConfigLoadErrors:
     def test_agent_with_environment_server_gets_no_relay(self, caplog: LogCaptureFixture) -> None:
         # A second server in front of the same agent would make agent-routed rows ambiguous.
         config = self._agent_without_environment_server_config(
-            mcqa_environment_server={
+            mcqa_served={
                 "environment_servers": {
                     "legacy_agent": {
                         "entrypoint": "app.py",
@@ -2193,20 +2199,18 @@ class TestConfigLoadErrors:
         with caplog.at_level("WARNING"):
             GlobalConfigDictParser()._front_agents_without_environment_server(config)
 
-        assert "mcqa_simple_agent_environment_server" not in config
-        assert _environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_environment_server"]}
-        assert "legacy_agent relays" not in caplog.text
+        assert "mcqa_environment_server" not in config
+        assert _environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_served"]}
+        assert "DEPRECATED" not in caplog.text
 
     def test_generated_relay_name_avoids_existing_entries(self) -> None:
         config = self._agent_without_environment_server_config(
-            mcqa_simple_agent_environment_server={"note": "an unrelated top-level entry"}
+            mcqa_environment_server={"note": "an unrelated top-level entry"}
         )
         GlobalConfigDictParser()._front_agents_without_environment_server(config)
 
-        assert config["mcqa_simple_agent_environment_server"] == {"note": "an unrelated top-level entry"}
-        assert _environment_servers_by_agent(config) == {
-            "mcqa_simple_agent": ["mcqa_simple_agent_environment_server_environment_server"]
-        }
+        assert config["mcqa_environment_server"] == {"note": "an unrelated top-level entry"}
+        assert _environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_simple_agent_environment_server"]}
 
     def test_parse_runs_a_config_without_environment_servers(self) -> None:
         # End to end through parse(): the generated relay resolves its agent reference and is assigned an address
@@ -2223,9 +2227,37 @@ class TestConfigLoadErrors:
             )
         )
 
-        relay = resolved["mcqa_simple_agent_environment_server"]["environment_servers"]["legacy_agent"]
+        relay = resolved["mcqa_environment_server"]["environment_servers"]["legacy_agent"]
         assert relay["agent_server"] == {"type": "responses_api_agents", "name": "mcqa_simple_agent"}
         assert "host" in relay and "port" in relay
+
+    def test_dangling_environment_server_agent_reference_suggests_migration(self) -> None:
+        # Renaming an agent with `_inherit_from` moves it, stranding the environment server that named it.
+        config = OmegaConf.merge(
+            GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            self._agent_without_environment_server_config(
+                renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+                mcqa_environment_server={
+                    "environment_servers": {
+                        "legacy_agent": {
+                            "entrypoint": "app.py",
+                            "agent_server": {"type": "responses_api_agents", "name": "mcqa_simple_agent"},
+                        }
+                    }
+                },
+            ),
+        )
+        with raises(
+            ServerRefNotFoundError, match="renamed with `_inherit_from`.*add_legacy_agent_environment_servers"
+        ):
+            GlobalConfigDictParser().parse(
+                GlobalConfigDictParserConfig(
+                    initial_global_config_dict=config,
+                    skip_load_from_cli=True,
+                    skip_load_from_dotenv=True,
+                    offline=True,
+                )
+            )
 
     @mark.parametrize("resources_server", ["reasoning_gym", "tavily_search"])
     def test_langchain_deepagents_configs_have_environment_servers(self, resources_server: str) -> None:

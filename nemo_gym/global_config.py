@@ -15,6 +15,7 @@
 import logging
 import re
 import sys
+import textwrap
 from argparse import ArgumentParser
 from collections import Counter, defaultdict
 from copy import deepcopy
@@ -587,6 +588,15 @@ Duplicate config paths:
                     else:
                         available = ", ".join(repr(n) for n in sorted(same_type_names)) or "(none)"
                         hint = f"Available {maybe_server_ref.type}: {available}"
+                    if (
+                        field_name == AGENT_SERVER_REF_KEY_NAME
+                        and server_instance_config.get_server_ref().type == ENVIRONMENT_SERVER_TYPE_KEY_NAME
+                    ):
+                        hint += (
+                            "\nIf the agent was renamed with `_inherit_from`, its environment server must be renamed "
+                            "with it: run `python scripts/add_legacy_agent_environment_servers.py <your config paths>` "
+                            "from a NeMo Gym checkout, or point this server's agent_server.name at the new name."
+                        )
                     raise ServerRefNotFoundError(
                         f"""In server instance '{server_instance_config.name}', field '{field_name}' references {maybe_server_ref.type}/'{maybe_server_ref.name}', which is not defined in the merged config.
 {hint}"""
@@ -1111,32 +1121,24 @@ the check."""
 {listing}
 
 Declare one for each, naming the agent in its `{AGENT_SERVER_REF_KEY_NAME}` reference, or run
-scripts/add_legacy_agent_environment_servers.py to update your config. Unset
-{ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME} to generate a legacy_agent relay for each instead."""
+`python scripts/add_legacy_agent_environment_servers.py <your config paths>` from a NeMo Gym checkout.
+Unset {ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME}
+to generate a legacy_agent relay for each instead, with a deprecation warning."""
             )
 
+        agent_types = {agent.name: agent.agent_type for agent in self._agent_instances(global_config_dict)}
         generated = {}
         for agent_name in without_environment_server:
-            server_name = f"{agent_name}_environment_server"
+            server_name = legacy_environment_server_name(agent_name, agent_types[agent_name])
+            if server_name in global_config_dict or server_name in generated.values():
+                server_name = f"{agent_name}{LEGACY_ENVIRONMENT_SERVER_SUFFIX}"
             while server_name in global_config_dict:
-                server_name = f"{server_name}_environment_server"
+                server_name = f"{server_name}{LEGACY_ENVIRONMENT_SERVER_SUFFIX}"
             with open_dict(global_config_dict):
-                global_config_dict[server_name] = {
-                    ENVIRONMENT_SERVER_TYPE_KEY_NAME: {
-                        "legacy_agent": {
-                            "entrypoint": "app.py",
-                            AGENT_SERVER_REF_KEY_NAME: {"type": AGENT_SERVER_TYPE_KEY_NAME, "name": agent_name},
-                        }
-                    }
-                }
+                global_config_dict[server_name] = legacy_environment_server_block(agent_name)
             generated[agent_name] = server_name
 
-        relays = ", ".join(f"`{agent}` -> `{server}`" for agent, server in generated.items())
-        logger.warning(
-            f"Agents without an environment server are deprecated; generated legacy_agent relays for {relays}. "
-            "Declare them in your config (scripts/add_legacy_agent_environment_servers.py writes them), or set "
-            f"{ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME}=true to make this an error."
-        )
+        logger.warning(agents_without_environment_server_deprecation(generated))
 
     def raise_on_missing_values(self, global_config_dict: DictConfig) -> None:
         """Fail fast with one actionable error listing every unset '???' value.
@@ -1751,6 +1753,60 @@ def model_type_for(global_config_dict: DictConfig, model_server_name: Optional[s
     if not isinstance(models, DictConfig) or len(models) != 1:
         return None
     return str(next(iter(models)))
+
+
+LEGACY_ENVIRONMENT_SERVER_SUFFIX = "_environment_server"
+
+
+def legacy_environment_server_name(agent_name: str, agent_type: str) -> str:
+    """Name an agent's legacy_agent relay after its environment, as the migration script does.
+
+    Stripping the agent type (or a trailing `_agent`) keeps the name stable across agent swaps:
+    `workplace_assistant_simple_agent` -> `workplace_assistant_environment_server`.
+    """
+    stem = agent_name.removesuffix(f"_{agent_type}").removesuffix(agent_type).rstrip("_")
+    if stem == agent_name:
+        stem = agent_name.removesuffix("_agent").rstrip("_")
+    return f"{stem or agent_type}{LEGACY_ENVIRONMENT_SERVER_SUFFIX}"
+
+
+def legacy_environment_server_block(agent_name: str) -> dict[str, Any]:
+    """The legacy_agent environment server config that relays to one agent."""
+    return {
+        ENVIRONMENT_SERVER_TYPE_KEY_NAME: {
+            "legacy_agent": {
+                "entrypoint": "app.py",
+                AGENT_SERVER_REF_KEY_NAME: {"type": AGENT_SERVER_TYPE_KEY_NAME, "name": agent_name},
+            }
+        }
+    }
+
+
+def agents_without_environment_server_deprecation(generated: Mapping[str, str]) -> str:
+    """Explain the deprecation and how to migrate, with the exact config to add for each agent."""
+    blocks = "\n".join(
+        OmegaConf.to_yaml({server: legacy_environment_server_block(agent)}) for agent, server in generated.items()
+    )
+    agents = ", ".join(f"`{agent}`" for agent in generated)
+    return f"""DEPRECATED: agents without an environment server: {agents}.
+Rollout collection reaches an agent only through an environment server. This run generated a
+legacy_agent environment server for each agent above, which relays /run to the agent unchanged, so
+results are not affected. A future release will reject these configs with
+AgentWithoutEnvironmentServerError.
+
+To migrate, declare the environment servers in your config. Either:
+
+1. Run the migration script from a NeMo Gym checkout on your config files or directories:
+
+     python scripts/add_legacy_agent_environment_servers.py path/to/config.yaml [more paths] [--check]
+
+   --check reports what would change without writing.
+
+2. Or add these blocks yourself, at the same level as the agents:
+
+{textwrap.indent(blocks, "     ")}
+To make this an error now, set {ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME}: true in your config or pass
++{ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME}=true."""
 
 
 def pairing_override_enabled(global_config_dict: DictConfig) -> bool:
