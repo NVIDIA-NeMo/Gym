@@ -16,14 +16,20 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
+from typing import ClassVar
 
 import yaml
 
-from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
 from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, SubmissionRecord
 
 
 class BaseExecutor(ABC):
+    # Whether this executor can auto-resubmit a benchmark that gets killed by
+    # the scheduler (time limit, preemption, node failure). False means asking
+    # for `resumable` on this executor is a config error, not a silent no-op.
+    supports_resumable: ClassVar[bool] = False
+
     @abstractmethod
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         """Submit `config` and return the record describing it.
@@ -37,7 +43,7 @@ class BaseExecutor(ABC):
         self,
         record: SubmissionRecord,
         config: SubmitConfig,
-        write_manifest: Callable[[Path, str], None],
+        write_manifest: Callable[..., None],
     ) -> None:
         """Store the record and the resolved config, in the order that survives a partial failure.
 
@@ -65,7 +71,10 @@ class BaseExecutor(ABC):
         resolved_config = run_dir / RESOLVED_CONFIG_NAME
         manifest = run_dir / MANIFEST_NAME
         try:
-            write_manifest(resolved_config, yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False))
+            # `host:` values are written as their references, so the record is safe for other readers
+            # (e.g. certification under another account). The resolved secrets stay in job.sh only.
+            record_config = config.model_dump(mode="json", context={HOST_ENV_REFS: True})
+            write_manifest(resolved_config, yaml.safe_dump(record_config, sort_keys=False))
             write_manifest(manifest, record.dumps())
         except Exception as error:
             queued = ", ".join(f"{b.benchmark}={b.job_id}" for b in record.benchmarks if b.job_id)

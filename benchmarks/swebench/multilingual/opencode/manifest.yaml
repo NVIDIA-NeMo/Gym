@@ -1,0 +1,31 @@
+name: swebench/multilingual/opencode
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: SWE-bench multilingual test-split software engineering tasks using prepared
+  repair prompts, a sandboxed OpenCode agent, and binary patch-resolution scoring.
+modality: text
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../opencode.yaml
+resources_server: swebench
+agent_server: opencode_sandboxed_agent
+datasets:
+- name: swebench_multilingual
+  type: benchmark
+  jsonl_fpath: benchmarks/swebench/data/swebench_multilingual_benchmark.jsonl
+  prepare_script: benchmarks/swebench/multilingual/prepare.py
+  num_repeats: 3
+model_server: policy_model
+canonical_split: test
+prompt_source: prepared
+lifecycle: active

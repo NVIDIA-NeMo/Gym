@@ -575,7 +575,7 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     from rich.markup import escape
 
     from nemo_gym.config_types import ConfigError
-    from nemo_gym.orchestration.api import SubmitConfig
+    from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
     from nemo_gym.orchestration.submit import submit
 
     _reject_scratch_namespace_additions(overrides)
@@ -612,10 +612,11 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
         raise ConfigError(f"Submit config '{config_path}' is invalid: {'. '.join(parts)}.") from e
 
     if args.resolve_only:
+        # Same form persist() writes as the run's record, so the two diff and hash alike.
         if args.json:
-            print(config.model_dump_json(indent=2))
+            print(config.model_dump_json(indent=2, context={HOST_ENV_REFS: True}))
         else:
-            print(yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False))
+            print(yaml.safe_dump(config.model_dump(mode="json", context={HOST_ENV_REFS: True}), sort_keys=False))
         return
 
     record = submit(config, dry_run=args.dry_run)
@@ -1024,6 +1025,11 @@ COMMANDS = {
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
             _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),
+            _bool_flag(
+                "interleave-repeats",
+                "interleave_repeats",
+                "Dispatch repeats round by round rather than each task's back to back.",
+            ),
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
             _value_flag("split", "split", "Dataset split to use (train, validation, or benchmark)."),

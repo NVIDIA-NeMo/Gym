@@ -384,6 +384,8 @@ class OpenClawAgentVerifyResponse(BaseVerifyResponse):
 class OpenClawAgent(SimpleResponsesAPIAgent):
     """Runs the OpenClaw CLI (openclaw agent --local --json)"""
 
+    ray_enabled = False
+
     config: OpenClawAgentConfig
     sem: Semaphore = None
     sigterm_events: set = Field(default_factory=set)

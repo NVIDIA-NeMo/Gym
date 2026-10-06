@@ -82,6 +82,8 @@ class MathWithAutograderResourcesServerConfig(LibraryJudgeMathResourcesServerCon
 class MathWithAutograderResourcesServer(LibraryJudgeMathResourcesServer):
     """math_with_judge subclass with a Skills-style autograder judge."""
 
+    ray_enabled = False
+
     config: MathWithAutograderResourcesServerConfig
 
     # Autograder verdict tokens (override Arena-Hard's `[[A=B]]` / `[[A!=B]]`).

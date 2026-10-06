@@ -1,22 +1,34 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
+import shlex
+import shutil
 import signal
 import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import yaml
+
 
 SCRIPT = Path(__file__).resolve().parents[2] / "benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh"
+BASH = shutil.which("bash")
 
 
+@unittest.skipUnless(BASH, "Launcher tests require Bash")
 class TestSuperVllmLauncher(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
+        workdir = TemporaryDirectory(prefix="gym-launcher-")
+        self.addCleanup(workdir.cleanup)
+        self.workdir = workdir.name
         # Never inherit cluster credentials, tuning overrides, or real sbatch commands.
         self.env = {
             "PATH": os.defpath,
+            # Bypass the sleep() stubs even in background functions on macOS Bash.
+            "TEST_SLEEP": shutil.which("sleep", path=os.defpath),
             "USER": "launcher-test",
             "MODEL": "/test/model",
             "CONTAINER": "/test/image.sqsh",
@@ -32,10 +44,11 @@ class TestSuperVllmLauncher(unittest.TestCase):
             "ALL_NODES": "node0 node1 node2 node3 node4 node5 node6 node7",
         }
 
-    def run_shell(self, command, *args, env=None):
+    def run_shell(self, command: str, *args: str, env: dict[str, str] | None = None) -> tuple[int, str, str]:
         proc = subprocess.Popen(
-            ["bash", "--noprofile", "--norc", "-c", command, "launcher-test", *args],
+            [BASH, "--noprofile", "--norc", "-c", command, "launcher-test", *args],
             env=self.env | (env or {}),
+            cwd=self.workdir,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -50,6 +63,12 @@ class TestSuperVllmLauncher(unittest.TestCase):
             stdout, stderr = proc.communicate()
             self.fail(f"Launcher did not terminate. stdout={stdout!r}, stderr={stderr!r}")
         return proc.returncode, stdout, stderr
+
+    def require_batch_bash(self) -> None:
+        # The batch script uses [[ -v ]] and wait -n -p; macOS ships Bash 3.2.
+        status, _, _ = self.run_shell("(( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) ))")
+        if status:
+            self.skipTest("Generated batch scripts require Bash 5.1 or newer")
 
     def capture_submission(self, *eval_args, env=None):
         # Capture generated commands and both sbatch calls without submitting jobs.
@@ -77,10 +96,12 @@ source "$launcher_script" "$@"
         eval_command, pd_command, _, _ = self.capture_submission("--config", "benchmark.yaml", *overrides, env=env)
         return eval_command, pd_command
 
-    def eval_arguments(self, *overrides, env=None):
+    def eval_arguments(self, *overrides: str, env: dict[str, str] | None = None) -> list[str]:
         command, _ = self.generate_commands(*overrides, env=env)
         command = command.replace("source /opt/Gym_venv/bin/activate", ":").replace("cd /opt/Gym\n", ":\n")
         stubs = r"""
+# Supply model parameters for the default /dev/null fixture; real configs replace these.
+GYM_MODEL_PARAMS=(++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0)
 gym() {
     if [[ "$2" == run ]]; then printf '%s\0' "$@"; fi
 }
@@ -94,7 +115,94 @@ getent() { printf '10.0.0.1 node0\n'; }
     def settings(self, args, key):
         return [arg for arg in args if arg.lstrip("+").startswith(key + "=")]
 
-    def serving_arguments(self, command, *, rank, coupled_head=False, env=None):
+    def test_mooncake_metrics_endpoint_uses_only_master_node(self) -> None:
+        for mode in ("independent", "coupled"):
+            for enabled in ("0", "1"):
+                with self.subTest(mode=mode, enabled=enabled), TemporaryDirectory() as temporary_dir:
+                    command, _ = self.generate_commands(
+                        env={"VLLM_PD_DEPLOYMENT_MODE": mode, "ENABLE_MOONCAKE": enabled}
+                    )
+                    start = 'read -r -a nodes <<< "$ALL_NODES"'
+                    setup = start + command.split(start, 1)[1].split("gym_config_args+=(--config", 1)[0]
+                    config_path = Path(temporary_dir) / "metrics.yaml"
+                    status, _, stderr = self.run_shell(
+                        setup, env={"inference_metrics_config": str(config_path), "ROUTER_NODE": "separate-router"}
+                    )
+                    self.assertEqual(status, 0, stderr)
+                    metrics = yaml.safe_load(config_path.read_text())["inference_metrics"]
+                    self.assertEqual(len(metrics["endpoints"]), 8 if mode == "independent" else 2)
+                    if enabled == "1":
+                        self.assertEqual(metrics["mooncake_endpoint"], "http://node0:9003/metrics")
+                    else:
+                        self.assertNotIn("mooncake_endpoint", metrics)
+
+    def model_arguments(self, *, config_path: Path, enable_mooncake: bool, rank: int = 0) -> list[list[str]]:
+        _, command = self.generate_commands(
+            env={"VLLM_CONFIG": str(config_path), "ENABLE_MOONCAKE": str(int(enable_mooncake))}
+        )
+        # Execute model setup without installing packages or starting services.
+        setup = command.split("# Increase the number of file descriptors", 1)[0]
+        inspect = r"""
+printf '%s\0' "${VLLM_COMMON_ARGS[@]}" ''
+printf '%s\0' "${VLLM_PREFILL_ARGS[@]}" ''
+printf '%s\0' "${VLLM_DECODE_ARGS[@]}" ''
+"""
+        # Real jobs pass ROUTER_NODE only to evaluation workers, not serving workers.
+        status, stdout, stderr = self.run_shell(setup + inspect, env={"SLURM_PROCID": str(rank), "ROUTER_NODE": ""})
+        self.assertEqual(status, 0, stderr)
+        return [args.split("\0") for args in stdout.removesuffix("\0\0").split("\0\0")]
+
+    def test_mooncake_preserves_every_model_connector_and_other_arguments(self) -> None:
+        """The store toggle starts services; recipes own their connector settings."""
+        recipes = sorted((SCRIPT.parent / "vllm_configs").glob("*.sh"))
+        self.assertTrue(recipes)
+        for config_path in recipes:
+            for rank in (0, 4):
+                with self.subTest(model=config_path.name, rank=rank):
+                    original = self.model_arguments(config_path=config_path, enable_mooncake=False, rank=rank)
+                    with_store = self.model_arguments(config_path=config_path, enable_mooncake=True, rank=rank)
+                    self.assertEqual(len(original), 3)
+                    self.assertTrue(original[0])
+                    for role_args in original[1:]:
+                        self.assertIn("--kv-transfer-config", role_args)
+                    self.assertEqual(with_store, original)
+
+    def test_mooncake_handles_common_equals_form_and_existing_multiconnector(self) -> None:
+        """Preserve an existing store's settings and support transfer configs in common args."""
+        nixl = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+        multi = {
+            "kv_connector": "MultiConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "connectors": [
+                    nixl,
+                    {
+                        "kv_connector": "MooncakeStoreConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {"load_async": False, "save_decode_cache": True},
+                    },
+                ],
+            },
+        }
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / "model config.sh"
+            config_path.write_text(
+                f"VLLM_COMMON_ARGS=({shlex.quote('--kv-transfer-config=' + json.dumps(nixl))})\n"
+                f"VLLM_PREFILL_ARGS=(--kv-transfer-config {shlex.quote(json.dumps(multi))})\n"
+                "VLLM_DECODE_ARGS=(--unrelated 'value with spaces')\n"
+            )
+            for rank in (0, 4):
+                with self.subTest(rank=rank):
+                    common, prefill, decode = self.model_arguments(
+                        config_path=config_path, enable_mooncake=True, rank=rank
+                    )
+                    self.assertEqual(common, ["--kv-transfer-config=" + json.dumps(nixl)])
+                    self.assertEqual(prefill, ["--kv-transfer-config", json.dumps(multi)])
+                    self.assertEqual(decode, ["--unrelated", "value with spaces"])
+
+    def serving_arguments(
+        self, command: str, *, rank: int, coupled_head: bool = False, env: dict[str, str] | None = None
+    ) -> tuple[str, str, list[str], list[str]]:
         # Record argv separately for vLLM and the router; marker files synchronize startup.
         stubs = r"""
 VLLM_COMMON_ARGS=(--common-test 'value with spaces')
@@ -104,24 +212,24 @@ vllm() {
     printf '%s\0' "$VLLM_NIXL_SIDE_CHANNEL_HOST" "$VLLM_NIXL_SIDE_CHANNEL_PORT" "$@"
     touch "$TEST_STATE_DIR/service-ready"
     if [[ "$TEST_COUPLED_HEAD" == 1 ]]; then
-        while true; do command sleep 0.01; done
+        while true; do "$TEST_SLEEP" 0.01; done
     fi
     if (( SLURM_PROCID == 0 )); then
-        while [[ ! -f "$TEST_STATE_DIR/router-ready" ]]; do command sleep 0.01; done
+        while [[ ! -f "$TEST_STATE_DIR/router-ready" ]]; do "$TEST_SLEEP" 0.01; done
     fi
 }
 vllm-router() {
     printf '%s\0' "$@" >&2
     touch "$TEST_STATE_DIR/router-ready"
     if [[ "$TEST_COUPLED_HEAD" == 1 ]]; then
+        while [[ ! -f "$TEST_STATE_DIR/service-ready" ]]; do "$TEST_SLEEP" 0.01; done
         kill -TERM "$$"
     else
         # Independent mode checks router liveness before starting vLLM.
-        while true; do command sleep 0.01; done
+        while true; do "$TEST_SLEEP" 0.01; done
     fi
 }
-curl() { [[ -f "$TEST_STATE_DIR/service-ready" ]]; }
-sleep() { command sleep 0.01; }
+sleep() { "$TEST_SLEEP" 0.01; }
 hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
 """
         with TemporaryDirectory(prefix="gym-serving-args-") as state_dir:
@@ -139,9 +247,7 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
         router_args = stderr.rstrip("\0").split("\0") if stderr else []
         return host, nixl_port, vllm_args, router_args
 
-    def assert_router_arguments(
-        self, args: list[str], prefill_urls: list[str], decode_urls: list[str], *, startup_timeout: bool = False
-    ) -> None:
+    def assert_router_arguments(self, args: list[str], prefill_urls: list[str], decode_urls: list[str]) -> None:
         expected = {
             "--prefill-policy": "cache_aware",
             "--decode-policy": "cache_aware",
@@ -150,9 +256,10 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
             "--intra-node-data-parallel-size": "1",
             "--request-timeout-secs": "86400",
             "--log-level": "error",
+            "--prometheus-host": "0.0.0.0",
+            "--prometheus-port": "29000",
+            "--worker-startup-timeout-secs": "1200",
         }
-        if startup_timeout:
-            expected["--worker-startup-timeout-secs"] = "1200"
         self.assertEqual(args.count("--vllm-pd-disaggregation"), 1)
         args = [arg for arg in args if arg != "--vllm-pd-disaggregation"]
         # URL options may precede or follow the common options; retain their tier order.
@@ -208,7 +315,6 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
                                 router,
                                 [f"http://node{i}:8001" for i in range(prefill_count)],
                                 [f"http://node{i}:8001" for i in range(prefill_count, prefill_count + decode_count)],
-                                startup_timeout=True,
                             )
                         else:
                             self.assertEqual(router, [])
@@ -238,26 +344,213 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
         self.assertNotIn("unexpected-submission", stdout)
         self.assertIn("VLLM_MODE=aggregated does not support VLLM_PD_DEPLOYMENT_MODE=coupled", stderr)
 
+    def run_tp1_services(
+        self,
+        *,
+        mode: str,
+        rank: int = 0,
+        exit_role: str = "engine-GPU-b",
+        exit_status: int = 7,
+        visible_gpus: str = "GPU-d,GPU-b,GPU-a,GPU-c",
+        shutdown_signal: str = "",
+    ) -> tuple[int, str, str, dict[str, list[str]]]:
+        """Execute generated commands with mock services, recording argv and GPU assignments."""
+        with TemporaryDirectory(prefix="gym-tp1-") as directory:
+            root = Path(directory)
+            config = root / "model.sh"
+            config.write_text(
+                "VLLM_COMMON_ARGS=(--tensor-parallel-size=4 --pipeline-parallel-size 2 "
+                "--data-parallel-size=8 --data-parallel-size-local 4 --api-server-count=2 "
+                "--common-test 'value with spaces')\n"
+                'VLLM_PREFILL_ARGS=(--prefill-test producer --kv-transfer-config \'{"kv_role":"kv_producer"}\')\n'
+                'VLLM_DECODE_ARGS=(--decode-test consumer \'--kv-transfer-config={"kv_role":"kv_consumer"}\')\n'
+            )
+            env = {
+                "VLLM_MODE": mode,
+                "VLLM_ENGINES_PER_NODE": "4",
+                "NUM_NODES": "1" if mode == "aggregated" else "2",
+                "NUM_PREFILL_NODES": "1",
+                "NUM_DECODE_NODES": "1",
+                "ALL_NODES": "node0" if mode == "aggregated" else "node0 node1",
+                "SLURM_PROCID": str(rank),
+                "VLLM_CONFIG": str(config),
+                "CUDA_VISIBLE_DEVICES": visible_gpus,
+                "TEST_STATE_DIR": directory,
+                "TEST_EXIT_ROLE": exit_role,
+                "TEST_EXIT_STATUS": str(exit_status),
+                "TEST_SHUTDOWN_SIGNAL": shutdown_signal,
+            }
+            _, command, _, submissions = self.capture_submission(env=env)
+            self.assertIn(f"--nodes={env['NUM_NODES']}", submissions[0])
+            stubs = r"""
+run_service() {
+    local role=$1
+    trap 'printf "%s-stopped\n" "$role"; exit 0' TERM
+    touch "$TEST_STATE_DIR/$role-ready"
+    if [[ "$role" == "$TEST_EXIT_ROLE" ]]; then
+        for gpu in GPU-d GPU-b GPU-a GPU-c; do
+            while [[ ! -f "$TEST_STATE_DIR/engine-$gpu-ready" ]]; do "$TEST_SLEEP" 0.01; done
+        done
+        if [[ -z "$TEST_SHUTDOWN_SIGNAL" ]]; then
+            return "$TEST_EXIT_STATUS"
+        fi
+        kill -s "$TEST_SHUTDOWN_SIGNAL" "$$"
+    fi
+    while true; do "$TEST_SLEEP" 0.01; done
+}
+vllm() {
+    printf '%s\0' "$CUDA_VISIBLE_DEVICES" "$VLLM_NIXL_SIDE_CHANNEL_HOST" \
+        "$VLLM_NIXL_SIDE_CHANNEL_PORT" "$@" > "$TEST_STATE_DIR/engine-$CUDA_VISIBLE_DEVICES.args"
+    run_service "engine-$CUDA_VISIBLE_DEVICES"
+}
+vllm-router() {
+    printf '%s\0' "$@" > "$TEST_STATE_DIR/router.args"
+    run_service router
+}
+hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
+sleep() { "$TEST_SLEEP" 0.01; }
+"""
+            status, stdout, stderr = self.run_shell(stubs + command, env=env)
+            recorded = {p.stem: p.read_text().rstrip("\0").split("\0") for p in root.glob("*.args")}
+            return status, stdout, stderr, recorded
+
+    def test_tp1_engines_have_distinct_gpus_ports_and_router_endpoints(self) -> None:
+        for mode in ("aggregated", "pd"):
+            for rank in (0,) if mode == "aggregated" else (0, 1):
+                with self.subTest(mode=mode, rank=rank):
+                    status, stdout, stderr, recorded = self.run_tp1_services(mode=mode, rank=rank)
+                    self.assertEqual(status, 7, stderr)
+                    for index, gpu in enumerate(("GPU-d", "GPU-b", "GPU-a", "GPU-c")):
+                        device, host, nixl_port, *args = recorded[f"engine-{gpu}"]
+                        self.assertEqual((device, host), (gpu, f"node{rank}"))
+                        self.assertEqual(nixl_port, str((5700 if mode == "pd" and rank == 1 else 5600) + index))
+                        self.assertEqual(args[args.index("--port") + 1], str(8001 + index))
+                        for flag in (
+                            "--tensor-parallel-size",
+                            "--pipeline-parallel-size",
+                            "--data-parallel-size",
+                            "--data-parallel-size-local",
+                            "--api-server-count",
+                        ):
+                            self.assertEqual(args.count(flag), 1)
+                            self.assertEqual(args[args.index(flag) + 1], "1")
+                            self.assertFalse(any(arg.startswith(flag + "=") for arg in args))
+                        self.assertEqual(args[args.index("--common-test") + 1], "value with spaces")
+                        if mode == "aggregated":
+                            self.assertFalse(any(arg.startswith("--kv-transfer-config") for arg in args))
+                        elif rank == 0:
+                            self.assertIn("--prefill-test", args)
+                            self.assertEqual(
+                                json.loads(args[args.index("--kv-transfer-config") + 1])["kv_role"], "kv_producer"
+                            )
+                        else:
+                            self.assertIn("--decode-test", args)
+                            self.assertIn('--kv-transfer-config={"kv_role":"kv_consumer"}', args)
+                        if gpu != "GPU-b":
+                            self.assertIn(f"engine-{gpu}-stopped", stdout)
+                    if rank == 0:
+                        router = recorded["router"]
+                        if mode == "pd":
+                            self.assert_router_arguments(
+                                router,
+                                [f"http://node0:{port}" for port in range(8001, 8005)],
+                                [f"http://node1:{port}" for port in range(8001, 8005)],
+                            )
+                        else:
+                            self.assertEqual(
+                                router[router.index("--worker-urls") + 1 :],
+                                [f"http://node0:{port}" for port in range(8001, 8005)],
+                            )
+                        self.assertIn("router-stopped", stdout)
+                    else:
+                        self.assertNotIn("router", recorded)
+
+    def test_tp1_engine_and_router_exits_stop_all_peers(self) -> None:
+        for role, exit_status in (("engine-GPU-b", 0), ("router", 9), ("router", 0)):
+            with self.subTest(role=role, exit_status=exit_status):
+                status, stdout, stderr, recorded = self.run_tp1_services(
+                    mode="pd", exit_role=role, exit_status=exit_status
+                )
+                self.assertEqual(status, exit_status or 1, stderr)
+                for service in recorded:
+                    if service != role:
+                        self.assertIn(f"{service}-stopped", stdout)
+
+    def test_tp1_shutdown_stops_all_services(self) -> None:
+        status, stdout, stderr, recorded = self.run_tp1_services(mode="pd", shutdown_signal="TERM")
+        self.assertEqual(status, 143, stderr)
+        for service in recorded:
+            self.assertIn(f"{service}-stopped", stdout)
+
+    def test_tp1_requires_four_visible_gpus(self) -> None:
+        for visible in ("0,1", ""):
+            with self.subTest(visible=visible):
+                status, _, stderr, recorded = self.run_tp1_services(mode="pd", rank=1, visible_gpus=visible)
+                self.assertEqual(status, 1, stderr)
+                self.assertIn("require at least four visible GPUs", stderr)
+                self.assertEqual(recorded, {})
+
+    def test_tp1_metrics_include_every_engine(self) -> None:
+        for mode in ("aggregated", "pd"):
+            with self.subTest(mode=mode):
+                env = {"VLLM_MODE": mode, "VLLM_ENGINES_PER_NODE": "4", "ALL_NODES": "node0 node1"}
+                command, _ = self.generate_commands(env=env)
+                start = 'read -r -a nodes <<< "$ALL_NODES"'
+                setup = start + command.split(start, 1)[1].split("gym_config_args+=(--config", 1)[0]
+                path = Path(self.workdir) / "metrics.yaml"
+                status, _, stderr = self.run_shell(setup, env=env | {"inference_metrics_config": str(path)})
+                self.assertEqual(status, 0, stderr)
+                self.assertEqual(
+                    yaml.safe_load(path.read_text())["inference_metrics"]["endpoints"],
+                    {
+                        f"node{node * 4 + engine}": f"http://node{node}:{8001 + engine}/metrics"
+                        for node in range(2)
+                        for engine in range(4)
+                    },
+                )
+
+    def test_tp1_incompatible_controls_fail_before_submission(self) -> None:
+        for extra in ({"VLLM_PD_DEPLOYMENT_MODE": "coupled"}, {"ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE": "4"}):
+            with self.subTest(extra=extra):
+                status, stdout, stderr = self.run_shell(
+                    'sbatch() { printf "unexpected-submission\\n"; }; source "$@"',
+                    str(SCRIPT),
+                    env={"VLLM_ENGINES_PER_NODE": "4"} | extra,
+                )
+                self.assertEqual(status, 1, stderr)
+                self.assertNotIn("unexpected-submission", stdout)
+
     def test_generated_scripts_have_valid_syntax(self) -> None:
         """Parse the generated scripts too: outer bash -n cannot validate heredoc contents."""
-        for env in ({}, {"VLLM_PD_DEPLOYMENT_MODE": "coupled"}, {"VLLM_MODE": "aggregated"}):
+        for env in (
+            {},
+            {"VLLM_PD_DEPLOYMENT_MODE": "coupled"},
+            {"VLLM_MODE": "aggregated"},
+            {"VLLM_ENGINES_PER_NODE": "4"},
+            {"VLLM_MODE": "aggregated", "VLLM_ENGINES_PER_NODE": "4"},
+        ):
             with self.subTest(env=env):
                 evaluation, serving, batch, _ = self.capture_submission("--config", "benchmark.yaml", env=env)
-                for command in (evaluation, serving, batch):
-                    result = subprocess.run(["bash", "-n"], input=command, text=True, capture_output=True, timeout=5)
-                    self.assertEqual(result.returncode, 0, result.stderr)
+                for name, command in (("evaluation", evaluation), ("serving", serving), ("batch", batch)):
+                    with self.subTest(script=name):
+                        if name == "batch":
+                            self.require_batch_bash()
+                        result = subprocess.run([BASH, "-n"], input=command, text=True, capture_output=True, timeout=5)
+                        self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_ultra_runtime_settings_override_launcher_defaults(self) -> None:
-        """Ultra configures its model runner, state layout, and communication environment."""
+    def test_ultra_runtime_settings_preserve_launcher_network_defaults(self) -> None:
+        """Ultra sets its model runner and state layout while inheriting the network defaults."""
         expected = {
             "VLLM_USE_V2_MODEL_RUNNER": "0",
             "VLLM_SSM_CONV_STATE_LAYOUT": "DS",
-            "UCX_TLS": "rc_x,rc,cuda_copy,cuda_ipc",
-            "UCX_NET_DEVICES": "mlx5_0:1",
-            "UCX_IB_ADDR_TYPE": "eth",
-            "NCCL_CUMEM_ENABLE": "unset",
-            "NCCL_MNNVL_ENABLE": "unset",
-            "NCCL_NVLS_ENABLE": "unset",
+            "UCX_TLS": "rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc",
+            "UCX_RNDV_SCHEME": "get_zcopy",
+            "UCX_RNDV_THRESH": "0",
+            "UCX_NET_DEVICES": "mlx5_0,mlx5_1,mlx5_3,mlx5_4",
+            "UCX_IB_ADDR_TYPE": "unset",
+            "NCCL_CUMEM_ENABLE": "1",
+            "NCCL_MNNVL_ENABLE": "1",
+            "NCCL_NVLS_ENABLE": "1",
         }
         recipe = str(SCRIPT.parent / "vllm_configs/nemotron_3_ultra.sh")
         _, command = self.generate_commands(env={"VLLM_CONFIG": recipe})
@@ -267,7 +560,48 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
         self.assertEqual(status, 0, stderr)
         self.assertEqual(dict(zip(expected, stdout.removesuffix("\0").split("\0"), strict=True)), expected)
 
-    def test_coupled_nodes_use_correct_tier_roles_and_ranks(self):
+    def test_api_server_count_is_removed_only_from_headless_ranks(self):
+        with TemporaryDirectory(prefix="gym-headless-args-") as directory:
+            config = Path(directory) / "config with spaces.sh"
+            config.write_text(
+                "VLLM_COMMON_ARGS=(--api-server-count 3 --common-test 'value with spaces')\n"
+                "VLLM_PREFILL_ARGS=(--prefill-test producer --api-server-count=2)\n"
+                "VLLM_DECODE_ARGS=(--api-server-count 5 --decode-test consumer)\n"
+            )
+            for mode, ranks in (("coupled", (1, 3, 4, 5, 7)), ("independent", (1,))):
+                env = {"VLLM_PD_DEPLOYMENT_MODE": mode, "VLLM_CONFIG": str(config)}
+                _, command = self.generate_commands(env=env)
+                for rank in ranks:
+                    with self.subTest(mode=mode, rank=rank):
+                        _, _, args, _ = self.serving_arguments(command, rank=rank, env=env)
+                        self.assertIn("value with spaces", args)
+                        self.assertIn("producer" if rank < 4 else "consumer", args)
+                        if mode == "coupled" and rank != 4:
+                            self.assertIn("--headless", args)
+                            self.assertFalse(any(arg.startswith("--api-server-count") for arg in args))
+                            self.assertEqual(
+                                args[: args.index("--headless")],
+                                [
+                                    "serve",
+                                    "/test/model",
+                                    "--served-model-name",
+                                    "/test/model",
+                                    "--common-test",
+                                    "value with spaces",
+                                    "--prefill-test" if rank < 4 else "--decode-test",
+                                    "producer" if rank < 4 else "consumer",
+                                ],
+                            )
+                        else:
+                            self.assertNotIn("--headless", args)
+                            self.assertIn("--api-server-count", args)
+                            self.assertIn("3", args)
+                            if mode == "coupled":
+                                self.assertEqual(args[-2:], ["--api-server-count", "1"])
+                            else:
+                                self.assertIn("--api-server-count=2", args)
+
+    def test_coupled_nodes_use_correct_tier_roles_and_ranks(self) -> None:
         """Assign coupled tier roles, ranks, and ports while leaving router balancing thresholds at defaults."""
         for prefill_count, decode_count in ((1, 1), (1, 4), (2, 3), (4, 4)):
             env = {
@@ -298,7 +632,7 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
                         "producer" if is_prefill else "consumer",
                     ]
                     if local_rank == 0:
-                        expected += ["--host", host, "--port", "8001" if is_prefill else "8002"]
+                        expected += ["--host", host, "--port", "8001"]
                     else:
                         expected += ["--headless"]
                     expected += ["--data-parallel-size", str(prefill_count if is_prefill else decode_count)]
@@ -315,7 +649,7 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
                     self.assertEqual(args, expected)
                     if rank == 0:
                         self.assert_router_arguments(
-                            router, ["http://node0:8001"], [f"http://node{prefill_count}:8002"]
+                            router, ["http://node0:8001"], [f"http://node{prefill_count}:8001"]
                         )
                     else:
                         self.assertEqual(router, [])
@@ -340,11 +674,11 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
                     self.assertEqual(router.count(flag), 1)
                     self.assertEqual(router[router.index(flag) + 1], value)
 
-    def test_independent_router_startup_failure_stops_launch(self):
+    def test_independent_router_startup_failure_stops_launch(self) -> None:
         """Stop independent startup when the router exits during main's five-second startup check."""
         stubs = r"""
-VLLM_COMMON_ARGS=()
-VLLM_PREFILL_ARGS=()
+VLLM_COMMON_ARGS=(--common-test common)
+VLLM_PREFILL_ARGS=(--prefill-test producer)
 VLLM_DECODE_ARGS=()
 vllm-router() { return "$TEST_ROUTER_STATUS"; }
 vllm() { printf 'unexpected-vllm-start\n'; }
@@ -399,18 +733,14 @@ sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
                 self.assertIn("--exclusive", calls[0])
                 self.assertIn("--dependency=afterany:12345", calls[1])
 
-    def test_segment_controls_resolve_to_one_submission_argument(self):
-        """Prefer the Ultra segment override, then main's SEGMENT, then calculated nodes, without duplicates."""
+    def test_segment_controls_resolve_to_one_submission_argument(self) -> None:
+        """Use SEGMENT or the calculated node count without duplicate submission arguments."""
         cases = (
             ({}, "8"),
             ({"NUM_NODES": "99"}, "8"),
             ({"SEGMENT": "2"}, "2"),
-            ({"VLLM_SLURM_SEGMENT": "4"}, "4"),
-            ({"VLLM_SLURM_SEGMENT": "4", "SEGMENT": "2"}, "4"),
-            ({"VLLM_SLURM_SEGMENT": "", "SEGMENT": "2"}, "2"),
-            ({"VLLM_SLURM_SEGMENT": "4", "SEGMENT": ""}, "4"),
-            ({"VLLM_SLURM_SEGMENT": "", "SEGMENT": ""}, "8"),
-            ({"VLLM_SLURM_SEGMENT": "4", "SEGMENT": "invalid"}, "4"),
+            ({"SEGMENT": "4"}, "4"),
+            ({"SEGMENT": ""}, "8"),
         )
         for mode in ("independent", "coupled"):
             for eval_args in ((), ("--config", "benchmark.yaml")):
@@ -426,10 +756,10 @@ sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
                         if eval_args:
                             self.assertFalse(any(arg.startswith("--segment=") for arg in calls[1]))
 
-    def test_submission_overrides_do_not_change_cleanup_allocation(self):
+    def test_submission_overrides_do_not_change_cleanup_allocation(self) -> None:
         """Apply custom walltime and segment size only to the main job, leaving cleanup CPU-only and short."""
         _, _, _, calls = self.capture_submission(
-            "--config", "benchmark.yaml", env={"SBATCH_TIME": "7-00:00:00", "VLLM_SLURM_SEGMENT": "4"}
+            "--config", "benchmark.yaml", env={"SBATCH_TIMELIMIT": "7-00:00:00", "SEGMENT": "4"}
         )
         self.assertEqual(len(calls), 2)
         self.assertIn("--time=7-00:00:00", calls[0])
@@ -441,13 +771,13 @@ sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
         self.assertIn("--gres=none", calls[1])
         self.assertFalse(any(arg.startswith("--segment=") for arg in calls[1]))
 
-    def test_walltime_alias_precedence_and_cleanup_isolation(self) -> None:
-        """SBATCH_TIME takes precedence over SBATCH_TIMELIMIT; cleanup has its own walltime."""
+    def test_walltime_override_and_cleanup_isolation(self) -> None:
+        """SBATCH_TIMELIMIT overrides the main job's default; cleanup has its own walltime."""
         for overrides, expected in (
+            ({}, "04:00:00"),
             ({"SBATCH_TIMELIMIT": "06:00:00"}, "06:00:00"),
-            ({"SBATCH_TIME": "", "SBATCH_TIMELIMIT": "06:00:00"}, "06:00:00"),
-            ({"SBATCH_TIME": "7-00:00:00", "SBATCH_TIMELIMIT": "06:00:00"}, "7-00:00:00"),
-            ({"SBATCH_TIME": "", "SBATCH_TIMELIMIT": ""}, "04:00:00"),
+            ({"SBATCH_TIMELIMIT": "7-00:00:00"}, "7-00:00:00"),
+            ({"SBATCH_TIMELIMIT": ""}, "04:00:00"),
         ):
             for mode in ("pd", "aggregated"):
                 with self.subTest(overrides=overrides, mode=mode):
@@ -458,13 +788,13 @@ sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
                     self.assertIn("--time=00:30:00", calls[1])
                     self.assertFalse(any(arg.startswith("--segment=") for arg in calls[1]))
 
-    def test_invalid_launcher_controls_are_rejected_before_submission(self):
-        """Reject invalid deployment modes and segment sizes without submitting any job."""
+    def test_invalid_launcher_controls_are_rejected_before_submission(self) -> None:
+        """Reject invalid serving and deployment modes without submitting any job."""
         stub = 'sbatch() { printf "unexpected-submission\\n"; }; source "$@"'
         cases = {
             "VLLM_PD_DEPLOYMENT_MODE": (("bad", "COUPLED"), 1),
-            "VLLM_SLURM_SEGMENT": (("0", "-1", "1.5", "bad"), 2),
-            "SEGMENT": (("0", "-1", "1.5", "bad"), 2),
+            "VLLM_MODE": (("bad", "PD"), 1),
+            "VLLM_ENGINES_PER_NODE": (("0", "2", "bad"), 1),
         }
         for name, (values, expected_status) in cases.items():
             for value in values:
@@ -474,20 +804,9 @@ sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
                     self.assertNotIn("unexpected-submission", stdout)
                     self.assertIn(name, stderr)
 
-    def test_invalid_segment_override_does_not_fall_back_to_main(self):
-        """Reject an invalid explicit Ultra segment even when main's SEGMENT supplies a valid fallback."""
-        stub = 'sbatch() { printf "unexpected-submission\\n"; }; source "$@"'
-        for value in ("0", "-1", "1.5", "bad"):
-            with self.subTest(value=value):
-                status, stdout, stderr = self.run_shell(
-                    stub, str(SCRIPT), env={"VLLM_SLURM_SEGMENT": value, "SEGMENT": "4"}
-                )
-                self.assertEqual(status, 2, stderr)
-                self.assertNotIn("unexpected-submission", stdout)
-                self.assertIn("VLLM_SLURM_SEGMENT must be a positive integer", stderr)
-
-    def test_serving_only_skips_evaluation_and_cleanup_submission(self):
+    def test_serving_only_skips_evaluation_and_cleanup_submission(self) -> None:
         """Run only the serving step without eval arguments and preserve its success or failure status."""
+        self.require_batch_bash()
         stubs = r"""
 scontrol() { printf '%s\n' node0 node1 node2 node3 node4 node5 node6 node7; }
 srun() { printf '%s\0' "$@"; printf '\0'; return "$TEST_SERVER_STATUS"; }
@@ -576,139 +895,63 @@ srun() { printf '%s\0' "$@"; printf '\0'; return "$TEST_SERVER_STATUS"; }
                     self.assertIn(f"+wandb_name={experiment_name}", args)
                     self.assertIn(f"+nemo_gym_log_dir=results/{experiment_name}/logs", args)
 
-    def test_prefill_exit_is_detected_during_both_health_checks(self):
-        """Detect prefill exits during either startup health check, including after request timeouts."""
+    def test_coupled_router_manages_worker_readiness(self) -> None:
+        """Start the router with a worker startup deadline even before health probes would succeed."""
         _, command = self.generate_commands(env={"VLLM_PD_DEPLOYMENT_MODE": "coupled"})
         stubs = r"""
-VLLM_COMMON_ARGS=()
-VLLM_PREFILL_ARGS=()
-vllm() { command sleep 0.1; return "$TEST_PREFILL_STATUS"; }
-curl() {
-    if [[ "$TEST_WAIT_ROLE" == decode && "$*" == *':8001/health'* ]]; then
-        return 0
-    fi
-    return "$TEST_HEALTH_STATUS"
+VLLM_COMMON_ARGS=(--common-test common)
+VLLM_PREFILL_ARGS=(--prefill-test producer)
+vllm() {
+    touch "$TEST_STATE_DIR/prefill-started"
+    while true; do "$TEST_SLEEP" 0.01; done
 }
-sleep() { command sleep 0.01; }
+curl() { printf 'unexpected-health-probe\n'; return 28; }
+sleep() { "$TEST_SLEEP" 0.01; }
 hostname() { printf 'node0\n'; }
-vllm-router() { printf 'unexpected-router-start\n'; }
-"""
-        for role in ("prefill", "decode"):
-            for exit_status in (0, 7):
-                # curl returns 28 for a timed-out request. That must not hide the
-                # prefill exit status or abort the polling loop prematurely.
-                for health_status in (1, 28):
-                    with self.subTest(role=role, exit_status=exit_status, health_status=health_status):
-                        status, stdout, stderr = self.run_shell(
-                            stubs + command,
-                            env={
-                                "TEST_WAIT_ROLE": role,
-                                "TEST_PREFILL_STATUS": str(exit_status),
-                                "TEST_HEALTH_STATUS": str(health_status),
-                            },
-                        )
-                        expected_status = exit_status or 1
-                        self.assertEqual(status, expected_status, stderr)
-                        self.assertNotIn("unexpected-router-start", stdout)
-                        self.assertIn(
-                            f"prefill vLLM process exited while waiting for {role} health (status={expected_status})",
-                            stderr,
-                        )
-
-    def test_coupled_health_probes_have_timeouts_and_retry_until_ready(self):
-        """Bound both tiers' health probes and retry timed-out requests until the servers are ready."""
-        _, command = self.generate_commands(env={"VLLM_PD_DEPLOYMENT_MODE": "coupled"})
-        stubs = r"""
-VLLM_COMMON_ARGS=()
-VLLM_PREFILL_ARGS=()
-vllm() { while true; do command sleep 0.01; done; }
-probe_count=0
-curl() {
-    printf '%s\0' "$@" >&2
-    printf '\0' >&2
-    probe_count=$((probe_count + 1))
-    # Both tiers time out once, then become healthy while prefill stays alive.
-    if (( probe_count % 2 )); then return 28; fi
-    return 0
+vllm-router() {
+    while [[ ! -f "$TEST_STATE_DIR/prefill-started" ]]; do "$TEST_SLEEP" 0.01; done
+    printf '%s\0' "$@"
+    kill -TERM "$$"
 }
-sleep() { :; }
-hostname() { printf 'node0\n'; }
-vllm-router() { printf 'router-started\n'; kill -TERM "$$"; }
 """
-        status, stdout, stderr = self.run_shell(stubs + command)
+        status, stdout, stderr = self.run_shell(stubs + command, env={"TEST_STATE_DIR": self.workdir})
         self.assertEqual(status, 143, stderr)
-        self.assertEqual(stdout, "router-started\n")
-        probes = [probe.split("\0") for probe in stderr.rstrip("\0").split("\0\0")]
-        self.assertEqual(len(probes), 4)
-        self.assertEqual(
-            [args[-1] for args in probes],
-            ["http://node0:8001/health"] * 2 + ["http://node4:8002/health"] * 2,
-        )
-        for args in probes:
-            self.assertIn("--connect-timeout", args)
-            self.assertEqual(args[args.index("--connect-timeout") + 1], "5")
-            self.assertIn("--max-time", args)
-            self.assertEqual(args[args.index("--max-time") + 1], "10")
-
-    def test_healthy_coupled_servers_start_router(self):
-        """Start the router with the correct prefill and decode URLs once both servers are healthy."""
-        _, command = self.generate_commands(env={"VLLM_PD_DEPLOYMENT_MODE": "coupled"})
-        stubs = r"""
-VLLM_COMMON_ARGS=()
-VLLM_PREFILL_ARGS=()
-vllm() { while true; do command sleep 0.01; done; }
-curl() { return 0; }
-hostname() { printf 'node0\n'; }
-vllm-router() { printf '%s\0' "$@"; kill -TERM "$$"; }
-"""
-        status, stdout, stderr = self.run_shell(stubs + command)
-        self.assertEqual(status, 143, stderr)
-        args = stdout.rstrip("\0").split("\0")
-        self.assertEqual(args[args.index("--prefill") + 1], "http://node0:8001")
-        self.assertEqual(args[args.index("--decode") + 1], "http://node4:8002")
+        self.assertEqual(stderr, "")
+        self.assert_router_arguments(stdout.rstrip("\0").split("\0"), ["http://node0:8001"], ["http://node4:8001"])
 
     def run_coupled_lifecycle(
-        self, *, exit_role="", exit_status=0, shutdown_signal="", startup_shutdown=False, exit_before_monitoring=False
-    ):
+        self, *, exit_role: str = "", exit_status: int = 0, shutdown_signal: str = "", exit_immediately: bool = False
+    ) -> tuple[int, str, str]:
         _, command = self.generate_commands(env={"VLLM_PD_DEPLOYMENT_MODE": "coupled"})
         stubs = r"""
-VLLM_COMMON_ARGS=()
-VLLM_PREFILL_ARGS=()
+VLLM_COMMON_ARGS=(--common-test common)
+VLLM_PREFILL_ARGS=(--prefill-test producer)
 run_service() {
     local role=$1
     trap 'printf "%s-stopped\n" "$role"; exit 0' TERM
-    trap 'exit "$TEST_EXIT_STATUS"' USR1
     printf '%s-started\n' "$role"
     touch "$TEST_STATE_DIR/$role-ready"
     if [[ "$role" == "$TEST_EXIT_ROLE" ]]; then
         # Synchronize on real process startup, not an assumed sleep duration.
-        while [[ ! -f "$TEST_STATE_DIR/prefill-ready" || ! -f "$TEST_STATE_DIR/router-ready" ]]; do
-            command sleep 0.01
-        done
+        if [[ "$TEST_EXIT_IMMEDIATELY" == 0 ]]; then wait_for_services; fi
         printf '%s-exited\n' "$role"
         return "$TEST_EXIT_STATUS"
     fi
     if [[ "$role" == router && -n "$TEST_SHUTDOWN_SIGNAL" ]]; then
+        wait_for_services
         # $$ remains the supervising shell's PID inside a background function.
         kill -s "$TEST_SHUTDOWN_SIGNAL" "$$"
     fi
-    while true; do command sleep 0.01; done
+    while true; do "$TEST_SLEEP" 0.01; done
 }
 vllm() { run_service prefill; }
 vllm-router() { run_service router; }
-curl() {
-    [[ -f "$TEST_STATE_DIR/prefill-ready" ]] || return 1
-    if [[ "$TEST_STARTUP_SHUTDOWN" == 1 ]]; then
-        kill -s "$TEST_SHUTDOWN_SIGNAL" "$$"
-    fi
-    if [[ "$TEST_EXIT_BEFORE_MONITORING" == 1 && "$*" == *':8002/health'* ]]; then
-        # Make prefill exit before the final health request returns success.
-        kill -USR1 "$prefill_pid"
-        wait "$prefill_pid" || true
-    fi
-    return 0
+wait_for_services() {
+    while [[ ! -f "$TEST_STATE_DIR/prefill-ready" || ! -f "$TEST_STATE_DIR/router-ready" ]]; do
+        "$TEST_SLEEP" 0.01
+    done
 }
-sleep() { command sleep 0.01; }
+sleep() { "$TEST_SLEEP" 0.01; }
 hostname() { printf 'node0\n'; }
 """
         with TemporaryDirectory(prefix="gym-coupled-lifecycle-") as state_dir:
@@ -719,8 +962,7 @@ hostname() { printf 'node0\n'; }
                     "TEST_EXIT_ROLE": exit_role,
                     "TEST_EXIT_STATUS": str(exit_status),
                     "TEST_SHUTDOWN_SIGNAL": shutdown_signal,
-                    "TEST_STARTUP_SHUTDOWN": str(int(startup_shutdown)),
-                    "TEST_EXIT_BEFORE_MONITORING": str(int(exit_before_monitoring)),
+                    "TEST_EXIT_IMMEDIATELY": str(int(exit_immediately)),
                 },
             )
 
@@ -757,18 +999,8 @@ hostname() { printf 'node0\n'; }
                 self.assertIn("router-stopped\n", stdout)
                 self.assertNotIn("ERROR:", stderr)
 
-    def test_coupled_shutdown_during_readiness_stops_prefill(self):
-        """Stop prefill on cancellation during readiness without starting the router."""
-        for signal_name, expected_status in (("TERM", 143), ("INT", 130)):
-            with self.subTest(signal=signal_name):
-                status, stdout, stderr = self.run_coupled_lifecycle(shutdown_signal=signal_name, startup_shutdown=True)
-                self.assertEqual(status, expected_status, stderr)
-                self.assertIn("prefill-stopped\n", stdout)
-                self.assertNotIn("router-started\n", stdout)
-                self.assertNotIn("ERROR:", stderr)
-
-    def test_prefill_exit_before_runtime_monitoring_is_detected(self):
-        """Catch a prefill exit between the final health response and runtime monitoring."""
-        status, _, stderr = self.run_coupled_lifecycle(exit_status=7, exit_before_monitoring=True)
+    def test_immediate_prefill_exit_is_detected(self) -> None:
+        """Propagate a prefill startup failure without waiting for worker readiness."""
+        status, _, stderr = self.run_coupled_lifecycle(exit_role="prefill", exit_status=7, exit_immediately=True)
         self.assertEqual(status, 7, stderr)
         self.assertIn("prefill process exited after startup (status=7)", stderr)
