@@ -125,6 +125,17 @@ last `session_close_retry_window_seconds` (default 300 seconds) without renewal 
 Stale cookies never fall back to host execution. State is process-local; Resources/provider
 own sandbox expiry and crash recovery. There is no separate per-agent session-expiry timer.
 
+Harness execution uses `nemo_gym.sandbox.session.SandboxSession`, shared with Hermes.
+The adapter stages its worker input and collects its own output; the common lifecycle
+confirms process cleanup, captures artifacts, then releases the provider connection or
+owned sandbox. Concurrent closes share that work, failed cleanup remains retryable,
+and interrupted activations keep captured observations after session files are removed.
+`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.py`
+runs inside the sandbox. Benchmark Resources session identity/verdict state stays separate.
+Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
+`worker_exit_code_unavailable` observation gaps. Positive cleanup confirmation remains
+required; the adapter validates the captured terminal events without inventing an exit code.
+
 One shared Linux supervisor per activation fences delayed launches and kills/reaps detached
 tool descendants. Close confirms its cleanup receipt before cancelling provider execution,
 then removes adapter-owned files and disconnects. Missing/negative cleanup evidence blocks
