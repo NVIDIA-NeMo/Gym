@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shlex
 import sys
 import tempfile
 from copy import deepcopy
@@ -15,7 +16,7 @@ from pathlib import Path
 from shutil import rmtree
 from time import monotonic
 from traceback import format_exc
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -45,6 +46,39 @@ from resources_servers.nl2repobench.task_store import (
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
+
+# "official": today's behavior - open/restricted egress per enforce_agent_no_network, generic agent
+#   image. Must stay byte-identical to reproduce already-completed eval runs.
+# "no_internet_preinstalled": agent boots from the pinned per-task grading image (deps pre-installed)
+#   with deny-all-except-policy_model egress; the real held-out test files are deleted from /workspace
+#   before the agent gets a turn, to use the pre-installed deps without leaking tests.
+# "block_target": open egress (so unrelated `pip install` still works), but pip/pip3/git are
+#   replaced with wrappers that refuse to install/clone the specific task's own package/repo -
+#   mitigates the observed "fetch the real upstream source and submit it" exploit without
+#   losing general internet access.
+AgentNetworkMode = Literal["official", "no_internet_preinstalled", "block_target"]
+
+# "block_target" wrapper: installed in place of the real pip/pip3/git binaries (the real binary
+# is moved aside to "<path>.nl2repobench-real" and exec'd from there), rather than relying on a
+# PATH-prepend - this guarantees the guard runs regardless of how the sandbox's non-interactive
+# shell resolves PATH, instead of depending on shell-specific PATH precedence/expansion rules.
+# Substring-matches a normalized (lowercase, "_"->"-") task_id against every argv token, so it
+# only catches tasks whose real PyPI/GitHub name is the task_id itself - a known, accepted gap
+# (see docs/PIPELINE.md).
+_GUARD_SCRIPT_TEMPLATE = """#!/usr/bin/env bash
+set -euo pipefail
+TARGET="{target}"
+REAL="{real_path}"
+norm() {{ echo "$1" | tr 'A-Z_' 'a-z-'; }}
+for arg in "$@"; do
+  a=$(norm "$arg")
+  if [[ "$a" == *"$TARGET"* ]]; then
+    echo "nl2repobench guard: blocked '$(basename "$REAL") $*' - matches guarded task target '$TARGET'" >&2
+    exit 1
+  fi
+done
+exec "$REAL" "$@"
+"""
 
 # Timeout for the agent-side workspace collection tar command.
 WORKSPACE_COLLECT_TIMEOUT_S = 300.0
@@ -99,6 +133,7 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_provider: str
     enforce_agent_no_network: bool = True
     sandbox_model_server: ModelServerRef | None = None
+    agent_network_mode: AgentNetworkMode = "official"
     sandbox_config: dict[str, Any]
 
     logs_dir: Path = Path("resources_servers/nl2repobench/logs")
@@ -229,15 +264,27 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
 
     def _provider_options(self, *, phase: str) -> dict[str, Any]:
         options = deepcopy(self.config.sandbox_config.get("provider_options", {}))
-        if phase != "agent" or not self.config.enforce_agent_no_network:
-            # Non-agent phases never restrict network. Same for the agent phase when
-            # enforce_agent_no_network is off: upstream's agent has real internet access
-            # (it must pip install whatever the generic image doesn't already have), so
-            # leave provider_options' network_policy untouched/absent rather than forcing
-            # a deny-all-plus-one-allow-rule policy regardless of this flag (the previous
-            # bug here - the model-egress branch below used to run unconditionally).
+        mode = self.config.agent_network_mode
+        if phase != "agent":
+            # Non-agent phases (verifier) never restrict network.
             options.pop("network_policy", None)
             return options
+        if mode == "official" and not self.config.enforce_agent_no_network:
+            # upstream's agent has real internet access (it must pip install whatever the
+            # generic image doesn't already have), so leave provider_options' network_policy
+            # untouched/absent rather than forcing a deny-all-plus-one-allow-rule policy
+            # regardless of this flag (the previous bug here - the model-egress branch below
+            # used to run unconditionally).
+            options.pop("network_policy", None)
+            return options
+        if mode == "block_target":
+            # Open egress, same as official-with-no-enforcement: the pip/pip3/git guard
+            # installed in _create_sandbox() is what actually restricts this mode, not the
+            # network layer (OpenSandbox's network_policy is host-based, not package-aware).
+            options.pop("network_policy", None)
+            return options
+        # mode == "no_internet_preinstalled", or mode == "official" with
+        # enforce_agent_no_network=True: deny-all except the policy_model host below.
 
         model_egress_target = self._model_egress_target()
         options.setdefault("network_policy", {"defaultAction": "deny", "egress": []})
@@ -279,9 +326,14 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config)
 
         current_task_id = task_id(task)
+        mode = self.config.agent_network_mode
         resources = dict(self.config.sandbox_config.get("resources", {}))
+        # "no_internet_preinstalled" boots the agent from the pinned per-task grading image too
+        # (deps pre-installed), instead of the generic image - the held-out test files it also
+        # ships get stripped out below, before the agent gets a turn.
+        agent_image = task_image(task) if mode == "no_internet_preinstalled" else _AGENT_SANDBOX_IMAGE
         spec = SandboxSpec(
-            image=_AGENT_SANDBOX_IMAGE if phase == "agent" else task_image(task),
+            image=agent_image if phase == "agent" else task_image(task),
             ttl_s=self.config.sandbox_config.get("ttl_s"),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir="/workspace",
@@ -337,6 +389,20 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                     f"Failed to create /workspace in agent sandbox for {task_id(task)!r}: "
                     f"{mkdir_result.stderr or mkdir_result.stdout or '(no output)'}"
                 )
+            if mode == "no_internet_preinstalled":
+                # agent_image above is task_image(task), which also ships this task's real
+                # held-out tests - strip them before the agent's session is usable (seed_session
+                # can't return until this function returns, so there's no window where the agent
+                # could read them first).
+                test_file_paths = " ".join(shlex.quote(f"/workspace/{path}") for path in task.test_files.files)
+                strip_result = await sandbox.exec(command=f"rm -rf {test_file_paths}", cwd="/", timeout_s=60)
+                if strip_result.return_code != 0:
+                    raise RuntimeError(
+                        f"Failed to strip held-out test files from agent sandbox for {task_id(task)!r}: "
+                        f"{strip_result.stderr or strip_result.stdout or '(no output)'}"
+                    )
+            elif mode == "block_target":
+                await self._install_pip_git_guard(sandbox, task)
             with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
                 f.write(task.start_md)
                 local_start_md_path = Path(f.name)
@@ -345,6 +411,53 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             finally:
                 local_start_md_path.unlink(missing_ok=True)
         return sandbox
+
+    async def _install_pip_git_guard(self, sandbox: AsyncSandbox, task: Task) -> None:
+        """Replace pip/pip3/git in place with wrappers that refuse to install/clone this task's
+        own package/repo by name, while passing every other invocation through untouched. Used
+        for agent_network_mode == "block_target", where network access otherwise stays open."""
+
+        current_task_id = task_id(task)
+        target = current_task_id.lower().replace("_", "-")
+        tool_names = ("pip", "pip3", "git")
+        discover = await sandbox.exec(
+            command="for n in pip pip3 git; do command -v \"$n\" || echo ''; done",
+            cwd="/",
+            timeout_s=30,
+        )
+        if discover.return_code != 0:
+            raise RuntimeError(
+                f"Failed to discover pip/pip3/git locations for guard install on {current_task_id!r}: "
+                f"{discover.stderr or discover.stdout or '(no output)'}"
+            )
+        real_paths = (discover.stdout or "").splitlines()
+        for name, real_path in zip(tool_names, real_paths):
+            real_path = real_path.strip()
+            if not real_path:
+                continue  # tool isn't installed in this image; nothing to guard
+            backup_path = f"{real_path}.nl2repobench-real"
+            move_result = await sandbox.exec(
+                command=f"mv {shlex.quote(real_path)} {shlex.quote(backup_path)}", cwd="/", timeout_s=30
+            )
+            if move_result.return_code != 0:
+                raise RuntimeError(
+                    f"Failed to back up real {name!r} for guard install on {current_task_id!r}: "
+                    f"{move_result.stderr or move_result.stdout or '(no output)'}"
+                )
+            script = _GUARD_SCRIPT_TEMPLATE.format(target=target, real_path=backup_path)
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
+                f.write(script)
+                local_script_path = Path(f.name)
+            try:
+                await sandbox.upload(local_script_path, real_path)
+            finally:
+                local_script_path.unlink(missing_ok=True)
+            chmod_result = await sandbox.exec(command=f"chmod +x {shlex.quote(real_path)}", cwd="/", timeout_s=30)
+            if chmod_result.return_code != 0:
+                raise RuntimeError(
+                    f"Failed to chmod guard wrapper for {name!r} on {current_task_id!r}: "
+                    f"{chmod_result.stderr or chmod_result.stdout or '(no output)'}"
+                )
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
         try:

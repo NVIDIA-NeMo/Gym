@@ -18,6 +18,12 @@ nl2repobench_opencode_resources_server:
       sandbox_model_server:
         type: responses_api_models
         name: policy_model
+      # agent_network_mode defaults to "official" (set in nl2repobench.yaml), which reproduces
+      # today's behavior exactly - needed to keep already-completed eval runs reproducible. To
+      # run a different network posture, override at the CLI instead of editing this file, e.g.:
+      #   ++nl2repobench_opencode_resources_server.resources_servers.nl2repobench.agent_network_mode=no_internet_preinstalled
+      #   ++nl2repobench_opencode_resources_server.resources_servers.nl2repobench.agent_network_mode=block_target
+      # See docs/PIPELINE.md "Network access and reference-lookup risk" for what each mode does.
 
 nl2repobench_opencode_sandboxed_agent:
   _inherit_from: opencode_sandboxed_agent
