@@ -138,7 +138,7 @@ async def test_agent_cannot_supply_collector_owned_failure_records(monkeypatch, 
     assert original == row | {"_ng_run_id": outcome.run_id}
     assert outcome.episode_id == failure.episode_id
     assert outcome.source == "collector" and outcome.delivery == "delivered"
-    assert outcome.failure.failure_kind == "protocol_violation" and outcome.failure.terminal
+    assert outcome.failure.failure_kind == "environment_protocol_violation" and outcome.failure.terminal
     assert outcome.exception_type == "InvalidRolloutResult"
 
 

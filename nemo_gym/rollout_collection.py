@@ -62,7 +62,7 @@ from nemo_gym.config_types import (
 from nemo_gym.deliverables import is_deliverable
 from nemo_gym.episode_types import EpisodeFailure, EpisodeId, TaskId
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.failure_kinds import CANCELLED, ENVIRONMENT_SERVER_FAILED, PROTOCOL_VIOLATION
+from nemo_gym.failure_kinds import CANCELLED, ENVIRONMENT_PROTOCOL_VIOLATION, ENVIRONMENT_SERVER_FAILED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_REF_KEY_NAME,
@@ -3843,7 +3843,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         and isinstance(e, (InvalidRolloutResult, orjson.JSONDecodeError))
                         and not isinstance(e, StaleRolloutResult)
                     ):
-                        failure[NG_FAILURE_CLASS_KEY] = PROTOCOL_VIOLATION
+                        failure[NG_FAILURE_CLASS_KEY] = ENVIRONMENT_PROTOCOL_VIOLATION
                         failure[NG_TERMINAL_KEY] = True
                     return _CompletedRollout(
                         row=row,

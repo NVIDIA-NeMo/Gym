@@ -67,7 +67,7 @@ The terminal flag, stage, and partial-response diagnostics are retained. Nonterm
 Judge-only recovery is a follow-up. Built-in `judge_failsafe` results retain their saved answers without a reward;
 the collector accepts their two known legacy judge markers while rejecting other reserved result keys.
 
-Malformed replies become terminal `protocol_violation` failures when routing is enabled; running the whole task again
+Malformed replies become terminal `environment_protocol_violation` failures when routing is enabled; running the whole task again
 cannot fix an invalid response format. A reply from a different execution attempt remains retryable because a transport
 retry can return a stale response. Receiving an HTTP reply records delivery as established.
 

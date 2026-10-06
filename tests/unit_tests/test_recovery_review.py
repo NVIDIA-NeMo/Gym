@@ -70,7 +70,8 @@ async def test_invalid_http_success_never_completes_evaluation(runner_config, mo
     assert store.coverage()["successful"] == 0
     if routing:
         assert all(
-            row["_ng_failure_record"]["failure"]["failure_kind"] == "protocol_violation" for row in store.failures()
+            row["_ng_failure_record"]["failure"]["failure_kind"] == "environment_protocol_violation"
+            for row in store.failures()
         )
         assert store.pending(3) == []
 
@@ -82,7 +83,7 @@ async def test_bad_reply_is_terminal_and_received_delivery_is_known(monkeypatch,
     install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, malformed)))
     _, outcome = await next(collection.RolloutCollectionHelper().run_outcomes([failing_row()]))
     assert outcome.source == "collector" and outcome.delivery == "delivered"
-    assert outcome.failure.failure_kind == "protocol_violation" and outcome.failure.terminal
+    assert outcome.failure.failure_kind == "environment_protocol_violation" and outcome.failure.terminal
 
 
 @pytest.mark.parametrize("routing", [False, True])
