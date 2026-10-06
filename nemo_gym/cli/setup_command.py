@@ -14,6 +14,7 @@
 # limitations under the License.
 import importlib.metadata
 import os
+import shlex
 from os import environ
 from pathlib import Path
 from subprocess import Popen
@@ -114,7 +115,9 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     venv_path = get_venv_path(dir_path, global_config_dict)
 
-    uv_venv_cmd = f"uv venv --seed --allow-existing --python {global_config_dict[PYTHON_VERSION_KEY_NAME]} {venv_path}"
+    python_request = environ.get("NEMO_GYM_PYTHON")
+    python_arg = shlex.quote(python_request) if python_request else global_config_dict[PYTHON_VERSION_KEY_NAME]
+    uv_venv_cmd = f"uv venv --seed --allow-existing --python {python_arg} {venv_path}"
 
     venv_python_fpath = venv_path / "bin/python"
     venv_activate_fpath = venv_path / "bin/activate"
@@ -134,6 +137,12 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     if should_skip_venv_setup:
         env_setup_cmd = f"source {venv_activate_fpath}"
     else:
+        # Editable component dependencies can invoke setuptools in the same
+        # shared source tree. Concurrent component startup otherwise races
+        # while removing that tree's build/ directory. Serialize setup across
+        # one Gym checkout; the descriptor also closes on an early exit.
+        setup_lock_fpath = PARENT_DIR / ".nemo_gym_component_setup.lock"
+        serialize_shared_setup = dir_path.resolve().is_relative_to(PARENT_DIR.resolve())
         has_pyproject_toml = (dir_path / "pyproject.toml").exists()
         has_requirements_txt = (dir_path / "requirements.txt").exists()
         if has_pyproject_toml and has_requirements_txt:
@@ -174,7 +183,23 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
 
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
-        env_setup_cmd = f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd}"
+        lock_prefix = f"exec 9>{setup_lock_fpath} && flock 9 && " if serialize_shared_setup else ""
+        env_setup_cmd = (
+            f"{lock_prefix}{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd}"
+        )
+
+    # OSWorld imports its complete evaluator registry at startup. Reuse the
+    # validated C1 opt-in installer for the packages intentionally excluded
+    # from managed Gym environments (cryptography and codec-bearing CV wheels).
+    if dir_path.name == "osworld" and dir_path.parent.name == "resources_servers":
+        runtime_installer = PARENT_DIR / "responses_api_agents/osworld_agent/install_optional_runtime_deps.sh"
+        env_setup_cmd += " && bash {} {}".format(
+            shlex.quote(str(runtime_installer)),
+            shlex.quote(str(venv_path)),
+        )
+
+    if not should_skip_venv_setup and serialize_shared_setup:
+        env_setup_cmd += " && flock -u 9"
 
     return f"cd {dir_path} && {env_setup_cmd}"
 

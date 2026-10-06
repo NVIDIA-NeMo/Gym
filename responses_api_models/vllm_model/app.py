@@ -426,7 +426,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
-        self._endpoint_file_mtime: Optional[float] = None
+        self._endpoint_file_signature: Optional[tuple[int, int]] = None
         self._endpoint_missing_since: Optional[float] = None
         self._endpoint_last_check_at: Optional[float] = None
 
@@ -1152,6 +1152,13 @@ class VLLMModel(SimpleResponsesAPIModel):
             chat_completion_dict.pop("prompt_token_ids", None)
             choice_dict.pop("token_ids", None)
             choice_dict["message"] = NeMoGymChatCompletionMessageForTraining.model_validate(message_dict)
+        else:
+            # Some NeMo-RL generation workers always return routed-expert
+            # transport metadata even when this adapter did not request token
+            # information. A routed_experts-only message is intentionally
+            # invalid: token metadata is atomic. Keep ordinary inference
+            # responses token-free instead of forwarding a partial bundle.
+            self._strip_capture_transport_fields(chat_completion_dict)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
@@ -1793,7 +1800,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             return
         self._endpoint_last_check_at = now
         try:
-            mtime = os.stat(self.config.endpoint_file).st_mtime
+            endpoint_stat = os.stat(self.config.endpoint_file)
         except FileNotFoundError:
             # Serving jobs remove the endpoint file while rotating;
             # keep the current clients until the successor publishes.
@@ -1802,7 +1809,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         except OSError:
             # Transient filesystem trouble is not a backend exit; retry the current clients.
             return
-        if mtime == self._endpoint_file_mtime:
+        # Include size because shared filesystems can expose coarse or delayed
+        # mtimes. In particular, an empty-unpublish followed by a same-tick
+        # republish must still be observed.
+        signature = (endpoint_stat.st_mtime_ns, endpoint_stat.st_size)
+        if signature == self._endpoint_file_signature:
             if self._endpoint_missing_since is not None:
                 self._note_endpoint_unpublished()
             return
@@ -1811,7 +1822,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 url = endpoint_stream.read().strip()
         except OSError:
             return
-        self._endpoint_file_mtime = mtime
+        self._endpoint_file_signature = signature
         if not url:
             # An empty file is as unpublished as a missing one.
             self._note_endpoint_unpublished()

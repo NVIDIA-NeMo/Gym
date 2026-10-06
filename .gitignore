@@ -139,6 +139,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.nemo_gym_component_setup.lock
 env/
 venv/
 ENV/

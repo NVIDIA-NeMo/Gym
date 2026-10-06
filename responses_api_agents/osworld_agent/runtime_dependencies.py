@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml
 from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
 
@@ -59,8 +58,13 @@ def managed_agent_venv_path(gym_root: Path, venv_root: Path | None = None) -> Pa
 def managed_agent_venv_from_env(gym_root: Path, env_file: Path) -> Path:
     """Resolve the OSWorld agent venv from a prepared Gym ``env.yaml``."""
 
+    import yaml
+
     env_file = env_file.expanduser().resolve()
-    payload: Any = yaml.safe_load(env_file.read_text(encoding="utf-8"))
+    try:
+        payload: Any = yaml.safe_load(env_file.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid Gym environment YAML: {env_file}") from exc
     if payload is None:
         payload = {}
     if not isinstance(payload, dict):
@@ -176,7 +180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "resolve-venv":
         try:
             print(managed_agent_venv_from_env(args.gym_root, args.env_file))
-        except (OSError, ValueError, yaml.YAMLError) as exc:
+        except (OSError, ValueError) as exc:
             print(f"Cannot resolve the managed OSWorld agent venv: {exc}", file=sys.stderr)
             return 2
         return 0

@@ -785,6 +785,48 @@ class TestApp:
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         assert not self._setup_server(monkeypatch).config.propagate_context_overflow_errors
 
+    async def test_noncapture_chat_strips_partial_worker_token_metadata(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl-token-free",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "prompt_token_ids": [1, 2],
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "token_ids": [3],
+                        "logprobs": {"content": []},
+                        "message": {
+                            "role": "assistant",
+                            "content": "answer",
+                            "routed_experts": [[[0, 1]]],
+                        },
+                    }
+                ],
+            }
+        )
+        server._clients = [client]
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "token-free-session"}
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            model="dummy_model",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+        result = await server.chat_completions(request, body)
+
+        payload = result.model_dump()
+        assert "prompt_token_ids" not in payload
+        choice = payload["choices"][0]
+        assert "token_ids" not in choice
+        assert choice["logprobs"] is None
+        assert "routed_experts" not in choice["message"]
+
     @mark.parametrize("propagate", [False, True])
     def test_context_overflow_propagation_flag(self, monkeypatch: MonkeyPatch, propagate: bool) -> None:
         server = self._setup_server(monkeypatch, propagate_context_overflow_errors=propagate)

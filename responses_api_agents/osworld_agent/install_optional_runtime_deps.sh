@@ -32,6 +32,7 @@ fi
 
 echo "[osworld-runtime-deps] Installing opt-in runtime dependencies..."
 uv pip install --no-config --python "${venv_python}" \
+    "packaging>=24" \
     "numpy<2" \
     "cryptography~=46.0" \
     "opencv-python-headless~=4.8.1.78" \

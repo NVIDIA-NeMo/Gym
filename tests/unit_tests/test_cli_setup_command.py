@@ -54,6 +54,36 @@ class TestCLISetupCommandSetupEnvCommand:
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
+    def test_editable_component_setup_is_serialized(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        monkeypatch.setattr(nemo_gym.cli.setup_command, "PARENT_DIR", tmp_path)
+
+        command = setup_env_command(
+            dir_path=server_dir,
+            global_config_dict=self._debug_global_config_dict(tmp_path),
+            prefix="server",
+        )
+
+        assert f"exec 9>{tmp_path}/.nemo_gym_component_setup.lock && flock 9 && uv venv" in command
+        assert command.endswith("&& flock -u 9")
+
+    def test_osworld_resource_venv_uses_c1_runtime_installer(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        server_dir = tmp_path / "resources_servers" / "osworld"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text("pytest\n")
+        (tmp_path / "pyproject.toml").write_text("")
+        monkeypatch.setattr(nemo_gym.cli.setup_command, "PARENT_DIR", tmp_path)
+
+        command = setup_env_command(
+            dir_path=server_dir,
+            global_config_dict=self._debug_global_config_dict(tmp_path),
+            prefix="osworld",
+        )
+
+        assert (
+            f"bash {tmp_path}/responses_api_agents/osworld_agent/install_optional_runtime_deps.sh {server_dir}/.venv"
+        ) in command
+
     def test_requirements_uses_server_local_overrides(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
         (server_dir / "overrides.txt").write_text("dependency==2\n")
@@ -120,6 +150,18 @@ class TestCLISetupCommandSetupEnvCommand:
         )
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python my python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
+
+    def test_nemo_gym_python_overrides_version(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        monkeypatch.setenv("NEMO_GYM_PYTHON", "/opt/container python/bin/python")
+
+        command = setup_env_command(
+            dir_path=server_dir,
+            global_config_dict=self._debug_global_config_dict(tmp_path),
+            prefix="my server name",
+        )
+
+        assert ("uv venv --seed --allow-existing --python '/opt/container python/bin/python'") in command
 
     def test_uv_pip_set_python(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)

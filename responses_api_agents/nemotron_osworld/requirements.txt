@@ -1,0 +1,8 @@
+-e nemo-gym[dev,sandbox] @ ../../
+# OSWorld benchmark harness — same referenced fork pin as resources_servers/osworld (keep in lockstep).
+# Provides mm_agents.nvidia.nemotron_agent (prompt contract + parsing) imported by this agent server.
+# Exact fork revision used by the OpenSandbox OSWorld reference runs.
+osworld @ https://github.com/terrykong/OSWorld/archive/5d8c93592be588ab8e9909bed82f3b480fd4f533.tar.gz
+
+# Match the #3368 root venv (uv.lock); Ray refuses mixed cluster versions.
+ray[default]==2.56.1

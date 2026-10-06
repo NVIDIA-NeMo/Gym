@@ -386,6 +386,22 @@ async def test_ambiguous_failure_is_not_retried_and_cannot_finish(failure):
         client.finish(answer(1))
 
 
+async def test_failed_later_call_can_finalize_only_the_last_acknowledged_action():
+    client, transport, _, _ = make_client()
+    first = await client.create()
+    client.append_observation([observation("pending")])
+    transport.post.side_effect = ConnectionError("ack lost")
+
+    with pytest.raises(ConnectionError):
+        await client.create()
+
+    result = client.finish_after_failed_call(first)
+    assert result.outcome == "execution_failure"
+    assert [action.response_id for action in result.segments[0].selected_actions] == [first.id]
+    with pytest.raises(RuntimeError, match="closed"):
+        await client.create()
+
+
 async def test_concurrent_create_and_finite_call_limits():
     import asyncio
 

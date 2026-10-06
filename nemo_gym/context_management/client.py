@@ -63,6 +63,7 @@ class ContextManagedResponsesClient:
         initial_request: NeMoGymResponseCreateParamsNonStreaming,
         seed_observations: Sequence[Any] = (),
         cookies: Any = None,
+        token_capture: bool = True,
     ):
         # Validate identity without creating a second owner/segment namespace.
         capture_rollout_id(logical_rollout_id, 0)
@@ -79,6 +80,12 @@ class ContextManagedResponsesClient:
         self.model_server = model_server
         self.logical_rollout_id = logical_rollout_id
         self.config = config.model_copy(deep=True)
+        self.token_capture = token_capture
+        if not self.token_capture and self.config.guards.max_total_tokens is not None:
+            raise ValueError(
+                "max_total_tokens requires token capture; inference-only context "
+                "management can use image/vision guards"
+            )
         self._request = initial_request.model_copy(deep=True)
         self._request.input = []
         self.history = SemanticHistory(logical_rollout_id)
@@ -163,7 +170,8 @@ class ContextManagedResponsesClient:
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
             self._request.model_dump() | {"input": list(prepared.view.items)}
         )
-        return capture_id, {PARENT_HEADER: orjson.dumps(parent).decode()}, body
+        headers = {PARENT_HEADER: orjson.dumps(parent).decode()} if self.token_capture else {}
+        return capture_id, headers, body
 
     async def _measure(self, prepared: PreparedHistoryView) -> ContextMeasurements:
         guards = self.config.guards
@@ -220,7 +228,7 @@ class ContextManagedResponsesClient:
                 self._model_calls += 1
                 http_response = await self.server_client.post(
                     server_name=self.model_server.name,
-                    url_path=f"{rollout_path_prefix(capture_id, token_capture=True)}/v1/responses",
+                    url_path=(f"{rollout_path_prefix(capture_id, token_capture=self.token_capture)}/v1/responses"),
                     json=request,
                     headers=headers,
                     cookies=self.cookies,
@@ -296,8 +304,7 @@ class ContextManagedResponsesClient:
         self._selected_ids.add(response.id)
         self._step += 1
 
-    def finish(self, response: NeMoGymResponse, *, outcome: str = "completed") -> LogicalCCResult:
-        self._check_open()
+    def _finish_selected(self, response: NeMoGymResponse, *, outcome: str) -> LogicalCCResult:
         if not self._segments or response.id != self._segments[-1].selected_actions[-1].response_id:
             raise ValueError("Final logical response must identify the last selected model action")
         if isinstance(self.controller, TurnChunkedHistoryController):
@@ -310,3 +317,24 @@ class ContextManagedResponsesClient:
         )
         self._closed = True
         return result.model_copy(deep=True)
+
+    def finish(self, response: NeMoGymResponse, *, outcome: str = "completed") -> LogicalCCResult:
+        self._check_open()
+        return self._finish_selected(response, outcome=outcome)
+
+    def finish_after_failed_call(
+        self,
+        response: NeMoGymResponse,
+        *,
+        outcome: str = "execution_failure",
+    ) -> LogicalCCResult:
+        """Finalize the last acknowledged action after a later call failed.
+
+        ``create`` closes the client when an acknowledgement may have been
+        lost, preventing any further generation. The previously selected chain
+        is still authoritative and can be finalized safely as a masked failure.
+        """
+
+        if not self._closed or self._busy:
+            raise RuntimeError("finish_after_failed_call requires a closed, idle context client")
+        return self._finish_selected(response, outcome=outcome)
