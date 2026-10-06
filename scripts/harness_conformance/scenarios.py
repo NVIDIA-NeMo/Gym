@@ -21,6 +21,7 @@ class Scenario:
     http_errors: tuple[int, ...] = ()
     terminal_error: bool = False
     expected_reward: float = 1.0
+    steps: bool = True
 
     def task(self) -> dict:
         """Only the task reaches the harness; expectations stay in the runner."""
@@ -43,11 +44,12 @@ SCENARIOS = (
     Scenario(
         "model_error",
         "A terminal model HTTP 400 with an error body and no response ID.",
-        evidence=("TE-1", "TE-2", "TE-4", "TE-7", "TE-8", "TE-9"),
+        evidence=("TE-1", "TE-2", "TE-4", "TE-7", "TE-8"),
         tool_steps=0,
         http_errors=(400,),
         terminal_error=True,
         expected_reward=0.0,
+        steps=False,  # The first request fails permanently; no model decision is returned.
     ),
     Scenario("verifier_failure", "A completed trajectory receives a known zero reward.", expected_reward=0.0),
 )

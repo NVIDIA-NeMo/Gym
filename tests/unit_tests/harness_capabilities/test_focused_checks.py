@@ -138,7 +138,12 @@ def test_malformed_collection_does_not_crash_or_poison_unrelated_checks(value):
 def test_explicit_applicability_does_not_depend_on_empty_collection():
     record = evidence_record()
     record["ng_trajectory"]["tool_calls"] = []
-    assert checks(record)["tool_calls.present"]["status"] == "fail"
+    record["ng_agent_observations"]["records"] = [
+        r for r in record["ng_agent_observations"]["records"] if r["kind"] != "tool_call"
+    ]
+    result = inspect_record(record)
+    assert result["evidence"]["TE-5"]["verdict"] == "not_fulfilled"
+    assert next(c for c in result["checks"] if c["id"] == "tool_calls.present")["status"] == "fail"
     assert checks(record, scope=EvidenceScope(tools=False))["tool_calls.present"]["status"] == "not_applicable"
 
 
@@ -148,3 +153,34 @@ def test_parent_reference_is_resolved_without_global_native_validation():
     result = checks(record)
     assert result["invocations.parent"]["status"] == "fail"
     assert result["calls.outcome"]["status"] == "pass"
+
+
+def test_missing_step_call_references_fail_p1_without_blocking_p0():
+    record = evidence_record()
+    for turn in record["ng_trajectory"]["turns"]:
+        turn.pop("model_calls")
+    result = inspect_record(record)
+    by_id = {c["id"]: c for c in result["checks"]}
+    assert result["verdict"] == "fulfilled"
+    assert result["evidence"]["TE-9"]["verdict"] == "not_fulfilled"
+    assert by_id["steps.references"]["tier"] == "P1"
+    assert by_id["steps.references"]["status"] == "fail"
+    assert by_id["steps.call_target"]["blocked_by"] == ["steps.references"]
+    assert by_id["steps.number"]["tier"] == "P0"
+    assert by_id["steps.number"]["status"] == "pass"
+
+
+def test_missing_invocations_still_block_p0_step_and_tool_relationships():
+    record = evidence_record()
+    record["ng_trajectory"].pop("invocations")
+    result = inspect_record(record)
+    by_id = {c["id"]: c for c in result["checks"]}
+    assert result["verdict"] == "not_fulfilled"
+    for check_id in (
+        "invocations.present",
+        "invocations.identity",
+        "steps.invocation_target",
+        "tools.invocation_target",
+    ):
+        assert by_id[check_id]["tier"] == "P0"
+        assert by_id[check_id]["status"] == "fail"

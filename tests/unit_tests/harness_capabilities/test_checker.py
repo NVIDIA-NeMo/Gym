@@ -9,7 +9,6 @@ import pytest
 
 from nemo_gym.harness_capabilities.checker import inspect_record
 from nemo_gym.harness_capabilities.cli import main
-from nemo_gym.harness_capabilities.reader import hydrate_record
 from tests.unit_tests.harness_capabilities.synthetic import evidence_record
 
 
@@ -19,15 +18,16 @@ def record():
 
 
 def verdict(record, capability):
-    return inspect_record(hydrate_record(record))["evidence"][capability]["verdict"]
+    return inspect_record(record)["evidence"][capability]["verdict"]
 
 
 def test_retained_model_evidence_and_tools_pass(record):
-    result = inspect_record(hydrate_record(record))
+    result = inspect_record(record)
     assert all(result["evidence"][c]["verdict"] == "fulfilled" for c in (f"TE-{i}" for i in range(1, 10))), result[
         "findings"
     ]
     assert result["verdict"] == "fulfilled"
+    assert all(c["status"] != "fail" for c in result["checks"])
     assert result["is_behavioral_qualification"] is False
 
 
@@ -51,14 +51,6 @@ def test_payload_removal_fails_even_with_complete_conversation(record):
     record["ng_trajectory"]["model_calls"][0]["request"] = None
     assert verdict(record, "TE-4") == "not_fulfilled"
     assert verdict(record, "TE-7") == "not_fulfilled"
-
-
-def test_tool_request_is_not_execution(record):
-    record["ng_agent_observations"]["records"] = [
-        r for r in record["ng_agent_observations"]["records"] if r["kind"] != "tool_call"
-    ]
-    record["ng_trajectory"]["tool_calls"] = []
-    assert verdict(record, "TE-5") == "not_fulfilled"
 
 
 def test_cli_atomic_replay_and_exit_codes(record, tmp_path):
@@ -89,7 +81,7 @@ def test_missing_p0_steps_or_tools_cannot_pass(record):
     record["ng_agent_observations"]["records"] = [
         r for r in record["ng_agent_observations"]["records"] if r["kind"] != "tool_call"
     ]
-    result = inspect_record(hydrate_record(record))
+    result = inspect_record(record)
     assert result["verdict"] == "not_fulfilled"
     assert result["evidence"]["TE-3"]["verdict"] == "not_fulfilled"
     assert result["evidence"]["TE-5"]["verdict"] == "not_fulfilled"
@@ -102,7 +94,7 @@ def test_provider_omission_is_preserved_and_reported(record):
         c["token_stats"]["cached_tokens"] = c["token_stats"]["reasoning_tokens"] = None
         c["response"]["usage"].pop("input_tokens_details", None)
         c["response"]["usage"].pop("output_tokens_details", None)
-    result = inspect_record(hydrate_record(record))
+    result = inspect_record(record)
     assert result["evidence"]["TE-2"]["verdict"] == "fulfilled"
     assert result["token_availability"]["cached_tokens"]["available"] == 0
     assert result["token_availability"]["reasoning_tokens"]["available"] == 0
@@ -126,15 +118,17 @@ def test_tool_record_does_not_require_p1_clocks(record):
     assert verdict(record, "TE-5") == "fulfilled"
 
 
-def test_step_join_does_not_exempt_p0_invocation_ownership():
+def test_missing_call_ownership_fails_p1_without_blocking_p0():
     record = evidence_record()
     for inv in record["ng_trajectory"]["invocations"]:
         if inv["kind"] == "agent_invocation":
             inv["model_calls"] = []
-    result = inspect_record(hydrate_record(record))
+    result = inspect_record(record)
     assert result["evidence"]["TE-8"]["verdict"] == "not_fulfilled"
     assert result["evidence"]["TE-9"]["verdict"] == "fulfilled"
-    assert result["verdict"] == "not_fulfilled"
+    assert result["verdict"] == "fulfilled"
+    check = next(c for c in result["checks"] if c["id"] == "ownership.call_owner")
+    assert check["tier"] == "P1" and check["status"] == "fail"
 
 
 def test_duplicated_step_ref_fails_without_closure_requirement():
@@ -201,10 +195,10 @@ def test_binary_resolution_does_not_replace_reward(record):
 def test_canonical_only_delivery_does_not_require_capture_middleware():
     record = evidence_record()
     del record["ng_model_call_capture"]
-    assert inspect_record(hydrate_record(record))["verdict"] == "fulfilled"
+    assert inspect_record(record)["verdict"] == "fulfilled"
     for call in record["ng_trajectory"]["model_calls"]:
         call["started_at"] = call["completed_at"] = call["duration_ms"] = None
-    result = inspect_record(hydrate_record(record))
+    result = inspect_record(record)
     assert result["verdict"] == "not_fulfilled"
     assert any(f["assertion"] == "calls.timing" for f in result["findings"])
 
@@ -231,7 +225,7 @@ def test_turn_resolution_is_required_by_te3(record):
     turn = record["ng_trajectory"]["turns"][0]
     del turn["resolved"]
     TrajectoryTurn.model_validate(turn, strict=True)
-    result = inspect_record(hydrate_record(record))
+    result = inspect_record(record)
     assert result["evidence"]["TE-3"]["verdict"] == "not_fulfilled"
     assert any(f["assertion"] == "steps.resolution" for f in result["findings"])
 
@@ -244,7 +238,7 @@ def test_turns_do_not_need_copies_of_model_content(record, missing):
                 turn.pop(field, None)
             else:
                 turn[field] = None
-    result = inspect_record(hydrate_record(record))
+    result = inspect_record(record)
     for te in ("TE-3", "TE-4", "TE-7", "TE-9"):
         assert result["evidence"][te]["verdict"] == "fulfilled", result["findings"]
 
@@ -261,4 +255,4 @@ def test_optional_tool_fields_remain_required_by_te5(record, field):
 
 def test_invocations_can_be_supplied_at_trajectory_path(record):
     del record["ng_agent_observations"]
-    assert inspect_record(hydrate_record(record))["verdict"] == "fulfilled"
+    assert inspect_record(record)["verdict"] == "fulfilled"

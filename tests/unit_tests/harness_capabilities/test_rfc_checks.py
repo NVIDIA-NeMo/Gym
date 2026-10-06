@@ -12,7 +12,6 @@ from jsonschema import Draft202012Validator
 from nemo_gym.harness_capabilities.checker import EvidenceScope, Inspector, inspect_record
 from nemo_gym.harness_capabilities.checks import Check, SchemaCheck
 from nemo_gym.harness_capabilities.cli import inspect_bundle, main
-from nemo_gym.harness_capabilities.reader import hydrate_record
 from nemo_gym.harness_capabilities.results import Results
 from tests.unit_tests.harness_capabilities.synthetic import evidence_record
 
@@ -36,17 +35,11 @@ def item_schema(check_id):
 
 
 def inspect(record, *, require_sandbox=False):
-    return inspect_record(hydrate_record(record), scope=EvidenceScope(require_sandbox=require_sandbox))
+    return inspect_record(record, scope=EvidenceScope(require_sandbox=require_sandbox))
 
 
 def ids(result):
     return {c["id"] for c in result["checks"] if c["status"] == "fail"}
-
-
-def test_complete_fixture_passes_added_requirements():
-    result = inspect(evidence_record())
-    assert result["verdict"] == "fulfilled", result["findings"]
-    assert not ids(result)
 
 
 @pytest.mark.parametrize("field", ["started_at", "completed_at"])
@@ -217,7 +210,7 @@ def test_incomplete_or_blank_call_reference_fails_schema(ref):
 
 @pytest.mark.parametrize("response_reference", [False, True])
 def test_call_target_must_exist_in_the_same_saved_trajectory(response_reference):
-    record = hydrate_record(evidence_record())
+    record = evidence_record()
     if response_reference:
         for turn in record["ng_trajectory"]["turns"]:
             turn["model_calls"][0].pop("model_call_id")
@@ -238,7 +231,7 @@ def test_conflicting_supplied_call_identifiers_do_not_fall_back(field):
 
 @pytest.mark.parametrize("response_reference", [False, True])
 def test_ambiguous_canonical_call_reference_fails(response_reference):
-    record = hydrate_record(evidence_record())
+    record = evidence_record()
     trajectory = record["ng_trajectory"]
     if response_reference:
         trajectory["turns"][0]["model_calls"][0].pop("model_call_id")
@@ -249,8 +242,28 @@ def test_ambiguous_canonical_call_reference_fails(response_reference):
     assert "steps.call_target" in ids(inspect(record))
 
 
+@pytest.mark.parametrize("other_server", [True, False])
+def test_previous_response_lookup_is_scoped_to_model_server(other_server):
+    record = evidence_record()
+    trajectory = record["ng_trajectory"]
+    calls = trajectory["model_calls"]
+    calls[1]["request"]["previous_response_id"] = calls[0]["response_metadata"]["response_id"]
+    assert not ids(inspect(record))
+    other = copy.deepcopy(calls[0])
+    other["model_call_id"] = "another-call"
+    if other_server:
+        other["response_metadata"]["model_ref"]["name"] = "other-model"
+    calls.insert(1, other)
+    reference = {"model_call_id": other["model_call_id"]}
+    trajectory["invocations"][0]["model_calls"].append(reference)
+    turn = copy.deepcopy(trajectory["turns"][0])
+    turn.update(turn_no=3, step_count=3, model_calls=[reference])
+    trajectory["turns"].append(turn)
+    assert ids(inspect(record)) == (set() if other_server else {"content.previous_response"})
+
+
 def test_response_id_is_scoped_to_the_model_server():
-    record = hydrate_record(evidence_record())
+    record = evidence_record()
     trajectory = record["ng_trajectory"]
     trajectory["turns"][0]["model_calls"][0].pop("model_call_id")
     other = copy.deepcopy(trajectory["model_calls"][0])

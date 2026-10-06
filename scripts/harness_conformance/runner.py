@@ -16,10 +16,10 @@ from pathlib import Path
 import psutil
 
 from nemo_gym import harness_capabilities
-from nemo_gym.harness_capabilities.behavior import inspect_behavior, model_checks, tool_checks
+from nemo_gym.harness_capabilities.behavior import inspect_behavior
 from nemo_gym.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
 from nemo_gym.harness_capabilities.cli import inspect_bundle
-from nemo_gym.harness_capabilities.reader import digest_file, hydrate_record, json_rows
+from nemo_gym.harness_capabilities.reader import digest_file, json_rows
 from nemo_gym.harness_capabilities.results import gate_passes, render_matrices
 
 from .episode import HARNESSES
@@ -98,28 +98,14 @@ def run_process(command: list[str], *, directory: Path, timeout: float) -> dict:
     return {"returncode": proc.returncode, "timed_out": timed_out}
 
 
-def _tool_witness_issues(record: dict, witnessed: list[dict]) -> list[str]:
-    return [reason for c in tool_checks(record, witnessed) if c["status"] == "fail" for reason in c["reasons"]]
-
-
-def _canonical_witness_issues(record: dict, attempts: list[dict]) -> list[str]:
-    return [
-        reason
-        for c in model_checks(record, attempts, fingerprint=_fingerprint)
-        if c["status"] == "fail"
-        for reason in c["reasons"]
-    ]
-
-
 def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dict:
     """Keep artifact results, behavioral results and execution status independent."""
     witness_path = directory / "witness.json"
     witness = json.loads(witness_path.read_text()) if witness_path.exists() else None
     bundle = directory / "rollouts.jsonl"
     records = list(json_rows(bundle)) if bundle.exists() else []
-    raw = records[0][1] if len(records) == 1 else None
-    record = hydrate_record(raw) if raw is not None else None
-    scope = EvidenceScope(tools=scenario.tool_steps > 0, verifier=not scenario.terminal_error)
+    record = records[0][1] if len(records) == 1 else None
+    scope = EvidenceScope(tools=scenario.tool_steps > 0, verifier=not scenario.terminal_error, steps=scenario.steps)
     artifact = inspect_record(record, scope=scope)
     checks = artifact["checks"] + inspect_behavior(
         witness,
@@ -149,7 +135,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         "behavioral_status": "pass" if behavior_passed else "fail",
         "execution": execution,
         "delivery": "rollout"
-        if raw is not None
+        if record is not None
         else "failure_record"
         if (directory / "rollouts_failures.jsonl").exists() and (directory / "rollouts_failures.jsonl").stat().st_size
         else "missing",
@@ -249,7 +235,8 @@ def run_suite(
         "harnesses": rows,
         "limits": [
             "local harness runtime and controlled Chat/Responses model only; no remote sandbox qualification",
-            "TE-10, P1, multimodal, compaction, parallelism and deployment health are outside this suite",
+            "P1 ownership and call-to-step checks are reported but do not block P0",
+            "multimodal, compaction, parallelism and deployment health are outside this suite",
         ],
     }
     (output / "conformance_report.md").write_text(render_matrices(rows))

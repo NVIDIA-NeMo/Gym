@@ -8,7 +8,7 @@ from collections import Counter
 from collections.abc import Callable
 
 from .checks import BehavioralCheck
-from .results import CheckResult, Results
+from .results import Results
 
 
 def _mapping(value: object) -> dict:
@@ -282,11 +282,11 @@ def inspect_behavior(
             applies=not terminal_error,
         )
     )
-    for row in model_checks(record, attempts, fingerprint=fingerprint, available=available):
-        results.rows[row["id"]] = CheckResult(**row)
-    for row in tool_checks(record, tools, applies=tool_steps > 0, available=available):
-        results.rows[row["id"]] = CheckResult(**row)
-    return results.dump()
+    return (
+        results.dump()
+        + model_checks(record, attempts, fingerprint=fingerprint, available=available)
+        + tool_checks(record, tools, applies=tool_steps > 0, available=available)
+    )
 
 
 def model_checks(

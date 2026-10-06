@@ -13,11 +13,12 @@ import pytest
 from fastapi.testclient import TestClient
 from scripts.harness_conformance.episode import HARNESSES, _config
 from scripts.harness_conformance.provider import Probe
-from scripts.harness_conformance.runner import inspect_episode, main, run_process, run_suite
+from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS
 
 from nemo_gym.base_responses_api_model import build_model_call_record
-from nemo_gym.harness_capabilities.reader import hydrate_record, json_rows
+from nemo_gym.harness_capabilities.behavior import model_checks
+from nemo_gym.harness_capabilities.reader import json_rows
 from tests.unit_tests.harness_capabilities.synthetic import evidence_record
 
 
@@ -181,8 +182,7 @@ def test_verifier_records_actual_final_answer(tmp_path, name, reward):
 @pytest.fixture
 def retained_episode(tmp_path):
     # Contract fixture only: used to prove a green artifact cannot hide a missing live probe.
-    raw = evidence_record()
-    record = hydrate_record(raw)
+    record = evidence_record()
     calls = [
         {**c, "status_code": c["response_metadata"]["status_code"]} for c in record["ng_trajectory"]["model_calls"]
     ]
@@ -207,7 +207,7 @@ def retained_episode(tmp_path):
             {"request": c["request"], "response": c["response"], "status_code": c["status_code"]} for c in calls
         ],
     }
-    (tmp_path / "rollouts.jsonl").write_text(json.dumps(raw) + "\n")
+    (tmp_path / "rollouts.jsonl").write_text(json.dumps(record) + "\n")
     (tmp_path / "witness.json").write_text(json.dumps(witness))
     (tmp_path / "capture").mkdir()
     (tmp_path / "capture/0-0.capture.jsonl").write_text("".join(json.dumps(c) + "\n" for c in calls))
@@ -395,15 +395,17 @@ def test_interrupted_run_does_not_publish_completed_summary(tmp_path, monkeypatc
     assert not (output / "conformance_summary.json").exists()
 
 
+def failed_model_checks(record, attempts):
+    return {c["id"] for c in model_checks(record, attempts, fingerprint=_fingerprint) if c["status"] == "fail"}
+
+
 @pytest.mark.parametrize(
     "mutation", ["missing_calls", "response_id", "finish_reason", "prompt_tokens", "missing_tokens", "request_order"]
 )
 def test_canonical_behavioral_checks_use_the_independent_witness(retained_episode, mutation):
-    from scripts.harness_conformance.runner import _canonical_witness_issues
-
     directory, witness = retained_episode
     raw = json.loads((directory / "rollouts.jsonl").read_text())
-    assert _canonical_witness_issues(raw, witness["attempts"]) == []
+    assert not failed_model_checks(raw, witness["attempts"])
     call = raw["ng_trajectory"]["model_calls"][1]
     if mutation == "missing_calls":
         del raw["ng_trajectory"]["model_calls"]
@@ -415,33 +417,27 @@ def test_canonical_behavioral_checks_use_the_independent_witness(retained_episod
         del call["token_stats"]
     else:
         call["request"]["input"].reverse()
-    issues = _canonical_witness_issues(raw, witness["attempts"])
+    issues = failed_model_checks(raw, witness["attempts"])
     assert issues
-    assert any("canonical" in issue for issue in issues)
+    assert issues <= {"model.saved_exchanges", "model.response_metadata", "model.token_counts"}
 
 
 def test_canonical_error_response_cannot_invent_an_id():
-    from scripts.harness_conformance.runner import _canonical_witness_issues
-
     request = {"input": []}
     response = {"error": {"message": "prescribed HTTP 400"}}
     attempts = [{"request": request, "response": response, "status_code": 400}]
     metadata = {"status_code": 400, "response_id": None, "response_status": None, "finish_reason": None}
     call = {"request": request, "response": response, "response_metadata": metadata}
     record = {"ng_trajectory": {"model_calls": [call]}}
-    assert not _canonical_witness_issues(record, attempts)
+    assert not failed_model_checks(record, attempts)
     metadata["response_id"] = "invented"
-    assert _canonical_witness_issues(record, attempts) == [
-        "canonical response metadata differs from the independent endpoint witness"
-    ]
+    assert failed_model_checks(record, attempts) == {"model.response_metadata"}
 
 
 @pytest.mark.parametrize(
     "field", ["prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens", "cached_tokens"]
 )
 def test_canonical_omitted_usage_must_stay_unavailable(field):
-    from scripts.harness_conformance.runner import _canonical_witness_issues
-
     request = {"messages": [{"role": "user", "content": "hello"}]}
     response = {"id": "r", "object": "chat.completion", "created": 123, "choices": [{"finish_reason": "stop"}]}
     call = {
@@ -452,16 +448,12 @@ def test_canonical_omitted_usage_must_stay_unavailable(field):
     call["response"].pop("created")  # The documented Chat decoder exception.
     record = {"ng_trajectory": {"model_calls": [call]}}
     attempts = [{"request": request, "response": response, "status_code": 200}]
-    assert not _canonical_witness_issues(record, attempts)
+    assert not failed_model_checks(record, attempts)
     call["token_stats"] = {field: 0}
-    assert _canonical_witness_issues(record, attempts) == [
-        "canonical token counts differ from the independent endpoint witness"
-    ]
+    assert failed_model_checks(record, attempts) == {"model.token_counts"}
 
 
 def test_canonical_counts_cannot_be_swapped_between_calls(retained_episode):
-    from scripts.harness_conformance.runner import _canonical_witness_issues
-
     directory, witness = retained_episode
     record = json.loads((directory / "rollouts.jsonl").read_text())
     calls = record["ng_trajectory"]["model_calls"]
@@ -470,11 +462,9 @@ def test_canonical_counts_cannot_be_swapped_between_calls(retained_episode):
         call["token_stats"]["prompt_tokens"] = 10 + i
         witness["attempts"][i]["response"]["usage"]["input_tokens"] = 10 + i
         call["response"]["usage"]["input_tokens"] = 10 + i
-    assert not _canonical_witness_issues(record, witness["attempts"])
+    assert not failed_model_checks(record, witness["attempts"])
     calls[0]["token_stats"], calls[1]["token_stats"] = calls[1]["token_stats"], calls[0]["token_stats"]
-    assert _canonical_witness_issues(record, witness["attempts"]) == [
-        "canonical token counts differ from the independent endpoint witness"
-    ]
+    assert failed_model_checks(record, witness["attempts"]) == {"model.token_counts"}
 
 
 @pytest.mark.parametrize(
@@ -547,10 +537,10 @@ def test_scenario_gate_uses_individual_priority(retained_episode, monkeypatch, t
     assert result["verdict"] == verdict
     assert result["behavioral_status"] == "fail"
     assert result["evidence"] == {}
-    assert all(c["tier"] == "P0" for c in result["checks"] if c["id"] != "independent.test")
+    assert all(c["status"] in {"pass", "not_applicable"} for c in result["checks"] if c["id"] != "independent.test")
 
 
-def test_required_step_check_not_exempted_by_invocation_ownership(retained_episode):
+def test_p1_step_attribution_failure_does_not_block_scenario_p0(retained_episode):
     directory, _ = retained_episode
     bundle = directory / "rollouts.jsonl"
     record = json.loads(bundle.read_text())
@@ -560,7 +550,7 @@ def test_required_step_check_not_exempted_by_invocation_ownership(retained_episo
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
     assert result["evidence"]["TE-8"]["verdict"] == "fulfilled"
     assert result["evidence"]["TE-9"]["verdict"] == "not_fulfilled"
-    assert result["verdict"] == "not_fulfilled"
+    assert result["verdict"] == "fulfilled"
 
 
 @pytest.mark.parametrize("delivery", ["missing", "failure_record"])
@@ -573,7 +563,25 @@ def test_missing_rollout_fails_required_checks_and_preserves_exclusions(tmp_path
     assert checks["calls.outcome"]["reasons"][0].startswith("required input is unavailable")
     assert checks["tool_calls.present"]["status"] == "not_applicable"
     assert checks["evaluation.reward"]["status"] == "not_applicable"
+    assert checks["turns.present"]["status"] == "not_applicable"
+    assert checks["steps.attempt_accounting"]["status"] == "not_applicable"
     assert result["evidence"]["TE-1"]["verdict"] == "not_fulfilled"
     assert result["behavioral_status"] == "fail"
     assert result["delivery"] == delivery
     assert result["execution"]["returncode"] == 1
+
+
+@pytest.mark.parametrize("scenario_name", ["model_error", "retry_429", "retry_500"])
+def test_step_scope_is_declared_by_scenario_not_missing_turns(retained_episode, scenario_name):
+    directory, _ = retained_episode
+    bundle = directory / "rollouts.jsonl"
+    record = json.loads(bundle.read_text())
+    record["ng_trajectory"]["turns"] = []
+    bundle.write_text(json.dumps(record) + "\n")
+    result = inspect_episode(SCENARIO[scenario_name], directory, {"returncode": 0, "timed_out": False})
+    checks = {c["id"]: c for c in result["checks"]}
+    expected = "not_applicable" if scenario_name == "model_error" else "fail"
+    for check_id in ("turns.present", "steps.number", "steps.call_owner", "steps.attempt_accounting"):
+        assert checks[check_id]["status"] == expected
+    for check_id in ("calls.identity", "calls.timing", "calls.outcome", "ownership.call_owner"):
+        assert checks[check_id]["status"] != "not_applicable"

@@ -132,8 +132,9 @@ tree, including harnesses that start new process groups.
 Exit codes: **0** when all selected gates pass, **1** for evidence or scenario
 failures, and **2** for execution, dependency, input, or checker errors. Existing
 harness evidence gaps are expected to remain visible as failures. This suite
-covers the current P0 checks; multimodal content, compaction, parallelism,
-transport disconnects, TE-10 and P1 remain outside its qualification scope.
+covers P0 checks and reports P1 ownership and call-to-step checks without letting
+them block P0. Multimodal content, compaction, parallelism and transport disconnects
+remain outside its qualification scope.
 
 Run regression checks with:
 

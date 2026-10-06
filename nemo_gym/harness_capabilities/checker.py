@@ -472,6 +472,8 @@ class Inspector:
                     c
                     for c in self.calls[:index]
                     if _mapping(c.get("response_metadata")).get("response_id") == previous
+                    and _mapping(c.get("response_metadata")).get("model_ref")
+                    == _mapping(call.get("response_metadata")).get("model_ref")
                 ]
                 valid &= (
                     len(matches) == 1
@@ -541,7 +543,7 @@ class Inspector:
         self.results.run(
             SchemaCheck(
                 id="invocations.references",
-                tier="P0",
+                tier="P1",
                 evidence=("TE-8",),
                 location="$.ng_trajectory.invocations",
                 reason="required evidence does not match its schema",
@@ -663,7 +665,7 @@ class Inspector:
         self.results.run(
             SchemaCheck(
                 id="steps.references",
-                tier="P0",
+                tier="P1",
                 evidence=("TE-9",),
                 location="$.ng_trajectory.turns",
                 reason="required evidence does not match its schema",
@@ -886,7 +888,7 @@ class Inspector:
         self.results.run(
             SemanticCheck(
                 id="invocations.parent",
-                tier="P0",
+                tier="P1",
                 evidence=("TE-8",),
                 location="$.ng_trajectory.invocations[*].parent_invocation_id",
                 reason="parent invocation is missing, ambiguous or cyclic",
@@ -907,7 +909,7 @@ class Inspector:
         self.results.run(
             SemanticCheck(
                 id="ownership.call_target",
-                tier="P0",
+                tier="P1",
                 evidence=("TE-8",),
                 location="$.ng_trajectory.invocations[*].model_calls",
                 reason="call reference does not resolve uniquely with all supplied identifiers",
@@ -925,7 +927,7 @@ class Inspector:
         self.results.run(
             SemanticCheck(
                 id="ownership.call_owner",
-                tier="P0",
+                tier="P1",
                 evidence=("TE-8",),
                 location="$.ng_trajectory.invocations[*].model_calls",
                 reason="each saved call must have exactly one invocation owner",
@@ -947,7 +949,7 @@ class Inspector:
         self.results.run(
             SemanticCheck(
                 id="steps.compaction_target",
-                tier="P0",
+                tier="P1",
                 evidence=("TE-9",),
                 location="$.ng_agent_observations.records",
                 reason="compaction helper reference is invalid or unresolved",
@@ -971,7 +973,7 @@ class Inspector:
         self.results.run(
             SemanticCheck(
                 id="steps.call_target",
-                tier="P0",
+                tier="P1",
                 evidence=("TE-9",),
                 location="$.ng_trajectory.turns[*].model_calls",
                 reason="step call reference does not resolve uniquely with all supplied identifiers",
@@ -990,7 +992,7 @@ class Inspector:
         self.results.run(
             SemanticCheck(
                 id="steps.call_owner",
-                tier="P0",
+                tier="P1",
                 evidence=("TE-9",),
                 location="$.ng_trajectory.turns[*].model_calls",
                 reason="call ownership contradicts its step invocation",
@@ -1004,7 +1006,7 @@ class Inspector:
         self.results.run(
             SemanticCheck(
                 id="steps.attempt_accounting",
-                tier="P0",
+                tier="P1",
                 evidence=("TE-9",),
                 location="$.ng_trajectory.turns[*].model_calls",
                 reason="every policy attempt needs one step; compaction helper calls must remain separate",
@@ -1166,7 +1168,7 @@ class Inspector:
         self.results.run(
             SemanticCheck(
                 id="ownership.gap",
-                tier="P0",
+                tier="P1",
                 evidence=("TE-8",),
                 location="$.ng_trajectory.gaps",
                 reason="producer explicitly reports unavailable evidence",
@@ -1199,7 +1201,7 @@ class Inspector:
         self.results.run(
             SemanticCheck(
                 id="steps.accounting_gap",
-                tier="P0",
+                tier="P1",
                 evidence=("TE-9",),
                 location="$.ng_trajectory.gaps",
                 reason="producer explicitly reports unavailable evidence",

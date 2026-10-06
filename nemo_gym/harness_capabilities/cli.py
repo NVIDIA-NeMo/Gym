@@ -16,7 +16,7 @@ from string import ascii_letters, digits
 from . import __version__
 from .checker import NAMES, PROFILE, EvidenceScope, inspect_record
 from .contracts import SCHEMA_VERSION
-from .reader import digest_file, hydrate_record, json_rows
+from .reader import digest_file, json_rows
 
 
 def _json(value: object) -> str:
@@ -74,8 +74,7 @@ def inspect_bundle(
     count = 0
     try:
         with (temporary / "evidence_results.jsonl").open("w") as handle:
-            for line, raw in json_rows(bundle):
-                record = hydrate_record(raw, capture_dir=capture_dir)
+            for line, record in json_rows(bundle):
                 result = inspect_record(record, source=f"{bundle.name}:{line}", scope=scope)
                 count += 1
                 passing_records += result["verdict"] == "fulfilled"
@@ -124,7 +123,7 @@ def inspect_bundle(
                 "TE-6 checks shipped Gym reward/resolution; extended verifier provenance is not certified",
                 "sandbox rows are reported under TE-6; record presence is enforced only with require_sandbox",
                 "all applicable individual P0 checks must pass; TE labels only group results",
-                "no P1 or P2 checks are currently defined",
+                "P1 ownership and call-to-step checks are reported but do not block P0; no P2 checks are defined",
             ],
             **manifest,
         }
