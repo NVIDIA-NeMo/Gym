@@ -1,12 +1,12 @@
 ---
 title: "Run Multi-turn User Simulation with NeMo User Sim"
-description: "Evaluate an assistant on a committed NeMo User Sim validation task and inspect the rollout."
+description: "Generate NeMo User Sim validation tasks, evaluate an assistant, and inspect one rollout."
 position: 4
 ---
 
 <Info>
-**Goal:** Run one committed NeMo User Sim validation task with the assistant you want to evaluate, then confirm
-that the rollout contains a conversation and score.
+**Goal:** Generate the 14-task NeMo User Sim validation set, run one conversation with the assistant you want
+to evaluate, and confirm that the rollout contains a conversation and score.
 </Info>
 
 [NeMo User Sim](https://github.com/NVIDIA-NeMo/UserSim) supplies simulated users and conversation scenarios.
@@ -23,7 +23,7 @@ summaries, simulating selected tool results, and running probe-specific checks.
 
 ```mermaid
 sequenceDiagram
-    participant P as Committed validation data
+    participant P as Offline preparation
     participant C as Gym rollout collector
     participant E as Environment Server
     participant R as Resources Server
@@ -59,6 +59,19 @@ run commands from the repository root:
 source .venv/bin/activate
 ```
 
+NeMo User Sim samples personas from the extended Nemotron-Personas dataset on NGC. If `en_US` is not already
+cached under `~/.data-designer/managed-assets/datasets/`, configure the NGC CLI:
+
+```bash
+uvx --from "git+https://github.com/NVIDIA-NeMo/UserSim.git@a5f676bf6dc5a73914c8a0860f97c10dd2c214ee" \
+  usersim setup-ngc
+export NGC_CLI_API_KEY="<your-ngc-key>"
+```
+
+See the [NGC CLI installation guide](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#installing-ngc-catalog-cli)
+and [API key guide](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#ngc-api-keys) if setup needs
+manual credentials.
+
 Create or update `env.yaml` in the repository root:
 
 ```yaml
@@ -87,18 +100,26 @@ export POLICY_API_KEY="<your-api-key>"
 export SUPPORT_MODEL_API_KEY="<your-api-key>"
 ```
 
-## Inspect the validation tasks
+## Generate the validation tasks
 
-The validation split contains five committed synthetic tasks and requires no NGC credentials or preparation.
-The tasks cover general, educational, health-disclosure, and financial-services scenarios.
-
-Inspect the source rows:
+Run the environment's preparation script:
 
 ```bash
-wc -l environments/usersim/data/validation.jsonl
+python environments/usersim/prepare.py
+```
+
+The script runs the pinned NeMo User Sim materializer in an isolated dependency environment and writes
+`environments/usersim/data/usersim.jsonl`. Its 14 deterministic rows contain one task for each first-party
+probe. NeMo User Sim resolves the persona, scenario, tools, seed, trajectory identity, and provenance before
+rollout collection begins.
+
+Confirm that all probe tasks were generated and inspect them:
+
+```bash
+wc -l environments/usersim/data/usersim.jsonl
 jq '.resolved_row | {
   probe_type, trajectory_id, usersim_provenance, usersim_config
-}' environments/usersim/data/validation.jsonl
+}' environments/usersim/data/usersim.jsonl
 ```
 
 The Resources Server validates required fields and the pinned NeMo User Sim revision when it seeds a session.
@@ -165,37 +186,14 @@ jq '.invocations[]
 The smoke run is complete when the rollout contains alternating User and Assistant messages, a non-error
 verification object, and the expected `mask_sample` value.
 
-## Run the complete benchmark
+## Run all validation tasks
 
-The benchmark split materializes one task for each of NeMo User Sim's 14 first-party probes. Unlike the
-committed validation split, preparation samples personas from the extended Nemotron-Personas dataset on NGC.
-
-If `en_US` is not already cached under `~/.data-designer/managed-assets/datasets/`, configure the NGC CLI:
-
-```bash
-uvx --from "git+https://github.com/NVIDIA-NeMo/UserSim.git@a5f676bf6dc5a73914c8a0860f97c10dd2c214ee" \
-  usersim setup-ngc
-export NGC_CLI_API_KEY="<your-ngc-key>"
-```
-
-See the [NGC CLI installation guide](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#installing-ngc-catalog-cli)
-and [API key guide](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#ngc-api-keys) if setup needs
-manual credentials.
-
-Prepare the benchmark:
-
-```bash
-gym eval prepare --config environments/usersim/config.yaml
-wc -l environments/usersim/data/usersim.jsonl
-```
-
-Preparation writes 14 deterministic materialized rows to `environments/usersim/data/usersim.jsonl`. Run each
-task once:
+After the smoke rollout succeeds, remove `--limit 1` to run all 14 generated probe tasks:
 
 ```bash
 gym eval run \
   --environment usersim \
-  --split benchmark \
+  --split validation \
   --output results/usersim/all-probes.jsonl \
   --num-repeats 1 \
   +user_model_uses_reasoning_parser=false \
