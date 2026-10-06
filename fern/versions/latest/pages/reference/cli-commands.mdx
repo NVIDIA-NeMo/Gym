@@ -42,12 +42,15 @@ gym env validate              # validate a manifest-backed workload or legacy co
 gym env packages              # list packages in a server's virtual environment
 gym env test                  # run resources-server tests
 gym env publish               # finalize readiness and confirm registry discovery
+gym env prefetch              # pre-warm per-server venvs without starting servers
 gym env start                 # start the servers
 gym env status                # show running servers
+gym env schema                # print a resources server's task-data schema as JSON Schema
 
 # Evaluation
 gym eval prepare              # prepare benchmark data and dump it to disk
 gym eval run                  # collate data, start servers, and collect rollouts
+gym eval submit               # submit a benchmark job to Slurm
 gym eval aggregate            # merge sharded rollout results
 gym eval export               # export supported Gym trajectories as ATIF
 gym eval health-check         # verify rollout artifact quality for an existing run
@@ -660,6 +663,40 @@ NeMo Gym Server Status:
 3 servers found (3 healthy, 0 unhealthy)
 ```
 
+### `gym env prefetch`
+
+Pre-warm per-server venvs without starting any servers. Accepts the same config flags as `gym env start`. For each server in the config, creates its isolated venv and installs dependencies serially. Intended for use in Dockerfile builds so venvs are ready at runtime without network access.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--benchmark NAME` | Load the named benchmark config. Repeatable. |
+| `--environment NAME` | Load the named environment config. Repeatable. |
+| `--resources-server NAME` | Load the named resources server config. Repeatable. |
+| `--model-type NAME` | Load the named model-type config. |
+| `--agent-type NAME[/FLAVOR]` | Compose with the named agent harness. |
+| `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent or model type. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+
+```bash
+config_paths="responses_api_models/local_vllm_model/configs/local_vllm_model.yaml,\
+resources_servers/math/configs/math.yaml"
+gym env prefetch "+config_paths=[${config_paths}]"
+```
+
+### `gym env schema`
+
+Print a resources server's `TaskData` schema as JSON Schema. Exits non-zero if the server does not export a `task_data.py` schema.
+
+| Option | Description |
+| --- | --- |
+| `--resources-server NAME` | Resources server to inspect. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+
+```bash
+gym env schema --resources-server example_multi_step
+```
+
 ---
 
 ## Evaluation
@@ -786,6 +823,23 @@ How it works:
 <Warning>
 If you change the config, schema, or data between runs, the materialized inputs become stale and resume will diff against the old expansion. Delete the `*_materialized_inputs.jsonl` file (and the output file) to start fresh.
 </Warning>
+
+### `gym eval submit`
+
+Submit a benchmark evaluation job to Slurm via a submit config YAML file. Renders job scripts and calls `sbatch` for each benchmark defined in the config. Use `--dry-run` to preview the generated scripts without submitting.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH`, `-c PATH` | Submit config YAML file. Required. |
+| `--dry-run` | Print generated job scripts without submitting. |
+| `--resolve-only` | Resolve and validate the config, print it, and stop before rendering job scripts or submitting anything. |
+| `--json` | Emit the submission record (or, with `--resolve-only`, the resolved config) as JSON. |
+
+```bash
+gym eval submit --config submit.yaml
+gym eval submit --config submit.yaml --dry-run
+gym eval submit --config submit.yaml --resolve-only --json
+```
 
 ### `gym eval aggregate`
 
