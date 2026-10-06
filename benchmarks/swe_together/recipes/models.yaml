@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Independent model routes: the candidate cannot select simulator or judge models.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:POLICY_BASE_URL,https://openrouter.ai/api/v1}
+      api_key: ${oc.env:POLICY_API_KEY}
+      model: ${oc.env:POLICY_MODEL,openai/gpt-5.5}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      uses_interleaved_reasoning: true
+
+swe_together_simulator_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:SIMULATOR_BASE_URL,https://openrouter.ai/api/v1}
+      api_key: ${oc.env:SIMULATOR_API_KEY}
+      model: ${oc.env:SIMULATOR_MODEL,google/gemini-3.1-pro-preview}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      uses_interleaved_reasoning: true
+
+swe_together_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:JUDGE_BASE_URL,https://openrouter.ai/api/v1}
+      api_key: ${oc.env:JUDGE_API_KEY}
+      model: ${oc.env:JUDGE_MODEL,anthropic/claude-opus-4.6}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      uses_interleaved_reasoning: true
+
+swe_together_interaction_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:INTERACTION_BASE_URL,https://openrouter.ai/api/v1}
+      api_key: ${oc.env:INTERACTION_API_KEY}
+      model: ${oc.env:INTERACTION_MODEL,google/gemini-3.1-pro-preview}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      uses_interleaved_reasoning: true
+

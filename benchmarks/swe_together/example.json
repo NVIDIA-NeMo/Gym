@@ -1,0 +1,18 @@
+{
+  "task_id": {
+    "taskset": "swe_together:full109",
+    "task_id": "agent-swarm-task-4a881b"
+  },
+  "task_input": {
+    "task_data": {
+      "task_id": "agent-swarm-task-4a881b",
+      "image": "ghcr.io/togetherbench/multi-user-turn-codebench/agent-swarm-task-4a881b:a61b000174ea",
+      "image_digest": "sha256:db8576eb44d3b82c9cb7f0173c9f749702f565a2fd82689d0c587a8aa0dbd959",
+      "workdir": "/workspace/agent-swarm",
+      "source_revision": "891d19eb4b3a64a47c3d49bbd066a311e0133254"
+    }
+  },
+  "responses_create_params": {
+    "input": []
+  }
+}

@@ -1,0 +1,547 @@
+{
+  "agent-swarm-task-4a881b": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/agent-swarm-task-4a881b:a61b000174ea",
+    "image_digest": "sha256:db8576eb44d3b82c9cb7f0173c9f749702f565a2fd82689d0c587a8aa0dbd959",
+    "workdir": "/workspace/agent-swarm"
+  },
+  "agent-swarm-task-ea4bd8": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/agent-swarm-task-ea4bd8:89fefa93d453",
+    "image_digest": "sha256:b7a2d509a9e6db9464bc48659b03e24437cd135eadea395d779a6d18b6b69571",
+    "workdir": "/workspace/agent-swarm"
+  },
+  "amytis-task-e3714e": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/amytis-task-e3714e:7bb742c4913c",
+    "image_digest": "sha256:393a212a05a07b64a63d0e4be04ad0f3ab40a45bf39299e0fd38af14ec1f0154",
+    "workdir": "/opt/amytis"
+  },
+  "arr-monitor-add-processes-flag": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/arr-monitor-add-processes-flag:b58fd5d9f425",
+    "image_digest": "sha256:d948c80d7bbd9be3ff083ce4738c76f63306d2c422929047c36e6bf3b0d38d2a",
+    "workdir": "/workspace"
+  },
+  "banodoco-video-perf-optimize": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/banodoco-video-perf-optimize:f53faec2ec3d",
+    "image_digest": "sha256:3da93f050be5a4ee140b746b2741649224599b0569e17ce49bcc3c33c00ec114",
+    "workdir": "/workspace/banodoco-wrapped"
+  },
+  "cli-fix-2026-0": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-fix-2026-0:fd49029246bc",
+    "image_digest": "sha256:53aca6b4c0d40849c53eadc9a814749d3356fb5b67397a283db062c1b17c7af4",
+    "workdir": "/workspace/repo"
+  },
+  "cli-task-0ec2e9": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-0ec2e9:6ed0e06f6418",
+    "image_digest": "sha256:12618ce133e90399b9c169318c6fd4f00ead3e523cafad2f1c9c28e924d38b92",
+    "workdir": "/workspace/repo"
+  },
+  "cli-task-19def0": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-19def0:fada3895dc9e",
+    "image_digest": "sha256:47209e23b62fcc3951b3c15d9af71e57d930347f92b616d82f1c28a9952ad656",
+    "workdir": "/workspace/repo"
+  },
+  "cli-task-2026-0": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-2026-0:a2b84fdb3743",
+    "image_digest": "sha256:381d3f7c1366bcfd41b55f462461beea092de720a2d23244d2daf40916485ac1",
+    "workdir": "/repo"
+  },
+  "cli-task-2a55af": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-2a55af:0ac3161c57d4",
+    "image_digest": "sha256:073866c71dede83189f975c4374959a4089a59fab7b08a8e11c047a6a47f20e5",
+    "workdir": "/workspace/repo"
+  },
+  "cli-task-2c3e30": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-2c3e30:e406049b02e4",
+    "image_digest": "sha256:283813bc8c4a926849054b1ddc7971154c70429d6f6b41cdf5ff2b65e310a4ad",
+    "workdir": "/workspace/repo"
+  },
+  "cli-task-2f5833": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-2f5833:0789fc66ad45",
+    "image_digest": "sha256:2de0bf0034df6c45772d74b803a9f53f7c1ee635bc01dd2f95f17e935704f6b3",
+    "workdir": "/workspace/cli"
+  },
+  "cli-task-30159a": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-30159a:bebe38000b0e",
+    "image_digest": "sha256:91ef0548941d0ce4a61e6a41474b1a33a093246033abfb9534065d04b8714398",
+    "workdir": "/workspace/cli"
+  },
+  "cli-task-32ba47": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-32ba47:3dacce59b4b1",
+    "image_digest": "sha256:356953c94355d804bb6589e13321675ba279eb5f48f3ed67160cb712b03a6e2c",
+    "workdir": "/workspace/cli"
+  },
+  "cli-task-33e050": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-33e050:1f1ce1c7e95c",
+    "image_digest": "sha256:730a1083560bc2f68c2efe5195217fbe3edcf25d6e9e9e4b3d86356e3c842e89",
+    "workdir": "/workspace/cli"
+  },
+  "cli-task-408b8c": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-408b8c:c029f07bcf28",
+    "image_digest": "sha256:93a5d541e0fa8677d954224f464588436a35e5949cc13bfc029fd0f1cf00cc30",
+    "workdir": "/workspace/entireio-cli"
+  },
+  "cli-task-4a9dde": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-4a9dde:5ea41ab5fbe4",
+    "image_digest": "sha256:80cea24ada80509c90d4ef0918b675bcce3c82184517645e181bdd5019908467",
+    "workdir": "/opt/entire-cli"
+  },
+  "cli-task-577e8c": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-577e8c:051d957e244e",
+    "image_digest": "sha256:5575b2917cc9f5e85ef129d4f7c478f19bd0bb3527c61dcc77a7738fd0d3db5e",
+    "workdir": "/app"
+  },
+  "cli-task-5a69ca": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-5a69ca:fdfd6bb3e5d6",
+    "image_digest": "sha256:fe1ed31b84cf19a1b268158418e8253a2702f049ff9eda748a609f1edd2c18c0",
+    "workdir": "/workspace/cli"
+  },
+  "cli-task-70c88c": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-70c88c:5fd32261159e",
+    "image_digest": "sha256:e426efcc0dafaf8880a43bf0b8bfadc316b385d1085b726bb254c701907b807a",
+    "workdir": "/workspace/cli"
+  },
+  "cli-task-726de6": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-726de6:405d2853941d",
+    "image_digest": "sha256:5190ddbfed0152a9c840070da958f472a439c2e02b6a35a8e7d8617dce4760c2",
+    "workdir": "/repo"
+  },
+  "cli-task-aa4038": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-aa4038:260e5ccc383f",
+    "image_digest": "sha256:835f88b248985b2d7450f795ce3fb18c7876e6c969a102a3f29d173edebb3b2a",
+    "workdir": "/workspace/cli"
+  },
+  "cli-task-b12319": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-b12319:4c87e5af172d",
+    "image_digest": "sha256:60c54339c810c5ac8d6c987417212fca4c5d66d960a4953be99a06fedeb30051",
+    "workdir": "/workspace/cli"
+  },
+  "cli-task-b3d2dd": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-b3d2dd:bce1928b044e",
+    "image_digest": "sha256:7034a7edd0ea63d84a9a7ec669308170a42ff43c1231fe87770f360b56366eba",
+    "workdir": "/workspace/cli"
+  },
+  "cli-task-c01017": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-c01017:a0ccc813c731",
+    "image_digest": "sha256:003c6401ff340540259cff4408e9b081df0a6f3f8fe6984ab45d2211a8ed82ae",
+    "workdir": "/workspace/repo"
+  },
+  "cli-task-c425e4": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-c425e4:3e8123ad47db",
+    "image_digest": "sha256:6326e7ea4c43fbbfa900a0f17020db72ccf977e46c84439e593e1c9fa4da0646",
+    "workdir": "/opt/cli"
+  },
+  "cli-task-c4c7e9": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-c4c7e9:9e15b6fc751f",
+    "image_digest": "sha256:a83b0a3ea131b1b868bc81f737dbfa228599b825517889cd799096cafbef0f9c",
+    "workdir": "/workspace/repo"
+  },
+  "cli-task-cd4662": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-cd4662:4a4fba8cb0d3",
+    "image_digest": "sha256:160efd308292e3ebb146df54632f7e3088c4185612002a5e3218421903ea3c9b",
+    "workdir": "/entire-cli"
+  },
+  "cli-task-cf32cb": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-cf32cb:ee3b130d3543",
+    "image_digest": "sha256:d6a97466c01348c2c0618cd3f608b0890dd7ff6145d98e006d85e4e06ed46178",
+    "workdir": "/workspace/cli"
+  },
+  "cli-task-dbd2bf": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-dbd2bf:93bc76805483",
+    "image_digest": "sha256:485956be494302237557ff19e2ef9803b9c3b547020f0268e39dd02071666446",
+    "workdir": "/repo/cli"
+  },
+  "cli-task-e5813e": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-e5813e:fa7ccfab64f4",
+    "image_digest": "sha256:ab6094573c94db671c515b5073d95b2b5174bb201cc91cebd274b9988eb8194c",
+    "workdir": "/home/agent/cli"
+  },
+  "cli-task-ea3f8f": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/cli-task-ea3f8f:9c2dc39e418f",
+    "image_digest": "sha256:233e8fc8841c420dfdbdb39c43fcee5035635a34f649e4f549750115ff0ea4ac",
+    "workdir": "/workspace/cli"
+  },
+  "comfyui-gemma3-sliding-window": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/comfyui-gemma3-sliding-window:e1932271906b",
+    "image_digest": "sha256:22abf84f21e4674385932bbd652352f232242516bc500481f43f1dee39e77f01",
+    "workdir": "/workspace/ComfyUI"
+  },
+  "comfyui-jina-clip-v2-full": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/comfyui-jina-clip-v2-full:7a7243f22b21",
+    "image_digest": "sha256:cdb19cdead12f804a08235d90cab89b97777a990abeba4395721a88b41cf75bd",
+    "workdir": "/workspace/ComfyUI"
+  },
+  "comfyui-lumina-axes-lens": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/comfyui-lumina-axes-lens:fb400717fa73",
+    "image_digest": "sha256:f9ef79c6bcf02a007b29762682b04469c7d49b89e4b405a11aacfa92f1be0b92",
+    "workdir": "/workspace/ComfyUI"
+  },
+  "comfyui-lumina2-lora-prefix": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/comfyui-lumina2-lora-prefix:d66fbfdb00fe",
+    "image_digest": "sha256:48d1c0d258715958a9fbe0614ecaab7ad24d71adb2d7a6a7bffe5cba6e255c60",
+    "workdir": "/workspace/ComfyUI"
+  },
+  "comfyui-newbie-lumina-refactor": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/comfyui-newbie-lumina-refactor:10ef82337c10",
+    "image_digest": "sha256:d4587d62db943ec43ae9204c282c80c9981042406314ad57408cb1b6ecbd15d9",
+    "workdir": "/workspace/ComfyUI"
+  },
+  "comfyui-triton-windows-amd-fix": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/comfyui-triton-windows-amd-fix:ccb61262648c",
+    "image_digest": "sha256:c7e0c23651e1459ed21e04bf593ac465c42e6a8da3fa1998925a7b35c3fcdc53",
+    "workdir": "/workspace/ComfyUI"
+  },
+  "dataclaw-anonymizer-tests": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/dataclaw-anonymizer-tests:8f629b1548d9",
+    "image_digest": "sha256:9d5800cd16565b21ecc0ba173018db4149f12f86e3f2345f5bf167c76f647d1a",
+    "workdir": "/workspace/repo"
+  },
+  "dataclaw-test-coverage-fix": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/dataclaw-test-coverage-fix:f51d94835007",
+    "image_digest": "sha256:8df723ac9113479827860a2b97b37ee682c363e48506bba6d99845fbd1c6c8fb",
+    "workdir": "/workspace/dataclaw"
+  },
+  "dataclaw-windows-path-fix": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/dataclaw-windows-path-fix:13923376d0ee",
+    "image_digest": "sha256:2e418e268d482aed21b25b8dbe7ee323ec57e35cf04d84bbf56aea0c7c318ba4",
+    "workdir": "/workspace/repo"
+  },
+  "desloppify-treesitter-plugins": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/desloppify-treesitter-plugins:dc6c18d03693",
+    "image_digest": "sha256:8c3fbd543d01bedd5a7088c6d4a5c8b590fc9450ca4dd88c2499b1f815dc1662",
+    "workdir": "/workspace/desloppify"
+  },
+  "desloppify-zone-classification": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/desloppify-zone-classification:d9e3ae10a8f3",
+    "image_digest": "sha256:55abf68a111458c0864204bc0aabe5d0c1dc10df36931338fad1faabedff8ce9",
+    "workdir": "/workspace/desloppify"
+  },
+  "gemini-voyager-task-16a5c7": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/gemini-voyager-task-16a5c7:d32423970f67",
+    "image_digest": "sha256:43681f0e0cf23972663a73bc80ec837ecd189752ef88b57303b32e9eebfc1294",
+    "workdir": "/opt/gemini-voyager"
+  },
+  "gemini-voyager-task-4a5730": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/gemini-voyager-task-4a5730:5f43e6b11a86",
+    "image_digest": "sha256:e7f219ce54968f3888e6fba0e6253e2de6e0677ef397c7f409d3cdea4923dcb7",
+    "workdir": "/workspace/repo"
+  },
+  "gemini-voyager-task-4bddaf": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/gemini-voyager-task-4bddaf:b39e9c437976",
+    "image_digest": "sha256:cee5da26a0d1417400dda2d7cbc97d39e86dde5c5e8c1136ee643f59599eb5dc",
+    "workdir": "/workspace/repo"
+  },
+  "gemini-voyager-task-64c72f": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/gemini-voyager-task-64c72f:ba9b58d0322f",
+    "image_digest": "sha256:2ef03183cb501fbd8f13274bfcb520e195fe949bab25980482f47492131c0eec",
+    "workdir": "/app"
+  },
+  "gemini-voyager-task-72a86c": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/gemini-voyager-task-72a86c:a8e299a15e3e",
+    "image_digest": "sha256:a80f2edd7b502db50c7f77aea01ca37f5b5d75065591e329d9428b0258b76962",
+    "workdir": "/workspace/gemini-voyager"
+  },
+  "gemini-voyager-task-aa88f5": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/gemini-voyager-task-aa88f5:e9181822ed24",
+    "image_digest": "sha256:24073f3070448ffb36f4e553649557f2d699e38d5cbb8b9163d03ca21565e0a4",
+    "workdir": "/workspace/gemini-voyager"
+  },
+  "gemini-voyager-task-c5c01d": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/gemini-voyager-task-c5c01d:7158c25074b5",
+    "image_digest": "sha256:c501394ca2f0d146374e8f7641fad2a5a27623af7c166c8cbc57c9078bcf4ce9",
+    "workdir": "/workspace/repo"
+  },
+  "gemini-voyager-task-f519c2": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/gemini-voyager-task-f519c2:b4d21738414c",
+    "image_digest": "sha256:a6fd84d47e86f6cfba2cb8b5709dd4728c169b2e9227c3a24c8d7164c6715e29",
+    "workdir": "/opt/gemini-voyager"
+  },
+  "hyperswitch-8008": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/hyperswitch-8008:9fe5ac8a55b9",
+    "image_digest": "sha256:6cb902e7672353ee9d4e98931a47191b19402a3f5360e17984abc25ea42c6402",
+    "workdir": "/workspace/hyperswitch"
+  },
+  "hyperswitch-8084": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/hyperswitch-8084:4d27613167a4",
+    "image_digest": "sha256:f3f6da3cfe7523aadebeefee282e902deef6292606c19d0cd7760e85d6d24a82",
+    "workdir": "/workspace/hyperswitch"
+  },
+  "hyperswitch-8338": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/hyperswitch-8338:8ff821b95f1a",
+    "image_digest": "sha256:afab8028da4546c4571fb1ecf39ff99570d772218839e2bf9f8c1b541298fd4d",
+    "workdir": "/workspace/hyperswitch"
+  },
+  "hyperswitch-8377": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/hyperswitch-8377:b71a4463b2a7",
+    "image_digest": "sha256:3007ad54289158a9ae002b1fae843051f37a58c060636c531f5d18114181e266",
+    "workdir": "/workspace/hyperswitch"
+  },
+  "hyperswitch-8389": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/hyperswitch-8389:3ce2a32f825c",
+    "image_digest": "sha256:907186177ef89f9adca0a4e398ff55e8098b09cb545f098cb04742516a0fde1d",
+    "workdir": "/workspace/hyperswitch"
+  },
+  "hyperswitch-9063": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/hyperswitch-9063:27bb883c9006",
+    "image_digest": "sha256:af5fcf0d2aeae19cdcbd719d0992dc00dab072a220ee64f81c29af5ffd8d36ad",
+    "workdir": "/workspace/hyperswitch"
+  },
+  "hyperswitch-9430": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/hyperswitch-9430:4588ace3c9a9",
+    "image_digest": "sha256:e2f01be0775544f78b3efd30335365031c3ac1e75e12419ce178004ba836adee",
+    "workdir": "/workspace/hyperswitch"
+  },
+  "hyperswitch-9437": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/hyperswitch-9437:3dc6ccc1069b",
+    "image_digest": "sha256:4971c22665fed063cf7e59dada2b67c4b515166c570c46ae2ee25b39ea09245c",
+    "workdir": "/workspace/hyperswitch"
+  },
+  "hyperswitch-9465": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/hyperswitch-9465:2937634b1e2b",
+    "image_digest": "sha256:c138f880113e55224f4b76dc525c7942fb8d6b93f4de11f559ada1a675e44c33",
+    "workdir": "/workspace/hyperswitch"
+  },
+  "light-protocol-implement-7adad1": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/light-protocol-implement-7adad1:b066eeb2e535",
+    "image_digest": "sha256:083b6135f8cb9c067c0e1b1a90c2e733a2b19ec00d21a8a98069bc8c603ee692",
+    "workdir": "/home/user/light-protocol"
+  },
+  "lock-code-manager-fix-7c955a": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/lock-code-manager-fix-7c955a:12a0f58f0525",
+    "image_digest": "sha256:b480a07a68e4eca890fb7679981f296ef09c53f70f7f41a905be2d5021ef4e71",
+    "workdir": "/workspace/lock_code_manager"
+  },
+  "mlx-lm-mambacache": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/mlx-lm-mambacache:3b821508ab77",
+    "image_digest": "sha256:1e7526f0f996c039084522d678599601e26c8c2787867d4dbb1b5709ecfafec9",
+    "workdir": "/workspace/mlx-lm"
+  },
+  "no-magic-task-ce67d5": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/no-magic-task-ce67d5:4aeba6c69416",
+    "image_digest": "sha256:6dbd2de3a04907e7fd4cd133f3196f8ad29195eea85ae3e8a2f53f443f15498b",
+    "workdir": "/home/user/no-magic"
+  },
+  "nunchaku-quantize-bugfix": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/nunchaku-quantize-bugfix:2155d05c5dc7",
+    "image_digest": "sha256:dbc0b289bcd52adf0685f6e34cc0e06ecb03220895e626fcbecce015e1223a55",
+    "workdir": "/workspace"
+  },
+  "nunchaku-svdq-reconstruction": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/nunchaku-svdq-reconstruction:87ea30aaf3d2",
+    "image_digest": "sha256:52f9bafa9e9322c1b6fb6517dddeff76f0d3f4f568ce609da5690c0adfff4bb3",
+    "workdir": "/workspace"
+  },
+  "openclaw-security-review-flow": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/openclaw-security-review-flow:2fb9b64200da",
+    "image_digest": "sha256:683de41e90fb2cdbd1bd126dae82d4caa6d9b62c37d361a51168abaf94921c57",
+    "workdir": "/workspace/openclaw"
+  },
+  "pi-mono-auto-0467b78e": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-0467b78e:68247cfbd78f",
+    "image_digest": "sha256:27a75505ecb66aa55c2bd88a6dd4fad80e30d093c3ced7ea572b0676321c7797",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-0750e8eb": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-0750e8eb:98f2cb46fa0a",
+    "image_digest": "sha256:a8efdb6e8ea1dfbf2eda2ed00cf8205e9cd258b592f0185e6c610e2668a84df0",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-0fa6d7bd": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-0fa6d7bd:ff40aad0fd99",
+    "image_digest": "sha256:6958359484863660fd0dfe99f73890c050a6d07dd6b69a6f4a8398bd02e2b5a6",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-1b58dd4f": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-1b58dd4f:80cd550859bd",
+    "image_digest": "sha256:4ea346733b1939e004ea37204ef7f497099ae53d8b671a59f08935d9bec4e5ca",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-41636ae5": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-41636ae5:07887dc26b26",
+    "image_digest": "sha256:a5d086f913eca1c2ee1444d21393eaf9af6d216faf9705cfc0190f4be6ad1bd9",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-4439324b": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-4439324b:8fed93e434a7",
+    "image_digest": "sha256:16f74f662958cf5223beffef3d69af2a1eb0a17e1e84f6b307e68b51cd9d3990",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-6f8288bb": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-6f8288bb:ec87a685b3fd",
+    "image_digest": "sha256:074117c856a6c4ffd2a3191b8ce2062f9ee3484440fd2c6db14cd7b0fa6fd005",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-90748a5d": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-90748a5d:8f0e90291656",
+    "image_digest": "sha256:20f354e012a4f47f22809a229c777e42dea31e7dfa29e37f4c3b81e2105bd2e5",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-93c17d3b": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-93c17d3b:2f7d1992e60d",
+    "image_digest": "sha256:4805e21fa2f3d38ed5dacc320ec0400b3fd402194051124b3a8a85cf826455fa",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-95de1efe": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-95de1efe:6c45cafb4ac4",
+    "image_digest": "sha256:1e727c5254de49e47395e70153e735f2906af8ff803632c926d3172c1bde270f",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-a4fca584": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-a4fca584:d1a6ee81ebeb",
+    "image_digest": "sha256:24df21b472314647843bab5009a4f5b443a129e7bd42904936e0176277bf8148",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-cad40af4": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-cad40af4:4d8a2b60979e",
+    "image_digest": "sha256:37ffd868d3ac1211929671bb6303795f8a3eb581b1d0605289d7b79ea790d844",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-cbb62cbe": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-cbb62cbe:1123fd95daf1",
+    "image_digest": "sha256:65b9ac982d67aaa1b4c351c8ed6d51831894940830b081829b80c2fcb350932d",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-d3b2130d": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-d3b2130d:c156882a1c0a",
+    "image_digest": "sha256:06a5e30066076d92b6f1ba8d8a7da8f78dce9dfbf2cb10ac97bb0d362fdd49ae",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-d8c68afc": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-d8c68afc:4b446119fc45",
+    "image_digest": "sha256:5d2f580f6e268deaa12410e3b05e99d376823b6ae918cafe3eece2da984216d9",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-e86a388c": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-e86a388c:d53eec149eab",
+    "image_digest": "sha256:ffc221ddac0c4150b9f27e8c72d0d15aea9839bb4c70b4bb3902545d3b314866",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-ec7037ba": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-ec7037ba:0d1c2a669853",
+    "image_digest": "sha256:dfb7165854acc4f3425a2aa5fb7a9e2f3cac9a9d6806ce8f878a1437aab35fd8",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-auto-fcb17499": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-auto-fcb17499:58309da15d8b",
+    "image_digest": "sha256:2744d38a2f4804ce42f070348dce8ffd1c09c6cc26c3aae6bf356e20efda80a6",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-extensions-event-refactor": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-extensions-event-refactor:a0bfa0e501e9",
+    "image_digest": "sha256:3dee07a4e188085a6e274d904ad6333de6ea14cd3c329bdd3311ba9ce3d55fb8",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-foreign-toolcall-fix": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-foreign-toolcall-fix:8fed93e434a7",
+    "image_digest": "sha256:0882c95f837b1f8841c6dec2e87726e5bbf29bfc52790ef6d10526bf5fa951c6",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-keybinding-scope": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-keybinding-scope:cfaff329f963",
+    "image_digest": "sha256:814bb82c79632f994dfd76691c15d603e85e935530d31dd8405e6ef935977ae5",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-parallel-tool-stall": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-parallel-tool-stall:7b3d676128f0",
+    "image_digest": "sha256:a2c2ef8ecb16789649526e31cc29fb6736eb3dacf6d71aa07f3ae4bce24094b1",
+    "workdir": "/workspace/pi-mono"
+  },
+  "pi-mono-tool-execution-write-error": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/pi-mono-tool-execution-write-error:a24ed80196fc",
+    "image_digest": "sha256:75f6b7081bd217b115ab616b3909ca3c848658da51a1029e3c42196c3cb227a5",
+    "workdir": "/workspace/pi-mono"
+  },
+  "qwen3-moe-gguf-dequant": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/qwen3-moe-gguf-dequant:0729ed0c61c3",
+    "image_digest": "sha256:6d0adbae1b2b959135fbb3fc6bf3ac321a01f8cdb00a4dc7b2128de2662e37d1",
+    "workdir": "/workspace"
+  },
+  "reigh-medialightbox-refactor": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/reigh-medialightbox-refactor:c0fdb255071e",
+    "image_digest": "sha256:3648d999b05745e49fa6dd41599ee643e4a3f66e0a5af59a3c8ee9a02ce6574c",
+    "workdir": "/workspace/repo"
+  },
+  "reigh-preset-data-flow": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/reigh-preset-data-flow:7c7d9842c79d",
+    "image_digest": "sha256:0057af61f248848255ac77e069b94cd437cbe2f7912de45cfd9dc9e0fe8b2ffd",
+    "workdir": "/workspace/repo"
+  },
+  "reigh-radix-props-cleanup": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/reigh-radix-props-cleanup:f09120df36ad",
+    "image_digest": "sha256:5ea3d40bf56fba31c0e70c3924f263b6e4d4d5a19b47659acf82b149e44569cc",
+    "workdir": "/workspace/repo"
+  },
+  "reigh-stroke-overlay-refactor": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/reigh-stroke-overlay-refactor:383e9c739d6e",
+    "image_digest": "sha256:825e7170eb584a9d2ebbf24c05100f15e86066c8b63cd4a6312c0531133357f4",
+    "workdir": "/workspace/repo"
+  },
+  "reigh-taskspane-lightbox-bug": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/reigh-taskspane-lightbox-bug:9e5d769cd1d0",
+    "image_digest": "sha256:881005cd116972ffa23c354e417ea53d9240201b80325adb18698a7a63d6e3ef",
+    "workdir": "/workspace/repo"
+  },
+  "reigh-timeline-mode-cleanup": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/reigh-timeline-mode-cleanup:f5770f4bb70e",
+    "image_digest": "sha256:627be7200ca26864e579afd4bb38b5dca17b1d13823f764ec52ab31267a99618",
+    "workdir": "/workspace/repo"
+  },
+  "reigh-timeline-multiselect": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/reigh-timeline-multiselect:dd1c6dc7158b",
+    "image_digest": "sha256:e269890d2ddb4dbfecb65a0b9e8730d5c129fa1f544ac335833c2520b2e3237a",
+    "workdir": "/workspace/repo"
+  },
+  "rudel-task-468289": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/rudel-task-468289:e9da8d0e98fb",
+    "image_digest": "sha256:21a46a4d39e67d854c06f80bba1fd53cda51708166bb8976e6961380ed411ddd",
+    "workdir": "/workspace/rudel"
+  },
+  "rudel-task-491983": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/rudel-task-491983:6ccd2430a828",
+    "image_digest": "sha256:7be37080c08c07acdef27753a29b7a03f0fb7c5dfe8d5c46b2ead4b18d07ade3",
+    "workdir": "/workspace/rudel"
+  },
+  "rudel-task-8e0bd6": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/rudel-task-8e0bd6:8480c44e7c51",
+    "image_digest": "sha256:bb090458b7194b08494bf6aa01f682ee6c2a417aea0313193d4e7a9145043f55",
+    "workdir": "/workspace/rudel"
+  },
+  "rudel-task-d1ddb8": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/rudel-task-d1ddb8:3e5a0468565f",
+    "image_digest": "sha256:9fb42e0113bd47beccf3277839e4f89d2e98b20060ea3b7143605d00047a98f1",
+    "workdir": "/workspace/rudel"
+  },
+  "sd-scripts-fp8-lumina": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/sd-scripts-fp8-lumina:a6e2437846b5",
+    "image_digest": "sha256:abee10577d3e3b671e295376917d9596d610387cafb1cac1f32aa95071410f0e",
+    "workdir": "/workspace/sd-scripts"
+  },
+  "sd-scripts-multiresolution-compat": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/sd-scripts-multiresolution-compat:557d151751f1",
+    "image_digest": "sha256:7fcd8d15591ad1e58680441994af767d252664c612ceccdf3426276891a46bde",
+    "workdir": "/workspace/sd-scripts"
+  },
+  "sd-scripts-reg-image-dedup": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/sd-scripts-reg-image-dedup:e34557c087de",
+    "image_digest": "sha256:289fb0ef89d0ceadbd643af9e9a8cc3db155779bd64191699df831c73a0d0880",
+    "workdir": "/workspace/sd-scripts"
+  },
+  "sd-scripts-sdxl-multires-dedup": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/sd-scripts-sdxl-multires-dedup:ef690300f4f7",
+    "image_digest": "sha256:684e2acfdeb1e8d04c69316cbd0d8594307caa197a328431fec406810578cde4",
+    "workdir": "/workspace/sd-scripts"
+  },
+  "triton-msvc-c4267-warnings": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/triton-msvc-c4267-warnings:b2585ac677d0",
+    "image_digest": "sha256:943bcde238cb5dd11e281fde3592b2d7dd0a8fe0e3c370d11f4c5b9b2bba652b",
+    "workdir": "/workspace/triton"
+  },
+  "unsloth-idefics3-finetune": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/unsloth-idefics3-finetune:aa4ad7f34e30",
+    "image_digest": "sha256:e21f49aded3dd668b093bc34f0768ad30e10e940f4f3e9d573d4dd372a7a6969",
+    "workdir": "/workspace/unsloth"
+  },
+  "vibecomfy-mcp-pr-integration": {
+    "image": "ghcr.io/togetherbench/multi-user-turn-codebench/vibecomfy-mcp-pr-integration:c4ec581117c9",
+    "image_digest": "sha256:f92869cb45f9d76ff4372da200f7175ff615016abbdcf6b774cd5d399f482f75",
+    "workdir": "/workspace/VibeComfy"
+  }
+}
