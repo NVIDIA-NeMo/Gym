@@ -251,9 +251,7 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         assert result.summary["run"]["issues"]["rollout_ended_on_failed_model_call"] == 1
 
     # Inspect the emitted records, not a reconstructed copy of the expected evidence.
-    report_dir, conformance = inspect_bundle(
-        path, output=tmp_path / "capabilities", profile="gym-p0/v3", capture_dir=capture_dir
-    )
+    report_dir, conformance = inspect_bundle(path, output=tmp_path / "capabilities", capture_dir=capture_dir)
     # Known mini-SWE gap: submission exits before saving the final tool observation.
     # Fix the native submission evidence before expecting TE-5 and the P0 gate to pass.
     submitted = scenario != "http_error"
