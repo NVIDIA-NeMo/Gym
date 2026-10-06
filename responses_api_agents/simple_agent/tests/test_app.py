@@ -360,6 +360,65 @@ class TestApp:
         else:
             assert observations is None
 
+    async def test_agent_session_returns_observations_from_every_activation(self) -> None:
+        server, server_client = _make_agent(True)
+        response_base = {
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+        def message_response(response_id: str, text: str) -> MagicMock:
+            return _mock_response(
+                response_base
+                | {
+                    "id": response_id,
+                    "output": [
+                        {
+                            "id": f"msg-{response_id}",
+                            "content": [{"annotations": [], "text": text, "type": "output_text"}],
+                            "role": "assistant",
+                            "status": "completed",
+                            "type": "message",
+                        }
+                    ],
+                }
+            )
+
+        server_client.post = AsyncMock(
+            side_effect=[message_response("resp-1", "First."), message_response("resp-2", "Second.")]
+        )
+        client = TestClient(server.setup_webserver())
+        episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+        seed = client.post(
+            "/v1/agent_sessions",
+            json=AgentSeedSessionRequest(
+                agent_session_id="agent-session",
+                episode_id=episode_id,
+                task_id=TaskId(taskset="example", task_id="0"),
+            ).model_dump(mode="json"),
+        )
+        assert seed.status_code == 200
+
+        for question in ("first?", "second?"):
+            result = client.post("/ng-rollout/rollout/v1/responses", json={"input": question})
+            assert result.status_code == 200
+
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json=AgentCloseSessionRequest(
+                agent_session_id=seed.json()["agent_session_id"], episode_id=episode_id
+            ).model_dump(mode="json"),
+        )
+
+        assert close.status_code == 200
+        records = close.json()["agent_observations"]["records"]
+        assert [record["invocation_id"] for record in records] == ["root", "activation-2"]
+        assert [record["model_calls"][0]["response_id"] for record in records] == ["resp-1", "resp-2"]
+
     async def test_agent_session_rejects_required_mcp_access(self) -> None:
         server, _ = _make_agent(False)
         request = MagicMock(session={})

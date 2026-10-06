@@ -71,6 +71,7 @@ class SimpleAgentSessionState(AgentSessionState):
     tool_access: DirectHTTPToolAccess | None
     resources_cookies: dict[str, str]
     observations: AgentObservationBundle | None = None
+    activations: int = 0
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -131,11 +132,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         resources_server_cookies: Any = None,
         tool_access: DirectHTTPToolAccess | None = None,
         in_session: bool = False,
+        invocation_id: str = "root",
         task_id: str = "unscoped",
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
-        invocation_id = "root"
         tool_records: list[TrajectoryToolCall] = []
         model_calls: list[ModelCallRef] = []
         turns: list[TrajectoryTurn] = []
@@ -358,12 +359,20 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         state = self._require_agent_session(agent_session_id) if agent_session_id is not None else None
         if state is not None and not isinstance(state, SimpleAgentSessionState):
             raise TypeError("Expected Simple Agent session state")
+        invocation_id = "root"
+        if state is not None:
+            # A session spans several activations, and its observations keep one invocation per activation.
+            # The first keeps "root" so single-activation sessions report what they did before.
+            state.activations += 1
+            if state.activations > 1:
+                invocation_id = f"activation-{state.activations}"
         model_response, trajectory, model_server_cookies, resources_server_cookies = await self._create_episode(
             body,
             model_url_path=self.url_path_for_request("/v1/responses", request),
             resources_server_cookies=state.resources_cookies if state is not None else request.cookies,
             tool_access=state.tool_access if state is not None else None,
             in_session=state is not None,
+            invocation_id=invocation_id,
             rollout_id=rollout_id or "unscoped",
             collect_trajectory=collect_trajectory,
         )
@@ -371,8 +380,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             state.resources_cookies = dict(resources_server_cookies or {})
             if trajectory is not None:
                 # A session returns agent evidence at close, where the Environment Server records it.
+                previous = state.observations
                 state.observations = AgentObservationBundle(
-                    source="simple_agent", records=list(trajectory.invocations), gaps=list(trajectory.gaps)
+                    source="simple_agent",
+                    records=[*(previous.records if previous else []), *trajectory.invocations],
+                    gaps=[*(previous.gaps if previous else []), *trajectory.gaps],
                 )
 
         # Legacy self-dispatch propagates resources cookies for its later verification call.
