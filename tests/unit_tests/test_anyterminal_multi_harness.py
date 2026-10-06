@@ -72,6 +72,5 @@ def test_enroot_profile_selects_named_provider_for_every_harness() -> None:
 
     assert config.sandbox.enroot
     assert all(
-        config[name].responses_api_agents.anyterminal_agent.sandbox_provider == "sandbox"
-        for name in [*POOL, SOURCE]
+        config[name].responses_api_agents.anyterminal_agent.sandbox_provider == "sandbox" for name in [*POOL, SOURCE]
     )
