@@ -448,6 +448,7 @@ async def request(
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
+    _max_num_tries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -460,7 +461,14 @@ async def request(
     ``ServerClient`` server name, ``remote_agent_service`` for the remote agent's external
     service, or ``None`` for the fallback label ``external``. It is retained across retries
     and redirects and is not forwarded to aiohttp.
+
+    ``_max_num_tries`` caps this call's total attempts on every exception path. It replaces the
+    default generic-error limit (``MAX_NUM_TRIES`` attempts for external calls, unbounded for
+    internal ones). A ``_max_connection_retries`` limit still applies as well.
     """
+    if _max_num_tries is not None and _max_num_tries < 1:
+        raise ValueError("_max_num_tries must be at least 1")
+
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
         kwargs["data"] = orjson.dumps(kwargs.pop("json"))
@@ -474,6 +482,7 @@ async def request(
             method,
             url,
             _internal=_internal,
+            _max_num_tries=_max_num_tries,
             _max_connection_retries=_max_connection_retries,
             _server_name=_server_name,
             **kwargs,
@@ -482,6 +491,7 @@ async def request(
         method,
         url,
         _internal=_internal,
+        _max_num_tries=_max_num_tries,
         _max_connection_retries=_max_connection_retries,
         _server_name=_server_name,
         **kwargs,
@@ -494,6 +504,7 @@ async def _traced_request(
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
+    _max_num_tries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -532,6 +543,7 @@ async def _traced_request(
             method,
             url,
             _internal=_internal,
+            _max_num_tries=_max_num_tries,
             _max_connection_retries=_max_connection_retries,
             _server_name=_server_name,
             **kwargs,
@@ -584,6 +596,7 @@ async def _request_with_retries(
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
+    _max_num_tries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
@@ -591,15 +604,20 @@ async def _request_with_retries(
     token = set_server_name(_server_name or "external") if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY else None
     try:
         num_tries = 1
+        explicit_tries = 0
         retries = 0
         retry_start = time.monotonic()
         while True:
+            if _max_num_tries is not None:
+                explicit_tries += 1
             try:
                 return await client.request(method=method, url=url, **kwargs)
             except ServerDisconnectedError:
                 global _NUM_SERVER_DISCONNECTED_ERROR
                 _NUM_SERVER_DISCONNECTED_ERROR += 1
                 retries += 1
+                if _max_num_tries is not None and explicit_tries >= _max_num_tries:
+                    raise
                 if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                     print(
                         f"[request_retry url={url} error=ServerDisconnectedError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
@@ -616,6 +634,8 @@ async def _request_with_retries(
                 global _NUM_CLIENT_OS_ERROR
                 _NUM_CLIENT_OS_ERROR += 1
                 retries += 1
+                if _max_num_tries is not None and explicit_tries >= _max_num_tries:
+                    raise
                 if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                     print(
                         f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
@@ -631,11 +651,16 @@ async def _request_with_retries(
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                     print_exc()
 
-                if _max_connection_retries is not None and num_tries >= _max_connection_retries:
+                # num_tries only advances on the default path, so count explicit attempts when capped.
+                attempts = explicit_tries if _max_num_tries is not None else num_tries
+                if _max_connection_retries is not None and attempts >= _max_connection_retries:
                     raise
 
+                if _max_num_tries is not None:
+                    if explicit_tries >= _max_num_tries:
+                        raise
                 # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
-                if not _internal:
+                elif not _internal:
                     print(
                         f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
 Sleeping 0.5s and retrying...

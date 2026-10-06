@@ -1857,13 +1857,18 @@ def dataset_agent_pins(global_config_dict: DictConfig, instance_name: str) -> Li
 
 
 def resolve_dataset_agent(
-    global_config_dict: DictConfig, declaring_instance_name: str, pin: Optional[str] = None
+    global_config_dict: DictConfig,
+    declaring_instance_name: str,
+    pin: Optional[str] = None,
+    *,
+    taskset: Optional[str] = None,
 ) -> str:
     """Resolve the agent that runs a dataset declared by ``declaring_instance_name``.
 
-    Single source of truth for dataset -> agent routing, shared by benchmark discovery,
-    preparation, manifest validation, and rollout dispatch, so they can never disagree.
-    First hit wins:
+    Shared by benchmark discovery, preparation, manifest validation, and flat-row dispatch.
+    A declared ``taskset`` resolves through ``environment_server_routes`` and the bound
+    Environment Server's ``agent_server``. It does not require an agent -> resources edge.
+    Otherwise, first hit wins:
 
     1. ``pin`` (the dataset's ``agent:`` key) — validated: it must name the declaring agent
        itself, or an agent referencing the declaring resources server. Anything else is a hard
@@ -1873,6 +1878,49 @@ def resolve_dataset_agent(
     """
     block = global_config_dict.get(declaring_instance_name)
     is_agent = isinstance(block, DictConfig) and "responses_api_agents" in block
+
+    if taskset is not None:
+        routes = global_config_dict.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
+        environment_name = routes.get(taskset) if isinstance(routes, DictConfig) else None
+        if not isinstance(environment_name, str) or not environment_name:
+            raise ConfigError(f"No Environment Server route for taskset {taskset!r}; set environment_server_routes.")
+        environment = global_config_dict.get(environment_name)
+        servers = environment.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME) if isinstance(environment, DictConfig) else None
+        if not isinstance(servers, DictConfig) or len(servers) != 1:
+            raise ConfigError(f"Taskset {taskset!r} route {environment_name!r} must name an Environment Server.")
+        environment_config = next(iter(servers.values()))
+        if not isinstance(environment_config, DictConfig):
+            raise ConfigError(f"Environment Server {environment_name!r} must have a configuration mapping.")
+        agent_ref = environment_config.get(AGENT_SERVER_REF_KEY_NAME)
+        agent_name = agent_ref.get("name") if isinstance(agent_ref, DictConfig) else None
+        agent = global_config_dict.get(agent_name) if isinstance(agent_name, str) else None
+        if (
+            not isinstance(agent, DictConfig)
+            or AGENT_SERVER_TYPE_KEY_NAME not in agent
+            or agent_ref.get("type", AGENT_SERVER_TYPE_KEY_NAME) != AGENT_SERVER_TYPE_KEY_NAME
+        ):
+            raise ConfigError(
+                f"Environment Server {environment_name!r} must bind a valid agent_server for this dataset."
+            )
+        if pin is not None and pin != agent_name:
+            raise ConfigError(
+                f"Taskset {taskset!r} pins agent {pin!r}, but Environment Server {environment_name!r} "
+                f"runs {agent_name!r}. Remove the pin or make it match the route."
+            )
+        if is_agent and declaring_instance_name != agent_name:
+            raise ConfigError(f"Taskset {taskset!r} must route to its declaring agent {declaring_instance_name!r}.")
+        if not is_agent:
+            resources_ref = environment_config.get("resources_server")
+            if (
+                not isinstance(resources_ref, DictConfig)
+                or resources_ref.get("name") != declaring_instance_name
+                or resources_ref.get("type", RESOURCES_SERVER_TYPE_KEY_NAME) != RESOURCES_SERVER_TYPE_KEY_NAME
+            ):
+                raise ConfigError(
+                    f"Environment Server {environment_name!r} must bind declaring resources server "
+                    f"{declaring_instance_name!r} for taskset {taskset!r}."
+                )
+        return agent_name
 
     if is_agent:
         if pin is not None and pin != declaring_instance_name:
