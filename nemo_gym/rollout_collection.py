@@ -241,7 +241,7 @@ def _environment_server_for_agent(agent_name: str, servers_by_agent: Mapping[str
 
     A row routed by its agent cannot choose between several environment servers.
     Several servers may still front one agent when every row names its server directly.
-    Native tasksets name their environment server through ``environment_server_routes``.
+    Materialized tasksets name their environment server through ``environment_server_routes``.
     """
     servers = servers_by_agent.get(agent_name, [])
     if len(servers) == 1:
@@ -270,10 +270,10 @@ def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> s
     """Pick the environment server a row is dispatched to, or None for today's agent path.
 
     A materialized task (``task_id.taskset`` plus ``task_input``) always routes by its taskset:
-    it is the native episode request and no agent-server ``/run`` accepts it. A flat row follows
+    it is already an episode request and no agent-server ``/run`` accepts it. A flat row follows
     ``environment_routing_mode``: ``agent`` keeps today's routing (its agent's environment server
     is resolved at dispatch), ``legacy`` sends every flat row to ``environment_server_name``, and
-    ``taskset`` refuses flat rows so a native-only run cannot silently pick up legacy input.
+    ``taskset`` refuses flat rows so a run of materialized rows cannot silently pick up legacy input.
 
     One batch may therefore hold both kinds of rows in ``agent`` and ``legacy`` mode. The chosen
     server is stamped on the row as ``_ng_environment_server`` and travels with it through the
@@ -295,7 +295,7 @@ def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> s
     )
 
 
-def _native_episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
+def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
     if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
         raise ValueError(f"Invalid episode attempt: {attempt!r}")
@@ -1086,9 +1086,9 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         description=(
             "How flat (non-materialized) rows are routed. `agent`: today's routing, each row through its "
             "agent's environment server. `legacy`: every flat row to `environment_server_name`. `taskset`: "
-            "flat rows are rejected, so the run is native-only. Materialized rows (`task_id.taskset` plus "
+            "flat rows are rejected, so the run takes only materialized rows. Materialized rows (`task_id.taskset` plus "
             "`task_input`) always route by `environment_server_routes`, in every mode, so one batch may mix "
-            "native and compatibility-routed tasksets."
+            "materialized and compatibility-routed tasksets."
         ),
     )
     environment_server_name: str | None = Field(
@@ -1814,7 +1814,7 @@ def _rollout_order_key(row: Dict[str, Any]) -> tuple:
 
 
 def _routing_identity(row: Mapping[str, Any]) -> Optional[str]:
-    """The agent a rollout ran on, or for a native taskset row, which names none, its environment server.
+    """The agent a rollout ran on, or for a materialized taskset row, which names none, its environment server.
 
     A materialized row, its result and its sidecar row all name the same one.
     """
@@ -1896,7 +1896,7 @@ def _missing_rollout_rows_counted_as_zero(
     into a no-op.
 
     The zero carries the rollout's identity: its agent, and its environment server stamp when the
-    row has one, which a native taskset row needs because it names no agent. `_fill_task_fields`
+    row has one, which a materialized taskset row needs because it names no agent. `_fill_task_fields`
     adds the task's dataset fields. A row that names neither cannot reach any server's metrics, so
     it is warned about rather than counted. The score enters the metric input and nothing else, the
     same way a counted failure row does.
@@ -3207,12 +3207,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             server_results.setdefault(server_name, []).append(result)
             if server_name not in server_agents:
                 if agent_name is None:
-                    # A native row names no agent; the environment server's own binding does.
+                    # A materialized row names no agent; the environment server's own binding does.
                     agent_name = self._agent_name_for_row({NG_ENVIRONMENT_SERVER_KEY: server_name}, global_config_dict)
                 server_agents[server_name] = agent_name
 
         # One entry per environment server, labelled by the agent it binds so metric names and
-        # `agent_ref` keep today's shape. Servers that front the same agent (a native server and its
+        # `agent_ref` keep today's shape. Servers that front the same agent (a session-based server and its
         # legacy_agent twin) are each labelled by their own name, whatever order their rows arrive in.
         labels = label_runs(server_agents)
         first_error: Optional[Exception] = None
@@ -3665,7 +3665,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 res = None
                 succeeded = False
                 try:
-                    request_body = _native_episode_request_body(row) if _materialized_taskset(row) else row
+                    request_body = _episode_request_body(row) if _materialized_taskset(row) else row
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
                     result = await get_response_json(res)
