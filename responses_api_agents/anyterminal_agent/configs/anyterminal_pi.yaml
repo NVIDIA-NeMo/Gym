@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+anyterminal_pi:
+  responses_api_agents:
+    anyterminal_agent:
+      entrypoint: app.py
+      domain: coding
+      description: Terminal Bench run by Pi natively inside the task container.
+      value: Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.pi_agent.app
+      agent_server_class: PiAgent
+      agent_config_class: PiAgentConfig
+      agent_kwargs:
+        model: model
+        workspace_root: /tmp/pi-agent
+        repo_dir: "."
+        thinking: high
+        timeout: 3600
+        bash_timeout: 300
+        pi_version: 0.80.2
+        system_prompt: Inspect and edit the current task workspace, run relevant checks, and leave the requested solution applied.
+        models_config: {}
+
+      container_formatter: "docker://{docker_image}"
+      concurrency: 6
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl
+
+anyterminal_pi_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: anyterminal_pi

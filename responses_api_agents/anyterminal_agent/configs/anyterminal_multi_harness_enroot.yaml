@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness.yaml
+  - nemo_gym/sandbox/providers/enroot/configs/enroot.yaml
+
+# These benchmark images need their normal container filesystem mounted before
+# Enroot resolves /dev/null; the provider documents this override for coding images.
+sandbox:
+  enroot:
+    create:
+      bypass_entrypoint: false
+
+anyterminal_opencode:
+  responses_api_agents:
+    anyterminal_agent:
+      sandbox_provider: sandbox
+
+anyterminal_openclaw:
+  responses_api_agents:
+    anyterminal_agent:
+      sandbox_provider: sandbox
+
+anyterminal_pi:
+  responses_api_agents:
+    anyterminal_agent:
+      sandbox_provider: sandbox
+
+anyterminal_hermes:
+  responses_api_agents:
+    anyterminal_agent:
+      sandbox_provider: sandbox

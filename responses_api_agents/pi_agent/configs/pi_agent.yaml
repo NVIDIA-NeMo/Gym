@@ -10,6 +10,7 @@ pi_agent:
       model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
       env: {}
       workspace_root: outputs/pi_agent/workspaces
+      repo_dir: null
       thinking: null
       system_prompt: null
       timeout: 900

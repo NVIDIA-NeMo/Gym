@@ -35,10 +35,7 @@ def test_profile_composes_all_four_native_harnesses_with_one_dataset_owner() -> 
     config = _resolved_profile()
 
     assert list(config.agent_pool.reasoning_gym) == POOL
-    assert {
-        name: next(iter(config[name].responses_api_agents))
-        for name in config.agent_pool.reasoning_gym
-    } == {
+    assert {name: next(iter(config[name].responses_api_agents)) for name in config.agent_pool.reasoning_gym} == {
         "hermes_reasoning_gym_agent": "hermes_agent",
         "openclaw_reasoning_gym_agent": "openclaw_agent",
         "opencode_reasoning_gym_agent": "opencode_agent",

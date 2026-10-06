@@ -178,6 +178,19 @@ class TestEnv:
         assert "EMPTY" not in env
 
 
+class TestRepoDir:
+    def test_defaults_to_temporary_workspace(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        assert agent._repo_dir(tmp_path) == tmp_path
+
+    def test_relative_repo_dir_resolves_from_current_directory(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        agent = _make_agent(repo_dir="task/repo")
+
+        assert agent._repo_dir(tmp_path / "fallback") == tmp_path / "task" / "repo"
+        assert (tmp_path / "task" / "repo").is_dir()
+
+
 @pytest.mark.parametrize("with_mcp", [False, True])
 @pytest.mark.parametrize("remaining_context", [False, True])
 @pytest.mark.parametrize("bash_timeout", [None, 120])
@@ -225,6 +238,34 @@ async def test_run_stages_private_mcp_config_and_cleans_workspace(tmp_path, with
         items, _, _, _ = await agent._run_pi("task", None)
     assert items[0].content[0].text == "done"
     assert homes and all(not home.exists() for home in homes)
+
+
+async def test_run_uses_and_preserves_configured_repo_dir(tmp_path):
+    workspace = tmp_path / "workspaces"
+    repo = tmp_path / "task-repo"
+    repo.mkdir()
+    (repo / "before.txt").write_text("benchmark input")
+    agent = _make_agent(workspace_root=str(workspace), repo_dir=str(repo))
+
+    async def launch(*cmd, **kwargs):
+        assert kwargs["cwd"] == str(repo)
+        home = Path(kwargs["env"]["HOME"])
+        assert home.is_relative_to(workspace)
+        stdout = asyncio.StreamReader()
+        stdout.feed_data((_msg_end("assistant", [{"type": "text", "text": "done"}]) + "\n").encode())
+        stdout.feed_eof()
+        return SimpleNamespace(
+            stdout=stdout,
+            stderr=SimpleNamespace(read=AsyncMock(return_value=b"")),
+            wait=AsyncMock(return_value=0),
+            returncode=0,
+        )
+
+    with patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", side_effect=launch):
+        await agent._run_pi("task", None)
+
+    assert (repo / "before.txt").read_text() == "benchmark input"
+    assert not workspace.exists() or not list(workspace.iterdir())
 
 
 class TestModelServer:
@@ -583,6 +624,7 @@ class TestConfigYaml:
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 8
         assert inner["command"] == "pi"
+        assert inner["repo_dir"] is None
 
 
 @pytest.mark.parametrize(

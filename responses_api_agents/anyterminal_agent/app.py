@@ -288,7 +288,23 @@ class GymAgentHarnessProcessor(BaseModel):
         shared = self._parent / "setup_scripts" / "_portable_python.sh"
         reqs = agent_dir / "requirements.txt"
 
-        recipe_src = b"".join(p.read_bytes() for p in (script, shared, reqs) if p.exists()) or b"no-script"
+        # Remote providers run the installed package without the host source bind, so agent or
+        # runner changes must invalidate an otherwise complete-looking portable runtime too.
+        recipe_paths = {script, shared, reqs, self._parent / "app.py", PARENT_DIR / "pyproject.toml"}
+        recipe_paths.update(
+            path
+            for path in agent_dir.rglob("*")
+            if path.is_file()
+            and not any(part in {"__pycache__", "data", "node_modules", "results", "tests"} for part in path.parts)
+        )
+        recipe_src = (
+            b"".join(
+                str(path.relative_to(PARENT_DIR)).encode() + b"\0" + path.read_bytes()
+                for path in sorted(recipe_paths)
+                if path.exists()
+            )
+            or b"no-script"
+        )
         recipe = hashlib.sha256(recipe_src).hexdigest()
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
             print(f"Agent deps already at {deps_dir}", flush=True)
@@ -306,11 +322,16 @@ class GymAgentHarnessProcessor(BaseModel):
                 return deps_dir
 
             deps_dir.mkdir(parents=True, exist_ok=True)
-            proc = Popen(
-                f"PORTABLE_PYTHON_SH={shared} DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}",
-                shell=True,
-            )
-            assert proc.wait() == 0, f"Agent deps setup failed ({script})"
+            # Every harness installer builds Gym from the same source checkout. Setuptools writes
+            # into <checkout>/build, so concurrent first-time installs can corrupt one another even
+            # though their destination prefixes differ. Serialize that shared build across agents.
+            runtime_install_lock = self._parent / "deps" / "runtime-install"
+            with _file_lock(runtime_install_lock, "shared Gym runtime install"):
+                proc = Popen(
+                    f"PORTABLE_PYTHON_SH={shared} DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}",
+                    shell=True,
+                )
+                assert proc.wait() == 0, f"Agent deps setup failed ({script})"
             sentinel.write_text(recipe)
             return deps_dir
 
@@ -344,7 +365,7 @@ class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
         default="docker://{docker_image}",
         description="Template for the task's image reference: use as a path if it ends with .sif or starts with / or ., else as a docker:// URI.",
     )
-    sandbox_provider: Dict[str, Any] = Field(default_factory=lambda: {"docker": {}})
+    sandbox_provider: str | Dict[str, Any] = Field(default_factory=lambda: {"docker": {}})
     sandbox_default_metadata: Dict[str, Any] = Field(default_factory=dict)
     # Docker network for the agent container. "host" lets the in-container agent reach a
     # model server on host loopback; None uses the docker default (e.g. for a remote server).

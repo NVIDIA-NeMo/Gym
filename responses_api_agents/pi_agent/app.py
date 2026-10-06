@@ -433,6 +433,7 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     model: str = "nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct"
     env: dict[str, str] = Field(default_factory=dict)
     workspace_root: str = "outputs/pi_agent/workspaces"
+    repo_dir: Optional[str] = None
     thinking: Optional[str] = None
     system_prompt: Optional[str] = None
     timeout: int = 900
@@ -487,6 +488,16 @@ class PiAgent(SimpleResponsesAPIAgent):
         root.mkdir(parents=True, exist_ok=True)
         return root
 
+    def _repo_dir(self, fallback: Path) -> Path:
+        """Return the environment-owned task directory or the temporary workspace."""
+        if not self.config.repo_dir:
+            return fallback
+        root = Path(self.config.repo_dir).expanduser()
+        if not root.is_absolute():
+            root = Path.cwd() / root
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
     def _env(self, home: Path) -> dict[str, str]:
         env = {**os.environ, "HOME": str(home), "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0"}
         env.update({k: v for k, v in self.config.env.items() if v})
@@ -533,6 +544,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         effective_model = self._effective_model()
         provider, _, model_id = effective_model.partition("/")
         work_dir = self._workspace_root()
+        project_dir = self._repo_dir(work_dir)
         home = work_dir / ".pi-home"
         (home / ".pi" / "agent").mkdir(parents=True, exist_ok=True)
         models_config = self._build_models_config(rollout_id)
@@ -569,7 +581,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                cwd=str(work_dir),
+                cwd=str(project_dir),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

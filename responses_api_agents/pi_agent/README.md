@@ -24,6 +24,11 @@ Per request the agent writes `models.json` into an isolated `HOME`, runs one `pi
 stdin from `/dev/null`, then parses the jsonl `message_end` events. Example rollouts are in
 `environments/pi_math/data/example_rollouts.jsonl`.
 
+By default Pi runs in that temporary workspace. Set `repo_dir` when Pi must edit an
+environment-owned task directory. Relative paths resolve from the agent process working directory,
+so `repo_dir: .` lets containerized adapters such as AnyTerminal run Pi directly in the benchmark
+workdir while keeping Pi's HOME and model configuration isolated and disposable.
+
 ## Model id
 
 `model` is `<provider>/<model-id>`. Define the provider in `models_config` (written to
@@ -61,6 +66,7 @@ configuration is unchanged.
   the benchmark preset disables it so history is preserved until the context is full.
 - `env`: extra env vars for the subprocess (e.g. provider API keys)
 - `workspace_root`: where per-request HOMEs are created and deleted
+- `repo_dir`: optional environment-owned task directory where Pi runs; it is preserved after cleanup
 - `thinking`: passed to `--thinking` (off, minimal, low, medium, high, xhigh)
 - `system_prompt`: appended via `--append-system-prompt`
 - `timeout`: seconds for the `pi` run

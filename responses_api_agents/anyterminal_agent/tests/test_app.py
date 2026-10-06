@@ -38,6 +38,7 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.sandbox.providers.docker import DockerProvider
+from nemo_gym.sandbox.providers.docker import provider as docker_provider
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.anyterminal_agent import app
 from responses_api_agents.anyterminal_agent.app import (
@@ -139,8 +140,13 @@ class TestFormatContainer:
 
 class TestSetupScriptsExist:
     def test_supported_agents_have_deps_scripts(self) -> None:
-        assert (PARENT_DIR / "responses_api_agents" / "hermes_agent" / "scripts" / "hermes_agent_deps.sh").exists()
+        for agent in ("hermes_agent", "openclaw_agent", "opencode_agent", "pi_agent"):
+            assert (PARENT_DIR / "responses_api_agents" / agent / "scripts" / f"{agent}_deps.sh").exists()
         assert (Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh").exists()
+
+
+def test_named_sandbox_provider_reference_is_accepted() -> None:
+    assert _config(sandbox_provider="sandbox").sandbox_provider == "sandbox"
 
 
 class TestExampleData:
@@ -493,9 +499,10 @@ class TestInstanceConfigProperties:
 
 class TestBuildProvider:
     @pytest.fixture(autouse=True)
-    def _fake_apptainer_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Constructing ApptainerProvider hard-errors if the real binary isn't on PATH.
+    def _fake_local_provider_binaries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Constructing either provider hard-errors if its real binary isn't on PATH.
         monkeypatch.setattr(apptainer_provider, "_require_apptainer", lambda _bin_path=None: "/usr/bin/apptainer")
+        monkeypatch.setattr(docker_provider, "_require_docker", lambda: "/usr/bin/docker")
 
     def test_default_is_docker(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
@@ -599,6 +606,38 @@ class TestHarnessProcessorSetup:
             proc.setup()
             proc.setup()
         assert "already at" in capsys.readouterr().out
+
+    def test_installer_serializes_shared_source_build(self, tmp_path: Path) -> None:
+        root = tmp_path / "gym"
+        parent = root / "responses_api_agents" / "anyterminal_agent"
+        agent_dir = root / "responses_api_agents" / "fake_agent"
+        script = agent_dir / "scripts" / "fake_agent_deps.sh"
+        shared = parent / "setup_scripts" / "_portable_python.sh"
+        script.parent.mkdir(parents=True)
+        shared.parent.mkdir(parents=True)
+        script.write_text("#!/bin/bash\n")
+        shared.write_text("#!/bin/bash\n")
+        proc = GymAgentHarnessProcessor(
+            config=SimpleNamespace(agent_server_module="responses_api_agents.fake_agent.app")
+        )
+        lock_targets: list[Path] = []
+        original_file_lock = app._file_lock
+
+        def record_lock(target: Path, *args, **kwargs):
+            lock_targets.append(target)
+            return original_file_lock(target, *args, **kwargs)
+
+        with (
+            patch.object(app, "PARENT_DIR", root),
+            patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=parent),
+            patch("responses_api_agents.anyterminal_agent.app._file_lock", side_effect=record_lock),
+            patch("responses_api_agents.anyterminal_agent.app.Popen") as popen,
+        ):
+            popen.return_value.wait.return_value = 0
+            proc.setup()
+
+        deps_dir = parent / "deps" / "anyterminal_fake_agent_deps"
+        assert lock_targets == [deps_dir, parent / "deps" / "runtime-install"]
 
     def test_rechecks_sentinel_after_acquiring_lock(self, tmp_path: Path) -> None:
         proc = self._proc_no_script()

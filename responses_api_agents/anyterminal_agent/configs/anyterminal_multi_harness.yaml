@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - responses_api_agents/anyterminal_agent/configs/anyterminal_opencode.yaml
+  - responses_api_agents/anyterminal_agent/configs/anyterminal_openclaw.yaml
+  - responses_api_agents/anyterminal_agent/configs/anyterminal_pi.yaml
+  - responses_api_agents/anyterminal_agent/configs/anyterminal_hermes.yaml
+
+# The dataset is owned once by anyterminal_hermes. Consecutive source tasks are
+# assigned OpenCode, OpenClaw, Pi, and Hermes before the sequence repeats.
+agent_pool:
+  anyterminal_hermes:
+    - anyterminal_opencode
+    - anyterminal_openclaw
+    - anyterminal_pi
+    - anyterminal_hermes
+
+anyterminal_opencode:
+  responses_api_agents:
+    anyterminal_agent:
+      datasets: []
+
+anyterminal_openclaw:
+  responses_api_agents:
+    anyterminal_agent:
+      datasets: []
+
+anyterminal_pi:
+  responses_api_agents:
+    anyterminal_agent:
+      datasets: []
+
+anyterminal_hermes:
+  responses_api_agents:
+    anyterminal_agent:
+      datasets:
+        - name: terminal_bench_multi_harness
+          type: train
+          jsonl_fpath: responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl
+          license: Apache 2.0
