@@ -12,28 +12,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Own the evaluation runner's artifacts and their recovery protocol.
+"""Persist evaluation outcomes and reserve execution identities for its controller.
 
-One writer owns each output path. Request dispatch, capture finalization and
-scoring policy belong to the caller; this store owns file lifetime and ordering.
-The journal reconstructs state for both collection and read-only aggregation.
+The controller holds run_lock across preparation, optional checkpoint restoration,
+collection and reporting. Results and sidecars contain outcomes; the manifest owns
+execution numbers. There is no dispatch journal or second outcome commit.
 """
 
+import logging
 import os
-import warnings
 from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 
 import orjson
+from pydantic import ValidationError
 
 from nemo_gym.config_types import ConfigError
+from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
-from nemo_gym.rollout_journal import (
+from nemo_gym.rollout_records import (
     RUN_ID_KEY,
-    MissingDispatchHistory,
-    RolloutJournal,
     RolloutRecord,
+    RolloutRecords,
     coverage_path_for,
     journal_path_for,
     logical_rollout_id,
@@ -41,42 +42,42 @@ from nemo_gym.rollout_journal import (
     prepare_append,
     read_records,
 )
-from nemo_gym.rollout_recovery import (
-    RunManifest,
-    atomic_write_json,
-    manifest_path_for,
-    validate_resume,
-)
+from nemo_gym.rollout_recovery import RunManifest, atomic_write_json, manifest_path_for, validate_resume
+
+
+logger = logging.getLogger(__name__)
 
 
 class RolloutStore:
-    def __init__(self, output: Path, state: RolloutJournal, *, seed_legacy: bool = False, read_only: bool = False):
+    """Saved outcomes shared by the evaluation controller and offline readers."""
+
+    def __init__(self, output: Path, state: RolloutRecords, *, read_only: bool = False):
         self.output = output
         self.manifest = state.manifest
         self._state = state
-        self._seed_legacy = seed_legacy
         self._read_only = read_only
         self._files = None
-        self._results_file = None
-        self._failures_file = None
+        self._results_file = self._failures_file = None
+        self._allocated: set[tuple[str, int]] = set()
 
     @staticmethod
     def _unverified_manifest(output: Path) -> RunManifest:
         manifest = RunManifest.import_legacy(list(read_records(materialized_path_for(output))))
-        # Losing a manifest must not silently relabel a mixture of foreign runs.
         run_ids = {
-            row[key]
-            for path, key in (
-                (output, RUN_ID_KEY),
-                (failures_path_for(output), RUN_ID_KEY),
-                (journal_path_for(output), "run_id"),
-            )
+            row[RUN_ID_KEY]
+            for path in (output, failures_path_for(output))
             for row in read_records(path)
-            if row.get(key) is not None
+            if row.get(RUN_ID_KEY) is not None
         }
         if len(run_ids) > 1:
             raise ConfigError("Saved artifacts belong to different runs.")
-        return manifest.model_copy(update={"run_id": run_ids.pop()}) if run_ids else manifest
+        if run_ids:
+            # Missing execution reservations cannot safely be inferred from outcomes:
+            # a lost manifest may hide newer attempts with no outcome.
+            raise ConfigError(
+                "Run-tagged outcomes have lost their manifest. Restore it from backup or use a new output path."
+            )
+        return manifest
 
     @classmethod
     def start_or_resume(
@@ -88,33 +89,34 @@ class RolloutStore:
         allow_unsafe: bool = False,
         migrate_outcomes: Callable[[Path], int] | None = None,
     ) -> "RolloutStore":
-        """Validate saved work before mutation; materialize fresh work once.
-
-        The callback keeps dataset/configuration preparation in the collector.
-        Legacy imports need not have their original dataset available, so they
-        deliberately do not invoke it when no saved manifest exists.
-        """
+        """Prepare or validate a run while its controller holds the run lock."""
         if resume:
             output = output.resolve()
         manifest_path = manifest_path_for(output)
         materialized = materialized_path_for(output)
-        journal = journal_path_for(output)
-        artifacts = (output, failures_path_for(output), materialized, manifest_path, journal)
+        artifacts = (output, failures_path_for(output), materialized, manifest_path, journal_path_for(output))
         output.parent.mkdir(parents=True, exist_ok=True)
+        if resume and journal_path_for(output).exists():
+            raise ConfigError(
+                "This run uses the superseded draft dispatch-journal format. Use its original Gym revision or start at a new output path."
+            )
         if (
             resume
             and any(path.exists() for path in artifacts)
             and not (materialized.exists() and output.exists())
-            and not (manifest_path.exists() or journal.exists())
+            and not manifest_path.exists()
         ):
-            # Legacy collection also restarted incomplete caches. Preparation can
-            # leave just the inventory if interrupted before publishing a run.
-            # Once a manifest or journal exists, missing files remain an error.
             print("Skipping resume_from_cache because the legacy cache is incomplete; starting fresh.")
             resume = False
         if resume and any(path.exists() for path in artifacts):
-            if not materialized.exists() or not output.exists():
-                raise ConfigError("Cannot resume: saved materialized inputs or rollout output are missing.")
+            if (
+                not materialized.exists()
+                or not output.exists()
+                or (manifest_path.exists() and not failures_path_for(output).exists())
+            ):
+                raise ConfigError(
+                    "Cannot resume: saved materialized inputs, rollout output, or failure sidecar are missing."
+                )
             current = None
             if manifest_path.exists():
                 try:
@@ -123,72 +125,39 @@ class RolloutStore:
                     if not allow_unsafe:
                         raise
             manifest = validate_resume(manifest_path, current, materialized, allow_unsafe=allow_unsafe)
-            seed_legacy = False
             if manifest is None:
                 manifest = cls._unverified_manifest(output)
-                seed_legacy = not journal.exists()
-            elif not journal.exists():
-                if not allow_unsafe:
-                    raise ConfigError(f"Cannot resume without attempt history: {journal}.")
-                warnings.warn(
-                    "Rebuilding missing attempt history from saved outcomes because allow_unsafe_resume=true. "
-                    "Dispatches without saved outcomes cannot be recovered; attempt counts are lower bounds.",
-                    stacklevel=2,
-                )
-                manifest = manifest.model_copy(update={"identity_overridden": True})
-                seed_legacy = True
-            try:
-                state = RolloutJournal.load(
-                    output, manifest, import_legacy=manifest.legacy_import, rebuild_history=seed_legacy
-                )
-            except MissingDispatchHistory:
-                if not allow_unsafe:
-                    raise
-                # A truncated journal can retain a valid prefix while losing
-                # dispatches for saved payloads. Validate the entire prefix and
-                # all payloads before adding reconstructed events on open.
-                manifest = manifest.model_copy(update={"identity_overridden": True})
-                state = RolloutJournal.load(
-                    output, manifest, import_legacy=manifest.legacy_import, rebuild_history=True
-                )
-                warnings.warn(
-                    "Rebuilding missing dispatch history because allow_unsafe_resume=true. "
-                    "Dispatches without saved outcomes cannot be recovered; attempt counts are lower bounds.",
-                    stacklevel=2,
-                )
-                seed_legacy = True
+            state = RolloutRecords.load(output, manifest, import_legacy=manifest.legacy_import)
+            if manifest.legacy_import:
+                next_attempt = dict(manifest.next_attempt)
+                for identity, attempt in state.payloads:
+                    next_attempt[identity] = max(next_attempt.get(identity, 0), attempt + 1)
+                manifest = manifest.model_copy(update={"next_attempt": next_attempt})
+                state.manifest = manifest
             if migrate_outcomes is not None:
-                # History validation above must precede every mutation. Migration
-                # reads strict JSON, so repair interrupted tails before invoking it.
-                for path in (output, failures_path_for(output), journal):
+                for path in (output, failures_path_for(output)):
                     prepare_append(path)
                 if migrate_outcomes(output):
-                    state = RolloutJournal.load(
-                        output, manifest, import_legacy=manifest.legacy_import, rebuild_history=seed_legacy
-                    )
-            if seed_legacy or manifest.identity_overridden or not manifest_path.exists():
+                    state = RolloutRecords.load(output, manifest, import_legacy=manifest.legacy_import)
+            if manifest.identity_overridden or manifest.legacy_import or not manifest_path.exists():
                 manifest.write(manifest_path)
-            return cls(output, state, seed_legacy=seed_legacy)
+            return cls(output, state)
 
         rows, manifest = prepare_inputs()
-        state = RolloutJournal(manifest, rows)
+        state = RolloutRecords(manifest, rows)
         with materialized.open("wb") as file:
             for row in rows:
                 file.write(orjson.dumps(row) + b"\n")
-        # Invalidate prior outputs before publishing the fresh run's identity.
         for path in (
             output,
             failures_path_for(output),
-            journal,
+            journal_path_for(output),
             coverage_path_for(output),
             aggregate_metrics_path_for(output),
         ):
             path.unlink(missing_ok=True)
-        # Publish the manifest only after the empty payload/history files exist.
-        # Preparation can then be interrupted before __enter__ without stranding
-        # an otherwise valid run with missing required artifacts.
         output.touch()
-        journal.touch()
+        failures_path_for(output).touch()
         manifest.write(manifest_path)
         return cls(output, state)
 
@@ -196,29 +165,27 @@ class RolloutStore:
     def read(
         cls, output: Path, *, import_legacy: bool = True, retry_terminal_timeouts: bool = False
     ) -> "RolloutStore | None":
-        """Read the same selected outcomes offline, without modifying artifacts.
-
-        A legacy file without an input inventory has unknown completion coverage;
-        return None so its caller can choose its documented compatibility path.
-        With import_legacy=False, an inventory alone also stays on that path:
-        pre-journal writers did not enforce the recovery identity invariants.
-        """
+        """Read selected outcomes without modifying files or acquiring a writer lock."""
         output = output.resolve()
         path = manifest_path_for(output)
-        if not import_legacy and not (path.exists() or journal_path_for(output).exists()):
+        if journal_path_for(output).exists():
+            raise ConfigError(
+                "This run uses the superseded draft dispatch-journal format; read it with its original Gym revision."
+            )
+        if not import_legacy and not path.exists():
             return None
         if path.exists():
-            manifest = RunManifest.model_validate_json(path.read_bytes())
+            if not output.exists() or not failures_path_for(output).exists():
+                raise ConfigError(f"Cannot read run {output}: rollout output or failure sidecar is missing.")
+            try:
+                manifest = RunManifest.model_validate_json(path.read_bytes())
+            except (ValidationError, OSError) as error:
+                raise ConfigError(f"Cannot read recovery manifest {path}: {error}") from error
         elif materialized_path_for(output).exists():
             manifest = cls._unverified_manifest(output)
         else:
             return None
-        state = RolloutJournal.load(
-            output,
-            manifest,
-            import_legacy=manifest.legacy_import,
-            rebuild_history=manifest.legacy_import and not journal_path_for(output).exists(),
-        )
+        state = RolloutRecords.load(output, manifest, import_legacy=manifest.legacy_import)
         state.retry_terminal_timeouts = retry_terminal_timeouts
         return cls(output, state, read_only=True)
 
@@ -227,51 +194,64 @@ class RolloutStore:
             raise RuntimeError("Cannot open a read-only or already open rollout store for writing.")
         files = ExitStack()
         try:
-            journal = journal_path_for(self.output)
-            failures = failures_path_for(self.output)
-            for path in (self.output, failures, journal):
+            for path in (self.output, failures_path_for(self.output)):
                 prepare_append(path)
-            # Registered first, so the snapshot follows file closure on every exit.
-            files.callback(self.write_coverage)
-            self._state.file = files.enter_context(journal.open("ab"))
             self._results_file = files.enter_context(self.output.open("ab"))
-            self._failures_file = files.enter_context(failures.open("ab"))
-            if self._seed_legacy:
-                self._state.seed_legacy_history()
-                self._seed_legacy = False
+            self._failures_file = files.enter_context(failures_path_for(self.output).open("ab"))
             self.write_coverage()
         except BaseException:
-            try:
-                files.close()
-            finally:
-                self._state.file = None
-                self._results_file = self._failures_file = None
+            files.close()
+            self._results_file = self._failures_file = None
             raise
         self._files = files
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, exc_type, exc_value, traceback):
         try:
-            return self._files.__exit__(*exc)
+            self._files.__exit__(exc_type, exc_value, traceback)
         finally:
             self._files = None
-            self._state.file = None
             self._results_file = self._failures_file = None
+            try:
+                self.write_coverage()
+            except Exception:
+                if exc_type is None:
+                    raise
+                logger.exception("Could not write coverage while handling collection failure")
 
     def _require_open(self) -> None:
         if self._files is None:
             raise RuntimeError("Rollout persistence requires an open store context.")
 
-    def record_dispatch(self, row: dict) -> None:
+    def allocate_attempt(self, row: dict) -> int:
+        """Durably reserve the next execution number before dispatch or restore.
+
+        The controller passes the returned number to checkpoint restore; restore
+        must not increment it. A failed restore reserves a new number before a
+        fresh execution. Reservations do not consume the failure retry budget.
+        """
         self._require_open()
-        self._state.dispatch(row)
+        identity, _ = self._state._key(row)
+        attempt = self.manifest.next_attempt.get(identity, self._state.latest.get(identity, -1) + 1)
+        manifest = self.manifest.model_copy(
+            update={"next_attempt": self.manifest.next_attempt | {identity: attempt + 1}}
+        )
+        manifest.write(manifest_path_for(self.output))
+        self.manifest = self._state.manifest = manifest
+        self._state.latest[identity] = attempt
+        row[ATTEMPT_INDEX_KEY_NAME] = attempt
+        row[RUN_ID_KEY] = manifest.run_id
+        self._allocated.add((identity, attempt))
+        return attempt
+
+    def record_dispatch(self, row: dict) -> None:
+        """Reserve once for this controller's request; no dispatch event is stored."""
+        self._require_open()
+        if self._state._key(row) not in self._allocated:
+            self.allocate_attempt(row)
 
     def record_outcome(self, result: dict, *, sync: bool = False) -> None:
-        """Commit a payload before its outcome event; reject conflicts before writing.
-
-        A crash between those writes is recoverable from the dispatch and payload.
-        Callers retiring external capture evidence request fsync before retirement.
-        """
+        """Append the outcome once; a complete JSONL row is the recovery record."""
         self._require_open()
         self._state.check_outcome(result)
         file = self._failures_file if result.get("_ng_failure_class") is not None else self._results_file
@@ -285,26 +265,34 @@ class RolloutStore:
         self._state.outcome(result, record=record)
 
     def record_omission(self, row: dict, reason: str) -> None:
-        self._require_open()
-        self._state.omit(row, reason)
+        """Save intentional omissions separately from scored results and failures."""
+        self.record_dispatch(row)
+        self.record_outcome(
+            row
+            | {
+                "_ng_failure_class": "skipped",
+                "_ng_failure_terminal": True,
+                "_ng_omitted": True,
+                "_ng_failure_message": reason[:2000],
+            }
+        )
 
     def pending(
         self, max_attempts: int, *, retry_terminal_timeouts: bool = False, dispatch_longest_first: bool = False
     ) -> list[dict]:
         # The caller supplies its attempt budget; the stored selection policy is
-        # latest_dispatched, including newer attempts with unknown outcomes.
+        # latest_allocated, including newer attempts with unknown outcomes.
         self._state.retry_terminal_timeouts = retry_terminal_timeouts
         exhausted = self._state.exhausted_count(max_attempts)
         if exhausted:
             print(
-                f"Retry budget exhausted for {exhausted} rollout(s) at the cap of {max_attempts} dispatched attempts. "
-                f"They will not be dispatched with this cap. Failures: {failures_path_for(self.output)}; "
-                f"dispatch history (including unknown outcomes): {journal_path_for(self.output)}."
+                f"Retry budget exhausted for {exhausted} rollout(s) at the cap of {max_attempts} counted failures. "
+                f"They will not be dispatched with this cap. Failures: {failures_path_for(self.output)}."
             )
         rows = [dict(row, **{RUN_ID_KEY: self.manifest.run_id}) for row in self._state.pending(max_attempts)]
         elapsed = {}
         # Main's cached-deliverable and longest-first controls still apply when
-        # the journal supplies the attempt identities.
+        # the manifest supplies the attempt identities.
         # Unknown attempts carry no new decision about a cached deliverable.
         # Stop at the newest recorded outcome (including an omission), rather
         # than carrying a reuse instruction past a newer failure without one.
@@ -314,7 +302,11 @@ class RolloutStore:
         for row in rows:
             identity = logical_rollout_id(row)
             previous = self._state.payloads.get((identity, latest_recorded.get(identity)))
-            if previous is not None and previous.reuse_cached_deliverable:
+            if (
+                previous is not None
+                and (identity, latest_recorded.get(identity)) not in self._state.omitted
+                and previous.reuse_cached_deliverable
+            ):
                 row["reuse_cached_deliverable"] = True
         if dispatch_longest_first:
             for (identity, _), outcome in self._state.payloads.items():
@@ -329,7 +321,7 @@ class RolloutStore:
         return self._state.attempt_counts[logical_rollout_id(row)]
 
     def disposition(self, row: dict) -> str:
-        """Return the latest dispatched attempt's disposition for this rollout."""
+        """Return the newest allocated attempt's disposition for this rollout."""
         return self._state.disposition(logical_rollout_id(row))
 
     def selected(self, disposition: str) -> list[dict]:
@@ -342,7 +334,7 @@ class RolloutStore:
 
     def failures(self) -> list[dict]:
         """Latest failure payloads, including terminal skips classified as omitted."""
-        return self.selected("failure") + self.selected("omitted")
+        return [row for row in self.selected("failure") + self.selected("omitted") if not row.get("_ng_omitted")]
 
     def inputs_for(self, results: list[dict]) -> list[dict]:
         return [self._state.expected[logical_rollout_id(result)] for result in results]

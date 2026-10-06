@@ -4145,8 +4145,8 @@ def test_single_pass_history_is_quarantined_before_switching_to_multistage(tmp_p
 
     import orjson
 
-    from nemo_gym.rollout_journal import coverage_path_for, materialized_path_for
-    from nemo_gym.rollout_journal import journal_path_for as attempts_path_for
+    from nemo_gym.rollout_records import coverage_path_for, materialized_path_for
+    from nemo_gym.rollout_records import journal_path_for as attempts_path_for
     from nemo_gym.rollout_recovery import RunManifest, manifest_path_for
     from nemo_gym.rollout_store import RolloutStore
 
@@ -4167,6 +4167,8 @@ def test_single_pass_history_is_quarantined_before_switching_to_multistage(tmp_p
         materialized_path_for(output),
         coverage_path_for(output),
     ]
+    # Retired draft journals must also move when switching collection modes.
+    attempts_path_for(output).write_text("{}\n")
     old = {path: path.read_bytes() for path in companions}
     _prepare_resume(SimpleNamespace(resume_from_cache=False), output, journal_path_for(output), "new-stage-config")
     for path, data in old.items():

@@ -64,7 +64,7 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
-from nemo_gym.rollout_journal import journal_path_for
+from nemo_gym.rollout_records import journal_path_for
 from nemo_gym.rollout_recovery import manifest_path_for
 
 

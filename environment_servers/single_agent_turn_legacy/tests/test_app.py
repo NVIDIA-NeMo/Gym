@@ -298,8 +298,8 @@ async def test_protocol_failure_metadata_survives_collection(
 
     import nemo_gym.rollout_collection as collection
     from nemo_gym.episode_types import EpisodeFailure
-    from nemo_gym.rollout_journal import logical_rollout_id
     from nemo_gym.rollout_outcomes import RolloutFailure
+    from nemo_gym.rollout_records import logical_rollout_id
     from nemo_gym.rollout_store import RolloutStore
     from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResponse
     from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
@@ -388,7 +388,7 @@ async def test_protocol_failure_metadata_survives_collection(
     assert record.episode_id.rollout_id == logical_rollout_id(saved)
     assert (record.source, record.delivery) == ("environment", "delivered")
     assert type(record.failure) is EpisodeFailure
-    assert record.failure.failure_kind == expected_kind
+    assert record.failure.failure_kind == failure_kind
     assert record.failure.failure_reason == "Judge unavailable"
     assert record.failure.stage == "verification" and record.failure.terminal is terminal
     assert "partial_response" not in record.model_dump()["failure"]

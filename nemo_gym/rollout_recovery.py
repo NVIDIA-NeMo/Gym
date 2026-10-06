@@ -18,6 +18,7 @@ The manifest stores digests, not configuration values or credentials. Recovery r
 completed rollouts; it does not checkpoint an agent's conversation or remote sandbox.
 """
 
+import fcntl
 import hashlib
 import json
 import os
@@ -25,13 +26,13 @@ import re
 import stat
 import warnings
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Any, BinaryIO, Literal
+from typing import Annotated, Any, BinaryIO, Literal
 from uuid import uuid4
 
 from omegaconf import OmegaConf
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.config_types import ConfigError
 
@@ -40,6 +41,9 @@ from nemo_gym.config_types import ConfigError
 _COLLECTION_OPTIONS = frozenset(
     {
         "resume_from_cache",
+        "checkpoint_dir",
+        "checkpoint_every_s",
+        "checkpoint_timeout_s",
         "dispatch_budget_s",
         "drain_margin_s",
         "dispatch_longest_first",
@@ -297,6 +301,11 @@ def atomic_output_file(path: Path) -> Iterator[BinaryIO]:
             file.flush()
             os.fsync(file.fileno())
         temporary.replace(path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -311,9 +320,10 @@ def atomic_write_json(path: Path, value: dict) -> None:
 class RunManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
-    # Selection is a run policy, not an inference from payload arrival order.
-    selection_policy: Literal["latest_dispatched"] = "latest_dispatched"
+    schema_version: Literal[2] = 2
+    selection_policy: Literal["latest_allocated"] = "latest_allocated"
+    # Controller-owned execution numbers. Reserving a number is not a failure.
+    next_attempt: dict[str, Annotated[int, Field(ge=1, strict=True)]] = Field(default_factory=dict)
     run_id: str
     source_digest: str
     materialized_digest: str
@@ -366,7 +376,7 @@ def validate_resume(
             with materialized_path.open(encoding="utf-8") as file:
                 saved_rows = [json.loads(line) for line in file if line.strip()]
         except (ValidationError, ValueError, OSError) as error:
-            raise ConfigError(f"Cannot read recovery manifest or materialized inputs: {error}") from error
+            raise ConfigError(f"Cannot read recovery manifest {path} or materialized inputs: {error}") from error
         mismatches = []
         if saved.legacy_import:
             mismatches.append("unverified legacy run identity")
@@ -448,3 +458,40 @@ def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: b
     if failure_class == "skipped":
         return True
     return bool(record.get("_ng_failure_terminal"))
+
+
+def run_lock_path_for(output: Path) -> Path:
+    """Stable lock file; never unlink it while another process may hold it open."""
+    output = output.resolve()
+    return output.with_name(output.stem + "_run.lock")
+
+
+@contextmanager
+def run_lock(output: Path, *, checkpoint_dir: Path | None = None) -> Iterator[None]:
+    """Own a run before preparing inputs, restoring state, or writing artifacts.
+
+    Checkpoint controllers must hold this same context around restore and collection.
+    Lock the checkpoint directory as well when supplied, so two output paths cannot
+    concurrently restore or replace the same checkpoints. Kernel locks are released
+    on process death; the presence of an old lock file does not block recovery.
+    """
+    paths = {run_lock_path_for(output)}
+    if checkpoint_dir is not None:
+        paths.add(checkpoint_dir.resolve() / ".collector.lock")
+    with ExitStack() as files:
+        for path in sorted(paths):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            file = files.enter_context(path.open("a+b"))
+            try:
+                fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise ConfigError(
+                    f"Another collector owns this run ({path}). Wait for it to stop before resuming."
+                ) from error
+        yield
+
+
+class IncompleteEvaluationError(RuntimeError):
+    """Saved partial results are valid, but the evaluation still has unfinished work."""
+
+    exit_code = 75

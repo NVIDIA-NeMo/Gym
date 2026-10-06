@@ -28,14 +28,14 @@ import nemo_gym.rollout_collection as collection
 from nemo_gym.config_types import ConfigError
 from nemo_gym.episode_types import EpisodeFailure, EpisodeId
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
-from nemo_gym.rollout_journal import (
-    RolloutJournal,
+from nemo_gym.rollout_outcomes import RolloutFailure
+from nemo_gym.rollout_records import (
+    RolloutRecords,
     coverage_path_for,
     journal_path_for,
     logical_rollout_id,
     read_records,
 )
-from nemo_gym.rollout_outcomes import RolloutFailure
 from nemo_gym.rollout_recovery import RunManifest, manifest_path_for, validate_resume
 from nemo_gym.rollout_store import RolloutStore
 from tests.unit_tests.test_rollout_collection import FakeResponse, failing_row, http_error, install_fake_server_client
@@ -115,7 +115,7 @@ async def test_valid_zero_and_masked_completed_results_remain_results(monkeypatc
 
 
 @pytest.mark.parametrize("wrong_identity", [None, "rollout_id", "attempt_index", "run_id"])
-async def test_agent_can_return_a_failure_for_its_dispatched_attempt(monkeypatch, wrong_identity):
+async def test_agent_cannot_supply_collector_owned_failure_records(monkeypatch, wrong_identity):
     row = failing_row() | {"_ng_rollout_id": "stable-task", "_ng_attempt_index": 2, "_ng_run_id": "test-run"}
     failure = RolloutFailure(
         episode_id=EpisodeId(rollout_id="stable-task", attempt=2),
@@ -136,13 +136,10 @@ async def test_agent_can_return_a_failure_for_its_dispatched_attempt(monkeypatch
     install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, payload)))
     original, outcome = await next(RolloutCollectionHelper().run_outcomes([row]))
     assert original == row | {"_ng_run_id": outcome.run_id}
-    if wrong_identity is None:
-        assert outcome == failure
-    else:
-        assert outcome.episode_id.rollout_id == failure.episode_id.rollout_id
-        assert outcome.episode_id.attempt == failure.episode_id.attempt
-        assert outcome.exception_type == "InvalidRolloutResult"
-        assert outcome.failure.stage is None
+    assert outcome.episode_id == failure.episode_id
+    assert outcome.source == "collector" and outcome.delivery == "delivered"
+    assert outcome.failure.failure_kind == "protocol_violation" and outcome.failure.terminal
+    assert outcome.exception_type == "InvalidRolloutResult"
 
 
 @pytest.mark.parametrize("failure_class", ["judge_failed", "judge_invalid"])
@@ -266,7 +263,7 @@ def test_older_manifest_defaults_to_existing_attempt_selection_policy(saved_mani
     _, _, _, _, _, saved, _ = saved_manifest
     payload = saved.model_dump()
     del payload["selection_policy"]
-    assert RunManifest.model_validate(payload).selection_policy == "latest_dispatched"
+    assert RunManifest.model_validate(payload).selection_policy == "latest_allocated"
 
 
 def test_unknown_selection_policy_is_rejected_even_with_override(saved_manifest):
@@ -610,12 +607,14 @@ async def test_failure_sidecar_preserves_producer_diagnostics(runner_config, mon
     [saved] = read_records(collection.failures_path_for(Path(runner_config.output_jsonl_fpath)))
     for key, value in diagnostics.items():
         assert saved[key] == value
-    assert saved["_ng_failure_record"]["failure"]["failure_reason"] == reason
+    assert saved["_ng_failure_record"]["failure"]["failure_reason"] == (
+        reason if reason_key == "failure_reason" else "Agent reported a no-result failure"
+    )
     assert "reward" not in saved and "response" not in saved
     assert next(row for row in returned if row["_ng_task_index"] == 1) == saved
 
 
-async def test_unbounded_interruption_consumes_attempts_until_the_cap_is_raised(tmp_path, monkeypatch):
+async def test_repeated_interruption_reserves_new_identities_without_spending_retries(tmp_path, monkeypatch):
     from nemo_gym.rollout_store import RolloutStore
 
     rows = [failing_row(index) for index in range(4)]
@@ -660,8 +659,8 @@ async def test_unbounded_interruption_consumes_attempts_until_the_cap_is_raised(
 
     reader = RolloutStore.read(output)
     assert reader.coverage()["unknown"] == len(rows)
-    assert reader.pending(3) == []
-    retry = reader.pending(4)
+    assert reader.coverage()["counted_failures"] == 0
+    retry = reader.pending(3)
     assert len(retry) == len(rows)
     assert all(row["_ng_attempt_index"] == 3 for row in retry)
     assert reader.selected("success") == [] and reader.failures() == []
@@ -896,13 +895,13 @@ async def test_reported_kill_shaped_failures_consume_bounded_attempts(runner_con
     assert coverage["attempts_exhausted"] == 2
     assert coverage["max_rollout_attempts"] == 2
     printed = capsys.readouterr().out
-    assert "attempt 2 of 2" in printed
+    assert "execution 1" in printed
     assert "Retry budget exhausted for 2 rollout(s) at the cap of 2" in printed
     assert str(collection.failures_path_for(output)) in printed
 
 
 @pytest.mark.parametrize("count_failures_as_zero", [False, True])
-async def test_runner_journals_before_request_and_resumes_only_failed_work(
+async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     runner_config, monkeypatch, count_failures_as_zero
 ):
     output = Path(runner_config.output_jsonl_fpath)
@@ -918,10 +917,9 @@ async def test_runner_journals_before_request_and_resumes_only_failed_work(
     async def post(**kwargs):
         row = kwargs["json"]
         calls.append(row)
-        history = RolloutJournal.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
+        history = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
         identity = logical_rollout_id(row)
-        assert history.latest[identity] == row.get("_ng_attempt_index", 0)
-        assert history.disposition(identity) == "unknown"
+        assert history.manifest.next_attempt[identity] == row.get("_ng_attempt_index", 0) + 1
         if row["task"] == 1 and row.get("_ng_attempt_index", 0) == 0:
             raise http_error(503)
         if row["task"] == 2:
@@ -964,12 +962,14 @@ async def test_runner_journals_before_request_and_resumes_only_failed_work(
     assert len(failures) == 2
     assert all("reward" not in row and "response" not in row for row in failures)
     assert all(row["_ng_failure_record"]["run_id"] == report["run_id"] for row in failures)
-    original_history = journal_path_for(output).read_bytes()
+    original_failures = collection.failures_path_for(output).read_bytes()
+    assert not journal_path_for(output).exists()
     runner_config.resume_from_cache = True
     calls.clear()
     await helper.run_from_config(runner_config)
     assert [(row["task"], row["_ng_attempt_index"]) for row in calls] == [(1, 1)]
-    assert journal_path_for(output).read_bytes().startswith(original_history)
+    assert collection.failures_path_for(output).read_bytes() == original_failures
+    assert not journal_path_for(output).exists()
     report = json.loads(coverage_path_for(output).read_text())
     assert [report[key] for key in ("successful", "failed", "intentionally_omitted", "unknown")] == [2, 0, 1, 0]
     assert (report["measured"], report["masked"], report["scored"], report["failures_counted_as_zero"]) == (1, 1, 2, 0)
@@ -1065,9 +1065,8 @@ async def test_runner_cancellation_closes_requests_before_return(runner_config, 
 
 
 @pytest.mark.parametrize("route_failures", [False, True])
-@pytest.mark.parametrize("legacy", [False, True])
 async def test_runner_accepts_explicit_failures_independently_of_exception_policy(
-    runner_config, monkeypatch, route_failures, legacy
+    runner_config, monkeypatch, route_failures
 ):
     runner_config.route_failures_to_sidecar = route_failures
 
@@ -1075,23 +1074,7 @@ async def test_runner_accepts_explicit_failures_independently_of_exception_polic
         row = kwargs["json"]
         if row["task"] == 0:
             return FakeResponse(200, {"reward": 0, "response": {}})
-        if legacy:
-            return FakeResponse(200, {"_ng_failure_class": "judge_failed", "error": "Judge unavailable"})
-        return FakeResponse(
-            200,
-            RolloutFailure(
-                episode_id=EpisodeId(rollout_id=logical_rollout_id(row), attempt=0),
-                run_id=row["_ng_run_id"],
-                source="environment",
-                delivery="delivered",
-                failure=EpisodeFailure(
-                    failure_reason="Judge unavailable",
-                    terminal=False,
-                    failure_kind="judge_failed",
-                    stage="verification",
-                ),
-            ).model_dump(),
-        )
+        return FakeResponse(200, {"_ng_failure_class": "judge_failed", "failure_reason": "Judge unavailable"})
 
     install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
     await RolloutCollectionHelper().run_from_config(runner_config)
@@ -1325,9 +1308,8 @@ def test_shipped_agent_runtime_references_do_not_change_identity(tmp_path, field
     assert RunManifest.create(source, rows, {}, servers).config_digest != before.config_digest
 
 
-@pytest.mark.parametrize("source", ["environment", "collector"])
 @pytest.mark.parametrize("alias", [False, True])
-async def test_unclassified_structured_failure_is_persisted_and_retried(runner_config, monkeypatch, source, alias):
+async def test_unclassified_structured_failure_is_persisted_and_retried(runner_config, monkeypatch, alias):
     from nemo_gym.rollout_store import RolloutStore
 
     async def post(**kwargs):
@@ -1336,13 +1318,11 @@ async def test_unclassified_structured_failure_is_persisted_and_retried(runner_c
             return FakeResponse(200, {"reward": 1.0, "response": {}})
         return FakeResponse(
             200,
-            RolloutFailure(
-                episode_id=EpisodeId(rollout_id=logical_rollout_id(row)),
-                run_id=row["_ng_run_id"],
-                source=source,
-                delivery="delivered",
-                failure=EpisodeFailure(failure_reason="Service unavailable", terminal=False),
-            ).model_dump(mode="json"),
+            {
+                "_ng_failure_class": "environment_server_failed",
+                "_ng_failure_kind": None,
+                "failure_reason": "Service unavailable",
+            },
         )
 
     client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
@@ -1729,7 +1709,7 @@ async def test_batch_status_uses_current_journal_attempts(tmp_path, monkeypatch,
             writer.record_omission(latest, "No reusable answer")
     assert success["reward"] == 1.0
     post.reset_mock()
-    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
     resumed = config.model_copy(update={"resume_from_cache": True})
     if latest_outcome == "suppressed_retry":
         monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "4")

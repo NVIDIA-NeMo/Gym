@@ -12,12 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Single-writer attempt history and reconciliation for Gym's evaluation runner.
+"""Index saved rollout outcomes for collection and offline aggregation.
 
-Dispatch is flushed before the request starts. Payloads stay in the existing
-result/sidecar artifacts, carrying the manifest's run id. A complete payload can
-therefore be recovered even if the collector died before journaling its outcome.
-The greatest dispatched attempt index wins, independent of arrival order.
+Results and failure sidecars are the source of truth. Execution numbers are
+reserved in the run manifest; no dispatch or outcome event journal is written.
 """
 
 import os
@@ -27,10 +25,10 @@ from collections.abc import Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import BinaryIO, Literal
+from typing import BinaryIO
 
 import orjson
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ValidationError
 
 from nemo_gym.config_types import ConfigError
 from nemo_gym.episode_types import EpisodeId
@@ -48,10 +46,6 @@ from nemo_gym.rollout_recovery import (
 
 
 RUN_ID_KEY = "_ng_run_id"
-
-
-class MissingDispatchHistory(ConfigError):
-    """A valid saved outcome has lost its preceding dispatch record."""
 
 
 def journal_path_for(output: Path) -> Path:
@@ -93,6 +87,7 @@ class RolloutRecord:
     line_number: int = 0
     legacy_attempt_index: int | None = None
     file_identity: tuple[int, int] | None = None
+    expected_identity: tuple[str | None, str, int] | None = None
 
     def read(self) -> dict:
         """Read this record with its effective legacy attempt identity."""
@@ -104,6 +99,10 @@ class RolloutRecord:
         row = orjson.loads(file.read(self.length))
         if self.legacy_attempt_index is not None:
             row[ATTEMPT_INDEX_KEY_NAME] = self.legacy_attempt_index
+        if self.expected_identity is not None:
+            actual = (row.get(RUN_ID_KEY), logical_rollout_id(row), row.get(ATTEMPT_INDEX_KEY_NAME, 0))
+            if actual != self.expected_identity:
+                raise ConfigError(f"Saved record identity changed after indexing {self.path} at byte {self.offset}.")
         return row
 
 
@@ -182,17 +181,6 @@ def prepare_append(path: Path) -> None:
         file.flush()
 
 
-class AttemptEvent(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: Literal[1] = 1
-    run_id: str
-    rollout_id: str
-    attempt_index: int = Field(ge=0, strict=True)
-    status: Literal["dispatched", "success", "failure", "omitted"]
-    reason: str | None = Field(default=None, max_length=2000)
-
-
 def _is_invalid_judge_migration(original: dict, migrated: dict) -> bool:
     """Recognize only the exact sidecar-first migration already supported by Gym."""
     if not (
@@ -214,7 +202,7 @@ def _is_invalid_judge_migration(original: dict, migrated: dict) -> bool:
     }
 
 
-class RolloutJournal:
+class RolloutRecords:
     def __init__(self, manifest: RunManifest, expected: list[dict]):
         self.manifest = manifest
         self.expected = {}
@@ -223,12 +211,13 @@ class RolloutJournal:
             if identity in self.expected:
                 raise ConfigError(f"Duplicate logical rollout id {identity!r} in materialized inputs.")
             self.expected[identity] = row
-        self.dispatched: set[tuple[str, int]] = set()
         self.attempt_counts: Counter = Counter()
-        self.latest: dict[str, int] = {}
+        self.overridden_terminal_counts: Counter = Counter()
+        self.latest: dict[str, int] = {
+            identity: index - 1 for identity, index in manifest.next_attempt.items() if index > 0
+        }
         self.payloads: dict[tuple[str, int], _Outcome] = {}
         self.omitted: set[tuple[str, int]] = set()
-        self.file: BinaryIO | None = None
         self.retry_terminal_timeouts = False
 
     def _key(self, row: dict) -> tuple[str, int]:
@@ -243,31 +232,6 @@ class RolloutJournal:
             if row.get(field) != expected.get(field):
                 raise ConfigError(f"Rollout {identity!r} has mismatched {field}.")
         return identity, index
-
-    def _dispatch(self, key: tuple[str, int]) -> None:
-        if key not in self.dispatched:
-            self.attempt_counts[key[0]] += 1
-        self.dispatched.add(key)
-        self.latest[key[0]] = max(key[1], self.latest.get(key[0], -1))
-
-    def _event(self, key: tuple[str, int], status: str, reason: str | None = None) -> None:
-        if self.file is None:
-            raise RuntimeError("Attempt history is not open for writing.")
-        event = AttemptEvent(
-            run_id=self.manifest.run_id,
-            rollout_id=key[0],
-            attempt_index=key[1],
-            status=status,
-            reason=reason[:2000] if reason else None,
-        )
-        self.file.write(event.model_dump_json().encode() + b"\n")
-        self.file.flush()
-
-    def dispatch(self, row: dict) -> None:
-        key = self._key(row)
-        if key not in self.dispatched:
-            self._event(key, "dispatched")
-            self._dispatch(key)
 
     def check_run_identity(self, row: dict, *, legacy: bool = False) -> None:
         if row.get(RUN_ID_KEY) != self.manifest.run_id and not (legacy and RUN_ID_KEY not in row):
@@ -294,21 +258,37 @@ class RolloutJournal:
                 raise ConfigError(
                     f"Saved failure record is inconsistent with its envelope for rollout attempt {key!r}."
                 )
-        if not legacy and key not in self.dispatched:
-            raise MissingDispatchHistory(f"Saved outcome {key!r} has no dispatch in this run's attempt history.")
+        if not legacy and key[1] >= self.manifest.next_attempt.get(key[0], 0):
+            raise ConfigError(f"Saved outcome {key!r} has no reserved attempt in the run manifest.")
         previous = self.payloads.get(key)
         if previous is not None and previous.record.read() != row:
             raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
-        if key in self.omitted:
-            raise ConfigError(f"Omitted rollout attempt {key!r} also has an outcome.")
         return key
 
     def _payload(self, row: dict, record: RolloutRecord, *, legacy: bool = False) -> None:
         key = self.check_outcome(row, legacy=legacy)
-        if legacy:
-            self._dispatch(key)
+        self.latest[key[0]] = max(key[1], self.latest.get(key[0], -1))
+        failure = row.get("_ng_failure_record")
+        delivery = failure.get("delivery") if isinstance(failure, dict) else "possibly_delivered"
+        if (
+            key not in self.payloads
+            and row.get("_ng_failure_class") is not None
+            and delivery != "not_sent"
+            and not row.get("_ng_failure_terminal")
+        ):
+            self.attempt_counts[key[0]] += 1
+        if (
+            key not in self.payloads
+            and row.get("_ng_failure_class") is not None
+            and delivery != "not_sent"
+            and row.get("_ng_failure_terminal")
+            and not is_terminal_failure(row, retry_terminal_timeouts=True)
+        ):
+            self.overridden_terminal_counts[key[0]] += 1
+        if row.get("_ng_omitted"):
+            self.omitted.add(key)
         self.payloads[key] = _Outcome(
-            record=record,
+            record=replace(record, expected_identity=(row.get(RUN_ID_KEY), key[0], key[1])),
             failure_class=row.get("_ng_failure_class"),
             terminal=bool(row.get("_ng_failure_terminal")),
             masked=bool(row.get("mask_sample")),
@@ -318,45 +298,18 @@ class RolloutJournal:
         )
 
     def outcome(self, row: dict, *, record: RolloutRecord) -> None:
-        """Called after the payload artifact is flushed, so it is already recoverable."""
-        key = self._key(row)
+        """Index an outcome after its JSONL record has been flushed."""
         self._payload(row, record)
-        self._event(key, "failure" if row.get("_ng_failure_class") is not None else "success")
-
-    def omit(self, row: dict, reason: str) -> None:
-        self.dispatch(row)
-        key = self._key(row)
-        if key in self.payloads:
-            raise ConfigError(f"Completed rollout attempt {key!r} cannot be omitted.")
-        self._event(key, "omitted", reason)
-        self.omitted.add(key)
 
     @classmethod
-    def load(
-        cls, output: Path, manifest: RunManifest, *, import_legacy: bool = False, rebuild_history: bool = False
-    ) -> "RolloutJournal":
+    def load(cls, output: Path, manifest: RunManifest, *, import_legacy: bool = False) -> "RolloutRecords":
         expected = list(read_records(materialized_path_for(output)))
         if _digest(expected) != manifest.materialized_digest:
             raise ConfigError("Saved materialized inputs do not match the run manifest.")
         state = cls(manifest, expected)
-        history = journal_path_for(output)
-        if not history.exists() and not (import_legacy or rebuild_history):
-            raise ConfigError(f"Cannot resume without attempt history: {history}.")
-        for value in read_records(history):
-            try:
-                event = AttemptEvent.model_validate(value)
-            except ValidationError as error:
-                raise ConfigError(f"Invalid attempt history in {history}: {error}") from error
-            if event.run_id != manifest.run_id or event.rollout_id not in state.expected:
-                raise ConfigError("Attempt history belongs to a different run or input inventory.")
-            key = event.rollout_id, event.attempt_index
-            if event.status == "dispatched":
-                state._dispatch(key)
-            elif key not in state.dispatched:
-                raise ConfigError(f"Outcome event {key!r} has no preceding dispatch.")
-            elif event.status == "omitted":
-                state.omitted.add(key)
-
+        unexpected = manifest.next_attempt.keys() - state.expected.keys()
+        if unexpected:
+            raise ConfigError(f"Run manifest reserves attempts for unknown rollouts: {sorted(unexpected)!r}.")
         # Legacy files lacked an attempt id on some rows. Import once in their
         # recorded order, preserving the old failure-count-based numbering.
         legacy_counts: Counter = Counter()
@@ -370,7 +323,7 @@ class RolloutJournal:
                     if key in state.payloads and state.payloads[key].record.read() != payload:
                         # Old append/reverify writers reused explicit attempt IDs.
                         # Only untagged legacy rows use arrival-order migration;
-                        # journal-backed records still reject conflicting payloads.
+                        # manifest-backed records still reject conflicting payloads.
                         payload[ATTEMPT_INDEX_KEY_NAME] = max(legacy_counts[identity], key[1] + 1)
                     legacy_counts[identity] = max(legacy_counts[identity], payload[ATTEMPT_INDEX_KEY_NAME] + 1)
                     record = replace(record, legacy_attempt_index=payload[ATTEMPT_INDEX_KEY_NAME])
@@ -385,18 +338,10 @@ class RolloutJournal:
                         # A crash after the sidecar fsync but before main-file
                         # replacement leaves both copies. Only this exact,
                         # explicitly marked reclassification may supersede one.
-                        state.check_run_identity(payload, legacy=import_legacy or rebuild_history)
+                        state.check_run_identity(payload, legacy=import_legacy)
                         continue
-                state._payload(
-                    payload, record, legacy=rebuild_history or (import_legacy and RUN_ID_KEY not in payload)
-                )
+                state._payload(payload, record, legacy=import_legacy and RUN_ID_KEY not in payload)
         return state
-
-    def seed_legacy_history(self) -> None:
-        """Import existing outcomes explicitly; all subsequent writes have run identity."""
-        for key, payload in self.payloads.items():
-            self._event(key, "dispatched")
-            self._event(key, "failure" if payload.failure_class is not None else "success")
 
     def disposition(self, identity: str) -> str:
         index = self.latest.get(identity)
@@ -442,19 +387,23 @@ class RolloutJournal:
             )
         return self.disposition(identity) not in {"success", "omitted"} and not terminal
 
+    def failure_count(self, identity: str) -> int:
+        return self.attempt_counts[identity] + (
+            self.overridden_terminal_counts[identity] if self.retry_terminal_timeouts else 0
+        )
+
     def exhausted_count(self, max_attempts: int) -> int:
         return sum(
-            self._retryable(identity) and self.attempt_counts[identity] >= max_attempts for identity in self.expected
+            self._retryable(identity) and self.failure_count(identity) >= max_attempts for identity in self.expected
         )
 
     def pending(self, max_attempts: int) -> list[dict]:
         pending = []
         for identity, original in self.expected.items():
-            if not self._retryable(identity) or self.attempt_counts[identity] >= max_attempts:
+            if not self._retryable(identity) or self.failure_count(identity) >= max_attempts:
                 continue
             row = dict(original)
-            if identity in self.latest:
-                row[ATTEMPT_INDEX_KEY_NAME] = self.latest[identity] + 1
+            row[ATTEMPT_INDEX_KEY_NAME] = self.manifest.next_attempt.get(identity, self.latest.get(identity, -1) + 1)
             pending.append(row)
         return pending
 
@@ -476,7 +425,7 @@ class RolloutJournal:
             if self.disposition(identity) == "success"
         )
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "selection_policy": self.manifest.selection_policy,
             "run_id": self.manifest.run_id,
             "expected": expected,
@@ -488,7 +437,10 @@ class RolloutJournal:
             "intentionally_omitted": counts["omitted"],
             "unknown": counts["unknown"],
             "never_dispatched": expected - len(self.latest),
-            "attempts": len(self.dispatched),
+            "attempts": sum(
+                max(self.manifest.next_attempt.get(identity, 0), index + 1) for identity, index in self.latest.items()
+            ),
+            "counted_failures": sum(self.failure_count(identity) for identity in self.expected),
             "attempts_exhausted": self.exhausted_count(max_attempts),
             "max_rollout_attempts": max_attempts,
             "retry_terminal_timeouts": self.retry_terminal_timeouts,

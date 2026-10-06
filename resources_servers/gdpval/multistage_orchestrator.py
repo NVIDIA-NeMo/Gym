@@ -85,11 +85,11 @@ from nemo_gym.rollout_collection import (
     migrate_invalid_judge_main_rows,
     observed_elapsed,
 )
-from nemo_gym.rollout_journal import (
+from nemo_gym.rollout_records import (
     coverage_path_for,
     materialized_path_for,
 )
-from nemo_gym.rollout_journal import (
+from nemo_gym.rollout_records import (
     journal_path_for as rollout_attempts_path_for,
 )
 from nemo_gym.rollout_recovery import manifest_path_for

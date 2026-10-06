@@ -63,3 +63,7 @@ class RolloutFailure(BaseModel):
 
 class InvalidRolloutResult(ValueError):
     """An agent returned a body that cannot represent a completed result."""
+
+
+class StaleRolloutResult(InvalidRolloutResult):
+    """A response from another attempt may be transient after a transport retry."""

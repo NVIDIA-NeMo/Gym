@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import multiprocessing
-import os
-import signal
 from collections import Counter
 from contextlib import contextmanager
 from itertools import permutations, product
@@ -26,10 +23,10 @@ import pytest
 
 from nemo_gym.config_types import ConfigError
 from nemo_gym.path_utils import failures_path_for
-from nemo_gym.rollout_journal import (
+from nemo_gym.rollout_records import (
     RUN_ID_KEY,
-    RolloutJournal,
     RolloutRecord,
+    RolloutRecords,
     coverage_path_for,
     journal_path_for,
     materialized_path_for,
@@ -37,6 +34,7 @@ from nemo_gym.rollout_journal import (
     read_records,
 )
 from nemo_gym.rollout_recovery import RunManifest, manifest_path_for
+from nemo_gym.rollout_store import RolloutStore
 
 
 @pytest.fixture
@@ -56,10 +54,13 @@ def run(tmp_path):
 @contextmanager
 def writer(run, *, resume=False):
     output, manifest, rows = run
-    history = RolloutJournal.load(output, manifest) if resume else RolloutJournal(manifest, rows)
-    with journal_path_for(output).open("ab") as file:
-        history.file = file
-        yield history
+    if resume:
+        manifest = RunManifest.model_validate_json(manifest_path_for(output).read_bytes())
+        state = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
+    else:
+        state = RolloutRecords(manifest, rows)
+    with RolloutStore(output, state) as store:
+        yield store
 
 
 def save(run, history, row, *, failure=None, reward=0.0, record_outcome=True):
@@ -77,7 +78,7 @@ def save(run, history, row, *, failure=None, reward=0.0, record_outcome=True):
         file.write(raw)
         file.flush()
     if record_outcome:
-        history.outcome(result, record=record)
+        history._state.outcome(result, record=record)
     return result
 
 
@@ -85,12 +86,12 @@ def test_every_expected_rollout_has_one_disposition(run):
     output, manifest, rows = run
     with writer(run) as history:
         for row in rows[:4]:
-            history.dispatch(row)
+            history.record_dispatch(row)
         save(run, history, rows[0], reward=0.0)
         save(run, history, rows[1], failure="agent_request_failed")
-        history.omit(rows[2], "No cached deliverable; producer intentionally skipped this task")
+        history.record_omission(rows[2], "No cached deliverable; producer intentionally skipped this task")
         # Row 3 was dispatched and disappeared. Row 4 was never dispatched.
-    recovered = RolloutJournal.load(output, manifest)
+    recovered = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
     coverage = recovered.coverage()
     assert (coverage["expected"], coverage["successful"], coverage["failed"]) == (5, 1, 1)
     assert (coverage["intentionally_omitted"], coverage["unknown"], coverage["never_dispatched"]) == (1, 2, 1)
@@ -104,14 +105,14 @@ def test_measurement_split_reconciles_without_changing_recovery(run, disposition
     output, manifest, rows = run
     with writer(run) as history:
         for row, disposition in zip(rows, dispositions):
-            history.dispatch(row)
+            history.record_dispatch(row)
             if disposition == "omitted":
-                history.omit(row, "Intentionally skipped")
+                history.record_omission(row, "Intentionally skipped")
             elif disposition == "failed":
                 save(run, history, row, failure="agent_run_error")
             elif disposition != "unknown":
                 save(run, history, row | {"mask_sample": disposition == "masked"}, reward=0.0)
-    recovered = RolloutJournal.load(output, manifest)
+    recovered = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
     report = recovered.coverage()
     expected = Counter(dispositions)
     assert report["measured"] == expected["measured"]
@@ -132,9 +133,9 @@ def test_fully_masked_run_is_complete_without_unmasked_measurements(run):
     output, manifest, rows = run
     with writer(run) as history:
         for row in rows:
-            history.dispatch(row)
+            history.record_dispatch(row)
             save(run, history, row | {"mask_sample": True})
-    recovered = RolloutJournal.load(output, manifest)
+    recovered = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
     report = recovered.coverage()
     assert (report["expected"], report["successful"], report["measured"], report["masked"]) == (5, 5, 0, 5)
     assert report["complete"] and report["reconciled"]
@@ -142,37 +143,10 @@ def test_fully_masked_run_is_complete_without_unmasked_measurements(run):
     assert len(recovered.selected("success")) == 5
 
 
-@pytest.mark.parametrize("corruption", ["schema", "undispatched", "indices", "artifact", "scalar"])
-def test_corrupt_history_or_payload_is_rejected_without_mutation(run, corruption):
-    output, manifest, rows = run
-    with writer(run) as history:
-        history.dispatch(rows[0])
-        payload = save(run, history, rows[0])
-    journal = journal_path_for(output)
-    events = list(read_records(journal))
-    if corruption == "schema":
-        events[0]["schema_version"] = 99
-    elif corruption == "undispatched":
-        events = events[1:]
-    elif corruption == "indices":
-        payload["_ng_rollout_id"] = "0-0"
-        payload["_ng_task_index"] = 1
-    elif corruption == "artifact":
-        payload["_ng_failure_class"] = "judge_failed"
-    else:
-        payload = []
-    journal.write_bytes(b"".join(orjson.dumps(event) + b"\n" for event in events))
-    output.write_bytes(orjson.dumps(payload) + b"\n")
-    before = (journal.read_bytes(), output.read_bytes())
-    with pytest.raises(ConfigError):
-        RolloutJournal.load(output, manifest)
-    assert (journal.read_bytes(), output.read_bytes()) == before
-
-
 def test_duplicate_inventory_cannot_conflate_distinct_tasks(run):
     _, manifest, rows = run
     with pytest.raises(ConfigError, match="Duplicate logical rollout"):
-        RolloutJournal(manifest, [rows[0], rows[0] | {"question": "Different question"}])
+        RolloutRecords(manifest, [rows[0], rows[0] | {"question": "Different question"}])
 
 
 @pytest.mark.parametrize("arrival_order", list(permutations(range(3))))
@@ -181,41 +155,25 @@ def test_latest_attempt_wins_independently_of_arrival_order(run, arrival_order):
     attempts = [dict(rows[0], _ng_attempt_index=index) for index in range(3)]
     with writer(run) as history:
         for row in attempts:
-            history.dispatch(row)
-        prefix = journal_path_for(output).read_bytes()
+            history.record_dispatch(row)
         for index in arrival_order:
             save(run, history, attempts[index], reward=index / 2)
-    assert journal_path_for(output).read_bytes().startswith(prefix)
     assert len(list(read_records(output))) == 3  # Older payloads remain append-only.
-    recovered = RolloutJournal.load(output, manifest)
+    recovered = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
     assert [row["reward"] for row in recovered.selected("success")] == [1.0]
     assert recovered.coverage()["successful"] == 1
     assert all(row["_ng_task_index"] != 0 for row in recovered.pending(3))
-
-
-def test_new_dispatch_fences_late_success_and_unknown_attempt_is_not_reused(run):
-    output, manifest, rows = run
-    retry = dict(rows[0], _ng_attempt_index=1)
-    with writer(run) as history:
-        history.dispatch(rows[0])
-        history.dispatch(retry)
-        save(run, history, rows[0])
-    recovered = RolloutJournal.load(output, manifest)
-    assert recovered.selected("success") == []
-    assert recovered.pending(3)[0]["_ng_attempt_index"] == 2
-    assert all(row["_ng_task_index"] != 0 for row in recovered.pending(2))
-    assert recovered.coverage()["unknown"] == 5  # Exhaustion does not invent a failure/reward.
 
 
 def test_latest_failure_is_not_hidden_by_a_late_older_success(run):
     output, manifest, rows = run
     retry = dict(rows[0], _ng_attempt_index=1)
     with writer(run) as history:
-        history.dispatch(rows[0])
-        history.dispatch(retry)
+        history.record_dispatch(rows[0])
+        history.record_dispatch(retry)
         save(run, history, retry, failure="judge_failed")
         save(run, history, rows[0], reward=1.0)
-    recovered = RolloutJournal.load(output, manifest)
+    recovered = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
     assert recovered.selected("success") == []
     assert recovered.selected("failure")[0]["_ng_attempt_index"] == 1
 
@@ -223,34 +181,41 @@ def test_latest_failure_is_not_hidden_by_a_late_older_success(run):
 def test_crash_between_payload_flush_and_outcome_event_keeps_result(run):
     output, manifest, rows = run
     with writer(run) as history:
-        history.dispatch(rows[0])
+        history.record_dispatch(rows[0])
         save(run, history, rows[0], record_outcome=False)
-    assert [event["status"] for event in read_records(journal_path_for(output))] == ["dispatched"]
-    recovered = RolloutJournal.load(output, manifest)
+    assert not journal_path_for(output).exists()
+    recovered = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
     assert recovered.selected("success")[0]["reward"] == 0.0
     assert all(row["_ng_task_index"] != 0 for row in recovered.pending(3))
 
 
-@pytest.mark.parametrize("artifact", ["history", "payload"])
+@pytest.mark.parametrize("artifact", ["payload"])
 def test_incomplete_tail_is_repaired_without_rewriting_prior_records(run, artifact):
     output, manifest, rows = run
     with writer(run) as history:
-        history.dispatch(rows[0])
+        history.record_dispatch(rows[0])
         save(run, history, rows[0])
     path = journal_path_for(output) if artifact == "history" else output
     prefix = path.read_bytes()
     with path.open("ab") as file:
         file.write(b'{"interrupted":')
     with pytest.warns(UserWarning, match="incomplete final"):
-        recovered = RolloutJournal.load(output, manifest)
+        recovered = RolloutRecords.load(
+            output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes())
+        )
     assert recovered.coverage()["successful"] == 1
     with pytest.warns(UserWarning, match="incomplete final"):
         prepare_append(path)
     assert path.read_bytes() == prefix
     with writer(run, resume=True) as history:
-        history.dispatch(rows[1])
+        history.record_dispatch(rows[1])
         save(run, history, rows[1])
-    assert RolloutJournal.load(output, manifest).coverage()["successful"] == 2
+    assert (
+        RolloutRecords.load(
+            output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes())
+        ).coverage()["successful"]
+        == 2
+    )
 
 
 def test_complete_unterminated_tail_gets_a_newline(tmp_path):
@@ -316,11 +281,11 @@ def test_interior_corruption_is_rejected(tmp_path):
         list(read_records(path))
 
 
-@pytest.mark.parametrize("artifact", ["history", "payload", "materialized"])
+@pytest.mark.parametrize("artifact", ["payload", "materialized"])
 def test_foreign_run_or_changed_inventory_is_rejected(run, artifact):
     output, manifest, rows = run
     with writer(run) as history:
-        history.dispatch(rows[0])
+        history.record_dispatch(rows[0])
         save(run, history, rows[0])
     if artifact == "materialized":
         path = materialized_path_for(output)
@@ -329,62 +294,38 @@ def test_foreign_run_or_changed_inventory_is_rejected(run, artifact):
         path = journal_path_for(output) if artifact == "history" else output
         path.write_bytes(path.read_bytes().replace(manifest.run_id.encode(), b"another-run"))
     with pytest.raises(ConfigError, match="different run|do not match"):
-        RolloutJournal.load(output, manifest)
+        RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
 
 
 def test_duplicate_delivery_is_idempotent_but_conflicting_payloads_are_rejected(run):
     output, manifest, rows = run
     with writer(run) as history:
-        history.dispatch(rows[0])
+        history.record_dispatch(rows[0])
         save(run, history, rows[0])
         save(run, history, rows[0])
-    assert RolloutJournal.load(output, manifest).coverage()["successful"] == 1
+    assert (
+        RolloutRecords.load(
+            output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes())
+        ).coverage()["successful"]
+        == 1
+    )
     with writer(run, resume=True) as history:
         with pytest.raises(ConfigError, match="Conflicting outcomes"):
             save(run, history, rows[0], reward=1.0)
     with pytest.raises(ConfigError, match="Conflicting outcomes"):
-        RolloutJournal.load(output, manifest)
+        RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
 
 
 def test_terminal_skip_is_a_durable_omission(run):
     output, manifest, rows = run
     row = dict(rows[0], _ng_failure_terminal=True)
     with writer(run) as history:
-        history.dispatch(row)
+        history.record_dispatch(row)
         save(run, history, row, failure="skipped")
-    recovered = RolloutJournal.load(output, manifest)
+    recovered = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
     assert recovered.coverage()["intentionally_omitted"] == 1
     assert recovered.coverage()["failed"] == 0
     assert all(row["_ng_task_index"] != 0 for row in recovered.pending(3))
-
-
-def dispatch_then_die(output, manifest_dict, rows):
-    history = RolloutJournal(RunManifest.model_validate(manifest_dict), rows)
-    with journal_path_for(output).open("ab") as file:
-        history.file = file
-        history.dispatch(rows[0])
-        os.kill(os.getpid(), signal.SIGKILL)
-
-
-@pytest.mark.skipif(not hasattr(signal, "SIGKILL"), reason="Requires process kill without cleanup")
-def test_killed_worker_leaves_durable_unknown_attempt(run):
-    output, manifest, rows = run
-    process = multiprocessing.get_context("spawn").Process(
-        target=dispatch_then_die, args=(output, manifest.model_dump(), rows)
-    )
-    process.start()
-    try:
-        process.join(30)
-        assert process.exitcode == -signal.SIGKILL
-        history = RolloutJournal.load(output, manifest)
-        assert history.coverage()["unknown"] == 5
-        assert history.coverage()["never_dispatched"] == 4
-        assert history.pending(3)[0]["_ng_attempt_index"] == 1
-        assert output.read_bytes() == b""
-    finally:
-        if process.is_alive():
-            process.terminate()
-            process.join()
 
 
 @pytest.mark.parametrize("companion", ["manifest", "journal", "materialized", "failures", "all"])
@@ -397,7 +338,7 @@ async def test_aggregation_preserves_existing_target_recovery_artifacts(run, mon
 
     source, _, rows = run
     with writer(run) as history:
-        history.dispatch(rows[0])
+        history.record_dispatch(rows[0])
         save(run, history, rows[0], reward=1.0)
     target = source.with_name("combined.jsonl")
     target_rows = [dict(rows[0], _ng_task_index=99)]
@@ -412,10 +353,12 @@ async def test_aggregation_preserves_existing_target_recovery_artifacts(run, mon
         "materialized": materialized_path_for(target),
         "failures": failures_path_for(target),
     }
+    if companion == "journal":
+        journal_path_for(target).touch()
     if companion != "all":
         for name, path in companions.items():
             if name != companion:
-                path.unlink()
+                path.unlink(missing_ok=True)
     destination = target
     if alias:
         destination = target.with_name("alias.jsonl")
@@ -443,7 +386,7 @@ async def test_aggregation_can_replace_a_plain_projection_without_recovery_histo
 
     source, _, rows = run
     with writer(run) as history:
-        history.dispatch(rows[0])
+        history.record_dispatch(rows[0])
         result = save(run, history, rows[0], reward=1.0)
     target = source.with_name("combined.jsonl")
     target.write_bytes(orjson.dumps(result | {"reward": 0.0}) + b"\n")
@@ -474,7 +417,7 @@ async def test_failed_merge_keeps_the_original_projection(run, monkeypatch, fail
     source, _, rows = run
     with writer(run) as history:
         for row in rows[:2]:
-            history.dispatch(row)
+            history.record_dispatch(row)
             save(run, history, row, reward=1.0)
     target = source.with_name("combined.jsonl")
     target.write_bytes(b'{"old": true}\n')
@@ -522,22 +465,22 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
         RolloutAggregationHelper,
         RolloutCollectionHelper,
     )
-    from nemo_gym.rollout_journal import coverage_path_for
+    from nemo_gym.rollout_records import coverage_path_for
 
     output, _, rows = run
     retry = dict(rows[0], _ng_attempt_index=1)
     with writer(run) as history:
-        history.dispatch(rows[0])
-        history.dispatch(retry)
+        history.record_dispatch(rows[0])
+        history.record_dispatch(retry)
         save(run, history, retry | {"mask_sample": masked}, reward=0.0)
         save(run, history, rows[0] | {"mask_sample": not masked}, reward=1.0)
-        history.dispatch(rows[1])
+        history.record_dispatch(rows[1])
         save(run, history, rows[1] | {"mask_sample": True, "failure_kind": failure_class}, failure=failure_class)
-        history.omit(rows[2], "No cached deliverable")
-        history.dispatch(rows[3])
+        history.record_omission(rows[2], "No cached deliverable")
+        history.record_dispatch(rows[3])
         save(run, history, rows[3] | {"mask_sample": True}, failure=failure_class)
         # The newer unknown attempt must fence the old, explicitly countable failure.
-        history.dispatch(rows[3] | {"_ng_attempt_index": 1})  # Row 4 was never dispatched.
+        history.record_dispatch(rows[3] | {"_ng_attempt_index": 1})  # Row 4 was never dispatched.
     original_failures = failures_path_for(output).read_bytes()
 
     scored = []
@@ -604,7 +547,7 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
 @pytest.mark.parametrize("masked", [False, True])
 async def test_legacy_aggregation_cannot_claim_complete_without_inventory(tmp_path, monkeypatch, capsys, masked):
     import nemo_gym.rollout_collection as collection
-    from nemo_gym.rollout_journal import coverage_path_for
+    from nemo_gym.rollout_records import coverage_path_for
 
     output = tmp_path / "legacy.jsonl"
     output.write_bytes(
@@ -691,9 +634,9 @@ async def test_aggregation_reports_journal_failure_classes(run, monkeypatch, cap
 
     output, _, rows = run
     with writer(run) as history:
-        history.dispatch(rows[0])
+        history.record_dispatch(rows[0])
         save(run, history, rows[0], reward=1.0)
-        history.dispatch(rows[1])
+        history.record_dispatch(rows[1])
         save(run, history, rows[1], failure="judge_failed")
     if mixed_legacy:
         output.with_name("rollouts_legacy.jsonl").write_bytes(
@@ -717,7 +660,7 @@ async def test_aggregation_reports_journal_failure_classes(run, monkeypatch, cap
 
 @pytest.mark.parametrize("versioned", [False, True])
 def test_saved_failure_contract_round_trip(run, versioned):
-    from nemo_gym.rollout_journal import logical_rollout_id
+    from nemo_gym.rollout_records import logical_rollout_id
 
     output, manifest, rows = run
     failure = {
@@ -731,9 +674,11 @@ def test_saved_failure_contract_round_trip(run, versioned):
         failure["schema_version"] = 1
     row = rows[0] | {"_ng_failure_record": failure}
     with writer(run) as history:
-        history.dispatch(row)
+        history.record_dispatch(row)
         saved = save(run, history, row, failure="judge_failed")
-    assert RolloutJournal.load(output, manifest).selected("failure") == [saved]
+    assert RolloutRecords.load(
+        output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes())
+    ).selected("failure") == [saved]
 
 
 @pytest.mark.parametrize("import_legacy", [False, True])
@@ -746,11 +691,11 @@ def test_saved_failure_contract_round_trip(run, versioned):
     ],
 )
 def test_resume_rejects_incompatible_saved_failure_contract(run, invalid, import_legacy):
-    from nemo_gym.rollout_journal import logical_rollout_id
+    from nemo_gym.rollout_records import logical_rollout_id
 
     output, manifest, rows = run
     with writer(run) as history:
-        history.dispatch(rows[0])
+        history.record_dispatch(rows[0])
         saved = save(run, history, rows[0], failure="judge_failed")
     saved["_ng_failure_record"] = {
         "schema_version": 1,
@@ -764,5 +709,5 @@ def test_resume_rejects_incompatible_saved_failure_contract(run, invalid, import
     sidecar.write_bytes(orjson.dumps(saved) + b"\n")
     before = sidecar.read_bytes()
     with pytest.raises(ConfigError, match="Invalid saved failure record"):
-        RolloutJournal.load(output, manifest, import_legacy=import_legacy)
+        RolloutRecords.load(output, manifest, import_legacy=import_legacy)
     assert sidecar.read_bytes() == before

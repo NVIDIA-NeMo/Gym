@@ -18,17 +18,14 @@
 import gc
 import tracemalloc
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import orjson
 import pytest
 
-import nemo_gym.rollout_store as persistence
 from nemo_gym.config_types import ConfigError
 from nemo_gym.path_utils import failures_path_for
-from nemo_gym.rollout_journal import (
-    RolloutJournal,
+from nemo_gym.rollout_records import (
     RolloutRecord,
     journal_path_for,
     materialized_path_for,
@@ -56,41 +53,6 @@ def snapshot(output):
     return {path.name: path.read_bytes() for path in output.parent.iterdir() if path.is_file()}
 
 
-@pytest.mark.parametrize("interruption", ["outcome_event", "fsync"])
-def test_flushed_payload_survives_interrupted_commit(prepared_run, monkeypatch, interruption):
-    output, prepare = prepared_run
-    store = RolloutStore.start_or_resume(output, prepare, resume=False)
-    original_event = RolloutJournal._event
-
-    def event(state, key, status, reason=None):
-        if status == "success":
-            # The payload must be visible even though its outcome event fails.
-            assert list(read_records(output)) == [result]
-            raise OSError("interrupted outcome event")
-        return original_event(state, key, status, reason)
-
-    def fsync(fd):
-        assert list(read_records(output)) == [result]
-        assert [row["status"] for row in read_records(journal_path_for(output))] == ["dispatched"]
-        raise OSError("interrupted fsync")
-
-    monkeypatch.setattr(RolloutJournal, "_event", event)
-    if interruption == "fsync":
-        monkeypatch.setattr(persistence, "os", SimpleNamespace(fsync=fsync, fstat=persistence.os.fstat))
-    with pytest.raises(OSError, match="interrupted"):
-        with store:
-            row = store.pending(3)[0]
-            store.record_dispatch(row)
-            result = row | {"reward": 0.0, "response": {}}
-            store.record_outcome(result, sync=interruption == "fsync")
-    before = snapshot(output)
-    recovered = RolloutStore.read(output)
-    assert recovered.selected("success") == [result]
-    assert [row["_ng_task_index"] for row in recovered.pending(3)] == [1]
-    assert recovered.coverage()["successful"] == 1
-    assert snapshot(output) == before
-
-
 def test_invalid_outcomes_are_rejected_before_appending_bytes(prepared_run):
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -100,7 +62,7 @@ def test_invalid_outcomes_are_rejected_before_appending_bytes(prepared_run):
         store.record_outcome(result)
         before = snapshot(output)
         for invalid in (result | {"reward": 1.0}, undispatched | {"reward": 0.0, "response": {}}):
-            with pytest.raises(ConfigError, match="Conflicting outcomes|no dispatch"):
+            with pytest.raises(ConfigError, match="Conflicting outcomes|no reserved attempt"):
                 store.record_outcome(invalid)
             assert snapshot(output) == before
     assert RolloutStore.read(output).selected("success") == [result]
@@ -126,7 +88,7 @@ def test_partial_open_failure_closes_files_and_allows_retry(prepared_run, monkey
         with pytest.raises(OSError, match="cannot open sidecar"):
             with store:
                 pytest.fail("The store must not open partially")
-    assert len(opened) == 2 and all(file.closed for file in opened)
+    assert len(opened) == 1 and all(file.closed for file in opened)
     with store:
         row = store.pending(3)[0]
         store.record_dispatch(row)
@@ -166,7 +128,7 @@ def test_recovery_and_offline_selection_use_the_newest_dispatch(prepared_run):
     before = snapshot(output)
     offline = RolloutStore.read(output)
     assert offline.selected("success") == []
-    assert offline.coverage()["selection_policy"] == "latest_dispatched"
+    assert offline.coverage()["selection_policy"] == "latest_allocated"
     assert snapshot(output) == before
     with RolloutStore.start_or_resume(output, prepare, resume=True) as resumed:
         assert resumed.coverage() == offline.coverage()
@@ -224,14 +186,14 @@ def test_large_history_retains_offsets_instead_of_trajectories(prepared_run, reo
         patch.setattr(RolloutRecord, "_read", unexpected_read)
         assert store.coverage()["successful"] == 1
         assert store.coverage()["failed"] == 1
-        assert store.pending(80)[0]["_ng_attempt_index"] == 64
+        assert store.pending(80)[0]["_ng_attempt_index"] == 32
         locations = store.selected_records("success")
         assert len(locations) == 1
 
     record = next(iter(locations.values()))
     assert record.path == output
     assert record.offset > 0
-    assert record.read()["_ng_attempt_index"] == 62
+    assert record.read()["_ng_attempt_index"] == 31
     assert store.selected("success")[0]["response"]["output_text"] == blob + "62"
 
 
@@ -340,7 +302,7 @@ def test_interruption_after_materialization_can_restart(prepared_run, monkeypatc
         assert store.coverage()["attempts"] == 0
 
 
-@pytest.mark.parametrize("metadata", [manifest_path_for, journal_path_for])
+@pytest.mark.parametrize("metadata", [manifest_path_for])
 @pytest.mark.parametrize("allow_unsafe", [False, True])
 def test_incomplete_journaled_cache_does_not_fall_back_to_fresh(prepared_run, metadata, allow_unsafe):
     output, prepare = prepared_run
@@ -350,34 +312,6 @@ def test_incomplete_journaled_cache_does_not_fall_back_to_fresh(prepared_run, me
         RolloutStore.start_or_resume(output, prepare, resume=True, allow_unsafe=allow_unsafe)
     prepare.assert_not_called()
     assert snapshot(output) == before
-
-
-@pytest.mark.parametrize("missing", [("journal",), ("manifest",), ("manifest", "journal")])
-def test_unsafe_recovery_rebuilds_own_artifacts_without_relabeling(prepared_run, missing):
-    output, prepare = prepared_run
-    with RolloutStore.start_or_resume(output, prepare, resume=False) as original:
-        row = original.pending(3)[0]
-        original.record_dispatch(row)
-        result = row | {"reward": 0.0, "response": {}}
-        original.record_outcome(result)
-    paths = {"journal": journal_path_for(output), "manifest": manifest_path_for(output)}
-    for name in missing:
-        paths[name].unlink()
-    saved_output = output.read_bytes()
-    with pytest.raises(ConfigError):
-        RolloutStore.start_or_resume(output, prepare, resume=True)
-    with pytest.warns(UserWarning, match="allow_unsafe_resume"):
-        resumed = RolloutStore.start_or_resume(output, prepare, resume=True, allow_unsafe=True)
-    with resumed:
-        assert resumed.manifest.run_id == original.manifest.run_id
-        assert resumed.selected("success") == [result]
-        assert [row["_ng_task_index"] for row in resumed.pending(3)] == [1]
-        assert not resumed.coverage()["identity_verified"]
-        pending = resumed.pending(3)[0]
-        resumed.record_dispatch(pending)
-        resumed.record_outcome(pending | {"reward": 1.0, "response": {}})
-    assert output.read_bytes().startswith(saved_output)
-    assert RolloutStore.read(output).coverage()["complete"]
 
 
 @pytest.mark.parametrize("remove_manifest", [False, True])
@@ -390,7 +324,7 @@ def test_unsafe_import_rejects_foreign_run_mixtures(prepared_run, remove_manifes
     records = list(read_records(output))
     records[1]["_ng_run_id"] = "foreign"
     output.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in records))
-    journal_path_for(output).unlink()
+    journal_path_for(output).unlink(missing_ok=True)
     if remove_manifest:
         manifest_path_for(output).unlink()
     before = snapshot(output)
@@ -451,7 +385,7 @@ def test_reverification_overwrite_preserves_existing_run(prepared_run):
     assert snapshot(output) == before
 
 
-@pytest.mark.parametrize("missing", ["output", "materialized", "journal"])
+@pytest.mark.parametrize("missing", ["output", "materialized"])
 def test_resume_rejects_missing_artifacts_before_changing_saved_work(prepared_run, missing):
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -487,30 +421,6 @@ def test_missing_current_source_requires_visible_identity_override(prepared_run)
     assert saved.identity_overridden
 
 
-@pytest.mark.parametrize("retained", [0, 2])
-def test_unsafe_resume_rebuilds_lost_dispatches_preserving_valid_prefix(prepared_run, retained):
-    output, prepare = prepared_run
-    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
-        for row in store.pending(3):
-            store.record_dispatch(row)
-            store.record_outcome(row | {"reward": 1.0, "response": {}})
-    results = output.read_bytes()
-    journal = journal_path_for(output)
-    prefix = b"".join(journal.read_bytes().splitlines(keepends=True)[:retained])
-    journal.write_bytes(prefix)
-    with pytest.raises(ConfigError, match="no dispatch"):
-        RolloutStore.start_or_resume(output, prepare, resume=True)
-    with pytest.warns(UserWarning, match="lower bounds"):
-        recovered = RolloutStore.start_or_resume(output, prepare, resume=True, allow_unsafe=True)
-    with recovered:
-        assert recovered.pending(3) == []
-        assert recovered.coverage()["successful"] == 2
-        assert not recovered.coverage()["identity_verified"]
-    assert output.read_bytes() == results
-    assert journal.read_bytes().startswith(prefix)
-    assert RolloutStore.read(output).selected("success") == recovered.selected("success")
-
-
 @pytest.mark.parametrize("corruption", ["foreign", "conflict", "invalid_event"])
 def test_unsafe_rebuild_does_not_hide_other_corruption(prepared_run, corruption):
     output, prepare = prepared_run
@@ -519,7 +429,8 @@ def test_unsafe_rebuild_does_not_hide_other_corruption(prepared_run, corruption)
             store.record_dispatch(row)
             store.record_outcome(row | {"reward": 1.0, "response": {}})
     records = list(read_records(output))
-    journal_path_for(output).write_bytes(b"{}\n" if corruption == "invalid_event" else b"")
+    if corruption == "invalid_event":
+        journal_path_for(output).write_bytes(b"{}\n")
     if corruption == "foreign":
         records[1]["_ng_run_id"] = "other-run"
     elif corruption == "conflict":
@@ -531,8 +442,8 @@ def test_unsafe_rebuild_does_not_hide_other_corruption(prepared_run, corruption)
     assert snapshot(output) == before
 
 
-@pytest.mark.parametrize("cap, expected_exhausted", [(1, 2), (2, 0)])
-def test_exhaustion_counts_failed_and_unknown_but_not_terminal_or_completed(
+@pytest.mark.parametrize("cap, expected_exhausted", [(1, 1), (2, 0)])
+def test_exhaustion_counts_failures_but_not_interruptions_terminal_or_completed(
     tmp_path, monkeypatch, cap, expected_exhausted
 ):
     monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", str(cap))
@@ -558,7 +469,7 @@ def test_exhaustion_counts_failed_and_unknown_but_not_terminal_or_completed(
     report = reopened.coverage()
     assert report["attempts_exhausted"] == expected_exhausted
     assert (report["failed"], report["unknown"], report["never_dispatched"], report["attempts"]) == (2, 2, 1, 5)
-    from nemo_gym.rollout_journal import coverage_path_for
+    from nemo_gym.rollout_records import coverage_path_for
 
     assert orjson.loads(coverage_path_for(output).read_bytes())["attempts_exhausted"] == expected_exhausted
 
@@ -670,8 +581,8 @@ def test_cached_deliverable_survives_unknown_attempt_but_not_newer_outcome(prepa
 def test_nested_failure_must_agree_with_saved_envelope(prepared_run, mismatch):
     from nemo_gym.episode_types import EpisodeFailure, EpisodeId
     from nemo_gym.rollout_collection import _failure_compatibility_row
-    from nemo_gym.rollout_journal import logical_rollout_id
     from nemo_gym.rollout_outcomes import RolloutFailure
+    from nemo_gym.rollout_records import logical_rollout_id
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -708,7 +619,7 @@ async def test_source_alias_uses_the_same_selected_history(prepared_run, monkeyp
     from unittest.mock import AsyncMock
 
     from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper, RolloutCollectionHelper
-    from nemo_gym.rollout_journal import coverage_path_for
+    from nemo_gym.rollout_records import coverage_path_for
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -756,7 +667,7 @@ def test_offline_coverage_declares_and_applies_timeout_retry_policy(prepared_run
 @pytest.mark.parametrize("other", ["failure", "unscored", "omitted"])
 async def test_missing_zero_uses_latest_attempt_without_changing_recovery(prepared_run, monkeypatch, previous, other):
     from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper, RolloutCollectionHelper
-    from nemo_gym.rollout_journal import coverage_path_for
+    from nemo_gym.rollout_records import coverage_path_for
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -801,7 +712,7 @@ async def test_missing_zero_uses_latest_attempt_without_changing_recovery(prepar
 
 async def test_missing_zero_keeps_separate_journal_run_identities(prepared_run, monkeypatch):
     from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper, RolloutCollectionHelper
-    from nemo_gym.rollout_journal import coverage_path_for
+    from nemo_gym.rollout_records import coverage_path_for
 
     output, prepare = prepared_run
     other = output.with_name("second.jsonl")
