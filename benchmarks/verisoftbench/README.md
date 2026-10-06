@@ -32,9 +32,15 @@ first use, no Lean container is needed for preparation):
 python benchmarks/verisoftbench/prepare.py
 ```
 
-→ `Wrote 500 rows` to `data/verisoftbench_benchmark.jsonl`. Fails closed if the
-dataset digest, row count or task ids differ from the pin. `--limit N` prepares a
-deliberate subset.
+→ `Wrote 500 rows` to `data/verisoftbench_benchmark.jsonl`, and prints the written
+file's sha256 for recording. Fails closed if the dataset digest, row count or task
+ids differ from the pin. `--limit N` prepares a deliberate subset.
+
+Benchmark rows carry upstream's prompts as top-level `system_prompt` / `user_prompt`
+fields and no pre-populated `responses_create_params.input`: Gym rejects a populated
+input wherever a `prompt_config` is declared, and renders the turns through the
+pass-through `prompt.yaml` at collation time instead — byte-identical to the server
+split's explicit input (the environment README's `--input` route is unchanged).
 
 ## Running
 

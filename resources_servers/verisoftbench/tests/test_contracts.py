@@ -23,6 +23,7 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 from app import REQUIRED_TASK_FIELDS, VeriSoftBenchResourcesServerConfig
 from task_data import TaskData
@@ -73,16 +74,100 @@ class TestShippedConfig:
         manifest = yaml.safe_load((GYM_ROOT / "benchmarks/verisoftbench/manifest.yaml").read_text())
         assert manifest["datasets"][0]["num_repeats"] == 8 and manifest["resources_server"] == "verisoftbench"
 
-    def test_pass_through_prompt_config_reproduces_the_prepared_input(self) -> None:
-        from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
+    @staticmethod
+    def _collate_benchmark_rows(rows: list[dict], jsonl_fpath) -> list[dict]:
+        """Run rows through Gym's registered benchmark collation (the path `gym eval run` prepares with).
 
-        prompt = load_prompt_config(str(GYM_ROOT / "benchmarks/verisoftbench/prompt.yaml"))
-        row = json.loads((SERVER_DIR / "data" / "example.jsonl").read_text().splitlines()[0])
-        rebuilt = apply_prompt_to_row(dict(row), prompt)
-        assert rebuilt["responses_create_params"]["input"] == row["responses_create_params"]["input"]
+        This is the path that calls ``validate_prompt_compatibility`` and ``apply_prompt_to_row``
+        (nemo_gym/train_data_utils.py) with the shipped pass-through prompt config, exactly as the
+        registered ``--split benchmark`` declaration does.
+        """
+        from omegaconf import DictConfig
+
+        from nemo_gym.config_types import ResponsesAPIAgentServerInstanceConfig
+        from nemo_gym.train_data_utils import TrainDataProcessor
+
+        jsonl_fpath.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        server_type_config_dict = {
+            "responses_api_agents": {
+                "verisoftbench_agent": {
+                    "host": "127.0.0.1",
+                    "port": 12345,
+                    "entrypoint": "app.py",
+                    "datasets": [
+                        {
+                            "name": "verisoftbench",
+                            "type": "benchmark",
+                            "jsonl_fpath": str(jsonl_fpath),
+                            "prepare_script": "benchmarks/verisoftbench/prepare.py",
+                            "prompt_config": str(GYM_ROOT / "benchmarks/verisoftbench/prompt.yaml"),
+                        }
+                    ],
+                    "resources_server": {"type": "resources_servers", "name": "verisoftbench"},
+                    "model_server": {"type": "responses_api_models", "name": "policy_model"},
+                }
+            }
+        }
+        config = ResponsesAPIAgentServerInstanceConfig(
+            name="verisoftbench_benchmark_agent",
+            server_type_config_dict=DictConfig(server_type_config_dict),
+            responses_api_agents=server_type_config_dict["responses_api_agents"],
+        )
+        [prepared] = TrainDataProcessor()._collate_samples_single_type(
+            "benchmark", [config], task_data_validation="off"
+        )
+        return [json.loads(line) for line in prepared.read_text().splitlines()]
+
+    def test_benchmark_form_rows_render_the_frozen_turns_through_gym_collation(self, tmp_path) -> None:
+        frozen = [
+            json.loads(line)
+            for line in (SERVER_DIR / "data" / "example.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        bench_rows = [
+            prep.format_benchmark_row(
+                {k: v for k, v in row["verifier_metadata"].items() if k != "context_mode"},
+                row["system_prompt"],
+                row["user_prompt"],
+            )
+            for row in frozen
+        ]
+        for row in bench_rows:
+            assert "responses_create_params" not in row
+        collated = self._collate_benchmark_rows(bench_rows, tmp_path / "bench.jsonl")
+        assert [r["responses_create_params"]["input"] for r in collated] == [
+            r["responses_create_params"]["input"] for r in frozen
+        ], "the pass-through prompt config must render exactly the frozen prepared turns"
+        assert all(r["task_source"] == "verisoftbench_benchmark_agent" for r in collated)
         bench = yaml.safe_load((GYM_ROOT / "benchmarks/verisoftbench/config.yaml").read_text())
         [dataset] = bench["verisoftbench_benchmark_agent"]["responses_api_agents"]["verisoftbench_agent"]["datasets"]
         assert dataset["prompt_config"] == "benchmarks/verisoftbench/prompt.yaml"
+
+    def test_explicit_input_rows_are_rejected_by_gym_when_a_prompt_config_is_declared(self, tmp_path) -> None:
+        # A row in the server split's explicit-input form (the frozen example rows carry
+        # exactly that shape) must be refused by the compatibility guard, not rendered.
+        frozen = json.loads((SERVER_DIR / "data" / "example.jsonl").read_text().splitlines()[0])
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            self._collate_benchmark_rows([frozen], tmp_path / "explicit.jsonl")
+
+    def test_benchmark_prepare_delegates_to_the_server_preparer_in_benchmark_form(self, monkeypatch) -> None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "verisoftbench_benchmark_prepare", GYM_ROOT / "benchmarks" / "verisoftbench" / "prepare.py"
+        )
+        bench = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bench)
+        captured = {}
+
+        class FakeServerPrepare:
+            @staticmethod
+            def main(argv):
+                captured["argv"] = argv
+
+        monkeypatch.setattr(bench, "_load_server_prepare", lambda: FakeServerPrepare)
+        bench.prepare()
+        assert captured["argv"] == ["--output", str(bench.OUTPUT_FPATH), "--benchmark-form"]
 
     def test_resources_server_block_comes_first(self) -> None:
         # The README-table hook reads the first top-level key.

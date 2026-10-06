@@ -112,6 +112,15 @@ class TestPrepare:
         out = prep.prepare([_row(i) for i in range(1, 11)], FakePrompts(), limit=3)
         assert [r["verifier_metadata"]["id"] for r in out] == [1, 2, 3]
 
+    def test_benchmark_form_carries_the_prompts_but_no_input(self) -> None:
+        # Gym rejects a populated responses_create_params.input wherever a prompt_config is
+        # declared, so the benchmark form must differ from the explicit form in exactly that key.
+        [explicit] = prep.prepare([_row(1)], FakePrompts(), limit=None)
+        [out] = prep.prepare([_row(1)], FakePrompts(), limit=None, benchmark_form=True)
+        assert "responses_create_params" not in out
+        assert out == {k: v for k, v in explicit.items() if k != "responses_create_params"}
+        assert out["system_prompt"] == "SYSTEM" and "<target_theorem>" in out["user_prompt"]
+
     def test_prompt_without_target_theorem_fails_closed(self) -> None:
         class Broken(FakePrompts):
             def user_prompt(self, row):
@@ -187,6 +196,28 @@ class TestMain:
         prep.main(["--upstream-dir", str(root), "--output", str(out), "--limit", "7"])
         lines = out.read_text().splitlines()
         assert len(lines) == 7 and json.loads(lines[-1])["verifier_metadata"]["id"] == 7
+
+    def test_main_benchmark_form_keeps_the_checks_and_reports_the_output_digest(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        root = _write_dataset(tmp_path, [_row(i) for i in range(1, 501)], monkeypatch)
+        monkeypatch.setattr(prep, "ensure_checkout", lambda d: None)
+        monkeypatch.setattr(prep, "PromptSource", lambda d: FakePrompts())
+        out = tmp_path / "out" / "benchmark.jsonl"
+        prep.main(["--upstream-dir", str(root), "--output", str(out), "--limit", "3", "--benchmark-form"])
+        rows = [json.loads(line) for line in out.read_text().splitlines()]
+        assert [r["verifier_metadata"]["id"] for r in rows] == [1, 2, 3]
+        assert all("responses_create_params" not in r and r["system_prompt"] == "SYSTEM" for r in rows)
+        # The printed digest is how a new split's identity gets recorded; it must hash the written bytes.
+        assert hashlib.sha256(out.read_bytes()).hexdigest() in capsys.readouterr().out
+
+    def test_main_benchmark_form_fails_closed_on_a_digest_mismatch(self, tmp_path, monkeypatch) -> None:
+        root = _write_dataset(tmp_path, [_row(i) for i in range(1, 501)], monkeypatch, pin_digest=False)
+        monkeypatch.setattr(prep, "ensure_checkout", lambda d: None)
+        out = tmp_path / "out" / "benchmark.jsonl"
+        with pytest.raises(prep.CorpusError, match="sha256"):
+            prep.main(["--upstream-dir", str(root), "--output", str(out), "--benchmark-form"])
+        assert not out.exists()
 
 
 class TestResolveUpstreamDir:

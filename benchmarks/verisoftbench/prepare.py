@@ -18,6 +18,12 @@ Delegates to the resources server's preparation script rather than duplicating i
 the benchmark split is produced by the same tested path as the environment split,
 including the pinned checkout, the dataset digest check and the 500-row / ids 1..500
 check that refuse to write a short or altered corpus.
+
+The one difference is ``--benchmark-form``: rows carry upstream's prompts as top-level
+``system_prompt``/``user_prompt`` fields with no pre-populated
+``responses_create_params.input``, because this benchmark declares ``prompt.yaml`` and
+Gym rejects rows that carry both. Gym renders the turns at collation time, byte-identical
+to the server split's explicit input.
 """
 
 import argparse
@@ -40,7 +46,7 @@ def _load_server_prepare():
 
 def prepare(limit: int | None = None, upstream_dir: str | None = None) -> Path:
     OUTPUT_FPATH.parent.mkdir(parents=True, exist_ok=True)
-    argv = ["--output", str(OUTPUT_FPATH)]
+    argv = ["--output", str(OUTPUT_FPATH), "--benchmark-form"]
     if limit is not None:
         argv += ["--limit", str(limit)]
     if upstream_dir is not None:

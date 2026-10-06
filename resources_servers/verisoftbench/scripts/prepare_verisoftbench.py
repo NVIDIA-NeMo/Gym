@@ -24,6 +24,14 @@ Preparation fails closed: the digest must match, exactly 500 rows must parse wit
 1..500, and nothing is written until every prompt has been built. ``--limit`` is the one
 supported way to prepare a deliberate subset. No Lean container is needed for
 preparation; prompts are built from the row alone.
+
+Two output forms share every check above. The default writes the server's explicit
+``responses_create_params.input`` (the format the recorded runs used). ``--benchmark-form``
+writes the same prompts as top-level fields only, because Gym rejects a populated input
+wherever a ``prompt_config`` is declared (``nemo_gym.prompt.validate_prompt_compatibility``);
+the benchmark's pass-through ``prompt.yaml`` then renders turns byte-identical to the
+explicit form. The sha256 of the written file is printed so a new split's digest can be
+recorded without touching older recorded digests.
 """
 
 import argparse
@@ -102,9 +110,9 @@ def format_row(row: dict[str, Any], system_prompt: str, user_prompt: str) -> dic
                 {"role": "user", "content": user_prompt},
             ]
         },
-        # The same two strings again as top-level fields, so that the benchmark's
-        # pass-through prompt config (benchmarks/verisoftbench/prompt.yaml) can
-        # re-materialise exactly this input; a prompt config is required there.
+        # The same two strings again as top-level fields: rendering them through the
+        # benchmark's pass-through prompt config (benchmarks/verisoftbench/prompt.yaml)
+        # reproduces exactly this input, which is what ties the two output forms together.
         "system_prompt": system_prompt,
         "user_prompt": user_prompt,
         "verifier_metadata": metadata,
@@ -112,7 +120,20 @@ def format_row(row: dict[str, Any], system_prompt: str, user_prompt: str) -> dic
     }
 
 
-def prepare(rows: list[dict[str, Any]], prompts: PromptSource, limit: Optional[int]) -> list[dict[str, Any]]:
+def format_benchmark_row(row: dict[str, Any], system_prompt: str, user_prompt: str) -> dict[str, Any]:
+    explicit = format_row(row, system_prompt, user_prompt)
+    # No responses_create_params: the benchmark declares a prompt config, and Gym refuses
+    # rows that carry both a populated input and a prompt config (prompt.py,
+    # validate_prompt_compatibility) before any inference. Gym builds the input from the
+    # top-level prompt fields at collation time instead.
+    del explicit["responses_create_params"]
+    return explicit
+
+
+def prepare(
+    rows: list[dict[str, Any]], prompts: PromptSource, limit: Optional[int], benchmark_form: bool = False
+) -> list[dict[str, Any]]:
+    formatter = format_benchmark_row if benchmark_form else format_row
     system_prompt = prompts.system_prompt()
     if limit is not None:
         rows = rows[:limit]
@@ -121,7 +142,7 @@ def prepare(rows: list[dict[str, Any]], prompts: PromptSource, limit: Optional[i
         user_prompt = prompts.user_prompt(row)
         if "<target_theorem>" not in user_prompt:
             raise CorpusError(f"task {row.get('id')}: prompt has no <target_theorem> section")
-        out.append(format_row(row, system_prompt, user_prompt))
+        out.append(formatter(row, system_prompt, user_prompt))
     return out
 
 
@@ -144,6 +165,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--limit", type=positive_int, default=None, help="prepare only the first N tasks (deliberate subset)"
     )
+    parser.add_argument(
+        "--benchmark-form",
+        action="store_true",
+        help="write prompt fields only, no responses_create_params.input (required wherever a prompt_config is declared)",
+    )
     return parser.parse_args(argv)
 
 
@@ -151,17 +177,21 @@ def main(argv: Optional[list[str]] = None) -> None:
     args = parse_args(argv)
     ensure_checkout(args.upstream_dir)
     rows = load_rows(args.upstream_dir)
-    prepared = prepare(rows, PromptSource(args.upstream_dir), args.limit)
+    prepared = prepare(rows, PromptSource(args.upstream_dir), args.limit, benchmark_form=args.benchmark_form)
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    output_hash = hashlib.sha256()
     with open(args.output, "w", encoding="utf-8") as f:
         for row in prepared:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            line = json.dumps(row, ensure_ascii=False) + "\n"
+            f.write(line)
+            output_hash.update(line.encode("utf-8"))
     print(
-        f"Wrote {len(prepared)} rows to {args.output} (upstream {UPSTREAM_COMMIT[:12]}, dataset sha256 {DATASET_SHA256[:12]})"
+        f"Wrote {len(prepared)} rows to {args.output} (upstream {UPSTREAM_COMMIT[:12]}, "
+        f"dataset sha256 {DATASET_SHA256[:12]}, output sha256 {output_hash.hexdigest()})"
     )
 
 
-__all__ = ["CorpusError", "Harness", "format_row", "load_rows", "prepare"]
+__all__ = ["CorpusError", "Harness", "format_benchmark_row", "format_row", "load_rows", "prepare"]
 
 if __name__ == "__main__":
     main()
