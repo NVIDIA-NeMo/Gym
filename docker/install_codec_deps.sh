@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Install codec-bearing packages that are excluded from the NeMo-Gym container.
+# Install packages that are excluded from the NeMo-Gym container (codec-bearing
+# packages, plus pycountry which vLLM's Mistral tokenizer import chain needs
+# when serving VLMs such as Qwen3-VL).
 #
 # Run this before using VLM or audio/video benchmarks inside the container:
 #
@@ -25,17 +27,18 @@
 # --no-config bypasses the project's sys_platform=='never' overrides.
 set -euo pipefail
 
-if python -c "import cv2, PyNvVideoCodec, torchcodec, torchvision, torchaudio" 2>/dev/null; then
+if python -c "import cv2, PyNvVideoCodec, torchcodec, torchvision, torchaudio, pycountry" 2>/dev/null; then
     echo "[codec-deps] Already installed, skipping."
     exit 0
 fi
 
-echo "[codec-deps] Installing codec-bearing packages..."
+echo "[codec-deps] Installing excluded packages..."
 uv pip install --no-config \
     "opencv-python-headless==5.0.0.93" \
     "pynvvideocodec==2.0.4" \
     "torchcodec==0.16.0" \
     "torchvision==0.26.0" \
-    "torchaudio==2.11.0"
+    "torchaudio==2.11.0" \
+    "pycountry==26.2.16"
 
 echo "[codec-deps] Done."
