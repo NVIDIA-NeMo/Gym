@@ -3,6 +3,7 @@
 
 """Regression coverage for the failure/recovery and checkpoint-controller boundary."""
 
+import asyncio
 import multiprocessing
 import os
 import signal
@@ -341,3 +342,222 @@ def test_cli_incomplete_status_after_saved_budget_drain(tmp_path):
         _check_saved_completion(output)
     coverage_path_for(output).write_bytes(orjson.dumps({"complete": True, "successful": 3, "expected": 3}))
     _check_saved_completion(output)
+
+
+@pytest.fixture
+def serialized_legacy_failure():
+    """Use the actual legacy response model's default JSON serialization."""
+    from pydantic import ConfigDict
+
+    from nemo_gym.base_resources_server import BaseVerifyResponse
+    from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+
+    class LegacyFailureResponse(BaseVerifyResponse):
+        model_config = ConfigDict(extra="allow")
+
+    def serialize(kind, *, terminal=False):
+        result = LegacyFailureResponse(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            response=NeMoGymResponse.model_construct(id="resp-1", output=[]),
+            reward=0.0,
+            **{"_ng_failure_class": kind, "_ng_failure_terminal": terminal},
+        ).model_dump(mode="json")
+        assert result["failure_kind"] is None
+        return result
+
+    return serialize
+
+
+@pytest.mark.parametrize(
+    "kind", ["timeout_exceeded", "kill_shaped", "reference_missing", "eval_missing", "transport_ineligible"]
+)
+def test_serialized_legacy_failure_keeps_routing_and_explicit_zero_policy(serialized_legacy_failure, kind):
+    row = {"_ng_task_index": 0, "_ng_rollout_index": 0, "_ng_run_id": "run"}
+    outcome = collection._normalize_rollout_outcome(row, serialized_legacy_failure(kind))
+    assert outcome.failure.failure_kind == kind
+    persisted = collection._failure_compatibility_row(outcome)
+    assert persisted["_ng_failure_class"] == kind
+    assert "reward" not in persisted
+    [counted] = collection._counted_failure_rows([persisted], [kind])
+    assert counted["reward"] == 0.0
+    assert collection._counted_failure_rows([persisted], ["environment_server_failed"]) == []
+    assert "reward" not in persisted
+
+
+async def test_serialized_terminal_timeout_retries_only_with_opt_in(
+    runner_config, monkeypatch, serialized_legacy_failure
+):
+    payload = serialized_legacy_failure("timeout_exceeded", terminal=True)
+
+    async def post(**kwargs):
+        result = payload if kwargs["json"]["task"] == 1 else {"response": {}, "reward": 1.0}
+        return FakeResponse(200, result)
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    helper = collection.RolloutCollectionHelper()
+    await helper.run_from_config(runner_config)
+    output = Path(runner_config.output_jsonl_fpath)
+    [saved] = RolloutStore.read(output).failures()
+    assert saved["_ng_failure_class"] == "timeout_exceeded"
+    assert "reward" not in saved
+    runner_config.resume_from_cache = True
+    client.post.reset_mock()
+    await helper.run_from_config(runner_config)
+    assert client.post.await_count == 0
+    runner_config.retry_terminal_timeouts = True
+    client.post = AsyncMock(return_value=FakeResponse(200, {"response": {}, "reward": 1.0}))
+    await helper.run_from_config(runner_config)
+    assert client.post.await_count == 1
+    store = RolloutStore.read(output)
+    assert store.coverage()["successful"] == 3
+    assert list(read_records(failures_path_for(output))) == [saved]
+
+
+@pytest.mark.parametrize("second_path", ["alias", "target"])
+async def test_fresh_symlink_collector_keeps_exclusive_ownership(runner_config, monkeypatch, second_path):
+    output = Path(runner_config.output_jsonl_fpath)
+    output.touch()
+    alias = output.with_name("latest.jsonl")
+    alias.symlink_to(output)
+    runner_config.output_jsonl_fpath = str(alias)
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def post(**kwargs):
+        calls.append(kwargs["json"]["_ng_run_id"])
+        if len(calls) == 1:
+            started.set()
+            await release.wait()
+        return FakeResponse(200, {"response": {}, "reward": 1.0})
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    first = asyncio.create_task(collection.RolloutCollectionHelper().run_from_config(runner_config))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=10)
+        before = snapshot(output)
+        second_config = runner_config.model_copy(
+            update={"output_jsonl_fpath": str(alias if second_path == "alias" else output)}
+        )
+        with pytest.raises(ConfigError, match="Another collector owns this run"):
+            await collection.RolloutCollectionHelper().run_from_config(second_config)
+        assert snapshot(output) == before
+        release.set()
+        results = await asyncio.wait_for(first, timeout=10)
+        assert len(calls) == len(results) == 3
+        assert len(set(calls)) == 1
+        assert alias.is_symlink()
+        assert RolloutStore.read(alias).selected("success") == results
+        assert manifest_path_for(output).exists() and not manifest_path_for(alias).exists()
+    finally:
+        release.set()
+        if not first.done():
+            first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"response": "answer", "reward": 1.0},
+        {"response": {"metadata": "custom-metadata"}, "reward": 1.0},
+        {"response": ["answer"], "elapsed_seconds": 5},
+    ],
+)
+async def test_native_result_schema_survives_collection_read_and_resume(runner_config, monkeypatch, payload):
+    from omegaconf import OmegaConf
+
+    Path(runner_config.input_jsonl_fpath).write_bytes(
+        orjson.dumps({"task_id": {"taskset": "native", "task_id": "0"}, "task_input": {}}) + b"\n"
+    )
+    runner_config.environment_server_routes = {"native": "environment"}
+
+    async def post(**kwargs):
+        body = kwargs["json"]
+        return FakeResponse(
+            200,
+            {
+                "episode_id": body["episode_id"],
+                "task_id": body["task"]["task_id"],
+                "result": payload,
+            },
+        )
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    client.global_config_dict = OmegaConf.create({"environment": {"environment_servers": {"custom": {}}}})
+    results = await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    assert results[0]["response"] == payload["response"]
+    output = Path(runner_config.output_jsonl_fpath)
+    assert RolloutStore.read(output).selected("success") == results
+    saved = output.read_bytes()
+    runner_config.resume_from_cache = True
+    assert await collection.RolloutCollectionHelper().run_from_config(runner_config) == results
+    assert client.post.await_count == 1
+    assert output.read_bytes() == saved
+
+
+@pytest.mark.parametrize(
+    "record, expected",
+    [
+        ({"response": "answer", "elapsed_seconds": 2}, 2.0),
+        ({"response": {"metadata": ["custom"]}}, None),
+        ({"response": {"metadata": {"elapsed_seconds": "3.5"}}}, 3.5),
+        ({"elapsed_seconds": 1, "response": {"metadata": {"elapsed_seconds": 8}}}, 1.0),
+        ({"elapsed_seconds": "invalid", "response": {"metadata": {"elapsed_seconds": 8}}}, 8.0),
+    ],
+)
+def test_optional_elapsed_hints_allow_environment_owned_response_shapes(record, expected):
+    from nemo_gym.rollout_recovery import observed_elapsed
+
+    assert observed_elapsed(record) == expected
+
+
+@pytest.mark.parametrize("failed", [False, True])
+@pytest.mark.parametrize("allow_unsafe", [False, True])
+def test_missing_companions_never_erase_run_tagged_outcomes(prepared_run, failed, allow_unsafe):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(3)[0]
+        store.allocate_attempt(row)
+        payload = {"_ng_failure_class": "judge_failed"} if failed else {"reward": 1.0, "response": {}}
+        store.record_outcome(row | payload)
+    manifest_path_for(output).unlink()
+    materialized_path_for(output).unlink()
+    before = snapshot(output)
+    prepare.reset_mock()
+    with pytest.raises(ConfigError, match="lost their manifest"):
+        RolloutStore.start_or_resume(output, prepare, resume=True, allow_unsafe=allow_unsafe)
+    assert snapshot(output) == before
+    prepare.assert_not_called()
+
+
+def test_interrupted_fresh_replacement_requires_repeating_fresh_command(prepared_run, monkeypatch):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(3)[0]
+        store.allocate_attempt(row)
+        store.record_outcome(row | {"reward": 1.0, "response": {}})
+    old_run_id = store.manifest.run_id
+    rows, _ = prepare()
+    changed = [row | {"task": "new"} for row in rows]
+    source = output.with_name("source.jsonl")
+    source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in changed))
+
+    def prepare_new():
+        return changed, RunManifest.create(source, changed, {}, {"agent": {"responses_api_agents": {"impl": {}}}})
+
+    def interrupted_write(*args):
+        raise OSError("interrupted before publishing new manifest")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(RunManifest, "write", interrupted_write)
+        with pytest.raises(OSError, match="interrupted"):
+            RolloutStore.start_or_resume(output, prepare_new, resume=False)
+    before = snapshot(output)
+    for unsafe in (False, True):
+        with pytest.raises(ConfigError, match="materialized inputs"):
+            RolloutStore.start_or_resume(output, prepare_new, resume=True, allow_unsafe=unsafe)
+        assert snapshot(output) == before
+    fresh = RolloutStore.start_or_resume(output, prepare_new, resume=False)
+    assert fresh.manifest.run_id != old_run_id
+    assert fresh.coverage()["attempts"] == 0
+    assert [row["task"] for row in fresh.pending(3)] == ["new", "new"]

@@ -380,7 +380,7 @@ def test_reverification_overwrite_preserves_existing_run(prepared_run):
     output, prepare = prepared_run
     RolloutStore.start_or_resume(output, prepare, resume=False)
     before = snapshot(output)
-    with pytest.raises(ConfigError, match="Cannot overwrite a journal-backed run"):
+    with pytest.raises(ConfigError, match="Cannot overwrite a manifest-backed run"):
         _prepare_output_fpaths("", str(output), False, True, False)
     assert snapshot(output) == before
 
@@ -492,14 +492,14 @@ async def test_journal_reverification_waits_for_followup_without_changing_files(
         judge_failed_only=True,
         append=True,
     )
-    with pytest.raises(ConfigError, match="Journal-backed reverification is a follow-up"):
+    with pytest.raises(ConfigError, match="Manifest-backed reverification is a follow-up"):
         await RolloutReverificationHelper().run_from_config(config)
     assert snapshot(output) == before
     # The final prefixed path must be checked too, including resume/append.
     from nemo_gym.rollout_reverification import _prepare_output_fpaths
 
     for append, resume in [(True, False), (False, True)]:
-        with pytest.raises(ConfigError, match="Journal-backed reverification is a follow-up"):
+        with pytest.raises(ConfigError, match="Manifest-backed reverification is a follow-up"):
             _prepare_output_fpaths("", str(output), resume, False, append)
     assert snapshot(output) == before
 
@@ -515,7 +515,7 @@ def test_journal_health_waits_for_followup_without_reporting_stale_results(prepa
         shortcut.symlink_to(output)
         output = shortcut
     before = snapshot(output)
-    with pytest.raises(ConfigError, match="Journal-aware health reports are a follow-up"):
+    with pytest.raises(ConfigError, match="Manifest-aware health reports are a follow-up"):
         run_health_checks(output, workers=1)
     assert snapshot(output) == before
 

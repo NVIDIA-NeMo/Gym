@@ -69,7 +69,7 @@ from nemo_gym.rollout_recovery import manifest_path_for
 
 
 class JournalHealthUnavailable(ConfigError):
-    """This reader requires an exported projection for a journal-backed run."""
+    """This reader requires an exported projection for a manifest-backed run."""
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -485,7 +485,7 @@ def run_health_checks(
     for path in paths:
         if manifest_path_for(path).exists() or journal_path_for(path).exists():
             raise JournalHealthUnavailable(
-                "Journal-aware health reports are a follow-up to evaluation resume. "
+                "Manifest-aware health reports are a follow-up to evaluation resume. "
                 "Run health checks on a merged selected-result projection from `gym eval aggregate`, "
                 "or disable automatic health checks with +disable_health_check=true."
             )

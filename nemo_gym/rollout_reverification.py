@@ -969,9 +969,9 @@ def _prepare_output_fpaths(
         if manifest_path_for(target).exists() or journal_path_for(target).exists():
             if overwrite:
                 raise ConfigError(
-                    "Cannot overwrite a journal-backed run with reverification; choose a new output path."
+                    "Cannot overwrite a manifest-backed run with reverification; choose a new output path."
                 )
-            raise ConfigError("Journal-backed reverification is a follow-up; choose a selected-result projection.")
+            raise ConfigError("Manifest-backed reverification is a follow-up; choose a selected-result projection.")
     failures_fpath = failures_path_for(output_fpath)
     if not (append or resume_from_cache):
         # A fresh run must not silently clobber a prior run's rollouts: delete only when the user
@@ -1016,7 +1016,7 @@ class RolloutReverificationHelper(BaseModel):
             path = _resolve_under_cwd_or_install(name).resolve()
             if manifest_path_for(path).exists() or journal_path_for(path).exists():
                 raise ConfigError(
-                    "Journal-backed reverification is a follow-up to evaluation resume. "
+                    "Manifest-backed reverification is a follow-up to evaluation resume. "
                     "Resume collection to retry unfinished tasks from their inputs, or reverify "
                     "a selected-result projection in a separate output. Saved artifacts were not changed."
                 )

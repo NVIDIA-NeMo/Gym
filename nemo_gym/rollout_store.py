@@ -90,8 +90,7 @@ class RolloutStore:
         migrate_outcomes: Callable[[Path], int] | None = None,
     ) -> "RolloutStore":
         """Prepare or validate a run while its controller holds the run lock."""
-        if resume:
-            output = output.resolve()
+        output = output.resolve()
         manifest_path = manifest_path_for(output)
         materialized = materialized_path_for(output)
         artifacts = (output, failures_path_for(output), materialized, manifest_path, journal_path_for(output))
@@ -106,6 +105,16 @@ class RolloutStore:
             and not (materialized.exists() and output.exists())
             and not manifest_path.exists()
         ):
+            # Missing companions do not make tagged outcomes an uninitialized
+            # cache. Never erase evidence of an established run during resume.
+            if any(
+                row.get(RUN_ID_KEY) is not None
+                for path in (output, failures_path_for(output))
+                for row in read_records(path)
+            ):
+                raise ConfigError(
+                    "Run-tagged outcomes have lost their manifest. Restore it from backup or use a new output path."
+                )
             print("Skipping resume_from_cache because the legacy cache is incomplete; starting fresh.")
             resume = False
         if resume and any(path.exists() for path in artifacts):

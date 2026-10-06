@@ -1678,7 +1678,13 @@ def _failure_outcome(row: Dict, failure: Dict, stage: str) -> RolloutFailure:
         failure=EpisodeFailure(
             failure_reason=message[:2000],
             terminal=bool(failure.get(NG_TERMINAL_KEY)),
-            failure_kind=failure.get("_ng_failure_kind", failure.get("failure_kind", failure[NG_FAILURE_CLASS_KEY])),
+            # A native reply may deliberately leave its kind unspecified. Legacy
+            # response models also emit a null shared field beside a routing class.
+            failure_kind=(
+                failure["_ng_failure_kind"]
+                if "_ng_failure_kind" in failure
+                else failure.get("failure_kind") or failure[NG_FAILURE_CLASS_KEY]
+            ),
             stage=episode_stage,
         ),
         exception_type=(str(failure["_ng_failure_type"])[:2000] if failure.get("_ng_failure_type") else None),
@@ -2602,13 +2608,14 @@ class RolloutCollectionHelper(BaseModel):
             return await self._run_from_config(config)
 
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
+        # Choose the target before locking, including fresh runs. Replacing an
+        # output alias would otherwise change the lock identity during collection.
+        config = config.model_copy(update={"output_jsonl_fpath": str(Path(config.output_jsonl_fpath).resolve())})
         # Hold ownership from identity validation through final aggregation/reporting.
         with run_lock(Path(config.output_jsonl_fpath)):
             return await self._run_locked_from_config(config)
 
     async def _run_locked_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
-        if config.resume_from_cache:
-            config = config.model_copy(update={"output_jsonl_fpath": str(Path(config.output_jsonl_fpath).resolve())})
         output_fpath = Path(config.output_jsonl_fpath)
         failures_fpath = failures_path_for(output_fpath)
         environment_server_client = (

@@ -183,8 +183,14 @@ recovery toggle is allowed; nested task parameters and model settings still affe
 Use a fresh output location when the intention is to evaluate changed tasks or a different model.
 A non-resume collection at an existing output path replaces the main output, failure sidecar, any retired draft attempt journal,
 manifest, materialized inputs, coverage, and aggregate metrics. Keep the previous run under a different path to retain it.
+Both fresh collection and resume resolve an output symlink before taking the run lock; they write the target and its
+companion files while preserving the symlink.
 
-If only part of a legacy cache exists and there is no manifest or journal, Gym prints `Skipping resume_from_cache`
+If an explicitly fresh replacement is interrupted during setup, old metadata may remain beside partially replaced
+files. Resume refuses that inconsistent history, including with `allow_unsafe_resume=true`. Repeat the fresh command
+without `--resume` to finish replacing that run, or choose a new output path; this cannot recover the overwritten run.
+
+If only part of a legacy cache exists and there is no manifest, journal, or run-tagged outcome, Gym prints `Skipping resume_from_cache`
 and starts fresh from the current inputs, replacing the incomplete cache. This also covers interruption during initial
 preparation before the run identity was published. If a manifest or journal exists, missing required artifacts remain
 an error rather than causing an automatic restart.

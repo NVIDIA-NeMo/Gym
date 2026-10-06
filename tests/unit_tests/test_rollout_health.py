@@ -436,7 +436,7 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
         assert not (run_dir / "rollout_verdicts.jsonl").exists()
         if not disabled:
             assert "Finished rollout collection" in stdout
-            assert "Rollout health checks skipped: Journal-aware health reports are a follow-up" in stdout
+            assert "Rollout health checks skipped: Manifest-aware health reports are a follow-up" in stdout
             assert not caplog.records
 
     assert artifacts[False] == artifacts[True]

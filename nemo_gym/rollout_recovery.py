@@ -405,9 +405,13 @@ def validate_resume(
 
 def observed_elapsed(record: dict[str, Any]) -> float | None:
     """Best-effort per-rollout wallclock from a result/failure row."""
+    # Native environments own their result schema; response and metadata need
+    # not be mappings. Optional scheduling hints must never invalidate an answer.
+    response = record.get("response")
+    metadata = response.get("metadata") if isinstance(response, Mapping) else None
     for candidate in (
         record.get("elapsed_seconds"),
-        ((record.get("response") or {}).get("metadata") or {}).get("elapsed_seconds"),
+        metadata.get("elapsed_seconds") if isinstance(metadata, Mapping) else None,
     ):
         try:
             if candidate is not None:

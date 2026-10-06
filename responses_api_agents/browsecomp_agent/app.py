@@ -844,9 +844,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     tool_choice="none",
                     tools=[],
                 ).model_dump()
-            # A harness failure is not a scored model outcome. Gym's journal-backed collector
+            # A harness failure is not a scored model outcome. Gym's manifest-backed collector
             # persists kill_shaped in the failure sidecar and may retry it within the run's
-            # dispatched-attempt budget. Retain NG_NO_PERSIST_KEY for legacy consumers.
+            # recorded-failure budget. Retain NG_NO_PERSIST_KEY for legacy consumers.
             # Long evaluations spanning several cluster jobs need a sufficient attempt budget.
             # Merged LAST so a stale sentinel echoed from `body` cannot shadow the fresh value.
             routing = {NG_NO_PERSIST_KEY: True, NG_FAILURE_CLASS_KEY: "kill_shaped"} if infra else {}
