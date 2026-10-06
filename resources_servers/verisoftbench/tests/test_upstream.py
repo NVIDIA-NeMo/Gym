@@ -22,7 +22,9 @@ import under our loader, that the prompt and parse functions are upstream's, and
 evaluator does.
 """
 
+import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -103,6 +105,17 @@ class TestLoader:
         monkeypatch.setitem(sys.modules, "core", type(sys)("core"))
         with pytest.raises(UpstreamError, match="already taken"):
             upstream.load_upstream(UPSTREAM_DIR)
+
+
+class TestRepoIndex:
+    def test_missing_required_index_fails_closed_at_startup(self, harness, monkeypatch, tmp_path) -> None:
+        # A healthy harness records the identity of the index it verifies under; one
+        # lost index file (or a never-copied directory) must refuse to score rather
+        # than degrade to upstream's silent no-op warning.
+        assert re.fullmatch(r"[0-9a-f]{64}", harness.repo_index_digest)
+        monkeypatch.setattr(harness.modules.utils, "REPO_INDEX_DIR", tmp_path)
+        with pytest.raises(UpstreamError, match="does not cover the benchmark"):
+            Harness(UPSTREAM_DIR, docker_container="verisoftbench-lean-test")
 
 
 class TestPrompts:
@@ -223,9 +236,12 @@ class TestVerifyCandidate:
         assert kw["thm_name"] == ROW["thm_name"] and kw["repo_name"] == "Lentil" and kw["proof_id"] == "p1"
         assert kw["theorem_stmt"] == entry["thm_stmt"] and kw["local_context"] == entry["verif_local_ctxs"]
 
-    def test_axiom_becomes_theorem_and_leaked_identifier_is_renamed(self, harness, entry, monkeypatch) -> None:
-        # The synthetic theorem is not in upstream's repo index, so `clean_leaked_identifiers`
-        # returns early and does not even add the `by` prefix; the axiom rewrite is unconditional.
+    def test_axiom_becomes_theorem_and_leaked_identifier_is_renamed(
+        self, harness, entry, monkeypatch, tmp_path
+    ) -> None:
+        # The synthetic theorem is not in upstream's repo index — the deliberate shape of
+        # the out-of-corpus example tasks — so `clean_leaked_identifiers` returns early
+        # and does not even add the `by` prefix; the axiom rewrite is unconditional.
         calls = []
 
         def fake_verify(**kw):
@@ -236,6 +252,37 @@ class TestVerifyCandidate:
         out = harness.verify_candidate(entry, "simp", "axiom h : True", "p2", max_conflict_attempts=1)
         assert not out.verified and out.error_msg == "Line 9:2 - unsolved goals"
         assert calls[0]["aux_lemmas"] == "theorem h : True" and calls[0]["theorem_proof"] == "simp"
+        # With the task's file indexed — what every benchmark task has after Setup
+        # step 4 — a reference to the earlier same-file theorem is renamed out of the
+        # proof, so dropping the anti-leak call is detectable here.
+        index = {
+            "theorems_by_file": {
+                ROW["rel_path"]: [
+                    {
+                        "name": "Demo.Inner.earlier",
+                        "aliases": ["Inner.earlier", "earlier"],
+                        "kind": "theorem",
+                        "namespace": "Demo.Inner",
+                        "line": 7,
+                        "end_line": 7,
+                        "text": "theorem earlier (n : Nat) : n = n := rfl",
+                    },
+                    {
+                        "name": ROW["thm_name"],
+                        "aliases": [],
+                        "kind": "theorem",
+                        "namespace": "Demo.Inner",
+                        "line": 9,
+                        "end_line": 10,
+                        "text": "theorem add_zero' (n : Nat) : n + 0 = n := by\n  simp",
+                    },
+                ]
+            }
+        }
+        (tmp_path / "Lentil.json").write_text(json.dumps(index))
+        monkeypatch.setattr(harness.modules.utils, "REPO_INDEX_DIR", tmp_path)
+        harness.verify_candidate(entry, "by\n  exact earlier n", "", "p2b", max_conflict_attempts=1)
+        assert calls[-1]["theorem_proof"] == "by\n  exact my_earlier n"
 
     def test_declared_clash_is_renamed_and_retried_within_budget(self, harness, entry, monkeypatch) -> None:
         answers = iter(

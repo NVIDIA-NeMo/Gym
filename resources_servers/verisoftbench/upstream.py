@@ -31,7 +31,9 @@ vendored into this repository but fetched at preparation time by
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import logging
 import re
 import subprocess
@@ -54,6 +56,13 @@ UPSTREAM_COMMIT = "d066523f2b087f28b793c05eacb29bf2e42c0504"  # pragma: allowlis
 DATASET_SHA256 = "ea584250021fbfaddc060834be2e05b9b2fae4f720c770a9932c71d039a50961"  # pragma: allowlist secret
 DATASET_RELATIVE_PATH = "data/verisoftbench.jsonl"
 EXPECTED_TASK_COUNT = 500
+
+# The synthetic example tasks (``data/example.jsonl``) place their theorems in this file,
+# which exists in no repository: they are deliberately absent from the repo index, so
+# upstream's ``clean_leaked_identifiers`` finds no earlier same-file theorems for them —
+# correct for out-of-corpus tasks. Benchmark tasks get no such exception:
+# ``require_repo_index`` fails closed when their index data is missing or corrupt.
+SYNTHETIC_EXAMPLE_REL_PATH = "GymExample.lean"
 
 # Upstream's Docker layout (``core/lean_interface.py``: DOCKER_LEAN_REPOS_DIR).
 DOCKER_LEAN_REPOS_DIR = Path("/workspace/lean_repos")
@@ -122,6 +131,52 @@ def ensure_checkout(upstream_dir: Path) -> None:
     subprocess.run(["git", "clone", "--quiet", UPSTREAM_REPO_URL, str(upstream_dir)], check=True)
     subprocess.run(["git", "-C", str(upstream_dir), "checkout", "--quiet", "--detach", UPSTREAM_COMMIT], check=True)
     require_pinned_checkout(upstream_dir)
+
+
+def require_repo_index(modules: "UpstreamModules") -> str:
+    """Fail closed unless the anti-leak repo index covers every benchmark repository.
+
+    Upstream's ``clean_leaked_identifiers`` reads ``data/repo_index/<repo>.json`` and
+    silently returns proof and lemmas unchanged when that file is missing, so a lost or
+    never-copied index would weaken the acceptance protocol while every verdict still
+    looks ordinary. This validates the exact directory upstream reads
+    (``utils.REPO_INDEX_DIR``) against the repositories named in the pinned dataset and
+    returns a sha256 over the required index files so a run can record which index it
+    scored under. The synthetic example tasks (``SYNTHETIC_EXAMPLE_REL_PATH``) stay
+    deliberately unindexed *inside* these validated files; nothing is weakened for them.
+    """
+    index_dir = Path(modules.utils.REPO_INDEX_DIR)
+    dataset_path = modules.root / DATASET_RELATIVE_PATH
+    try:
+        required = sorted(
+            {json.loads(line)["lean_root"] for line in dataset_path.read_text().splitlines() if line.strip()}
+        )
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as e:
+        raise UpstreamError(f"cannot read the benchmark's repositories from {dataset_path}: {e}") from e
+    problems = []
+    digest = hashlib.sha256()
+    for root in required:
+        path = index_dir / f"{root}.json"
+        try:
+            data = path.read_bytes()
+            theorems_by_file = json.loads(data).get("theorems_by_file")
+        except OSError:
+            problems.append(f"{path.name} is missing")
+            continue
+        except json.JSONDecodeError:
+            problems.append(f"{path.name} is not JSON")
+            continue
+        if not isinstance(theorems_by_file, dict) or not theorems_by_file:
+            problems.append(f"{path.name} has no 'theorems_by_file'")
+            continue
+        digest.update(f"{path.name}:{hashlib.sha256(data).hexdigest()}\n".encode())
+    if problems:
+        raise UpstreamError(
+            f"repo index at {index_dir} does not cover the benchmark: {'; '.join(problems)}. "
+            "Upstream's leaked-identifier check would silently no-op; copy the generated index "
+            "out of the container (README, Setup step 4) before scoring"
+        )
+    return digest.hexdigest()
 
 
 def _stub_missing_provider_sdks() -> None:
@@ -198,6 +253,10 @@ class Harness:
 
     def __init__(self, upstream_dir: Path, docker_container: str):
         self.modules = load_upstream(upstream_dir)
+        # The anti-leak protocol is part of the instrument: refuse to score without its
+        # index, and record which index identity this harness verifies under.
+        self.repo_index_digest = require_repo_index(self.modules)
+        LOG.info("Repo index validated; sha256 over the required index files: %s", self.repo_index_digest)
         self.docker_container = docker_container
         # In Docker mode upstream uses this path only for path arithmetic.
         self.lean_repl = self.modules.lean_interface.LeanREPL(DOCKER_LEAN_REPOS_DIR, docker_container=docker_container)

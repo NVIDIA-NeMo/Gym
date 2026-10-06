@@ -53,7 +53,7 @@ from app import (  # noqa: E402
     VeriSoftBenchVerifyResponse,
 )
 from prepare_verisoftbench import AGENT_REF, DEFAULT_UPSTREAM_DIR, PromptSource, prepare  # noqa: E402
-from upstream import ensure_checkout  # noqa: E402
+from upstream import SYNTHETIC_EXAMPLE_REL_PATH, ensure_checkout  # noqa: E402
 
 from nemo_gym.config_types import DatasetConfig  # noqa: E402
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming  # noqa: E402
@@ -198,7 +198,9 @@ def example_rows() -> list[dict]:
                 "thm_name": thm_name,
                 "thm_stmt": stmt,
                 "lean_root": repo,
-                "rel_path": "GymExample.lean",
+                # The harness's named out-of-corpus exception: no repository contains
+                # this file, so these rows are deliberately absent from the repo index.
+                "rel_path": SYNTHETIC_EXAMPLE_REL_PATH,
                 "imports": [],
                 "used_lib_defs": [],
                 "used_repo_defs": [],

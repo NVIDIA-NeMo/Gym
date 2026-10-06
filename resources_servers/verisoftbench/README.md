@@ -123,8 +123,13 @@ mean, a quantity upstream never reports; it stays in `agent_metrics` and
 - **Leaked-identifier check needs `data/repo_index/`.** Upstream's
   `clean_leaked_identifiers` reads `data/repo_index/<repo>.json` from the checkout,
   which the release does not ship; it is generated inside the image at
-  `/workspace/repo_index`. Copy it out (Setup below) or the check is a silent no-op
-  with a warning, exactly as in a stock upstream run.
+  `/workspace/repo_index`. A stock upstream run degrades to a silent no-op with a
+  warning when that copy is skipped; here the harness refuses to start unless the
+  index covers every repository the dataset names (Setup step 4) and logs a sha256
+  over the required index files, so each run records which index it scored under.
+  The synthetic example tasks place their theorems in `GymExample.lean`, a file no
+  repository contains: they stay deliberately unindexed inside those validated
+  files, and no benchmark check is weakened for them.
 
 ## Harness validation
 
