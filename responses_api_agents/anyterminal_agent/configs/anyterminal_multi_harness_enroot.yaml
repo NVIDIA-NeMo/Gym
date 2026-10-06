@@ -31,3 +31,8 @@ anyterminal_hermes:
   responses_api_agents:
     anyterminal_agent:
       sandbox_provider: sandbox
+
+anyterminal_multi_harness:
+  responses_api_agents:
+    anyterminal_agent:
+      sandbox_provider: sandbox

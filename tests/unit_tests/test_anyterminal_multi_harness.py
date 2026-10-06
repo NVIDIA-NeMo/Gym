@@ -3,13 +3,13 @@
 
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.global_config import AGENT_POOL_INDEX_KEY_NAME, GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.rollout_collection import RolloutCollectionHelper
 
 
 PROFILE = "responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness.yaml"
 ENROOT_PROFILE = "responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness_enroot.yaml"
-SOURCE = "anyterminal_hermes"
+SOURCE = "anyterminal_multi_harness"
 POOL = ["anyterminal_opencode", "anyterminal_openclaw", "anyterminal_pi", "anyterminal_hermes"]
 
 
@@ -31,7 +31,8 @@ def _resolved_profile(profile: str = PROFILE) -> DictConfig:
 def test_profile_composes_all_four_terminal_harnesses_with_one_dataset_owner() -> None:
     config = _resolved_profile()
 
-    assert list(config.agent_pool[SOURCE]) == POOL
+    assert config.get("agent_pool") is None
+    assert config.get("fan_out") is None
     assert {name: config[name].responses_api_agents.anyterminal_agent.agent_server_class for name in POOL} == {
         "anyterminal_opencode": "OpenCodeAgent",
         "anyterminal_openclaw": "OpenClawAgent",
@@ -54,27 +55,23 @@ def test_profile_composes_all_four_terminal_harnesses_with_one_dataset_owner() -
     assert dataset_owners == [SOURCE]
 
 
-def test_profile_routes_each_source_task_to_one_p0_harness() -> None:
+def test_generic_source_fans_each_task_out_to_every_p0_harness() -> None:
     config = _resolved_profile()
-    agent_pool = OmegaConf.to_container(config.agent_pool, resolve=True)
-    rows = [
-        {
-            "task_source": SOURCE,
-            AGENT_POOL_INDEX_KEY_NAME: task_index,
-            "responses_create_params": {"input": f"terminal task {task_index // 2}"},
-        }
-        for task_index in (0, 0, 1, 1, 2, 2, 3, 3)
-    ]
+    fan_out = {SOURCE: POOL}
+    rows = [{"task_source": SOURCE, "responses_create_params": {"input": "terminal task"}}]
 
-    RolloutCollectionHelper._validate_agent_pool_destinations(agent_pool, config)
-    RolloutCollectionHelper._apply_agent_pool(rows, agent_pool)
+    RolloutCollectionHelper._validate_agent_pool_destinations(fan_out, config)
+    expanded = RolloutCollectionHelper().preprocess_examples(rows, fan_out=fan_out)
 
-    assert [row["agent_ref"]["name"] for row in rows] == [agent for agent in POOL for _ in range(2)]
-    assert all(row["_ng_agent_pool_assignment"] == row["agent_ref"]["name"] for row in rows)
+    assert [row["agent_ref"]["name"] for row in expanded] == POOL
+    assert all(row["task_source"] == SOURCE for row in expanded)
 
 
 def test_enroot_profile_selects_named_provider_for_every_harness() -> None:
     config = _resolved_profile(ENROOT_PROFILE)
 
     assert config.sandbox.enroot
-    assert all(config[name].responses_api_agents.anyterminal_agent.sandbox_provider == "sandbox" for name in POOL)
+    assert all(
+        config[name].responses_api_agents.anyterminal_agent.sandbox_provider == "sandbox"
+        for name in [*POOL, SOURCE]
+    )

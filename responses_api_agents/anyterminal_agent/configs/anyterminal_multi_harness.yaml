@@ -7,14 +7,9 @@ config_paths:
   - responses_api_agents/anyterminal_agent/configs/anyterminal_pi.yaml
   - responses_api_agents/anyterminal_agent/configs/anyterminal_hermes.yaml
 
-# The dataset is owned once by anyterminal_hermes. Consecutive source tasks are
-# assigned OpenCode, OpenClaw, Pi, and Hermes before the sequence repeats.
-agent_pool:
-  anyterminal_hermes:
-    - anyterminal_opencode
-    - anyterminal_openclaw
-    - anyterminal_pi
-    - anyterminal_hermes
+# The dataset has a neutral source name. Callers choose the routing behavior:
+# use agent_pool.anyterminal_multi_harness to select one harness per task, or
+# fan_out.anyterminal_multi_harness to run every task through every harness.
 
 anyterminal_opencode:
   responses_api_agents:
@@ -34,8 +29,37 @@ anyterminal_pi:
 anyterminal_hermes:
   responses_api_agents:
     anyterminal_agent:
+      datasets: []
+
+# Routing-only dataset owner. Its runtime fields mirror Hermes so an un-routed
+# row still has a valid fallback, but normal multi-harness runs replace it with
+# one or all of the four explicitly named harnesses above.
+anyterminal_multi_harness:
+  responses_api_agents:
+    anyterminal_agent:
+      entrypoint: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.entrypoint}
+      domain: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.domain}
+      description: Shared Terminal-Bench source for multi-harness routing.
+      value: Route one Terminal-Bench dataset across multiple Gym agents.
+      agent_server_module: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.agent_server_module}
+      agent_server_class: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.agent_server_class}
+      agent_config_class: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.agent_config_class}
+      agent_request_sampling_fields: >-
+        ${anyterminal_hermes.responses_api_agents.anyterminal_agent.agent_request_sampling_fields}
+      agent_kwargs: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.agent_kwargs}
+      container_formatter: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.container_formatter}
+      concurrency: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.concurrency}
+      model_server: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.model_server}
       datasets:
         - name: terminal_bench_multi_harness
           type: train
           jsonl_fpath: responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl
           license: Apache 2.0
+
+anyterminal_multi_harness_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: anyterminal_multi_harness

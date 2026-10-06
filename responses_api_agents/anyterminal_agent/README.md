@@ -12,17 +12,19 @@ they run.
 
 ## Multi-harness training
 
-`configs/anyterminal_multi_harness.yaml` owns one Terminal-Bench dataset and routes
-consecutive source tasks across the P0 harnesses in this order:
+`configs/anyterminal_multi_harness.yaml` owns one Terminal-Bench dataset under the
+neutral source route `anyterminal_multi_harness`. Use `fan_out` to run every source
+task through all P0 harnesses in this order:
 
 1. OpenCode
 2. OpenClaw
 3. Pi
 4. Hermes
 
-The assignment is stamped during dataset collation, remains stable across repeats,
-retries, and resume, and is honored by both unsharded Gym collection and sharded
-NeMo RL training.
+Each task/harness pair is independent. In GRPO, all sibling generations for one
+pair stay on the same harness, so group-relative advantages never mix harnesses.
+Use `agent_pool` instead only when the desired behavior is selecting one harness
+per source task.
 
 Prepare four real Terminal-Bench 2.1 tasks from an existing checkout and collate them:
 
@@ -38,8 +40,8 @@ gym dataset collate \
   --mode train_preparation
 ```
 
-Start all four harnesses and collect one rollout per task. No `--agent` is needed;
-the run-wide `agent_pool` selects the destination:
+Start all four harnesses and collect one rollout per task and harness. No `--agent`
+is needed; `fan_out` creates the cross-product:
 
 ```bash
 gym env start \
@@ -48,6 +50,7 @@ gym env start \
 
 gym eval run --no-serve \
   --config responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness.yaml \
+  '+fan_out={anyterminal_multi_harness:[anyterminal_opencode,anyterminal_openclaw,anyterminal_pi,anyterminal_hermes]}' \
   --input data/anyterminal_multi_harness/train.jsonl \
   --output results/anyterminal_multi_harness.jsonl
 ```
@@ -55,8 +58,8 @@ gym eval run --no-serve \
 For an Enroot cluster, use `configs/anyterminal_multi_harness_enroot.yaml` for both
 commands. The host needs Enroot, and compute nodes need registry access for the task
 images. The same profile can be placed in NeMo RL's `env.nemo_gym.config_paths`; use
-`token_id_capture.enabled: true` and `token_id_capture.all_agents: true` for policy
-training with external harnesses.
+`env.nemo_gym.fan_out.anyterminal_multi_harness` with the four target names and
+`token_capture.enabled: true` for policy training with external harnesses.
 
 ## Prerequisites
 
