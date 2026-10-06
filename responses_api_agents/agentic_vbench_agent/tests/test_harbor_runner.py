@@ -422,3 +422,15 @@ def test_hub_post_persistent_request_error_raises_without_rejecting_verification
     with pytest.raises(RuntimeError, match="HTTP 429"):
         module.real_post("/v1beta/models/m:generateContent", {"contents": []})
     assert len(module.FAILURES) == 2  # rate limiting is transport, not this request's content
+
+
+def test_compaction_and_title_knobs_reach_opencode_config() -> None:
+    config = make_job(compaction_auto=True, compaction_prune=False, disable_title=True, max_turns=12)
+    opencode = config["agents"][0]["kwargs"]["opencode_config"]
+    assert opencode["compaction"] == {"auto": True, "prune": False}
+    assert opencode["agent"] == {"build": {"steps": 12}, "title": {"disable": True}}
+    # Evaluation keeps OpenCode's own defaults: nothing is pinned.
+    default = make_job()["agents"][0]["kwargs"]["opencode_config"]
+    assert "compaction" not in default and "agent" not in default
+    only_auto = make_job(compaction_auto=False)["agents"][0]["kwargs"]["opencode_config"]
+    assert only_auto["compaction"] == {"auto": False}

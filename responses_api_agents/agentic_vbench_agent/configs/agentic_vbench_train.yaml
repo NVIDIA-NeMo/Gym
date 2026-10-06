@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Training variant of benchmarks/agentic_vbench/config.yaml for NeMo-RL token
+# capture (optionally with context compaction). Same pinned tasks, Harbor 0.6.6
+# and stock OpenCode 1.14.39; the agent additionally records every served
+# completion through its capture proxy and pins OpenCode's compaction policy.
+# All run-time inputs come from AGENTIC_VBENCH_* variables set by the launcher.
+agentic_vbench_agent:
+  responses_api_agents:
+    agentic_vbench_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Opt into training-token capture whenever the run enables it.
+      token_id_capture: true
+      benchmark_root: ${oc.env:AGENTIC_VBENCH_ROOT,null}
+      harbor_python: ${oc.env:AGENTIC_VBENCH_HARBOR_PYTHON}
+      output_root: ${oc.env:AGENTIC_VBENCH_OUTPUT_ROOT}
+      runtime_root: ${oc.env:AGENTIC_VBENCH_RUNTIME_ROOT,null}
+      docker_cli_dir: ${oc.env:AGENTIC_VBENCH_DOCKER_CLI_DIR,null}
+      backend: ${oc.env:AGENTIC_VBENCH_BACKEND,remote}
+      backend_dir: ${oc.env:AGENTIC_VBENCH_BACKEND_DIR,null}
+      backend_wait_seconds: ${oc.env:AGENTIC_VBENCH_BACKEND_WAIT_SECONDS,1800}
+      credentials_file: ${oc.env:AGENTIC_VBENCH_CREDENTIALS_FILE,null}
+      judge_protocol: ${oc.env:AGENTIC_VBENCH_JUDGE_PROTOCOL,nvinference-hybrid}
+      concurrency: ${oc.env:AGENTIC_VBENCH_CONCURRENCY,12}
+      max_turns: ${oc.env:AGENTIC_VBENCH_MAX_TURNS,32}
+      verifier_timeout_multiplier: ${oc.env:AGENTIC_VBENCH_VERIFIER_TIMEOUT_MULTIPLIER,3}
+      # Advertise the policy's real context so OpenCode compacts before the engine
+      # overflows; the output capability is the per-call max_tokens OpenCode sends.
+      model_context_tokens: ${oc.env:AGENTIC_VBENCH_CONTEXT_TOKENS,49152}
+      model_output_capability_tokens: ${oc.env:AGENTIC_VBENCH_OUTPUT_TOKENS,8192}
+      model_call_timeout_ms: ${oc.env:AGENTIC_VBENCH_MODEL_CALL_TIMEOUT_MS,3600000}
+      opencode_compaction_auto: ${oc.env:AGENTIC_VBENCH_COMPACTION_AUTO,null}
+      opencode_compaction_prune: ${oc.env:AGENTIC_VBENCH_COMPACTION_PRUNE,null}
+      opencode_disable_title: ${oc.env:AGENTIC_VBENCH_DISABLE_TITLE,true}
+      train_compaction_summaries: ${oc.env:AGENTIC_VBENCH_TRAIN_COMPACTION_SUMMARIES,true}
+      capture_proxy_host: ${oc.env:AGENTIC_VBENCH_CAPTURE_PROXY_HOST,null}
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: ${oc.env:TRAIN_PATH}
+        num_repeats: 1
+        # Benchmark tasks are debugging data for training, not a clean measurement.
+        license: TBD

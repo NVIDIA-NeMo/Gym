@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Gym /run adapter for the pinned official-compatible Harbor/OpenCode workflow."""
+"""Gym /run adapter for the pinned official-compatible Harbor/OpenCode workflow.
+
+Under NeMo-RL token capture the same workflow trains: OpenCode's calls go
+through a per-episode capture proxy to Gym's rollout-scoped policy route, and
+the returned output is rebuilt from the served completions (see
+``capture_proxy``). Evaluation runs are unchanged.
+"""
 
 import asyncio
 import hashlib
@@ -27,6 +33,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import get_server_url
+from responses_api_agents.agentic_vbench_agent.capture_proxy import (
+    CaptureProxy,
+    capture_output,
+    load_records,
+    local_ip_toward,
+)
 from responses_api_agents.agentic_vbench_agent.core import (
     FAMILIES,
     backend_environment,
@@ -69,6 +81,19 @@ class AgenticVBenchConfig(BaseResponsesAPIAgentConfig):
     model_context_tokens: int = Field(default=262144, gt=0)
     model_output_capability_tokens: int = Field(default=100000, gt=0)
     model_call_timeout_ms: int = Field(default=3_600_000, gt=0)
+    # OpenCode context compaction. None keeps OpenCode's defaults (evaluation).
+    # Training pins them: auto on with NeMo-RL context compaction, both off for
+    # an append-only context under ordinary token capture.
+    opencode_compaction_auto: bool | None = None
+    opencode_compaction_prune: bool | None = None
+    # Drop OpenCode's session-title model call (a side generation outside the task).
+    opencode_disable_title: bool = False
+    # Under token capture, also return compaction summary generations so NeMo-RL
+    # trains them in their own rewritten context.
+    train_compaction_summaries: bool = True
+    # Address the task container uses to reach this server's capture proxy; derived
+    # from the route to the policy server when unset.
+    capture_proxy_host: str | None = None
 
 
 class AgenticVBenchRunRequest(BaseRunRequest):
@@ -90,6 +115,12 @@ class AgenticVBenchVerifyResponse(BaseVerifyResponse):
     reward_assembly: float | None = None
     reward_sequencing: float | None = None
     reward_repurpose: float | None = None
+    # Token-capture runs: served id of the last accepted model call and call statistics.
+    terminal_response_id: str | None = None
+    model_calls: int = 0
+    compaction_summaries: int = 0
+    generated_tokens: int = 0
+    capture_records: str | None = None
 
 
 class AgenticVBenchAgent(SimpleResponsesAPIAgent):
@@ -102,10 +133,13 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
     _output_root: Path = PrivateAttr()
     _runtime_root: Path = PrivateAttr()
     _env: dict[str, str] = PrivateAttr()
+    _proxy: CaptureProxy | None = PrivateAttr(default=None)
+    _proxy_lock: asyncio.Lock = PrivateAttr()
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         config = self.config
+        self._proxy_lock = asyncio.Lock()
         if (config.model_server is None) == (config.model_base_url is None):
             raise ValueError("Configure exactly one of model_server or model_base_url")
         if config.model_base_url is not None and not config.model_id:
@@ -155,7 +189,9 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
             return self.config.model_base_url.rstrip("/"), str(self.config.model_id)
         server = self.config.model_server
         assert server is not None
-        base_url = self.base_url_for_run(get_server_url(server.name), body.model_dump()) + "/v1"
+        # Pass the request model: the explicit capture id NeMo-RL sends is excluded
+        # from dumps, and the derived task/rollout key would not match its ledger.
+        base_url = self.base_url_for_run(get_server_url(server.name), body) + "/v1"
         global_config = getattr(self.server_client, "global_config_dict", None) or {}
         model = self.config.model_id or (
             global_config.get("policy_model_name") if hasattr(global_config, "get") else None
@@ -164,6 +200,26 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         raise HTTPException(400, "Use /run with an Agentic-VBench dataset row")
+
+    def _proxy_host(self, policy_endpoint: str) -> str:
+        host = self.config.capture_proxy_host or self.config.host
+        if host in ("", "0.0.0.0", "::", "127.0.0.1", "localhost"):
+            from urllib.parse import urlsplit
+
+            policy_host = urlsplit(policy_endpoint).hostname or "127.0.0.1"
+            host = local_ip_toward(policy_host, urlsplit(policy_endpoint).port or 80)
+        return host
+
+    async def _ensure_proxy(self, policy_endpoint: str) -> CaptureProxy:
+        async with self._proxy_lock:
+            if self._proxy is None:
+                proxy = CaptureProxy(
+                    advertise_host=self._proxy_host(policy_endpoint),
+                    request_timeout_s=self.config.model_call_timeout_ms / 1000 + 60,
+                )
+                await proxy.start()
+                self._proxy = proxy
+            return self._proxy
 
     async def run(self, body: AgenticVBenchRunRequest) -> AgenticVBenchVerifyResponse:
         endpoint, model = self._model_endpoint(body)
@@ -210,13 +266,21 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 await asyncio.to_thread(self._archive_incomplete, output)
             output.mkdir(parents=True, exist_ok=False)
             runtime = self._runtime_root / key[:16]
+            capture = self._token_id_capture_enabled()
+            record_dir = output / "model_calls"
+            agent_endpoint = endpoint
+            if capture:
+                # OpenCode in the task container reaches the proxy; the proxy forwards to
+                # the rollout-prefixed policy route and records every served completion.
+                proxy = await self._ensure_proxy(endpoint)
+                agent_endpoint = proxy.register(key[:16], endpoint.removesuffix("/v1"), record_dir)
             command = [
                 self._harbor_python,
                 str(Path(__file__).with_name("harbor_runner.py")),
                 "--task-path",
                 str(self._benchmark_root / "tasks" / f"agentic_vbench_{task['family']}" / task_id),
                 "--endpoint",
-                endpoint,
+                agent_endpoint,
                 "--model",
                 model,
                 "--output",
@@ -240,21 +304,57 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 command.extend(["--max-turns", str(self.config.max_turns)])
             if self.config.credentials_file:
                 command.extend(["--credentials-file", self.config.credentials_file])
+            if self.config.opencode_compaction_auto is not None:
+                command.extend(["--compaction-auto", str(self.config.opencode_compaction_auto).lower()])
+            if self.config.opencode_compaction_prune is not None:
+                command.extend(["--compaction-prune", str(self.config.opencode_compaction_prune).lower()])
+            if self.config.opencode_disable_title:
+                command.append("--disable-title")
             try:
                 exit_code = await run_process(command, output, runtime, self._env)
             except asyncio.CancelledError:
                 await asyncio.shield(asyncio.to_thread(self._cleanup_containers, output))
                 raise
+            finally:
+                if capture:
+                    proxy.unregister(key[:16])
             # A nonzero exit never becomes an invented zero reward. Preserve the original artifacts.
             if exit_code:
                 await asyncio.to_thread(self._cleanup_containers, output)
                 raise RuntimeError(f"Harbor runner exited {exit_code}; inspect {output / 'runner.log'}")
             result = await asyncio.to_thread(read_result, output, task)
             response = HarborAgentUtils.get_default_response_object()
-            response.update(
-                model=model,
-                output=HarborAgentUtils.trial_result_to_responses({}, result["trajectory"]),
-            )
+            extra: dict[str, Any] = {}
+            if capture:
+                # The served completions, converted as the capture ledger converts them,
+                # so NeMo-RL selects every accepted call by content and tool-call id.
+                items, stats = capture_output(
+                    load_records(record_dir), include_compaction_summaries=self.config.train_compaction_summaries
+                )
+                response.update(model=model, output=items)
+                extra = {
+                    "terminal_response_id": stats.terminal_response_id,
+                    "model_calls": stats.model_calls,
+                    "compaction_summaries": stats.compaction_summaries,
+                    "generated_tokens": stats.generated_tokens,
+                    "capture_records": str(record_dir),
+                }
+                if stats.failed_calls:
+                    # The capture ledger records the failure as well; the reward is
+                    # real but the trajectory is not a clean measurement.
+                    extra.update(mask_sample=True, failure_kind="agentic_vbench:model_call_failed")
+                print(
+                    f"[agentic_vbench] task={task_id} reward={result['reward']:.3f} calls={stats.model_calls} "
+                    f"compactions={stats.compaction_summaries} ignored={stats.ignored_calls} "
+                    f"failed={stats.failed_calls} generated_tokens={stats.generated_tokens} "
+                    f"complete={stats.complete}",
+                    flush=True,
+                )
+            else:
+                response.update(
+                    model=model,
+                    output=HarborAgentUtils.trial_result_to_responses({}, result["trajectory"]),
+                )
             response["usage"] = None
             family = task["family"]
             verified = AgenticVBenchVerifyResponse(
@@ -266,6 +366,7 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 equal_family_reward=result["reward"] * equal_family_weight(family),
                 **{f"reward_{family}": result["reward"]},
                 **result,
+                **extra,
             )
             temporary = output / "gym_result.json.tmp"
             temporary.write_text(verified.model_dump_json())

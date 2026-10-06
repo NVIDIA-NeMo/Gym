@@ -45,6 +45,9 @@ def job_config(
     max_turns: int | None = None,
     verifier_timeout_multiplier: float = 1.0,
     model_timeout_ms: int | None = None,
+    compaction_auto: bool | None = None,
+    compaction_prune: bool | None = None,
+    disable_title: bool = False,
 ) -> dict:
     """Create a single-attempt Harbor job using OpenCode's compatible provider.
 
@@ -55,6 +58,11 @@ def job_config(
     budget and the scores are unaffected. ``model_timeout_ms`` is OpenCode's per-call
     provider timeout; Gym's model proxy replays a streamed completion only once it is
     complete, so the timeout must cover a whole 100k-token generation.
+    ``compaction_auto``/``compaction_prune`` pin OpenCode's context compaction
+    (``None`` keeps OpenCode's defaults: both on). Training with NeMo-RL token
+    capture sets them explicitly: compaction on for framework-owned context
+    reconstruction, both off for an append-only context. ``disable_title`` drops
+    OpenCode's side model call that names the session.
     """
     if not 0 < output_tokens < context_tokens:
         raise ValueError("Output token limit must be positive and smaller than context")
@@ -93,7 +101,14 @@ def job_config(
         },
     }
     if max_turns is not None:
-        opencode_config["agent"] = {"build": {"steps": max_turns}}
+        opencode_config.setdefault("agent", {})["build"] = {"steps": max_turns}
+    if disable_title:
+        opencode_config.setdefault("agent", {})["title"] = {"disable": True}
+    compaction = {
+        key: value for key, value in (("auto", compaction_auto), ("prune", compaction_prune)) if value is not None
+    }
+    if compaction:
+        opencode_config["compaction"] = compaction
     return {
         "job_name": "trial",
         "jobs_dir": str(output / "jobs"),
@@ -235,6 +250,9 @@ def main() -> None:
         default=_env_default("AGENTIC_VBENCH_VERIFIER_TIMEOUT_MULTIPLIER", float, 1.0),
     )
     parser.add_argument("--model-timeout-ms", type=int, default=None)
+    parser.add_argument("--compaction-auto", choices=("true", "false"), default=None)
+    parser.add_argument("--compaction-prune", choices=("true", "false"), default=None)
+    parser.add_argument("--disable-title", action="store_true")
     args = parser.parse_args()
     if importlib.metadata.version("harbor") != "0.6.6":
         raise RuntimeError("AgenticVBench requires upstream harbor==0.6.6")
@@ -274,6 +292,9 @@ def main() -> None:
             max_turns=args.max_turns,
             verifier_timeout_multiplier=args.verifier_timeout_multiplier,
             model_timeout_ms=args.model_timeout_ms,
+            compaction_auto=None if args.compaction_auto is None else args.compaction_auto == "true",
+            compaction_prune=None if args.compaction_prune is None else args.compaction_prune == "true",
+            disable_title=args.disable_title,
         )
     )
     config_path = args.output / "harbor_job.json"
