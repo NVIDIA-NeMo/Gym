@@ -19,8 +19,16 @@ from pathlib import Path
 
 import pytest
 import yaml
+from omegaconf import OmegaConf
 
-from nemo_gym.global_config import legacy_environment_server_name
+from nemo_gym.global_config import (
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    environment_server_agent_refs,
+    legacy_environment_server_name,
+)
+from nemo_gym.rollout_collection import _environment_servers_by_agent
+from nemo_gym.server_utils import DictConfig
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "add_legacy_agent_environment_servers.py"
@@ -95,16 +103,145 @@ my_episodes:
     assert config.read_text() == before
 
 
-def test_rename_inherits_the_renamed_agents_server(tmp_path: Path) -> None:
-    # `_inherit_from` moves the source agent, so the source's server must move with it.
+MULTI_AGENT_CONFIG = (
+    AGENT_CONFIG
+    + """\
+my_user_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: my_resources
+my_conversation:
+  environment_servers:
+    conversation:
+      entrypoint: app.py
+      user_agent:
+        type: responses_api_agents
+        name: my_user_agent
+      assistant_agent:
+        type: responses_api_agents
+        name: my_simple_agent
+"""
+)
+
+
+def _server_fronting(agent: str, *, name: str, server_type: str) -> str:
+    return f"""\
+{name}:
+  environment_servers:
+    {server_type}:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: {agent}
+"""
+
+
+def _parse(*configs: Path, strict: bool) -> DictConfig:
+    return GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.merge(
+                GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                *(OmegaConf.load(config) for config in configs),
+                {"error_on_agent_without_environment_server": strict},
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+
+
+def test_rename_points_the_declared_server_at_the_new_name(tmp_path: Path) -> None:
+    # The server keeps its name, so routes that name it still resolve.
     config = tmp_path / "my_run.yaml"
     config.write_text("renamed_agent:\n  _inherit_from: workplace_assistant_simple_agent\n")
 
     assert migration.main([str(config)]) == 0
 
-    server = yaml.safe_load(config.read_text())["renamed_environment_server"]
-    assert server["_inherit_from"] == "workplace_assistant_environment_server"
-    assert server["environment_servers"]["legacy_agent"]["agent_server"]["name"] == "renamed_agent"
+    document = yaml.safe_load(config.read_text())
+    assert set(document) == {"renamed_agent", "workplace_assistant_environment_server"}
+    assert document["workplace_assistant_environment_server"]["environment_servers"]["legacy_agent"] == {
+        "agent_server": {"type": "responses_api_agents", "name": "renamed_agent"}
+    }
+
+
+@pytest.mark.parametrize(
+    ("source_server", "expected_server", "expected_type"),
+    [
+        # The script declares the source's server, so the rename inherits the server it generates.
+        ("", "renamed_environment_server", "legacy_agent"),
+        # The source's server has a name the script would not generate.
+        (_server_fronting("my_simple_agent", name="my_relay", server_type="legacy_agent"), "my_relay", "legacy_agent"),
+        # The source's server is not a legacy_agent relay.
+        (
+            _server_fronting("my_simple_agent", name="my_environment_server", server_type="single_agent_turn_legacy"),
+            "my_environment_server",
+            "single_agent_turn_legacy",
+        ),
+    ],
+    ids=["generated-source-server", "custom-named-source-server", "non-legacy-source-server"],
+)
+def test_migrated_rename_parses_with_one_server(
+    tmp_path: Path, source_server: str, expected_server: str, expected_type: str
+) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(AGENT_CONFIG + source_server)
+    overlay = tmp_path / "rename.yaml"
+    overlay.write_text("renamed_agent:\n  _inherit_from: my_simple_agent\n")
+
+    assert migration.main([str(base), str(overlay)]) == 0
+
+    # A generated relay would hide a missing server, so require the migrated one.
+    resolved = _parse(base, overlay, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"renamed_agent": [expected_server]}
+    assert list(resolved[expected_server]["environment_servers"]) == [expected_type]
+
+
+def test_leaves_the_agents_a_multi_agent_server_references(tmp_path: Path) -> None:
+    config = tmp_path / "my_run.yaml"
+    config.write_text(MULTI_AGENT_CONFIG)
+
+    assert migration.main([str(config)]) == 0
+
+    assert config.read_text() == MULTI_AGENT_CONFIG
+
+
+def test_migrated_renames_point_a_multi_agent_server_at_the_new_names(tmp_path: Path) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(MULTI_AGENT_CONFIG)
+    overlay = tmp_path / "rename.yaml"
+    overlay.write_text(
+        "renamed_user:\n  _inherit_from: my_user_agent\nrenamed_assistant:\n  _inherit_from: my_simple_agent\n"
+    )
+
+    assert migration.main([str(base), str(overlay)]) == 0
+
+    # One block retargets both fields, so the server's key is not repeated.
+    assert set(yaml.safe_load(overlay.read_text())) == {"renamed_user", "renamed_assistant", "my_conversation"}
+    # Parsing fails on a reference to a retired agent, so this checks both fields followed the rename.
+    resolved = _parse(base, overlay, strict=True)
+    assert _environment_servers_by_agent(resolved) == {
+        "renamed_user": ["my_conversation"],
+        "renamed_assistant": ["my_conversation"],
+    }
+
+
+def test_reports_a_rename_beside_the_server_it_would_retarget(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    # Appending would repeat the server's key in the same file.
+    config = tmp_path / "my_run.yaml"
+    config.write_text(MULTI_AGENT_CONFIG + "renamed_assistant:\n  _inherit_from: my_simple_agent\n")
+    before = config.read_text()
+
+    assert migration.main([str(config)]) == 2
+
+    assert config.read_text() == before
+    assert (
+        "point `my_conversation.environment_servers.conversation.assistant_agent.name` at `renamed_assistant`"
+        in capsys.readouterr().err
+    )
 
 
 def test_reports_an_unreadable_config(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
@@ -113,6 +250,21 @@ def test_reports_an_unreadable_config(tmp_path: Path, capsys: pytest.CaptureFixt
     assert migration.main([str(tmp_path)]) == 2
 
     assert "broken.yaml" in capsys.readouterr().err
+
+
+def test_finds_the_agent_references_gym_finds() -> None:
+    # The script depends only on PyYAML, so it keeps its own copy of the rule.
+    server = {
+        "entrypoint": "app.py",
+        "agent_server": {"name": "untyped_agent_server"},
+        "user_agent": {"type": "responses_api_agents", "name": "typed_field"},
+        "helper": {"name": "untyped_other_field"},
+        "resources_server": {"type": "resources_servers", "name": "not_an_agent"},
+    }
+
+    expected = [reference["name"] for reference in environment_server_agent_refs(OmegaConf.create(server))]
+    assert expected == ["untyped_agent_server", "typed_field"]
+    assert [agent for _, agent in migration.agent_references(server)] == expected
 
 
 @pytest.mark.parametrize(

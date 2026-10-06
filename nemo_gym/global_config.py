@@ -187,6 +187,47 @@ MODEL_SERVER_TYPE_KEY_NAME = "responses_api_models"
 RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
 
 
+def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
+    """Return the agent references in one environment server's config.
+
+    An environment server can front several agents, such as a user and an assistant.
+    Any top-level field whose value has `type: responses_api_agents` references an agent.
+    So does `agent_server`, whose type may be left out.
+    `scripts/add_legacy_agent_environment_servers.py` applies the same rule.
+    """
+    return [
+        reference
+        for field, reference in server.items()
+        if isinstance(reference, DictConfig)
+        and (
+            reference.get("type") == AGENT_SERVER_TYPE_KEY_NAME
+            or (field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None)
+        )
+    ]
+
+
+def environment_server_agent_names(server: DictConfig) -> list[str]:
+    """Return the names of the agents one environment server's config references."""
+    return [
+        str(reference["name"])
+        for reference in environment_server_agent_refs(server)
+        if reference.get("name") is not None
+    ]
+
+
+def environment_server_attributed_agent(server: DictConfig) -> Optional[str]:
+    """Return the agent that results from one environment server are attributed to.
+
+    That is the server's `agent_server`, or the only agent it references.
+    A server that fronts several agents without an `agent_server` has no single agent to attribute.
+    """
+    agent_ref = server.get(AGENT_SERVER_REF_KEY_NAME)
+    if isinstance(agent_ref, DictConfig):
+        return agent_ref.get("name")
+    agents = environment_server_agent_names(server)
+    return agents[0] if len(agents) == 1 else None
+
+
 @dataclass(frozen=True)
 class _AgentInstance:
     """A top-level agent instance, with its single agent type already unwrapped."""
@@ -589,14 +630,15 @@ Duplicate config paths:
                         available = ", ".join(repr(n) for n in sorted(same_type_names)) or "(none)"
                         hint = f"Available {maybe_server_ref.type}: {available}"
                     if (
-                        field_name == AGENT_SERVER_REF_KEY_NAME
+                        maybe_server_ref.type == AGENT_SERVER_TYPE_KEY_NAME
                         and server_instance_config.get_server_ref().type == ENVIRONMENT_SERVER_TYPE_KEY_NAME
                     ):
                         hint += (
-                            "\nIf the agent was renamed with `_inherit_from`, its environment server must be renamed with it."
+                            "\nIf the agent was renamed with `_inherit_from`, this environment server must reference "
+                            "the agent's new name."
                             "\nTo fix this automatically, run "
                             "`python scripts/add_legacy_agent_environment_servers.py <your config paths>` from a NeMo Gym checkout."
-                            "\nOr point this server's agent_server.name at the agent's new name."
+                            f"\nOr point this server's {field_name}.name at the agent's new name."
                         )
                     raise ServerRefNotFoundError(
                         f"""In server instance '{server_instance_config.name}', field '{field_name}' references {maybe_server_ref.type}/'{maybe_server_ref.name}', which is not defined in the merged config.
@@ -842,7 +884,7 @@ Duplicate config paths:
         """Point each environment server at the agent composition put in place of the one it named.
 
         The server is named after the environment, not the agent, so a swap leaves its own name
-        alone and only its `agent_server` reference has to follow.
+        alone and only its references to the swapped agent have to follow.
         """
         for instance in global_config_dict.values():
             if not isinstance(instance, DictConfig):
@@ -851,9 +893,11 @@ Duplicate config paths:
             if not isinstance(servers, DictConfig):
                 continue
             for server in servers.values():
-                reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
-                if isinstance(reference, DictConfig) and reference.get("name") in renames:
-                    reference["name"] = renames[reference["name"]]
+                if not isinstance(server, DictConfig):
+                    continue
+                for reference in environment_server_agent_refs(server):
+                    if reference.get("name") in renames:
+                        reference["name"] = renames[reference["name"]]
 
     @staticmethod
     def _composed_instance_name(target: _AgentInstance, agent_type: str) -> str:
@@ -1102,9 +1146,11 @@ the check."""
             if not isinstance(servers, DictConfig):
                 continue
             for server in servers.values():
-                reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
-                if isinstance(reference, DictConfig):
-                    with_environment_server.add(reference.get("name"))
+                if not isinstance(server, DictConfig):
+                    continue
+                for reference in environment_server_agent_refs(server):
+                    if reference.get("name") is not None:
+                        with_environment_server.add(reference["name"])
 
         without_environment_server = sorted(
             agent.name
@@ -1856,18 +1902,30 @@ def dataset_agent_pins(global_config_dict: DictConfig, instance_name: str) -> Li
     return pins
 
 
+def taskset_environment_server_name(global_config_dict: DictConfig, taskset: Optional[str]) -> Optional[str]:
+    """The Environment Server ``environment_server_routes`` names for a taskset, or None without one."""
+    routes = global_config_dict.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
+    name = routes.get(taskset) if taskset is not None and isinstance(routes, DictConfig) else None
+    return name if isinstance(name, str) else None
+
+
 def resolve_dataset_agent(
     global_config_dict: DictConfig,
     declaring_instance_name: str,
     pin: Optional[str] = None,
     *,
     taskset: Optional[str] = None,
-) -> str:
+) -> Optional[str]:
     """Resolve the agent that runs a dataset declared by ``declaring_instance_name``.
 
     Shared by benchmark discovery, preparation, manifest validation, and flat-row dispatch.
-    A declared ``taskset`` resolves through ``environment_server_routes`` and the bound
-    Environment Server's ``agent_server``. It does not require an agent -> resources edge.
+    A declared ``taskset`` routes to the Environment Server named by ``environment_server_routes``, not
+    to an agent, so its dataset cannot pin one. Resolution checks the route: every agent the server
+    references (``environment_server_agent_refs``) must exist, a declaring agent must be one of them,
+    and a declaring resources server must be the one the server binds. It returns the declaring agent,
+    or the server's attributed agent (``environment_server_attributed_agent``), or None when the server
+    fronts several agents, such as a user and an assistant, without an ``agent_server``. It does not
+    require an agent -> resources edge.
     Otherwise, first hit wins:
 
     1. ``pin`` (the dataset's ``agent:`` key) — validated: it must name the declaring agent
@@ -1891,23 +1949,26 @@ def resolve_dataset_agent(
         environment_config = next(iter(servers.values()))
         if not isinstance(environment_config, DictConfig):
             raise ConfigError(f"Environment Server {environment_name!r} must have a configuration mapping.")
-        agent_ref = environment_config.get(AGENT_SERVER_REF_KEY_NAME)
-        agent_name = agent_ref.get("name") if isinstance(agent_ref, DictConfig) else None
-        agent = global_config_dict.get(agent_name) if isinstance(agent_name, str) else None
-        if (
-            not isinstance(agent, DictConfig)
-            or AGENT_SERVER_TYPE_KEY_NAME not in agent
-            or agent_ref.get("type", AGENT_SERVER_TYPE_KEY_NAME) != AGENT_SERVER_TYPE_KEY_NAME
-        ):
+        agent_names = []
+        for agent_ref in environment_server_agent_refs(environment_config):
+            name = agent_ref.get("name")
+            agent = global_config_dict.get(name) if isinstance(name, str) else None
+            if not isinstance(agent, DictConfig) or AGENT_SERVER_TYPE_KEY_NAME not in agent:
+                raise ConfigError(
+                    f"Environment Server {environment_name!r} references {name!r}, which is not an agent. "
+                    "Its agent_server and other agent references must name agents."
+                )
+            agent_names.append(name)
+        if not agent_names:
             raise ConfigError(
                 f"Environment Server {environment_name!r} must bind a valid agent_server for this dataset."
             )
-        if pin is not None and pin != agent_name:
+        if pin is not None:
             raise ConfigError(
-                f"Taskset {taskset!r} pins agent {pin!r}, but Environment Server {environment_name!r} "
-                f"runs {agent_name!r}. Remove the pin or make it match the route."
+                f"Taskset {taskset!r} pins agent {pin!r}, but a taskset routes to Environment Server "
+                f"{environment_name!r} through environment_server_routes, not to an agent. Remove the `agent` key."
             )
-        if is_agent and declaring_instance_name != agent_name:
+        if is_agent and declaring_instance_name not in agent_names:
             raise ConfigError(f"Taskset {taskset!r} must route to its declaring agent {declaring_instance_name!r}.")
         if not is_agent:
             resources_ref = environment_config.get("resources_server")
@@ -1920,7 +1981,9 @@ def resolve_dataset_agent(
                     f"Environment Server {environment_name!r} must bind declaring resources server "
                     f"{declaring_instance_name!r} for taskset {taskset!r}."
                 )
-        return agent_name
+        if is_agent:
+            return str(declaring_instance_name)
+        return environment_server_attributed_agent(environment_config)
 
     if is_agent:
         if pin is not None and pin != declaring_instance_name:

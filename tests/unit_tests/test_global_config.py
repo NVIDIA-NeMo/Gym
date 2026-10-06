@@ -2191,8 +2191,10 @@ class TestConfigLoadErrors:
         assert relay["agent_server"] == {"type": "responses_api_agents", "name": "mcqa_simple_agent"}
         assert "host" in relay and "port" in relay
 
-    def test_dangling_environment_server_agent_reference_suggests_migration(self) -> None:
-        # Renaming an agent with `_inherit_from` moves it, stranding the environment server that named it.
+    # `user_agent` is one of several agents a multi-agent environment server can reference.
+    @mark.parametrize("field", ["agent_server", "user_agent"])
+    def test_dangling_environment_server_agent_reference_suggests_migration(self, field: str) -> None:
+        # Renaming an agent with `_inherit_from` moves it, stranding the environment server that referenced it.
         config = OmegaConf.merge(
             GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
             self._agent_without_environment_server_config(
@@ -2201,14 +2203,18 @@ class TestConfigLoadErrors:
                     "environment_servers": {
                         "legacy_agent": {
                             "entrypoint": "app.py",
-                            "agent_server": {"type": "responses_api_agents", "name": "mcqa_simple_agent"},
+                            field: {"type": "responses_api_agents", "name": "mcqa_simple_agent"},
                         }
                     }
                 },
             ),
         )
         with raises(
-            ServerRefNotFoundError, match="(?s)renamed with `_inherit_from`.*add_legacy_agent_environment_servers"
+            ServerRefNotFoundError,
+            match=(
+                "(?s)renamed with `_inherit_from`, this environment server must reference the agent's new name"
+                f".*add_legacy_agent_environment_servers.*point this server's {field}.name at the agent's new name"
+            ),
         ):
             GlobalConfigDictParser().parse(
                 GlobalConfigDictParserConfig(
@@ -2253,6 +2259,71 @@ class TestConfigLoadErrors:
         environment = resolved[f"{agent_name}_environment_server"]["environment_servers"]["legacy_agent"]
         assert environment["entrypoint"] == "app.py"
         assert environment["agent_server"] == {"type": "responses_api_agents", "name": agent_name}
+
+    def test_multi_agent_environment_server_satisfies_agent_routing(self) -> None:
+        parser = GlobalConfigDictParser()
+        config = self._multi_agent_environment_config()
+
+        parser._front_agents_without_environment_server(config)
+
+        assert _environment_servers_by_agent(config) == {
+            "participant_a": ["multi_agent_environment"],
+            "participant_b": ["multi_agent_environment"],
+        }
+
+    def test_multi_agent_environment_server_requires_every_participant(self) -> None:
+        parser = GlobalConfigDictParser()
+        config = self._multi_agent_environment_config()
+        del config["multi_agent_environment"]["environment_servers"]["multi_agent"]["participant_b"]
+        config["error_on_agent_without_environment_server"] = True
+
+        with raises(AgentWithoutEnvironmentServerError, match="participant_b"):
+            parser._front_agents_without_environment_server(config)
+
+    def test_composition_retargets_only_the_swapped_participant(self) -> None:
+        config = self._multi_agent_environment_config()
+
+        GlobalConfigDictParser._retarget_environment_servers(config, {"participant_b": "participant_b_swapped"})
+
+        server = config["multi_agent_environment"]["environment_servers"]["multi_agent"]
+        assert server["participant_a"]["name"] == "participant_a"
+        assert server["participant_b"]["name"] == "participant_b_swapped"
+
+    @staticmethod
+    def _multi_agent_environment_config() -> DictConfig:
+        return OmegaConf.create(
+            {
+                "participant_a": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "entrypoint": "app.py",
+                        }
+                    }
+                },
+                "participant_b": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "entrypoint": "app.py",
+                        }
+                    }
+                },
+                "multi_agent_environment": {
+                    "environment_servers": {
+                        "multi_agent": {
+                            "entrypoint": "app.py",
+                            "participant_a": {
+                                "type": "responses_api_agents",
+                                "name": "participant_a",
+                            },
+                            "participant_b": {
+                                "type": "responses_api_agents",
+                                "name": "participant_b",
+                            },
+                        }
+                    }
+                },
+            }
+        )
 
     def test_all_repo_configs_load_without_duplicate_keys(self) -> None:
         # OmegaConf.load (the loader `gym env start` actually uses) rejects duplicate YAML keys,

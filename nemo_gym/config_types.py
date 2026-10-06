@@ -571,7 +571,8 @@ class BenchmarkDatasetConfig(BaseModel):
             "Only needed when the config is ambiguous: the dataset is declared on a resources "
             "server that several agents reference. The pin must name one of those agents — rows "
             "are dispatched along the agent -> resources server edge, so any other value is a "
-            "config error. Unambiguous configs resolve without it."
+            "config error. Unambiguous configs resolve without it. A dataset that declares `taskset` "
+            "routes to an Environment Server, not an agent, and cannot set it."
         ),
     )
 

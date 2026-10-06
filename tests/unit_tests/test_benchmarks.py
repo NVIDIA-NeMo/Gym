@@ -155,7 +155,7 @@ class TestListBenchmarks:
     def test_json_output(self, capsys) -> None:
         import json
 
-        bench = MagicMock(agent_name="my_agent", num_repeats=4)
+        bench = MagicMock(agent_name="my_agent", num_repeats=4, environment_server=None)
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config({"json": True})),
             patch("nemo_gym.cli.eval.discover_benchmarks", return_value={"my_bench": bench}),
@@ -166,6 +166,7 @@ class TestListBenchmarks:
             {
                 "name": "my_bench",
                 "agent_name": "my_agent",
+                "environment_server": None,
                 "domain": "math",
                 "num_repeats": 4,
                 "description": "a description",
@@ -183,7 +184,7 @@ class TestListBenchmarks:
         assert json.loads(capsys.readouterr().out) == []
 
     def test_inspect_benchmark_by_name(self, capsys) -> None:
-        bench = MagicMock(agent_name="my_agent", num_repeats=8)
+        bench = MagicMock(agent_name="my_agent", num_repeats=8, environment_server=None)
         bench.path = Path("benchmarks/aime24/config.yaml")
         bench.dataset.jsonl_fpath = Path("benchmarks/aime24/data/aime24.jsonl")
         bench.dataset.prepare_script = Path("benchmarks/aime24/prepare.py")
@@ -820,21 +821,20 @@ class TestNativeTasksetBenchmark:
             }
         )
 
-    @pytest.mark.parametrize("pin", [None, "agent"])
-    def test_discover_prepare_collate_and_dispatch(self, config, tmp_path, monkeypatch, pin):
+    def test_discover_prepare_collate_and_dispatch(self, config, tmp_path, monkeypatch):
         import json
 
         from nemo_gym.benchmarks import BenchmarkConfig
         from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
         from nemo_gym.train_data_utils import TrainDataProcessor
 
-        config.resources.resources_servers.impl.datasets[0].agent = pin
         benchmark = BenchmarkConfig.from_initial_config_dict(
             path=tmp_path / "config.yaml",
             initial_config_dict=config,
             strict=False,
         )
         assert benchmark.agent_name == "agent"
+        assert benchmark.environment_server == "environment"
         source = tmp_path / "source.jsonl"
         row = {"instance_id": "task", "responses_create_params": {"input": "fix it"}, "answer": "expected"}
 
@@ -894,11 +894,19 @@ class TestNativeTasksetBenchmark:
         assert not (tmp_path / "source_prepare.jsonl").exists()
         assert not (tmp_path / "source_metrics.json").exists()
 
-    @pytest.mark.parametrize("pin", [None, "agent"])
-    def test_native_route_accepts_matching_pin(self, config, pin):
+    def test_native_route_resolves_the_servers_agent(self, config):
         from nemo_gym.global_config import resolve_dataset_agent
 
-        assert resolve_dataset_agent(config, "resources", pin=pin, taskset="swe:test") == "agent"
+        assert resolve_dataset_agent(config, "resources", taskset="swe:test") == "agent"
+
+    @pytest.mark.parametrize("pin", ["agent", "other"])
+    def test_native_route_rejects_any_pin(self, config, pin):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        # A taskset routes to its Environment Server; even a pin naming that server's agent is rejected.
+        with pytest.raises(ConfigError, match=f"pins agent '{pin}', but a taskset routes to Environment Server"):
+            resolve_dataset_agent(config, "resources", pin=pin, taskset="swe:test")
 
     @pytest.mark.parametrize(
         "change, message",
@@ -954,6 +962,93 @@ class TestNativeTasksetBenchmark:
         config.other = {"responses_api_agents": {"impl": {"entrypoint": "app.py"}}}
         with pytest.raises(ConfigError, match="must route to its declaring agent"):
             resolve_dataset_agent(config, "other", taskset="swe:test")
+
+    @pytest.fixture
+    def multi_agent_config(self, config):
+        config.user = {"responses_api_agents": {"impl": {"entrypoint": "app.py"}}}
+        server = config.environment.environment_servers.single_agent_turn
+        del server["agent_server"]
+        server.user_agent = {"type": "responses_api_agents", "name": "user"}
+        server.assistant_agent = {"type": "responses_api_agents", "name": "agent"}
+        return config
+
+    def test_multi_agent_route_resolves_without_a_pin(self, multi_agent_config):
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        # The server fronts two agents and names no agent_server, so no single agent is reported.
+        assert resolve_dataset_agent(multi_agent_config, "resources", taskset="swe:test") is None
+        multi_agent_config.environment.environment_servers.single_agent_turn.agent_server = {
+            "type": "responses_api_agents",
+            "name": "agent",
+        }
+        assert resolve_dataset_agent(multi_agent_config, "resources", taskset="swe:test") == "agent"
+
+    def test_multi_agent_route_rejects_a_pin(self, multi_agent_config):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        with pytest.raises(ConfigError, match="pins agent 'agent', but a taskset routes to Environment Server"):
+            resolve_dataset_agent(multi_agent_config, "resources", pin="agent", taskset="swe:test")
+
+    def test_multi_agent_route_accepts_a_declaring_participant(self, multi_agent_config):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        assert resolve_dataset_agent(multi_agent_config, "user", taskset="swe:test") == "user"
+        multi_agent_config.other = {"responses_api_agents": {"impl": {"entrypoint": "app.py"}}}
+        with pytest.raises(ConfigError, match="must route to its declaring agent"):
+            resolve_dataset_agent(multi_agent_config, "other", taskset="swe:test")
+
+    def test_multi_agent_route_rejects_a_reference_to_a_non_agent(self, multi_agent_config):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        multi_agent_config.environment.environment_servers.single_agent_turn.user_agent.name = "resources"
+        with pytest.raises(ConfigError, match="references 'resources', which is not an agent"):
+            resolve_dataset_agent(multi_agent_config, "resources", taskset="swe:test")
+
+    @pytest.mark.parametrize("dataset_type", ["benchmark", "example", "train"])
+    def test_collation_routes_a_multi_agent_taskset_of_any_type(self, multi_agent_config, tmp_path, dataset_type):
+        import json
+
+        from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+        from nemo_gym.train_data_utils import TrainDataProcessor
+
+        source = tmp_path / "source.jsonl"
+        rows = [{"instance_id": f"task-{index}", "answer": "expected"} for index in range(5)]
+        source.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        dataset = multi_agent_config.resources.resources_servers.impl.datasets[0]
+        if dataset_type != "benchmark":
+            dataset.type = dataset_type
+            del dataset["prepare_script"]
+            dataset.license = "Apache 2.0"
+        mode = "example_validation" if dataset_type == "example" else "train_preparation"
+        multi_agent_config.update({"mode": mode, "output_dirpath": str(tmp_path / "collated")})
+        TrainDataProcessor().run(multi_agent_config)
+        loaded = RolloutCollectionHelper()._preprocess_rows_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(tmp_path / f"collated/{dataset_type}.jsonl"),
+                output_jsonl_fpath="unused",
+                environment_server_routes={"swe:test": "environment"},
+            )
+        )
+        assert {row["_ng_environment_server"] for row in loaded} == {"environment"}
+        assert loaded[0]["task_input"]["answer"] == "expected"
+
+    def test_listing_names_the_environment_server_without_a_single_agent(self, multi_agent_config, tmp_path):
+        from nemo_gym.benchmarks import BenchmarkConfig
+
+        benchmark = BenchmarkConfig.from_initial_config_dict(
+            path=tmp_path / "config.yaml", initial_config_dict=multi_agent_config, strict=False
+        )
+        assert benchmark.agent_name is None
+        assert benchmark.environment_server == "environment"
+
+    def test_manifest_cannot_describe_a_multi_agent_taskset(self, multi_agent_config):
+        from nemo_gym.environment.validation import EnvironmentValidationError, _resolve_dataset_owner_agent
+
+        with pytest.raises(EnvironmentValidationError, match="fronts several agents"):
+            _resolve_dataset_owner_agent(multi_agent_config, "resources")
 
 
 class TestAgentPinDiscoveryCollateRollout:

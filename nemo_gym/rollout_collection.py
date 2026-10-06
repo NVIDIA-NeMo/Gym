@@ -61,7 +61,6 @@ from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
-    AGENT_SERVER_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -75,6 +74,8 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
     dataset_agent_pins,
+    environment_server_agent_names,
+    environment_server_attributed_agent,
     get_global_config_dict,
     label_runs,
     pairing_override_enabled,
@@ -218,7 +219,7 @@ _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 
 
 def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, list[str]]:
-    """Map each agent name to the environment servers whose ``agent_server`` names it."""
+    """Map each agent name to the environment servers that front it."""
     servers_by_agent: dict[str, list[str]] = {}
     for name, instance in global_config_dict.items():
         if not isinstance(instance, DictConfig):
@@ -227,10 +228,10 @@ def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, l
         if not isinstance(servers, DictConfig):
             continue
         for server in servers.values():
-            reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
-            agent_name = reference.get("name") if isinstance(reference, DictConfig) else None
-            if agent_name is not None:
-                servers_by_agent.setdefault(str(agent_name), []).append(str(name))
+            if not isinstance(server, DictConfig):
+                continue
+            for agent_name in environment_server_agent_names(server):
+                servers_by_agent.setdefault(agent_name, []).append(str(name))
     return servers_by_agent
 
 
@@ -3212,9 +3213,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if not isinstance(environment_server_name, str):
             return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
         environment_group = global_config_dict[environment_server_name]["environment_servers"]
-        environment_config = next(iter(environment_group.values()))
-        agent_ref = environment_config.get("agent_server")
-        return agent_ref.get("name") if isinstance(agent_ref, DictConfig) else None
+        return environment_server_attributed_agent(next(iter(environment_group.values())))
 
     @classmethod
     def _stamp_environment_server_agent_refs(
@@ -3269,17 +3268,17 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 continue
             environment_group = global_config_dict[environment_server_name]["environment_servers"]
             environment_config = next(iter(environment_group.values()))
-            agent_ref = environment_config.get("agent_server")
             resources_ref = environment_config.get("resources_server")
-            configured_agent = agent_ref.get("name") if isinstance(agent_ref, DictConfig) else None
+            configured_agent = environment_server_attributed_agent(environment_config)
+            server_agents = environment_server_agent_names(environment_config)
             configured_resources = resources_ref.get("name") if isinstance(resources_ref, DictConfig) else None
 
             row_agent = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
             task_source = row.get(TASK_SOURCE_KEY_NAME)
-            if row_agent is not None and configured_agent is not None and row_agent != configured_agent:
+            if row_agent is not None and server_agents and row_agent not in server_agents:
                 raise ValueError(
-                    f"Row agent_ref {row_agent!r} does not match environment server "
-                    f"{environment_server_name!r} agent server {configured_agent!r}"
+                    f"Row agent_ref {row_agent!r} is not an agent of environment server "
+                    f"{environment_server_name!r}: {', '.join(repr(agent) for agent in server_agents)}"
                 )
             if task_source is not None and configured_resources is not None and task_source != configured_resources:
                 raise ValueError(
