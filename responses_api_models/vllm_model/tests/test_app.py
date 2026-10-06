@@ -3904,6 +3904,30 @@ class TestVLLMConverter:
         assert {field: captured_kwargs[field] for field in extensions} == extensions
 
     @mark.parametrize("stream", [False, True])
+    def test_anthropic_system_blocks_reach_chat_backend_intact(self, stream):
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+        blocks = [
+            {"type": "text", "text": "x-anthropic-billing-header: cc_version=example;"},
+            {"type": "text", "text": "You are an evaluation assistant."},
+            {"type": "text", "text": "Grade each goal and return JSON using goal_results and judge_score."},
+        ]
+
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "dummy_model",
+                "max_tokens": 100,
+                "stream": stream,
+                "system": blocks,
+                "messages": [{"role": "user", "content": "Inspect the result."}],
+            },
+        )
+
+        assert response.status_code == 200
+        assert captured_kwargs["messages"][0] == {"role": "system", "content": blocks}
+        assert captured_kwargs["messages"][1] == {"role": "user", "content": "Inspect the result."}
+
+    @mark.parametrize("stream", [False, True])
     @mark.parametrize("reasoning", [{"effort": "high"}, {"max_tokens": 4096, "enabled": True, "exclude": False}])
     def test_native_reasoning_configuration_reaches_backend(self, stream, reasoning):
         usage = {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}

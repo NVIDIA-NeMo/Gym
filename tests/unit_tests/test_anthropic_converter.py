@@ -56,7 +56,7 @@ class TestAnthropicRequestToResponses:
         assert params.input[0].role == "user"
         assert params.input[0].content == "Hello"
 
-    def test_system_block_list_is_joined(self) -> None:
+    def test_system_block_list_preserves_boundaries(self) -> None:
         params = _converter().anthropic_request_to_responses(
             {
                 "system": [
@@ -67,7 +67,18 @@ class TestAnthropicRequestToResponses:
                 "messages": [{"role": "user", "content": "hi"}],
             }
         )
-        assert params.instructions == "Answer concisely.\nUse JSON."
+        assert params.instructions is None
+        assert params.input[0].role == "system"
+        assert params.input[0].model_dump()["content"] == [
+            {"type": "input_text", "text": "Answer concisely."},
+            {"type": "input_text", "text": "Use JSON."},
+        ]
+        assert _converter().responses_to_anthropic(
+            params, model="m", max_tokens=10, thinking=None, thinking_budget_tokens=None, extra_body={}
+        )["system"] == [
+            {"type": "text", "text": "Answer concisely."},
+            {"type": "text", "text": "Use JSON."},
+        ]
 
     def test_no_system_leaves_instructions_unset(self) -> None:
         params = _converter().anthropic_request_to_responses(
@@ -75,8 +86,8 @@ class TestAnthropicRequestToResponses:
         )
         assert params.instructions is None
 
-    def test_system_list_without_text_leaves_instructions_unset(self) -> None:
-        # A system list that contributes no usable text (empty-text blocks) yields no instructions.
+    def test_empty_system_text_block_keeps_its_boundary(self) -> None:
+        # Even empty text blocks retain their original boundary through a round trip.
         params = _converter().anthropic_request_to_responses(
             {
                 "system": [{"type": "text", "text": ""}],
@@ -85,6 +96,9 @@ class TestAnthropicRequestToResponses:
             }
         )
         assert params.instructions is None
+        assert _converter().responses_to_anthropic(
+            params, model="m", max_tokens=10, thinking=None, thinking_budget_tokens=None, extra_body={}
+        )["system"] == [{"type": "text", "text": ""}]
 
     def test_system_role_message_passes_through(self) -> None:
         # Anthropic allows a "system" role inside messages (distinct from the top-level system
@@ -605,13 +619,16 @@ class TestSharedHelperBranches:
         with pytest.raises(ValueError):  # invalid base64 payload
             conv._parse_image_data_url("data:image/png;base64,!!!notb64!!!")
 
-    def test_content_to_text_list_and_unsupported(self) -> None:
+    def test_content_to_text_parts_and_unsupported(self) -> None:
         import pytest
 
         conv = _converter()
-        assert conv._content_to_text([{"type": "input_text", "text": "a"}, {"type": "text", "text": "b"}]) == "a\nb"
+        assert conv._content_to_text_parts([{"type": "input_text", "text": "a"}, {"type": "text", "text": "b"}]) == [
+            "a",
+            "b",
+        ]
         with pytest.raises(NotImplementedError):
-            conv._content_to_text([{"type": "input_image", "image_url": "x"}])
+            conv._content_to_text_parts([{"type": "input_image", "image_url": "x"}])
 
     def test_json_object_from_arguments_rejects_non_object(self) -> None:
         import pytest
