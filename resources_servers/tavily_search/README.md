@@ -3,12 +3,10 @@ RL environment which allows access to web search (Search Provider: Tavily)
 
 ## Prerequisites and setup
 
-Follow [Tavily search access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/tavily-search)
-for the required exclusion policy, service credentials, and datasets.
-
-NVIDIA users can start with @rgala. External users can contact the maintainers
-to discuss policy and dataset access options before running this recipe.
-
+Follow [Tavily search setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/tavily-search)
+to configure your own Tavily key, exclusion policy, and policy-model and
+judge-model endpoints. Some NVIDIA benchmark artifacts are private and are not
+required to run the generic integration with your own task data.
 
 ### Performance Metrics
 100*16 samples:

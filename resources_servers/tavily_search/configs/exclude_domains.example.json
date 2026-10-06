@@ -1,0 +1,16 @@
+{
+  "notices": [
+    {
+      "properties": [
+        {
+          "type": "domain",
+          "value": "example.com"
+        },
+        {
+          "type": "url_substring",
+          "value": "example.invalid/private/"
+        }
+      ]
+    }
+  ]
+}
