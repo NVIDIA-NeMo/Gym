@@ -92,6 +92,38 @@ claude_code_agent:
 
 Both the run-wide `enabled` setting and the agent opt-in are required. To capture every configured agent, set `token_id_capture.all_agents: true` instead of setting the flag on each agent.
 
+### Route training tasks across multiple harnesses
+
+Use `agent_pool` to train one policy from several compatible harnesses. Each key is an `agent_ref.name` or `task_source` from the input data. Gym assigns consecutive tasks to the listed agents in deterministic round-robin order:
+
+```yaml
+agent_pool:
+  shared_resources_server:
+    - opencode_agent
+    - claude_code_agent
+    - codex_agent
+    - mini_swe_agent
+num_repeats: 8
+
+env:
+  nemo_gym:
+    token_id_capture:
+      enabled: true
+      all_agents: true
+```
+
+Assignment happens before `num_repeats` expansion. All eight rollouts for one task therefore use the same harness and form one harness-consistent training group, while different tasks contribute rollouts from different harnesses to the shared policy update. A rollout never switches harnesses after it starts.
+
+Use the routing option that matches the experiment:
+
+| Option | Behavior |
+|---|---|
+| `agent_map` | Route every matching task to one named agent. |
+| `agent_pool` | Choose one listed agent per task, then keep it fixed across repeats. |
+| `fan_out` | Run every matching task through every listed agent. |
+
+Do not configure the same routing key in both `agent_pool` and `fan_out`. Gym rejects the ambiguous configuration before collection. Every selected agent must be present in the merged config and compatible with the task's resources server through `allowed_agents` when that restriction is declared.
+
 Some harnesses probe optional model-server endpoints such as `/v1/models`. Gym does not need to implement or predict these endpoints, and no per-harness route configuration is required. An unimplemented request that returns 404 or 405 cannot contribute policy-generated text and does not make capture incomplete. Any other response from an unrecognized route fails closed because its content could enter a later prompt; the rollout is marked with `mask_sample: true`.
 
 If a custom model server implements a successful metadata, health, or tokenization route whose response cannot contain policy-generated content, declare the exact method and path once on that model server:

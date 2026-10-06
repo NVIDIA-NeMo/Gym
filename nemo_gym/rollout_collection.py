@@ -1480,6 +1480,14 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             "Precedence: agent_map[<row value>] > agent_map._default > row agent_ref > task_source resolution."
         ),
     )
+    agent_pool: Optional[Dict[str, List[str]]] = Field(
+        default=None,
+        description=(
+            "Choose one agent per matching task using deterministic round-robin assignment, keyed by the row's "
+            "agent_ref.name or task_source (e.g. {shared_resources_server: [agent_a, agent_b]}). Selection happens "
+            "before num_repeats, so every repeat of a task uses the same agent."
+        ),
+    )
     fan_out: Optional[Dict[str, List[str]]] = Field(
         default=None,
         description=(
@@ -1500,7 +1508,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         description=(
             "How many times to repeat each example. Either an int (applied to every row) or a "
             "dict keyed by the dispatched agent name or by the row's own routing key (its "
-            "agent_ref.name or task_source as written in the data, before any agent_map/fan_out "
+            "agent_ref.name or task_source as written in the data, before any agent_map/agent_pool/fan_out "
             "re-route); the dispatched agent wins when both have entries. In dict form, every row "
             "must match an entry, unless a special '_default' key is provided as a fallback. "
             "Useful for mean@k."
@@ -1596,6 +1604,28 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
                     f"fan_out[{key!r}] lists the same agent more than once: {duplicates}. Each listed "
                     "agent already runs every matching row; use num_repeats for repetition."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_agent_pool(self) -> "RolloutCollectionConfig":
+        for key, agents in (self.agent_pool or {}).items():
+            if not agents:
+                raise ValueError(
+                    f"agent_pool[{key!r}] is an empty list, which cannot select an agent. "
+                    "Remove the key, or list at least one agent."
+                )
+            duplicates = sorted({agent for agent in agents if list(agents).count(agent) > 1})
+            if duplicates:
+                raise ValueError(
+                    f"agent_pool[{key!r}] lists the same agent more than once: {duplicates}. "
+                    "List each agent once; task assignment is round-robin."
+                )
+        overlap = sorted(set(self.agent_pool or {}) & set(self.fan_out or {}))
+        if overlap:
+            raise ValueError(
+                f"agent_pool and fan_out both configure routing keys {overlap}. agent_pool selects one agent per "
+                "task, while fan_out runs every listed agent; configure only one behavior for each key."
+            )
         return self
 
     @property
@@ -2103,6 +2133,7 @@ class RolloutCollectionHelper(BaseModel):
         examples: List[Dict],
         *,
         agent_map: Optional[Dict[str, str]] = None,
+        agent_pool: Optional[Dict[str, List[str]]] = None,
         fan_out: Optional[Dict[str, List[str]]] = None,
         num_repeats: Union[int, Dict[str, int]] = 1,
         num_repeats_add_seed: Union[bool, Dict[str, bool]] = False,
@@ -2112,8 +2143,8 @@ class RolloutCollectionHelper(BaseModel):
 
         Public entry point for direct ``run_examples`` callers (e.g. trainer integrations that
         drive dispatch themselves): ``run_examples`` resolves task_sources and validates agent
-        names, but ``agent_map``, ``fan_out`` and ``num_repeats`` are applied only during
-        preprocessing. Call this first, then pass the returned rows to ``run_examples``.
+        names, but ``agent_map``, ``agent_pool``, ``fan_out`` and ``num_repeats`` are applied only
+        during preprocessing. Call this first, then pass the returned rows to ``run_examples``.
 
         Pass ``global_config_dict`` (the merged config) to also resolve task_source-only rows to
         their agents here; leave it None to defer that to ``run_examples``, which does it against
@@ -2124,6 +2155,7 @@ class RolloutCollectionHelper(BaseModel):
             input_jsonl_fpath="<in-memory>",
             output_jsonl_fpath="<in-memory>",
             agent_map=agent_map,
+            agent_pool=agent_pool,
             fan_out=fan_out,
             num_repeats=num_repeats,
             num_repeats_add_seed=num_repeats_add_seed,
@@ -2156,6 +2188,8 @@ class RolloutCollectionHelper(BaseModel):
 
         if config.agent_map:
             print(f"Routing rows via agent_map {config.agent_map}")
+        if config.agent_pool:
+            print(f"Selecting one agent per task via agent_pool {config.agent_pool}")
 
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
@@ -2197,6 +2231,12 @@ class RolloutCollectionHelper(BaseModel):
         rows: List[Dict] = []
         overridden_agents: set[Tuple[str, str]] = set()
         for row_idx, row_str, row in tqdm(raw_rows, desc="Preprocessing and repeating rows"):
+            # Resolve task index before agent-pool selection. Honor a caller-provided value
+            # when present so chunked trainer integrations retain globally stable assignments;
+            # otherwise dedupe identical input rows to the same task index as before.
+            if TASK_INDEX_KEY_NAME not in row:
+                row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
+
             task_source = row.get(TASK_SOURCE_KEY_NAME)
             taskset = _materialized_taskset(row)
             environment_server = _environment_server_for_config_row(row, config)
@@ -2226,11 +2266,26 @@ class RolloutCollectionHelper(BaseModel):
                     agent_name = mapped
                     row[AGENT_REF_KEY_NAME] = {"name": agent_name}
 
-            # Fan-out: run this row once per listed agent (cross-product). Otherwise a single
-            # target — the row's agent when known, else deferred to task_source resolution.
+            # Agent pool: choose one harness per task before repetition. Fan-out instead runs
+            # every listed harness. Otherwise use the row's known agent or defer task_source
+            # resolution until the merged config is available.
+            matched_pool_key = None
+            if config.agent_pool:
+                matched_pool_key = next(
+                    (
+                        key
+                        for key in dict.fromkeys((basis, task_source))
+                        if key is not None and key in config.agent_pool
+                    ),
+                    None,
+                )
             targets: List[Optional[str]]
             if environment_server is not None:
                 targets = [None]
+            elif matched_pool_key is not None:
+                assert config.agent_pool is not None
+                pool = config.agent_pool[matched_pool_key]
+                targets = [pool[row[TASK_INDEX_KEY_NAME] % len(pool)]]
             elif config.fan_out and basis is not None and basis in config.fan_out:
                 targets = list(config.fan_out[basis])
             elif agent_name is not None:
@@ -2256,23 +2311,17 @@ class RolloutCollectionHelper(BaseModel):
             if skills_ref_dict is not None and taskset is None:
                 row[SKILLS_REF_KEY_NAME] = skills_ref_dict
 
-            # Resolve task index. Honor a caller-provided value when present (e.g. when an
-            # upstream slicer has stamped a globally-stable index across chunks so that
-            # subsequent /aggregate_metrics groupby unions chunks correctly); otherwise dedupe
-            # identical input rows to the same task index as before.
-            if TASK_INDEX_KEY_NAME not in row:
-                row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
             if environment_server is not None:
                 row[NG_ENVIRONMENT_SERVER_KEY] = environment_server
 
             base_row = row
             for target in targets:
                 # num_repeats keys match either side of a re-route: the dispatched agent (the
-                # fan-out/agent_map target) or the row's original routing key (its agent_ref.name
+                # agent-pool/fan-out/agent-map target) or the row's original routing key (its agent_ref.name
                 # or task_source as written in the data). The dispatched agent wins when both have
                 # entries, so `agent_map={source: agent}` composes with `num_repeats={source: k}`.
                 # Dict-form misses batch into one consolidated raise after the loop.
-                repeat_keys = [k for k in dict.fromkeys((target, basis)) if k is not None]
+                repeat_keys = [k for k in dict.fromkeys((target, matched_pool_key, basis)) if k is not None]
                 agents_seen.update(repeat_keys)
                 if fixed_num_repeats is not None:
                     row_num_repeats = fixed_num_repeats
@@ -3746,8 +3795,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         We provide this function as a lower level interface for running rollout collection.
 
         Rows are dispatched as given: task_sources are resolved and agent names validated here,
-        but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
-        ``preprocess_examples`` first if you need them.
+        but run-level knobs (``agent_map``, ``agent_pool``, ``fan_out``, ``num_repeats``) are NOT
+        applied — call ``preprocess_examples`` first if you need them.
 
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
         that ends every rollout still in flight. It defaults off because those rollouts then leave

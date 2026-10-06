@@ -131,8 +131,8 @@ from. Because the harness is settled once the servers are up, `--agent-type` is 
 `--no-serve`.
 </Note>
 
-Anything that routes rows — `--agent`, `+agent_map` values, `+fan_out` entries — must name the composed
-instance, and Gym says so rather than failing later:
+Anything that routes rows — `--agent`, `+agent_map` values, `+agent_pool` entries, `+fan_out` entries —
+must name the composed instance, and Gym says so rather than failing later:
 
 ```text
 Routing names agent instances that no longer exist once the agent is swapped:
@@ -161,6 +161,19 @@ Select one of: opencode_sandboxed_agent, terminus_2_sandboxed_agent. Or pass
 
 Results from an undeclared pairing might not be valid.
 </Warning>
+
+For multi-harness training, `+agent_pool` selects one agent per task in deterministic round-robin order before applying `num_repeats`. Unlike `+fan_out`, it does not duplicate each task across every agent:
+
+```bash
+gym eval run \
+    --no-serve \
+    --input rows.jsonl \
+    --output rollouts.jsonl \
+    '+agent_pool={shared_resources_server:[opencode_agent,claude_code_agent]}' \
+    +num_repeats=8
+```
+
+All repeats of one task use the selected agent. The selected agent is recorded in the materialized inputs, so resuming the run preserves the assignment.
 
 ### Hydra overrides (escape hatch)
 
