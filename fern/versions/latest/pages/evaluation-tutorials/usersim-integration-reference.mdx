@@ -9,7 +9,7 @@ This page describes the integration behind the
 
 ## Component ownership
 
-- **Preparation** materializes one complete User Sim row per probe before collection.
+- **Dataset sourcing** provides committed synthetic validation rows or materializes one benchmark row per probe.
 - The **rollout collector** loads a task and dispatches an episode request to the Environment Server.
 - The **Environment Server** seeds sessions, owns the conversation runtime and tool loop, invokes participants
   and support models, requests verification, and returns the episode response.
@@ -25,7 +25,8 @@ The Resources Server does not create a second conversation runtime and does not 
 
 ## Materialized task contract
 
-Preparation writes stable string `task_id` values and complete `resolved_row` objects:
+Both committed validation data and benchmark preparation provide stable string `task_id` values and complete
+`resolved_row` objects:
 
 ```json
 {
