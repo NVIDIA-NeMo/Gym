@@ -50,8 +50,8 @@ from upstream import (  # noqa: E402
     EXPECTED_TASK_COUNT,
     UPSTREAM_COMMIT,
     Harness,
+    PromptSource,
     ensure_checkout,
-    load_upstream,
 )
 
 
@@ -84,20 +84,6 @@ def load_rows(upstream_dir: Path) -> list[dict[str, Any]]:
     if ids != list(range(1, EXPECTED_TASK_COUNT + 1)):
         raise CorpusError("task ids are not exactly 1..500")
     return rows
-
-
-class PromptSource:
-    """Upstream's prompt builder without a Lean container (``Harness`` wants one for verification)."""
-
-    def __init__(self, upstream_dir: Path):
-        modules = load_upstream(upstream_dir)
-        self._builder = modules.prompt_builder.PromptBuilder(modules.root / "prompts" / "templates", mode=CONTEXT_MODE)
-
-    def system_prompt(self) -> str:
-        return self._builder.retrive_sys_prompt()
-
-    def user_prompt(self, row: dict[str, Any]) -> str:
-        return self._builder.build_user_prompt(theorem_entry=row, mode=CONTEXT_MODE)
 
 
 def format_row(row: dict[str, Any], system_prompt: str, user_prompt: str) -> dict[str, Any]:
@@ -191,7 +177,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     )
 
 
-__all__ = ["CorpusError", "Harness", "format_benchmark_row", "format_row", "load_rows", "prepare"]
+__all__ = ["CorpusError", "Harness", "PromptSource", "format_benchmark_row", "format_row", "load_rows", "prepare"]
 
 if __name__ == "__main__":
     main()

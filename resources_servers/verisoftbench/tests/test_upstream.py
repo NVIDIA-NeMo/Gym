@@ -220,6 +220,25 @@ class TestPrompts:
         assert prompt.rstrip().endswith("</target_theorem>")
         assert "Nat in Init.Prelude" in prompt and "def foo := 1" in prompt
 
+    def test_prompt_source_row_is_byte_identical_to_a_direct_builder_row(self, harness) -> None:
+        # The preparer builds rows only through the boundary's ``PromptSource``; parity
+        # with a direct upstream ``PromptBuilder`` construction keeps the prepared prompt
+        # strings (and so the recorded split digests) unchanged by that indirection.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import prepare_verisoftbench as prep
+
+        source = upstream.PromptSource(UPSTREAM_DIR)
+        [via_boundary] = prep.prepare([dict(ROW)], source, limit=None)
+        builder = harness.modules.prompt_builder.PromptBuilder(
+            harness.modules.root / "prompts" / "templates", mode=upstream.CONTEXT_MODE
+        )
+        direct = prep.format_row(
+            dict(ROW),
+            builder.retrive_sys_prompt(),
+            builder.build_user_prompt(theorem_entry=dict(ROW), mode=upstream.CONTEXT_MODE),
+        )
+        assert json.dumps(via_boundary, ensure_ascii=False) == json.dumps(direct, ensure_ascii=False)
+
     def test_repair_prompt_is_fix_txt_with_the_failed_round(self, harness) -> None:
         entry = dict(ROW, thm_stmt=ROW["thm_stmt"] + " :=", verif_local_ctxs="import Lentil.Basic\n")
         prompt = harness.repair_prompt(
@@ -256,6 +275,35 @@ class TestParsing:
         assert harness.parse_repair(
             "<fixed_lean4_lemmas>\nlemma z : True := trivial\n</fixed_lean4_lemmas>", "old", "oldlem"
         ) == ("old", "lemma z : True := trivial")
+
+
+class TestNoRenameOverride:
+    def test_identity_inside_and_restored_on_exit_and_on_exception(self, harness) -> None:
+        utils = harness.modules.utils
+        original = utils.clean_leaked_identifiers
+        with upstream.no_rename_override(harness.modules):
+            assert utils.clean_leaked_identifiers({}, "simp", "lemma h : True := trivial") == (
+                "simp",
+                "lemma h : True := trivial",
+            )
+        assert utils.clean_leaked_identifiers is original
+        with pytest.raises(RuntimeError, match="sweep crashed"):
+            with upstream.no_rename_override(harness.modules):
+                raise RuntimeError("sweep crashed")
+        assert utils.clean_leaked_identifiers is original
+
+
+class TestGoldNormalization:
+    def test_missplit_gold_proof_is_recovered_at_upstreams_separator(self, harness) -> None:
+        # A duplicated statement tail in front of the real proof (upstream's Case 2a):
+        # the body starts where upstream's own separator function says it does.
+        body, missplit = upstream.normalize_gold_body(harness.modules, ":= n + 0 = n := by\n  simp")
+        assert body == ":= by\n  simp" and missplit
+
+    def test_ordinary_gold_proof_keeps_only_the_contamination_strip(self, harness) -> None:
+        g = ":= by\n  simp\n\ntheorem junk : True := trivial"
+        assert upstream.normalize_gold_body(harness.modules, g) == (":= by\n  simp", False)
+        assert upstream.strip_gold_contamination(g) == ":= by\n  simp"
 
 
 class TestPrepareEntry:
@@ -368,6 +416,12 @@ class TestVerifyCandidate:
         }
         (tmp_path / "Lentil.json").write_text(json.dumps(index))
         monkeypatch.setattr(harness.modules.utils, "REPO_INDEX_DIR", tmp_path)
+        # An oracle/no-rename sweep is scoped: inside the override the reference passes
+        # through unrenamed, and a later contract sweep in the same process must see the
+        # pinned rename again rather than inherit the weakened normalization.
+        with upstream.no_rename_override(harness.modules):
+            harness.verify_candidate(entry, "by\n  exact earlier n", "", "p2a", max_conflict_attempts=1)
+            assert calls[-1]["theorem_proof"] == "by\n  exact earlier n"
         harness.verify_candidate(entry, "by\n  exact earlier n", "", "p2b", max_conflict_attempts=1)
         assert calls[-1]["theorem_proof"] == "by\n  exact my_earlier n"
 

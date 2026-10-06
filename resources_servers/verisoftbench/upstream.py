@@ -42,6 +42,8 @@ import subprocess
 import sys
 import threading
 import types
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -319,6 +321,26 @@ class _EvaluatorShim:
         self._build_verif_context = types.MethodType(evaluator_module.BenchmarkEvaluator._build_verif_context, self)
 
 
+class PromptSource:
+    """Upstream's prompt builder without a Lean container.
+
+    The prompt-only face of this boundary: ``scripts/prepare_verisoftbench.py`` builds
+    every task's curated-context prompt through it from the row alone, while ``Harness``
+    constructs the same ``PromptBuilder`` plus the verification backend.
+    """
+
+    def __init__(self, upstream_dir: Path):
+        modules = load_upstream(upstream_dir)
+        self._builder = modules.prompt_builder.PromptBuilder(modules.root / "prompts" / "templates", mode=CONTEXT_MODE)
+
+    def system_prompt(self) -> str:
+        """``prompts/templates/init.txt``; upstream sends it on the initial and every repair call."""
+        return self._builder.retrive_sys_prompt()
+
+    def user_prompt(self, row: dict[str, Any]) -> str:
+        return self._builder.build_user_prompt(theorem_entry=row, mode=CONTEXT_MODE)
+
+
 class Harness:
     """One task-independent handle on upstream's prompt builder and Lean interface."""
 
@@ -498,6 +520,63 @@ class VerificationOutcome:
     # exec boundary (``_observe_transport_faults``), never a substring of the formatted
     # compiler message — a diagnostic that merely contains marker-like text stays charged.
     backend_fault: bool = False
+
+
+# --- model-free validation adapters -------------------------------------------------
+
+# Body-start patterns upstream's ``verify_ground_truth.py`` (inline in ``verify_one``)
+# uses to tell a real proof body from a ``ground_truth_proof`` that begins with the tail
+# of the statement (rows mis-split at an inner ``let x :=``).
+GOLD_BODY_STARTS = (r":=\s+by\b", r":=\s+match\b", r":=\s+calc\b", r":=\s+fun\b", r":=\s+λ\b", r":=\s+begin\b")
+# Upstream's trailing-contamination strip for gold proofs, verbatim from
+# ``verify_ground_truth.py``: block comments or new top-level declarations accidentally
+# included during extraction appear after a blank line at column 0.
+_GOLD_CONTAMINATION_RE = re.compile(
+    r"\n\n(?=/--|/-|example\b|def\b|theorem\b|lemma\b|#|open\b|namespace\b|section\b).*", re.DOTALL
+)
+
+
+def strip_gold_contamination(ground_truth_proof: str) -> str:
+    """Upstream's contamination strip on a shipped ground-truth proof, nothing else."""
+    return _GOLD_CONTAMINATION_RE.sub("", ground_truth_proof.strip())
+
+
+def normalize_gold_body(modules: UpstreamModules, ground_truth_proof: str) -> tuple[str, bool]:
+    """Upstream's gold-body normalization: (body at the real separator, was_missplit).
+
+    Validation-only adaptation, explicitly identified: upstream performs these steps
+    inline in ``verify_ground_truth.verify_one`` on a whole task entry, so they are not
+    importable as functions. This reproduces exactly the two body-only steps the
+    model-free sweeps need — the contamination strip and the Case-2a mis-split recovery
+    (a ``ground_truth_proof`` that duplicates the statement tail in front of the real
+    proof) — and delegates the separator decision to upstream's own
+    ``find_decl_body_separator``.
+    """
+    g = strip_gold_contamination(ground_truth_proof)
+    if g.startswith(":=") and not any(re.match(pat, g) for pat in GOLD_BODY_STARTS):
+        idx, pat = modules.utils.find_decl_body_separator(g)
+        if idx > 0 and pat not in (":=", ":"):
+            return g[idx:], True
+    return g, False
+
+
+@contextmanager
+def no_rename_override(modules: UpstreamModules) -> Iterator[None]:
+    """Replace upstream's ``clean_leaked_identifiers`` with the identity, scoped.
+
+    The oracle and no-rename sweep forms of ``scripts/validate_model_free.py`` measure
+    the instrument without the anti-leakage rename. That override is validation-only
+    state on the shared upstream module, so it must not outlive the sweep: the original
+    function is restored on exit, including on exception, and a later contract-mode
+    sweep in the same process sees the pinned rename behavior again.
+    """
+    utils = modules.utils
+    original = utils.clean_leaked_identifiers
+    utils.clean_leaked_identifiers = lambda entry, proof, aux_lemmas: (proof, aux_lemmas)
+    try:
+        yield
+    finally:
+        utils.clean_leaked_identifiers = original
 
 
 # --- backend fault provenance ------------------------------------------------------

@@ -37,6 +37,7 @@ import hashlib
 import json
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Optional
 
@@ -47,6 +48,7 @@ from app import (  # noqa: E402
     VeriSoftBenchResourcesServerConfig,
     VeriSoftBenchVerifyRequest,
 )
+from upstream import UpstreamModules, no_rename_override, normalize_gold_body, strip_gold_contamination  # noqa: E402
 
 from nemo_gym.openai_utils import NeMoGymResponse  # noqa: E402
 from nemo_gym.server_utils import ServerClient  # noqa: E402
@@ -68,33 +70,20 @@ SWEEPS = ("gold", "empty", "sorry", "wrong_theorem", "unparseable", "repair")
 #   statement, a ``where``/``|`` proof) from what the rename costs.
 GOLD_MODES = ("contract", "contract_norename", "oracle")
 
-# Body-start patterns upstream's ``verify_ground_truth.py`` uses to tell a real proof from a
-# ``ground_truth_proof`` that begins with the *tail of the statement* (rows mis-split at an
-# inner ``let x :=``). Set by ``main`` from the loaded upstream modules.
-UPSTREAM_UTILS = None
-_BODY_STARTS = (r":=\s+by\b", r":=\s+match\b", r":=\s+calc\b", r":=\s+fun\b", r":=\s+λ\b", r":=\s+begin\b")
+# Handle on the loaded upstream modules, set by ``main`` from the server's harness; all
+# upstream interaction goes through the named adapters in ``upstream.py``.
+UPSTREAM_MODULES: Optional[UpstreamModules] = None
 
 
 def real_body(ground_truth_proof: str) -> tuple[str, bool]:
     """Upstream's Case 2a: drop a duplicated statement tail in front of the real proof.
 
-    Returns (body starting at the real separator, was_missplit).
+    Returns (body starting at the real separator, was_missplit). Before ``main`` has
+    loaded upstream, only the separator-free contamination strip applies.
     """
-    import re
-
-    # Upstream's verify_ground_truth.py: "Strip trailing contamination from gt_proof: block
-    # comments or new top-level declarations ... accidentally included during extraction."
-    g = re.sub(
-        r"\n\n(?=/--|/-|example\b|def\b|theorem\b|lemma\b|#|open\b|namespace\b|section\b).*",
-        "",
-        ground_truth_proof.strip(),
-        flags=re.DOTALL,
-    )
-    if g.startswith(":=") and not any(re.match(pat, g) for pat in _BODY_STARTS) and UPSTREAM_UTILS is not None:
-        idx, pat = UPSTREAM_UTILS.find_decl_body_separator(g)
-        if idx > 0 and pat not in (":=", ":"):
-            return g[idx:], True
-    return g, False
+    if UPSTREAM_MODULES is not None:
+        return normalize_gold_body(UPSTREAM_MODULES, ground_truth_proof)
+    return strip_gold_contamination(ground_truth_proof), False
 
 
 def make_response(text: str) -> NeMoGymResponse:
@@ -305,13 +294,15 @@ def main(argv: Optional[list[str]] = None) -> None:
         max_concurrent_compilations=args.concurrency,
     )
     server = VeriSoftBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-    global UPSTREAM_UTILS
-    UPSTREAM_UTILS = server._harness.modules.utils
-    if args.gold_mode in ("oracle", "contract_norename"):
-        UPSTREAM_UTILS.clean_leaked_identifiers = lambda entry, proof, aux_lemmas: (proof, aux_lemmas)
+    global UPSTREAM_MODULES
+    UPSTREAM_MODULES = server._harness.modules
+    # The oracle/no-rename forms weaken shared upstream state, so they run inside the
+    # scoped override: it is restored even when a sweep raises.
+    no_rename = args.gold_mode in ("oracle", "contract_norename")
+    override = no_rename_override(UPSTREAM_MODULES) if no_rename else nullcontext()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     all_results: list[dict[str, Any]] = []
-    with open(args.output, "a", encoding="utf-8") as out:
+    with override, open(args.output, "a", encoding="utf-8") as out:
         for sweep in args.sweeps:
             all_results.extend(
                 asyncio.run(run_sweep(server, sweep, rows, args.concurrency, out, args.gold_mode, all_rows=all_rows))
