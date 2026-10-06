@@ -37,7 +37,6 @@ VLLM_COMMON_ARGS=(
     --prefix-match-unit 128
     --enable-mamba-fine-grained-prefix-cache
     --kernel-config '{"linear_backend_per_quant":{"fp8_w8a8":"torch"}}'
-    --compilation-config '{"pass_config": {"fuse_attn_quant": true}}'
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
     --skip-mm-profiling
@@ -48,6 +47,7 @@ VLLM_COMMON_ARGS=(
 )
 VLLM_PREFILL_ARGS=(
     --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":5,\"num_speculative_tokens_per_batch_size\":[[1,1024,0]]}"
+    --compilation-config '{"pass_config":{"fuse_attn_quant":true},"use_inductor_graph_partition":true,"cudagraph_mode":"FULL_AND_PIECEWISE"}'
     --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
@@ -103,7 +103,7 @@ VLLM_DECODE_ARGS=(
             ]
         }
     }'
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    --compilation-config '{"pass_config":{"fuse_attn_quant":true},"use_inductor_graph_partition":true,"cudagraph_mode":"FULL_DECODE_ONLY"}'
     --max-cudagraph-capture-size 1536
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
