@@ -526,11 +526,14 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         patch_verification_time_taken = 0.0
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
         deadline = _verification_deadline(self.config.verification_total_timeout)
+        budget_spent_error = None
         for attempt in range(1, attempts + 1):
             eval_sandbox: AsyncSandbox | None = None
             start_time = time()
+            budget = _attempt_budget(self.config.verification_attempt_timeout, deadline)
+            attempt_timeout = asyncio.timeout(budget)
             try:
-                async with asyncio.timeout(_attempt_budget(self.config.verification_attempt_timeout, deadline)):
+                async with attempt_timeout:
                     eval_sandbox = await self._create_sandbox(body, files=sandbox_files)
                     eval_sandbox_start_time_taken = time() - start_time
                     verification_start = time()
@@ -544,12 +547,21 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             except Exception as exc:
                 eval_sandbox_start_time_taken = time() - start_time
                 patch_verification_time_taken = 0.0
+                # str(TimeoutError()) is empty, so name the limit that fired instead.
+                if attempt_timeout.expired() and budget == self.config.verification_attempt_timeout:
+                    error = f"Verification attempt exceeded verification_attempt_timeout={budget:g}s"
+                elif attempt_timeout.expired():
+                    error = (
+                        f"Verification attempt timed out after the {budget:.1f}s left of verification_total_timeout"
+                    )
+                else:
+                    error = f"Verification failed: {str(exc) or type(exc).__name__}"
                 result = VerificationResult(
                     completed=False,
                     resolved=False,
                     patch_applied=False,
                     test_results=None,
-                    error=f"Verification failed: {exc}",
+                    error=error,
                 )
             finally:
                 if eval_sandbox is not None:
@@ -561,12 +573,11 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
 
             reason = inconclusive_reason(result)
             if reason is not None and _budget_spent(deadline):
-                print(
-                    f"Verification for {body.instance_id} gave up after {attempt} attempt(s): "
-                    f"the {self.config.verification_total_timeout}s budget for this rollout is spent "
-                    f"({reason})",
-                    file=sys.stderr,
+                budget_spent_error = (
+                    f"gave up after {attempt} attempt(s): "
+                    f"verification_total_timeout={self.config.verification_total_timeout:g}s for this rollout is spent"
                 )
+                print(f"Verification for {body.instance_id} {budget_spent_error} ({reason})", file=sys.stderr)
                 break
             if reason is None or attempt == attempts:
                 if reason is not None:
@@ -581,6 +592,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 file=sys.stderr,
             )
 
+        error = extraction_error or result.error or reason
+        if budget_spent_error is not None:
+            error = f"{error}; {budget_spent_error}"
         response_data = body.model_dump() | {
             "image_provenance": await asyncio.to_thread(self._image_info, body),
             "reward": float(result.resolved),
@@ -594,7 +608,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "model_patch": model_patch or None,
             "test_results": result.test_results,
             "test_output": result.test_output,
-            "error": extraction_error or result.error or reason,
+            "error": error,
             "log_dir": str(run_log_dir),
         }
         return SWEBenchProVerifyResponse.model_validate(response_data)

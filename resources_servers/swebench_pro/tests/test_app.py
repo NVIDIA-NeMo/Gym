@@ -900,7 +900,39 @@ def test_verify_bounds_an_attempt_that_never_returns(monkeypatch: MonkeyPatch) -
     assert response.status_code == 200
     assert response.json()["evaluation_completed"] is False
     assert response.json()["reward"] == 0.0
-    assert "Verification failed" in response.json()["error"]
+    # str(TimeoutError()) is empty, so the message must name the limit itself.
+    assert response.json()["error"] == "Verification attempt exceeded verification_attempt_timeout=0.05s"
+
+
+def test_verify_names_the_rollout_budget_when_it_cuts_an_attempt_short(monkeypatch: MonkeyPatch) -> None:
+    server = make_server(golden=True, verification_total_timeout=0.05, inconclusive_verification_retries=0)
+
+    async def _hang(*args: object, **kwargs: object) -> None:
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(server, "_create_sandbox", _hang)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    assert response.json()["evaluation_completed"] is False
+    assert response.json()["error"].startswith("Verification attempt timed out after the 0.")
+    assert response.json()["error"].endswith(
+        "s left of verification_total_timeout; "
+        "gave up after 1 attempt(s): verification_total_timeout=0.05s for this rollout is spent"
+    )
+
+
+@pytest.mark.parametrize("exc", [RuntimeError(), TimeoutError()])
+def test_verify_names_an_exception_that_has_no_message(monkeypatch: MonkeyPatch, exc: Exception) -> None:
+    """A bare exception, including a TimeoutError raised by the sandbox rather than our own limit, keeps its type."""
+    server = make_server(golden=True, inconclusive_verification_retries=0)
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=exc))
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    assert response.json()["error"] == f"Verification failed: {type(exc).__name__}"
 
 
 def test_verify_stops_retrying_once_the_rollout_budget_is_spent(monkeypatch: MonkeyPatch) -> None:
@@ -925,7 +957,10 @@ def test_verify_stops_retrying_once_the_rollout_budget_is_spent(monkeypatch: Mon
     # third never does.
     assert verify.await_count == 2
     assert response.json()["evaluation_completed"] is False
-    assert response.json()["error"] == "parser produced no usable output"
+    assert response.json()["error"] == (
+        "parser produced no usable output; "
+        "gave up after 2 attempt(s): verification_total_timeout=1500s for this rollout is spent"
+    )
 
 
 def test_verify_uses_every_attempt_when_no_budget_is_set(monkeypatch: MonkeyPatch) -> None:
