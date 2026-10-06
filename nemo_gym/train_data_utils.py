@@ -65,11 +65,12 @@ from nemo_gym.hf_utils import (
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.task_data import (
     TaskDataSchemaError,
+    TaskDataValidationReport,
     TaskDataValidator,
     find_server_dir,
     load_task_data_schema,
 )
-from nemo_gym.task_materialization import materialize_task
+from nemo_gym.task_materialization import TASK_ID_FIELDS, materialize_task, source_task_id
 
 
 class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
@@ -1064,6 +1065,9 @@ This could be due to a change in how metrics are calculated, leading to outdated
         paths_to_collate = []
         used_prepare_paths: set[Path] = set()
         source_task_index = -1
+        # The first source row of each (taskset, task ID), to report IDs that name two tasks.
+        task_id_locations: Dict[Tuple[str, str], str] = {}
+        duplicate_task_ids: List[str] = []
         for c in server_instance_configs:
             for d in c.datasets:
                 if d.type != type:
@@ -1100,6 +1104,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 # for this dataset comes from the declaration, and passing the stale field
                 # through would leak the old coupling into the clean format.
                 legacy_agent_ref_rows = 0
+                positional_task_id_rows = 0
                 validator = None
                 if task_data_validation != "off":
                     validator = self._task_data_validator_for(c, d, server_instance_configs)
@@ -1120,6 +1125,15 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         # Count each source row once, using its original JSONL line index.
                         if validator is not None and row_index % d.num_repeats == 0:
                             validator.validate_row(row_index // d.num_repeats, row)
+                        if d.taskset is not None and row_index % d.num_repeats == 0:
+                            task_id = source_task_id(row)
+                            if task_id is None:
+                                positional_task_id_rows += 1
+                            else:
+                                location = f"{c.name}/{d.name} line {row_index // d.num_repeats}"
+                                first = task_id_locations.setdefault((d.taskset, task_id), location)
+                                if first != location:
+                                    duplicate_task_ids.append(f"{d.taskset}/{task_id} ({first}; {location})")
                         if d.taskset is not None:
                             # Keep collector identity outside task_data so shards and retries
                             # retain their capture keys after materialization.
@@ -1143,6 +1157,14 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         raise ValueError(summary)
                     print(f"[task_data validation]\n{summary}")
 
+                if positional_task_id_rows:
+                    warnings.warn(
+                        f"{d.jsonl_fpath}: {positional_task_id_rows} rows of taskset {d.taskset!r} have no "
+                        f"{', '.join(TASK_ID_FIELDS)}, so their task IDs are positions in this collation and "
+                        "change when datasets are added or reordered. Write a stable task_id in the dataset's "
+                        "preparation script.",
+                        stacklevel=2,
+                    )
                 if legacy_agent_ref_rows:
                     warnings.warn(
                         f"{d.jsonl_fpath}: stripped legacy agent_ref from {legacy_agent_ref_rows} rows "
@@ -1151,6 +1173,17 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         stacklevel=2,
                     )
                 paths_to_collate.append(prepare_path)
+
+        if duplicate_task_ids and task_data_validation != "off":
+            # A TaskId names one task in a run; results and reward profiles grouped by it would merge these.
+            summary = (
+                f"{len(duplicate_task_ids)} task IDs name more than one task in their taskset: "
+                + "; ".join(duplicate_task_ids[: TaskDataValidationReport.MAX_RECORDED_ERRORS])
+                + (" ..." if len(duplicate_task_ids) > TaskDataValidationReport.MAX_RECORDED_ERRORS else "")
+            )
+            if task_data_validation == "error":
+                raise ValueError(summary)
+            print(f"[task_data validation]\n{summary}")
 
         return paths_to_collate
 

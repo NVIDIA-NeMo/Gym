@@ -16,22 +16,30 @@ from nemo_gym.global_config import (
 )
 
 
+# Source fields that carry a task's own ID, in order of precedence.
+TASK_ID_FIELDS = ("task_id", "problem_id", "instance_id")
+
+
+def source_task_id(row: Mapping[str, JsonValue]) -> str | None:
+    """Return the ID a flat row carries in its own fields, or None when only its position identifies it."""
+    return next((str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None), None)
+
+
 def materialize_task(
     row: Mapping[str, JsonValue], *, taskset: str, task_index: int | None = None
 ) -> dict[str, JsonValue]:
     """Preserve legacy task identity and task fields without embedding runtime routing.
 
-    Rows without an explicit ID use the collector's ``_ng_task_index``, or a source-row
-    index across all datasets of the same type in the collation, before repeats.
-    Adding or reordering other datasets shifts these positional IDs; editing prompt text does not.
+    The ID comes from the row's own fields (``TASK_ID_FIELDS``). Rows without one use the
+    collector's ``_ng_task_index``, or a source-row index across all datasets of the same type in
+    the collation, before repeats. These positional IDs are legacy: adding or reordering other
+    datasets shifts them, so collation warns when it uses them.
+    The source ID field stays in ``task_input``, because some verifiers read it as a task field.
     Prepared source files are never modified by this conversion.
     """
     if "task_input" in row or isinstance(row.get("task_id"), Mapping):
         raise ValueError("Expected a flat dataset row, not an already materialized task")
-    task_id = next(
-        (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
-        None,
-    )
+    task_id = source_task_id(row)
     if task_id is None:
         index = row.get(TASK_INDEX_KEY_NAME, task_index)
         if not isinstance(index, int) or isinstance(index, bool) or index < 0:
