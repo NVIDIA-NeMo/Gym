@@ -9,7 +9,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from environments.nemo_user_sim import prepare as prepare_module
-from nemo_gym.config_types import BenchmarkDatasetConfig
+from nemo_gym.config_types import DatasetConfig
 from nemo_gym.task_materialization import materialize_task
 from resources_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
 
@@ -32,20 +32,17 @@ REGISTERED_PROBES = (
 )
 
 
-def test_environment_config_declares_one_benchmark() -> None:
+def test_environment_config_declares_generated_validation_split() -> None:
     config = OmegaConf.load("environments/nemo_user_sim/config.yaml")
     datasets = config.nemo_user_sim_resources.resources_servers.nemo_user_sim.datasets
-    [raw_dataset] = [dataset for dataset in datasets if dataset.type == "benchmark"]
-    dataset = BenchmarkDatasetConfig.model_validate(raw_dataset)
-
-    assert dataset.name == "usersim"
-    assert dataset.type == "benchmark"
-    assert dataset.taskset == "usersim:benchmark"
-    assert dataset.agent is None
-    assert raw_dataset.prepare_script == "environments/nemo_user_sim/prepare.py"
     [example] = [dataset for dataset in datasets if dataset.type == "example"]
     assert example.name == "example"
     assert example.taskset == "nemo_user_sim:example"
+    [raw_validation] = [dataset for dataset in datasets if dataset.type == "validation"]
+    validation = DatasetConfig.model_validate(raw_validation)
+    assert validation.name == "nemo_user_sim"
+    assert validation.jsonl_fpath == "environments/nemo_user_sim/data/nemo_user_sim.jsonl"
+    assert validation.taskset == "nemo_user_sim:validation"
 
 
 def test_probe_seed_and_task_id_are_stable() -> None:
@@ -108,10 +105,11 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
     )
     assert all("assets_dir" not in row["resolved_row"]["usersim_config"] for row in rows)
     for index, row in enumerate(rows):
-        task = materialize_task(row, taskset="usersim:benchmark", task_index=index)
+        task = materialize_task(row, taskset="nemo_user_sim:validation", task_index=index)
         request = UserSimEpisodeRequest.model_validate(
             {"episode_id": {"rollout_id": f"rollout-{index}", "attempt": 0}, "task": task}
         )
+        assert request.task.task_id.taskset == "nemo_user_sim:validation"
         assert request.task.task_id.task_id == row["task_id"]
         assert request.task.task_input.resolved_row == row["resolved_row"]
     assert len(calls) == 1

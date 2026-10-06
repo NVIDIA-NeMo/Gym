@@ -2,6 +2,9 @@
 config_paths:
   - resources_servers/nemo_user_sim/configs/usersim.yaml
 
+environment_server_routes:
+  "usersim:validation": usersim_environment
+
 prepare_script_args:
   policy_model_name: ${policy_model_name}
   support_model_name: ${support_model_name}
@@ -14,6 +17,12 @@ nemo_user_sim_resources:
           type: example
           jsonl_fpath: resources_servers/nemo_user_sim/data/example.jsonl
           taskset: nemo_user_sim:example
+          num_repeats: 1
+          license: Apache 2.0
+        - name: usersim_validation
+          type: validation
+          jsonl_fpath: environments/usersim/data/validation.jsonl
+          taskset: usersim:validation
           num_repeats: 1
           license: Apache 2.0
         - name: usersim

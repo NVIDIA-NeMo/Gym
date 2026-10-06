@@ -1,1 +1,2 @@
-data/
+data/*
+!data/validation.jsonl
