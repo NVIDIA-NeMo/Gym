@@ -32,7 +32,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status, rollout_path_prefix
-from nemo_gym.token_id_capture.sink import CAPTURE_PARENT_HEADER
 
 
 class ContextGuardRejected(RuntimeError):
@@ -142,11 +141,6 @@ class ContextManagedResponsesClient:
             self._request.model_dump() | {"input": list(prepared.view.items)}
         )
 
-    def _candidate_headers(self) -> dict[str, str]:
-        # Keep the last accepted response even across a semantic rewrite. RL
-        # compares the actual request and owns root versus continuation choice.
-        return {CAPTURE_PARENT_HEADER: orjson.dumps(self._last_accepted_response_id).decode()}
-
     async def _measure(self, prepared: PreparedHistoryView) -> ContextMeasurements:
         guards = self.config.guards
         prompt_tokens = 0
@@ -156,7 +150,6 @@ class ContextManagedResponsesClient:
                 server_name=self.model_server.name,
                 url_path=f"/context/{self.logical_rollout_id}/measure",
                 json=body,
-                headers=self._candidate_headers(),
                 cookies=self.cookies,
                 _retry=False,
             )
@@ -204,7 +197,6 @@ class ContextManagedResponsesClient:
                     server_name=self.model_server.name,
                     url_path=f"{rollout_path_prefix(self.logical_rollout_id, token_capture=True)}/v1/responses",
                     json=request,
-                    headers=self._candidate_headers(),
                     cookies=self.cookies,
                     _retry=False,
                 )

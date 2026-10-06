@@ -207,7 +207,8 @@ def test_sequential_calls_share_attempt_and_store_independent_roots(monkeypatch,
     assert harness.worker_calls[1][0].parent_call_id == manifest.records[0].model_call_id
 
 
-def test_measurement_uses_same_candidate_without_ledger_writes(monkeypatch, tmp_path):
+@pytest.mark.parametrize("send_parent_hint", [False, True])
+def test_measurement_uses_same_candidate_without_ledger_writes(monkeypatch, tmp_path, send_parent_hint):
     harness = make_capture_harness(monkeypatch, tmp_path)
     first = assert_clean(harness.post("attempt", HISTORY))
     assert_clean(harness.post("attempt", HISTORY, parent=None))  # A newer rejected response.
@@ -222,7 +223,7 @@ def test_measurement_uses_same_candidate_without_ledger_writes(monkeypatch, tmp_
     response = harness.client.post(
         "/context/attempt/measure",
         json={"input": HISTORY + first["output"] + [{"role": "user", "content": "next"}]},
-        headers={CAPTURE_PARENT_HEADER: json.dumps(first["id"])},
+        headers={CAPTURE_PARENT_HEADER: json.dumps(first["id"])} if send_parent_hint else {},
     )
     assert response.status_code == 200, response.text
     assert response.json() == {"prompt_token_count": 19}

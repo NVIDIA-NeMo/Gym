@@ -121,7 +121,7 @@ async def test_identity_and_full_history_adapter_share_selected_parent_state():
         NeMoGymResponse.model_validate(second_full.model_dump() | {"output": full.output_items}).output
     )
     assert [call["json"].model_dump() for call in explicit_calls] == [call["json"].model_dump() for call in full_calls]
-    assert [json.loads(call["headers"][CAPTURE_PARENT_HEADER]) for call in full_calls] == [None, first.id]
+    assert all(CAPTURE_PARENT_HEADER not in call.get("headers", {}) for call in full_calls)
     assert all(call["_retry"] is False for call in full_calls)
     assert all("/group_g0/training-token-capture/v1/responses" in call["url_path"] for call in full_calls)
 
@@ -152,6 +152,21 @@ async def test_full_history_adapter_accepts_original_source_after_policy_compact
     ]
     assert "seed.png" not in calls[-1]["json"].model_dump_json()
     assert "newest.png" in calls[-1]["json"].model_dump_json()
+
+
+async def test_measurement_and_generation_use_same_history_without_parent_hint():
+    client, _, calls, _ = make_client(config=ContextHistoryConfig(guards={"max_total_tokens": 100}))
+    await client.create()
+    client.append_observation([{"role": "user", "content": "next"}])
+    final = await client.create()
+    client.finish(final)
+    assert len(calls) == 4
+    for measurement, generation in zip(calls[::2], calls[1::2], strict=True):
+        assert measurement["url_path"].endswith("/measure")
+        assert generation["url_path"].endswith("/v1/responses")
+        assert measurement["json"] == generation["json"]
+        assert CAPTURE_PARENT_HEADER not in measurement.get("headers", {})
+        assert CAPTURE_PARENT_HEADER not in generation.get("headers", {})
 
 
 async def test_empty_initial_message_does_not_drop_final_output():
@@ -186,7 +201,7 @@ async def test_only_definite_responses_are_resampled_from_the_accepted_parent():
     final = await client.create(select_response=lambda response: response.id != "response-3")
     client.finish(final)
     assert first.id == "response-2"
-    assert [json.loads(call["headers"][CAPTURE_PARENT_HEADER]) for call in calls] == [None, None, first.id, first.id]
+    assert all(CAPTURE_PARENT_HEADER not in call.get("headers", {}) for call in calls)
     assert [item["id"] for item in client.output_items if item.get("role") == "assistant"] == [
         "message-2",
         "message-4",
