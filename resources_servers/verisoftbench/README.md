@@ -218,6 +218,18 @@ template embeds its one-shot worked example (`prompts/templates/examples/e1.txt`
 MIT) in every user prompt, that upstream text does appear verbatim inside the
 tracked example files; it is attributed in the repository-level `ATTRIBUTIONS.md`.
 
+One script writes all five tracked files under `data/` — `example.jsonl`,
+`example_metrics.json`, `example_rollouts.jsonl`,
+`example_rollouts_materialized_inputs.jsonl` and
+`example_rollouts_aggregate_metrics.json` — deterministically: no model calls, no
+servers, no Lean container. The rollout files rebuild one recorded smoke run from
+the hand-checked outcomes embedded in the script, with every service identifier,
+provider route and timestamp a fixed placeholder; the aggregate file goes through
+the server's own `compute_metrics`, so it shows the `any_of_k/*` headline. The
+tests assert the committed copies match the generator byte for byte. The collate
+gate below only validates `example.jsonl` against its metrics sidecar; it rewrites
+nothing new.
+
 ```bash
 python resources_servers/verisoftbench/scripts/make_example_data.py
 gym dataset collate \

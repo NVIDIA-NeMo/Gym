@@ -20,6 +20,7 @@ every field the server requires.
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -192,6 +193,40 @@ class TestExampleData:
             assert meta["thm_name"].startswith("GymExample."), "example theorems are authored here, not upstream's"
             assert meta["id"] >= 100_000, "example ids must not collide with upstream's 1..500"
             assert [m["role"] for m in row["responses_create_params"]["input"]] == ["system", "user"]
+
+    def test_full_example_set_regenerates_and_carries_no_service_identifiers(self) -> None:
+        # The committed example artifacts must be exactly what scripts/make_example_data.py
+        # emits — no provider-collected bytes survive outside the generator. example.jsonl's
+        # prompts need the pinned checkout, so that file is pinned down to its synthetic
+        # source rows here; the four artifacts derived from it must rebuild byte-for-byte.
+        import make_example_data as gen
+
+        data = SERVER_DIR / "data"
+        example_jsonl = (data / "example.jsonl").read_bytes()
+        rows = [json.loads(line) for line in example_jsonl.decode("utf-8").splitlines()]
+        assert [
+            {k: v for k, v in row["verifier_metadata"].items() if k != "context_mode"} for row in rows
+        ] == gen.example_rows()
+        rollouts = gen.rollout_rows(rows)
+        assert gen.jsonl_bytes(rollouts) == (data / "example_rollouts.jsonl").read_bytes()
+        assert (
+            gen.jsonl_bytes(gen.materialized_input_rows(rows))
+            == (data / "example_rollouts_materialized_inputs.jsonl").read_bytes()
+        )
+        assert gen.aggregate_metrics_bytes(rollouts) == (data / "example_rollouts_aggregate_metrics.json").read_bytes()
+        assert gen.example_metrics_bytes(example_jsonl) == (data / "example_metrics.json").read_bytes()
+        # No provider identifiers anywhere: real runs carry opaque response/completion id
+        # shapes, a provider model route and wall-clock timestamps; the committed set must
+        # carry only the generator's fixed placeholders.
+        service_markers = re.compile(
+            rb"resp_[0-9A-Za-z_-]{8,}|chatcmpl-[0-9a-f-]{8,}|azure|anthropic|openai|claude|gpt", re.IGNORECASE
+        )
+        for fpath in sorted(data.glob("example*")):
+            assert service_markers.search(fpath.read_bytes()) is None, fpath.name
+        for row in [json.loads(line) for line in (data / "example_rollouts.jsonl").read_text().splitlines()]:
+            for response in (row["response"], *(a["response"] for a in row["attempts"])):
+                assert response["created_at"] == gen.EXAMPLE_CREATED_AT
+                assert response["model"] == gen.EXAMPLE_MODEL
 
 
 class TestTaskData:

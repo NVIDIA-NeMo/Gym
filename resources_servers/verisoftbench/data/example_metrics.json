@@ -43,5 +43,9 @@
     "user_prompt": {
         "unique_count": 5,
         "total_count": 5
+    },
+    "task_source": {
+        "unique_count": 1,
+        "total_count": 5
     }
 }
