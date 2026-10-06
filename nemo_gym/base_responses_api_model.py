@@ -1789,7 +1789,13 @@ class _CaptureMiddleware:
             )
 
         try:
-            await asyncio.to_thread(_parse_and_record)
+            # Shielded: cancellation here strands the queued write and the row is
+            # lost silently -- no log line, no incomplete marker. The error path
+            # above already treats CancelledError as recoverable; match it.
+            await asyncio.shield(asyncio.to_thread(_parse_and_record))
+        except asyncio.CancelledError:
+            logger.warning("Model-call capture finalization was cancelled; the write continues detached.")
+            raise
         except Exception:
             logger.warning("Model-call capture finalization failed.", exc_info=True)
         finally:
