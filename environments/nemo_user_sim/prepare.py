@@ -14,7 +14,7 @@ from pathlib import Path
 
 ENVIRONMENT_DIR = Path(__file__).parent
 DATA_DIR = ENVIRONMENT_DIR / "data"
-TASKS_FPATH = DATA_DIR / "usersim.jsonl"
+TASKS_FPATH = DATA_DIR / "nemo_user_sim.jsonl"
 PREPARE_REQUIREMENTS_FPATH = ENVIRONMENT_DIR / "requirements.txt"
 USERSIM_REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
 _MATERIALIZE_SCRIPT = """

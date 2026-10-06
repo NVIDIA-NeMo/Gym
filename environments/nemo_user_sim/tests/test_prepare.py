@@ -56,7 +56,7 @@ def test_probe_seed_and_task_id_are_stable() -> None:
 def test_prepare_materializes_every_registered_probe_with_usersim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    tasks_path = tmp_path / "usersim.jsonl"
+    tasks_path = tmp_path / "nemo_user_sim.jsonl"
     monkeypatch.setattr(prepare_module, "TASKS_FPATH", tasks_path)
     monkeypatch.setattr(prepare_module.shutil, "which", lambda executable: f"/bin/{executable}")
     calls: list[tuple[list[str], dict[str, object]]] = []
