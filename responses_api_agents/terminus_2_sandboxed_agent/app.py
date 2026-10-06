@@ -398,9 +398,9 @@ class NeMoGymTerminus2(Terminus2):
         try:
             res = await super()._execute_commands(commands, session)
         except ShellExitedError:
-            # The model must see the state reset before confirming completion.
-            # Do not retry the command that discovered the exit or the rest of
-            # its batch: they were planned for the previous shell state.
+            # If the shell exits, do not retry the current command or execute
+            # the remaining commands in the batch. Return partial output and a
+            # shell-reset notice so the model can recover before confirming completion.
             self._pending_completion = False
             res = False, self._limit_output_length(await session.recover_shell())
         if commands:
