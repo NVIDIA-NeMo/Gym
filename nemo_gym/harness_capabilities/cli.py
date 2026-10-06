@@ -68,10 +68,7 @@ def inspect_bundle(
     report_id = hashlib.sha256(_json(manifest).encode()).hexdigest()
     output.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=".capabilities-", dir=output))
-    totals = {
-        key: {"records": 0, "fulfilled": 0, "not_fulfilled": 0, "not_applicable": 0, "not_assessed": 0}
-        for key in NAMES
-    }
+    totals = {key: {"records": 0, "fulfilled": 0, "not_fulfilled": 0, "not_applicable": 0} for key in NAMES}
     token_availability = {}
     passing_records = 0
     count = 0
@@ -99,8 +96,6 @@ def inspect_bundle(
                 **counts,
                 "verdict": "not_fulfilled"
                 if counts["not_fulfilled"]
-                else "not_assessed"
-                if counts["not_assessed"]
                 else "not_applicable"
                 if counts["not_applicable"] == count
                 else "fulfilled",
@@ -204,7 +199,6 @@ def inspect_matrix(
             "fulfilled": "PASS",
             "not_fulfilled": "FAIL",
             "not_applicable": "N/A",
-            "not_assessed": "Not assessed",
         }
         for name, summary in rows.items():
             table.append(

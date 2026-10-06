@@ -18,6 +18,7 @@ The `gym-p0/v1` profile checks the currently supported P0 trajectory evidence
 (TE-1–TE-9). Each check declares `tier`: `P0`, `P1` or `P2`. All current
 checks are P0, and every applicable P0 check must pass on every rollout.
 TE labels group results for reporting; they do not determine priority or schedule checks.
+This guide and the check definitions maintain the implemented requirements.
 
 | Evidence | Persisted contract |
 | --- | --- |
@@ -83,16 +84,18 @@ Identical inputs and checker versions reuse the same report directory.
 The standalone inspector runs schema and semantic checks; the conformance runner
 also runs behavioral checks.
 
-Each check reports `pass`, `fail`, `not_assessed` (input or a prerequisite is
-unavailable), or `not_applicable` (excluded by the declared scenario scope).
-A collection prerequisite runs once. Its failure blocks dependent checks without
-turning them into additional failures. An unrelated malformed step does not
-invalidate model-call checks. A behavioral failure does not erase artifact passes.
+Each check reports `pass` (✓), `fail` (✗: requirement not demonstrated), or
+`not_applicable` (—: excluded by the check's applicability condition).
+Missing required input and blocked prerequisites fail the check; the result retains
+the reason and `blocked_by` IDs. Blocked checks do not evaluate their input.
+An unrelated malformed step does not invalidate model-call checks.
+A behavioral failure does not erase artifact passes.
 
 The runner writes `conformance_report.md` with one table per harness: check IDs as
 rows and scenarios as columns. Process return codes and timeouts stay in
 `scenario_result.json` as execution status, outside the evidence checks. A failure
-sidecar without a normal rollout leaves artifact checks unassessed.
+sidecar without a normal rollout fails applicable artifact checks. Missing check
+results also display ✗; execution details retain any runner/checker error.
 
 ## Compare harnesses
 

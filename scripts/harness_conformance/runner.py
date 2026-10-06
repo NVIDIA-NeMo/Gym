@@ -136,7 +136,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         report = str(destination.relative_to(directory) / "evidence_summary.json")
     evidence = {}
     for key in scenario.evidence:
-        verdict = summary["evidence"][key]["verdict"] if summary else "not_assessed"
+        verdict = artifact["evidence"][key]["verdict"]
         evidence[key] = {"verdict": verdict, "artifact_verdict": verdict}
     behavioral = [c for c in checks if c["kind"] == "behavioral"]
     behavior_passed = all(c["status"] in ("pass", "not_applicable") for c in behavioral)
@@ -146,11 +146,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         "verdict": "fulfilled" if gate_passes(checks) else "not_fulfilled",
         "issues": [reason for c in checks if c["status"] == "fail" for reason in c["reasons"]],
         "checks": checks,
-        "behavioral_status": "pass"
-        if behavior_passed
-        else "fail"
-        if any(c["status"] == "fail" for c in behavioral)
-        else "not_assessed",
+        "behavioral_status": "pass" if behavior_passed else "fail",
         "execution": execution,
         "delivery": "rollout"
         if raw is not None
@@ -223,7 +219,7 @@ def run_suite(
                     "issues": ["could not inspect this episode's artifacts"],
                     "artifact_report": None,
                     "evidence": {
-                        key: {"verdict": "not_assessed", "artifact_verdict": "not_assessed"}
+                        key: {"verdict": "not_fulfilled", "artifact_verdict": "not_fulfilled"}
                         for key in scenario.evidence
                     },
                 }

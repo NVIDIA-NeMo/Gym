@@ -10,7 +10,7 @@ from typing import Literal
 from .checks import Check, Kind, PriorityTier
 
 
-Status = Literal["pass", "fail", "not_assessed", "not_applicable"]
+Status = Literal["pass", "fail", "not_applicable"]
 
 
 @dataclass
@@ -43,7 +43,7 @@ class Results:
         reason: str = "",
         blocked_by: Iterable[str] = (),
     ) -> bool:
-        rank = {"not_applicable": 0, "pass": 1, "not_assessed": 2, "fail": 3}
+        rank = {"not_applicable": 0, "pass": 1, "fail": 2}
         row = self.rows.get(check_id)
         if row is None:
             row = self.rows[check_id] = CheckResult(check_id, kind, status, tier, tuple(evidence))
@@ -65,10 +65,18 @@ class Results:
         if not check.applies:
             status = "not_applicable"
         elif not check.available or blocked:
-            status = "not_assessed"
+            status = "fail"
         else:
             evaluation = check.evaluate()
             status = "pass" if evaluation.passed else "fail"
+        reason = ""
+        if status == "fail":
+            if not check.available:
+                reason = "required input is unavailable; " + check.reason
+            elif blocked:
+                reason = "blocked by " + ", ".join(blocked) + "; " + check.reason
+            else:
+                reason = check.reason
         passed = self.add(
             check.id,
             check.kind,
@@ -76,7 +84,7 @@ class Results:
             tier=check.tier,
             evidence=check.evidence,
             location=check.location,
-            reason=check.reason if status in ("fail", "not_assessed") else "",
+            reason=reason,
             blocked_by=blocked,
         )
         if evaluation is not None and status == "fail":
@@ -97,11 +105,11 @@ def gate_passes(checks: list[dict], *, tier: PriorityTier = "P0") -> bool:
 
 def render_matrices(harnesses: dict) -> str:
     """Render saved check results; never infer a pass from an absent failure message."""
-    labels = {"pass": "✓", "fail": "✗", "not_assessed": "?", "not_applicable": "—"}
+    labels = {"pass": "✓", "fail": "✗", "not_applicable": "—"}
     lines = [
         "# Harness checks by scenario",
         "",
-        "✓ Pass · ✗ Fail · ? Not assessed (blocked or unavailable) · — Not applicable.",
+        "✓ Pass · ✗ Requirement not demonstrated (invalid, missing, blocked, or no result) · — Not applicable.",
         "",
     ]
     for harness, row in harnesses.items():
@@ -119,12 +127,12 @@ def render_matrices(harnesses: dict) -> str:
                 found = [next((c for c in s.get("checks", []) if c["id"] == key), None) for s in scenarios]
                 if next(c["kind"] for c in found if c) != kind:
                     continue
-                cells = [labels[c["status"]] if c else "?" for c in found]
+                cells = [labels[c["status"]] if c else "✗" for c in found]
                 group.append(f"| `{key}` | " + " | ".join(cells) + " |")
             if group:
                 lines.append(f"| **{kind.title()}** |" + " |" * len(scenarios))
                 lines.extend(group)
         if not keys:
-            lines.append("| No check results available | " + " | ".join("?" for _ in scenarios) + " |")
+            lines.append("| No check results available | " + " | ".join("✗" for _ in scenarios) + " |")
         lines.append("")
     return "\n".join(lines)

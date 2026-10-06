@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 from jsonschema import Draft202012Validator
 
-from . import schemas as s
 from .checks import SchemaCheck, SemanticCheck
 from .results import Results, gate_passes
 
@@ -30,6 +29,50 @@ PROFILE = "gym-p0/v1"
 TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens", "cached_tokens")
 
 
+MODEL_CALL_REF = {
+    "type": "object",
+    "properties": {
+        "model_call_id": {"anyOf": [{"type": "string", "pattern": "\\S"}, {"type": "null"}]},
+        "model_ref": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "required": ["type", "name"],
+                    "properties": {
+                        "type": {"const": "responses_api_models"},
+                        "name": {"type": "string", "pattern": "\\S"},
+                    },
+                },
+                {"type": "null"},
+            ]
+        },
+        "response_id": {"anyOf": [{"type": "string", "pattern": "\\S"}, {"type": "null"}]},
+    },
+    "anyOf": [
+        {
+            "type": "object",
+            "required": ["model_call_id"],
+            "properties": {"model_call_id": {"type": "string", "pattern": "\\S"}},
+        },
+        {
+            "type": "object",
+            "required": ["model_ref", "response_id"],
+            "properties": {
+                "model_ref": {
+                    "type": "object",
+                    "required": ["type", "name"],
+                    "properties": {
+                        "type": {"const": "responses_api_models"},
+                        "name": {"type": "string", "pattern": "\\S"},
+                    },
+                },
+                "response_id": {"type": "string", "pattern": "\\S"},
+            },
+        },
+    ],
+}
+
+
 @dataclass(frozen=True)
 class EvidenceScope:
     """Declared applicability; absent artifacts never imply an exemption."""
@@ -38,6 +81,11 @@ class EvidenceScope:
     verifier: bool = True
     steps: bool = True
     require_sandbox: bool = False
+
+
+def required_object(**properties: dict) -> dict:
+    """Require the named properties without restricting unrelated fields."""
+    return {"type": "object", "required": list(properties), "properties": properties}
 
 
 def _mapping(value: object) -> dict:
@@ -70,7 +118,7 @@ def _missing_content(value: object) -> bool:
 
 
 def _resolve(reference: dict, calls: list[dict]) -> list[int]:
-    if not Draft202012Validator(s.MODEL_CALL_REF).is_valid(reference):
+    if not Draft202012Validator(MODEL_CALL_REF).is_valid(reference):
         return []
     return [
         i
@@ -123,7 +171,7 @@ class Inspector:
                 value=self.trajectory.get("model_calls"),
                 schema={
                     "type": "array",
-                    "items": s.required_object(model_call_id={"type": "string", "pattern": "\\S"}),
+                    "items": required_object(model_call_id={"type": "string", "pattern": "\\S"}),
                 },
                 depends_on=("model_calls.present",),
                 applies=True,
@@ -140,9 +188,9 @@ class Inspector:
                 value=self.trajectory.get("model_calls"),
                 schema={
                     "type": "array",
-                    "items": s.required_object(
-                        response_metadata=s.required_object(
-                            model_ref=s.required_object(
+                    "items": required_object(
+                        response_metadata=required_object(
+                            model_ref=required_object(
                                 type={"const": "responses_api_models"}, name={"type": "string", "pattern": "\\S"}
                             )
                         )
@@ -163,8 +211,8 @@ class Inspector:
                 value=self.trajectory.get("model_calls"),
                 schema={
                     "type": "array",
-                    "items": s.required_object(
-                        response_metadata=s.required_object(dialect={"enum": ["chat", "responses", "messages"]})
+                    "items": required_object(
+                        response_metadata=required_object(dialect={"enum": ["chat", "responses", "messages"]})
                     ),
                 },
                 depends_on=("model_calls.present",),
@@ -182,7 +230,7 @@ class Inspector:
                 value=self.trajectory.get("model_calls"),
                 schema={
                     "type": "array",
-                    "items": s.required_object(
+                    "items": required_object(
                         started_at={"type": "number", "minimum": 0}, completed_at={"type": "number", "minimum": 0}
                     ),
                 },
@@ -201,7 +249,7 @@ class Inspector:
                 value=self.trajectory.get("model_calls"),
                 schema={
                     "type": "array",
-                    "items": s.required_object(
+                    "items": required_object(
                         response_metadata={
                             "type": "object",
                             "properties": {
@@ -213,19 +261,19 @@ class Inspector:
                                 "finish_reason": {"anyOf": [{"type": "string", "pattern": "\\S"}, {"type": "null"}]},
                             },
                             "anyOf": [
-                                s.required_object(error_category={"type": "string", "pattern": "\\S"}),
+                                required_object(error_category={"type": "string", "pattern": "\\S"}),
                                 {
                                     "allOf": [
-                                        s.required_object(
+                                        required_object(
                                             status_code={"type": "integer", "minimum": 200, "maximum": 299}
                                         ),
                                         {
                                             "anyOf": [
-                                                s.required_object(
+                                                required_object(
                                                     dialect={"enum": ["chat", "messages"]},
                                                     finish_reason={"type": "string", "pattern": "\\S"},
                                                 ),
-                                                s.required_object(
+                                                required_object(
                                                     dialect={"const": "responses"},
                                                     response_status={"enum": ["completed", "incomplete"]},
                                                 ),
@@ -252,15 +300,15 @@ class Inspector:
                 value=self.trajectory.get("model_calls"),
                 schema={
                     "type": "array",
-                    "items": s.required_object(
+                    "items": required_object(
                         response_metadata={
-                            "if": s.required_object(error_category={"type": "string", "pattern": "\\S"}),
+                            "if": required_object(error_category={"type": "string", "pattern": "\\S"}),
                             "then": {
                                 "properties": {
                                     "response_id": {"anyOf": [{"type": "string", "pattern": "\\S"}, {"type": "null"}]}
                                 }
                             },
-                            "else": s.required_object(response_id={"type": "string", "pattern": "\\S"}),
+                            "else": required_object(response_id={"type": "string", "pattern": "\\S"}),
                         }
                     ),
                 },
@@ -281,21 +329,21 @@ class Inspector:
                     "type": "array",
                     "items": {
                         "anyOf": [
-                            s.required_object(
-                                response_metadata=s.required_object(dialect={"const": "responses"}),
-                                request=s.required_object(
+                            required_object(
+                                response_metadata=required_object(dialect={"const": "responses"}),
+                                request=required_object(
                                     input={
                                         "anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "object"}}]
                                     }
                                 ),
                             ),
-                            s.required_object(
-                                response_metadata=s.required_object(dialect={"const": "chat"}),
-                                request=s.required_object(messages={"type": "array", "items": {"type": "object"}}),
+                            required_object(
+                                response_metadata=required_object(dialect={"const": "chat"}),
+                                request=required_object(messages={"type": "array", "items": {"type": "object"}}),
                             ),
-                            s.required_object(
-                                response_metadata=s.required_object(dialect={"const": "messages"}),
-                                request=s.required_object(messages={"type": "array", "items": {"type": "object"}}),
+                            required_object(
+                                response_metadata=required_object(dialect={"const": "messages"}),
+                                request=required_object(messages={"type": "array", "items": {"type": "object"}}),
                             ),
                         ]
                     },
@@ -322,51 +370,51 @@ class Inspector:
                                 "required": ["response", "response_metadata"],
                                 "properties": {
                                     "response": {"type": ["object", "string"]},
-                                    "response_metadata": s.required_object(
+                                    "response_metadata": required_object(
                                         status_code={"type": "integer", "minimum": 100, "maximum": 599}
                                     ),
                                 },
-                                "if": s.required_object(
+                                "if": required_object(
                                     response_metadata={
                                         "type": "object",
                                         "required": ["status_code"],
                                         "properties": {
                                             "status_code": {"type": "integer", "minimum": 200, "maximum": 299}
                                         },
-                                        "not": s.required_object(error_category={"type": "string", "pattern": "\\S"}),
+                                        "not": required_object(error_category={"type": "string", "pattern": "\\S"}),
                                     }
                                 ),
                                 "then": {
                                     "anyOf": [
-                                        s.required_object(
-                                            response_metadata=s.required_object(dialect={"const": "responses"}),
-                                            response=s.required_object(
+                                        required_object(
+                                            response_metadata=required_object(dialect={"const": "responses"}),
+                                            response=required_object(
                                                 output={"type": "array", "items": {"type": "object"}}
                                             ),
                                         ),
-                                        s.required_object(
-                                            response_metadata=s.required_object(dialect={"const": "chat"}),
-                                            response=s.required_object(
+                                        required_object(
+                                            response_metadata=required_object(dialect={"const": "chat"}),
+                                            response=required_object(
                                                 choices={
                                                     "type": "array",
-                                                    "items": s.required_object(
-                                                        message=s.required_object(role={"const": "assistant"})
+                                                    "items": required_object(
+                                                        message=required_object(role={"const": "assistant"})
                                                     ),
                                                 }
                                             ),
                                         ),
-                                        s.required_object(
-                                            response_metadata=s.required_object(dialect={"const": "messages"}),
-                                            response=s.required_object(
+                                        required_object(
+                                            response_metadata=required_object(dialect={"const": "messages"}),
+                                            response=required_object(
                                                 content={"type": "array", "items": {"type": "object"}}
                                             ),
                                         ),
                                     ]
                                 },
                             },
-                            s.required_object(
+                            required_object(
                                 response={"type": "null"},
-                                response_metadata=s.required_object(
+                                response_metadata=required_object(
                                     status_code={"type": "null"}, error_category={"type": "string", "pattern": "\\S"}
                                 ),
                             ),
@@ -390,7 +438,7 @@ class Inspector:
                     value=self.trajectory.get("model_calls"),
                     schema={
                         "type": "array",
-                        "items": s.required_object(
+                        "items": required_object(
                             token_stats={
                                 "type": "object",
                                 "properties": {field: {"type": ["integer", "null"], "minimum": 0}},
@@ -453,7 +501,7 @@ class Inspector:
                     location="$.ng_trajectory",
                     reason="required evidence does not match its schema",
                     value=self.trajectory,
-                    schema=s.required_object(**{field: {"type": "string", "pattern": "\\S"}}),
+                    schema=required_object(**{field: {"type": "string", "pattern": "\\S"}}),
                     depends_on=(),
                     applies=True,
                     available=self.available,
@@ -483,7 +531,7 @@ class Inspector:
                 value=self.trajectory.get("invocations"),
                 schema={
                     "type": "array",
-                    "items": s.required_object(invocation_id={"type": "string", "pattern": "\\S"}),
+                    "items": required_object(invocation_id={"type": "string", "pattern": "\\S"}),
                 },
                 depends_on=("invocations.present",),
                 applies=True,
@@ -500,7 +548,7 @@ class Inspector:
                 value=self.trajectory.get("invocations"),
                 schema={
                     "type": "array",
-                    "items": s.required_object(
+                    "items": required_object(
                         model_calls={
                             "type": "array",
                             "items": {
@@ -511,7 +559,7 @@ class Inspector:
                                     },
                                     "model_ref": {
                                         "anyOf": [
-                                            s.required_object(
+                                            required_object(
                                                 type={"const": "responses_api_models"},
                                                 name={"type": "string", "pattern": "\\S"},
                                             ),
@@ -521,9 +569,9 @@ class Inspector:
                                     "response_id": {"anyOf": [{"type": "string", "pattern": "\\S"}, {"type": "null"}]},
                                 },
                                 "anyOf": [
-                                    s.required_object(model_call_id={"type": "string", "pattern": "\\S"}),
-                                    s.required_object(
-                                        model_ref=s.required_object(
+                                    required_object(model_call_id={"type": "string", "pattern": "\\S"}),
+                                    required_object(
+                                        model_ref=required_object(
                                             type={"const": "responses_api_models"},
                                             name={"type": "string", "pattern": "\\S"},
                                         ),
@@ -563,7 +611,7 @@ class Inspector:
                 value=self.trajectory.get("turns"),
                 schema={
                     "type": "array",
-                    "items": s.required_object(invocation_id={"type": "string", "pattern": "\\S"}),
+                    "items": required_object(invocation_id={"type": "string", "pattern": "\\S"}),
                 },
                 depends_on=("turns.present",),
                 applies=self.scope.steps,
@@ -578,7 +626,7 @@ class Inspector:
                 location="$.ng_trajectory.turns",
                 reason="required evidence does not match its schema",
                 value=self.trajectory.get("turns"),
-                schema={"type": "array", "items": s.required_object(turn_no={"type": "integer", "minimum": 1})},
+                schema={"type": "array", "items": required_object(turn_no={"type": "integer", "minimum": 1})},
                 depends_on=("turns.present",),
                 applies=self.scope.steps,
                 available=self.available,
@@ -592,7 +640,7 @@ class Inspector:
                 location="$.ng_trajectory.turns",
                 reason="required evidence does not match its schema",
                 value=self.trajectory.get("turns"),
-                schema={"type": "array", "items": s.required_object(timestamp={"type": "number", "minimum": 0})},
+                schema={"type": "array", "items": required_object(timestamp={"type": "number", "minimum": 0})},
                 depends_on=("turns.present",),
                 applies=self.scope.steps,
                 available=self.available,
@@ -606,7 +654,7 @@ class Inspector:
                 location="$.ng_trajectory.turns",
                 reason="required evidence does not match its schema",
                 value=self.trajectory.get("turns"),
-                schema={"type": "array", "items": s.required_object(resolved={"type": ["boolean", "null"]})},
+                schema={"type": "array", "items": required_object(resolved={"type": ["boolean", "null"]})},
                 depends_on=("turns.present",),
                 applies=self.scope.steps,
                 available=self.available,
@@ -622,7 +670,7 @@ class Inspector:
                 value=self.trajectory.get("turns"),
                 schema={
                     "type": "array",
-                    "items": s.required_object(
+                    "items": required_object(
                         model_calls={
                             "type": "array",
                             "minItems": 1,
@@ -634,7 +682,7 @@ class Inspector:
                                     },
                                     "model_ref": {
                                         "anyOf": [
-                                            s.required_object(
+                                            required_object(
                                                 type={"const": "responses_api_models"},
                                                 name={"type": "string", "pattern": "\\S"},
                                             ),
@@ -644,9 +692,9 @@ class Inspector:
                                     "response_id": {"anyOf": [{"type": "string", "pattern": "\\S"}, {"type": "null"}]},
                                 },
                                 "anyOf": [
-                                    s.required_object(model_call_id={"type": "string", "pattern": "\\S"}),
-                                    s.required_object(
-                                        model_ref=s.required_object(
+                                    required_object(model_call_id={"type": "string", "pattern": "\\S"}),
+                                    required_object(
+                                        model_ref=required_object(
                                             type={"const": "responses_api_models"},
                                             name={"type": "string", "pattern": "\\S"},
                                         ),
@@ -686,7 +734,7 @@ class Inspector:
                 value=self.trajectory.get("tool_calls"),
                 schema={
                     "type": "array",
-                    "items": s.required_object(tool_call_id={"type": "string", "pattern": "\\S"}),
+                    "items": required_object(tool_call_id={"type": "string", "pattern": "\\S"}),
                 },
                 depends_on=("tool_calls.present",),
                 applies=self.scope.tools,
@@ -701,7 +749,7 @@ class Inspector:
                 location="$.ng_trajectory.tool_calls",
                 reason="required evidence does not match its schema",
                 value=self.trajectory.get("tool_calls"),
-                schema={"type": "array", "items": s.required_object(tool_name={"type": "string", "pattern": "\\S"})},
+                schema={"type": "array", "items": required_object(tool_name={"type": "string", "pattern": "\\S"})},
                 depends_on=("tool_calls.present",),
                 applies=self.scope.tools,
                 available=self.available,
@@ -717,7 +765,7 @@ class Inspector:
                 value=self.trajectory.get("tool_calls"),
                 schema={
                     "type": "array",
-                    "items": s.required_object(invocation_id={"type": "string", "pattern": "\\S"}),
+                    "items": required_object(invocation_id={"type": "string", "pattern": "\\S"}),
                 },
                 depends_on=("tool_calls.present",),
                 applies=self.scope.tools,
@@ -734,7 +782,7 @@ class Inspector:
                 value=self.trajectory.get("tool_calls"),
                 schema={
                     "type": "array",
-                    "items": s.required_object(status={"enum": ["completed", "failed", "timeout", "cancelled"]}),
+                    "items": required_object(status={"enum": ["completed", "failed", "timeout", "cancelled"]}),
                 },
                 depends_on=("tool_calls.present",),
                 applies=self.scope.tools,
@@ -749,7 +797,7 @@ class Inspector:
                 location="$.ng_trajectory.tool_calls",
                 reason="required evidence does not match its schema",
                 value=self.trajectory.get("tool_calls"),
-                schema={"type": "array", "items": s.required_object(output={"type": ["string", "array", "object"]})},
+                schema={"type": "array", "items": required_object(output={"type": ["string", "array", "object"]})},
                 depends_on=("tool_calls.present",),
                 applies=self.scope.tools,
                 available=self.available,
@@ -891,7 +939,7 @@ class Inspector:
         for observation in self.observations:
             if observation.get("kind") == "context_compaction":
                 refs = observation.get("model_calls")
-                auxiliary_valid &= Draft202012Validator({"type": "array", "items": s.MODEL_CALL_REF}).is_valid(refs)
+                auxiliary_valid &= Draft202012Validator({"type": "array", "items": MODEL_CALL_REF}).is_valid(refs)
                 for reference in _objects(refs):
                     matches = _resolve(reference, self.calls)
                     auxiliary_valid &= len(matches) == 1
@@ -978,7 +1026,7 @@ class Inspector:
                 location="$",
                 reason="required evidence does not match its schema",
                 value=self.record,
-                schema=s.required_object(reward={"type": "number"}),
+                schema=required_object(reward={"type": "number"}),
                 depends_on=(),
                 applies=self.scope.verifier,
                 available=self.available,
@@ -992,7 +1040,7 @@ class Inspector:
                 location="$",
                 reason="required evidence does not match its schema",
                 value=self.record,
-                schema=s.required_object(evaluation_completed={"type": "boolean"}),
+                schema=required_object(evaluation_completed={"type": "boolean"}),
                 depends_on=(),
                 applies=self.scope.verifier,
                 available=self.available,
@@ -1006,7 +1054,7 @@ class Inspector:
                 location="$",
                 reason="required evidence does not match its schema",
                 value=self.record,
-                schema=s.required_object(mask_sample={"type": "boolean"}),
+                schema=required_object(mask_sample={"type": "boolean"}),
                 depends_on=(),
                 applies=self.scope.verifier,
                 available=self.available,
@@ -1022,7 +1070,7 @@ class Inspector:
                     location="$",
                     reason="required evidence does not match its schema",
                     value=self.record,
-                    schema=s.required_object(**{field: {"type": "string", "pattern": "\\S"}}),
+                    schema=required_object(**{field: {"type": "string", "pattern": "\\S"}}),
                     depends_on=(),
                     applies=self.scope.verifier and failed,
                     available=self.available,
@@ -1051,7 +1099,7 @@ class Inspector:
                 location="$.ng_agent_observations.records",
                 reason="required evidence does not match its schema",
                 value=sandbox,
-                schema={"type": "array", "items": s.required_object(sandbox_id={"type": "string", "pattern": "\\S"})},
+                schema={"type": "array", "items": required_object(sandbox_id={"type": "string", "pattern": "\\S"})},
                 depends_on=("sandbox.present",) if self.scope.require_sandbox else (),
                 applies=bool(sandbox) or self.scope.require_sandbox,
                 available=self.available,
@@ -1067,7 +1115,7 @@ class Inspector:
                 value=sandbox,
                 schema={
                     "type": "array",
-                    "items": s.required_object(
+                    "items": required_object(
                         outcome={"enum": ["completed", "failed", "timeout", "oom", "sandbox_error", "cancelled"]}
                     ),
                 },
@@ -1087,8 +1135,8 @@ class Inspector:
                 schema={
                     "type": "array",
                     "items": {
-                        "if": s.required_object(outcome={"enum": ["failed", "oom", "sandbox_error"]}),
-                        "then": s.required_object(error_type={"type": "string", "pattern": "\\S"}),
+                        "if": required_object(outcome={"enum": ["failed", "oom", "sandbox_error"]}),
+                        "then": required_object(error_type={"type": "string", "pattern": "\\S"}),
                     },
                 },
                 depends_on=("sandbox.present",) if self.scope.require_sandbox else (),
@@ -1174,13 +1222,7 @@ class Inspector:
             ):
                 statuses = {"not_applicable"}
             verdict = (
-                "not_fulfilled"
-                if "fail" in statuses
-                else "not_assessed"
-                if "not_assessed" in statuses
-                else "fulfilled"
-                if "pass" in statuses
-                else "not_applicable"
+                "not_fulfilled" if "fail" in statuses else "fulfilled" if "pass" in statuses else "not_applicable"
             )
             evidence[key] = {"name": name, "verdict": verdict, "basis": "retained_artifacts"}
         return {
@@ -1209,7 +1251,7 @@ class Inspector:
 
 
 def inspect_record(record: dict | None, *, source: str = "record", scope: EvidenceScope = EvidenceScope()) -> dict:
-    """Validate designated fields; absent input produces unassessed checks."""
+    """Validate designated fields; absent required input fails applicable checks."""
     inspector = Inspector(record, scope)
     inspector.model_calls()
     inspector.structure()

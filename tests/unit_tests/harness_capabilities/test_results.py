@@ -43,8 +43,9 @@ def test_missing_prerequisite_blocks_only_dependent_checks():
     )
     result.run(schema_check("tools.present"))
     assert len(result.dump()) == 3
-    assert result.rows["calls.owner"].status == "not_assessed"
+    assert result.rows["calls.owner"].status == "fail"
     assert result.rows["calls.owner"].blocked_by == ["calls.present"]
+    assert result.rows["calls.owner"].reasons == ["blocked by calls.present; unresolved call owner"]
     assert result.rows["tools.present"].status == "pass"
 
 
@@ -52,8 +53,9 @@ def test_missing_prerequisite_blocks_only_dependent_checks():
     "settings,status",
     [
         ({"applies": False}, "not_applicable"),
-        ({"available": False}, "not_assessed"),
-        ({"depends_on": ("absent",)}, "not_assessed"),
+        ({"applies": False, "available": False, "depends_on": ("absent",)}, "not_applicable"),
+        ({"available": False}, "fail"),
+        ({"depends_on": ("absent",)}, "fail"),
     ],
 )
 def test_excluded_or_blocked_schema_does_not_evaluate(settings, status):
@@ -64,14 +66,15 @@ def test_excluded_or_blocked_schema_does_not_evaluate(settings, status):
     assert result.rows[check.id].status == status
 
 
-def test_multiple_items_cannot_hide_failure_or_missing_assessment():
+def test_multiple_items_cannot_hide_failure_or_unavailable_input():
     result = Results()
     for value in ("call", None, "call"):
         result.run(schema_check(value=value))
     assert result.rows["call.id"].status == "fail"
     result.run(schema_check("tool.id"))
     result.run(schema_check("tool.id", available=False))
-    assert result.rows["tool.id"].status == "not_assessed"
+    assert result.rows["tool.id"].status == "fail"
+    assert result.rows["tool.id"].reasons == ["required input is unavailable; expected a string"]
 
 
 def test_matrix_reports_independent_results_and_absence():
@@ -90,9 +93,10 @@ def test_matrix_reports_independent_results_and_absence():
     text = render_matrices(
         {"example": {"scenarios": [{"scenario": "normal", "checks": a.dump()}, {"scenario": "error", "checks": []}]}}
     )
-    assert "| **Schema** | | |\n| `call.id` | ✓ | ? |" in text
-    assert "| **Behavioral** | | |\n| `tool.status` | ✗ | ? |" in text
+    assert "| **Schema** | | |\n| `call.id` | ✓ | ✗ |" in text
+    assert "| **Behavioral** | | |\n| `tool.status` | ✗ | ✗ |" in text
     assert "Gate" not in text
+    assert "?" not in text
 
 
 @pytest.mark.parametrize("kind", [SemanticCheck, BehavioralCheck])

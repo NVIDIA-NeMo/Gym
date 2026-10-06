@@ -31,7 +31,7 @@ def test_shared_prerequisite_runs_once_and_blocks_only_dependents():
     record["ng_trajectory"]["model_calls"] = []
     result = checks(record)
     assert result["model_calls.present"]["status"] == "fail"
-    assert result["calls.outcome"]["status"] == "not_assessed"
+    assert result["calls.outcome"]["status"] == "fail"
     assert result["tokens.prompt_tokens"]["blocked_by"] == ["model_calls.present"]
     assert result["steps.resolution"]["status"] == "pass"
     assert result["tools.output"]["status"] == "pass"
@@ -53,7 +53,7 @@ def test_no_fallback_from_observations_or_capture():
     result = checks(record)
     assert result["model_calls.present"]["status"] == "fail"
     assert result["invocations.present"]["status"] == "fail"
-    assert result["steps.invocation_target"]["status"] == "not_assessed"
+    assert result["steps.invocation_target"]["status"] == "fail"
 
 
 @pytest.mark.parametrize("field", TOKEN_FIELDS)
@@ -80,16 +80,16 @@ def test_gym_owned_copy_consistency_and_clock_order_are_not_rechecked():
     assert inspect_record(record)["verdict"] == "fulfilled"
 
 
-def test_missing_rollout_is_unassessed_not_failed():
+def test_missing_rollout_fails_applicable_checks():
     result = checks(None)
-    assert {c["status"] for c in result.values()} <= {"not_assessed", "not_applicable"}
-    assert result["calls.outcome"]["status"] == "not_assessed"
+    assert {c["status"] for c in result.values()} <= {"fail", "not_applicable"}
+    assert result["calls.outcome"]["status"] == "fail"
 
 
 def test_failure_artifact_is_not_silently_used_as_a_normal_rollout():
     result = checks({"failure": "no rollout"})
     assert result["model_calls.present"]["status"] == "fail"
-    assert result["calls.outcome"]["status"] == "not_assessed"
+    assert result["calls.outcome"]["status"] == "fail"
 
 
 def test_retry_attempt_and_compaction_helper_accounting():
@@ -122,7 +122,7 @@ def test_ambiguous_reference_is_a_relationship_failure_not_a_global_schema_failu
     assert result["calls.identity"]["status"] == "pass"
     assert result["ownership.call_target"]["status"] == "fail"
     assert result["steps.call_target"]["status"] == "fail"
-    assert result["ownership.call_owner"]["status"] == "not_assessed"
+    assert result["ownership.call_owner"]["status"] == "fail"
 
 
 @pytest.mark.parametrize("value", [None, False, [], "wrong", [None]])
@@ -131,7 +131,7 @@ def test_malformed_collection_does_not_crash_or_poison_unrelated_checks(value):
     record["ng_trajectory"]["turns"] = value
     result = checks(record)
     assert result["turns.present"]["status"] == "fail"
-    assert result["steps.number"]["status"] == "not_assessed"
+    assert result["steps.number"]["status"] == "fail"
     assert result["calls.outcome"]["status"] == "pass"
 
 

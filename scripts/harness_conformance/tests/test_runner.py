@@ -502,7 +502,7 @@ def test_missing_tool_request_blocks_only_request_comparison(retained_episode):
     inv["conversation"] = [i for i in inv["conversation"] if i.get("call_id") != "tool-1"]
     checks = {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}
     assert checks["tools.witness_join"]["status"] == "fail"
-    assert checks["tools.witness_request"]["status"] == "not_assessed"
+    assert checks["tools.witness_request"]["status"] == "fail"
     assert checks["tools.witness_status"]["status"] == "pass"
     assert checks["tools.witness_output"]["status"] == "pass"
 
@@ -511,9 +511,7 @@ def test_missing_witness_does_not_fail_retained_evidence(retained_episode):
     directory, _ = retained_episode
     (directory / "witness.json").unlink()
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
-    assert all(
-        c["status"] in {"not_assessed", "not_applicable"} for c in result["checks"] if c["kind"] == "behavioral"
-    )
+    assert all(c["status"] in {"fail", "not_applicable"} for c in result["checks"] if c["kind"] == "behavioral")
     assert all(v["verdict"] == "fulfilled" for v in result["evidence"].values())
 
 
@@ -563,3 +561,19 @@ def test_required_step_check_not_exempted_by_invocation_ownership(retained_episo
     assert result["evidence"]["TE-8"]["verdict"] == "fulfilled"
     assert result["evidence"]["TE-9"]["verdict"] == "not_fulfilled"
     assert result["verdict"] == "not_fulfilled"
+
+
+@pytest.mark.parametrize("delivery", ["missing", "failure_record"])
+def test_missing_rollout_fails_required_checks_and_preserves_exclusions(tmp_path, delivery):
+    if delivery == "failure_record":
+        (tmp_path / "rollouts_failures.jsonl").write_text('{"failure": "model error"}\n')
+    result = inspect_episode(SCENARIO["model_error"], tmp_path, {"returncode": 1, "timed_out": False})
+    checks = {c["id"]: c for c in result["checks"]}
+    assert checks["calls.outcome"]["status"] == "fail"
+    assert checks["calls.outcome"]["reasons"][0].startswith("required input is unavailable")
+    assert checks["tool_calls.present"]["status"] == "not_applicable"
+    assert checks["evaluation.reward"]["status"] == "not_applicable"
+    assert result["evidence"]["TE-1"]["verdict"] == "not_fulfilled"
+    assert result["behavioral_status"] == "fail"
+    assert result["delivery"] == delivery
+    assert result["execution"]["returncode"] == 1
