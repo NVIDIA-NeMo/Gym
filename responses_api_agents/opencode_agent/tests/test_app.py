@@ -258,6 +258,32 @@ class TestParseOpencodeSession:
         assert usage["input_tokens"] == 105
         assert usage["output_tokens"] == 20
 
+    def test_reasoning_usage_reaches_response(self, tmp_path: Path) -> None:
+        db = _session_db(
+            tmp_path,
+            [
+                (
+                    "assistant",
+                    [
+                        {"type": "text", "text": "done"},
+                        {"type": "step-finish", "tokens": {"input": 100, "output": 3509, "reasoning": 4396}},
+                        {"type": "step-finish", "tokens": {"input": 50, "output": 0, "reasoning": 10}},
+                    ],
+                )
+            ],
+        )
+        items, usage = parse_opencode_session(db)
+        agent = _make_agent()
+        agent._run_opencode = AsyncMock(return_value=(items, usage, "model", None))
+        episode = asyncio.run(
+            agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve"), collect_observations=False)
+        )
+        actual = episode.response.usage
+        assert actual.input_tokens == 150
+        assert actual.output_tokens == 7915
+        assert actual.output_tokens_details.reasoning_tokens == 4406
+        assert actual.total_tokens == 8065
+
     def test_preserves_tree_parallel_tools_compaction_and_reasoning(self, tmp_path) -> None:
         db = _session_db(
             tmp_path,

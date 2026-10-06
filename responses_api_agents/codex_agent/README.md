@@ -125,8 +125,9 @@ last `session_close_retry_window_seconds` (default 300 seconds) without renewal 
 Stale cookies never fall back to host execution. State is process-local; Resources/provider
 own sandbox expiry and crash recovery. There is no separate per-agent session-expiry timer.
 
-Harness execution uses `nemo_gym.sandbox.session.SandboxSession`, shared with Hermes.
-The adapter stages its worker input and collects its own output; the common lifecycle
+Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
+The adapter stages its worker input and collects its own output. The shared session
+uploads the supervisor at activation and owns its control files and log access; the common lifecycle
 confirms process cleanup, captures artifacts, then releases the provider connection or
 owned sandbox. Concurrent closes share that work, failed cleanup remains retryable,
 and interrupted activations keep captured observations after session files are removed.

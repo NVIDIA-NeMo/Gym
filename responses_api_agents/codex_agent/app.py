@@ -32,6 +32,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -59,10 +60,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, process_supervisor
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.sandbox.session import SandboxSession
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
@@ -534,7 +534,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         state = CodexSandboxSession(
             request=body,
             session=SandboxSession(
-                sandbox=sandbox, directory=directory, workdir=workdir, owns_sandbox=owns_sandbox, harness="Codex"
+                sandbox=sandbox, session_dir=directory, workdir=workdir, owns_sandbox=owns_sandbox, harness="Codex"
             ),
             runtime=runtime,
         )
@@ -573,7 +573,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     f"error_type={installed.error_type}; stdout={installed.stdout}; stderr={installed.stderr}"
                 )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
-            await sandbox.upload(Path(process_supervisor.__file__), f"{directory}/process_supervisor.py")
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -680,14 +679,14 @@ class CodexAgent(SimpleResponsesAPIAgent):
             f"{state.runtime}/codex/node_modules/@openai/codex/bin/codex.js",
         ]
         payload = {
-            "directory": state.session.directory,
+            "directory": state.session.session_dir,
             "command": command,
             "prompt": prompt,
             "cwd": state.session.workdir,
             "env": {
-                "HOME": f"{state.session.directory}/home",
-                "CODEX_HOME": f"{state.session.directory}/home/.codex",
-                "XDG_CACHE_HOME": f"{state.session.directory}/home/.cache",
+                "HOME": f"{state.session.session_dir}/home",
+                "CODEX_HOME": f"{state.session.session_dir}/home/.codex",
+                "XDG_CACHE_HOME": f"{state.session.session_dir}/home/.cache",
                 # Gym receives the calls; never copy the direct OpenAI credential into this path.
                 "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
             },

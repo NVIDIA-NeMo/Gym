@@ -29,7 +29,8 @@ only the EnvironmentServer config is insufficient.
 TB's `_ResourcesSessionState` is private Resources bookkeeping for request identity
 and seed/verdict replay. Its state fields reflect TB's verification needs; the public
 session protocol and sandbox ownership match SWE-Pro. Harness process execution uses
-Gym's shared `SandboxSession` and `supervisor_client`, as in Hermes #3961; Resources
+Gym's shared `SandboxSession` and `supervisor_client` in `nemo_gym.agent_utils`,
+as in Hermes #3961; Resources
 request/verdict bookkeeping remains benchmark-owned. These are separate responsibilities.
 
 ## Codex in a task sandbox

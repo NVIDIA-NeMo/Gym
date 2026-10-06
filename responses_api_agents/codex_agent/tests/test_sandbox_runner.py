@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from nemo_gym.sandbox import process_supervisor
+from nemo_gym.agent_utils import process_supervisor
 from responses_api_agents.codex_agent import sandbox_runner
 
 
@@ -41,7 +41,7 @@ def launch(tmp_path, code, timeout=3, python=sys.executable):
             "--cleanup-timeout",
             "0.5",
             "--stop-file",
-            str(tmp_path / "runner.stop"),
+            str(tmp_path / "stop.request"),
             "--receipt",
             str(tmp_path / "cleanup.json"),
             "--",
@@ -108,7 +108,7 @@ def test_spawn_error_is_not_success(tmp_path):
 
 
 def test_stop_marker_prevents_process_launch(tmp_path):
-    (tmp_path / "runner.stop").touch()
+    (tmp_path / "stop.request").touch()
     process = launch(tmp_path, "open('should-not-exist', 'w').close()")
     summary = result(tmp_path, process)
     assert summary["cleanup_confirmed"] is True
