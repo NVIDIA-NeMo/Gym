@@ -1088,7 +1088,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         # enter this path, so their host does not need OpenClaw, Node, or npm.
         if self._local_setup_task is None:
             self._local_setup_task = asyncio.create_task(
-                asyncio.to_thread(ensure_openclaw, self.config.openclaw_version)
+                asyncio.to_thread(ensure_openclaw, self.config.openclaw_version, node_bin_dir=self.config.node_bin_dir)
             )
         setup_task = self._local_setup_task
         try:

@@ -112,6 +112,21 @@ class TestSanity:
         assert agent.sem._value == 4
 
 
+@pytest.mark.asyncio
+async def test_lazy_local_install_uses_configured_node_runtime(tmp_path: Path) -> None:
+    with patch("responses_api_agents.openclaw_agent.app.ensure_openclaw") as install:
+        agent = _make_agent(node_bin_dir="/opt/task-node/bin")
+        install.assert_not_called()
+        with (
+            patch.object(agent, "_workspace_root", return_value=tmp_path),
+            patch.object(agent, "_run_exec", AsyncMock(side_effect=RuntimeError("stop before onboard"))),
+        ):
+            for _ in range(2):
+                with pytest.raises(RuntimeError, match="stop before onboard"):
+                    await agent._run_openclaw("task", None)
+        install.assert_called_once_with("2026.6.11", node_bin_dir="/opt/task-node/bin")
+
+
 class TestExtractInstruction:
     def test_user_only(self) -> None:
         user, system = _extract_instruction([NeMoGymEasyInputMessage(role="user", content="hello")])
