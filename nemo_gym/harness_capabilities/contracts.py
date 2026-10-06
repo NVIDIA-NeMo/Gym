@@ -3,4 +3,4 @@
 
 """Version of the focused artifact checks and their designated locations."""
 
-SCHEMA_VERSION = "gym-p0-evidence/v3"
+SCHEMA_VERSION = "gym-p0-evidence/v2"

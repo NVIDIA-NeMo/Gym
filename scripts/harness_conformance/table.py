@@ -166,7 +166,7 @@ def regenerate(*, root: Path, commit: str, output: Path, harnesses: list[str], t
             raise ValueError(f"{harness} runtime changed during probing")
         runtimes[harness] = identities[0]
     report = {
-        "schema_version": "trajectory-capabilities-table/v2",
+        "schema_version": "trajectory-capabilities-table/v1",
         "gym_commit": commit,
         "suite": SUITE,
         "tests": tests,

@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from jsonschema import Draft202012Validator
 
 from . import schemas as s
-from .results import Results
+from .checks import SchemaCheck, SemanticCheck
+from .results import Results, gate_passes
 
 
 NAMES = {
@@ -25,8 +26,7 @@ NAMES = {
     "TE-8": "run_join",
     "TE-9": "step_join",
 }
-PROFILE = "gym-p0/v3"
-P0 = tuple(f"TE-{i}" for i in range(1, 8))
+PROFILE = "gym-p0/v1"
 TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens", "cached_tokens")
 
 
@@ -38,12 +38,6 @@ class EvidenceScope:
     verifier: bool = True
     steps: bool = True
     require_sandbox: bool = False
-
-
-def gate_passes(evidence: dict) -> bool:
-    return all(evidence[k]["verdict"] in {"fulfilled", "not_applicable"} for k in P0) and any(
-        evidence[k]["verdict"] == "fulfilled" for k in ("TE-8", "TE-9")
-    )
 
 
 def _mapping(value: object) -> dict:
@@ -104,122 +98,323 @@ class Inspector:
         self.tools = _objects(self.trajectory.get("tool_calls"))
         self.observations = _objects(_mapping(self.record.get("ng_agent_observations")).get("records"))
 
-    def schema(
-        self,
-        key: str,
-        value: object,
-        schema: dict,
-        path: str,
-        evidence: tuple[str, ...],
-        *,
-        depends_on: tuple[str, ...] = (),
-        applies: bool = True,
-    ) -> None:
-        # Error messages can contain payloads. Retain only rule names and JSON paths.
-        validator = Draft202012Validator(schema)
-        errors = list(validator.iter_errors(value))
-        self.results.check(
-            key,
-            "schema",
-            not errors,
-            evidence=evidence,
-            location=path,
-            reason="required evidence does not match its schema",
-            depends_on=depends_on,
-            available=self.available,
-            applies=applies,
-        )
-        row = self.results.rows[key]
-        if errors and row.status == "fail":
-            for error in errors:
-                location = path + "".join(
-                    f"[{part}]" if isinstance(part, int) else f".{part}" for part in error.absolute_path
-                )
-                if location not in row.locations:
-                    row.locations.append(location)
-
-    def semantic(
-        self,
-        key: str,
-        condition: bool,
-        path: str,
-        evidence: tuple[str, ...],
-        *,
-        depends_on: tuple[str, ...] = (),
-        applies: bool = True,
-        reason: str,
-    ) -> None:
-        self.results.check(
-            key,
-            "semantic",
-            condition,
-            location=path,
-            evidence=evidence,
-            reason=reason,
-            available=self.available,
-            depends_on=depends_on,
-            applies=applies,
-        )
-
-    def collection(self, name: str, evidence: tuple[str, ...], *, applies: bool = True) -> None:
-        self.schema(
-            name + ".present",
-            self.trajectory.get(name),
-            {**s.NONEMPTY, "items": {"type": "object"}},
-            "$.ng_trajectory." + name,
-            evidence,
-            applies=applies,
-        )
-
-    def fields(self, collection: str, rules: tuple, *, applies: bool = True) -> None:
-        # Each field rule evaluates the collection once; nested errors retain item paths.
-        for key, schema, evidence in rules:
-            self.schema(
-                key,
-                self.trajectory.get(collection),
-                {"type": "array", "items": schema},
-                "$.ng_trajectory." + collection,
-                evidence,
-                depends_on=(collection + ".present",),
-                applies=applies,
-            )
-
     def model_calls(self) -> None:
-        self.collection("model_calls", ("TE-1", "TE-2", "TE-4", "TE-7", "TE-8", "TE-9"))
-        self.fields(
-            "model_calls",
-            (
-                ("calls.identity", s.required_object(model_call_id=s.NONBLANK), ("TE-1",)),
-                (
-                    "calls.model",
-                    s.required_object(response_metadata=s.required_object(model_ref=s.MODEL_REF)),
-                    ("TE-1",),
-                ),
-                (
-                    "calls.protocol",
-                    s.required_object(response_metadata=s.required_object(dialect=s.DIALECT)),
-                    ("TE-1",),
-                ),
-                ("calls.timing", s.required_object(started_at=s.TIMESTAMP, completed_at=s.TIMESTAMP), ("TE-1",)),
-                ("calls.outcome", s.required_object(response_metadata=s.OUTCOME), ("TE-1",)),
-                ("calls.response_id", s.required_object(response_metadata=s.RESPONSE_ID), ("TE-1",)),
-                ("calls.request", s.REQUEST, ("TE-4", "TE-7")),
-                ("calls.response", s.RESPONSE, ("TE-4", "TE-7")),
-            ),
+        self.results.run(
+            SchemaCheck(
+                id="model_calls.present",
+                tier="P0",
+                evidence=("TE-1", "TE-2", "TE-4", "TE-7", "TE-8", "TE-9"),
+                location="$.ng_trajectory.model_calls",
+                reason="expected a nonempty collection of saved model_calls",
+                value=self.trajectory.get("model_calls"),
+                schema={"type": "array", "minItems": 1, "items": {"type": "object"}},
+                depends_on=(),
+                applies=True,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="calls.identity",
+                tier="P0",
+                evidence=("TE-1",),
+                location="$.ng_trajectory.model_calls",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("model_calls"),
+                schema={
+                    "type": "array",
+                    "items": s.required_object(model_call_id={"type": "string", "pattern": "\\S"}),
+                },
+                depends_on=("model_calls.present",),
+                applies=True,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="calls.model",
+                tier="P0",
+                evidence=("TE-1",),
+                location="$.ng_trajectory.model_calls",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("model_calls"),
+                schema={
+                    "type": "array",
+                    "items": s.required_object(
+                        response_metadata=s.required_object(
+                            model_ref=s.required_object(
+                                type={"const": "responses_api_models"}, name={"type": "string", "pattern": "\\S"}
+                            )
+                        )
+                    ),
+                },
+                depends_on=("model_calls.present",),
+                applies=True,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="calls.protocol",
+                tier="P0",
+                evidence=("TE-1",),
+                location="$.ng_trajectory.model_calls",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("model_calls"),
+                schema={
+                    "type": "array",
+                    "items": s.required_object(
+                        response_metadata=s.required_object(dialect={"enum": ["chat", "responses", "messages"]})
+                    ),
+                },
+                depends_on=("model_calls.present",),
+                applies=True,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="calls.timing",
+                tier="P0",
+                evidence=("TE-1",),
+                location="$.ng_trajectory.model_calls",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("model_calls"),
+                schema={
+                    "type": "array",
+                    "items": s.required_object(
+                        started_at={"type": "number", "minimum": 0}, completed_at={"type": "number", "minimum": 0}
+                    ),
+                },
+                depends_on=("model_calls.present",),
+                applies=True,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="calls.outcome",
+                tier="P0",
+                evidence=("TE-1",),
+                location="$.ng_trajectory.model_calls",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("model_calls"),
+                schema={
+                    "type": "array",
+                    "items": s.required_object(
+                        response_metadata={
+                            "type": "object",
+                            "properties": {
+                                "status_code": {
+                                    "anyOf": [{"type": "integer", "minimum": 100, "maximum": 599}, {"type": "null"}]
+                                },
+                                "error_category": {"anyOf": [{"type": "string", "pattern": "\\S"}, {"type": "null"}]},
+                                "response_status": {"anyOf": [{"type": "string", "pattern": "\\S"}, {"type": "null"}]},
+                                "finish_reason": {"anyOf": [{"type": "string", "pattern": "\\S"}, {"type": "null"}]},
+                            },
+                            "anyOf": [
+                                s.required_object(error_category={"type": "string", "pattern": "\\S"}),
+                                {
+                                    "allOf": [
+                                        s.required_object(
+                                            status_code={"type": "integer", "minimum": 200, "maximum": 299}
+                                        ),
+                                        {
+                                            "anyOf": [
+                                                s.required_object(
+                                                    dialect={"enum": ["chat", "messages"]},
+                                                    finish_reason={"type": "string", "pattern": "\\S"},
+                                                ),
+                                                s.required_object(
+                                                    dialect={"const": "responses"},
+                                                    response_status={"enum": ["completed", "incomplete"]},
+                                                ),
+                                            ]
+                                        },
+                                    ]
+                                },
+                            ],
+                        }
+                    ),
+                },
+                depends_on=("model_calls.present",),
+                applies=True,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="calls.response_id",
+                tier="P0",
+                evidence=("TE-1",),
+                location="$.ng_trajectory.model_calls",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("model_calls"),
+                schema={
+                    "type": "array",
+                    "items": s.required_object(
+                        response_metadata={
+                            "if": s.required_object(error_category={"type": "string", "pattern": "\\S"}),
+                            "then": {
+                                "properties": {
+                                    "response_id": {"anyOf": [{"type": "string", "pattern": "\\S"}, {"type": "null"}]}
+                                }
+                            },
+                            "else": s.required_object(response_id={"type": "string", "pattern": "\\S"}),
+                        }
+                    ),
+                },
+                depends_on=("model_calls.present",),
+                applies=True,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="calls.request",
+                tier="P0",
+                evidence=("TE-4", "TE-7"),
+                location="$.ng_trajectory.model_calls",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("model_calls"),
+                schema={
+                    "type": "array",
+                    "items": {
+                        "anyOf": [
+                            s.required_object(
+                                response_metadata=s.required_object(dialect={"const": "responses"}),
+                                request=s.required_object(
+                                    input={
+                                        "anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "object"}}]
+                                    }
+                                ),
+                            ),
+                            s.required_object(
+                                response_metadata=s.required_object(dialect={"const": "chat"}),
+                                request=s.required_object(messages={"type": "array", "items": {"type": "object"}}),
+                            ),
+                            s.required_object(
+                                response_metadata=s.required_object(dialect={"const": "messages"}),
+                                request=s.required_object(messages={"type": "array", "items": {"type": "object"}}),
+                            ),
+                        ]
+                    },
+                },
+                depends_on=("model_calls.present",),
+                applies=True,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="calls.response",
+                tier="P0",
+                evidence=("TE-4", "TE-7"),
+                location="$.ng_trajectory.model_calls",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("model_calls"),
+                schema={
+                    "type": "array",
+                    "items": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "required": ["response", "response_metadata"],
+                                "properties": {
+                                    "response": {"type": ["object", "string"]},
+                                    "response_metadata": s.required_object(
+                                        status_code={"type": "integer", "minimum": 100, "maximum": 599}
+                                    ),
+                                },
+                                "if": s.required_object(
+                                    response_metadata={
+                                        "type": "object",
+                                        "required": ["status_code"],
+                                        "properties": {
+                                            "status_code": {"type": "integer", "minimum": 200, "maximum": 299}
+                                        },
+                                        "not": s.required_object(error_category={"type": "string", "pattern": "\\S"}),
+                                    }
+                                ),
+                                "then": {
+                                    "anyOf": [
+                                        s.required_object(
+                                            response_metadata=s.required_object(dialect={"const": "responses"}),
+                                            response=s.required_object(
+                                                output={"type": "array", "items": {"type": "object"}}
+                                            ),
+                                        ),
+                                        s.required_object(
+                                            response_metadata=s.required_object(dialect={"const": "chat"}),
+                                            response=s.required_object(
+                                                choices={
+                                                    "type": "array",
+                                                    "items": s.required_object(
+                                                        message=s.required_object(role={"const": "assistant"})
+                                                    ),
+                                                }
+                                            ),
+                                        ),
+                                        s.required_object(
+                                            response_metadata=s.required_object(dialect={"const": "messages"}),
+                                            response=s.required_object(
+                                                content={"type": "array", "items": {"type": "object"}}
+                                            ),
+                                        ),
+                                    ]
+                                },
+                            },
+                            s.required_object(
+                                response={"type": "null"},
+                                response_metadata=s.required_object(
+                                    status_code={"type": "null"}, error_category={"type": "string", "pattern": "\\S"}
+                                ),
+                            ),
+                        ]
+                    },
+                },
+                depends_on=("model_calls.present",),
+                applies=True,
+                available=self.available,
+            )
         )
         for field in TOKEN_FIELDS:
             # Optional metrics retain missing/null as unavailable; no normalization recheck.
-            schema = s.required_object(
-                token_stats={"type": "object", "properties": {field: {"type": ["integer", "null"], "minimum": 0}}}
+            self.results.run(
+                SchemaCheck(
+                    id="tokens." + field,
+                    tier="P0",
+                    evidence=("TE-2",),
+                    location="$.ng_trajectory.model_calls",
+                    reason="required evidence does not match its schema",
+                    value=self.trajectory.get("model_calls"),
+                    schema={
+                        "type": "array",
+                        "items": s.required_object(
+                            token_stats={
+                                "type": "object",
+                                "properties": {field: {"type": ["integer", "null"], "minimum": 0}},
+                            }
+                        ),
+                    },
+                    depends_on=("model_calls.present",),
+                    applies=True,
+                    available=self.available,
+                )
             )
-            self.fields("model_calls", (("tokens." + field, schema, ("TE-2",)),))
-        self.semantic(
-            "content.media",
-            not any(_missing_content(c.get(k)) for c in self.calls for k in ("request", "response")),
-            "$.ng_trajectory.model_calls",
-            ("TE-4", "TE-7"),
-            depends_on=("model_calls.present", "calls.request", "calls.response"),
-            reason="external, encrypted or invalid media is unavailable to this reader",
+        self.results.run(
+            SemanticCheck(
+                id="content.media",
+                tier="P0",
+                evidence=("TE-4", "TE-7"),
+                location="$.ng_trajectory.model_calls",
+                reason="external, encrypted or invalid media is unavailable to this reader",
+                predicate=lambda: not any(
+                    (_missing_content(c.get(k)) for c in self.calls for k in ("request", "response"))
+                ),
+                available=self.available,
+                depends_on=("model_calls.present", "calls.request", "calls.response"),
+            )
         )
         valid = True
         for index, call in enumerate(self.calls):
@@ -235,85 +430,367 @@ class Inspector:
                     and matches[0].get("request") is not None
                     and matches[0].get("response") is not None
                 )
-        self.semantic(
-            "content.previous_response",
-            valid,
-            "$.ng_trajectory.model_calls",
-            ("TE-4",),
-            depends_on=("model_calls.present", "calls.request"),
-            reason="previous response has no unique retained history",
+        self.results.run(
+            SemanticCheck(
+                id="content.previous_response",
+                tier="P0",
+                evidence=("TE-4",),
+                location="$.ng_trajectory.model_calls",
+                reason="previous response has no unique retained history",
+                predicate=lambda: valid,
+                available=self.available,
+                depends_on=("model_calls.present", "calls.request"),
+            )
         )
 
     def structure(self) -> None:
         for field in ("task_id", "rollout_id"):
-            self.schema(
-                "trajectory." + field,
-                self.trajectory,
-                s.required_object(**{field: s.NONBLANK}),
-                "$.ng_trajectory",
-                ("TE-3", "TE-8"),
+            self.results.run(
+                SchemaCheck(
+                    id="trajectory." + field,
+                    tier="P0",
+                    evidence=("TE-3", "TE-8"),
+                    location="$.ng_trajectory",
+                    reason="required evidence does not match its schema",
+                    value=self.trajectory,
+                    schema=s.required_object(**{field: {"type": "string", "pattern": "\\S"}}),
+                    depends_on=(),
+                    applies=True,
+                    available=self.available,
+                )
             )
-        self.collection("invocations", ("TE-8",))
-        self.fields(
-            "invocations",
-            (
-                ("invocations.identity", s.required_object(invocation_id=s.NONBLANK), ("TE-8",)),
-                (
-                    "invocations.references",
-                    s.required_object(model_calls={"type": "array", "items": s.MODEL_CALL_REF}),
-                    ("TE-8",),
-                ),
-            ),
+        self.results.run(
+            SchemaCheck(
+                id="invocations.present",
+                tier="P0",
+                evidence=("TE-8",),
+                location="$.ng_trajectory.invocations",
+                reason="expected a nonempty collection of saved invocations",
+                value=self.trajectory.get("invocations"),
+                schema={"type": "array", "minItems": 1, "items": {"type": "object"}},
+                depends_on=(),
+                applies=True,
+                available=self.available,
+            )
         )
-        self.collection("turns", ("TE-3", "TE-9"), applies=self.scope.steps)
-        self.fields(
-            "turns",
-            (
-                ("steps.invocation", s.required_object(invocation_id=s.NONBLANK), ("TE-3", "TE-9")),
-                ("steps.number", s.required_object(turn_no={"type": "integer", "minimum": 1}), ("TE-3", "TE-9")),
-                ("steps.timestamp", s.required_object(timestamp=s.TIMESTAMP), ("TE-3",)),
-                ("steps.resolution", s.required_object(resolved={"type": ["boolean", "null"]}), ("TE-3",)),
-                ("steps.references", s.TURN_CALLS, ("TE-9",)),
-            ),
-            applies=self.scope.steps,
+        self.results.run(
+            SchemaCheck(
+                id="invocations.identity",
+                tier="P0",
+                evidence=("TE-8",),
+                location="$.ng_trajectory.invocations",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("invocations"),
+                schema={
+                    "type": "array",
+                    "items": s.required_object(invocation_id={"type": "string", "pattern": "\\S"}),
+                },
+                depends_on=("invocations.present",),
+                applies=True,
+                available=self.available,
+            )
         )
-        self.collection("tool_calls", ("TE-5",), applies=self.scope.tools)
-        self.fields(
-            "tool_calls",
-            (
-                ("tools.identity", s.required_object(tool_call_id=s.NONBLANK), ("TE-5",)),
-                ("tools.name", s.required_object(tool_name=s.NONBLANK), ("TE-5",)),
-                ("tools.invocation", s.required_object(invocation_id=s.NONBLANK), ("TE-5",)),
-                (
-                    "tools.status",
-                    s.required_object(status={"enum": ["completed", "failed", "timeout", "cancelled"]}),
-                    ("TE-5",),
-                ),
-                ("tools.output", s.TOOL_OUTPUT, ("TE-5",)),
-            ),
-            applies=self.scope.tools,
+        self.results.run(
+            SchemaCheck(
+                id="invocations.references",
+                tier="P0",
+                evidence=("TE-8",),
+                location="$.ng_trajectory.invocations",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("invocations"),
+                schema={
+                    "type": "array",
+                    "items": s.required_object(
+                        model_calls={
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "model_call_id": {
+                                        "anyOf": [{"type": "string", "pattern": "\\S"}, {"type": "null"}]
+                                    },
+                                    "model_ref": {
+                                        "anyOf": [
+                                            s.required_object(
+                                                type={"const": "responses_api_models"},
+                                                name={"type": "string", "pattern": "\\S"},
+                                            ),
+                                            {"type": "null"},
+                                        ]
+                                    },
+                                    "response_id": {"anyOf": [{"type": "string", "pattern": "\\S"}, {"type": "null"}]},
+                                },
+                                "anyOf": [
+                                    s.required_object(model_call_id={"type": "string", "pattern": "\\S"}),
+                                    s.required_object(
+                                        model_ref=s.required_object(
+                                            type={"const": "responses_api_models"},
+                                            name={"type": "string", "pattern": "\\S"},
+                                        ),
+                                        response_id={"type": "string", "pattern": "\\S"},
+                                    ),
+                                ],
+                            },
+                        }
+                    ),
+                },
+                depends_on=("invocations.present",),
+                applies=True,
+                available=self.available,
+            )
         )
-        for collection, records, prefix, evidence, applies in (
-            ("turns", self.turns, "steps", ("TE-3", "TE-9"), self.scope.steps),
-            ("tool_calls", self.tools, "tools", ("TE-5",), self.scope.tools),
-        ):
-            self.semantic(
-                prefix + ".invocation_target",
-                all(
-                    sum(i.get("invocation_id") == r.get("invocation_id") for i in self.invocations) == 1
-                    for r in records
-                ),
-                "$.ng_trajectory." + collection,
-                evidence,
-                applies=applies,
-                depends_on=(
-                    collection + ".present",
-                    prefix + ".invocation",
-                    "invocations.present",
-                    "invocations.identity",
-                ),
+        self.results.run(
+            SchemaCheck(
+                id="turns.present",
+                tier="P0",
+                evidence=("TE-3", "TE-9"),
+                location="$.ng_trajectory.turns",
+                reason="expected a nonempty collection of saved turns",
+                value=self.trajectory.get("turns"),
+                schema={"type": "array", "minItems": 1, "items": {"type": "object"}},
+                depends_on=(),
+                applies=self.scope.steps,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="steps.invocation",
+                tier="P0",
+                evidence=("TE-3", "TE-9"),
+                location="$.ng_trajectory.turns",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("turns"),
+                schema={
+                    "type": "array",
+                    "items": s.required_object(invocation_id={"type": "string", "pattern": "\\S"}),
+                },
+                depends_on=("turns.present",),
+                applies=self.scope.steps,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="steps.number",
+                tier="P0",
+                evidence=("TE-3", "TE-9"),
+                location="$.ng_trajectory.turns",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("turns"),
+                schema={"type": "array", "items": s.required_object(turn_no={"type": "integer", "minimum": 1})},
+                depends_on=("turns.present",),
+                applies=self.scope.steps,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="steps.timestamp",
+                tier="P0",
+                evidence=("TE-3",),
+                location="$.ng_trajectory.turns",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("turns"),
+                schema={"type": "array", "items": s.required_object(timestamp={"type": "number", "minimum": 0})},
+                depends_on=("turns.present",),
+                applies=self.scope.steps,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="steps.resolution",
+                tier="P0",
+                evidence=("TE-3",),
+                location="$.ng_trajectory.turns",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("turns"),
+                schema={"type": "array", "items": s.required_object(resolved={"type": ["boolean", "null"]})},
+                depends_on=("turns.present",),
+                applies=self.scope.steps,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="steps.references",
+                tier="P0",
+                evidence=("TE-9",),
+                location="$.ng_trajectory.turns",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("turns"),
+                schema={
+                    "type": "array",
+                    "items": s.required_object(
+                        model_calls={
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "model_call_id": {
+                                        "anyOf": [{"type": "string", "pattern": "\\S"}, {"type": "null"}]
+                                    },
+                                    "model_ref": {
+                                        "anyOf": [
+                                            s.required_object(
+                                                type={"const": "responses_api_models"},
+                                                name={"type": "string", "pattern": "\\S"},
+                                            ),
+                                            {"type": "null"},
+                                        ]
+                                    },
+                                    "response_id": {"anyOf": [{"type": "string", "pattern": "\\S"}, {"type": "null"}]},
+                                },
+                                "anyOf": [
+                                    s.required_object(model_call_id={"type": "string", "pattern": "\\S"}),
+                                    s.required_object(
+                                        model_ref=s.required_object(
+                                            type={"const": "responses_api_models"},
+                                            name={"type": "string", "pattern": "\\S"},
+                                        ),
+                                        response_id={"type": "string", "pattern": "\\S"},
+                                    ),
+                                ],
+                            },
+                        }
+                    ),
+                },
+                depends_on=("turns.present",),
+                applies=self.scope.steps,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="tool_calls.present",
+                tier="P0",
+                evidence=("TE-5",),
+                location="$.ng_trajectory.tool_calls",
+                reason="expected a nonempty collection of saved tool_calls",
+                value=self.trajectory.get("tool_calls"),
+                schema={"type": "array", "minItems": 1, "items": {"type": "object"}},
+                depends_on=(),
+                applies=self.scope.tools,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="tools.identity",
+                tier="P0",
+                evidence=("TE-5",),
+                location="$.ng_trajectory.tool_calls",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("tool_calls"),
+                schema={
+                    "type": "array",
+                    "items": s.required_object(tool_call_id={"type": "string", "pattern": "\\S"}),
+                },
+                depends_on=("tool_calls.present",),
+                applies=self.scope.tools,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="tools.name",
+                tier="P0",
+                evidence=("TE-5",),
+                location="$.ng_trajectory.tool_calls",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("tool_calls"),
+                schema={"type": "array", "items": s.required_object(tool_name={"type": "string", "pattern": "\\S"})},
+                depends_on=("tool_calls.present",),
+                applies=self.scope.tools,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="tools.invocation",
+                tier="P0",
+                evidence=("TE-5",),
+                location="$.ng_trajectory.tool_calls",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("tool_calls"),
+                schema={
+                    "type": "array",
+                    "items": s.required_object(invocation_id={"type": "string", "pattern": "\\S"}),
+                },
+                depends_on=("tool_calls.present",),
+                applies=self.scope.tools,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="tools.status",
+                tier="P0",
+                evidence=("TE-5",),
+                location="$.ng_trajectory.tool_calls",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("tool_calls"),
+                schema={
+                    "type": "array",
+                    "items": s.required_object(status={"enum": ["completed", "failed", "timeout", "cancelled"]}),
+                },
+                depends_on=("tool_calls.present",),
+                applies=self.scope.tools,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="tools.output",
+                tier="P0",
+                evidence=("TE-5",),
+                location="$.ng_trajectory.tool_calls",
+                reason="required evidence does not match its schema",
+                value=self.trajectory.get("tool_calls"),
+                schema={"type": "array", "items": s.required_object(output={"type": ["string", "array", "object"]})},
+                depends_on=("tool_calls.present",),
+                applies=self.scope.tools,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SemanticCheck(
+                id="steps.invocation_target",
+                tier="P0",
+                evidence=("TE-3", "TE-9"),
+                location="$.ng_trajectory.turns",
                 reason="invocation reference does not resolve to exactly one saved invocation",
+                predicate=lambda: all(
+                    (
+                        sum((i.get("invocation_id") == r.get("invocation_id") for i in self.invocations)) == 1
+                        for r in self.turns
+                    )
+                ),
+                available=self.available,
+                applies=self.scope.steps,
+                depends_on=("turns.present", "steps.invocation", "invocations.present", "invocations.identity"),
             )
+        )
+        self.results.run(
+            SemanticCheck(
+                id="tools.invocation_target",
+                tier="P0",
+                evidence=("TE-5",),
+                location="$.ng_trajectory.tool_calls",
+                reason="invocation reference does not resolve to exactly one saved invocation",
+                predicate=lambda: all(
+                    (
+                        sum((i.get("invocation_id") == r.get("invocation_id") for i in self.invocations)) == 1
+                        for r in self.tools
+                    )
+                ),
+                available=self.available,
+                applies=self.scope.tools,
+                depends_on=("tool_calls.present", "tools.invocation", "invocations.present", "invocations.identity"),
+            )
+        )
         # Arguments currently live only in the invocation conversation. Tool output has its own authority above.
         requests = [
             [
@@ -325,19 +802,25 @@ class Inspector:
             ]
             for tool in self.tools
         ]
-        self.semantic(
-            "tools.request",
-            all(
-                len(items) == 1
-                and isinstance(items[0].get("arguments"), str)
-                and items[0].get("name") == tool.get("tool_name")
-                for items, tool in zip(requests, self.tools)
-            ),
-            "$.ng_trajectory.invocations[*].conversation",
-            ("TE-5",),
-            applies=self.scope.tools,
-            depends_on=("tool_calls.present", "tools.identity", "tools.name", "tools.invocation_target"),
-            reason="tool execution lacks a unique saved request with name and arguments",
+        self.results.run(
+            SemanticCheck(
+                id="tools.request",
+                tier="P0",
+                evidence=("TE-5",),
+                location="$.ng_trajectory.invocations[*].conversation",
+                reason="tool execution lacks a unique saved request with name and arguments",
+                predicate=lambda: all(
+                    (
+                        len(items) == 1
+                        and isinstance(items[0].get("arguments"), str)
+                        and (items[0].get("name") == tool.get("tool_name"))
+                        for items, tool in zip(requests, self.tools)
+                    )
+                ),
+                available=self.available,
+                applies=self.scope.tools,
+                depends_on=("tool_calls.present", "tools.identity", "tools.name", "tools.invocation_target"),
+            )
         )
 
     def ownership(self) -> None:
@@ -352,13 +835,17 @@ class Inspector:
                     break
                 current = matches[0]
                 seen.add(id(current))
-        self.semantic(
-            "invocations.parent",
-            parent_valid,
-            "$.ng_trajectory.invocations[*].parent_invocation_id",
-            ("TE-8",),
-            depends_on=("invocations.present", "invocations.identity"),
-            reason="parent invocation is missing, ambiguous or cyclic",
+        self.results.run(
+            SemanticCheck(
+                id="invocations.parent",
+                tier="P0",
+                evidence=("TE-8",),
+                location="$.ng_trajectory.invocations[*].parent_invocation_id",
+                reason="parent invocation is missing, ambiguous or cyclic",
+                predicate=lambda: parent_valid,
+                available=self.available,
+                depends_on=("invocations.present", "invocations.identity"),
+            )
         )
         owners: dict[int, list[str]] = {i: [] for i in range(len(self.calls))}
         valid = True
@@ -368,29 +855,36 @@ class Inspector:
                 valid &= len(matches) == 1
                 if len(matches) == 1:
                     owners[matches[0]].append(inv.get("invocation_id"))
-        path = "$.ng_trajectory.invocations[*].model_calls"
-        dependencies = (
-            "model_calls.present",
-            "calls.identity",
-            "invocations.present",
-            "invocations.references",
-            "invocations.identity",
+
+        self.results.run(
+            SemanticCheck(
+                id="ownership.call_target",
+                tier="P0",
+                evidence=("TE-8",),
+                location="$.ng_trajectory.invocations[*].model_calls",
+                reason="call reference does not resolve uniquely with all supplied identifiers",
+                predicate=lambda: valid,
+                available=self.available,
+                depends_on=(
+                    "model_calls.present",
+                    "calls.identity",
+                    "invocations.present",
+                    "invocations.references",
+                    "invocations.identity",
+                ),
+            )
         )
-        self.semantic(
-            "ownership.call_target",
-            valid,
-            path,
-            ("TE-8",),
-            depends_on=dependencies,
-            reason="call reference does not resolve uniquely with all supplied identifiers",
-        )
-        self.semantic(
-            "ownership.call_owner",
-            all(len(v) == 1 for v in owners.values()),
-            path,
-            ("TE-8",),
-            depends_on=("ownership.call_target",),
-            reason="each saved call must have exactly one invocation owner",
+        self.results.run(
+            SemanticCheck(
+                id="ownership.call_owner",
+                tier="P0",
+                evidence=("TE-8",),
+                location="$.ng_trajectory.invocations[*].model_calls",
+                reason="each saved call must have exactly one invocation owner",
+                predicate=lambda: all((len(v) == 1 for v in owners.values())),
+                available=self.available,
+                depends_on=("ownership.call_target",),
+            )
         )
         helpers = set()
         auxiliary_valid = True
@@ -402,14 +896,18 @@ class Inspector:
                     matches = _resolve(reference, self.calls)
                     auxiliary_valid &= len(matches) == 1
                     helpers.update(matches)
-        self.semantic(
-            "steps.compaction_target",
-            auxiliary_valid,
-            "$.ng_agent_observations.records",
-            ("TE-9",),
-            applies=self.scope.steps,
-            depends_on=("model_calls.present",),
-            reason="compaction helper reference is invalid or unresolved",
+        self.results.run(
+            SemanticCheck(
+                id="steps.compaction_target",
+                tier="P0",
+                evidence=("TE-9",),
+                location="$.ng_agent_observations.records",
+                reason="compaction helper reference is invalid or unresolved",
+                predicate=lambda: auxiliary_valid,
+                available=self.available,
+                applies=self.scope.steps,
+                depends_on=("model_calls.present",),
+            )
         )
         refs = Counter()
         turn_valid, owner_valid = True, True
@@ -421,126 +919,248 @@ class Inspector:
                     index = matches[0]
                     refs[index] += 1
                     owner_valid &= not owners[index] or owners[index] == [turn.get("invocation_id")]
-        dependencies = (
-            "model_calls.present",
-            "calls.identity",
-            "turns.present",
-            "steps.references",
-            "steps.invocation_target",
+
+        self.results.run(
+            SemanticCheck(
+                id="steps.call_target",
+                tier="P0",
+                evidence=("TE-9",),
+                location="$.ng_trajectory.turns[*].model_calls",
+                reason="step call reference does not resolve uniquely with all supplied identifiers",
+                predicate=lambda: turn_valid,
+                available=self.available,
+                applies=self.scope.steps,
+                depends_on=(
+                    "model_calls.present",
+                    "calls.identity",
+                    "turns.present",
+                    "steps.references",
+                    "steps.invocation_target",
+                ),
+            )
         )
-        self.semantic(
-            "steps.call_target",
-            turn_valid,
-            "$.ng_trajectory.turns[*].model_calls",
-            ("TE-9",),
-            applies=self.scope.steps,
-            depends_on=dependencies,
-            reason="step call reference does not resolve uniquely with all supplied identifiers",
-        )
-        self.semantic(
-            "steps.call_owner",
-            owner_valid,
-            "$.ng_trajectory.turns[*].model_calls",
-            ("TE-9",),
-            applies=self.scope.steps,
-            depends_on=("steps.call_target", "ownership.call_target"),
-            reason="call ownership contradicts its step invocation",
+        self.results.run(
+            SemanticCheck(
+                id="steps.call_owner",
+                tier="P0",
+                evidence=("TE-9",),
+                location="$.ng_trajectory.turns[*].model_calls",
+                reason="call ownership contradicts its step invocation",
+                predicate=lambda: owner_valid,
+                available=self.available,
+                applies=self.scope.steps,
+                depends_on=("steps.call_target", "ownership.call_target"),
+            )
         )
         policy = set(range(len(self.calls))) - helpers
-        self.semantic(
-            "steps.attempt_accounting",
-            bool(policy) and all(refs[i] == 1 for i in policy) and not any(refs[i] for i in helpers),
-            "$.ng_trajectory.turns[*].model_calls",
-            ("TE-9",),
-            applies=self.scope.steps,
-            depends_on=("steps.call_target", "steps.compaction_target"),
-            reason="every policy attempt needs one step; compaction helper calls must remain separate",
+        self.results.run(
+            SemanticCheck(
+                id="steps.attempt_accounting",
+                tier="P0",
+                evidence=("TE-9",),
+                location="$.ng_trajectory.turns[*].model_calls",
+                reason="every policy attempt needs one step; compaction helper calls must remain separate",
+                predicate=lambda: bool(policy)
+                and all((refs[i] == 1 for i in policy))
+                and (not any((refs[i] for i in helpers))),
+                available=self.available,
+                applies=self.scope.steps,
+                depends_on=("steps.call_target", "steps.compaction_target"),
+            )
         )
 
     def evaluation(self) -> None:
-        for field, schema in (
-            ("reward", {"type": "number"}),
-            ("evaluation_completed", {"type": "boolean"}),
-            ("mask_sample", {"type": "boolean"}),
-        ):
-            self.schema(
-                "evaluation." + field,
-                self.record,
-                s.required_object(**{field: schema}),
-                "$",
-                ("TE-6",),
+        self.results.run(
+            SchemaCheck(
+                id="evaluation.reward",
+                tier="P0",
+                evidence=("TE-6",),
+                location="$",
+                reason="required evidence does not match its schema",
+                value=self.record,
+                schema=s.required_object(reward={"type": "number"}),
+                depends_on=(),
                 applies=self.scope.verifier,
+                available=self.available,
             )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="evaluation.evaluation_completed",
+                tier="P0",
+                evidence=("TE-6",),
+                location="$",
+                reason="required evidence does not match its schema",
+                value=self.record,
+                schema=s.required_object(evaluation_completed={"type": "boolean"}),
+                depends_on=(),
+                applies=self.scope.verifier,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="evaluation.mask_sample",
+                tier="P0",
+                evidence=("TE-6",),
+                location="$",
+                reason="required evidence does not match its schema",
+                value=self.record,
+                schema=s.required_object(mask_sample={"type": "boolean"}),
+                depends_on=(),
+                applies=self.scope.verifier,
+                available=self.available,
+            )
+        )
         failed = self.record.get("mask_sample") is True or self.record.get("evaluation_completed") is False
         for field in ("failure_kind", "failure_reason"):
-            self.schema(
-                "evaluation." + field,
-                self.record,
-                s.required_object(**{field: s.NONBLANK}),
-                "$",
-                ("TE-6",),
-                applies=self.scope.verifier and failed,
+            self.results.run(
+                SchemaCheck(
+                    id="evaluation." + field,
+                    tier="P0",
+                    evidence=("TE-6",),
+                    location="$",
+                    reason="required evidence does not match its schema",
+                    value=self.record,
+                    schema=s.required_object(**{field: {"type": "string", "pattern": "\\S"}}),
+                    depends_on=(),
+                    applies=self.scope.verifier and failed,
+                    available=self.available,
+                )
             )
         sandbox = [r for r in self.observations if r.get("kind") == "sandbox"]
-        self.schema(
-            "sandbox.present",
-            sandbox,
-            s.NONEMPTY,
-            "$.ng_agent_observations.records",
-            ("TE-6",),
-            applies=self.scope.require_sandbox,
-        )
-        for key, schema in (
-            ("identity", s.required_object(sandbox_id=s.NONBLANK)),
-            ("outcome", s.SANDBOX_OUTCOME),
-            ("error", s.SANDBOX_ERROR),
-        ):
-            self.schema(
-                "sandbox." + key,
-                sandbox,
-                {"type": "array", "items": schema},
-                "$.ng_agent_observations.records",
-                ("TE-6",),
-                applies=bool(sandbox) or self.scope.require_sandbox,
-                depends_on=("sandbox.present",) if self.scope.require_sandbox else (),
+        self.results.run(
+            SchemaCheck(
+                id="sandbox.present",
+                tier="P0",
+                evidence=("TE-6",),
+                location="$.ng_agent_observations.records",
+                reason="required evidence does not match its schema",
+                value=sandbox,
+                schema={"type": "array", "minItems": 1},
+                depends_on=(),
+                applies=self.scope.require_sandbox,
+                available=self.available,
             )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="sandbox.identity",
+                tier="P0",
+                evidence=("TE-6",),
+                location="$.ng_agent_observations.records",
+                reason="required evidence does not match its schema",
+                value=sandbox,
+                schema={"type": "array", "items": s.required_object(sandbox_id={"type": "string", "pattern": "\\S"})},
+                depends_on=("sandbox.present",) if self.scope.require_sandbox else (),
+                applies=bool(sandbox) or self.scope.require_sandbox,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="sandbox.outcome",
+                tier="P0",
+                evidence=("TE-6",),
+                location="$.ng_agent_observations.records",
+                reason="required evidence does not match its schema",
+                value=sandbox,
+                schema={
+                    "type": "array",
+                    "items": s.required_object(
+                        outcome={"enum": ["completed", "failed", "timeout", "oom", "sandbox_error", "cancelled"]}
+                    ),
+                },
+                depends_on=("sandbox.present",) if self.scope.require_sandbox else (),
+                applies=bool(sandbox) or self.scope.require_sandbox,
+                available=self.available,
+            )
+        )
+        self.results.run(
+            SchemaCheck(
+                id="sandbox.error",
+                tier="P0",
+                evidence=("TE-6",),
+                location="$.ng_agent_observations.records",
+                reason="required evidence does not match its schema",
+                value=sandbox,
+                schema={
+                    "type": "array",
+                    "items": {
+                        "if": s.required_object(outcome={"enum": ["failed", "oom", "sandbox_error"]}),
+                        "then": s.required_object(error_type={"type": "string", "pattern": "\\S"}),
+                    },
+                },
+                depends_on=("sandbox.present",) if self.scope.require_sandbox else (),
+                applies=bool(sandbox) or self.scope.require_sandbox,
+                available=self.available,
+            )
+        )
 
     def gaps(self) -> None:
         # Canonical projection retains producer gaps. Duplicate attachment gaps are not compared.
         codes = [str(g.get("code", "")) for g in _objects(self.trajectory.get("gaps"))]
-        for key, bad, evidence, applies in (
-            (
-                "calls.capture_gap",
-                any(c.startswith("model_call_capture") or c == "agent_observation_join_failed" for c in codes),
-                ("TE-1", "TE-4", "TE-7", "TE-8", "TE-9"),
-                True,
-            ),
-            (
-                "ownership.gap",
-                any(c.startswith("model_call_reference") or c == "model_call_ownership_unavailable" for c in codes),
-                ("TE-8",),
-                True,
-            ),
-            (
-                "steps.gap",
-                any(
-                    c in {"turns_unavailable", "turn_evidence_incomplete", "trajectory_projection_failed"}
-                    for c in codes
-                ),
-                ("TE-3",),
-                self.scope.steps,
-            ),
-            ("steps.accounting_gap", "turn_model_call_scope_incomplete" in codes, ("TE-9",), self.scope.steps),
-        ):
-            self.semantic(
-                key,
-                not bad,
-                "$.ng_trajectory.gaps",
-                evidence,
-                applies=applies,
-                depends_on=("model_calls.present",),
+        self.results.run(
+            SemanticCheck(
+                id="calls.capture_gap",
+                tier="P0",
+                evidence=("TE-1", "TE-4", "TE-7", "TE-8", "TE-9"),
+                location="$.ng_trajectory.gaps",
                 reason="producer explicitly reports unavailable evidence",
+                predicate=lambda: not any(
+                    (c.startswith("model_call_capture") or c == "agent_observation_join_failed" for c in codes)
+                ),
+                available=self.available,
+                applies=True,
+                depends_on=("model_calls.present",),
             )
+        )
+        self.results.run(
+            SemanticCheck(
+                id="ownership.gap",
+                tier="P0",
+                evidence=("TE-8",),
+                location="$.ng_trajectory.gaps",
+                reason="producer explicitly reports unavailable evidence",
+                predicate=lambda: not any(
+                    (c.startswith("model_call_reference") or c == "model_call_ownership_unavailable" for c in codes)
+                ),
+                available=self.available,
+                applies=True,
+                depends_on=("model_calls.present",),
+            )
+        )
+        self.results.run(
+            SemanticCheck(
+                id="steps.gap",
+                tier="P0",
+                evidence=("TE-3",),
+                location="$.ng_trajectory.gaps",
+                reason="producer explicitly reports unavailable evidence",
+                predicate=lambda: not any(
+                    (
+                        c in {"turns_unavailable", "turn_evidence_incomplete", "trajectory_projection_failed"}
+                        for c in codes
+                    )
+                ),
+                available=self.available,
+                applies=self.scope.steps,
+                depends_on=("model_calls.present",),
+            )
+        )
+        self.results.run(
+            SemanticCheck(
+                id="steps.accounting_gap",
+                tier="P0",
+                evidence=("TE-9",),
+                location="$.ng_trajectory.gaps",
+                reason="producer explicitly reports unavailable evidence",
+                predicate=lambda: not "turn_model_call_scope_incomplete" in codes,
+                available=self.available,
+                applies=self.scope.steps,
+                depends_on=("model_calls.present",),
+            )
+        )
 
     def result(self, source: str) -> dict:
         checks = self.results.dump()
@@ -567,7 +1187,7 @@ class Inspector:
             "source": source,
             "checks": checks,
             "evidence": evidence,
-            "verdict": "fulfilled" if gate_passes(evidence) else "not_fulfilled",
+            "verdict": "fulfilled" if gate_passes(checks) else "not_fulfilled",
             "token_availability": {
                 key: {
                     "available": sum(_mapping(c.get("token_stats")).get(key) is not None for c in self.calls),

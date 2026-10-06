@@ -108,7 +108,7 @@ def inspect_bundle(
             }
             for key, counts in totals.items()
         }
-        # Apply the join alternative per rollout, not only to aggregate columns.
+        # Require the individual P0 checks to pass on every rollout.
         passed = passing_records == count
         summary = {
             "schema_version": "harness-evidence/v1",
@@ -128,8 +128,8 @@ def inspect_bundle(
                 "retained artifacts only; no live qualification or health certification",
                 "TE-6 checks shipped Gym reward/resolution; extended verifier provenance is not certified",
                 "sandbox rows are reported under TE-6; record presence is enforced only with require_sandbox",
-                "existing stricter checks and ownership gate remain; this is not exact RFC alignment",
-                "P1 evidence is outside this profile",
+                "all applicable individual P0 checks must pass; TE labels only group results",
+                "no P1 or P2 checks are currently defined",
             ],
             **manifest,
         }
@@ -221,7 +221,7 @@ def inspect_matrix(
                 "",
                 *[f"- {key}: {name}" for key, name in NAMES.items()],
                 "",
-                "P0 requires all applicable TE-1–TE-7 and TE-8 or TE-9 on every record.",
+                "P0 requires every applicable individual P0 check to pass on every record; TE labels only group results.",
                 "TE-2 PASS means saved counts have valid types and ranges; availability is reported separately.",
                 "See each evidence_summary.json for input hashes, applicability, token availability and limitations.",
             ]

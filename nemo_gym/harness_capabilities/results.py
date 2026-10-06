@@ -3,13 +3,14 @@
 
 """Independent check results. TE labels describe results; they never schedule checks."""
 
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
+from .checks import Check, Kind, PriorityTier
+
 
 Status = Literal["pass", "fail", "not_assessed", "not_applicable"]
-Kind = Literal["schema", "semantic", "behavioral"]
 
 
 @dataclass
@@ -17,6 +18,7 @@ class CheckResult:
     id: str
     kind: Kind
     status: Status
+    tier: PriorityTier
     evidence: tuple[str, ...] = ()
     locations: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
@@ -35,6 +37,7 @@ class Results:
         kind: Kind,
         status: Status,
         *,
+        tier: PriorityTier,
         evidence: tuple[str, ...] = (),
         location: str = "",
         reason: str = "",
@@ -43,8 +46,8 @@ class Results:
         rank = {"not_applicable": 0, "pass": 1, "not_assessed": 2, "fail": 3}
         row = self.rows.get(check_id)
         if row is None:
-            row = self.rows[check_id] = CheckResult(check_id, kind, status, tuple(evidence))
-        elif row.kind != kind or row.evidence != tuple(evidence):
+            row = self.rows[check_id] = CheckResult(check_id, kind, status, tier, tuple(evidence))
+        elif row.kind != kind or row.evidence != tuple(evidence) or row.tier != tier:
             raise ValueError(f"conflicting definition for check {check_id}")
         if rank[status] > rank[row.status]:
             row.status = status
@@ -54,39 +57,42 @@ class Results:
                     target.append(value)
         return status == "pass"
 
-    def check(
-        self,
-        check_id: str,
-        kind: Kind,
-        condition: bool | Callable[[], bool],
-        *,
-        evidence: tuple[str, ...] = (),
-        location: str = "",
-        reason: str = "",
-        applies: bool = True,
-        available: bool = True,
-        depends_on: tuple[str, ...] = (),
-    ) -> bool:
-        blocked = [key for key in depends_on if key not in self.rows or self.rows[key].status != "pass"]
-        if not applies:
+    def run(self, check: Check) -> bool:
+        """Execute a typed rule; excluded and blocked rules never evaluate their input."""
+        blocked = [key for key in check.depends_on if key not in self.rows or self.rows[key].status != "pass"]
+        evaluation = None
+        status: Status
+        if not check.applies:
             status = "not_applicable"
-        elif not available or blocked:
+        elif not check.available or blocked:
             status = "not_assessed"
         else:
-            passed = condition() if callable(condition) else condition
-            status = "pass" if passed else "fail"
-        return self.add(
-            check_id,
-            kind,
+            evaluation = check.evaluate()
+            status = "pass" if evaluation.passed else "fail"
+        passed = self.add(
+            check.id,
+            check.kind,
             status,
-            evidence=evidence,
-            location=location,
-            reason=reason if status in ("fail", "not_assessed") else "",
+            tier=check.tier,
+            evidence=check.evidence,
+            location=check.location,
+            reason=check.reason if status in ("fail", "not_assessed") else "",
             blocked_by=blocked,
         )
+        if evaluation is not None and status == "fail":
+            for location in evaluation.locations:
+                if location not in self.rows[check.id].locations:
+                    self.rows[check.id].locations.append(location)
+        return passed
 
     def dump(self) -> list[dict]:
         return [asdict(row) for row in self.rows.values()]
+
+
+def gate_passes(checks: list[dict], *, tier: PriorityTier = "P0") -> bool:
+    """Require all applicable checks in the selected tier, independently of TE labels."""
+    selected = [c for c in checks if c["tier"] == tier and c["status"] != "not_applicable"]
+    return bool(selected) and all(c["status"] == "pass" for c in selected)
 
 
 def render_matrices(harnesses: dict) -> str:

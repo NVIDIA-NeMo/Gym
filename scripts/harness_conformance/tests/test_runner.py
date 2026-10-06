@@ -328,6 +328,9 @@ def test_missing_runtime_is_recorded_and_no_stale_output_reused(tmp_path, monkey
         assert row["evidence"]["TE-1"] == {"required": 1, "observed": 0, "passed": 0}
     assert (output / "conformance_summary.json").is_file()
     before = (output / "suite.json").read_bytes()
+    manifest = json.loads(before)
+    assert {"behavior.py", "checker.py", "checks.py"} <= manifest["checker_sources"].keys()
+    assert "behavior.py" not in manifest["runner_sources"]
     assert main(["--harness", "pi", "--output", str(output)]) == 2
     assert (output / "suite.json").read_bytes() == before
 
@@ -491,7 +494,7 @@ def test_malformed_evidence_keeps_other_check_results(retained_episode, collecti
 
 
 def test_missing_tool_request_blocks_only_request_comparison(retained_episode):
-    from scripts.harness_conformance.behavior import tool_checks
+    from nemo_gym.harness_capabilities.behavior import tool_checks
 
     directory, witness = retained_episode
     record = json.loads((directory / "rollouts.jsonl").read_text())
@@ -512,3 +515,51 @@ def test_missing_witness_does_not_fail_retained_evidence(retained_episode):
         c["status"] in {"not_assessed", "not_applicable"} for c in result["checks"] if c["kind"] == "behavioral"
     )
     assert all(v["verdict"] == "fulfilled" for v in result["evidence"].values())
+
+
+@pytest.mark.parametrize("tier,verdict", [("P0", "not_fulfilled"), ("P1", "fulfilled"), ("P2", "fulfilled")])
+def test_scenario_gate_uses_individual_priority(retained_episode, monkeypatch, tier, verdict):
+    from dataclasses import replace
+
+    from scripts.harness_conformance import runner
+
+    directory, _ = retained_episode
+    original = runner.inspect_behavior
+
+    def with_failing_check(*args, **kwargs):
+        checks = original(*args, **kwargs)
+        # No TE label: this rule's priority alone determines whether it blocks P0.
+        checks.append(
+            {
+                "id": "independent.test",
+                "kind": "behavioral",
+                "tier": tier,
+                "status": "fail",
+                "evidence": (),
+                "locations": [],
+                "reasons": ["mismatch"],
+                "blocked_by": [],
+            }
+        )
+        return checks
+
+    monkeypatch.setattr(runner, "inspect_behavior", with_failing_check)
+    scenario = replace(SCENARIO["verifier_failure"], evidence=())
+    result = inspect_episode(scenario, directory, {"returncode": 0, "timed_out": False})
+    assert result["verdict"] == verdict
+    assert result["behavioral_status"] == "fail"
+    assert result["evidence"] == {}
+    assert all(c["tier"] == "P0" for c in result["checks"] if c["id"] != "independent.test")
+
+
+def test_required_step_check_not_exempted_by_invocation_ownership(retained_episode):
+    directory, _ = retained_episode
+    bundle = directory / "rollouts.jsonl"
+    record = json.loads(bundle.read_text())
+    for turn in record["ng_trajectory"]["turns"]:
+        turn["model_calls"] = []
+    bundle.write_text(json.dumps(record) + "\n")
+    result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
+    assert result["evidence"]["TE-8"]["verdict"] == "fulfilled"
+    assert result["evidence"]["TE-9"]["verdict"] == "not_fulfilled"
+    assert result["verdict"] == "not_fulfilled"

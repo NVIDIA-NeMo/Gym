@@ -9,11 +9,30 @@ import json
 import pytest
 from jsonschema import Draft202012Validator
 
-from nemo_gym.harness_capabilities import schemas as s
-from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
+from nemo_gym.harness_capabilities.checker import EvidenceScope, Inspector, inspect_record
+from nemo_gym.harness_capabilities.checks import Check, SchemaCheck
 from nemo_gym.harness_capabilities.cli import inspect_bundle, main
 from nemo_gym.harness_capabilities.reader import hydrate_record
+from nemo_gym.harness_capabilities.results import Results
 from tests.unit_tests.harness_capabilities.synthetic import evidence_record
+
+
+def item_schema(check_id):
+    """Exercise the schemas on actual check definitions, not separate copies."""
+    definitions = {}
+
+    class CollectingResults(Results):
+        def run(self, check: Check) -> bool:
+            definitions[check.id] = check
+            return super().run(check)
+
+    inspector = Inspector(evidence_record(), EvidenceScope())
+    inspector.results = CollectingResults()
+    inspector.model_calls()
+    inspector.structure()
+    check = definitions[check_id]
+    assert isinstance(check, SchemaCheck)
+    return check.schema["items"]
 
 
 def inspect(record, *, require_sandbox=False):
@@ -94,7 +113,7 @@ def test_tool_output_must_be_saved_at_its_designated_field(value):
 
 @pytest.mark.parametrize("value", ["", [], {}])
 def test_empty_tool_content_is_valid_json_evidence(value):
-    assert Draft202012Validator(s.TOOL_OUTPUT).is_valid({"output": value})
+    assert Draft202012Validator(item_schema("tools.output")).is_valid({"output": value})
 
 
 @pytest.mark.parametrize("field", ["evaluation_completed", "mask_sample"])
@@ -192,7 +211,7 @@ def test_supported_call_reference_forms_resolve(form):
     ],
 )
 def test_incomplete_or_blank_call_reference_fails_schema(ref):
-    validator = Draft202012Validator(s.TURN_CALLS)
+    validator = Draft202012Validator(item_schema("steps.references"))
     assert not validator.is_valid({"model_calls": [ref]})
 
 
@@ -247,7 +266,7 @@ def test_request_protocol_shapes(dialect):
     call = record["ng_trajectory"]["model_calls"][0]
     call["response_metadata"]["dialect"] = dialect
     key = "input" if dialect == "responses" else "messages"
-    validator = Draft202012Validator(s.REQUEST)
+    validator = Draft202012Validator(item_schema("calls.request"))
     call["request"] = {key: []}
     assert validator.is_valid(call)
     call["request"] = {key: "prompt"}
@@ -260,7 +279,7 @@ def test_chat_choices_require_an_assistant_message():
     record = evidence_record()
     call = record["ng_trajectory"]["model_calls"][0]
     call["response_metadata"]["dialect"] = "chat"
-    validator = Draft202012Validator(s.RESPONSE)
+    validator = Draft202012Validator(item_schema("calls.response"))
     call["response"] = {"choices": [{}]}
     assert not validator.is_valid(call)
     call["response"] = {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
@@ -307,8 +326,8 @@ def test_diagnostics_do_not_copy_payloads():
         ({"status_code": 999, "error_category": "http_error"}, False),
     ],
 )
-def test_registered_outcome_alternatives(patch, expected):
-    validator = Draft202012Validator(s.required_object(response_metadata=s.OUTCOME))
+def test_outcome_alternatives(patch, expected):
+    validator = Draft202012Validator(item_schema("calls.outcome"))
     assert validator.is_valid({"response_metadata": patch}) is expected
 
 
@@ -317,12 +336,12 @@ def test_canonical_model_reference_requires_nonblank_name(name):
     record = evidence_record()
     call = record["ng_trajectory"]["model_calls"][0]
     call["response_metadata"]["model_ref"]["name"] = name
-    validator = Draft202012Validator(s.required_object(response_metadata=s.required_object(model_ref=s.MODEL_REF)))
+    validator = Draft202012Validator(item_schema("calls.model"))
     assert not validator.is_valid(call)
 
 
 def test_response_id_is_required_for_success_but_optional_for_error():
-    validator = Draft202012Validator(s.required_object(response_metadata=s.RESPONSE_ID))
+    validator = Draft202012Validator(item_schema("calls.response_id"))
     assert not validator.is_valid({"response_metadata": {}})
     assert not validator.is_valid({"response_metadata": {"response_id": " "}})
     assert validator.is_valid({"response_metadata": {"response_id": "r"}})
@@ -332,7 +351,7 @@ def test_response_id_is_required_for_success_but_optional_for_error():
 
 def test_no_response_transport_error_and_returned_body_are_distinct():
     call = evidence_record()["ng_trajectory"]["model_calls"][0]
-    validator = Draft202012Validator(s.RESPONSE)
+    validator = Draft202012Validator(item_schema("calls.response"))
     call["response"] = None
     assert not validator.is_valid(call)
     call["response_metadata"].update(status_code=None, error_category="timeout")
@@ -347,4 +366,4 @@ def test_no_response_transport_error_and_returned_body_are_distinct():
 def test_supplied_optional_outcome_strings_are_nonblank(field):
     metadata = {"status_code": 200, "dialect": "responses", "response_status": "completed"}
     metadata[field] = " "
-    assert not Draft202012Validator(s.OUTCOME).is_valid(metadata)
+    assert not Draft202012Validator(item_schema("calls.outcome")["properties"]["response_metadata"]).is_valid(metadata)

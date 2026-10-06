@@ -15,12 +15,13 @@ from pathlib import Path
 
 import psutil
 
+from nemo_gym import harness_capabilities
+from nemo_gym.harness_capabilities.behavior import inspect_behavior, model_checks, tool_checks
 from nemo_gym.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
 from nemo_gym.harness_capabilities.cli import inspect_bundle
 from nemo_gym.harness_capabilities.reader import digest_file, hydrate_record, json_rows
-from nemo_gym.harness_capabilities.results import render_matrices
+from nemo_gym.harness_capabilities.results import gate_passes, render_matrices
 
-from .behavior import inspect_behavior, tool_checks
 from .episode import HARNESSES
 from .scenarios import SCENARIOS, SUITE, Scenario, suite_manifest
 
@@ -102,8 +103,6 @@ def _tool_witness_issues(record: dict, witnessed: list[dict]) -> list[str]:
 
 
 def _canonical_witness_issues(record: dict, attempts: list[dict]) -> list[str]:
-    from .behavior import model_checks
-
     return [
         reason
         for c in model_checks(record, attempts, fingerprint=_fingerprint)
@@ -122,7 +121,15 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     record = hydrate_record(raw) if raw is not None else None
     scope = EvidenceScope(tools=scenario.tool_steps > 0, verifier=not scenario.terminal_error)
     artifact = inspect_record(record, scope=scope)
-    checks = artifact["checks"] + inspect_behavior(scenario, witness, record, fingerprint=_fingerprint)
+    checks = artifact["checks"] + inspect_behavior(
+        witness,
+        record,
+        http_errors=scenario.http_errors,
+        terminal_error=scenario.terminal_error,
+        tool_steps=scenario.tool_steps,
+        expected_reward=scenario.expected_reward,
+        fingerprint=_fingerprint,
+    )
     summary, report = None, None
     if record is not None:
         destination, summary = inspect_bundle(bundle, output=directory / "evidence", scope=scope)
@@ -133,13 +140,10 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         evidence[key] = {"verdict": verdict, "artifact_verdict": verdict}
     behavioral = [c for c in checks if c["kind"] == "behavioral"]
     behavior_passed = all(c["status"] in ("pass", "not_applicable") for c in behavioral)
-    mandatory = [key for key in scenario.evidence if key not in ("TE-8", "TE-9")]
-    artifact_passed = all(evidence[key]["verdict"] == "fulfilled" for key in mandatory)
-    artifact_passed = artifact_passed and any(evidence[k]["verdict"] == "fulfilled" for k in ("TE-8", "TE-9"))
     return {
         "scenario": scenario.name,
         "exercised": record is not None,
-        "verdict": "fulfilled" if artifact_passed and behavior_passed else "not_fulfilled",
+        "verdict": "fulfilled" if gate_passes(checks) else "not_fulfilled",
         "issues": [reason for c in checks if c["status"] == "fail" for reason in c["reasons"]],
         "checks": checks,
         "behavioral_status": "pass"
@@ -178,6 +182,9 @@ def run_suite(
         timeout=timeout,
         python=sys.version,
         runner_sources={p.name: digest_file(p) for p in sorted(Path(__file__).parent.glob("*.py"))},
+        checker_sources={
+            p.name: digest_file(p) for p in sorted(Path(harness_capabilities.__file__).parent.glob("*.py"))
+        },
     )
     (output / "suite.json").write_text(_json(manifest))
     rows = {}
@@ -237,7 +244,7 @@ def run_suite(
         }
     passed = all(row["verdict"] == "fulfilled" for row in rows.values())
     summary = {
-        "schema_version": "harness-probe-report/v2",
+        "schema_version": "harness-probe-report/v1",
         "suite": SUITE,
         "runner_status": "completed",
         "full_suite": scenarios == SCENARIOS,

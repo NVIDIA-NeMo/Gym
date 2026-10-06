@@ -14,9 +14,10 @@ python scripts/inspect_harness_conformance.py \
     --output results/my-harness/evidence
 ```
 
-The `gym-p0/v3` profile checks the currently supported P0 trajectory evidence
-(TE-1–TE-9). Every applicable TE-1–TE-7 must pass, plus **TE-8 or TE-9** on
-every rollout. TE labels group results for reporting; they do not schedule the checks.
+The `gym-p0/v1` profile checks the currently supported P0 trajectory evidence
+(TE-1–TE-9). Each check declares `tier`: `P0`, `P1` or `P2`. All current
+checks are P0, and every applicable P0 check must pass on every rollout.
+TE labels group results for reporting; they do not determine priority or schedule checks.
 
 | Evidence | Persisted contract |
 | --- | --- |
@@ -31,8 +32,7 @@ every rollout. TE labels group results for reporting; they do not schedule the c
 | TE-9: step join | Every retained policy attempt belongs to exactly one identified step. Retries remain attempts on that step. Explicit compaction-helper refs are excluded from policy steps. |
 
 Checks do not repeat Gym's unit tests for ID uniqueness, timestamp ordering or
-usage normalization. Semantic checks resolve references to their saved targets;
-ambiguous targets fail that relationship check.
+usage normalization.
 
 The profile covers retained artifacts. It does not certify live failure/retry
 scenario coverage, closed-run completeness, health, accuracy, or deployment
@@ -45,7 +45,7 @@ remain outside this profile.
 By default the pair has policy steps, tools, and a verifier. Use `--no-tools`,
 `--no-verifier`, or `--no-steps` only when that feature does not apply to the
 pair. These flags select checks; they are not inferred from the artifacts.
-A step-free pair still needs TE-8.
+With `--no-steps`, step checks are excluded; invocation ownership checks still apply.
 
 `--bundle` accepts a JSONL file, or a directory with exactly one `rollouts.jsonl`
 or `evaluator_rollouts.jsonl`, at its root or under `artifacts/`.
@@ -65,7 +65,7 @@ Each inspection atomically publishes an immutable directory containing:
 
 - `evidence_summary.json`: gate, per-TE counts, token availability, applicability,
   source/checker hashes and qualification limits.
-- `evidence_results.jsonl`: individual checks with ID, kind, status, JSONPath,
+- `evidence_results.jsonl`: individual checks with ID, kind, priority tier, status, JSONPath,
   reason and blocking prerequisite; TE labels and failure findings for reporting.
 - `evidence_report.md`: evidence table.
 
@@ -75,9 +75,13 @@ Identical inputs and checker versions reuse the same report directory.
 
 ## Read individual results
 
-`schema` checks validate selected fields. `semantic` checks resolve relationships.
-The conformance runner additionally reports `behavioral` checks against its
-independent scripted Model Server, tool and verifier observations.
+- **Schema:** saved fields have the required structure, types and values.
+- **Semantic:** references resolve to unambiguous saved targets.
+- **Behavioral:** harness behavior and saved evidence match the controlled test's
+  model, tool and verifier observations.
+
+The standalone inspector runs schema and semantic checks; the conformance runner
+also runs behavioral checks.
 
 Each check reports `pass`, `fail`, `not_assessed` (input or a prerequisite is
 unavailable), or `not_applicable` (excluded by the declared scenario scope).
@@ -89,9 +93,6 @@ The runner writes `conformance_report.md` with one table per harness: check IDs 
 rows and scenarios as columns. Process return codes and timeouts stay in
 `scenario_result.json` as execution status, outside the evidence checks. A failure
 sidecar without a normal rollout leaves artifact checks unassessed.
-
-Version 3 changes check IDs, result shape and evidence authority. Regenerate old
-reports; do not combine old failure-only findings with the new individual results.
 
 ## Compare harnesses
 

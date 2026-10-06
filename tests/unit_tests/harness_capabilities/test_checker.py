@@ -126,7 +126,7 @@ def test_tool_record_does_not_require_p1_clocks(record):
     assert verdict(record, "TE-5") == "fulfilled"
 
 
-def test_step_join_can_qualify_without_invocation_refs():
+def test_step_join_does_not_exempt_p0_invocation_ownership():
     record = evidence_record()
     for inv in record["ng_trajectory"]["invocations"]:
         if inv["kind"] == "agent_invocation":
@@ -134,7 +134,7 @@ def test_step_join_can_qualify_without_invocation_refs():
     result = inspect_record(hydrate_record(record))
     assert result["evidence"]["TE-8"]["verdict"] == "not_fulfilled"
     assert result["evidence"]["TE-9"]["verdict"] == "fulfilled"
-    assert result["verdict"] == "fulfilled"
+    assert result["verdict"] == "not_fulfilled"
 
 
 def test_duplicated_step_ref_fails_without_closure_requirement():

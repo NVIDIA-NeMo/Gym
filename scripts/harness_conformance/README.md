@@ -91,7 +91,8 @@ reported as exercise failures.
 The runner observes actual retry behavior. A runtime that does not retry the
 injected error leaves that scenario incomplete. A terminal error must still
 produce a collected rollout to satisfy its evidence checks; a failure sidecar
-alone cannot qualify it. TE-8 and TE-9 remain alternatives per scenario.
+alone cannot qualify it. Every applicable individual P0 check must pass;
+TE labels group results and do not determine priority or grant exemptions.
 
 ## Results
 
