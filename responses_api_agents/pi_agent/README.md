@@ -133,8 +133,9 @@ configuration must not replace the agent's cap with a larger value. Enforcement 
 7. Environment Server asks Resources to verify and close the task session. The benchmark
    owns its verification procedure and sandbox teardown.
 
-Harness execution uses `nemo_gym.sandbox.session.SandboxSession`, shared with Hermes.
-The adapter stages its worker input and collects its own output; the common lifecycle
+Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
+The adapter stages its worker input and collects its own output. The shared session
+uploads the supervisor at activation and owns its control files and log access; the common lifecycle
 confirms process cleanup, captures artifacts, then releases the provider connection or
 owned sandbox. Concurrent closes share that work, failed cleanup remains retryable,
 and interrupted activations keep captured observations after session files are removed.

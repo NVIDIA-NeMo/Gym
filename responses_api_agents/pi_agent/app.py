@@ -31,6 +31,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -64,10 +65,9 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, process_supervisor
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.sandbox.session import SandboxSession
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
 from responses_api_agents.pi_agent.sandbox import PiSandboxSession
 from responses_api_agents.pi_agent.setup_pi import ensure_pi
@@ -535,7 +535,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         state = PiSandboxSession(
             request=body,
             session=SandboxSession(
-                sandbox=sandbox, directory=directory, workdir=workdir, owns_sandbox=owns_sandbox, harness="Pi"
+                sandbox=sandbox, session_dir=directory, workdir=workdir, owns_sandbox=owns_sandbox, harness="Pi"
             ),
             runtime=runtime,
         )
@@ -569,7 +569,6 @@ class PiAgent(SimpleResponsesAPIAgent):
                     f"Pi sandbox installation failed (exit {installed.return_code}): {details[-16000:]}"
                 )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
-            await sandbox.upload(Path(process_supervisor.__file__), f"{directory}/process_supervisor.py")
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -649,14 +648,15 @@ class PiAgent(SimpleResponsesAPIAgent):
         await state.upload_json("home/.pi/agent/settings.json", self._build_settings_config())
         output_limit_extension = "output-limit.mjs"
         await state.session.sandbox.upload(
-            Path(__file__).with_name(output_limit_extension), f"{state.session.directory}/{output_limit_extension}"
+            Path(__file__).with_name(output_limit_extension), f"{state.session.session_dir}/{output_limit_extension}"
         )
         runtime_guards_extension = "runtime-guards.mjs"
         await state.session.sandbox.upload(
-            Path(__file__).with_name(runtime_guards_extension), f"{state.session.directory}/{runtime_guards_extension}"
+            Path(__file__).with_name(runtime_guards_extension),
+            f"{state.session.session_dir}/{runtime_guards_extension}",
         )
         await state.session.sandbox.upload(
-            Path(__file__).with_name("outcome.mjs"), f"{state.session.directory}/outcome.mjs"
+            Path(__file__).with_name("outcome.mjs"), f"{state.session.session_dir}/outcome.mjs"
         )
         command = [
             f"{state.runtime}/node/bin/node",
@@ -671,11 +671,11 @@ class PiAgent(SimpleResponsesAPIAgent):
             self.config.model,
             "--no-extensions",
             "--extension",
-            f"{state.session.directory}/{output_limit_extension}",
+            f"{state.session.session_dir}/{output_limit_extension}",
             "--extension",
-            f"{state.session.directory}/{runtime_guards_extension}",
+            f"{state.session.session_dir}/{runtime_guards_extension}",
             "--extension",
-            f"{state.session.directory}/outcome.mjs",
+            f"{state.session.session_dir}/outcome.mjs",
             "--no-skills",
             "--no-prompt-templates",
             "--no-themes",
@@ -685,13 +685,13 @@ class PiAgent(SimpleResponsesAPIAgent):
         if system:
             command += ["--append-system-prompt", system]
         payload = {
-            "directory": state.session.directory,
+            "directory": state.session.session_dir,
             "command": command,
             "prompt": prompt,
             "cwd": state.session.workdir,
             "env": {
-                "HOME": f"{state.session.directory}/home",
-                "PI_CODING_AGENT_DIR": f"{state.session.directory}/home/.pi/agent",
+                "HOME": f"{state.session.session_dir}/home",
+                "PI_CODING_AGENT_DIR": f"{state.session.session_dir}/home/.pi/agent",
                 "PI_SKIP_VERSION_CHECK": "1",
                 "PI_TELEMETRY": "0",
                 "NEMO_GYM_PI_BASH_TIMEOUT": str(self.config.sandbox_bash_timeout_seconds),

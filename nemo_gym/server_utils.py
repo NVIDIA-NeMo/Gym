@@ -24,6 +24,7 @@ from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
 from functools import partial
+from importlib import import_module
 from ipaddress import ip_network
 from os import environ, getenv
 from pathlib import Path
@@ -725,6 +726,28 @@ class ServerClient(BaseModel):
 
     # Resolved base URLs, cached by server name.
     _server_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    def assistant_message_header(self, model_server_name: str) -> bytes | None:
+        """Read the optional header property of harnesses using this model server.
+
+        The property lives on the harness package so model workers need not import
+        an agent's app or install its runtime dependencies.
+        """
+        headers = set()
+        for instance in self.global_config_dict.values():
+            if not isinstance(instance, (dict, DictConfig)):
+                continue
+            for harness, config in instance.get("responses_api_agents", {}).items():
+                model = config.get("model_server") or {}
+                if model.get("name") != model_server_name or model.get("type") != "responses_api_models":
+                    continue
+                package = import_module(f"responses_api_agents.{harness}")
+                header = getattr(package, "_assistant_message_header", None)
+                if header is not None:
+                    headers.add(header.lower())
+        if len(headers) > 1:
+            raise ValueError(f"Harnesses using model server {model_server_name!r} declare different assistant headers")
+        return next(iter(headers), None)
 
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
