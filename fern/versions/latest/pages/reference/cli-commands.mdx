@@ -94,6 +94,9 @@ Commands that need a model (`gym env start`, `gym eval run`) configure it throug
 | `--model-url` | Base URL of an existing model server endpoint. Maps to `policy_base_url`. |
 | `--model-api-key` | API key for the model server. Maps to `policy_api_key`. |
 
+<Warning>
+`--model-api-key` passed on the command line appears in shell history. Prefer setting `policy_api_key` in your `env.yaml` instead.
+</Warning>
 
 ### Swapping the agent
 
@@ -327,6 +330,10 @@ gym search models vllm --json
 
 Commands for preparing, previewing, and managing datasets. By default dataset transfer commands use HuggingFace; pass `--storage gitlab` to target the GitLab Registry.
 
+<Note>
+HuggingFace commands require an `HF_TOKEN` environment variable (or `huggingface-cli login`). GitLab commands authenticate via `mlflow_tracking_token` in your YAML config (or the `MLFLOW_TRACKING_TOKEN` environment variable). See [Downloading from HuggingFace](/data/download-huggingface) for HF authentication details.
+</Note>
+
 ### `gym dataset upload`
 
 Upload a prepared local JSONL dataset to HuggingFace (default) or GitLab.
@@ -532,7 +539,7 @@ By default, values a run needs but the config leaves undefined (such as `policy_
 | `--model-type NAME` | Also load a named model config (otherwise a dummy `policy_model` is used). |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
-| `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
+| `--allow-unsupported-pairing` | Run even if the environment's resources server does not declare support for the selected agent or model type. |
 | `--model` / `--model-url` / `--model-api-key` | Override model name, base URL, and API key. |
 
 ```bash
@@ -611,7 +618,7 @@ gym env publish my_benchmark --kind benchmark --json
 
 ### `gym env start`
 
-Start the NeMo Gym servers (agents, models, resources) defined by the provided configs. Reads configuration from YAML files and runs each configured server in its own environment.
+Start the NeMo Gym servers (agents, models, resources, and environment servers) defined by the provided configs. Reads configuration from YAML files and runs each configured server in its own environment. Rollout collection dispatches `/run` through environment servers.
 
 | Option | Description |
 | --- | --- |
@@ -622,7 +629,7 @@ Start the NeMo Gym servers (agents, models, resources) defined by the provided c
 | `--model-type NAME` | Load the named model-type config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
-| `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
+| `--allow-unsupported-pairing` | Run even if the environment's resources server does not declare support for the selected agent or model type. |
 | `--model`, `-m` | Served model identifier. See [Selecting the model server](#selecting-the-model-server). |
 | `--model-url` | Model server base URL. |
 | `--model-api-key` | Model server API key. |
@@ -737,7 +744,7 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--resume` | Resume from cached rollouts instead of recollecting. Maps to legacy `+resume_from_cache=true`. Refer to [Resume interrupted runs](#resume-interrupted-runs). |
 | `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Rejected with `--no-serve`. Refer to [Swapping the agent](#swapping-the-agent). |
 | `--agent`, `-a` | Agent instance to collect rollouts with. |
-| `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
+| `--allow-unsupported-pairing` | Run even if the environment's resources server does not declare support for the selected agent or model type. |
 | `--input`, `-i` | Input tasks JSONL file. |
 | `--output`, `-o` | Output rollouts JSONL file. |
 | `--limit` | Maximum number of tasks to run. |
@@ -765,15 +772,23 @@ gym eval run --benchmark aime24 \
     --split validation \
     --concurrency 10
 
-# Against an already-running server, with a remote vLLM endpoint
-gym eval run --no-serve \
+# Two-terminal sequence for --no-serve: model settings go to env start, not eval run.
+# Model URL and credentials configure servers at start time; passing them during
+# collection has no effect on already-running servers.
+
+# Terminal 1 — start servers with the model endpoint configured:
+gym env start \
+    --resources-server math_with_judge \
     --model-type openai_model \
+    --model openai/gpt-oss-120b \
+    --model-url http://127.0.0.1:10240/v1 \
+    --model-api-key dummy_key
+
+# Terminal 2 — collect rollouts against the running servers:
+gym eval run --no-serve \
     --resources-server math_with_judge \
     --output results/test_001.jsonl \
     --split validation \
-    --model openai/gpt-oss-120b \
-    --model-url http://0.0.0.0:10240/v1 \
-    --model-api-key dummy_key \
     --temperature 1.0 \
     --top-p 1.0
 
@@ -875,7 +890,7 @@ omitting data. All invalid JSONL rows are reported together, and no destination 
 model attempts not selected by a turn, such as failed retries, remain in `extra.nemo_gym.surplus_model_calls`; they do not
 become canonical ATIF steps or contribute to final usage totals. The destination directory must not already exist.
 
-This command does not parse ATOF and does not load NeMo Relay. Each ATIF trajectory takes its agent name from the source
+This command does not parse ATIF and does not load NeMo Relay. Each ATIF trajectory takes its agent name from the source
 row's `agent_ref.name`; `--agent-version` records the version of that agent implementation.
 
 | Option | Description |
