@@ -459,6 +459,24 @@ The source JSONL stays unchanged and can still be shared with flat-row recipes.
 Omit `taskset` to keep the current flat-row format. This option accepts flat input
 only; already materialized input should be passed directly with `--input`.
 
+Collation validates each source row against two `task_data.py` schemas. The first
+belongs to the Environment Server the dataset routes to, under
+`environment_servers/<implementation>/task_data.py`, and declares the fields that
+server reads itself. The second belongs to the resources server that server binds,
+and declares the remaining task fields. Each schema validates only the fields it
+declares and the fields neither declares, so a resources schema with
+`extra="forbid"` does not need to list the Environment Server's fields. Fields that
+neither schema declares are reported against the resources server's schema.
+
+The built-in single-agent Environment Servers declare `responses_create_params`,
+one agent's request to one model, with `SingleAgentTaskData` from
+`nemo_gym/task_data.py`. Datasets without `taskset` route by agent, so they are
+single-agent run requests and use the same schema. An Environment Server that runs
+several agents declares its own fields instead, and its rows need no
+`responses_create_params`. Rows that a preparation script already materialized
+name their own taskset, so collation checks them only against the resources
+server's schema, and their Environment Server validates them at dispatch.
+
 For example, add these keys to a config whose `swebench_pro_hermes` Environment
 Server binds the `swebench_pro_hermes_resources_server` instance:
 

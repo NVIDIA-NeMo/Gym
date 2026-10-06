@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
 
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter, ValidationError
 from tqdm.auto import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
@@ -58,12 +58,14 @@ from nemo_gym.global_config import (
     GlobalConfigDictParser,
     get_global_config_dict,
     resolve_dataset_agent,
+    taskset_environment_server,
 )
 from nemo_gym.hf_utils import (
     download_hf_dataset_as_jsonl,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.task_data import (
+    SINGLE_AGENT_TASK_DATA,
     TaskDataSchemaError,
     TaskDataValidationReport,
     TaskDataValidator,
@@ -528,7 +530,29 @@ def _prepare_command(global_config: DictConfig, dataset: DatasetConfig) -> str:
     return "gym eval prepare --config <config path>"
 
 
+class TasksetSchemas(BaseModel):
+    """Where a taskset's rows find their schemas: its environment server and that server's resources server."""
+
+    environment_implementation: str
+    resources_implementation: Optional[str] = None
+
+    @classmethod
+    def for_taskset(cls, global_config_dict: DictConfig, taskset: str) -> "TasksetSchemas":
+        environment = taskset_environment_server(global_config_dict, taskset)
+        resources_ref = environment.config.get("resources_server")
+        resources_name = resources_ref.get("name") if isinstance(resources_ref, DictConfig) else None
+        resources = global_config_dict.get(resources_name) if isinstance(resources_name, str) else None
+        servers = resources.get("resources_servers") if isinstance(resources, DictConfig) else None
+        return cls(
+            environment_implementation=environment.implementation,
+            resources_implementation=next(iter(servers)) if isinstance(servers, DictConfig) and servers else None,
+        )
+
+
 class TrainDataProcessor(BaseModel):
+    # Filled while loading configs, which is the only step with the run's environment_server_routes.
+    _taskset_schemas: Dict[str, TasksetSchemas] = PrivateAttr(default_factory=dict)
+
     def run(self, global_config_dict: DictConfig):  # pragma: no cover
         """
         See the README section "How To: Prepare and validate data for PR submission or RL training"
@@ -637,6 +661,9 @@ class TrainDataProcessor(BaseModel):
                         agent_config.name,
                         pin=dataset.agent if isinstance(dataset, BenchmarkDatasetConfig) else None,
                         taskset=dataset.taskset,
+                    )
+                    self._taskset_schemas[dataset.taskset] = TasksetSchemas.for_taskset(
+                        global_config_dict, dataset.taskset
                     )
 
             inner_config = agent_config.get_inner_run_server_config()
@@ -1015,37 +1042,65 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 return next(iter(other.resources_servers))
         return None
 
+    @staticmethod
+    def _load_task_data_schema(impl_key: str, base_folder: str) -> Optional[TypeAdapter]:
+        """Load ``<base_folder>/<impl_key>/task_data.py``, or None when the server ships no usable schema."""
+        server_dir = find_server_dir(impl_key, base_folder=base_folder)
+        if server_dir is None:
+            return None
+        try:
+            return load_task_data_schema(server_dir)
+        except TaskDataSchemaError as e:
+            warnings.warn(f"Skipping task_data validation for {impl_key}: {e}", stacklevel=2)
+            return None
+
     @classmethod
     def _task_data_validator_for(
         cls,
         c: ServerInstanceConfig,
         d: Union[DatasetConfig, BenchmarkDatasetConfig],
         server_instance_configs: List[ServerInstanceConfig],
+        *,
+        taskset_schemas: Optional["TasksetSchemas"] = None,
     ) -> Optional[TaskDataValidator]:
+        """The validator for one dataset: its environment server's schema composed with its task owner's.
+
+        A dataset routed by taskset uses the routed environment server's schema (``taskset_schemas``),
+        and the schema of the resources server that environment server binds. A dataset routed by agent
+        is a single-agent run request, so it uses ``SingleAgentTaskData``, and the schema of the
+        resources server or self-contained agent that owns its data.
+        """
+        # A taskset whose route was not resolved has no known environment server, so it is not
+        # assumed to be a single-agent run request.
+        environment_adapter: Optional[TypeAdapter] = SINGLE_AGENT_TASK_DATA if d.taskset is None else None
         impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
         base_folder = "resources_servers"
-        if impl_key is None:
+        if taskset_schemas is not None:
+            environment_adapter = cls._load_task_data_schema(
+                taskset_schemas.environment_implementation, "environment_servers"
+            )
+            if taskset_schemas.resources_implementation is not None:
+                impl_key = taskset_schemas.resources_implementation
+        if impl_key is None and c.SERVER_TYPE == "responses_api_agents":
             # No resources server owns this data. A self-contained agent (one that declares no
             # resources_server reference at all) may own a schema itself, under
             # responses_api_agents/<implementation>/task_data.py. An agent whose reference is
-            # dangling is skipped: its schema home is the (missing) resources server.
-            if c.SERVER_TYPE != "responses_api_agents":
-                return None
-            if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
-                return None
-            impl_key = next(iter(c.responses_api_agents))
-            base_folder = "responses_api_agents"
-        server_dir = find_server_dir(impl_key, base_folder=base_folder)
-        if server_dir is None:
+            # dangling has no task owner: its schema home is the (missing) resources server.
+            if getattr(c.get_inner_run_server_config(), "resources_server", None) is None:
+                impl_key = next(iter(c.responses_api_agents))
+                base_folder = "responses_api_agents"
+        adapter = cls._load_task_data_schema(impl_key, base_folder) if impl_key is not None else None
+        if adapter is None and environment_adapter is None:
             return None
-        try:
-            adapter = load_task_data_schema(server_dir)
-        except TaskDataSchemaError as e:
-            warnings.warn(f"Skipping task_data validation for {impl_key}: {e}", stacklevel=2)
-            return None
-        if adapter is None:
-            return None
-        return TaskDataValidator(server_name=impl_key, adapter=adapter, dataset_fpath=str(d.jsonl_fpath))
+        server_name = impl_key if adapter is not None else None
+        if server_name is None:
+            server_name = taskset_schemas.environment_implementation if taskset_schemas is not None else "single-agent"
+        return TaskDataValidator(
+            server_name=server_name,
+            adapter=adapter,
+            dataset_fpath=str(d.jsonl_fpath),
+            environment_adapter=environment_adapter,
+        )
 
     @classmethod
     def _dataset_metrics_hook_for(
@@ -1121,7 +1176,12 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 positional_task_id_rows = 0
                 validator = None
                 if task_data_validation != "off":
-                    validator = self._task_data_validator_for(c, d, server_instance_configs)
+                    validator = self._task_data_validator_for(
+                        c,
+                        d,
+                        server_instance_configs,
+                        taskset_schemas=self._taskset_schemas.get(d.taskset) if d.taskset is not None else None,
+                    )
                 with open(prepare_path, "w") as target:
                     for row_index, line in enumerate(self._iter_dataset_lines(d)):
                         row = json.loads(line)

@@ -1977,6 +1977,36 @@ def taskset_environment_server_name(global_config_dict: DictConfig, taskset: Opt
     return name if isinstance(name, str) else None
 
 
+@dataclass(frozen=True)
+class TasksetEnvironmentServer:
+    """The Environment Server a taskset routes to."""
+
+    name: str
+    implementation: str
+    config: DictConfig
+
+
+def taskset_environment_server(global_config_dict: DictConfig, taskset: str) -> TasksetEnvironmentServer:
+    """Resolve a taskset through ``environment_server_routes`` to its Environment Server instance.
+
+    Raises ``ConfigError`` when the taskset has no route or the route names no Environment Server.
+    """
+    routes = global_config_dict.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
+    environment_name = routes.get(taskset) if isinstance(routes, DictConfig) else None
+    if not isinstance(environment_name, str) or not environment_name:
+        raise ConfigError(f"No Environment Server route for taskset {taskset!r}; set environment_server_routes.")
+    environment = global_config_dict.get(environment_name)
+    servers = environment.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME) if isinstance(environment, DictConfig) else None
+    if not isinstance(servers, DictConfig) or len(servers) != 1:
+        raise ConfigError(f"Taskset {taskset!r} route {environment_name!r} must name an Environment Server.")
+    implementation, environment_config = next(iter(servers.items()))
+    if not isinstance(environment_config, DictConfig):
+        raise ConfigError(f"Environment Server {environment_name!r} must have a configuration mapping.")
+    return TasksetEnvironmentServer(
+        name=environment_name, implementation=str(implementation), config=environment_config
+    )
+
+
 def resolve_dataset_agent(
     global_config_dict: DictConfig,
     declaring_instance_name: str,
@@ -2006,17 +2036,8 @@ def resolve_dataset_agent(
     is_agent = isinstance(block, DictConfig) and "responses_api_agents" in block
 
     if taskset is not None:
-        routes = global_config_dict.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
-        environment_name = routes.get(taskset) if isinstance(routes, DictConfig) else None
-        if not isinstance(environment_name, str) or not environment_name:
-            raise ConfigError(f"No Environment Server route for taskset {taskset!r}; set environment_server_routes.")
-        environment = global_config_dict.get(environment_name)
-        servers = environment.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME) if isinstance(environment, DictConfig) else None
-        if not isinstance(servers, DictConfig) or len(servers) != 1:
-            raise ConfigError(f"Taskset {taskset!r} route {environment_name!r} must name an Environment Server.")
-        environment_config = next(iter(servers.values()))
-        if not isinstance(environment_config, DictConfig):
-            raise ConfigError(f"Environment Server {environment_name!r} must have a configuration mapping.")
+        environment = taskset_environment_server(global_config_dict, taskset)
+        environment_name, environment_config = environment.name, environment.config
         agent_names = []
         for agent_ref in environment_server_agent_refs(environment_config):
             name = agent_ref.get("name")

@@ -18,6 +18,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.task_data import (
     RESERVED_ROW_KEYS,
+    SINGLE_AGENT_TASK_DATA,
     TaskDataSchemaError,
     TaskDataValidator,
     find_server_dir,
@@ -25,13 +26,14 @@ from nemo_gym.task_data import (
     normalize_task_fields,
     validate_jsonl_rows,
 )
-from nemo_gym.train_data_utils import TrainDataProcessor
+from nemo_gym.train_data_utils import TrainDataProcessor, TrainDataProcessorConfig
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_FILES = sorted(
     list((REPO_ROOT / "resources_servers").glob("*/task_data.py"))
     + list((REPO_ROOT / "responses_api_agents").glob("*/task_data.py"))
+    + list((REPO_ROOT / "environment_servers").glob("*/task_data.py"))
 )
 
 
@@ -46,7 +48,8 @@ class TestNormalizeTaskFields:
         fields, conflicts = normalize_task_fields(
             {"responses_create_params": {}, "verifier_metadata": {"label": "safe", "type": "homonyms"}}
         )
-        assert fields == {"label": "safe", "type": "homonyms"}
+        # responses_create_params is a single-agent task field, not a framework key.
+        assert fields == {"responses_create_params": {}, "label": "safe", "type": "homonyms"}
         assert conflicts == []
 
     def test_equal_duplicate_is_harmless(self):
@@ -67,7 +70,7 @@ class TestNormalizeTaskFields:
         fields, conflicts = normalize_task_fields(
             {"responses_create_params": {}, "task_data": {"expected_city": "Tokyo"}}
         )
-        assert fields == {"expected_city": "Tokyo"}
+        assert fields == {"responses_create_params": {}, "expected_city": "Tokyo"}
         assert conflicts == []
 
     def test_empty_task_data_container_leaves_no_residue(self):
@@ -142,13 +145,18 @@ class _Schema(BaseModel):
 
 
 class TestTaskDataValidator:
-    def _validator(self):
+    def _validator(self, environment_adapter=None):
         from pydantic import TypeAdapter
 
-        return TaskDataValidator(server_name="s", adapter=TypeAdapter(_Schema), dataset_fpath="d.jsonl")
+        return TaskDataValidator(
+            server_name="s",
+            adapter=TypeAdapter(_Schema),
+            dataset_fpath="d.jsonl",
+            environment_adapter=environment_adapter,
+        )
 
     def test_clean_rows(self):
-        v = self._validator()
+        v = self._validator(SINGLE_AGENT_TASK_DATA)
         v.validate_row(0, {"responses_create_params": {}, "question": "q", "expected_answer": "a"})
         assert v.report.clean and v.report.rows == 1 and v.report.error_rows == 0
 
@@ -182,7 +190,7 @@ class TestTaskDataValidator:
         assert v.report.conflicting_keys == {"question": 1}
 
     def test_materialized_task_validates_its_task_data(self):
-        v = self._validator()
+        v = self._validator(SINGLE_AGENT_TASK_DATA)
         task = {"taskset": "t", "task_id": "0"}
         v.validate_row(
             0,
@@ -210,9 +218,22 @@ class TestTaskDataValidator:
     def test_materialized_verifier_metadata_preserves_schema_normalization(self, nested):
         fields = {"verifier_metadata": {"question": "q", "expected_answer": "a"}}
         task_input = {"responses_create_params": {}, **({"task_data": fields} if nested else fields)}
-        v = self._validator()
+        v = self._validator(SINGLE_AGENT_TASK_DATA)
         v.validate_row(0, {"task_id": {"taskset": "t", "task_id": "0"}, "task_input": task_input})
         assert v.report.clean
+
+    def test_materialized_row_is_not_required_to_be_a_single_agent_run_request(self):
+        # A row that already names its taskset is validated by its environment server at dispatch, so a
+        # dataset routed by agent does not apply the single-agent schema to it.
+        v = self._validator(SINGLE_AGENT_TASK_DATA)
+        v.validate_row(
+            0, {"task_id": {"taskset": "t", "task_id": "0"}, "task_input": {"question": "q", "expected_answer": "a"}}
+        )
+        assert v.report.clean, v.report.summary()
+        # A plain row in the same dataset is a run request and still needs one.
+        v.validate_row(1, {"question": "q", "expected_answer": "a"})
+        assert v.report.error_rows == 1
+        assert "responses_create_params" in v.report.errors[0]
 
     def test_mixed_materialized_task_reports_conflicting_fields(self):
         v = self._validator()
@@ -286,7 +307,7 @@ class TestOwningResourcesServerImpl:
 
 
 class TestShippedSchemas:
-    """CI enforcement for every committed task_data.py (resources servers and agents)."""
+    """CI enforcement for every committed task_data.py (resources servers, agents, and environment servers)."""
 
     ALLOWED_IMPORT_PREFIXES = ("pydantic", "nemo_gym.task_data")
 
@@ -354,7 +375,9 @@ class TestShippedSchemas:
         assert server_dir is not None
         adapter = load_task_data_schema(server_dir)
         example = server_dir / "data" / "example.jsonl"
-        report = validate_jsonl_rows(server, adapter, str(example), example.read_text().splitlines())
+        report = validate_jsonl_rows(
+            server, adapter, str(example), example.read_text().splitlines(), environment_adapter=SINGLE_AGENT_TASK_DATA
+        )
         assert report.rows > 0
         assert report.clean, report.summary()
 
@@ -401,7 +424,7 @@ class TestSelfContainedAgentSchemaFallback:
     def _dataset(self):
         from types import SimpleNamespace
 
-        return SimpleNamespace(jsonl_fpath="data/example.jsonl")
+        return SimpleNamespace(jsonl_fpath="data/example.jsonl", taskset=None)
 
     def test_agent_without_rs_reference_uses_its_own_schema(self, tmp_path, monkeypatch):
         agent_dir = tmp_path / "responses_api_agents" / "tau2"
@@ -418,13 +441,25 @@ class TestSelfContainedAgentSchemaFallback:
         assert validator is not None
         assert validator.report.server_name == "tau2"
 
-    def test_agent_without_rs_reference_and_no_schema_is_skipped(self, tmp_path, monkeypatch):
+    @staticmethod
+    def _assert_validates_only_single_agent_fields(validator):
+        # Rows routed by agent are single-agent run requests, so responses_create_params is still checked.
+        # With no task owner schema, other fields are neither validated nor reported as unknown.
+        validator.validate_row(0, {"responses_create_params": {"input": "q"}, "anything": 1})
+        assert validator.report.clean
+        validator.validate_row(1, {"anything": 1})
+        assert validator.report.error_rows == 1
+        assert "responses_create_params" in validator.report.errors[0]
+
+    def test_agent_without_rs_reference_and_no_schema_validates_single_agent_fields(self, tmp_path, monkeypatch):
         (tmp_path / "responses_api_agents" / "tau2").mkdir(parents=True)
         monkeypatch.chdir(tmp_path)
         agent = self._agent("tau2", None)
-        assert TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent]) is None
+        self._assert_validates_only_single_agent_fields(
+            TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent])
+        )
 
-    def test_agent_with_dangling_rs_reference_is_skipped(self, tmp_path, monkeypatch):
+    def test_agent_with_dangling_rs_reference_validates_single_agent_fields(self, tmp_path, monkeypatch):
         agent_dir = tmp_path / "responses_api_agents" / "tau2"
         agent_dir.mkdir(parents=True)
         (agent_dir / "task_data.py").write_text(
@@ -432,7 +467,10 @@ class TestSelfContainedAgentSchemaFallback:
         )
         monkeypatch.chdir(tmp_path)
         agent = self._agent("tau2", {"type": "resources_servers", "name": "missing_rs"})
-        assert TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent]) is None
+        # The agent's own schema is not used: its schema home is the missing resources server.
+        self._assert_validates_only_single_agent_fields(
+            TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent])
+        )
 
     def test_agent_with_valid_rs_reference_uses_that_servers_schema(self, tmp_path, monkeypatch):
         # The benchmark shape: the dataset is declared on the agent, the agent references a
@@ -532,6 +570,103 @@ class TestSchemaPresence:
             "describe its dataset rows (see nemo_gym/task_data.py for the protocol)."
         )
 
+    def test_every_environment_server_ships_a_schema(self):
+        missing = sorted(
+            d.name
+            for d in (REPO_ROOT / "environment_servers").iterdir()
+            if d.is_dir() and (d / "app.py").exists() and not (d / "task_data.py").exists()
+        )
+        assert not missing, (
+            f"environment servers without a task_data.py schema: {missing}. Every environment server must "
+            "declare the task fields it reads itself (see nemo_gym/task_data.py for the protocol)."
+        )
+
+    def test_single_agent_task_data_matches_the_runtime_input(self):
+        from nemo_gym.single_agent_turn_types import SingleAgentTurnTaskInput
+        from nemo_gym.task_data import SingleAgentTaskData
+
+        # The runtime model keeps every other task field in its task_data container.
+        assert set(SingleAgentTurnTaskInput.model_fields) == set(SingleAgentTaskData.model_fields) | {"task_data"}
+
+
+class TestEnvironmentServerSchemas:
+    """Collation validates each dataset against the environment server it routes to."""
+
+    @pytest.fixture
+    def servers(self, tmp_path, monkeypatch):
+        (tmp_path / "resources_servers" / "qa").mkdir(parents=True)
+        (tmp_path / "resources_servers" / "qa" / "task_data.py").write_text(
+            "from pydantic import BaseModel, ConfigDict\n"
+            "class TaskData(BaseModel):\n"
+            "    model_config = ConfigDict(extra='forbid')\n"
+            "    expected_answer: str\n"
+        )
+        (tmp_path / "environment_servers" / "dialogue").mkdir(parents=True)
+        (tmp_path / "environment_servers" / "dialogue" / "task_data.py").write_text(
+            "from pydantic import BaseModel, ConfigDict\n"
+            "class TaskData(BaseModel):\n"
+            "    model_config = ConfigDict(extra='allow')\n"
+            "    persona: str\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        return tmp_path
+
+    def _collate(self, tmp_path, rows, *, environment=None):
+        source = tmp_path / "source.jsonl"
+        source.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        dataset = {"name": "d", "type": "example", "jsonl_fpath": str(source)}
+        config = {
+            "resources": {"resources_servers": {"qa": {"entrypoint": "app.py", "domain": "other"}}},
+            "agent": {
+                "responses_api_agents": {
+                    "simple_agent": {
+                        "entrypoint": "app.py",
+                        "resources_server": {"type": "resources_servers", "name": "resources"},
+                    }
+                }
+            },
+        }
+        if environment is None:
+            config["resources"]["resources_servers"]["qa"]["datasets"] = [dataset]
+        else:
+            config["resources"]["resources_servers"]["qa"]["datasets"] = [dict(dataset, taskset="t")]
+            config["environment_server_routes"] = {"t": "environment"}
+            config["environment"] = {
+                "environment_servers": {
+                    environment: {
+                        "entrypoint": "app.py",
+                        "agent_server": {"type": "responses_api_agents", "name": "agent"},
+                        "resources_server": {"type": "resources_servers", "name": "resources"},
+                    }
+                }
+            }
+        global_config = OmegaConf.create(config | {"mode": "example_validation", "output_dirpath": str(tmp_path)})
+        processor = TrainDataProcessor()
+        configs = processor.load_and_validate_server_instance_configs(
+            TrainDataProcessorConfig.model_validate(global_config), global_config
+        )
+        return processor._collate_samples_single_type("example", configs, task_data_validation="error")
+
+    @pytest.mark.parametrize("environment", [None, "single_agent_turn"])
+    def test_single_agent_rows_need_responses_create_params(self, servers, environment):
+        # The resources schema forbids extra fields but never sees responses_create_params.
+        self._collate(
+            servers, [{"responses_create_params": {"input": "q"}, "expected_answer": "a"}], environment=environment
+        )
+        with pytest.raises(ValueError, match=r"SingleAgentTaskData; responses_create_params;\s+Field required"):
+            self._collate(servers, [{"expected_answer": "a"}], environment=environment)
+
+    def test_environment_server_with_its_own_fields_needs_no_responses_create_params(self, servers):
+        self._collate(servers, [{"persona": "p", "expected_answer": "a"}], environment="dialogue")
+        # Both schemas report their errors for one row.
+        with pytest.raises(ValueError, match=r"persona;\s+Field required.*expected_answer;\s+Field required"):
+            self._collate(servers, [{"question": "q"}], environment="dialogue")
+
+    def test_environment_server_without_a_schema_validates_the_resources_fields(self, servers):
+        self._collate(servers, [{"expected_answer": "a"}], environment="unschematized")
+        with pytest.raises(ValueError, match="expected_answer"):
+            self._collate(servers, [{"answer": "a"}], environment="unschematized")
+
 
 class TestRepoDataMatchesSchemas:
     """The drift gate: every committed dataset row must validate against its server's schema.
@@ -618,7 +753,16 @@ class TestRepoDataMatchesSchemas:
                                 )
                                 owner = ("resources_servers", rs) if rs else None
                             if owner and str(d["jsonl_fpath"]) in tracked:
-                                server_files.setdefault(owner, set()).add(str(d["jsonl_fpath"]))
+                                # A dataset that declares a taskset routes to an environment server and
+                                # uses its schema; one that does not routes by agent and is a single-agent
+                                # run request. Mirrors collation's choice.
+                                environment = None
+                                if d.get("taskset"):
+                                    route = (full.get("environment_server_routes") or {}).get(d["taskset"])
+                                    block = full.get(route) if route else None
+                                    servers = block.get("environment_servers") if isinstance(block, dict) else None
+                                    environment = next(iter(servers)) if isinstance(servers, dict) else ""
+                                server_files.setdefault(owner, {})[str(d["jsonl_fpath"])] = environment
 
         assert len(server_files) > 50, "mapping looks broken: too few servers with committed data"
         agent_owned = [o for o in server_files if o[0] == "responses_api_agents"]
@@ -631,8 +775,14 @@ class TestRepoDataMatchesSchemas:
             if adapter is None:
                 failures.append(f"{server}: no loadable schema")
                 continue
-            for f in sorted(files):
-                report = validate_jsonl_rows(server, adapter, f, open(f).read().splitlines())
+            for f, environment in sorted(files.items()):
+                environment_adapter = SINGLE_AGENT_TASK_DATA
+                if environment is not None:
+                    environment_dir = find_server_dir(environment, base_folder="environment_servers")
+                    environment_adapter = load_task_data_schema(environment_dir) if environment_dir else None
+                report = validate_jsonl_rows(
+                    server, adapter, f, open(f).read().splitlines(), environment_adapter=environment_adapter
+                )
                 rows_checked += report.rows
                 if not report.clean:
                     failures.append(report.summary())
