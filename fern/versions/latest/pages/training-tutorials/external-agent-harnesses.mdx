@@ -140,7 +140,7 @@ Use the routing option that matches the experiment:
 
 Do not configure the same routing key in both `agent_pool` and `fan_out`. Gym rejects the ambiguous configuration before collection. Every selected agent must be present in the merged config and compatible with the task's resources server through `allowed_agents` when that restriction is declared.
 
-When NeMo RL uses Gym sharding, keep a pool's source route and all of its target agents on the same shard. NeMo RL chooses the Gym actor before the actor applies `agent_pool`; cross-shard harness pools require corresponding routing support in NeMo RL.
+With a NeMo RL version that supports sharded agent pools, put `agent_pool` directly under `env.nemo_gym`. NeMo RL applies the same deterministic selection before choosing the Gym actor, so target agents may live on different shards. Include the pool's resources-server config on every target shard; the resources route may be repeated for this purpose, while each agent must live on exactly one shard. Older NeMo RL versions must keep the source route and all pool targets on the same shard.
 
 Some harnesses probe optional model-server endpoints such as `/v1/models`. Gym does not need to implement or predict these endpoints, and no per-harness route configuration is required. An unimplemented request that returns 404 or 405 cannot contribute policy-generated text and does not make capture incomplete. Any other response from an unrecognized route fails closed because its content could enter a later prompt; the rollout is marked with `mask_sample: true`.
 
