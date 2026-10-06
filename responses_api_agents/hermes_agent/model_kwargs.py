@@ -76,7 +76,12 @@ def install_summary_compat(agent: Any, *, preserve_reasoning_history: bool) -> N
         return original_ensure_client(reason=reason)
 
     def handle_max_iterations(messages: list[dict[str, Any]], api_call_count: int) -> str:
-        agent._gym_iteration_limit_reached = True
+        if not getattr(agent, "_gym_iteration_limit_reached", False):
+            agent._gym_iteration_limit_reached = True
+            callback = getattr(agent, "_gym_on_iteration_limit_reached", None)
+            invocation_id = getattr(agent, "_gym_invocation_id", None)
+            if callable(callback) and isinstance(invocation_id, str):
+                callback(invocation_id=invocation_id)
         return original_handle_max_iterations(messages, api_call_count)
 
     agent._ensure_primary_openai_client = ensure_client
