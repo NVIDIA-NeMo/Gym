@@ -21,6 +21,7 @@ and the shape of an emitted row.
 
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -141,17 +142,20 @@ class TestArguments:
         assert args.limit is None and args.upstream_dir == prep.DEFAULT_UPSTREAM_DIR
 
 
+def _committed_checkout(path: Path) -> None:
+    """A git checkout with ``evaluate.py`` committed, standing in for the upstream clone."""
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    (path / "evaluate.py").write_text("")
+    subprocess.run(["git", "-C", str(path), "add", "evaluate.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"],
+        check=True,
+    )
+
+
 class TestCheckout:
     def test_unpinned_checkout_is_refused(self, tmp_path) -> None:
-        import subprocess
-
-        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-        (tmp_path / "evaluate.py").write_text("")
-        subprocess.run(["git", "-C", str(tmp_path), "add", "evaluate.py"], check=True)
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"],
-            check=True,
-        )
+        _committed_checkout(tmp_path)
         with pytest.raises(upstream.UpstreamError, match="expected d066523f"):
             upstream.require_pinned_checkout(tmp_path)
 
@@ -159,9 +163,22 @@ class TestCheckout:
         with pytest.raises(upstream.UpstreamError, match="no upstream checkout"):
             upstream.require_pinned_checkout(tmp_path)
 
+    def test_dirty_tracked_file_at_the_pinned_head_is_refused(self, tmp_path, monkeypatch) -> None:
+        # The right HEAD with edited tracked content is a different instrument; the
+        # untracked artifacts the setup generates (the extracted repo_index) stay allowed.
+        _committed_checkout(tmp_path)
+        monkeypatch.setattr(upstream, "UPSTREAM_COMMIT", upstream.checkout_head(tmp_path))
+        upstream.require_pinned_checkout(tmp_path)
+        (tmp_path / "repo_index.json").write_text("{}")
+        upstream.require_pinned_checkout(tmp_path)
+        (tmp_path / "evaluate.py").write_text("tampered")
+        with pytest.raises(upstream.UpstreamError, match="modified tracked files"):
+            upstream.require_pinned_checkout(tmp_path)
+
     def test_ensure_checkout_does_not_clone_over_an_existing_pinned_checkout(self, tmp_path, monkeypatch) -> None:
         (tmp_path / "evaluate.py").write_text("")
         monkeypatch.setattr(upstream, "checkout_head", lambda d: upstream.UPSTREAM_COMMIT)
+        monkeypatch.setattr(upstream, "require_clean_tracked_tree", lambda d: None)
 
         def no_network(*a, **k):
             raise AssertionError("must not clone")

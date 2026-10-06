@@ -25,6 +25,19 @@
 set -euo pipefail
 UPSTREAM="${1:?usage: build_image.sh <upstream_checkout> [image_tag]}"
 TAG="${2:-verisoftbench/lean:d066523}"
+# The image context must come from the audited commit with unmodified tracked content;
+# untracked generated artifacts (the extracted repo_index) are allowed. A tag naming the
+# commit is not evidence of its content, so refuse anything else here.
+PINNED_COMMIT="d066523f2b087f28b793c05eacb29bf2e42c0504"  # pragma: allowlist secret
+HEAD="$(git -C "$UPSTREAM" rev-parse HEAD)"
+if [[ "$HEAD" != "$PINNED_COMMIT" ]]; then
+    echo "error: $UPSTREAM is at $HEAD, expected $PINNED_COMMIT" >&2
+    exit 1
+fi
+if [[ -n "$(git -C "$UPSTREAM" status --porcelain --untracked-files=no)" ]]; then
+    echo "error: $UPSTREAM has modified tracked files; restore the pinned content first" >&2
+    exit 1
+fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CTX="$(mktemp -d)"
 trap 'rm -rf "$CTX"' EXIT

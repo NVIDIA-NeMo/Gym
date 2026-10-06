@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 import upstream
-from upstream import UPSTREAM_COMMIT, Harness, UpstreamError, VerificationOutcome
+from upstream import UPSTREAM_COMMIT, Harness, UpstreamError, UpstreamModules, VerificationOutcome
 
 
 GYM_ROOT = Path(__file__).resolve().parents[3]
@@ -105,6 +105,26 @@ class TestLoader:
         monkeypatch.setitem(sys.modules, "core", type(sys)("core"))
         with pytest.raises(UpstreamError, match="already taken"):
             upstream.load_upstream(UPSTREAM_DIR)
+
+    def test_checkout_modified_after_the_cached_load_is_refused(self, harness, monkeypatch, tmp_path) -> None:
+        # ``load_upstream`` returns its cached modules on every later call; the tracked
+        # tree must still be rechecked there so a checkout edited after the first load
+        # is not presented as the pinned instrument.
+        repo = tmp_path / "checkout"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "tracked.py").write_text("original\n")
+        subprocess.run(["git", "-C", str(repo), "add", "tracked.py"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"],
+            check=True,
+        )
+        cached = UpstreamModules(None, None, None, None, repo.resolve())
+        monkeypatch.setattr(upstream, "_LOADED", cached)
+        assert upstream.load_upstream(repo) is cached
+        (repo / "tracked.py").write_text("tampered\n")
+        with pytest.raises(UpstreamError, match="modified tracked files"):
+            upstream.load_upstream(repo)
 
 
 class TestRepoIndex:

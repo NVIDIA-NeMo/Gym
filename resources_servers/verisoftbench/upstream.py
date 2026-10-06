@@ -112,13 +112,39 @@ def checkout_head(upstream_dir: Path) -> str:
         raise UpstreamError(f"{upstream_dir} is not a git checkout: {e}") from e
 
 
+def require_clean_tracked_tree(upstream_dir: Path) -> None:
+    """Fail closed when tracked upstream content differs from what its HEAD commits.
+
+    A checkout can sit at the right HEAD with edited tracked files, so the commit check
+    alone does not pin the instrument. Untracked and ignored artifacts — the extracted
+    ``data/repo_index``, caches — are deliberately generated into the checkout and stay
+    allowed; one ``git status`` call keeps this cheap enough to repeat on cached loads.
+    """
+    try:
+        status = subprocess.run(
+            ["git", "-C", str(upstream_dir), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        raise UpstreamError(f"cannot check tracked content of {upstream_dir}: {e}") from e
+    if status.strip():
+        dirty = ", ".join(line.strip() for line in status.strip().splitlines()[:5])
+        raise UpstreamError(
+            f"upstream checkout at {upstream_dir} has modified tracked files ({dirty}); "
+            f"restore the pinned content of {UPSTREAM_COMMIT} before scoring"
+        )
+
+
 def require_pinned_checkout(upstream_dir: Path) -> None:
-    """Fail closed unless ``upstream_dir`` is the audited upstream commit."""
+    """Fail closed unless ``upstream_dir`` is the audited upstream commit, unmodified."""
     if not (upstream_dir / "evaluate.py").exists():
         raise UpstreamError(f"no upstream checkout at {upstream_dir}; run scripts/prepare_verisoftbench.py first")
     head = checkout_head(upstream_dir)
     if head != UPSTREAM_COMMIT:
         raise UpstreamError(f"upstream checkout at {upstream_dir} is at {head}, expected {UPSTREAM_COMMIT}")
+    require_clean_tracked_tree(upstream_dir)
 
 
 def ensure_checkout(upstream_dir: Path) -> None:
@@ -215,6 +241,9 @@ def load_upstream(upstream_dir: Path) -> UpstreamModules:
     if _LOADED is not None:
         if _LOADED.root != upstream_dir:
             raise UpstreamError(f"upstream already loaded from {_LOADED.root}; cannot also load {upstream_dir}")
+        # The commit cannot move under an open checkout unnoticed, but tracked files can:
+        # recheck them cheaply so a checkout edited after the first load is refused.
+        require_clean_tracked_tree(upstream_dir)
         return _LOADED
     require_pinned_checkout(upstream_dir)
     for name in UPSTREAM_TOP_LEVEL_MODULES:
