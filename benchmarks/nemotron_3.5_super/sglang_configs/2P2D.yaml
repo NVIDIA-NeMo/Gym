@@ -64,7 +64,8 @@ observability:
 benchmark:
   type: custom
   container_image: gym-eval
-  client_placement: last_decode
+  placement:
+    node: last_decode
   stream_output: true
   env:
     GYM_CONFIG: benchmarks/swebench/verified/opencode.yaml
