@@ -169,3 +169,75 @@ def test_task_assets_and_image_match_official_definition(tmp_path, monkeypatch):
     toml.write_text(toml.read_text() + "# changed\n")
     with pytest.raises(ValueError, match="missing or changed"):
         task.load_task(tmp_path, data)
+
+
+@pytest.mark.asyncio
+async def test_optional_reward_prefers_canonical_script_location(tmp_path):
+    import asyncio
+
+    from resources_servers.swe_together.evaluation import read_test_reward
+
+    canonical = tmp_path / "canonical.txt"
+    staged = tmp_path / "staged.txt"
+    canonical.write_text("0.875\n")
+    staged.write_text("0.0\n")
+
+    class FilesystemSandbox:
+        async def exec(self, command, *, timeout_s):
+            command = command.replace("/logs/verifier/reward.txt", str(canonical)).replace(
+                "/tmp/judge_inputs/logs/reward.txt", str(staged)
+            )
+            process = await asyncio.create_subprocess_shell(command, stdout=asyncio.subprocess.PIPE)
+            stdout, _ = await process.communicate()
+            return SimpleNamespace(stdout=stdout.decode(), return_code=process.returncode, error_type=None)
+
+    sandbox = FilesystemSandbox()
+    result = await read_test_reward(sandbox)
+    assert result["test_reward_raw"] == 0.875 and result["test_reward_path"] == str(canonical)
+    assert result["test_reward_source"] == "judge_optional_tests"
+    canonical.unlink()
+    assert (await read_test_reward(sandbox))["test_reward_raw"] == 0.0
+    staged.unlink()
+    result = await read_test_reward(sandbox)
+    assert result["test_reward_raw"] is None and "test_reward_error" not in result
+    canonical.write_text("nan\n")
+    result = await read_test_reward(sandbox)
+    assert result["test_reward_raw"] is None and "not finite" in result["test_reward_error"]
+
+
+def test_importer_emits_catalog_envelope_without_hidden_prompts(tmp_path, monkeypatch):
+    import hashlib
+
+    from benchmarks.swe_together import prepare
+    from nemo_gym.base_resources_server import BaseRunRequest
+    from resources_servers.swe_together import task
+
+    directory = tmp_path / "source/tasks/fixture"
+    directory.mkdir(parents=True)
+    toml = directory / "task.toml"
+    toml.write_text('[environment]\ndocker_image = "ghcr.io/official/task:pin"\n')
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {"tasks": [{"task_id": "fixture", "files": {"task.toml": hashlib.sha256(toml.read_bytes()).hexdigest()}}]}
+        )
+    )
+    monkeypatch.setattr(task, "MANIFEST", manifest)
+    monkeypatch.setattr(prepare, "MANIFEST", manifest)
+    images = tmp_path / "images.json"
+    images.write_text(
+        json.dumps(
+            {
+                "fixture": {
+                    "image": "ghcr.io/official/task:pin",
+                    "image_digest": "sha256:" + "a" * 64,
+                    "workdir": "/workspace",
+                }
+            }
+        )
+    )
+    output = prepare.prepare(tmp_path / "source", images, tmp_path / "tasks.jsonl")
+    row = json.loads(output.read_text())
+    request = BaseRunRequest.model_validate(row)
+    assert request.responses_create_params.input == []
+    assert row["task_input"]["task_data"]["task_id"] == row["task_id"]["task_id"] == "fixture"

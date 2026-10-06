@@ -38,6 +38,9 @@ def prepare(
         load_task(source / "tasks" / task_id, task)
         rows.append(
             {
+                # The catalog's BaseRunRequest validator requires this envelope.
+                # Interactive Resources supplies the actual prompt at seed time.
+                "responses_create_params": {"input": []},
                 "task_id": {"taskset": "swe_together:full109", "task_id": task_id},
                 "task_input": {"task_data": task.model_dump()},
             }

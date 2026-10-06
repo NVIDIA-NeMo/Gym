@@ -3,6 +3,7 @@
 """Frozen-goal correctness and independent interaction diagnostics."""
 
 import json
+import math
 from pathlib import Path
 from shlex import quote
 from uuid import uuid4
@@ -107,6 +108,29 @@ async def stage_judge(sandbox: AsyncSandbox, task_dir: Path, patch: str, workdir
     )
 
 
+async def read_test_reward(sandbox: AsyncSandbox) -> dict:
+    """Canonical scripts may hardcode /logs/verifier despite staged LOGS_DIR."""
+    result = {"test_reward_raw": None, "test_reward_source": "judge_optional_tests"}
+    try:
+        output = await sandbox.exec(
+            "for path in /logs/verifier/reward.txt /tmp/judge_inputs/logs/reward.txt; do "
+            'if [ -r "$path" ]; then printf "%s\\n" "$path"; cat "$path"; exit; fi; done',
+            timeout_s=15,
+        )
+        if output.return_code or output.error_type:
+            raise RuntimeError("Optional test reward read failed")
+        lines = (output.stdout or "").splitlines()
+        if lines:
+            result["test_reward_path"] = lines[0]
+            reward = float("\n".join(lines[1:]).strip())
+            if not math.isfinite(reward):
+                raise ValueError("Optional test reward is not finite")
+            result["test_reward_raw"] = reward
+    except Exception as error:
+        result["test_reward_error"] = str(error)
+    return result
+
+
 async def run_judge(
     *,
     client: ServerClient,
@@ -165,10 +189,7 @@ async def run_judge(
     raw = await read_text(sandbox, path="/tmp/judge_inputs/verdict.json")
     (artifact_dir / "judge-verdict-raw.json").write_text(raw)
     verdict = derive_score(json.loads((task_dir / "canonical_goals.json").read_text()), json.loads(raw))
-    try:
-        verdict["test_reward_raw"] = float(await read_text(sandbox, path="/tmp/judge_inputs/logs/reward.txt"))
-    except Exception:
-        verdict["test_reward_raw"] = None
+    verdict.update(await read_test_reward(sandbox))
     verdict["judge_runtime"] = (transcript.get("metadata") or {}).get("runtime_version")
     return verdict
 
