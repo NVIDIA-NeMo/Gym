@@ -245,6 +245,7 @@ class TestModelServer:
         provider = config["providers"]["nemo"]
         assert agent._effective_model() == "nemo/Qwen3.6-35B-A3B"
         assert provider["baseUrl"] == "http://model/ng-rollout/1-2/v1"
+        assert provider["headers"] == {"x-session-id": "1-2"}
         assert provider["models"][0]["id"] == "Qwen3.6-35B-A3B"
         assert provider["models"][0]["maxTokens"] == 131072
         assert agent.config.models_config == models_config
@@ -618,3 +619,22 @@ async def test_mcp_setup_exit_is_request_failure_and_cleans_workspace(tmp_path, 
         with pytest.raises(RuntimeError, match="Required Gym MCP"):
             await agent._run_pi("task", None, collect_observations=collect_observations)
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("correlated", [False, True])
+def test_failed_model_attempt_uses_transport_ownership_when_correlated(correlated: bool) -> None:
+    bundle = _build_pi_observations(
+        [(1.0, {"type": "message_end", "message": {"role": "assistant", "stopReason": "error"}})],
+        "rollout",
+        ModelServerRef(type="responses_api_models", name="policy"),
+        [],
+        capture_correlated=correlated,
+    )
+    assert any(g.code == "model_call_ownership_unavailable" for g in bundle.gaps) is not correlated
+    assert _records(bundle, AgentInvocation)[0].invocation_id == "rollout"
+
+
+def test_uncorrelated_pi_provider_has_no_invocation_header() -> None:
+    agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy"))
+    with patch.object(PiAgent, "resolve_model_base_url", return_value="http://model/v1"):
+        assert "headers" not in agent._build_models_config()["providers"]["nemo"]

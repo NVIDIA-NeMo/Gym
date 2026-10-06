@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from pathlib import Path
 
 import pytest
@@ -29,8 +30,18 @@ async def _capture(tmp_path: Path, rollout_id: str = "rollout") -> ModelUsageCap
     return capture
 
 
-@pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("dialect", ["chat", "responses", "messages"])
+@pytest.mark.parametrize(
+    ("dialect", "streaming"),
+    [
+        ("chat", False),
+        ("chat", True),
+        ("responses", False),
+        ("responses", True),
+        ("raw_responses", True),
+        ("messages", False),
+        ("messages", True),
+    ],
+)
 async def test_counts_model_server_json_and_sse_without_native_harness_usage(tmp_path, dialect, streaming):
     from nemo_gym.anthropic_converter import AnthropicConverter
     from nemo_gym.chat_streaming import synthesize_chat_completion_sse
@@ -48,10 +59,18 @@ async def test_counts_model_server_json_and_sse_without_native_harness_usage(tmp
             "usage": {"prompt_tokens": 10, "completion_tokens": 3, "prompt_tokens_details": {"cached_tokens": 4}},
         }
         events = synthesize_chat_completion_sse(payload, include_usage=True)
-    elif dialect == "responses":
+    elif dialect in {"responses", "raw_responses"}:
         path = "/v1/responses"
         payload = {"id": "repeated-provider-id", "status": "incomplete", "output": [], "usage": usage}
-        events = synthesize_responses_sse(payload)
+        events = (
+            [
+                "event: response.incomplete\ndata: "
+                + json.dumps({"type": "response.incomplete", "response": payload})
+                + "\n\n"
+            ]
+            if dialect == "raw_responses"
+            else synthesize_responses_sse(payload)
+        )
     else:
         path = "/v1/messages"
         payload = {
@@ -92,7 +111,9 @@ async def test_counts_model_server_json_and_sse_without_native_harness_usage(tmp
     assert result is not None
     assert (result.input_tokens, result.output_tokens, result.total_tokens) == (20, 6, 26)
     assert result.input_tokens_details.cached_tokens == 8
-    assert result.output_tokens_details.reasoning_tokens is None
+    # Gym's synthesized Responses wire schema supplies zero; raw provider omission remains unknown.
+    expected_reasoning = 0 if dialect == "responses" and streaming else None
+    assert result.output_tokens_details.reasoning_tokens == expected_reasoning
 
 
 async def test_capture_is_scoped_to_agent_lifecycle_and_snapshot_is_stable(tmp_path):

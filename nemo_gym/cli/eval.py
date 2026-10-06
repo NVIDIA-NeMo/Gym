@@ -63,6 +63,7 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
     resolve_dataset_agent,
+    taskset_environment_server_name,
 )
 
 
@@ -84,7 +85,8 @@ def _inspect_benchmark(name: str, benchmarks: dict, global_config_dict) -> None:
     domain, description = read_config_metadata(bench.path)
     details = {
         "config": str(bench.path.resolve()),
-        "agent": bench.agent_name,
+        "agent": bench.agent_name or "",
+        "environment server": bench.environment_server or "",
         "num repeats": str(bench.num_repeats),
         "dataset": str(bench.dataset.jsonl_fpath),
         "prepare script": str(bench.dataset.prepare_script),
@@ -141,6 +143,7 @@ def list_benchmarks() -> None:
             {
                 "name": name,
                 "agent_name": bench.agent_name,
+                "environment_server": bench.environment_server,
                 "domain": metadata[name][0] or "",
                 "num_repeats": bench.num_repeats,
                 "description": metadata[name][1] or "",
@@ -169,7 +172,9 @@ def list_benchmarks() -> None:
 
     for name, bench in benchmarks.items():
         domain, description = metadata[name]
-        table.add_row(name, domain or "", description or "", bench.agent_name, str(bench.num_repeats))
+        # A taskset routed to a server that fronts several agents has no single agent; name the server instead.
+        agent = bench.agent_name or f"{bench.environment_server} (environment server)"
+        table.add_row(name, domain or "", description or "", agent, str(bench.num_repeats))
 
     print_rich_table(table)
 
@@ -180,6 +185,10 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
 
     The benchmark is identified from a config_paths entry pointing to a
     benchmarks/*/config.yaml file.
+
+    With `use_cached_prepared_benchmarks=true`, an existing prepared file is reused. A prepare.py whose output
+    depends on its own code (for example, settings written into each row) can define
+    `is_prepared_data_current(fpath: Path) -> bool`; when it returns False, the cached file is prepared again.
 
     Examples:
 
@@ -289,7 +298,9 @@ def prepare_benchmark() -> None:
         dataset = datasets[0]
 
         try:
-            agent_name = resolve_dataset_agent(global_config_dict, str(server_instance_name), pin=dataset.agent)
+            agent_name = resolve_dataset_agent(
+                global_config_dict, str(server_instance_name), pin=dataset.agent, taskset=dataset.taskset
+            )
         except ConfigError as e:
             raise ConfigError(f"Benchmark dataset {dataset.name!r}: {e}") from e
 
@@ -301,6 +312,7 @@ def prepare_benchmark() -> None:
             agent_name=agent_name,
             num_repeats=dataset.num_repeats,
             dataset=dataset,
+            environment_server=taskset_environment_server_name(global_config_dict, dataset.taskset),
         )
 
     if not benchmarks_dict:
@@ -335,8 +347,15 @@ def prepare_benchmark() -> None:
 
         is_already_prepared = benchmark_config.dataset.jsonl_fpath.exists()
         if prepare_benchmark_config.use_cached_prepared_benchmarks and is_already_prepared:
-            already_prepared.append(benchmark_config)
-            continue
+            is_current = getattr(module, "is_prepared_data_current", None)
+            if callable(is_current) and not is_current(benchmark_config.dataset.jsonl_fpath):
+                print(
+                    f"The cached file for {benchmark_config.name} ({benchmark_config.dataset.jsonl_fpath}) "
+                    "is out of date, so it will be prepared again."
+                )
+            else:
+                already_prepared.append(benchmark_config)
+                continue
 
         validated.append((benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args)))
 
