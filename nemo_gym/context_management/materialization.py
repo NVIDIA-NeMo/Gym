@@ -8,7 +8,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Mapping, Sequence
 
-from responses_api_agents.simple_agent_with_compaction.compaction.history import (
+from nemo_gym.context_management.history import (
     HistoryViewPlan,
     MaterializedHistoryView,
     SemanticHistory,
@@ -26,7 +26,7 @@ def materialize_history_view(history: SemanticHistory, plan: HistoryViewPlan) ->
     retained = plan.retained_part_ids
     artifacts_by_anchor = {artifact.anchor_part_id: artifact for artifact in plan.artifacts}
     items: list[Mapping[str, Any]] = []
-    media_ids: list[str] = []
+    image_part_ids: list[str] = []
     descriptor: list[str] = []
 
     for event in history.events:
@@ -47,10 +47,8 @@ def materialize_history_view(history: SemanticHistory, plan: HistoryViewPlan) ->
                 if part.part_id not in retained:
                     continue
                 if part.kind == "image":
-                    if part.media_id is None:
-                        raise ValueError(f"Image part {part.part_id} has no media ID")
-                    materialized_content.append(deepcopy(dict(history.media_arena.resolve(part.media_id))))
-                    media_ids.append(part.media_id)
+                    materialized_content.append(deepcopy(source_part))
+                    image_part_ids.append(part.part_id)
                 else:
                     materialized_content.append(deepcopy(source_part))
                 descriptor.append(f"part:{part.part_id}")
@@ -78,7 +76,7 @@ def materialize_history_view(history: SemanticHistory, plan: HistoryViewPlan) ->
 
     return MaterializedHistoryView(
         items=tuple(items),
-        media_ids=tuple(media_ids),
+        image_part_ids=tuple(image_part_ids),
         descriptor=tuple(descriptor),
         decision=plan.decision,
     )
@@ -94,15 +92,4 @@ def descriptor_is_append_compatible(
         return False
     prefix = tuple(previous_completed_descriptor)
     current = tuple(current_descriptor)
-    return len(current) >= len(prefix) and current[: len(prefix)] == prefix
-
-
-def ordered_media_is_append_compatible(
-    previous_media_ids: Sequence[str] | None,
-    current_media_ids: Sequence[str],
-) -> bool:
-    if previous_media_ids is None:
-        return False
-    prefix = tuple(previous_media_ids)
-    current = tuple(current_media_ids)
     return len(current) >= len(prefix) and current[: len(prefix)] == prefix
