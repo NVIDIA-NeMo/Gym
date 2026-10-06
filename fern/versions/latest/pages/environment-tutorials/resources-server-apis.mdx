@@ -488,10 +488,15 @@ The task's qualified ID is `<taskset>/<id>`. The ID is taken from `task_id`,
 index across all datasets of the same type, before repeats. Adding or reordering
 other datasets in that collation can shift these positional IDs.
 
-For these tasksets, benchmark discovery and `gym eval prepare` use the routed
-Environment Server's `agent_server` and `resources_server` bindings; the agent
-does not need its own `resources_server` binding. A dataset-level `agent` pin, if
-present, must match the routed agent. Collation preserves existing collector
+These tasksets route to an Environment Server, not to an agent, so their datasets
+do not set `agent`. Benchmark discovery, `gym eval prepare`, and collation check the
+route instead: every agent the Environment Server references must exist, a dataset
+declared on an agent must be one of them, and a dataset declared on a resources
+server must be the one the Environment Server binds. The agent does not need its
+own `resources_server` binding. An Environment Server can front several agents
+through fields other than `agent_server`, such as a `user_agent` and an
+`assistant_agent`. When it does and names no `agent_server`, `gym eval list` shows
+the Environment Server instead of an agent. Collation preserves existing collector
 task indices, rollout IDs, and retry attempts outside `task_input`.
 
 ## Next Steps

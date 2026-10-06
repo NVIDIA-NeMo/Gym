@@ -62,7 +62,6 @@ from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
-    AGENT_SERVER_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -76,7 +75,8 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
     dataset_agent_pins,
-    environment_server_agent_refs,
+    environment_server_agent_names,
+    environment_server_attributed_agent,
     get_global_config_dict,
     label_runs,
     pairing_override_enabled,
@@ -220,28 +220,6 @@ _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw"
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 
 
-def _environment_server_agents(environment_config: DictConfig) -> list[str]:
-    """Return the names of the agents one environment server's config references."""
-    return [
-        str(reference["name"])
-        for reference in environment_server_agent_refs(environment_config)
-        if reference.get("name") is not None
-    ]
-
-
-def _attributed_agent(environment_config: DictConfig) -> str | None:
-    """Return the agent that results from one environment server are attributed to.
-
-    That is the server's `agent_server`, or the only agent it references.
-    A server that fronts several agents without an `agent_server` has no single agent to attribute.
-    """
-    agent_ref = environment_config.get(AGENT_SERVER_REF_KEY_NAME)
-    if isinstance(agent_ref, DictConfig):
-        return agent_ref.get("name")
-    agents = _environment_server_agents(environment_config)
-    return agents[0] if len(agents) == 1 else None
-
-
 def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, list[str]]:
     """Map each agent name to the environment servers that front it."""
     servers_by_agent: dict[str, list[str]] = {}
@@ -254,7 +232,7 @@ def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, l
         for server in servers.values():
             if not isinstance(server, DictConfig):
                 continue
-            for agent_name in _environment_server_agents(server):
+            for agent_name in environment_server_agent_names(server):
                 servers_by_agent.setdefault(agent_name, []).append(str(name))
     return servers_by_agent
 
@@ -3469,7 +3447,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if not isinstance(environment_server_name, str):
             return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
         environment_group = global_config_dict[environment_server_name]["environment_servers"]
-        return _attributed_agent(next(iter(environment_group.values())))
+        return environment_server_attributed_agent(next(iter(environment_group.values())))
 
     @classmethod
     def _stamp_environment_server_agent_refs(
@@ -3525,8 +3503,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             environment_group = global_config_dict[environment_server_name]["environment_servers"]
             environment_config = next(iter(environment_group.values()))
             resources_ref = environment_config.get("resources_server")
-            configured_agent = _attributed_agent(environment_config)
-            server_agents = _environment_server_agents(environment_config)
+            configured_agent = environment_server_attributed_agent(environment_config)
+            server_agents = environment_server_agent_names(environment_config)
             configured_resources = resources_ref.get("name") if isinstance(resources_ref, DictConfig) else None
 
             row_agent = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
