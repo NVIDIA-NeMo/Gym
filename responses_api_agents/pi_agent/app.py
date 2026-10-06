@@ -67,6 +67,7 @@ from nemo_gym.rollout_observability import (
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, process_supervisor
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox.session import SandboxSession
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
 from responses_api_agents.pi_agent.sandbox import PiSandboxSession
 from responses_api_agents.pi_agent.setup_pi import ensure_pi
@@ -531,7 +532,13 @@ class PiAgent(SimpleResponsesAPIAgent):
                 raise
         directory = f"/tmp/nemo-gym-pi-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-pi-node-22.19.0-{self.config.pi_version}"
-        state = PiSandboxSession(body, sandbox, directory, runtime, workdir=workdir, owns_sandbox=owns_sandbox)
+        state = PiSandboxSession(
+            request=body,
+            session=SandboxSession(
+                sandbox=sandbox, directory=directory, workdir=workdir, owns_sandbox=owns_sandbox, harness="Pi"
+            ),
+            runtime=runtime,
+        )
         try:
             if owns_sandbox:
                 await sandbox.start(spec)
@@ -641,14 +648,16 @@ class PiAgent(SimpleResponsesAPIAgent):
         await state.upload_json("home/.pi/agent/models.json", models)
         await state.upload_json("home/.pi/agent/settings.json", self._build_settings_config())
         output_limit_extension = "output-limit.mjs"
-        await state.sandbox.upload(
-            Path(__file__).with_name(output_limit_extension), f"{state.directory}/{output_limit_extension}"
+        await state.session.sandbox.upload(
+            Path(__file__).with_name(output_limit_extension), f"{state.session.directory}/{output_limit_extension}"
         )
         runtime_guards_extension = "runtime-guards.mjs"
-        await state.sandbox.upload(
-            Path(__file__).with_name(runtime_guards_extension), f"{state.directory}/{runtime_guards_extension}"
+        await state.session.sandbox.upload(
+            Path(__file__).with_name(runtime_guards_extension), f"{state.session.directory}/{runtime_guards_extension}"
         )
-        await state.sandbox.upload(Path(__file__).with_name("outcome.mjs"), f"{state.directory}/outcome.mjs")
+        await state.session.sandbox.upload(
+            Path(__file__).with_name("outcome.mjs"), f"{state.session.directory}/outcome.mjs"
+        )
         command = [
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
@@ -662,11 +671,11 @@ class PiAgent(SimpleResponsesAPIAgent):
             self.config.model,
             "--no-extensions",
             "--extension",
-            f"{state.directory}/{output_limit_extension}",
+            f"{state.session.directory}/{output_limit_extension}",
             "--extension",
-            f"{state.directory}/{runtime_guards_extension}",
+            f"{state.session.directory}/{runtime_guards_extension}",
             "--extension",
-            f"{state.directory}/outcome.mjs",
+            f"{state.session.directory}/outcome.mjs",
             "--no-skills",
             "--no-prompt-templates",
             "--no-themes",
@@ -676,22 +685,61 @@ class PiAgent(SimpleResponsesAPIAgent):
         if system:
             command += ["--append-system-prompt", system]
         payload = {
-            "directory": state.directory,
+            "directory": state.session.directory,
             "command": command,
             "prompt": prompt,
-            "cwd": state.workdir,
+            "cwd": state.session.workdir,
             "env": {
-                "HOME": f"{state.directory}/home",
-                "PI_CODING_AGENT_DIR": f"{state.directory}/home/.pi/agent",
+                "HOME": f"{state.session.directory}/home",
+                "PI_CODING_AGENT_DIR": f"{state.session.directory}/home/.pi/agent",
                 "PI_SKIP_VERSION_CHECK": "1",
                 "PI_TELEMETRY": "0",
                 "NEMO_GYM_PI_BASH_TIMEOUT": str(self.config.sandbox_bash_timeout_seconds),
             },
         }
-        async with self.sem:
-            raw = await state.execute(
-                payload, timeout=self.config.timeout, close_timeout=self.config.session_close_timeout_seconds
+        try:
+            async with self.sem:
+                raw = await state.execute(
+                    payload, timeout=self.config.timeout, close_timeout=self.config.session_close_timeout_seconds
+                )
+        except BaseException as failure:
+            # Common finalization captures before close removes the session directory.
+            raw = state.session.artifacts if state.session.artifacts is not None else ""
+            events, output = [], []
+            for line in raw.splitlines():
+                try:
+                    observed_at, event = json.loads(line)
+                    if not isinstance(event, dict):
+                        continue
+                    events.append((float(observed_at), event))
+                    parsed, _ = parse_pi_events(json.dumps(event))
+                    output.extend(parsed)
+                except (ValueError, TypeError, AttributeError):
+                    LOG.warning("Skipping malformed partial Pi event")
+            conversation = [NeMoGymEasyInputMessage(role="system", content=system)] if system else []
+            conversation.append(NeMoGymEasyInputMessage(role="user", content=prompt))
+            try:
+                state.observations = _build_pi_observations(
+                    events,
+                    state.request.episode_id.capture_key,
+                    self.config.model_server,
+                    [*conversation, *output],
+                    transcript_available=bool(output),
+                )
+            except Exception:
+                LOG.exception("failed to build interrupted Pi observations")
+                state.observations = AgentObservationBundle(
+                    source="pi", gaps=[ObservationGap(code="observation_parse_failed")]
+                )
+            state.observations.gaps.append(
+                ObservationGap(code="agent_activation_interrupted", detail=type(failure).__name__)
             )
+            if state.runtime_info is None:
+                state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
+            for record in state.observations.records:
+                if isinstance(record, AgentInvocation):
+                    record.status = "incomplete"
+            raise
         events = [tuple(json.loads(line)) for line in raw.splitlines() if line.strip()]
         output = []
         usage = {"input_tokens": 0, "output_tokens": 0}
@@ -732,12 +780,12 @@ class PiAgent(SimpleResponsesAPIAgent):
                 output.append(item)
             for key in usage:
                 usage[key] += tokens[key]
-        cleanup = state.cleanup
+        cleanup = state.session.cleanup
         runtime = state.runtime_info
-        assert cleanup is not None and runtime is not None
+        assert cleanup is not None
         error = cleanup["error"] or terminal_error
         model_limit = bool(stop_reasons and stop_reasons[-1] == "error" and context_overflow)
-        if cleanup["return_code"] != 0 and not cleanup["timed_out"] and not model_limit:
+        if cleanup["return_code"] not in (None, 0) and not cleanup["timed_out"] and not model_limit:
             error = error or f"Pi exited with code {cleanup['return_code']}"
         if not stop_reasons:
             cached_tokens = None
@@ -771,8 +819,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             ),
             metadata={
                 "harness_execution": "sandbox",
-                "harness_hostname": runtime.hostname,
-                "harness_pid": str(runtime.pid),
+                **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
                 "pi_version": self.config.pi_version,
             },
         )
@@ -797,6 +844,10 @@ class PiAgent(SimpleResponsesAPIAgent):
             for record in state.observations.records:
                 if isinstance(record, AgentInvocation):
                     record.status = "incomplete"
+        if runtime is None:
+            state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
+        if cleanup["return_code"] is None:
+            state.observations.gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
         state.observations.gaps.append(ObservationGap(code="reasoning_token_usage_unavailable"))
         if cached_tokens is None:
             state.observations.gaps.append(
@@ -1061,7 +1112,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             rollout_id = request.path_params.get("rollout_id")
             if state.request.episode_id.capture_key != rollout_id:
                 raise HTTPException(409, "Pi activation does not match the seeded session and rollout route")
-            if state.closing:
+            if state.session.closing:
                 raise HTTPException(409, "Pi session is closing")
             prompt, system = self._conversation_input(body)
             if state.task is None:

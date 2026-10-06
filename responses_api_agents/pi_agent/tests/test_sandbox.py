@@ -20,7 +20,7 @@ from pydantic import ValidationError
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.runner import parse_cleanup_receipt
+from nemo_gym.sandbox.supervisor_client import parse_cleanup_receipt
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest
 
@@ -108,7 +108,7 @@ class Sandbox:
         self.cleanup_available = True
 
     async def execute(self, command, **kwargs):
-        if command.startswith("trap '' TERM;"):
+        if "--receipt" in command and "process_supervisor.py" in command:
             return await self.launch(command, **kwargs)
         if "ln -s stop " in command:
             await self.signal()
@@ -193,7 +193,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
             assert created.status_code == 200, created.text
             session_id = created.json()["agent_session_id"]
-            directory = agent._session_records[session_id].state.directory
+            directory = agent._session_records[session_id].state.session.directory
             installer = f"{directory}/install_pi_runtime.sh"
             assert installer in sandbox.files
             assert agent.config.resources_server is None
@@ -245,9 +245,9 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
 async def test_install_failure_preserves_stdout_and_stderr(setup):
     agent, sandbox = setup
     sandbox.exec.side_effect = [
-        SimpleNamespace(return_code=0, stdout="", stderr=""),
+        SimpleNamespace(return_code=0, error_type=None, stdout="", stderr=""),
         SimpleNamespace(return_code=1, stdout="Node cannot load libstdc++.so.6", stderr="exit status 1"),
-        SimpleNamespace(return_code=0, stdout="", stderr=""),
+        SimpleNamespace(return_code=0, error_type=None, stdout="", stderr=""),
     ]
     with pytest.raises(RuntimeError) as error:
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
@@ -468,7 +468,7 @@ def test_cleanup_receipt_is_required():
 
 
 @pytest.mark.parametrize("artifact", ["missing_runtime", "invalid_runtime", "unknown_exit", "runtime_overrides_exit"])
-async def test_worker_output_failure_does_not_invalidate_cleanup(setup, artifact):
+async def test_worker_diagnostics_never_override_exit_or_cleanup(setup, artifact):
     agent, sandbox = setup
     download = sandbox.download
     if artifact == "unknown_exit":
@@ -490,15 +490,24 @@ async def test_worker_output_failure_does_not_invalidate_cleanup(setup, artifact
 
     sandbox.download = AsyncMock(side_effect=download_artifact)
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="runner returned no valid result"):
-        await task
+    if artifact in ("missing_runtime", "invalid_runtime", "unknown_exit"):
+        response = await task
+        assert response.status == "completed"
+        if artifact != "unknown_exit":
+            assert "harness_hostname" not in response.metadata
+    else:
+        with pytest.raises(RuntimeError, match="exited with code 7"):
+            await task
     state = agent._session_records[session_id].state
-    assert state.cleanup["cleanup_confirmed"] is True
-    assert state.runtime_info is None
+    assert state.session.cleanup["cleanup_confirmed"] is True
+    if artifact != "unknown_exit":
+        assert state.runtime_info is None
+        assert any(gap.code == "runtime_info_unavailable" for gap in state.observations.gaps)
     if artifact == "unknown_exit":
-        assert state.cleanup["return_code"] is None
+        assert state.session.cleanup["return_code"] is None
+        assert any(gap.code == "worker_exit_code_unavailable" for gap in state.observations.gaps)
     elif artifact == "runtime_overrides_exit":
-        assert state.cleanup["return_code"] == 7
+        assert state.session.cleanup["return_code"] == 7
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert agent._session_records[session_id].state is None
     sandbox.disconnect.assert_awaited_once()
@@ -610,9 +619,9 @@ async def test_unknown_launch_outcome_fails_closed(setup):
 async def test_install_failure_disconnects_without_stopping_owner(setup):
     agent, sandbox = setup
     sandbox.exec.side_effect = [
-        SimpleNamespace(return_code=0),
+        SimpleNamespace(return_code=0, error_type=None),
         SimpleNamespace(return_code=1, stderr="npm failed", stdout=""),
-        SimpleNamespace(return_code=0),
+        SimpleNamespace(return_code=0, error_type=None),
     ]
     request = Request({"type": "http", "session": {}})
     with pytest.raises(RuntimeError, match="npm failed"):
@@ -642,14 +651,15 @@ async def test_failed_connection_closes_provider_without_publishing_session(setu
     sandbox.stop.assert_not_awaited()
 
 
-async def test_invalid_runtime_receipt_fails_activation_but_preserves_confirmed_cleanup(setup):
+async def test_invalid_runtime_metadata_keeps_valid_output_and_confirmed_cleanup(setup):
     agent, sandbox = setup
     sandbox.result["pid"] = "invalid-pid"
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="runner returned no valid result"):
-        await task
+    response = await task
+    assert response.status == "completed"
+    assert "harness_pid" not in response.metadata
     state = agent._session_records[session_id].state
-    assert state.runtime_info is None and state.cleanup["cleanup_confirmed"] is True
+    assert state.runtime_info is None and state.session.cleanup["cleanup_confirmed"] is True
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert agent._session_records[session_id].state is None
     sandbox.disconnect.assert_awaited_once()
@@ -659,9 +669,9 @@ async def test_invalid_runtime_receipt_fails_activation_but_preserves_confirmed_
 async def test_cancelled_install_never_publishes_session_or_launches_pi(setup):
     agent, sandbox = setup
     sandbox.exec.side_effect = [
-        SimpleNamespace(return_code=0),
+        SimpleNamespace(return_code=0, error_type=None),
         asyncio.CancelledError(),
-        SimpleNamespace(return_code=0),
+        SimpleNamespace(return_code=0, error_type=None),
     ]
     request = Request({"type": "http", "session": {}})
     with pytest.raises(asyncio.CancelledError):
@@ -971,7 +981,7 @@ async def test_failed_setup_preserves_handle_until_cleanup_confirmed(setup, clea
         await agent.seed_agent_session(request, seed())
     session_id = seed().agent_session_id
     if cleanup_fails:
-        assert agent._session_records[session_id].state.closing
+        assert agent._session_records[session_id].state.session.closing
         with pytest.raises(HTTPException):
             await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
     else:
@@ -992,7 +1002,7 @@ async def test_caller_id_never_controls_filesystem_path(setup):
     request = Request({"type": "http", "session": {}})
     response = await agent.seed_agent_session(request, body)
     assert response.agent_session_id == body.agent_session_id
-    directory = agent._session_records[body.agent_session_id].state.directory
+    directory = agent._session_records[body.agent_session_id].state.session.directory
     assert Path(directory).parent == Path("/tmp/nemo-gym-pi-sessions")
     assert len(Path(directory).name) == 32
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(body.agent_session_id)))
@@ -1092,7 +1102,7 @@ async def local_session(setup, tmp_path):
     state = agent._session_records[body.agent_session_id].state
     directory = tmp_path / "session"
     directory.mkdir()
-    state.directory = str(directory)
+    state.session.directory = str(directory)
     from nemo_gym.sandbox import process_supervisor
     from responses_api_agents.pi_agent import sandbox_runner
 
@@ -1136,7 +1146,7 @@ async def test_close_fences_delayed_launch_before_and_after_removing_session(loc
     commands = []
 
     async def queued_exec(command, **kwargs):
-        if command.startswith("trap '' TERM;"):
+        if "--receipt" in command and "process_supervisor.py" in command:
             commands.append(command)
             waiting.set()
             if failure == "cancel":
@@ -1144,15 +1154,15 @@ async def test_close_fences_delayed_launch_before_and_after_removing_session(loc
             raise OSError("lost launch response")
         return await execute(command, **kwargs)
 
-    state.sandbox.exec.side_effect = queued_exec
+    state.session.sandbox.exec.side_effect = queued_exec
     state.task = asyncio.create_task(state.execute({}, timeout=5, close_timeout=2))
     await asyncio.wait_for(waiting.wait(), 2)
     if failure == "cancel":
         state.task.cancel()
     with pytest.raises(asyncio.CancelledError if failure == "cancel" else OSError):
         await state.task
-    directory = Path(state.directory)
-    assert state.cleanup["cleanup_confirmed"] is True
+    directory = Path(state.session.directory)
+    assert state.session.cleanup["cleanup_confirmed"] is True
     assert (directory / "launch.claim").readlink() == Path("stop")
     assert (await execute(commands[0])).return_code == 0
     assert not (directory / "runner.pid").exists()
@@ -1160,26 +1170,26 @@ async def test_close_fences_delayed_launch_before_and_after_removing_session(loc
     assert not directory.exists()
     assert (await execute(commands[0])).return_code == 0
     assert not directory.exists()
-    state.sandbox.disconnect.assert_awaited_once()
-    state.sandbox.stop.assert_not_awaited()
+    state.session.sandbox.disconnect.assert_awaited_once()
+    state.session.sandbox.stop.assert_not_awaited()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
 async def test_launch_claim_without_receipt_blocks_close(local_session):
     state, _ = local_session
-    (Path(state.directory) / "launch.claim").symlink_to("launch")
-    state.launch_started = True
+    (Path(state.session.directory) / "launch.claim").symlink_to("launch")
+    state.session.launch_started = True
     with pytest.raises(RuntimeError, match="launch outcome is unknown"):
         await state.close(1)
-    state.sandbox.disconnect.assert_not_awaited()
-    assert state.cleanup is None
+    state.session.sandbox.disconnect.assert_not_awaited()
+    assert state.session.cleanup is None
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
 async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_session):
     state, _ = local_session
     payload = {
-        "directory": state.directory,
+        "directory": state.session.directory,
         "cwd": state.request.sandbox_access.workdir,
         # This stdlib-only event producer must not load the host's editable installs or site hooks.
         "command": [
@@ -1196,29 +1206,29 @@ async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_ses
     diagnostics = {
         name: path.read_text(errors="replace")
         for name in ("cleanup.json", "runtime.json", "runner.log", "stderr.log", "events.jsonl")
-        if (path := Path(state.directory) / name).exists()
+        if (path := Path(state.session.directory) / name).exists()
     }
-    assert state.cleanup["cleanup_confirmed"] and state.cleanup["return_code"] == 0, diagnostics
+    assert state.session.cleanup["cleanup_confirmed"] and state.session.cleanup["return_code"] == 0, diagnostics
     assert raw.strip(), diagnostics
     _, event = json.loads(raw)
     assert event == {"prompt": "real invocation"}
     assert state.runtime_info.hostname
     await state.close(2)
-    assert not Path(state.directory).exists()
-    state.sandbox.stop.assert_not_awaited()
+    assert not Path(state.session.directory).exists()
+    state.session.sandbox.stop.assert_not_awaited()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
 async def test_close_confirms_cleanup_before_provider_cancellation(local_session):
     state, _ = local_session
-    processes_path = Path(state.directory).parent / "children.json"
+    processes_path = Path(state.session.directory).parent / "children.json"
     code = (
         "import json,os,subprocess,sys,time; from pathlib import Path; "
         "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
         f"Path({str(processes_path)!r}).write_text(json.dumps([os.getpid(),child.pid])); time.sleep(60)"
     )
     payload = {
-        "directory": state.directory,
+        "directory": state.session.directory,
         "cwd": state.request.sandbox_access.workdir,
         "command": [sys.executable, "-c", code],
         "env": {},
@@ -1231,14 +1241,14 @@ async def test_close_confirms_cleanup_before_provider_cancellation(local_session
             while not processes_path.exists():
                 await asyncio.sleep(0.01)
         processes = json.loads(processes_path.read_text())
-        processes.append(json.loads((Path(state.directory) / "runtime.json").read_text())["pid"])
+        processes.append(json.loads((Path(state.session.directory) / "runtime.json").read_text())["pid"])
         await state.close(3)
-        assert state.closed and state.cleanup["cleanup_confirmed"] is True
+        assert state.session.closed and state.session.cleanup["cleanup_confirmed"] is True
         assert all(not Path(f"/proc/{pid}").exists() for pid in processes)
-        state.sandbox.disconnect.assert_awaited_once()
-        state.sandbox.stop.assert_not_awaited()
+        state.session.sandbox.disconnect.assert_awaited_once()
+        state.session.sandbox.stop.assert_not_awaited()
     finally:
-        if not state.closed:
+        if not state.session.closed:
             for pid in processes:
                 try:
                     os.kill(pid, signal.SIGKILL)
@@ -1253,11 +1263,11 @@ async def test_close_confirms_cleanup_before_provider_cancellation(local_session
 async def test_receipt_read_failure_does_not_signal_reused_pid(local_session):
     state, _ = local_session
     unrelated = await asyncio.create_subprocess_exec(sys.executable, "-c", "import time; time.sleep(60)")
-    directory = Path(state.directory)
+    directory = Path(state.session.directory)
     (directory / "launch.claim").symlink_to("launch")
     (directory / "runner.pid").write_text(str(unrelated.pid))
     (directory / "cleanup.json").write_text(json.dumps({"cleanup_confirmed": True, "error": None}))
-    state.launch_started = True
+    state.session.launch_started = True
     downloads = 0
 
     async def download(source, destination):
@@ -1267,10 +1277,10 @@ async def test_receipt_read_failure_does_not_signal_reused_pid(local_session):
             raise OSError("transient receipt download failure")
         shutil.copyfile(source, destination)
 
-    state.sandbox.download.side_effect = download
+    state.session.sandbox.download.side_effect = download
     try:
-        await state.stop_runner(2)
-        assert state.cleanup["cleanup_confirmed"] is True
+        await state.session.stop_runner(timeout=2)
+        assert state.session.cleanup["cleanup_confirmed"] is True
         assert unrelated.returncode is None
         os.kill(unrelated.pid, 0)
     finally:
@@ -1331,8 +1341,8 @@ def test_sandbox_source_controls_ownership_and_native_routing(setup, owned):
         created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
         assert created.status_code == 200, created.text
         state = agent._session_records[body.agent_session_id].state
-        assert state.owns_sandbox is owned
-        assert state.workdir == sandbox.expected_workdir
+        assert state.session.owns_sandbox is owned
+        assert state.session.workdir == sandbox.expected_workdir
         resolve.assert_called_once_with("agent-provider" if owned else "sandbox", {})
         workspace_calls = [call for call in sandbox.exec.await_args_list if call.args[0].startswith("mkdir -p --")]
         assert len(workspace_calls) == int(owned)
@@ -1381,13 +1391,13 @@ def test_owned_stop_failure_blocks_close_until_retry(setup):
         created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
         assert created.status_code == 200, created.text
         state = agent._session_records[body.agent_session_id].state
-        assert state.workdir == "/workspace"
+        assert state.session.workdir == "/workspace"
         # An owned sandbox can be destroyed even when no runner receipt was returned.
-        state.launch_started = True
+        state.session.launch_started = True
         sandbox.stop.side_effect = [RuntimeError("provider stop failed"), None]
         close_request = {"agent_session_id": body.agent_session_id, "episode_id": body.episode_id.model_dump()}
         assert client.post("/v1/agent_sessions/close", json=close_request).status_code == 500
-        assert not state.closed
+        assert not state.session.closed
         assert (
             client.post(f"/ng-rollout/{body.episode_id.capture_key}/v1/responses", json={"input": "task"}).status_code
             == 409
@@ -1429,7 +1439,7 @@ def test_owned_setup_failure_preserves_error_and_retryable_cleanup(setup, stage)
         assert error.value is original
         assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 409
         state = agent._session_records[body.agent_session_id].state
-        assert state.closing and not state.closed
+        assert state.session.closing and not state.session.closed
         response = client.post(
             "/v1/agent_sessions/close",
             json={"agent_session_id": body.agent_session_id, "episode_id": body.episode_id.model_dump()},
@@ -1469,3 +1479,73 @@ def test_owned_workdir_is_validated_before_creation(setup, workdir):
         assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 422
         factory.assert_not_called()
         sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("owned", [False, True])
+async def test_close_keeps_captured_events_after_sandbox_release(setup, owned):
+    agent, sandbox = setup
+    sandbox.events += "\n{"  # A terminated writer can leave a partial final record.
+    request = Request(
+        {"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": seed().episode_id.capture_key}}
+    )
+    seeded = await agent.seed_agent_session(request, seed())
+    state = agent._session_records[seeded.agent_session_id].state
+    state.session.owns_sandbox = owned
+    captured = asyncio.Event()
+    execute = state.execute
+
+    async def pause_after_capture(*args, **kwargs):
+        await execute(*args, **kwargs)
+        captured.set()
+        await asyncio.Future()
+
+    state.execute = pause_after_capture
+    sandbox.stop.side_effect = sandbox.files.clear
+    sandbox.disconnect.side_effect = sandbox.files.clear
+    task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
+    await asyncio.wait_for(captured.wait(), 2)
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seeded.agent_session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert sandbox.files == {}
+    assert state.session.closed
+    assert state.session.artifacts == sandbox.events
+    assert closed.agent_observations is not None
+    observations = closed.agent_observations.model_dump(mode="json")
+    assert any(record.get("kind") == "tool_call" for record in observations["records"])
+    assert "Fixed" in json.dumps(observations["records"])
+    assert any(gap["code"] == "agent_activation_interrupted" for gap in observations["gaps"])
+    assert sandbox.stop.await_count == int(owned)
+    assert sandbox.disconnect.await_count == int(not owned)
+
+
+@pytest.mark.parametrize("owned", [False, True])
+async def test_malformed_exit_diagnostics_keep_valid_output_and_cleanup(setup, owned):
+    agent, sandbox = setup
+    sandbox.result["return_code"] = "invalid-diagnostic"
+    request, session_id, task = await activate(agent, sandbox)
+    state = agent._session_records[session_id].state
+    state.session.owns_sandbox = owned
+    response = await task
+    assert response.status == "completed"
+    assert response.output
+    assert state.session.cleanup["cleanup_confirmed"] is True
+    assert state.session.cleanup["return_code"] is None
+    assert any(gap.code == "worker_exit_code_unavailable" for gap in state.observations.gaps)
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert closed.agent_observations.records
+    assert sandbox.stop.await_count == int(owned)
+    assert sandbox.disconnect.await_count == int(not owned)
+
+
+async def test_missing_exit_and_empty_output_are_not_success(setup):
+    agent, sandbox = setup
+    sandbox.result["return_code"] = None
+    sandbox.events = ""
+    request, session_id, task = await activate(agent, sandbox)
+    with pytest.raises(RuntimeError, match="no assistant result"):
+        await task
+    state = agent._session_records[session_id].state
+    assert state.session.cleanup["cleanup_confirmed"] is True
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
