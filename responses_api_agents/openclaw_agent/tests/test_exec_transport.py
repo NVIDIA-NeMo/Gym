@@ -64,7 +64,8 @@ class ExecOnlySandbox:
 
 def make_session(tmp_path):
     directory = tmp_path / "session"
-    directory.mkdir()
+    # Mirror the directory prepared by the real seed hook before activation.
+    (directory / "home/.openclaw").mkdir(parents=True)
     workdir = tmp_path / "task"
     workdir.mkdir()
     request = seed()
