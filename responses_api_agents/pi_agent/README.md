@@ -133,6 +133,17 @@ configuration must not replace the agent's cap with a larger value. Enforcement 
 7. Environment Server asks Resources to verify and close the task session. The benchmark
    owns its verification procedure and sandbox teardown.
 
+Harness execution uses `nemo_gym.sandbox.session.SandboxSession`, shared with Hermes.
+The adapter stages its worker input and collects its own output; the common lifecycle
+confirms process cleanup, captures artifacts, then releases the provider connection or
+owned sandbox. Concurrent closes share that work, failed cleanup remains retryable,
+and interrupted activations keep captured observations after session files are removed.
+`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.py`
+runs inside the sandbox. Benchmark Resources session identity/verdict state stays separate.
+Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
+`worker_exit_code_unavailable` observation gaps. Positive cleanup confirmation remains
+required; the adapter validates the captured terminal events without inventing an exit code.
+
 Each sandbox session supports one activation and a matching episode and rollout identity.
 Identical request retries join the running activation or replay its result; changed requests
 are rejected. A disconnected HTTP caller does not cancel Pi; session close owns cancellation.
