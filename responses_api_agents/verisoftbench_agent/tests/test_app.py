@@ -14,14 +14,20 @@
 # limitations under the License.
 """The repair loop with the model and resources servers replaced by a scripted client."""
 
+import sys
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import orjson
 import pytest
 from app import VeriSoftBenchAgent, VeriSoftBenchAgentConfig, VeriSoftBenchAgentRunRequest, repair_params
 from fastapi import Request
+from fastapi.testclient import TestClient
 
+from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 
@@ -66,6 +72,9 @@ class FakeHTTPResponse:
 
     async def json(self):
         return self._payload
+
+    async def read(self):
+        return orjson.dumps(self._payload)
 
 
 class ScriptedClient:
@@ -216,3 +225,94 @@ class TestResponses:
         assert server_name == "policy_model" and path.endswith("/v1/responses")
         assert [m.role for m in sent.input] == ["user"]
         assert out.output[0].content[0].text.startswith("<lean4_proof>")
+
+
+def _real_resources_server():
+    """The real verisoftbench resources server, harness-free.
+
+    Its flat ``upstream`` import resolves only with the server directory on sys.path, and
+    ``/nonexistent`` makes harness setup fail closed before any git or docker access.
+    """
+    server_dir = Path(__file__).resolve().parents[3] / "resources_servers" / "verisoftbench"
+    sys.path.insert(0, str(server_dir))
+    try:
+        from resources_servers.verisoftbench.app import (
+            VeriSoftBenchResourcesServer,
+            VeriSoftBenchResourcesServerConfig,
+        )
+    finally:
+        sys.path.remove(str(server_dir))
+    config = VeriSoftBenchResourcesServerConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="verisoftbench",
+        upstream_dir="/nonexistent",
+        require_container_at_startup=False,
+    )
+    return VeriSoftBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class AggregatingClient:
+    """Routes the agent's ``/aggregate_metrics`` forward to a real resources server."""
+
+    def __init__(self, server):
+        self.server = server
+        self.posts: list[tuple[str, str, AggregateMetricsRequest]] = []
+
+    async def post(self, server_name, url_path, json=None, cookies=None):
+        assert url_path == "/aggregate_metrics"
+        request = json if isinstance(json, AggregateMetricsRequest) else AggregateMetricsRequest.model_validate(json)
+        self.posts.append((server_name, url_path, request))
+        metrics = await self.server.aggregate_metrics(request)
+        return FakeHTTPResponse(metrics.model_dump())
+
+
+def _row(task: int, rollout: int, reward: float, without_repair: float, category: str, **extra) -> dict[str, Any]:
+    return {
+        TASK_INDEX_KEY_NAME: task,
+        ROLLOUT_INDEX_KEY_NAME: rollout,
+        "reward": reward,
+        "solved_without_repair": without_repair,
+        "repair_rounds_used": 1 if reward >= 1.0 and without_repair < 1.0 else 0,
+        "harness_failure": 0.0,
+        "category": category,
+        **extra,
+    }
+
+
+class TestAggregateMetrics:
+    def test_proxies_to_the_resources_server_and_reports_the_any_of_k_headline(self) -> None:
+        """Gym aggregates through the agent's /aggregate_metrics; prove that boundary forwards.
+
+        Two tasks: task 0 is solved on repair only, task 1 is unsolved — its only
+        verified row is masked, so counting it would flip ``any_of_k/solved`` to 100.
+        """
+        rows = [
+            _row(0, 0, 1.0, 0.0, "Compiler"),
+            _row(0, 1, 0.0, 0.0, "Compiler"),
+            _row(1, 0, 0.0, 0.0, "Semantics"),
+            _row(1, 1, 1.0, 1.0, "Semantics", mask_sample=True, harness_failure=1.0),
+        ]
+        client = AggregatingClient(_real_resources_server())
+        agent = _agent(client)
+        agent.server_client.global_config_dict = {"observability_enabled": True}
+        http = TestClient(agent.setup_webserver())
+
+        result = http.post("/aggregate_metrics", json={"verify_responses": rows})
+
+        assert result.status_code == 200
+        server_name, _, forwarded = client.posts[0]
+        assert server_name == "verisoftbench" and forwarded.verify_responses == rows
+        am = result.json()["agent_metrics"]
+        assert am["any_of_k/solved"] == 50.0
+        assert am["any_of_k/solved_without_repair"] == 0.0
+        assert am["any_of_k/solved/compiler"] == 100.0 and am["any_of_k/solved/semantics"] == 0.0
+        assert am["count/tasks"] == 2
+        # The masked row leaves the quality set the way Gym's partition does, and is
+        # reported as coverage instead.
+        assert am["coverage/masked_rollouts"] == 1 and am["coverage/measured_rollouts"] == 3
+        key_metrics = result.json()["key_metrics"]
+        assert key_metrics["any_of_k/solved"] == 50.0 and key_metrics["any_of_k/solved_without_repair"] == 0.0
+        # Headline selection is the server's: per-category breakdowns stay out.
+        assert "any_of_k/solved/compiler" not in key_metrics
