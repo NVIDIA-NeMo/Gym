@@ -1,49 +1,37 @@
 ---
 title: "Evaluation Tutorials"
-description: "Choose a tutorial for evaluating models and agents with NeMo Gym."
+description: "Run benchmark-specific evaluation workflows with NeMo Gym."
 position: 1
 ---
 
-This page lists tutorials for evaluating models and agents with NeMo Gym. Choose a tutorial below based on the benchmark or workflow you want to try.
-
-These tutorials assume familiarity with [basic evaluation concepts](/main/about/concepts/evaluation) and [Gym's evaluation workflow](/main/evaluation). If you are new to Gym evaluation, read those pages first. Each tutorial covers the setup and instructions for its particular workflow.
-
-## Tutorials
+Here are the hands-on walkthroughs for running benchmarks, collecting rollouts, and reading the outputs. They assume familiarity with the basic concepts in [Evaluation](/about/concepts/evaluation) and the workflow in [Evaluation](/evaluation).
 
 <Cards>
 
-<Card title="Evaluate EvalPlus" href="/main/tutorials/evaluation-tutorials/evalplus">
-Evaluate your model's Python coding ability with EvalPlus, then inspect its generated code and benchmark scores.
+<Card title="Evaluate EvalPlus" href="/tutorials/evaluation-tutorials/evalplus">
+Run the EvalPlus coding benchmark and inspect rollout and aggregate metric outputs.
 </Card>
 
-<Card title="Collect NeMo User Sim Rollouts" href="/main/tutorials/evaluation-tutorials/usersim-rollout-collection">
-Collect multi-turn conversations between a simulated user and your assistant, then inspect the assistant's tool use and score.
+<Card title="Run Multi-turn User Simulation with NeMo User Sim" href="/tutorials/evaluation-tutorials/usersim-rollout-collection">
+Prepare NeMo User Sim tasks, run a multi-turn smoke episode, and inspect its conversation and score.
 </Card>
 
-<Card title="Reverify Rollouts" href="/main/tutorials/evaluation-tutorials/reverify-rollouts">
-Recompute scores for saved rollouts using an updated verifier, without rerunning the agent.
+<Card title="Reverify Rollouts" href="/tutorials/evaluation-tutorials/reverify-rollouts">
+Recompute rewards from existing rollouts after changing a verifier parameter, without re-running model inference.
 </Card>
 
 <Card title="Workplace Assistant with Claude Code" href="https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/workplace_assistant/notebooks/workplace-claude-demo.ipynb">
-Evaluate tool use on workplace tasks with Claude Code, then analyze the results with BLADE.
+Run an agentic tool-use benchmark end to end with the Claude Code agent harness — config, rollouts, and BLADE analysis.
 
 <Badge minimal outlined>notebook</Badge>
 </Card>
 
-</Cards>
-
-## Reference pages
-
-Use these pages to find available environments and understand evaluation results.
-
-<Cards>
-
-<Card title="Environment List" href="/main/evaluation/environment-list">
-Find the built-in environments available for evaluation and training.
+<Card title="Environment List" href="/evaluation/environment-list">
+Browse the built-in benchmark and training environments.
 </Card>
 
-<Card title="Aggregate Metrics" href="/main/evaluation/aggregate-metrics">
-Understand the summary scores and statistics saved after rollout collection.
+<Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
+Understand the aggregate metrics written after rollout collection.
 </Card>
 
 </Cards>
