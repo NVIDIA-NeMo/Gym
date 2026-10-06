@@ -23,10 +23,11 @@ strict-validation behavior.
 
 import json
 from time import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from aiohttp import ClientResponseError
 from fastapi import Body, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
@@ -779,6 +780,29 @@ class TestResponsesDispatchRoute:
         payload = json.loads(failed[0][len("data: ") :])
         assert payload["response"]["status"] == "failed"
         assert "backend exploded" in payload["response"]["error"]["message"]
+
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize(
+        "status,content_type,content",
+        [
+            (400, "application/json", b'{"error":{"code":"context_length_exceeded"}}'),
+            (429, "application/json", b'{"error":{"code":"rate_limit_exceeded"}}'),
+            (502, "text/plain", b"Upstream unavailable"),
+        ],
+    )
+    def test_upstream_http_error_is_preserved_before_stream_starts(
+        self, stream: bool, status: int, content_type: str, content: bytes
+    ) -> None:
+        error = ClientResponseError(
+            MagicMock(), (), status=status, message="upstream failed", headers={"Content-Type": content_type}
+        )
+        error.response_content = content
+        with patch.object(_EchoModel, "responses", AsyncMock(side_effect=error)):
+            client, _ = _client(_EchoModel)
+            response = client.post("/v1/responses", json={"input": "task", "stream": stream})
+        assert response.status_code == status
+        assert response.headers["content-type"].split(";")[0] == content_type
+        assert response.content == content
 
     def test_streaming_http_exception_keeps_its_status(self) -> None:
         # An HTTPException is a status the server chose to return; it is raised before the

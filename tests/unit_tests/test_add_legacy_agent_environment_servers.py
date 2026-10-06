@@ -73,7 +73,9 @@ def test_migrates_a_config_outside_the_repository(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("resources", [None, {"type": "resources_servers", "name": "my_resources"}])
-@pytest.mark.parametrize("agent_type", ["hermes_agent", "pi_agent", "osworld_agent"])
+@pytest.mark.parametrize(
+    "agent_type", ["hermes_agent", "pi_agent", "codex_agent", "openclaw_agent", "opencode_agent", "osworld_agent"]
+)
 def test_migration_respects_native_session_templates(
     tmp_path: Path, resources: dict[str, str] | None, agent_type: str
 ) -> None:
@@ -82,35 +84,31 @@ def test_migration_respects_native_session_templates(
         yaml.safe_dump(
             {
                 "my_agent": {
-                    "responses_api_agents": {
-                        agent_type: {
-                            "entrypoint": "app.py",
-                            "resources_server": resources,
-                        }
-                    }
+                    "responses_api_agents": {agent_type: {"entrypoint": "app.py", "resources_server": resources}}
                 }
             }
         )
     )
     before = config.read_text()
-
     assert migration.main([str(config)]) == 0
-
-    if agent_type in {"hermes_agent", "pi_agent"} and resources is None:
+    if agent_type != "osworld_agent" and resources is None:
         assert config.read_text() == before
     else:
         assert _environment_servers(yaml.safe_load(config.read_text())) == {"my_agent": ["my_environment_server"]}
 
 
-def test_pi_overlay_keeps_inherited_resources(tmp_path: Path) -> None:
+@pytest.mark.parametrize("agent_type", ["hermes_agent", "pi_agent", "codex_agent", "openclaw_agent", "opencode_agent"])
+def test_native_capable_overlay_keeps_inherited_resources(tmp_path: Path, agent_type: str) -> None:
     base = tmp_path / "base.yaml"
-    base.write_text(AGENT_CONFIG.replace("simple_agent", "pi_agent"))
+    base.write_text(AGENT_CONFIG.replace("simple_agent", agent_type))
     overlay = tmp_path / "overlay.yaml"
-    overlay.write_text("renamed_agent:\n  _inherit_from: my_pi_agent\n  responses_api_agents:\n    pi_agent: {}\n")
+    overlay.write_text(
+        f"renamed_agent:\n  _inherit_from: my_{agent_type}\n  responses_api_agents:\n    {agent_type}: {{}}\n"
+    )
     assert migration.main([str(base), str(overlay)]) == 0
     resolved = _parse(base, overlay, strict=True)
     assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["renamed_environment_server"]}
-    assert resolved.renamed_agent.responses_api_agents.pi_agent.resources_server.name == "my_resources"
+    assert resolved.renamed_agent.responses_api_agents[agent_type].resources_server.name == "my_resources"
 
 
 def test_default_pi_composes_with_exactly_one_native_environment(tmp_path: Path) -> None:
