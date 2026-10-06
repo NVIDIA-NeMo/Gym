@@ -1657,11 +1657,60 @@ def test_downconverting_null_responses_only_fields_treats_them_as_absent(convert
     assert converted.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
 
 
-def test_downconverting_text_format_fails_explicitly(converter: ResponsesConverter):
+def test_downconverting_json_object_text_format(converter: ResponsesConverter):
     params = NeMoGymResponseCreateParamsNonStreaming(input="hi", text={"format": {"type": "json_object"}})
 
-    with pytest.raises(NotImplementedError, match="text format"):
-        converter.responses_to_chat_completion_create_params(params)
+    converted = converter.responses_to_chat_completion_create_params(params)
+
+    assert converted.response_format == {"type": "json_object"}
+
+
+def test_downconverting_json_schema_text_format(converter: ResponsesConverter):
+    schema = {
+        "type": "object",
+        "properties": {"score": {"type": "integer"}},
+        "required": ["score"],
+        "additionalProperties": False,
+    }
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="hi",
+        text={"format": {"type": "json_schema", "name": "evaluation", "schema": schema, "strict": True}},
+    )
+
+    converted = converter.responses_to_chat_completion_create_params(params)
+
+    assert converted.response_format == {
+        "type": "json_schema",
+        "json_schema": {"name": "evaluation", "schema": schema, "strict": True},
+    }
+
+
+def test_downconverting_json_schema_preserves_description_without_defaulting_strict(
+    converter: ResponsesConverter,
+):
+    schema = {"type": "object", "properties": {"score": {"type": "integer"}}}
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="hi",
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "evaluation",
+                "description": "Score the response.",
+                "schema": schema,
+            }
+        },
+    )
+
+    converted = converter.responses_to_chat_completion_create_params(params)
+
+    assert converted.response_format == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "evaluation",
+            "description": "Score the response.",
+            "schema": schema,
+        },
+    }
 
 
 @pytest.mark.parametrize("field", ["context", "generate_summary", "summary"])
