@@ -179,6 +179,30 @@ class TestPrepareEntry:
         assert entry["verif_local_ctxs"] == "import Lentil.Basic\n" + ROW["local_ctx"]
 
 
+def _docker_run_fake(compile_result=None, write=(0, ""), compile_raises=None):
+    """``subprocess.run`` standing in for docker: ``cat`` reads, ``tee`` writes, ``lake`` compiles.
+
+    ``compile_result`` is ``(returncode, stdout, stderr)``; ``{file}`` in the stdout is
+    replaced with the container path of the compiled candidate file.
+    """
+
+    def run(cmd, **kwargs):
+        if "tee" in cmd:
+            rc, stderr = write
+            return subprocess.CompletedProcess(cmd, rc, stdout="", stderr=stderr)
+        if "cat" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout=SOURCE_FILE, stderr="")
+        if "rm" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        assert "lake" in cmd, f"unexpected docker command: {cmd}"
+        if compile_raises is not None:
+            raise compile_raises
+        rc, stdout, stderr = compile_result
+        return subprocess.CompletedProcess(cmd, rc, stdout=stdout.format(file=cmd[-1]), stderr=stderr)
+
+    return run
+
+
 class TestVerifyCandidate:
     @pytest.fixture
     def entry(self, harness, monkeypatch):
@@ -243,6 +267,92 @@ class TestVerifyCandidate:
             entry, "by\n  exact helper", "lemma helper : True := trivial", "p4", max_conflict_attempts=1
         )
         assert not out.verified and out.conflict_resolution_attempts == 1
+
+    # The cases below go through the REAL pinned ``verify_proof``/``compile_file`` with
+    # only ``subprocess.run`` mocked: upstream's parser keeps Lean-looking lines only, so
+    # a daemon failure with no source location is reduced to the bare "Compilation
+    # failed" — the typed capture at the docker exec boundary must see it first.
+
+    @pytest.mark.parametrize(
+        "rc,stdout,stderr,expect",
+        [
+            (
+                126,
+                "",
+                "Error response from daemon: Container verisoftbench-lean-test is not running",
+                "Error response from daemon",
+            ),
+            (
+                126,
+                "",
+                "OCI runtime exec failed: exec failed: unable to start container process: error during container init",
+                "OCI runtime exec failed",
+            ),
+            (
+                1,
+                "info: Cli: checking out revision 'd9fc8ae'\nerror: external command 'git' exited with code 128",
+                "",
+                "external command 'git'",
+            ),
+        ],
+    )
+    def test_transport_and_lake_faults_are_captured_before_formatting_loses_them(
+        self, harness, entry, monkeypatch, rc, stdout, stderr, expect
+    ) -> None:
+        monkeypatch.setattr(subprocess, "run", _docker_run_fake(compile_result=(rc, stdout, stderr)))
+        out = harness.verify_candidate(entry, "by\n  simp", "", "p5", max_conflict_attempts=1)
+        assert not out.verified and out.backend_fault
+        assert expect in out.error_msg
+
+    def test_marker_text_inside_a_real_diagnostic_stays_charged(self, harness, entry, monkeypatch) -> None:
+        # A genuine elaborator diagnostic whose text contains a backend marker: it sits
+        # after a source location, so it is the candidate's failure, not infrastructure.
+        stdout = "{file}:4:2: error: unknown identifier 'is not running'\n"
+        monkeypatch.setattr(subprocess, "run", _docker_run_fake(compile_result=(1, stdout, "")))
+        out = harness.verify_candidate(entry, "by\n  simp", "", "p6", max_conflict_attempts=1)
+        assert not out.verified and not out.backend_fault
+        assert out.error_msg == "Line 4:2 - error: unknown identifier 'is not running'"
+
+    def test_failed_container_write_is_a_backend_fault_not_a_lean_error(self, harness, entry, monkeypatch) -> None:
+        # Upstream ignores the write helper's exit code; the candidate file was never
+        # materialized, so the subsequent compile failure must not be charged.
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            _docker_run_fake(compile_result=(1, "", ""), write=(1, "tee: /workspace: No space left on device")),
+        )
+        out = harness.verify_candidate(entry, "by\n  simp", "", "p7", max_conflict_attempts=1)
+        assert not out.verified and out.backend_fault
+        assert "writing" in out.error_msg and "No space left on device" in out.error_msg
+
+    def test_transport_failure_while_reading_the_source_is_a_backend_fault(self, harness, monkeypatch) -> None:
+        # Upstream maps any failed read to None; a daemon failure there must surface
+        # rather than silently degrade the verification context.
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(harness.lean_repl, "_docker_read_file", lambda path, timeout=30: SOURCE_FILE)
+            entry = harness.prepare_entry(dict(ROW))
+        daemon = "Error response from daemon: Container verisoftbench-lean-test is not running"
+
+        def run(cmd, **kwargs):
+            if "cat" in cmd:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=daemon)
+            if "tee" in cmd or "rm" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", run)
+        out = harness.verify_candidate(entry, "by\n  simp", "", "p8", max_conflict_attempts=1)
+        assert not out.verified and out.backend_fault
+        assert out.error_msg.startswith("reading ") and "Error response from daemon" in out.error_msg
+
+    def test_compile_timeout_stays_charged(self, harness, entry, monkeypatch) -> None:
+        # Upstream's released protocol charges the timeout to the candidate.
+        monkeypatch.setattr(
+            subprocess, "run", _docker_run_fake(compile_raises=subprocess.TimeoutExpired(cmd="lake", timeout=600))
+        )
+        out = harness.verify_candidate(entry, "by\n  simp", "", "p9", max_conflict_attempts=1)
+        assert not out.verified and not out.backend_fault
+        assert "timeout" in out.error_msg.lower()
 
 
 class TestContainerHealth:

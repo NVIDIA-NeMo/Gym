@@ -170,21 +170,51 @@ class TestCheckout:
         upstream.ensure_checkout(tmp_path)
 
 
-class TestBackendFaultMarkers:
+class TestBackendFaultClassification:
+    """``classify_transport_fault`` works on the typed docker exec result, not on message text."""
+
+    @staticmethod
+    def _result(returncode: int, stdout: str = "", stderr: str = ""):
+        import subprocess
+
+        return subprocess.CompletedProcess(["docker", "exec"], returncode, stdout=stdout, stderr=stderr)
+
     @pytest.mark.parametrize(
-        "msg,expected",
+        "stderr",
         [
-            ("Error response from daemon: No such container: x", True),
-            ("Cannot connect to the Docker daemon at unix:///var/run/docker.sock", True),
-            ("info: Cli: checking out revision 'd9fc8ae'\nerror: external command 'git' exited with code 128", True),
-            ("Line 3:2 - unsolved goals", False),
-            ("Compilation timeout (>300s)", False),
-            (None, False),
-            ("", False),
+            "Error response from daemon: Container 3f4a is not running",
+            "Error response from daemon: No such container: x",
+            "Error: No such container: x",
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+            'OCI runtime exec failed: exec failed: unable to start container process: exec: "lake": '
+            "executable file not found in $PATH: unknown",
         ],
     )
-    def test_markers(self, msg, expected) -> None:
-        assert upstream.is_backend_fault(msg) is expected
+    def test_docker_transport_stderr_is_a_fault(self, stderr) -> None:
+        fault = upstream.classify_transport_fault(self._result(126, stderr=stderr))
+        assert fault is not None and stderr.splitlines()[0] in fault
+
+    def test_pre_elaboration_lake_git_failure_is_a_fault(self) -> None:
+        output = "info: Cli: checking out revision 'd9fc8ae'\nerror: external command 'git' exited with code 128"
+        fault = upstream.classify_transport_fault(self._result(1, stdout=output))
+        assert fault is not None and "external command 'git'" in fault
+
+    @pytest.mark.parametrize(
+        "stdout,stderr",
+        [
+            # An elaborator diagnostic whose text happens to contain a marker is the
+            # model's failure, not the backend's: it sits after a source location.
+            ("././Lentil/Demo.lean:4:2: error: unknown identifier 'is not running'", ""),
+            ("", "././Lentil/Demo.lean:4:2: error: unexpected token; expected 'Error response from daemon'"),
+            ("././Lentil/Demo.lean:9:0: error: unsolved goals\n⊢ external command 'git' exited with code 128 = x", ""),
+            ("Line 3:2 - unsolved goals", ""),
+        ],
+    )
+    def test_compiler_diagnostics_stay_charged(self, stdout, stderr) -> None:
+        assert upstream.classify_transport_fault(self._result(1, stdout=stdout, stderr=stderr)) is None
+
+    def test_success_is_never_a_fault(self) -> None:
+        assert upstream.classify_transport_fault(self._result(0, stderr="Error response from daemon: x")) is None
 
 
 class TestMain:

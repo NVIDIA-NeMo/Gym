@@ -36,6 +36,7 @@ import logging
 import re
 import subprocess
 import sys
+import threading
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -200,6 +201,10 @@ class Harness:
         self.docker_container = docker_container
         # In Docker mode upstream uses this path only for path arithmetic.
         self.lean_repl = self.modules.lean_interface.LeanREPL(DOCKER_LEAN_REPOS_DIR, docker_container=docker_container)
+        # Per-thread slot for backend faults observed at the docker exec boundary;
+        # ``verify_candidate`` runs in worker threads, one compile per thread at a time.
+        self._fault_slot = threading.local()
+        _observe_transport_faults(self.lean_repl, self._fault_slot)
         self._shim = _EvaluatorShim(self.modules.evaluator, self.lean_repl, docker_container, DOCKER_LEAN_REPOS_DIR)
         self.prompt_builder = self.modules.prompt_builder.PromptBuilder(
             self.modules.root / "prompts" / "templates", mode=CONTEXT_MODE
@@ -293,10 +298,14 @@ class Harness:
         while "axiom " in lemmas:
             lemmas = lemmas.replace("axiom ", "theorem ")
         proof, lemmas = utils.clean_leaked_identifiers(entry, proof, lemmas)
-        success, error_msg = self._verify_proof(entry, proof, lemmas, proof_id)
+        success, error_msg, fault = self._verify_proof(entry, proof, lemmas, proof_id)
         attempts = 0
         while (
-            not success and error_msg and "has already been declared" in error_msg and attempts < max_conflict_attempts
+            fault is None
+            and not success
+            and error_msg
+            and "has already been declared" in error_msg
+            and attempts < max_conflict_attempts
         ):
             attempts += 1
             name_mapping = utils.find_conflicting_names_from_error(error_msg, lemmas)
@@ -306,13 +315,21 @@ class Harness:
             while "axiom " in lemmas:
                 lemmas = lemmas.replace("axiom ", "theorem ")
             proof, lemmas = utils.clean_leaked_identifiers(entry, proof, lemmas)
-            success, error_msg = self._verify_proof(entry, proof, lemmas, proof_id)
+            success, error_msg, fault = self._verify_proof(entry, proof, lemmas, proof_id)
             if success or "has already been declared" not in error_msg:
                 break
+        if fault is not None and not success:
+            # The backend, not the candidate, failed; carry the typed evidence instead of
+            # upstream's formatted message (often reduced to the bare "Compilation failed").
+            return VerificationOutcome(False, fault, proof, lemmas, attempts, backend_fault=True)
         return VerificationOutcome(success, None if success else error_msg, proof, lemmas, attempts)
 
-    def _verify_proof(self, entry: dict[str, Any], proof: str, lemmas: str, proof_id: str) -> tuple[bool, str]:
-        return self.lean_repl.verify_proof(
+    def _verify_proof(
+        self, entry: dict[str, Any], proof: str, lemmas: str, proof_id: str
+    ) -> tuple[bool, str, Optional[str]]:
+        """Upstream's verify, plus the backend fault observed at the docker boundary, if any."""
+        self._fault_slot.fault = None
+        success, error_msg = self.lean_repl.verify_proof(
             thm_name=entry["thm_name"],
             repo_name=entry["lean_root"],
             rel_path=entry["rel_path"],
@@ -323,6 +340,7 @@ class Harness:
             aux_lemmas=lemmas,
             suffix=entry.get("suffix", ""),
         )
+        return success, error_msg, getattr(self._fault_slot, "fault", None)
 
     # --- backend health --------------------------------------------------------
 
@@ -346,23 +364,105 @@ class VerificationOutcome:
     proof: str
     aux_lemmas: str
     conflict_resolution_attempts: int
+    # The Lean backend, not the candidate, failed: typed evidence captured at the docker
+    # exec boundary (``_observe_transport_faults``), never a substring of the formatted
+    # compiler message — a diagnostic that merely contains marker-like text stays charged.
+    backend_fault: bool = False
 
 
-# Error text that means the Lean backend, not the candidate, failed. ``docker exec``
-# against a stopped container or an unreachable daemon surfaces through upstream's
-# generic parsing as a compile failure; these fragments are how it is told apart.
-BACKEND_FAULT_MARKERS = (
-    "Error response from daemon",
-    "Cannot connect to the Docker daemon",
-    "docker: command not found",
-    "lake command not found",
-    "No such container",
-    "is not running",
-    # Lake re-resolving a dependency inside the repository during `lake env lean`; the
-    # candidate never reached the elaborator.
-    "external command 'git' exited",
+# --- backend fault provenance ------------------------------------------------------
+
+# ``docker`` writes its own transport failures (unreachable daemon, missing or stopped
+# container, exec that never started) to stderr at the start of a line. A compiler
+# diagnostic that merely contains such text sits after a ``file.lean:line:col:``
+# location, so a line-anchored match on the raw stderr of a nonzero ``docker exec``
+# separates infrastructure evidence from elaborator output.
+_DOCKER_TRANSPORT_RE = re.compile(
+    r"^(?:Error response from daemon|Error: No such container|"
+    r"Cannot connect to the Docker daemon|OCI runtime exec failed)",
+    re.MULTILINE,
 )
+# Lake re-resolving a dependency inside the repository during ``lake env lean``: its own
+# ``error:`` line with no source location, emitted before the candidate ever reached the
+# elaborator.
+_LAKE_RESOLUTION_RE = re.compile(r"^error: external command 'git' exited with code \d+", re.MULTILINE)
 
 
-def is_backend_fault(error_msg: Optional[str]) -> bool:
-    return bool(error_msg) and any(marker in error_msg for marker in BACKEND_FAULT_MARKERS)
+def classify_transport_fault(result: "subprocess.CompletedProcess[str]") -> Optional[str]:
+    """A backend-fault description from a finished ``docker exec`` result, else ``None``.
+
+    Works on the typed result (exit code plus raw stderr/stdout), not on upstream's
+    formatted error message: ``compile_file`` keeps only lines that look like Lean
+    diagnostics, so by the time it has formatted its output a daemon failure with no
+    Lean source location has been reduced to the bare string "Compilation failed".
+    A compile timeout is upstream's released protocol and stays charged.
+    """
+    if result.returncode == 0:
+        return None
+    stderr = result.stderr or ""
+    match = _DOCKER_TRANSPORT_RE.search(stderr)
+    if match is not None:
+        line = stderr[match.start() :].splitlines()[0]
+        return f"docker exec failed (exit code {result.returncode}): {line}"
+    output = f"{result.stdout or ''}\n{stderr}"
+    match = _LAKE_RESOLUTION_RE.search(output)
+    if match is not None:
+        line = output[match.start() :].splitlines()[0]
+        return f"Lake re-resolved a dependency before elaboration: {line}"
+    return None
+
+
+def _observe_transport_faults(repl: Any, slot: threading.local) -> None:
+    """Wrap ``repl``'s docker helpers so infrastructure faults keep typed provenance.
+
+    Upstream's ``verify_proof`` ignores the write helper's exit code, maps read failures
+    to ``None`` and formats compile output down to Lean-looking lines; a stopped
+    container or daemon error would be charged to the candidate. The wrappers record the
+    first fault seen by the calling thread into ``slot``; ``Harness._verify_proof``
+    clears and reads it around each ``verify_proof`` call.
+    """
+    orig_exec = repl._docker_exec
+    orig_write = repl._docker_write_file
+
+    def record(message: str) -> None:
+        if getattr(slot, "fault", None) is None:
+            slot.fault = message
+
+    def observed_exec(cmd: list, cwd: Path, timeout: int) -> "subprocess.CompletedProcess[str]":
+        try:
+            result = orig_exec(cmd, cwd, timeout)
+        except FileNotFoundError as e:  # the docker binary itself is unavailable
+            record(f"docker is not available on the host: {e}")
+            raise
+        fault = classify_transport_fault(result)
+        if fault is not None:
+            record(fault)
+        return result
+
+    def observed_write(container_path: str, content: str, timeout: int = 30) -> "subprocess.CompletedProcess[str]":
+        result = orig_write(container_path, content, timeout)
+        if result.returncode != 0:
+            # The candidate file was never materialized; any verdict on it would be about
+            # the backend, not the model.
+            stderr = (result.stderr or "").strip()
+            record(f"writing {container_path} in the container failed (exit code {result.returncode}): {stderr}")
+        return result
+
+    def observed_read(container_path: str, timeout: int = 30) -> Optional[str]:
+        # Upstream's helper returns None for any nonzero ``cat`` and loses the result;
+        # run the same command and keep that contract (a genuinely absent file has an
+        # upstream fallback), but surface a docker transport failure as a backend fault.
+        docker_cmd = ["docker", "exec", repl.docker_container, "cat", container_path]
+        try:
+            result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=timeout)
+        except FileNotFoundError as e:
+            record(f"docker is not available on the host: {e}")
+            raise
+        fault = classify_transport_fault(result)
+        if fault is not None:
+            record(f"reading {container_path}: {fault}")
+        return result.stdout if result.returncode == 0 else None
+
+    repl._docker_exec = observed_exec
+    repl._docker_write_file = observed_write
+    repl._docker_read_file = observed_read

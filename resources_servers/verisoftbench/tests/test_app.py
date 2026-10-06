@@ -16,8 +16,9 @@
 
 The fake keeps the tag conventions (``<lean4_proof>``, ``<fixed_lean4_thm_proof>``)
 and answers by proof text: ``GOOD`` verifies, anything else fails with a Lean-style
-message, and ``DAEMON`` produces the text ``docker exec`` emits when the container is
-gone. Tests that concern the HTTP boundary go through FastAPI's test client so that
+message, ``DAEMON`` produces the typed backend fault the docker exec boundary records
+when the container is gone, and ``TRICKY`` produces a charged diagnostic whose text
+merely contains a marker. Tests that concern the HTTP boundary go through FastAPI's test client so that
 response construction and JSON encoding are exercised too. Nothing here needs the
 upstream checkout or a Lean container; those are covered by
 ``scripts/validate_model_free.py`` against the real backend.
@@ -94,8 +95,21 @@ class FakeHarness:
             dict(id=entry["id"], proof=proof, lemmas=lemmas, proof_id=proof_id, attempts=max_conflict_attempts)
         )
         if "DAEMON" in proof:
+            # What upstream.Harness returns when the docker exec boundary observed a
+            # transport fault: the typed flag is set, the raw evidence is the message.
             return VerificationOutcome(
-                False, "Error response from daemon: No such container: verisoftbench-lean", proof, lemmas, 0
+                False,
+                "docker exec failed (exit code 125): Error response from daemon: No such container: verisoftbench-lean",
+                proof,
+                lemmas,
+                0,
+                backend_fault=True,
+            )
+        if "TRICKY" in proof:
+            # A genuine elaborator diagnostic whose text contains a backend marker; the
+            # boundary saw no transport fault, so the flag stays off and the row is charged.
+            return VerificationOutcome(
+                False, "Line 4:2 - error: unknown identifier 'Error response from daemon'", proof, lemmas, 0
             )
         if "GOOD" in proof:
             return VerificationOutcome(True, None, proof, lemmas, 0)
@@ -290,6 +304,14 @@ class TestHarnessFaults:
             "verifier_error",
         )
         assert "No such container" in r.failure_reason and r.needs_repair is False
+
+    @pytest.mark.asyncio
+    async def test_marker_text_in_a_lean_diagnostic_stays_charged(self) -> None:
+        # The verdict must come from the typed boundary flag, not from sniffing the
+        # error message: this diagnostic contains a daemon marker but is a model failure.
+        r = await verify(make_server(), "<lean4_proof>by TRICKY</lean4_proof>")
+        assert (r.status, r.reward, r.harness_failure, r.mask_sample) == ("lean_error", 0.0, 0.0, False)
+        assert r.needs_repair is True
 
     @pytest.mark.asyncio
     async def test_container_stopped_between_requests(self) -> None:

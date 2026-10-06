@@ -40,7 +40,6 @@ from upstream import (
     CONTEXT_MODE,
     Harness,
     UpstreamError,
-    is_backend_fault,
     resolve_upstream_dir,
 )
 
@@ -314,7 +313,7 @@ class VeriSoftBenchResourcesServer(SimpleResourcesServer):
                 )
             lean_time = loop.time() - t0
 
-        if not outcome.verified and is_backend_fault(outcome.error_msg):
+        if not outcome.verified and outcome.backend_fault:
             return self._respond(body, Status.BACKEND_ERROR, failure_reason=outcome.error_msg, lean_time_s=lean_time)
 
         if outcome.verified:
