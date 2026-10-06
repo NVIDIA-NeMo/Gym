@@ -1,0 +1,22 @@
+config_paths:
+  - resources_servers/facts_search/configs/facts_search.yaml
+  - responses_api_agents/facts_search_agent/configs/facts_search_agent.yaml
+
+facts_search_public:
+  _inherit_from: facts_search_agent
+  responses_api_agents:
+    facts_search_agent:
+      datasets:
+        - name: facts_search_public
+          type: benchmark
+          jsonl_fpath: benchmarks/facts_search/data/facts_search_public.jsonl
+          prepare_script: benchmarks/facts_search/prepare.py
+          num_repeats: 1
+          license: Apache-2.0
+
+facts_search_public_environment_server:
+  _inherit_from: facts_search_agent_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: facts_search_public
