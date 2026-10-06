@@ -424,6 +424,7 @@ Validate and collate a dataset, generating metrics and statistics.
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--resources-server NAME` | Load the named resources server config. |
+| `--model-type NAME` | Load the named model-type config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--mode {train_preparation,example_validation}` | Use `train_preparation` to prepare train/validation datasets, or `example_validation` to validate example data. |
 | `--output-dir` | Output directory for the prepared data. |
@@ -601,6 +602,7 @@ Run the local publication check for a manifest-backed workload. The command runs
 | `NAME` | Manifest-backed catalog entry to publish. |
 | `--kind environment\|benchmark` | Resolve an ambiguous catalog name. |
 | `--json` | Output the publication result as JSON. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
 gym env publish my_eval
@@ -615,8 +617,9 @@ Start the NeMo Gym servers (agents, models, resources) defined by the provided c
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config (start its servers). |
+| `--environment NAME` | Load the named environment config. Repeatable. |
 | `--resources-server NAME` | Load the named resources server config. |
-| `--model-type NAME` | Load the named model server type config. |
+| `--model-type NAME` | Load the named model-type config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
 | `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
@@ -726,8 +729,9 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config. |
+| `--environment NAME` | Load the named environment config. Repeatable. |
 | `--resources-server NAME` | Load the named resources server config. |
-| `--model-type NAME` | Load the named model server type config. |
+| `--model-type NAME` | Load the named model-type config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--no-serve` | Collect against already-running servers instead of starting them. |
 | `--resume` | Resume from cached rollouts instead of recollecting. Maps to legacy `+resume_from_cache=true`. Refer to [Resume interrupted runs](#resume-interrupted-runs). |
@@ -904,6 +908,7 @@ Verify rollout quality for an existing run directory. The command reads `<run-di
 | `--rollouts-file PATH` | Rollout JSONL path. Relative paths resolve under `RUN_DIR`; absolute paths are used as written. Defaults to `rollouts.jsonl`. |
 | `--workers` | Number of worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--ignore-checks`, `--ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
+| `--json` | Output health-check results as JSON. |
 
 ```bash
 gym eval health-check results/my-run
@@ -993,13 +998,17 @@ Servers that report `unsupported` or `unknown` cause the command to abort unless
 | --- | --- |
 | `--config PATH` | Config file for the resources server. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config. |
+| `--environment NAME` | Load the named environment config. Repeatable. |
 | `--resources-server NAME` | Load the named resources server config. |
+| `--model-type NAME` | Load the named model-type config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--input-format gym\|atif` | Select native Gym rollout input or the bounded Relay ATIF v1.7 profile. Defaults to `gym`. |
 | `--inputs PATH` | `*_materialized_inputs.jsonl` from `gym eval run`. |
 | `--rollouts PATH` | Native Gym `rollouts.jsonl`. Required when `--input-format gym`. |
 | `--atif-manifest PATH` | JSONL manifest mapping each Relay ATIF trajectory to `_ng_task_index` and `_ng_rollout_index`, with an optional source SHA-256. Missing hashes produce a warning. Required when `--input-format atif`. |
 | `--output PATH`, `-o` | Output JSONL for recomputed rollouts. |
+| `--concurrency` | Maximum number of concurrent samples. |
+| `--limit` | Maximum number of examples to re-verify. |
 | `--force` | Override the `UNSUPPORTED` or `UNKNOWN` reverify mode guard; output is prefixed with `unsafe_`. |
 | `--overwrite` | Delete an existing output file instead of raising an error. |
 | `--resume` | Resume a partial run: skip rows already in the output and re-verify only the rest. |
