@@ -126,6 +126,7 @@ class TestLoadAndValidateServerInstanceConfigs:
                                 "name": "example",
                                 "type": "example",
                                 "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
+                                "taskset": None,
                                 "num_repeats": 1,
                                 "source": None,
                                 "gitlab_identifier": None,

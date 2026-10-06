@@ -3,6 +3,7 @@
 
 import runpy
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import orjson
 import pytest
@@ -169,6 +170,44 @@ def test_legacy_adapter_forwards_aggregate_metrics_to_resources() -> None:
     assert response.status_code == 200
     assert response.json()["agent_metrics"] == {"mean/reward": 0.5}
     assert [(server, path) for server, path, _ in client.calls] == [("resources", "/aggregate_metrics")]
+
+
+def test_legacy_adapter_preserves_task_identity_and_data():
+    row = {
+        "problem_id": "problem-1",
+        "instance_id": "instance-1",
+        "responses_create_params": {"input": "fix it", "temperature": 0.4},
+        "run_script": "verifier\nscript\n",
+        "verifier_metadata": {"answer": "expected"},
+        "agent_ref": {"name": "old-agent"},
+        "skills_ref": "old-skills",
+        "task_source": "old-source",
+        "_ng_task_index": 7,
+        "_ng_rollout_index": 2,
+        "_ng_attempt_index": 1,
+    }
+    row.update(task_source="resources", agent_ref={"name": "agent"})
+    adapter = SingleAgentTurnLegacyEnvironmentServer(
+        config=SingleAgentTurnEnvironmentServerConfig(
+            name="environment",
+            host="localhost",
+            port=1,
+            entrypoint="app.py",
+            cleanup_timeout_seconds=10,
+            resources_server={"type": "resources_servers", "name": "resources"},
+            agent_server={"type": "responses_api_agents", "name": "agent"},
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    request = adapter._native_request(row)
+    assert (request.task.task_id.taskset, request.task.task_id.task_id) == ("resources", "problem-1")
+    assert request.task.task_input.task_data == {
+        "problem_id": "problem-1",
+        "instance_id": "instance-1",
+        "run_script": "verifier\nscript\n",
+        "verifier_metadata": {"answer": "expected"},
+    }
+    assert request.episode_id.attempt == 1
 
 
 @pytest.mark.parametrize("task_id_field", ["task_id", "problem_id", "instance_id"])
