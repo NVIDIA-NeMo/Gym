@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 
 from nemo_gym.base_responses_api_agent import (
+    AGENT_SESSION_COOKIE_KEY,
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
 )
@@ -89,12 +90,17 @@ def cli(request: pytest.FixtureRequest, tmp_path: Path):
     return agent, module, runner
 
 
+def active_sessions(agent):
+    return {key: record.state for key, record in agent._session_records.items() if record.state is not None}
+
+
 def params() -> NeMoGymResponseCreateParamsNonStreaming:
     return NeMoGymResponseCreateParamsNonStreaming(input="Solve the task", model="test-model")
 
 
 def seed(rollout: str = "rollout") -> AgentSeedSessionRequest:
     return AgentSeedSessionRequest(
+        agent_session_id="session" if rollout == "rollout" else f"session-{rollout}",
         episode_id=EpisodeId(rollout_id=rollout, attempt=1),
         task_id=TaskId(taskset="verifier", task_id="task"),
     )
@@ -199,7 +205,7 @@ def test_http_seed_activate_close_preserves_response_usage_and_observations(cli,
             assert invocation.conversation[-1].content[0].text == "42"
             assert invocation.model_calls == []
             assert "model_call_ownership_unavailable" in {gap.code for gap in bundle.gaps}
-        assert session_id not in agent._agent_sessions
+        assert session_id not in active_sessions(agent)
         agent.server_client.post.assert_not_called()  # Native agent does no seed/verify orchestration.
 
 
@@ -211,24 +217,30 @@ def test_http_cookie_isolation_and_single_activation(cli):
         a = first.post("/v1/agent_sessions", json=seed("a").model_dump(mode="json")).json()["agent_session_id"]
         b = second.post("/v1/agent_sessions", json=seed("b").model_dump(mode="json")).json()["agent_session_id"]
         assert a != b
-        assert first.post("/v1/agent_sessions", json=seed("a").model_dump(mode="json")).status_code == 409
+        assert first.post("/v1/agent_sessions", json=seed("a").model_dump(mode="json")).status_code == 200
         assert (
             second.post("/v1/agent_sessions/close", json=close_request(a, "a").model_dump(mode="json")).status_code
             == 409
         )
-        assert a in agent._agent_sessions
+        assert a in active_sessions(agent)
         route = f"/ng-rollout/{seed('a').episode_id.capture_key}/v1/responses"
         assert second.post(route, json=params().model_dump(mode="json")).status_code == 409
         assert first.post("/v1/responses", json=params().model_dump(mode="json")).status_code == 409
         mocked.assert_not_called()
         assert first.post(route, json=params().model_dump(mode="json")).status_code == 200
-        assert first.post(route, json=params().model_dump(mode="json")).status_code == 409
+        assert first.post(route, json=params().model_dump(mode="json")).status_code == 200
+        assert (
+            first.post(
+                route, json=params().model_copy(update={"input": "Different"}).model_dump(mode="json")
+            ).status_code
+            == 409
+        )
         mocked.assert_awaited_once()
         assert (
             first.post("/v1/agent_sessions/close", json=close_request(a, "a").model_dump(mode="json")).status_code
             == 200
         )
-        assert b in agent._agent_sessions
+        assert b in active_sessions(agent)
         assert (
             second.post("/v1/agent_sessions/close", json=close_request(b, "b").model_dump(mode="json")).status_code
             == 200
@@ -251,7 +263,7 @@ def test_unsupported_access_fails_before_activation(cli, access):
         result = client.post("/v1/agent_sessions", json=body)
         assert result.status_code == 422
         assert "does not support" in result.text or "do not support" in result.text
-    assert agent._agent_sessions == {}
+    assert active_sessions(agent) == {}
     mocked.assert_not_called()
 
 
@@ -263,7 +275,7 @@ def test_configured_required_tools_reject_native_seed_but_preserve_direct_calls(
     with TestClient(agent.setup_webserver()) as client:
         native = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert native.status_code == 422 and "required runtime tools" in native.text
-        assert agent._agent_sessions == {}
+        assert active_sessions(agent) == {}
         mocked.assert_not_called()
         assert client.post("/v1/responses", json=params().model_dump(mode="json")).status_code == 200
         mocked.assert_awaited_once()
@@ -292,7 +304,7 @@ def test_optional_tools_can_be_skipped_for_verifier_only_sessions(cli, kind, con
         )
     mocked.assert_awaited_once()
     agent.server_client.post.assert_not_called()
-    assert agent._agent_sessions == {}
+    assert active_sessions(agent) == {}
 
 
 @pytest.mark.parametrize("episode_required", [False, True])
@@ -314,7 +326,7 @@ def test_episode_tool_access_overrides_configured_access_by_name(cli, episode_re
                 == 200
             )
     mocked.assert_not_called()
-    assert agent._agent_sessions == {}
+    assert active_sessions(agent) == {}
 
 
 @pytest.mark.asyncio
@@ -340,14 +352,14 @@ async def test_wrong_episode_close_does_not_cancel_active_harness(cli, episode_i
                 request, AgentCloseSessionRequest(agent_session_id="session", episode_id=episode_id)
             )
         assert error.value.status_code == 409
-        state = agent._agent_sessions["session"].state
+        state = active_sessions(agent)["session"]
         assert not state.task.done()
         assert not state.task.cancelling()
         assert not state.cancel_requested
     finally:
         await agent.close_agent_session(request, close_request())
         await asyncio.gather(activation, return_exceptions=True)
-    assert agent._agent_sessions == {}
+    assert active_sessions(agent) == {}
 
 
 def test_multiworker_legacy_config_rejects_only_native_seed(cli):
@@ -355,11 +367,11 @@ def test_multiworker_legacy_config_rejects_only_native_seed(cli):
     mock_runner(agent, runner)
     agent.config.num_workers = 2
     with TestClient(agent.setup_webserver()) as client:
-        native = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        assert native.status_code == 422 and "num_workers=1" in native.text
+        with pytest.raises(ValueError, match="num_workers=1"):
+            client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         legacy = client.post("/v1/responses", json=params().model_dump(mode="json"))
         assert legacy.status_code == 200
-    assert agent._agent_sessions == {}
+    assert active_sessions(agent) == {}
 
 
 def test_persistent_workspace_is_legacy_only(cli, tmp_path):
@@ -385,7 +397,7 @@ async def test_queued_activation_can_close_without_starting_cli(cli):
     activation = asyncio.create_task(agent.responses(request, params()))
     try:
         await asyncio.sleep(0)
-        assert agent._agent_sessions["session"].activation_started
+        assert active_sessions(agent)["session"].task is not None
         result = await agent.close_agent_session(request, close_request())
         assert result.agent_observations.records[0].status == "incomplete"
         with pytest.raises(asyncio.CancelledError):
@@ -399,7 +411,7 @@ async def test_queued_activation_can_close_without_starting_cli(cli):
 
 
 @pytest.mark.asyncio
-async def test_caller_cancellation_leaves_cleanup_for_close(cli):
+async def test_caller_cancellation_preserves_activation_until_explicit_close(cli):
     agent, _, _ = cli
     request = request_for()
     await agent.seed_agent_session(request, seed())
@@ -419,12 +431,14 @@ async def test_caller_cancellation_leaves_cleanup_for_close(cli):
     activation.cancel()
     with pytest.raises(asyncio.CancelledError):
         await activation
+    assert not cleaning.is_set()
+    assert not active_sessions(agent)["session"].task.done()
+    closing = asyncio.create_task(agent.close_agent_session(request, close_request()))
     await cleaning.wait()
-    assert not agent._agent_sessions["session"].state.task.done()
     release.set()
-    closed = await agent.close_agent_session(request, close_request())
+    closed = await closing
     assert closed.agent_observations.records[0].status == "incomplete"
-    assert agent._agent_sessions == {}
+    assert active_sessions(agent) == {}
 
 
 @pytest.mark.asyncio
@@ -451,14 +465,14 @@ async def test_close_waits_for_cancelled_activation_and_can_be_retried(cli):
     closing.cancel()
     with pytest.raises(asyncio.CancelledError):
         await closing
-    assert "session" in agent._agent_sessions
+    assert "session" in active_sessions(agent)
     release.set()
     result = await agent.close_agent_session(request, close_request())
     assert result.agent_observations.records[0].status == "incomplete"
     with pytest.raises(asyncio.CancelledError):
         await activation
     assert agent.sem._value == 1
-    assert agent._agent_sessions == {}
+    assert active_sessions(agent) == {}
 
 
 @pytest.mark.asyncio
@@ -481,7 +495,7 @@ async def test_cancelled_cleanup_failure_does_not_close_session(cli):
     for _ in range(2):
         with pytest.raises(RuntimeError, match="cleanup failed"):
             await agent.close_agent_session(request, close_request())
-        assert "session" in agent._agent_sessions
+        assert "session" in active_sessions(agent)
     with pytest.raises(RuntimeError, match="cleanup failed"):
         await activation
 
@@ -496,7 +510,7 @@ async def test_activation_error_is_preserved_and_close_collects_failure(cli):
         await agent.responses(request, params())
     result = await agent.close_agent_session(request, close_request())
     assert result.agent_observations.records[0].status == "failed"
-    assert agent._agent_sessions == {}
+    assert active_sessions(agent) == {}
 
 
 @pytest.mark.asyncio
@@ -584,7 +598,7 @@ async def test_legacy_run_preserves_verifier_fields_cookie_and_rollout_path(cli)
     assert calls[-1]["url_path"] == "/verify"
     assert calls[-1]["cookies"] == {"resource-cookie": "owner"}
     assert "_ng_agent_observations" not in calls[-1]["json"]["response"]
-    assert agent._agent_sessions == {}
+    assert active_sessions(agent) == {}
 
 
 @pytest.mark.asyncio
@@ -623,7 +637,7 @@ async def test_real_subprocess_cancellation_cleans_up(cli, monkeypatch, tmp_path
             task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=5)
-        assert agent._agent_sessions == {}
+        assert active_sessions(agent) == {}
         assert processes[0].returncode is not None
         if hasattr(agent.config, "workspace_root"):
             assert not list(Path(agent.config.workspace_root).glob("*"))
@@ -635,3 +649,146 @@ async def test_real_subprocess_cancellation_cleans_up(cli, monkeypatch, tmp_path
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_activation_retries_share_work_and_keep_request_and_response_immutable(cli):
+    agent, _, runner = cli
+    mocked = mock_runner(agent, runner)
+    execute = AsyncMock(wraps=agent._execute_responses)
+    object.__setattr__(agent, "_execute_responses", execute)
+    request = request_for()
+    await agent.seed_agent_session(request, seed())
+    await agent.sem.acquire()
+    first_body = params()
+    first = asyncio.create_task(agent.responses(request, first_body))
+    second = asyncio.create_task(agent.responses(request, params()))
+    try:
+        await asyncio.sleep(0)
+        first_body.input = "mutated by caller"
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert not active_sessions(agent)["session"].task.cancelling()
+    finally:
+        agent.sem.release()
+    result = await second
+    replay = await agent.responses(request, params())
+    assert result == replay
+    assert execute.call_args.args[1] == params()
+    mocked.assert_awaited_once()
+    result.output.clear()
+    assert (await agent.responses(request, params())).output
+    closed = await agent.close_agent_session(request, close_request())
+    assert closed.agent_observations is not None
+    assert await agent.close_agent_session(request, close_request()) == closed
+    closed.agent_observations.source = "mutated by caller"
+    assert (
+        await agent.close_agent_session(request, close_request())
+    ).agent_observations.source == agent.observation_source
+    with pytest.raises(HTTPException, match="Unknown or closing"):
+        await agent.responses(request, params())
+    mocked.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker", ["unknown", "", False])
+async def test_stale_or_malformed_session_never_falls_back_to_local_execution(cli, marker):
+    agent, _, runner = cli
+    mocked = mock_runner(agent, runner)
+    request = request_for()
+    request.session[AGENT_SESSION_COOKIE_KEY] = marker
+    with pytest.raises(HTTPException) as error:
+        await agent.responses(request, params())
+    assert error.value.status_code == 409
+    mocked.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_embedded_runner_without_session_middleware_preserves_direct_responses(cli):
+    agent, _, runner = cli
+    mocked = mock_runner(agent, runner)
+    # HarnessAgent/AnySWE/AnyTerminal call the adapter directly with a lightweight request.
+    request = SimpleNamespace(path_params={}, url=SimpleNamespace(path=""))
+    result = await agent.responses(request, params())
+    assert result.output[-1].content[0].text == "42"
+    mocked.assert_awaited_once()
+    assert not active_sessions(agent)
+
+
+@pytest.mark.asyncio
+async def test_environment_server_drives_caller_assigned_session_and_closes_before_verify(cli):
+    from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
+    from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
+
+    agent, _, runner = cli
+    mocked = mock_runner(agent, runner)
+    calls = []
+
+    class Response:
+        ok = True
+        cookies = {"session": SimpleNamespace(value="resources-cookie")}
+
+        def __init__(self, body):
+            self.body = body
+
+        async def read(self):
+            return json.dumps(self.body).encode()
+
+    with TestClient(agent.setup_webserver()) as http:
+
+        async def post(server_name, url_path, **kwargs):
+            calls.append((server_name, url_path))
+            body = kwargs["json"]
+            if isinstance(body, NeMoGymResponseCreateParamsNonStreaming):
+                body = body.model_dump(mode="json")
+            if server_name == "agent":
+                result = await asyncio.to_thread(http.post, url_path, json=body)
+                assert result.status_code == 200, result.text
+                response = Response(result.json())
+                response.cookies = {key: SimpleNamespace(value=value) for key, value in result.cookies.items()}
+                return response
+            if url_path == "/seed_session":
+                return Response({"resources_session_id": body["resources_session_id"]})
+            if url_path == "/close_session":
+                return Response({"resources_session_id": body["resources_session_id"]})
+            assert url_path == "/verify"
+            assert not active_sessions(agent)
+            assert calls[-2] == ("agent", "/v1/agent_sessions/close")
+            assert body["response"]["output"][-1]["content"][0]["text"] == "42"
+            return Response(body | {"reward": 1.0})
+
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(side_effect=post)
+        client.global_config_dict = OmegaConf.create(
+            {
+                "agent": {"responses_api_agents": {"test": {"host": "testserver", "port": 80}}},
+                "verifier": {"resources_servers": {"test": {"host": "verifier", "port": 80}}},
+            }
+        )
+        environment = SingleAgentTurnLegacyEnvironmentServer(
+            config=SingleAgentTurnEnvironmentServerConfig(
+                name="environment",
+                host="localhost",
+                port=1,
+                entrypoint="app.py",
+                resources_server={"type": "resources_servers", "name": "verifier"},
+                agent_server={"type": "responses_api_agents", "name": "agent"},
+                resources_tool_transports=[],
+                default_episode_timeout_seconds=10,
+                cleanup_timeout_seconds=10,
+            ),
+            server_client=client,
+        )
+        result = await environment.run_legacy(
+            {
+                "responses_create_params": params().model_dump(mode="json"),
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "_ng_rollout_id": "environment-cli",
+            }
+        )
+    assert result.get("reward") == 1.0, result
+    assert result["ng_agent_observations"]["source"] == agent.observation_source
+    assert calls[-1] == ("verifier", "/close_session")
+    mocked.assert_awaited_once()

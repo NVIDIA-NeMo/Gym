@@ -279,6 +279,7 @@ class PrimeAgentVerifyResponse(BaseVerifyResponse):
 
 
 class PrimeAgent(CLIResponsesAPIAgent):
+    ray_enabled = False
     config: PrimeAgentConfig
     observation_source = "prime"
     sem: Semaphore = None

@@ -434,6 +434,8 @@ class ClineAgent(CLIResponsesAPIAgent):
     are not wired up.
     """
 
+    ray_enabled = False
+
     config: ClineAgentConfig
     observation_source = "cline"
     sem: Semaphore = None

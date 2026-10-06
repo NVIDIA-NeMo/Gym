@@ -14,11 +14,15 @@
 # limitations under the License.
 
 import asyncio
+import shutil
+import subprocess
 from pathlib import Path
+from shlex import quote
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -29,12 +33,12 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
-from nemo_gym.single_agent_episode_types import ResponsesResourcesVerifyRequest, ResponsesVerificationInput
 from resources_servers.swebench_pro.app import (
     SWEBenchProInstanceRequest,
     SWEBenchProResourcesServer,
     SWEBenchProResourcesServerConfig,
     SWEBenchProSeedSessionRequest,
+    SWEBenchProVerifyRequest,
     _attempt_budget,
     _budget_spent,
 )
@@ -112,6 +116,8 @@ def test_golden_patch_verify_and_cleanup(monkeypatch: MonkeyPatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["reward"] == 1.0
+    assert response.json()["evaluation_completed"] is True
+    assert response.json()["mask_sample"] is False
     assert response.json()["model_patch"] == "gold patch"
     assert response.json()["resolved"] is True
     assert verify.await_args.kwargs["inputs"].prefetch_go_modules is True
@@ -119,8 +125,17 @@ def test_golden_patch_verify_and_cleanup(monkeypatch: MonkeyPatch) -> None:
     sandbox.stop.assert_awaited_once()
 
 
-def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch) -> None:
-    server = make_server(golden=False)
+@pytest.mark.parametrize(
+    "tests,completed",
+    [
+        ([{"name": "new_test", "status": "FAILED"}, {"name": "old_test", "status": "PASSED"}], True),
+        ([{"name": "new_test", "status": "FAILED"}], True),
+        ([{"name": "old_test", "status": "PASSED"}], True),
+        ([], True),  # Pass-only parsers and compilation failures can produce empty reports.
+    ],
+)
+def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch, tests: list[dict], completed: bool) -> None:
+    server = make_server(golden=False, inconclusive_verification_retries=0)
     sandbox = SimpleNamespace(stop=AsyncMock())
     monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="agent patch"))
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
@@ -129,9 +144,7 @@ def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch) -> None:
             completed=True,
             resolved=False,
             patch_applied=True,
-            test_results={
-                "tests": [{"name": "new_test", "status": "FAILED"}, {"name": "old_test", "status": "PASSED"}]
-            },
+            test_results={"tests": tests},
             test_output="test run output",
         )
     )
@@ -143,6 +156,10 @@ def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch) -> None:
     assert response.json()["model_patch"] == "agent patch"
     assert response.json()["reward"] == 0.0
     assert response.json()["test_output"] == "test run output"
+    assert response.json()["evaluation_completed"] is completed
+    assert response.json()["mask_sample"] is False
+    assert bool(response.json()["error"]) is not completed
+    verify.assert_awaited_once()
 
 
 def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
@@ -153,8 +170,62 @@ def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["evaluation_completed"] is False
+    assert response.json()["mask_sample"] is False
     assert response.json()["reward"] == 0.0
     assert "sandbox unavailable" in response.json()["error"]
+
+
+@pytest.mark.parametrize(
+    "test_output,extraction_error,completed,expected_error",
+    [
+        ("compilation failed: undefined symbol", None, True, None),
+        (
+            "npm ERR! EAI_AGAIN registry.npmjs.org",
+            None,
+            False,
+            "dependency network failure before any test results",
+        ),
+        ("test run completed", "patch download failed", True, "Failed to extract model patch: patch download failed"),
+        (
+            "test run completed",
+            "fatal: not a git repository",
+            True,
+            "Failed to extract model patch: fatal: not a git repository",
+        ),
+    ],
+)
+def test_verify_keeps_failures_unmasked_and_reports_error(
+    monkeypatch: MonkeyPatch,
+    test_output: str,
+    extraction_error: str | None,
+    completed: bool,
+    expected_error: str | None,
+) -> None:
+    server = make_server(golden=False, inconclusive_verification_retries=0)
+    extract = AsyncMock(return_value="agent patch")
+    if extraction_error is not None:
+        extract.side_effect = RuntimeError(extraction_error)
+    monkeypatch.setattr(server, "_extract_model_patch", extract)
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.run_verification",
+        AsyncMock(
+            return_value=VerificationResult(
+                completed=True,
+                resolved=False,
+                patch_applied=True,
+                test_results={"tests": []},
+                test_output=test_output,
+            )
+        ),
+    )
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+    assert response.status_code == 200
+    assert response.json()["reward"] == 0.0
+    assert response.json()["mask_sample"] is False
+    assert response.json()["evaluation_completed"] is completed
+    assert response.json()["error"] == expected_error
+    assert response.json()["model_patch"] == (None if extraction_error else "agent patch")
 
 
 def test_schema_rejects_missing_evaluator_asset() -> None:
@@ -198,6 +269,7 @@ async def test_seed_session_applies_shared_anti_cheat_setup(monkeypatch: MonkeyP
     assert sandbox.exec.await_args_list[0].kwargs["timeout_s"] == 600
     assert response.sandbox_handle == "sandbox-id"
     assert server._session_id_to_sandbox["session"] is sandbox
+    assert "session" not in server._session_id_to_identity
 
 
 @pytest.mark.asyncio
@@ -225,6 +297,7 @@ async def test_episode_seed_returns_direct_access_and_resources_close_owns_stop(
 ) -> None:
     server = make_server(golden=False, apply_anti_cheating=False)
     sandbox = SimpleNamespace(
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
         exec=AsyncMock(),
         serialize=AsyncMock(return_value={"sandbox_id": "sandbox-id"}),
         stop=AsyncMock(),
@@ -243,6 +316,7 @@ async def test_episode_seed_returns_direct_access_and_resources_close_owns_stop(
     response = await server.seed_session(
         request,
         ResourcesSeedSessionRequest(
+            resources_session_id="session",
             episode_id=EpisodeId(rollout_id="rollout"),
             task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
             task_data=task_data,
@@ -256,45 +330,70 @@ async def test_episode_seed_returns_direct_access_and_resources_close_owns_stop(
         EpisodeId(rollout_id="rollout"),
         TaskId(taskset="swebench_pro", task_id="instance_example"),
     )
+    repeated = await server.seed_session(
+        request,
+        ResourcesSeedSessionRequest(
+            resources_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
+            task_data=task_data,
+        ),
+    )
+    assert repeated.resources_session_id == "session"
+    server._create_sandbox.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
 
-    with pytest.raises(ValueError, match="Verification identity"):
-        await server.verify(
-            request,
-            ResponsesResourcesVerifyRequest(
-                episode_id=EpisodeId(rollout_id="different"),
-                task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
-                verification_input=ResponsesVerificationInput(
-                    responses_create_params={"input": "task"},
-                    response=NeMoGymResponse.model_construct(id="response", output=[]),
-                ),
-            ),
-        )
-
     with pytest.raises(ValueError, match="episode_id does not match"):
-        await server.close_session(
+        await server.close_resources_session(
             request,
             ResourcesCloseSessionRequest(
                 resources_session_id="session",
                 episode_id=EpisodeId(rollout_id="different"),
-            ),
+            ).model_dump(mode="json"),
         )
     sandbox.stop.assert_not_awaited()
 
-    await server.close_session(
+    await server.close_resources_session(
         request,
         ResourcesCloseSessionRequest(
             resources_session_id="session",
             episode_id=EpisodeId(rollout_id="rollout"),
-        ),
+        ).model_dump(mode="json"),
     )
     sandbox.stop.assert_awaited_once()
+    await server.close_resources_session(
+        request,
+        ResourcesCloseSessionRequest(
+            resources_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+        ).model_dump(mode="json"),
+    )
+    sandbox.stop.assert_awaited_once()
+    with pytest.raises(ValueError, match="episode_id does not match the closed resources session"):
+        await server.close_resources_session(
+            request,
+            ResourcesCloseSessionRequest(
+                resources_session_id="session",
+                episode_id=EpisodeId(rollout_id="different"),
+            ).model_dump(mode="json"),
+        )
+    with pytest.raises(ValueError, match="already closed"):
+        await server.seed_session(
+            request,
+            ResourcesSeedSessionRequest(
+                resources_session_id="session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
+                task_data=task_data,
+            ),
+        )
 
 
 @pytest.mark.asyncio
 async def test_episode_seed_rolls_back_sandbox_when_handoff_fails(monkeypatch: MonkeyPatch) -> None:
     server = make_server(golden=False, apply_anti_cheating=False)
     sandbox = SimpleNamespace(
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
         exec=AsyncMock(),
         serialize=AsyncMock(side_effect=RuntimeError("cannot serialize")),
         stop=AsyncMock(),
@@ -314,6 +413,7 @@ async def test_episode_seed_rolls_back_sandbox_when_handoff_fails(monkeypatch: M
         await server.seed_session(
             request,
             ResourcesSeedSessionRequest(
+                resources_session_id="session",
                 episode_id=EpisodeId(rollout_id="rollout"),
                 task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
                 task_data=task_data,
@@ -322,7 +422,7 @@ async def test_episode_seed_rolls_back_sandbox_when_handoff_fails(monkeypatch: M
 
     sandbox.stop.assert_awaited_once()
     assert "session" not in server._session_id_to_sandbox
-    assert "session" not in server._session_id_to_task
+    assert "session" not in server._session_id_to_identity
 
 
 @pytest.mark.asyncio
@@ -334,17 +434,16 @@ async def test_episode_close_retains_state_when_sandbox_stop_fails() -> None:
         TaskId(taskset="swebench_pro", task_id="instance_example"),
     )
     server._session_id_to_sandbox["session"] = sandbox
-    server._session_id_to_task["session"] = SWEBenchProInstanceRequest.model_validate(request_body())
     server._session_id_to_identity["session"] = identity
     request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
 
     with pytest.raises(RuntimeError, match="stop failed"):
-        await server.close_session(
+        await server.close_resources_session(
             request,
             ResourcesCloseSessionRequest(
                 resources_session_id="session",
                 episode_id=identity[0],
-            ),
+            ).model_dump(mode="json"),
         )
 
     assert server._session_id_to_sandbox["session"] is sandbox
@@ -353,7 +452,7 @@ async def test_episode_close_retains_state_when_sandbox_stop_fails() -> None:
 
 @pytest.mark.parametrize("verdict", ["resolved", "unresolved", "infrastructure_failure"])
 @pytest.mark.parametrize("agent_status", ["completed", "failed"])
-def test_native_episode_http_lifecycle_preserves_verdict_and_private_task_data(
+def test_environment_server_episode_http_lifecycle_preserves_verdict_and_private_task_data(
     monkeypatch: MonkeyPatch, verdict: str, agent_status: str
 ) -> None:
     server = make_server(golden=False, apply_anti_cheating=False, inconclusive_verification_retries=0)
@@ -373,6 +472,9 @@ def test_native_episode_http_lifecycle_preserves_verdict_and_private_task_data(
 
     task_sandbox = SimpleNamespace(
         exec=AsyncMock(side_effect=task_exec),
+        _handle=SimpleNamespace(sandbox_id="task-sandbox"),
+        _provider=SimpleNamespace(),
+        download=AsyncMock(side_effect=lambda remote, local: local.write_text("agent patch")),
         serialize=AsyncMock(return_value={"sandbox_id": "task-sandbox"}),
         stop=AsyncMock(side_effect=stop_task),
         pty=SimpleNamespace(create=AsyncMock()),
@@ -423,7 +525,13 @@ def test_native_episode_http_lifecycle_preserves_verdict_and_private_task_data(
 
     with TestClient(server.setup_webserver()) as client:
         seed = client.post(
-            "/seed_session", json={"episode_id": episode_id, "task_id": task_id, "task_data": task_data}
+            "/seed_session",
+            json={
+                "resources_session_id": "resources-session",
+                "episode_id": episode_id,
+                "task_id": task_id,
+                "task_data": task_data,
+            },
         )
         assert seed.status_code == 200
         session_id = seed.json()["resources_session_id"]
@@ -441,20 +549,19 @@ def test_native_episode_http_lifecycle_preserves_verdict_and_private_task_data(
         task_sandbox.pty.create.assert_not_awaited()
         task_sandbox.stop.assert_not_awaited()
 
-        # Verification receives only identity and the agent response; private assets stay in the resources session.
+        # Verification uses the Resources Server's flat request; private assets were not sent to the agent.
         response = client.post(
             "/verify",
             json={
-                "episode_id": episode_id,
-                "task_id": task_id,
-                "verification_input": {"responses_create_params": responses_create_params, "response": agent_response},
+                **task_data,
+                "responses_create_params": responses_create_params,
+                "response": agent_response,
             },
         )
         assert response.status_code == 200
         result = response.json()
         assert result["reward"] == float(resolved)
-        # The shared response now includes a default mask, but SWE Pro still
-        # reports verification completion separately rather than deriving it.
+        # Completion diagnostics do not change whether SWE Pro includes the sample in scoring.
         assert result["mask_sample"] is False
         assert result["evaluation_completed"] is completed
         assert result["resolved"] is resolved
@@ -467,11 +574,10 @@ def test_native_episode_http_lifecycle_preserves_verdict_and_private_task_data(
         close_body = {"resources_session_id": session_id, "episode_id": episode_id}
         close = client.post("/close_session", json=close_body)
         assert close.status_code == 200
-        # Upstream rejects unknown sessions after successful close removes identity.
-        # A repeated request must not stop an already released sandbox again.
-        with pytest.raises(ValueError, match="Unknown resources session"):
-            client.post("/close_session", json=close_body)
-        assert session_id not in server._session_id_to_task
+        # A repeated close confirms cleanup without stopping the sandbox again.
+        repeated_close = client.post("/close_session", json=close_body)
+        assert repeated_close.status_code == 200
+        assert repeated_close.json() == close.json()
         assert session_id not in server._session_id_to_identity
         assert session_id not in server._session_id_to_sandbox
 
@@ -481,10 +587,57 @@ def test_native_episode_http_lifecycle_preserves_verdict_and_private_task_data(
 
 
 @pytest.mark.asyncio
+async def test_repeated_verify_of_a_typed_session_fails_after_task_sandbox_is_consumed(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    server = make_server(golden=False, apply_anti_cheating=False)
+    task = SWEBenchProInstanceRequest.model_validate(request_body())
+    identity = (
+        EpisodeId(rollout_id="rollout"),
+        TaskId(taskset="swebench_pro", task_id=task.instance_id),
+    )
+    task_sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="agent patch", stderr="")),
+        stop=AsyncMock(),
+    )
+    verification_sandbox = SimpleNamespace(stop=AsyncMock())
+    server._session_id_to_identity["session"] = identity
+    server._session_id_to_sandbox["session"] = task_sandbox
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=verification_sandbox))
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.run_verification",
+        AsyncMock(
+            return_value=VerificationResult(
+                completed=True,
+                resolved=True,
+                patch_applied=True,
+                test_results={
+                    "tests": [
+                        {"name": "new_test", "status": "PASSED"},
+                        {"name": "old_test", "status": "PASSED"},
+                    ]
+                },
+            )
+        ),
+    )
+    # The flat body single_agent_turn sends: the task's fields, the request, and the agent's response.
+    body = SWEBenchProVerifyRequest.model_validate(request_body())
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+
+    first = await server.verify(request, body)
+    with pytest.raises(ValueError, match="task sandbox is no longer available"):
+        await server.verify(request, body)
+
+    assert first.reward == 1.0
+    task_sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_extract_model_patch_includes_commits_and_untracked_files() -> None:
     server = make_server(golden=False)
     sandbox = SimpleNamespace(
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="complete patch", stderr="")),
+        download=AsyncMock(side_effect=lambda remote, local: local.write_text("complete patch")),
         stop=AsyncMock(),
     )
     server._session_id_to_sandbox["session"] = sandbox
@@ -492,7 +645,7 @@ async def test_extract_model_patch_includes_commits_and_untracked_files() -> Non
     patch = await server._extract_model_patch("session", "abc123")
 
     assert patch == "complete patch"
-    command = sandbox.exec.await_args.args[0]
+    command = sandbox.exec.await_args_list[0].args[0]
     assert "git -C /app add -N ." in command
     assert "git -C /app --no-pager diff abc123" in command
     sandbox.stop.assert_awaited_once()
@@ -509,6 +662,7 @@ async def test_extract_model_patch_drops_untracked_files_the_image_already_shipp
     server = make_server(golden=False)
     sandbox = SimpleNamespace(
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout=artifact + fix, stderr="")),
+        download=AsyncMock(side_effect=lambda remote, local: local.write_text(artifact + fix)),
         stop=AsyncMock(),
     )
     server._session_id_to_sandbox["session"] = sandbox
@@ -517,6 +671,131 @@ async def test_extract_model_patch_drops_untracked_files_the_image_already_shipp
     patch = await server._extract_model_patch("session", "abc123")
 
     assert patch == fix
+    assert "session" not in server._session_id_to_pristine_untracked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during", ["git", "download", "cleanup"])
+async def test_extract_model_patch_cleans_up_after_cancellation(cancel_during: str) -> None:
+    entered = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def wait_for_cancellation(stage: str) -> None:
+        if stage == cancel_during:
+            entered.set()
+            await blocked.wait()
+
+    async def exec_command(command: str) -> SimpleNamespace:
+        await wait_for_cancellation("cleanup" if command.startswith("rm -f -- ") else "git")
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    async def download(remote: str, local: Path) -> None:
+        local.write_text("complete patch\n")
+        await wait_for_cancellation("download")
+
+    sandbox = SimpleNamespace(exec=exec_command, download=AsyncMock(side_effect=download), stop=AsyncMock())
+    server = make_server(golden=False)
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_pristine_untracked["session"] = frozenset({"pristine.txt"})
+    task = asyncio.create_task(server._extract_model_patch("session", "abc123"))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert task.cancelled()
+    sandbox.stop.assert_awaited_once()
+    assert "session" not in server._session_id_to_sandbox
+    assert "session" not in server._session_id_to_pristine_untracked
+    if sandbox.download.await_count:
+        assert not sandbox.download.await_args.args[1].parent.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
+@pytest.mark.parametrize("new_content", [b"new\n", b"new\r\n", b"new"])
+async def test_extract_model_patch_survives_lossy_exec_logs(tmp_path: Path, new_content: bytes) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str, **kwargs: object) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True, **kwargs)
+
+    git("init")
+    git("config", "core.autocrlf", "false")
+    git("config", "apply.whitespace", "nowarn")
+    (repo / "tracked.txt").write_bytes(b"old\n")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "base")
+    base_commit = git("rev-parse", "HEAD").stdout.decode().strip()
+    (repo / "tracked.txt").write_bytes(new_content)
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-am", "agent commit")
+    (repo / "untracked.txt").write_bytes(b"created\n")
+    git("add", "-N", ".")
+    expected = git("diff", base_commit).stdout
+    # Reproduce the provider's line-log transport dropping the terminal LF.
+    with pytest.raises(subprocess.CalledProcessError, match="returned non-zero"):
+        git("apply", "--numstat", "-", input=expected.rstrip(b"\n"))
+
+    async def exec_command(command: str) -> SimpleNamespace:
+        result = subprocess.run(command.replace("/app", quote(str(repo))), shell=True, capture_output=True)
+        return SimpleNamespace(
+            return_code=result.returncode,
+            stdout=result.stdout.decode().rstrip("\n"),
+            stderr=result.stderr.decode(),
+        )
+
+    sandbox = SimpleNamespace(
+        exec=exec_command,
+        download=AsyncMock(side_effect=shutil.copyfile),
+        stop=AsyncMock(),
+    )
+    server = make_server(golden=False)
+    server._session_id_to_sandbox["session"] = sandbox
+    patch = await server._extract_model_patch("session", base_commit)
+
+    assert patch.encode() == expected
+    remote_patch, local_patch = sandbox.download.await_args.args
+    assert not Path(remote_patch).exists()
+    assert not local_patch.exists()
+    git("reset", "--hard", base_commit)
+    git("clean", "-fd")
+    git("apply", "-", input=patch.encode())
+    assert (repo / "tracked.txt").read_bytes() == new_content
+    assert (repo / "untracked.txt").read_bytes() == b"created\n"
+    sandbox.stop.assert_awaited_once()
+    assert "session" not in server._session_id_to_sandbox
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["git", "download"])
+async def test_extract_model_patch_cleans_up_after_failure(failure: str) -> None:
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(return_code=1 if failure == "git" else 0, stdout="", stderr="git diff failed"),
+                SimpleNamespace(return_code=0, stdout="", stderr=""),
+            ]
+        ),
+        download=AsyncMock(side_effect=RuntimeError("download failed")),
+        stop=AsyncMock(),
+    )
+    server = make_server(golden=False)
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_pristine_untracked["session"] = frozenset()
+
+    with pytest.raises(RuntimeError, match="git diff failed" if failure == "git" else "download failed"):
+        await server._extract_model_patch("session", "abc123")
+
+    assert sandbox.exec.await_args.args[0].startswith("rm -f -- /tmp/nemo-gym-swebench-pro-")
+    if failure == "git":
+        sandbox.download.assert_not_awaited()
+    else:
+        assert not sandbox.download.await_args.args[1].parent.exists()
+    sandbox.stop.assert_awaited_once()
+    assert "session" not in server._session_id_to_sandbox
     assert "session" not in server._session_id_to_pristine_untracked
 
 
@@ -645,19 +924,25 @@ def test_verify_stops_retrying_once_the_rollout_budget_is_spent(monkeypatch: Mon
     # starts (500s left, which is what its own ceiling is clamped to) and the
     # third never does.
     assert verify.await_count == 2
+    assert response.json()["evaluation_completed"] is False
+    assert response.json()["error"] == "parser produced no usable output"
 
 
 def test_verify_uses_every_attempt_when_no_budget_is_set(monkeypatch: MonkeyPatch) -> None:
     """Leaving both ceilings unset preserves the previous unbounded behaviour."""
     server = make_server(golden=True, verification_attempt_timeout=None, verification_total_timeout=None)
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
-    verify = AsyncMock(return_value=inconclusive_result())
+    verify = AsyncMock(
+        return_value=VerificationResult(completed=True, resolved=False, patch_applied=True, test_results=None)
+    )
     monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
 
     response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
 
     assert response.status_code == 200
     assert verify.await_count == 3
+    assert response.json()["evaluation_completed"] is False
+    assert response.json()["error"] == "parser produced no usable output"
 
 
 def test_attempt_budget_takes_the_smaller_of_the_two_ceilings(monkeypatch: MonkeyPatch) -> None:
@@ -672,3 +957,142 @@ def test_attempt_budget_takes_the_smaller_of_the_two_ceilings(monkeypatch: Monke
     assert _budget_spent(None) is False
     assert _budget_spent(90.0) is True
     assert _budget_spent(150.0) is False
+
+
+@pytest.mark.parametrize("cancel_stop", [False, True])
+async def test_patch_extraction_retains_failed_stop_for_resources_close(cancel_stop: bool, caplog) -> None:
+    server = make_server(golden=False)
+    stop_error = asyncio.CancelledError() if cancel_stop else RuntimeError("stop unavailable")
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
+        download=AsyncMock(side_effect=lambda remote, local: local.write_text("complete patch\n")),
+        stop=AsyncMock(side_effect=stop_error),
+    )
+    identity = (
+        EpisodeId(rollout_id="rollout"),
+        TaskId(taskset="swebench_pro", task_id="instance_example"),
+    )
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_identity["session"] = identity
+    server._session_id_to_pristine_untracked["session"] = frozenset({"pristine.txt"})
+    if cancel_stop:
+        with pytest.raises(asyncio.CancelledError):
+            await server._extract_model_patch("session", "abc123")
+    else:
+        assert await server._extract_model_patch("session", "abc123") == "complete patch\n"
+        assert "stop unavailable" in caplog.text
+    assert server._session_id_to_sandbox["session"] is sandbox
+    assert server._session_id_to_identity["session"] == identity
+    assert server._session_id_to_pristine_untracked["session"] == frozenset({"pristine.txt"})
+
+    sandbox.stop.side_effect = None
+    request = SimpleNamespace(session={})
+    close_body = ResourcesCloseSessionRequest(resources_session_id="session", episode_id=identity[0])
+    receipt = await server.close_resources_session(request, close_body.model_dump(mode="json"))
+    assert receipt.resources_session_id == "session"
+    assert await server.close_resources_session(request, close_body.model_dump(mode="json")) == receipt
+    assert sandbox.stop.await_count == 2
+    assert "session" not in server._session_id_to_sandbox
+    assert "session" not in server._session_id_to_identity
+    assert "session" not in server._session_id_to_pristine_untracked
+
+
+def test_local_image_template_preserves_case() -> None:
+    server = make_server(golden=False, image_template="/sifs/{dockerhub_tag}.sif")
+    body = SWEBenchProInstanceRequest.model_validate(
+        request_body() | {"dockerhub_tag": "org.Repo-ABC", "image_digest": "sha256:" + "a" * 64}
+    )
+    assert server._image(body) == "/sifs/org.Repo-ABC.sif"
+
+
+@pytest.mark.asyncio
+async def test_seed_returns_reconnect_descriptor_and_cleanup_releases_container() -> None:
+    server = make_server(golden=False)
+    descriptor = {"sandbox_id": "sandbox-id", "workdir": "/app", "staging_dir": "/tmp/shared"}
+    sandbox = SimpleNamespace(
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        _provider=SimpleNamespace(connect=AsyncMock(), serialize_handle=AsyncMock()),
+        serialize=AsyncMock(return_value=descriptor),
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
+        upload=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    server._create_sandbox = AsyncMock(return_value=sandbox)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+    body = SWEBenchProSeedSessionRequest.model_validate(request_body())
+
+    response = await server.seed_session(request, body)
+
+    assert response.sandbox_descriptor == descriptor
+    assert server._session_id_to_sandbox["session"] is sandbox
+
+    # An agent that fails before verification must still release the benchmark's state.
+    await server.close_resources_session(request)
+    await server.close_resources_session(request)
+    sandbox.stop.assert_awaited_once()
+    assert server._session_id_to_sandbox == {}
+    assert server._session_id_to_pristine_untracked == {}
+
+
+@pytest.mark.asyncio
+async def test_failed_seed_releases_container() -> None:
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(upload=AsyncMock(side_effect=OSError("upload failed")), stop=AsyncMock())
+    server._create_sandbox = AsyncMock(return_value=sandbox)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+    body = SWEBenchProSeedSessionRequest.model_validate(request_body())
+
+    with pytest.raises(OSError, match="upload failed"):
+        await server.seed_session(request, body)
+
+    sandbox.stop.assert_awaited_once()
+    assert server._session_id_to_sandbox == {}
+    assert server._session_id_to_pristine_untracked == {}
+
+
+def test_close_session_endpoint_cleans_up_matching_cookie_only() -> None:
+    server = make_server(golden=False)
+    mine = SimpleNamespace(stop=AsyncMock())
+    other = SimpleNamespace(stop=AsyncMock())
+    app = server.setup_webserver()
+
+    @app.post("/test_seed")
+    async def seed(request: Request):
+        server._session_id_to_sandbox = {request.session[SESSION_ID_KEY]: mine, "other": other}
+        return {"seeded": True}
+
+    client = TestClient(app)
+    assert client.post("/test_seed").status_code == 200
+    response = client.post("/close_session", json={})
+    assert response.status_code == 200 and response.json() == {"closed": True}
+    mine.stop.assert_awaited_once()
+    other.stop.assert_not_awaited()
+
+
+async def test_close_session_without_session_is_a_noop() -> None:
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(stop=AsyncMock())
+    server._session_id_to_sandbox["other"] = sandbox
+    assert await server.close_resources_session(SimpleNamespace(session={})) == {"closed": True}
+    sandbox.stop.assert_not_awaited()
+
+
+def test_close_session_accepts_cookie_and_typed_bodies_over_http() -> None:
+    server = make_server(golden=False)
+    client = TestClient(server.setup_webserver())
+
+    # Agents that seeded through /run, such as hermes_sandboxed_agent, close with an empty body.
+    cookie_close = client.post("/close_session", json={})
+    typed_close = client.post(
+        "/close_session",
+        json=ResourcesCloseSessionRequest(
+            resources_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+        ).model_dump(mode="json"),
+    )
+    malformed_close = client.post("/close_session", json={"resources_session_id": "session"})
+
+    assert (cookie_close.status_code, cookie_close.json()) == (200, {"closed": True})
+    assert typed_close.status_code == 200
+    assert typed_close.json()["resources_session_id"] == "session"
+    assert malformed_close.status_code == 422

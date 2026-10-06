@@ -384,6 +384,8 @@ class OpenClawAgentVerifyResponse(BaseVerifyResponse):
 class OpenClawAgent(CLIResponsesAPIAgent):
     """Runs the OpenClaw CLI (openclaw agent --local --json)"""
 
+    ray_enabled = False
+
     config: OpenClawAgentConfig
     observation_source = "openclaw"
     sem: Semaphore = None

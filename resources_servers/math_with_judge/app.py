@@ -31,6 +31,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -44,6 +45,7 @@ from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_met
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True
@@ -147,6 +149,7 @@ def _run_math_verify_in_subprocess(expected_answer: str, generated_answer: str, 
 
 
 class LibraryJudgeMathResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     # These judge messages are adapted from ones used in Arena Hard.
     # https://github.com/lmarena/arena-hard-auto/blob/196f6b826783b3da7310e361a805fa36f0be83f3/utils/judge_utils.py
     # They are intended to serve as example messages for an LLM judge, and have not

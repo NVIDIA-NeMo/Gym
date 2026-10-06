@@ -296,6 +296,7 @@ class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
 
 class ClaudeCodeAgent(CLIResponsesAPIAgent):
     observation_source = "claude_code"
+    ray_enabled = False
     config: ClaudeCodeAgentConfig
     sem: Semaphore = None
     _static_mcp_config: Optional[dict[str, Any]] = PrivateAttr(default=None)
@@ -660,7 +661,7 @@ class ClaudeCodeAgent(CLIResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
         rollout_id = request.path_params.get("rollout_id")
-        if self.agent_session_id_from_request(request) is not None:
+        if self._agent_session_id_from_request(request) is not None:
             episode = await self._create_episode(body, rollout_id=rollout_id)
             return episode.response.model_copy(
                 update={"_ng_agent_observations": episode.observations.model_dump(mode="json")}

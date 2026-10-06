@@ -280,6 +280,8 @@ class KiloCodeAgent(CLIResponsesAPIAgent):
     that field. Eval-only either way: token IDs and logprobs are not wired up.
     """
 
+    ray_enabled = False
+
     config: KiloCodeAgentConfig
     observation_source = "kilocode"
     sem: Semaphore = None

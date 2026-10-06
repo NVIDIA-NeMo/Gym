@@ -155,6 +155,8 @@ class ArenaResourcesServer(SimpleResourcesServer):
     to cancel out positional bias. The reward is the average of both game scores.
     """
 
+    ray_enabled = False
+
     config: ArenaResourcesServerConfig
     _judge_semaphore: asyncio.Semaphore = PrivateAttr()
     _metrics: ArenaMetrics = PrivateAttr()

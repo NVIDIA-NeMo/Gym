@@ -59,7 +59,6 @@ def test_osworld_agent_uv_config_mirrors_project_resolver_policy() -> None:
     assert server_overrides - project_overrides == {
         "grpcio-status==1.71.2",
         "protobuf==5.29.6",
-        "numpy>=2.1,<2.5",
     }
     project_exclusions = set(project_config["exclude-dependencies"])
     server_exclusions = set(server_config["exclude-dependencies"])
@@ -121,8 +120,13 @@ def test_osworld_resources_server_owns_a_python_313_wheel_compatible_runtime() -
     ):
         assert Version(rejected) not in direct[package].specifier
         assert Version(admitted) in direct[package].specifier
-        assert Version(rejected) not in overrides[package].specifier
-        assert Version(admitted) in overrides[package].specifier
+        if package != "numpy":
+            assert Version(rejected) not in overrides[package].specifier
+            assert Version(admitted) in overrides[package].specifier
+
+    # The fork metadata supports NumPy 2 on Python 3.13. Resolve its actual
+    # requirements rather than hiding a stale NumPy pin with an override.
+    assert "numpy" not in overrides
 
     assert Version("2.5.1") not in overrides["torch"].specifier
     assert Version("2.11.0") in overrides["torch"].specifier
@@ -136,7 +140,7 @@ def test_osworld_agent_dependency_overrides() -> None:
 
     assert "grpcio-status==1.71.2" in agent_overrides
     assert "protobuf==5.29.6" in agent_overrides
-    assert "numpy>=2.1,<2.5" in agent_overrides
+    assert all(Requirement(value).name != "numpy" for value in agent_overrides)
     assert "torch==2.11.0" in public_overrides
     assert "numpy==2.5.1" not in agent_overrides
     assert "opencv-python-headless==5.0.0.93" not in agent_overrides

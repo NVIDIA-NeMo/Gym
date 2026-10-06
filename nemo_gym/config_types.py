@@ -185,6 +185,14 @@ class AlmostServerError(ConfigError, ValueError):
     `error_on_almost_servers` is set, so the run is aborted."""
 
 
+class AgentWithoutEnvironmentServerError(ConfigError, ValueError):
+    """An agent instance has no environment server."""
+
+
+class AmbiguousEnvironmentServerError(ConfigError, ValueError):
+    """Rows route by an agent that more than one environment server fronts."""
+
+
 class AgentCompositionError(ConfigError, ValueError):
     """A standalone agent config could not be composed onto the merged config's agent instances."""
 
@@ -449,6 +457,11 @@ class DatasetConfig(BaseModel):
     name: str
     type: DatasetType
     jsonl_fpath: str
+    taskset: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="Taskset identifier used to materialize and route this dataset's tasks to an Environment Server.",
+    )
 
     num_repeats: int = Field(default=1, ge=1)
     # Unified, self-describing dataset source. Prefer this over the legacy *_identifier fields below.
@@ -540,8 +553,17 @@ class BenchmarkDatasetConfig(BaseModel):
     type: Literal["benchmark"]
     jsonl_fpath: Path
     prepare_script: Path
+    taskset: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="Taskset identifier used to materialize and route this dataset's tasks to an Environment Server.",
+    )
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
+    # `uv pip install` arguments the prepare script needs, installed before it is
+    # imported. Without this a benchmark whose prepare pulls something Gym does
+    # not otherwise depend on has to shell out to pip mid-prepare to get it.
+    prepare_dependencies: List[str] = Field(default_factory=list)
     agent: Optional[str] = Field(
         default=None,
         description=(
@@ -549,7 +571,8 @@ class BenchmarkDatasetConfig(BaseModel):
             "Only needed when the config is ambiguous: the dataset is declared on a resources "
             "server that several agents reference. The pin must name one of those agents — rows "
             "are dispatched along the agent -> resources server edge, so any other value is a "
-            "config error. Unambiguous configs resolve without it."
+            "config error. Unambiguous configs resolve without it. A dataset that declares `taskset` "
+            "routes to an Environment Server, not an agent, and cannot set it."
         ),
     )
 

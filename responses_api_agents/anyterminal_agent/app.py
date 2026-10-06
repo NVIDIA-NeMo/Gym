@@ -702,6 +702,8 @@ def _run_remote(params_dict: dict) -> bool:
 class AnyTerminalAgent(SimpleResponsesAPIAgent):
     """Runs any Gym agent harness inside a Terminal Bench task sandbox."""
 
+    ray_enabled = True
+
     config: AnyTerminalAgentConfig
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

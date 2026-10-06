@@ -96,20 +96,30 @@ def test_native_turns_enable_content_health_without_call_references(tmp_path, pa
     assert not {
         "agent_turn_hollow",
         "rollout_missing_agent_turns",
-        "model_call_failed",
+        "rollout_ended_on_failed_model_call",
         "model_call_zero_completion_tokens",
         "model_call_missing_token_counts",
         "trajectory_capture_mismatch",
         "model_call_runaway_generation",
     } & set(verdict["unobserved"])
-    assert "rollout_token_count_mismatch" in verdict["unobserved"]
+    # Invocation ownership is sufficient to compare aggregate usage, even without turn links.
+    assert "rollout_token_count_mismatch" not in verdict["unobserved"]
+    mismatch = next(f for f in verdict["findings"] if f["check"] == "rollout_token_count_mismatch")
+    assert mismatch["detail"] == {
+        "transcript_prompt": 999,
+        "transcript_completion": 999,
+        "capture_prompt": 10,
+        "capture_completion": 2,
+    }
     assert summary["run"]["artifacts"]["coverage"]["task_no_successful_model_calls"]["unobserved"] == 1
 
 
 def test_invocation_bound_failed_call_remains_evaluable(tmp_path, parse):
     trajectory, observations = _trajectory(parse, _session_db(tmp_path, [_policy({"type": "text", "text": "known"})]))
     _, _, verdict = _health(tmp_path, trajectory, observations, status_code=503, tokens_out=0)
-    assert {"model_call_failed", "model_call_zero_completion_tokens"} <= {f["check"] for f in verdict["findings"]}
+    assert {"rollout_ended_on_failed_model_call", "model_call_zero_completion_tokens"} <= {
+        f["check"] for f in verdict["findings"]
+    }
     assert not {"agent_turn_hollow", "rollout_missing_agent_turns"} & {f["check"] for f in verdict["findings"]}
 
 
@@ -167,7 +177,7 @@ def test_partial_evidence_preserves_known_turns_and_gates_content_checks(tmp_pat
     assert trajectory.turns[0].answer[0]["content"][0]["text"] == "known"
     _, _, verdict = _health(tmp_path, trajectory, observations)
     assert {"agent_turn_hollow", "rollout_missing_agent_turns"} <= set(verdict["unobserved"])
-    assert "model_call_failed" not in verdict["unobserved"]
+    assert "rollout_ended_on_failed_model_call" not in verdict["unobserved"]
     assert not {"agent_turn_hollow", "rollout_missing_agent_turns"} & {f["check"] for f in verdict["findings"]}
 
 

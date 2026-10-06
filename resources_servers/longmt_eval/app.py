@@ -138,6 +138,7 @@ class LongmtEvalVerifyResponse(LongmtEvalVerifyRequest, BaseVerifyResponse):
 
 
 class LongmtEvalServer(SimpleResourcesServer):
+    ray_enabled = True
     config: LongmtEvalConfig
 
     _segale_actors: List[Any] = PrivateAttr(default_factory=list)

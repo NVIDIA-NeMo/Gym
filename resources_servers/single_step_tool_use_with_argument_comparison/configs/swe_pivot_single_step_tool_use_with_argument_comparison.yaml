@@ -40,3 +40,11 @@ swe_pivot_single_step_tool_use_with_argument_comparison_agent:
         type: example
         jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/example.jsonl
         num_repeats: 1
+
+swe_pivot_single_step_tool_use_with_argument_comparison_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swe_pivot_single_step_tool_use_with_argument_comparison_agent

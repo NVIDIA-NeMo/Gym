@@ -171,6 +171,7 @@ class SimpleStrandsAgentVerifyResponse(BaseVerifyResponse):
 
 
 class SimpleStrandsAgent(CLIResponsesAPIAgent):
+    ray_enabled = False
     config: SimpleStrandsAgentConfig
     observation_source = "simple_strands"
     sem: Semaphore = None
