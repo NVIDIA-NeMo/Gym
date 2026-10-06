@@ -1,0 +1,207 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+import asyncio
+import json
+import subprocess
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.interactive_agent_types import AgentActivationResponse, ResourcesStepRequest
+from nemo_gym.openai_utils import NeMoGymResponse
+from resources_servers.swe_together import snapshot_worker
+from resources_servers.swe_together.app import Session, SWETResourcesServer
+from resources_servers.swe_together.metrics import aggregate
+from resources_servers.swe_together.simulator import UserAgent
+from resources_servers.swe_together.task import TaskData
+
+
+def activation(index, **kwargs):
+    return AgentActivationResponse(
+        activation_id=index,
+        response=NeMoGymResponse(
+            id="r",
+            object="response",
+            created_at=1,
+            model="test",
+            output=[],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        ),
+        **kwargs,
+    )
+
+
+def session(tmp_path, decisions):
+    task = TaskData(task_id="test", image="image", image_digest="sha256:" + "1" * 64)
+    request = ResourcesSeedSessionRequest(
+        resources_session_id="s",
+        episode_id={"rollout_id": "rollout"},
+        task_id={"taskset": "test", "task_id": "test"},
+        task_data=task.model_dump(),
+    )
+    state = Session(request, task, tmp_path, tmp_path, {})
+    state.snapshots = SimpleNamespace(capture=AsyncMock(return_value=""))
+    state.prompt = "Task"
+    llm = SimpleNamespace(
+        call=AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    content="",
+                    tool_calls=[{"function": {"name": action, "arguments": json.dumps({"content": message})}}],
+                )
+                for action, message in decisions
+            ]
+        )
+    )
+    state.simulator = UserAgent(llm, original_user_messages=["a", "b"])
+    server = SWETResourcesServer.model_construct(
+        config=SimpleNamespace(max_resumes=15, user_context_chars=3000, trial_budget_seconds=5400)
+    )
+    return server, state, llm
+
+
+@pytest.mark.asyncio
+async def test_retries_do_not_duplicate_user_and_fourth_noop_stops(tmp_path):
+    server, state, llm = session(tmp_path, [("redirect", "please fix it")] + [("no-op", "")] * 4)
+
+    async def invoke(i):
+        request = ResourcesStepRequest(
+            resources_session_id="s", episode_id=state.request.episode_id, activation=activation(i)
+        )
+        return await state.steps.execute(index=i, request=request, operation=lambda: server._step(state, request))
+
+    first, retry = await asyncio.gather(invoke(0), invoke(0))
+    assert first == retry and not first.synthetic
+    assert llm.call.await_count == 1 and state.simulator._cursor == 1 and len(state.messages) == 1
+    assert state.simulator.last_turn_content.startswith("## Turn 1\n")
+    for i in range(1, 4):
+        result = await invoke(i)
+        assert result.continue_episode and result.synthetic
+        assert result.responses_create_params.input[0].content == "continue"
+    final = await invoke(4)
+    assert not final.continue_episode and final.stop_reason == "consecutive_noops"
+    assert llm.call.await_count == 5
+
+
+@pytest.mark.asyncio
+async def test_timeout_rescue_and_final_resume_do_not_consult_simulator(tmp_path):
+    server, state, llm = session(tmp_path, [])
+    request = ResourcesStepRequest(
+        resources_session_id="s",
+        episode_id=state.request.episode_id,
+        activation=activation(0, turn_complete=False, stop_reason="timeout"),
+    )
+    result = await server._step(state, request)
+    assert result.synthetic and result.metadata["cap_rescue"]
+    assert "interrupted" in result.responses_create_params.input[0].content
+    assert not llm.call.called and state.noops == 0
+    request.activation = activation(15)
+    result = await server._step(state, request)
+    assert not result.continue_episode and result.stop_reason == "max_resumes"
+    assert not llm.call.called
+
+
+def init_repo(path):
+    path.mkdir()
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+    (path / "tracked.txt").write_text("original\n")
+    snapshot_worker.git(str(path), "add", "-A")
+    snapshot_worker.git(
+        str(path), "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "initial"
+    )
+
+
+def test_snapshot_preserves_dirty_baseline_untracked_and_agent_commits(tmp_path):
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    (repo / "tracked.txt").write_text("prepared dirty\n")
+    (repo / "preexisting.txt").write_text("prepared untracked\n")
+    baseline = snapshot_worker.snapshot(str(repo))
+    snapshot_worker.git(str(repo), "update-ref", "refs/nemo-gym/test/baseline", baseline)
+    snapshot_worker.git(str(repo), "gc", "--prune=now")
+    assert snapshot_worker.git(str(repo), "cat-file", "-t", baseline).strip() == "tree"
+    snapshot_worker.git(str(repo), "log", "--all", "--oneline")
+    assert snapshot_worker.git(str(repo), "status", "--porcelain").strip() == "M tracked.txt\n?? preexisting.txt"
+    (repo / "tracked.txt").write_text("candidate\n")
+    (repo / "new.txt").write_text("new file\n")
+    snapshot_worker.git(str(repo), "add", "-A")
+    snapshot_worker.git(
+        str(repo), "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "candidate"
+    )
+    (repo / "new.txt").write_text("new file\nsecond turn\n")
+    final = snapshot_worker.snapshot(str(repo))
+    patch = snapshot_worker.git(str(repo), "diff", baseline, final)
+    assert "-prepared dirty" in patch and "+candidate" in patch and "+second turn" in patch
+    assert "preexisting.txt" not in patch
+    assert snapshot_worker.git(str(repo), "status", "--porcelain").strip() == "M new.txt"
+
+
+def test_failure_aware_repeat_aggregation():
+    result = aggregate(
+        [
+            {"task_id": "a", "judge_score": 1.0, "user_correction": 0.0},
+            {"task_id": "a", "judge_score": 0.8},
+            {"task_id": "b", "judge_score": None, "mask_sample": True},
+        ],
+        planned=4,
+    )
+    assert result["graded"] == 2 and result["masked"] == 1 and result["missing"] == 1
+    assert result["MeanJudge"] == 0.9 and result["pass@1"] == 0.5
+    assert result["stable_solve_rate"] == 1 and result["pass2"] == 0
+    assert result["upstream_compatibility_mean_zero_filled"] == 0.45
+
+
+@pytest.mark.asyncio
+async def test_declared_session_budget_stops_before_simulator(tmp_path):
+    server, state, llm = session(tmp_path, [])
+    request = ResourcesStepRequest(
+        resources_session_id="s",
+        episode_id=state.request.episode_id,
+        activation=activation(0, turn_complete=False, stop_reason="session_budget_exhausted"),
+    )
+    result = await server._step(state, request)
+    assert not result.continue_episode and not llm.call.called
+    assert state.snapshots.capture.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_close_retains_late_creation_until_owned_handle_is_stopped(tmp_path):
+    server, state, _ = session(tmp_path, [])
+    server.config.close_timeout = 0.01
+    server._sessions["s"] = state
+    ready = asyncio.Event()
+    sandbox = SimpleNamespace(serialize=AsyncMock(return_value={"id": "late"}), stop=AsyncMock())
+    state.sandbox = sandbox
+    state.creations["candidate"] = asyncio.create_task(ready.wait())
+    body = ResourcesCloseSessionRequest(resources_session_id="s", episode_id=state.request.episode_id)
+    with pytest.raises(TimeoutError):
+        await server.close_resources_session(None, body)
+    assert "s" in server._sessions and not state.creations["candidate"].cancelled()
+    assert not sandbox.stop.called
+    assert not json.loads((tmp_path / "candidate-sandbox-close.json").read_text())["cleanup_confirmed"]
+    ready.set()
+    receipt = await server.close_resources_session(None, body)
+    assert receipt.resources_session_id == "s" and "s" not in server._sessions
+    sandbox.stop.assert_awaited_once()
+    assert json.loads((tmp_path / "candidate-sandbox-close.json").read_text())["cleanup_confirmed"]
+
+
+@pytest.mark.asyncio
+async def test_simulator_failure_retains_exact_inputs_without_noop(tmp_path):
+    server, state, llm = session(tmp_path, [])
+    llm.call.side_effect = RuntimeError("transport unavailable")
+    state.simulator_model = SimpleNamespace(calls=[{"error": "transport unavailable"}])
+    request = ResourcesStepRequest(
+        resources_session_id="s", episode_id=state.request.episode_id, activation=activation(0)
+    )
+    with pytest.raises(RuntimeError, match="User simulator request failed"):
+        await server._step(state, request)
+    evidence = json.loads((tmp_path / "turn-0-simulator.json").read_text())
+    assert evidence["simulator_messages"] == state.simulator.last_messages_sent
+    assert evidence["error"] == "User simulator request failed"
+    assert state.noops == 0 and state.messages == []
+    assert json.loads((tmp_path / "simulator-model-calls.json").read_text())[0]["error"] == "transport unavailable"
