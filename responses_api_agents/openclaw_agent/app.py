@@ -34,6 +34,7 @@ import psutil
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -64,7 +65,7 @@ from nemo_gym.rollout_observability import (
     AgentObservationBundle,
     ObservationGap,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, process_supervisor
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
@@ -494,7 +495,13 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 raise
         directory = f"/tmp/nemo-gym-openclaw-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-openclaw-node-22.19.0-{self.config.openclaw_version}"
-        state = OpenClawSandboxSession(body, sandbox, directory, runtime, workdir=workdir, owns_sandbox=owns_sandbox)
+        state = OpenClawSandboxSession(
+            request=body,
+            session=SandboxSession(
+                sandbox=sandbox, session_dir=directory, workdir=workdir, harness="OpenClaw", owns_sandbox=owns_sandbox
+            ),
+            runtime=runtime,
+        )
         prepared_directory = False
         try:
             if owns_sandbox:
@@ -541,16 +548,13 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     f"{installed.stderr or installed.stdout}"
                 )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
-            await sandbox.upload(Path(process_supervisor.__file__), f"{directory}/process_supervisor.py")
         except BaseException as error:
             try:
                 if prepared_directory or owns_sandbox:
                     await state.close(self.config.session_close_timeout_seconds)
                 else:
                     # The path check may have rejected overlap with task-owned storage.
-                    state.closing = True
                     await sandbox.disconnect()
-                    state.closed = True
             except BaseException:
                 LOG.exception("OpenClaw seed cleanup failed; retaining session %s", body.agent_session_id)
                 raise AgentSessionSetupError(state, error=error) from error
@@ -652,7 +656,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             {
                 "agents": {
                     "defaults": {
-                        "workspace": state.workdir,
+                        "workspace": state.session.workdir,
                         "skipBootstrap": True,
                         "skills": [],
                         "model": {"primary": self._effective_model()},
@@ -667,7 +671,6 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 "plugins": {"enabled": False},
             }
         )
-        await state.upload_json("home/.openclaw/openclaw.json", native_config)
         command = [
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/openclaw/node_modules/openclaw/openclaw.mjs",
@@ -677,26 +680,27 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             "--agent",
             "main",
             "--session-id",
-            state.directory.rsplit("/", 1)[-1],
+            state.session.session_dir.rsplit("/", 1)[-1],
             "--thinking",
             self.config.thinking,
             "--model",
             self._effective_model(),
             "--message-file",
-            f"{state.directory}/prompt.txt",
+            f"{state.session.session_dir}/prompt.txt",
             "--timeout",
             str(self.config.timeout),
         ]
         payload = {
-            "directory": state.directory,
+            "config": native_config,
+            "directory": state.session.session_dir,
             "command": command,
             "prompt": f"{system}\n\n{prompt}" if system else prompt,
-            "cwd": state.workdir,
+            "cwd": state.session.workdir,
             "env": {
-                "HOME": f"{state.directory}/home",
-                "XDG_CACHE_HOME": f"{state.directory}/home/.cache",
-                "OPENCLAW_STATE_DIR": f"{state.directory}/home/.openclaw",
-                "OPENCLAW_CONFIG_PATH": f"{state.directory}/home/.openclaw/openclaw.json",
+                "HOME": f"{state.session.session_dir}/home",
+                "XDG_CACHE_HOME": f"{state.session.session_dir}/home/.cache",
+                "OPENCLAW_STATE_DIR": f"{state.session.session_dir}/home/.openclaw",
+                "OPENCLAW_CONFIG_PATH": f"{state.session.session_dir}/home/.openclaw/openclaw.json",
                 "OPENCLAW_TELEMETRY": "0",
                 "CLAWHUB_DISABLE_TELEMETRY": "1",
                 "OPENCLAW_EXEC_SHELL_SNAPSHOT": "0",
@@ -704,7 +708,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         }
         try:
             async with self.sem:
-                stdout = await state.execute(
+                await state.execute(
                     payload, timeout=self.config.timeout, close_timeout=self.config.session_close_timeout_seconds
                 )
         except BaseException:
@@ -715,7 +719,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             except Exception:
                 LOG.exception("Could not salvage interrupted OpenClaw observations")
             raise
-        response = await self._collect_sandbox_response(state, body, prompt=prompt, system=system, stdout=stdout)
+        response = await self._collect_sandbox_response(state, body, prompt=prompt, system=system)
         if response.error is not None:
             # Preserve the transcript in session observations, but let the environment
             # classify runtime/provider failures before it invokes the verifier.
@@ -729,20 +733,16 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
-        stdout: str = "",
     ) -> NeMoGymResponse:
         gaps = []
-        if not stdout:
-            try:
-                stdout = await state.read_text("stdout.log")
-            except Exception:
-                gaps.append(ObservationGap(code="agent_stdout_unavailable"))
-        session_id = state.directory.rsplit("/", 1)[-1]
-        events = []
-        try:
-            transcript = await state.read_text(f"home/.openclaw/agents/main/sessions/{session_id}.jsonl")
-            events = parse_openclaw_session_events(transcript)
-        except Exception:
+        artifacts = state.session.artifacts or {}
+        stdout = artifacts.get("stdout.log", "")
+        if "stdout.log" not in artifacts:
+            gaps.append(ObservationGap(code="agent_stdout_unavailable"))
+        session_id = state.session.session_dir.rsplit("/", 1)[-1]
+        transcript_name = f"home/.openclaw/agents/main/sessions/{session_id}.jsonl"
+        events = parse_openclaw_session_events(artifacts.get(transcript_name, ""))
+        if transcript_name not in artifacts:
             gaps.append(ObservationGap(code="agent_transcript_unavailable"))
         # include_input=True preserves reasoning fields; only remove the input
         # messages when projecting the transcript into Responses output.
@@ -837,8 +837,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 ObservationGap(code="model_call_usage_unavailable", detail="Only CLI envelope totals available")
             )
         gaps.append(ObservationGap(code="reasoning_token_usage_unavailable"))
-        result = state.cleanup
+        result = state.session.cleanup
         runtime = state.runtime_info
+        if runtime is None:
+            gaps.append(ObservationGap(code="runtime_info_unavailable"))
+        if result is not None and result["return_code"] is None:
+            gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
         error = result["error"] if result else "OpenClaw activation ended without a cleanup receipt"
         last = assistants[-1] if assistants else {}
         if last.get("stopReason") == "error" or (
@@ -846,10 +850,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         ):
             error = error or last.get("errorMessage") or f"OpenClaw model call {last['stopReason']}"
         if result and result["return_code"] and not result["timed_out"]:
-            try:
-                stderr = (await state.read_text("stderr.log"))[-4000:]
-            except Exception:
-                stderr = "stderr unavailable"
+            stderr = artifacts.get("stderr.log", "stderr unavailable")[-4000:]
             error = error or f"OpenClaw exited {result['return_code']}: {stderr}"
         incomplete = bool(result and result["timed_out"]) or last.get("stopReason") == "length"
         if not incomplete and not error and last.get("stopReason") != "stop":
@@ -875,8 +876,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             ),
             metadata={
                 "harness_execution": "sandbox",
-                "harness_hostname": runtime.hostname if runtime else "unknown",
-                "harness_pid": str(runtime.pid) if runtime else "unknown",
+                **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
                 "openclaw_version": self.config.openclaw_version,
             },
         )

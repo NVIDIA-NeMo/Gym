@@ -15,10 +15,10 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
+from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.runner import parse_cleanup_receipt
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig, _unique_usage_messages
 
@@ -111,9 +111,9 @@ class Sandbox:
         raise AssertionError("This provider supports exec only; no PTY API")
 
     async def run_exec(self, command, **kwargs):
-        if command.startswith("trap '' TERM;"):
+        if "--receipt" in command and "process_supervisor.py" in command:
             return await self.launch(command=command, **kwargs)
-        if "runner.stop" in command:
+        if "stop.request" in command:
             await self.request_stop()
         return self.exec.return_value
 
@@ -199,7 +199,7 @@ def test_http_native_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeout
             created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
             assert created.status_code == 200, created.text
             session_id = created.json()["agent_session_id"]
-            directory = agent._session_records[session_id].state.directory
+            directory = agent._session_records[session_id].state.session.session_dir
             installer = f"{directory}/install_openclaw_runtime.sh"
             assert installer in sandbox.files
             assert agent.config.resources_server is None
@@ -701,9 +701,9 @@ async def test_unknown_launch_outcome_fails_closed(setup):
 async def test_install_failure_disconnects_without_stopping_owner(setup):
     agent, sandbox = setup
     sandbox.exec.side_effect = [
-        SimpleNamespace(return_code=0),
+        SimpleNamespace(return_code=0, error_type=None),
         SimpleNamespace(return_code=1, stderr="npm failed"),
-        SimpleNamespace(return_code=0),
+        SimpleNamespace(return_code=0, error_type=None),
     ]
     request = Request({"type": "http", "session": {}})
     with pytest.raises(RuntimeError, match="npm failed"):
@@ -717,9 +717,9 @@ async def test_install_failure_disconnects_without_stopping_owner(setup):
 async def test_cancelled_install_never_publishes_session_or_launches_openclaw(setup):
     agent, sandbox = setup
     sandbox.exec.side_effect = [
-        SimpleNamespace(return_code=0),
+        SimpleNamespace(return_code=0, error_type=None),
         asyncio.CancelledError(),
-        SimpleNamespace(return_code=0),
+        SimpleNamespace(return_code=0, error_type=None),
     ]
     request = Request({"type": "http", "session": {}})
     with pytest.raises(asyncio.CancelledError):
@@ -752,7 +752,7 @@ async def test_cleanup_command_provider_error_blocks_close_and_can_retry(setup):
         SimpleNamespace(return_code=0, error_type="timeout", stderr="cleanup timed out"),
         SimpleNamespace(return_code=0, error_type=None, stderr=""),
     ]
-    with pytest.raises(RuntimeError, match="cleanup timed out"):
+    with pytest.raises(RuntimeError, match="Could not remove OpenClaw session files"):
         await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     sandbox.disconnect.assert_not_awaited()
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
@@ -1100,12 +1100,12 @@ async def test_invalid_envelope_usage_does_not_discard_valid_transcript(setup):
     request, session_id, task = await activate(agent, sandbox)
     await task
     state = agent._session_records[session_id].state
+    state.session.artifacts["stdout.log"] = json.dumps({"meta": {"agentMeta": {"usage": {"input": "not-a-number"}}}})
     response = await agent._collect_sandbox_response(
         state,
         NeMoGymResponseCreateParamsNonStreaming(input="task"),
         prompt="task",
         system="",
-        stdout=json.dumps({"meta": {"agentMeta": {"usage": {"input": "not-a-number"}}}}),
     )
     assert response.status == "completed"
     assert response.output[-1].content[0].text == "Fixed"
@@ -1132,18 +1132,19 @@ async def test_native_envelope_fallback_preserves_known_and_unknown_cache_detail
     request, session_id, task = await activate(agent, sandbox)
     await task
     state = agent._session_records[session_id].state
-    sandbox.files[f"{state.directory}/home/.openclaw/agents/main/sessions/{Path(state.directory).name}.jsonl"] = ""
+    state.session.artifacts = {
+        "stdout.log": json.dumps(
+            {
+                "payloads": [{"text": "Retained final output."}],
+                "meta": {"agentMeta": {"usage": {"input": 10, "output": 3, **cache}}},
+            }
+        )
+    }
     response = await agent._collect_sandbox_response(
         state,
         NeMoGymResponseCreateParamsNonStreaming(input="task"),
         prompt="task",
         system="",
-        stdout=json.dumps(
-            {
-                "payloads": [{"text": "Retained final output."}],
-                "meta": {"agentMeta": {"usage": {"input": 10, "output": 3, **cache}}},
-            }
-        ),
     )
     assert response.output[0].content[0].text == "Retained final output."
     assert response.usage.input_tokens == 10 + (expected_cache or 0)
@@ -1308,7 +1309,7 @@ async def test_caller_id_never_controls_filesystem_path(setup):
     request = Request({"type": "http", "session": {}})
     response = await agent.seed_agent_session(request, body)
     assert response.agent_session_id == body.agent_session_id
-    directory = agent._session_records[body.agent_session_id].state.directory
+    directory = agent._session_records[body.agent_session_id].state.session.session_dir
     assert Path(directory).parent == Path("/tmp/nemo-gym-openclaw-sessions")
     assert len(Path(directory).name) == 32
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(body.agent_session_id)))
@@ -1482,9 +1483,9 @@ async def test_failed_seed_with_confirmed_cleanup_accepts_cookie_less_close(setu
     agent, sandbox = setup
     body = seed()
     sandbox.exec.side_effect = [
-        SimpleNamespace(return_code=0),
+        SimpleNamespace(return_code=0, error_type=None),
         SimpleNamespace(return_code=1, stderr="npm unavailable"),
-        SimpleNamespace(return_code=0),
+        SimpleNamespace(return_code=0, error_type=None),
     ]
     with pytest.raises(RuntimeError, match="npm unavailable"):
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
@@ -1499,14 +1500,14 @@ async def test_failed_seed_cleanup_retains_state_until_explicit_retry(setup):
     agent, sandbox = setup
     body = seed()
     sandbox.exec.side_effect = [
-        SimpleNamespace(return_code=0),
+        SimpleNamespace(return_code=0, error_type=None),
         SimpleNamespace(return_code=1, stderr="npm unavailable"),
-        SimpleNamespace(return_code=0),
+        SimpleNamespace(return_code=0, error_type=None),
     ]
     sandbox.disconnect.side_effect = RuntimeError("disconnect unavailable")
     with pytest.raises(RuntimeError, match="npm unavailable"):
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
-    assert agent._session_records[body.agent_session_id].state.closing
+    assert agent._session_records[body.agent_session_id].state.session.closing
     assert body.agent_session_id not in agent._closed_session_records
     with pytest.raises(HTTPException, match="closing"):
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
@@ -1568,8 +1569,8 @@ def test_sandbox_source_controls_ownership_and_native_routing(setup, owned):
         created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
         assert created.status_code == 200, created.text
         state = agent._session_records[body.agent_session_id].state
-        assert state.owns_sandbox is owned
-        assert state.workdir == sandbox.expected_workdir
+        assert state.session.owns_sandbox is owned
+        assert state.session.workdir == sandbox.expected_workdir
         resolve.assert_called_once_with("agent-provider" if owned else "sandbox", {})
         workspace_calls = [call for call in sandbox.exec.await_args_list if call.args[0].startswith("mkdir -p --")]
         assert len(workspace_calls) == int(owned)
@@ -1618,13 +1619,13 @@ def test_owned_stop_failure_blocks_close_until_retry(setup):
         created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
         assert created.status_code == 200, created.text
         state = agent._session_records[body.agent_session_id].state
-        assert state.workdir == "/workspace"
+        assert state.session.workdir == "/workspace"
         # An owned sandbox can be destroyed even when no runner receipt was returned.
-        state.launch_started = True
+        state.session.launch_started = True
         sandbox.stop.side_effect = [RuntimeError("provider stop failed"), None]
         close_request = {"agent_session_id": body.agent_session_id, "episode_id": body.episode_id.model_dump()}
         assert client.post("/v1/agent_sessions/close", json=close_request).status_code == 500
-        assert not state.closed
+        assert not state.session.closed
         assert (
             client.post(f"/ng-rollout/{body.episode_id.capture_key}/v1/responses", json={"input": "task"}).status_code
             == 409
@@ -1666,7 +1667,7 @@ def test_owned_setup_failure_preserves_error_and_retryable_cleanup(setup, stage)
         assert error.value is original
         assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 409
         state = agent._session_records[body.agent_session_id].state
-        assert state.closing and not state.closed
+        assert state.session.closing and not state.session.closed
         response = client.post(
             "/v1/agent_sessions/close",
             json={"agent_session_id": body.agent_session_id, "episode_id": body.episode_id.model_dump()},
@@ -1706,3 +1707,71 @@ def test_owned_workdir_is_validated_before_creation(setup, workdir):
         assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 422
         factory.assert_not_called()
         sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("owned", [False, True])
+@pytest.mark.parametrize("invalid_runtime", [False, True])
+async def test_close_retains_capture_after_provider_release(setup, tmp_path, owned, invalid_runtime):
+    agent, sandbox = setup
+    body = seed()
+    if owned:
+        body.sandbox_access = None
+        agent.config.sandbox_provider = "agent-provider"
+        agent.config.sandbox_config = {"image": "test-image"}
+    if invalid_runtime:
+        sandbox.runtime_info = {"hostname": "worker", "pid": "not-an-integer"}
+        sandbox.result["return_code"] = "not-an-integer"
+    sandbox.start = AsyncMock()
+
+    request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": "openclaw-smoke-a2"}})
+    with patch("responses_api_agents.openclaw_agent.app.AsyncSandbox", return_value=sandbox) as factory:
+        factory.connect = AsyncMock(return_value=sandbox)
+        await agent.seed_agent_session(request, body)
+        state = agent._session_records[body.agent_session_id].state
+        directory = state.session.session_dir
+        assert f"{directory}/process_supervisor.py" not in sandbox.files
+        sandbox.blocked = True
+        task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
+        await asyncio.wait_for(sandbox.started.wait(), 2)
+        assert f"{directory}/process_supervisor.py" in sandbox.files
+
+        async def release():
+            assert state.session.cleanup["cleanup_confirmed"] is True
+            assert state.session.artifacts is not None
+            sandbox.files.clear()
+            sandbox.download = AsyncMock(side_effect=AssertionError("output read after release"))
+
+        sandbox.stop.side_effect = release
+        sandbox.disconnect.side_effect = release
+        close = AgentCloseSessionRequest(**close_body(body.agent_session_id))
+        response = await agent.close_agent_session(request, close)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert response.agent_observations is not None
+        invocations = [record for record in response.agent_observations.records if record.kind == "agent_invocation"]
+        assert any(record.conversation for record in invocations)
+        assert state.session.closed
+        assert await agent.close_agent_session(request, close) == response
+        (sandbox.stop if owned else sandbox.disconnect).assert_awaited_once()
+        (sandbox.disconnect if owned else sandbox.stop).assert_not_awaited()
+
+
+@pytest.mark.parametrize("diagnostics", [{"return_code": "0"}, {"extra": 1}])
+def test_optional_diagnostics_preserve_valid_terminal_result(setup, diagnostics):
+    agent, sandbox = setup
+    sandbox.result.update(diagnostics)
+    sandbox.runtime_info = {"pid": "invalid"}
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        response.raise_for_status()
+        assert response.json()["status"] == "completed"
+        assert response.json()["output"][-1]["content"][0]["text"] == "Fixed"
+        assert "harness_hostname" not in response.json()["metadata"]
+        assert "harness_pid" not in response.json()["metadata"]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        closed.raise_for_status()
+        gaps = {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
+        assert "runtime_info_unavailable" in gaps
+        assert ("worker_exit_code_unavailable" in gaps) == ("return_code" in diagnostics)
