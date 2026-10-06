@@ -246,7 +246,7 @@ roles:
       kv-cache-dtype: fp8_e4m3
       linear-attn-backend: triton
       mamba-backend: flashinfer
-      mamba-full-memory-ratio: 4
+      mamba-full-memory-ratio: 8
       mamba-radix-cache-strategy: extra_buffer
       mamba-ssm-dtype: float32
       max-running-requests: 128
