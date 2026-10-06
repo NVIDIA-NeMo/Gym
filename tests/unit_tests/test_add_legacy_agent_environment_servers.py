@@ -72,6 +72,103 @@ def test_migrates_a_config_outside_the_repository(tmp_path: Path) -> None:
     assert config.read_text().startswith(AGENT_CONFIG)  # existing content, comments included, is untouched
 
 
+@pytest.mark.parametrize("resources", [None, {"type": "resources_servers", "name": "my_resources"}])
+@pytest.mark.parametrize("agent_type", ["hermes_agent", "pi_agent", "osworld_agent"])
+def test_migration_respects_native_session_templates(
+    tmp_path: Path, resources: dict[str, str] | None, agent_type: str
+) -> None:
+    config = tmp_path / "agent.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "my_agent": {
+                    "responses_api_agents": {
+                        agent_type: {
+                            "entrypoint": "app.py",
+                            "resources_server": resources,
+                        }
+                    }
+                }
+            }
+        )
+    )
+    before = config.read_text()
+
+    assert migration.main([str(config)]) == 0
+
+    if agent_type in {"hermes_agent", "pi_agent"} and resources is None:
+        assert config.read_text() == before
+    else:
+        assert _environment_servers(yaml.safe_load(config.read_text())) == {"my_agent": ["my_environment_server"]}
+
+
+def test_pi_overlay_keeps_inherited_resources(tmp_path: Path) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(AGENT_CONFIG.replace("simple_agent", "pi_agent"))
+    overlay = tmp_path / "overlay.yaml"
+    overlay.write_text("renamed_agent:\n  _inherit_from: my_pi_agent\n  responses_api_agents:\n    pi_agent: {}\n")
+    assert migration.main([str(base), str(overlay)]) == 0
+    resolved = _parse(base, overlay, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["renamed_environment_server"]}
+    assert resolved.renamed_agent.responses_api_agents.pi_agent.resources_server.name == "my_resources"
+
+
+def test_default_pi_composes_with_exactly_one_native_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/pi_agent/configs/pi_agent.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("pi_agent", name="native_environment", server_type="single_agent_turn_legacy")
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"pi_agent": ["native_environment"]}
+    assert resolved.pi_agent.responses_api_agents.pi_agent.resources_server is None
+
+
+def test_hermes_overlay_keeps_its_inherited_resources_binding(tmp_path: Path) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(AGENT_CONFIG.replace("simple_agent", "hermes_agent"))
+    overlay = tmp_path / "overlay.yaml"
+    overlay.write_text(
+        "renamed_agent:\n"
+        "  _inherit_from: my_hermes_agent\n"
+        "  responses_api_agents:\n"
+        "    hermes_agent:\n"
+        "      max_turns: 7\n"
+    )
+
+    assert migration.main([str(base), str(overlay)]) == 0
+
+    resolved = _parse(base, overlay, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["renamed_environment_server"]}
+    assert resolved.renamed_agent.responses_api_agents.hermes_agent.resources_server.name == "my_resources"
+
+
+def test_default_hermes_composes_with_exactly_one_native_environment(tmp_path: Path) -> None:
+    config = tmp_path / "hermes.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/hermes_agent/configs/hermes_agent.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("hermes_agent", name="native_environment", server_type="single_agent_turn_legacy")
+    )
+    before = config.read_text()
+
+    # Migrating the standalone harness must not install a second, legacy route.
+    assert migration.main([str(config)]) == 0
+
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"hermes_agent": ["native_environment"]}
+    assert resolved.hermes_agent.responses_api_agents.hermes_agent.resources_server is None
+
+
 def test_check_reports_without_writing(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     config = tmp_path / "my_run.yaml"
     config.write_text(AGENT_CONFIG)
@@ -279,3 +376,8 @@ def test_finds_the_agent_references_gym_finds() -> None:
 def test_server_names_match_the_relays_gym_generates(agent_name: str, agent_type: str) -> None:
     # The deprecation warning prints a block to paste; it must match what this script writes.
     assert migration.server_name(agent_name, agent_type) == legacy_environment_server_name(agent_name, agent_type)
+
+
+def test_repository_configs_declare_every_environment_server(capsys: pytest.CaptureFixture[str]) -> None:
+    """Every agent in the repository's configs has an environment server, so no run needs a generated relay."""
+    assert migration.main(["--check"]) == 0, capsys.readouterr().out

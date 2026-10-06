@@ -3028,9 +3028,21 @@ class TestComposeUnboundAgent:
         assert "no other agent instance to rehost it on" in str(exc_info.value)
 
     def test_real_benchmark_composes_onto_real_harness(self) -> None:
-        resolved = self._parse_config_paths(
-            "benchmarks/gpqa/config.yaml",
-            "responses_api_agents/hermes_agent/configs/hermes_agent.yaml",
+        # Native Hermes has no Resources binding; legacy harness swaps explicitly leave it unbound.
+        resolved = self._parse(
+            DictConfig(
+                {
+                    "config_paths": [
+                        "benchmarks/gpqa/config.yaml",
+                        "responses_api_agents/hermes_agent/configs/hermes_agent.yaml",
+                    ],
+                    "hermes_agent": {
+                        "responses_api_agents": {
+                            "hermes_agent": {"resources_server": {"type": "resources_servers", "name": "???"}}
+                        }
+                    },
+                }
+            )
         )
 
         block = resolved[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]["hermes_agent"]
