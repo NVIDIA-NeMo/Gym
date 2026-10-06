@@ -9,8 +9,8 @@ from collections import Counter
 from dataclasses import replace
 from typing import Literal, Sequence
 
-from responses_api_agents.simple_agent_with_compaction.compaction.config import ContextGuardConfig
-from responses_api_agents.simple_agent_with_compaction.compaction.history import (
+from nemo_gym.context_management.config import ContextGuardConfig
+from nemo_gym.context_management.history import (
     ContextMeasurements,
     FinalizedChunkRecord,
     GuardEvaluation,
@@ -27,12 +27,11 @@ from responses_api_agents.simple_agent_with_compaction.compaction.history import
     _semantic_part_digest,
     _view_digest,
 )
-from responses_api_agents.simple_agent_with_compaction.compaction.materialization import (
+from nemo_gym.context_management.materialization import (
     descriptor_is_append_compatible,
     materialize_history_view,
-    ordered_media_is_append_compatible,
 )
-from responses_api_agents.simple_agent_with_compaction.compaction.policies import HistoryPolicy
+from nemo_gym.context_management.policies import HistoryPolicy
 
 
 class HistoryController:
@@ -42,12 +41,12 @@ class HistoryController:
         self.history = history
         self.policy = policy
         self._completed_descriptor: tuple[str, ...] | None = None
-        self._completed_media_ids: tuple[str, ...] | None = None
+        self._completed_image_part_ids: tuple[str, ...] | None = None
         self._completed_view_digest: str | None = None
+        self._completed_items: tuple | None = None
         self._pending_boundary: RewriteBoundaryEvent | None = None
         self._boundary_events: list[RewriteBoundaryEvent] = []
         self._context_epoch = 0
-        self._segment_index = 0
         self.evaluation_count = 0
 
     @property
@@ -82,12 +81,13 @@ class HistoryController:
                 append_compatible=False,
                 boundary=self._pending_boundary,
                 context_epoch=self._context_epoch,
-                segment_index=self._segment_index,
             )
 
-        append_compatible = descriptor_is_append_compatible(
-            self._completed_descriptor, view.descriptor
-        ) and ordered_media_is_append_compatible(self._completed_media_ids, view.media_ids)
+        append_compatible = descriptor_is_append_compatible(self._completed_descriptor, view.descriptor)
+        # IDs alone do not catch rendering changes (for example a changed omission marker).
+        append_compatible = append_compatible and (
+            self._completed_items == view.items[: len(self._completed_items or ())]
+        )
         boundary = None
         if self._completed_descriptor is not None and not append_compatible:
             assert self._completed_view_digest is not None
@@ -98,9 +98,10 @@ class HistoryController:
                 current_view_digest=view_digest,
             )
             self._pending_boundary = boundary
-            self._boundary_events.append(boundary)
+            # Retain only the current diagnostic. Historical selections can grow
+            # with history; keeping every one would recreate quadratic storage.
+            self._boundary_events[:] = [boundary]
             self._context_epoch += 1
-            self._segment_index += 1
 
         return PreparedHistoryView(
             view=view,
@@ -108,7 +109,6 @@ class HistoryController:
             append_compatible=append_compatible,
             boundary=boundary,
             context_epoch=self._context_epoch,
-            segment_index=self._segment_index,
         )
 
     def _plan(self, *, applies_to_step: int) -> HistoryViewPlan:
@@ -123,8 +123,9 @@ class HistoryController:
             raise RuntimeError("Prepared boundary is not pending")
 
         self._completed_descriptor = prepared.view.descriptor
-        self._completed_media_ids = prepared.view.media_ids
+        self._completed_image_part_ids = prepared.view.image_part_ids
         self._completed_view_digest = prepared.view_digest
+        self._completed_items = prepared.view.items
 
     def _make_boundary(
         self,
@@ -134,8 +135,8 @@ class HistoryController:
         view: MaterializedHistoryView,
         current_view_digest: str,
     ) -> RewriteBoundaryEvent:
-        previous_media = Counter(self._completed_media_ids or ())
-        current_media = Counter(view.media_ids)
+        previous_media = Counter(self._completed_image_part_ids or ())
+        current_media = Counter(view.image_part_ids)
         removed_media_count = sum((previous_media - current_media).values())
         identity = _config_digest(
             {
@@ -159,7 +160,7 @@ class HistoryController:
             changed_part_ranges=decision.changed_part_ranges,
             retained_part_count=decision.retained_part_count,
             omitted_part_count=decision.omitted_part_count,
-            retained_media_count=len(view.media_ids),
+            retained_media_count=len(view.image_part_ids),
             removed_media_count=removed_media_count,
             inserted_artifact_ids=decision.inserted_artifact_ids,
         )
@@ -350,7 +351,7 @@ class TurnChunkedHistoryController(HistoryController):
                 actual_action_count=len(self._action_ids),
                 early_close_reason=early_close_reason,
                 active_observation_group_count=len(active_group_ids),
-                active_raw_image_count=len(self._last_acknowledged.view.media_ids),
+                active_raw_image_count=len(self._last_acknowledged.view.image_part_ids),
             )
         )
         self._action_ids = []
