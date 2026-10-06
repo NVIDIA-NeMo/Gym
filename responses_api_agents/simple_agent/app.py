@@ -20,7 +20,7 @@ from time import perf_counter, time
 from typing import Any
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, ValidationError
+from pydantic import ConfigDict, Field, ValidationError
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -78,6 +78,13 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     max_steps: int = None
+    execute_tools: bool = Field(
+        default=True,
+        description=(
+            "Whether to execute model-requested tools. Disabling tool execution is supported only for agent-session "
+            "requests, where unresolved function calls are returned to the Environment Server."
+        ),
+    )
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -132,6 +139,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         resources_server_cookies: Any = None,
         tool_access: DirectHTTPToolAccess | None = None,
         in_session: bool = False,
+        execute_tools: bool = True,
         invocation_id: str = "root",
         task_id: str = "unscoped",
         rollout_id: str = "unscoped",
@@ -243,6 +251,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         rollout_id,
                         step,
                     )
+                break
+
+            if not execute_tools:
                 break
 
             for output_function_call in all_fn_calls:
@@ -359,6 +370,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         state = self._require_agent_session(agent_session_id) if agent_session_id is not None else None
         if state is not None and not isinstance(state, SimpleAgentSessionState):
             raise TypeError("Expected Simple Agent session state")
+        if state is None and not self.config.execute_tools:
+            raise ValueError(
+                "Simple Agent execute_tools=false is supported only for agent-session requests; "
+                "seed an agent session before calling /v1/responses"
+            )
         invocation_id = "root"
         if state is not None:
             # A session spans several activations, and its observations keep one invocation per activation.
@@ -372,6 +388,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             resources_server_cookies=state.resources_cookies if state is not None else request.cookies,
             tool_access=state.tool_access if state is not None else None,
             in_session=state is not None,
+            execute_tools=self.config.execute_tools,
             invocation_id=invocation_id,
             rollout_id=rollout_id or "unscoped",
             collect_trajectory=collect_trajectory,
@@ -401,6 +418,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return model_response
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
+        if not self.config.execute_tools:
+            raise ValueError(
+                "Simple Agent execute_tools=false is supported only for agent-session requests; "
+                "the legacy /run route requires execute_tools=true"
+            )
         if self.config.resources_server is None:
             raise ValueError("resources_server is required when invoking the legacy Simple Agent /run route")
         cookies = request.cookies
