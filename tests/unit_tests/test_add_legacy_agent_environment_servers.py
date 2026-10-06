@@ -126,6 +126,26 @@ def test_native_openclaw_template_composes_with_one_environment(tmp_path: Path) 
     assert resolved.openclaw_agent_native.responses_api_agents.openclaw_agent.resources_server is None
 
 
+def test_default_hermes_composes_with_exactly_one_native_environment(tmp_path: Path) -> None:
+    config = tmp_path / "hermes.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/hermes_agent/configs/hermes_agent.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("hermes_agent", name="native_environment", server_type="single_agent_turn_legacy")
+    )
+    before = config.read_text()
+
+    # Migrating the standalone harness must not install a second, legacy route.
+    assert migration.main([str(config)]) == 0
+
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"hermes_agent": ["native_environment"]}
+    assert resolved.hermes_agent.responses_api_agents.hermes_agent.resources_server is None
+
+
 def test_check_reports_without_writing(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     config = tmp_path / "my_run.yaml"
     config.write_text(AGENT_CONFIG)
