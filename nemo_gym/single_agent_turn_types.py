@@ -5,7 +5,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.episode_types import (
@@ -24,6 +24,12 @@ class SingleAgentTurnTaskInput(BaseModel):
 
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     task_data: dict[str, JsonValue]
+    agent_timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        description="Agent execution budget after setup; close the agent before grading its preserved state on timeout.",
+    )
 
 
 class SingleAgentTurnResult(BaseVerifyResponse):
@@ -38,6 +44,8 @@ class SingleAgentTurnResult(BaseVerifyResponse):
 
     ng_agent_observations: AgentObservationBundle | None = None
     ng_trajectory: TrajectoryRecord | None = None
+    agent_timed_out: bool = False
+    agent_timeout_seconds: float | None = None
 
 
 class SingleAgentTurnFailure(EpisodeFailure):

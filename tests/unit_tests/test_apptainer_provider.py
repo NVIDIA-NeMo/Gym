@@ -960,6 +960,31 @@ async def test_run_real_timeout(fake_binary: str) -> None:
         await provider._run([shutil.which("sleep"), "5"], timeout_s=0.1)
 
 
+@pytest.mark.skipif(shutil.which("sh") is None or shutil.which("sleep") is None, reason="shell/sleep unavailable")
+@pytest.mark.parametrize(
+    ("default_timeout", "requested_timeout", "times_out"),
+    [(None, None, False), (None, 0.03, True), (0.03, None, True), (0.03, 2, False)],
+)
+async def test_exec_nullable_default_preserves_explicit_deadlines(
+    tmp_path: Path, default_timeout: float | None, requested_timeout: float | None, times_out: bool
+) -> None:
+    """A long activation can disable the provider clock without disabling per-call bounds."""
+    binary = tmp_path / "apptainer"
+    binary.write_text(f"#!{shutil.which('sh')}\n{shlex.quote(shutil.which('sleep'))} 0.15\nprintf 'completed'\n")
+    binary.chmod(0o700)
+    provider = apptainer_provider.ApptainerProvider(
+        bin_path=str(tmp_path), exec={"default_timeout_s": default_timeout, "timeout_grace_s": 0}
+    )
+    result = await provider.exec(_make_handle(tmp_path), "long-activation", timeout_s=requested_timeout)
+    if times_out:
+        assert result.error_type == "timeout"
+        assert result.return_code == apptainer_provider.SANDBOX_RUNTIME_RETURN_CODE
+    else:
+        assert result.error_type is None
+        assert result.return_code == 0
+        assert result.stdout == "completed"
+
+
 @pytest.mark.skipif(shutil.which("sh") is None, reason="sh not available")
 async def test_run_daemonizing_returns_despite_lingering_child(fake_binary: str) -> None:
     """Regression: a backgrounded child inheriting stdout must not wedge the read.

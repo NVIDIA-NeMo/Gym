@@ -8,8 +8,12 @@ from pathlib import Path
 from benchmarks.swebench.pro.prepare import OUTPUT_FPATH, prepare
 
 
-def prepare_native(*, source: Path = OUTPUT_FPATH, output: Path | None = None) -> Path:
+def prepare_native(
+    *, source: Path = OUTPUT_FPATH, output: Path | None = None, max_output_tokens: int | None = None
+) -> Path:
     """Preserve task and grading data while separating the Responses request."""
+    if max_output_tokens is not None and (type(max_output_tokens) is not int or max_output_tokens <= 0):
+        raise ValueError("max_output_tokens must be a positive integer")
     if not source.exists():
         prepare(output_fpath=source)
     output = output or source.with_name("swebench_pro_nooa.jsonl")
@@ -17,6 +21,8 @@ def prepare_native(*, source: Path = OUTPUT_FPATH, output: Path | None = None) -
         for line in reader:
             task_data = json.loads(line)
             params = task_data.pop("responses_create_params")
+            if max_output_tokens is not None:
+                params["max_output_tokens"] = max_output_tokens
             writer.write(
                 json.dumps(
                     {

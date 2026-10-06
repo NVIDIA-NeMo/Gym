@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from contextlib import contextmanager
+import asyncio
+import logging
+from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 from glob import glob
+from math import isfinite
 from pathlib import Path
 from shlex import join
 from sys import stderr
@@ -12,8 +16,8 @@ from time import time
 from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
-from fastapi import Request
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
@@ -21,14 +25,24 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.terminal_bench_2_1.task_metadata import CanonicalImageStartup, read_image_startup
+
+
+LOG = logging.getLogger(__name__)
 
 
 # Bullseye security packages were removed from the live mirror after LTS ended.
@@ -49,6 +63,7 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
 
     is_verifying_golden_patch: bool = False
     evaluation_timeout: Optional[int] = None
+    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
     # Sandbox config
     sandbox_provider: str
@@ -65,6 +80,8 @@ class TerminalBench21SeedSessionRequest(BaseModel):
     task_name: str
     docker_image: str
     task_folder: str
+    verifier_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    image_startup: CanonicalImageStartup | None = None
 
 
 class TerminalBench21VerifyRequest(TerminalBench21SeedSessionRequest, BaseVerifyRequest):
@@ -80,6 +97,13 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
     task_name: str
     test_output: str
     golden_patch_output: Optional[str]
+
+
+@dataclass
+class _NativeSession:
+    request: ResourcesSeedSessionRequest
+    response: ResourcesSeedSessionResponse | None = None
+    verification_started: bool = False
 
 
 GOLDEN_PATCH_SOLVE_SH_PATCHES = {
@@ -140,8 +164,55 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("Terminal-Bench process-local sessions require num_workers=1")
 
         self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+        self._native_sessions: dict[str, _NativeSession] = {}
+        self._native_session_locks: dict[str, asyncio.Lock] = {}
+        self._closed_native_sessions: dict[str, EpisodeId] = {}
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            try:
+                async with parent_lifespan(app) as state:
+                    yield state
+            finally:
+                for session_id in list(self._session_id_to_sandbox):
+                    try:
+                        await self._stop_session_sandbox(session_id)
+                    except Exception:
+                        LOG.exception("Failed to stop Terminal-Bench session %s on shutdown", session_id)
+
+        app.router.lifespan_context = lifespan
+        return app
+
+    async def _stop_session_sandbox(self, session_id: str) -> None:
+        sandbox = self._session_id_to_sandbox.get(session_id)
+        if sandbox is not None:
+            async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                await sandbox.stop()
+            # Retain ownership after a failed stop so close can retry.
+            self._session_id_to_sandbox.pop(session_id, None)
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        """Close the owner's sandbox, including when a seed response was lost."""
+        session_id = body.resources_session_id
+        async with self._native_session_locks.setdefault(session_id, asyncio.Lock()):
+            closed_episode = self._closed_native_sessions.get(session_id)
+            session = self._native_sessions.get(session_id)
+            expected = closed_episode or (session.request.episode_id if session is not None else None)
+            if expected is not None and expected != body.episode_id:
+                raise HTTPException(409, "episode_id does not match the resources session")
+            await self._stop_session_sandbox(session_id)
+            self._native_sessions.pop(session_id, None)
+            # Fence a delayed seed even if close arrives first.
+            self._closed_native_sessions[session_id] = body.episode_id
+            return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     def _patch_sandbox_provider_options_for_instances(
         self, task_name: str, resources: SandboxResources, provider_options: Dict[str, Any]
@@ -161,7 +232,22 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 "disk_gib": resources.disk_gib,
             }
 
-    async def _create_sandbox(self, verify_request: TerminalBench21SeedSessionRequest) -> AsyncSandbox:
+    async def _create_sandbox(
+        self, verify_request: TerminalBench21SeedSessionRequest, *, session_id: str | None = None
+    ) -> AsyncSandbox:
+        entrypoint = None
+        if verify_request.image_startup is not None:
+            task_folder = Path(verify_request.task_folder)
+            if not task_folder.is_absolute():
+                task_folder = PARENT_DIR / task_folder
+            expected = read_image_startup(task_folder)
+            if (
+                expected is None
+                or expected != verify_request.image_startup
+                or expected.docker_image != verify_request.docker_image
+            ):
+                raise ValueError("Sandbox startup metadata does not match the canonical task image and Dockerfile")
+            entrypoint = expected.command
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -194,10 +280,13 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 "instance_id": verify_request.task_name,
             },
             resources=SandboxResources.from_mapping(resources),
-            entrypoint=None,
+            entrypoint=entrypoint,
             provider_options=provider_options,
         )
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
+        if session_id is not None:
+            # Keep ownership even if setup and its first teardown attempt both fail.
+            self._session_id_to_sandbox[session_id] = eval_sandbox
 
         async def _run_setup(sandbox: AsyncSandbox) -> None:
             result = await sandbox.exec(
@@ -220,12 +309,67 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         return eval_sandbox
 
     async def seed_session(
-        self, request: Request, body: TerminalBench21SeedSessionRequest
-    ) -> TerminalBench21SeedSessionResponse:
+        self, request: Request, body: ResourcesSeedSessionRequest | TerminalBench21SeedSessionRequest
+    ) -> ResourcesSeedSessionResponse | TerminalBench21SeedSessionResponse:
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return await self._seed_native_session(request, body)
         eval_sandbox = await self._create_sandbox(body)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
         return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
+
+    async def _seed_native_session(
+        self, request: Request, body: ResourcesSeedSessionRequest
+    ) -> ResourcesSeedSessionResponse:
+        if self.config.is_verifying_golden_patch:
+            raise HTTPException(422, "Golden-patch mode cannot be used with agent sandbox sessions")
+        task = TerminalBench21SeedSessionRequest.model_validate(body.task_data)
+        if body.task_id.task_id != task.task_name:
+            raise HTTPException(422, "TaskId does not match the Terminal-Bench task_name")
+        task_folder = Path(task.task_folder)
+        if not task_folder.is_absolute():
+            task_folder = PARENT_DIR / task_folder
+        if not (task_folder / "tests/test.sh").is_file():
+            raise HTTPException(422, f"Missing local task verifier: {task_folder / 'tests/test.sh'}")
+        session_id = body.resources_session_id
+        async with self._native_session_locks.setdefault(session_id, asyncio.Lock()):
+            if session_id in self._closed_native_sessions:
+                raise HTTPException(409, "Resources session is already closed")
+            session = self._native_sessions.get(session_id)
+            if session is not None:
+                if session.request != body:
+                    raise HTTPException(409, "resources_session_id is already bound to a different request")
+                if session.response is None or session.verification_started:
+                    raise HTTPException(409, "Resources session is no longer available for seeding")
+                request.session[SESSION_ID_KEY] = session_id
+                return session.response
+            session = _NativeSession(request=body.model_copy(deep=True))
+            self._native_sessions[session_id] = session
+            try:
+                sandbox = await self._create_sandbox(task, session_id=session_id)
+                self._session_id_to_sandbox[session_id] = sandbox
+                working_directory = await sandbox.exec("pwd", timeout_s=30)
+                workdir = (working_directory.stdout or "").strip()
+                if working_directory.return_code != 0 or not Path(workdir).is_absolute():
+                    raise RuntimeError("Could not determine the task sandbox's absolute working directory")
+                session.response = ResourcesSeedSessionResponse(
+                    resources_session_id=session_id,
+                    sandbox_access=SandboxAccess(
+                        connection=DirectSandboxConnection(
+                            provider_config_ref=self.config.sandbox_provider,
+                            descriptor=await sandbox.serialize(),
+                        ),
+                        workdir=workdir,
+                    ),
+                )
+            except BaseException:
+                try:
+                    await self._stop_session_sandbox(session_id)
+                except Exception:
+                    LOG.exception("Failed to stop partially seeded Terminal-Bench session %s", session_id)
+                raise
+            request.session[SESSION_ID_KEY] = session_id
+            return session.response
 
     @contextmanager
     def _patch_golden_patch_solve_sh(
@@ -269,7 +413,26 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 await sandbox.upload(local_path=new_local_fpath, remote_path=target_fpath)
 
     async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
+        session_id = request.session.get(SESSION_ID_KEY)
+        if session_id in self._closed_native_sessions:
+            raise HTTPException(409, "Resources session is already closed")
+        if session_id in self._native_sessions:
+            async with self._native_session_locks[session_id]:
+                session = self._native_sessions.get(session_id)
+                if session is None or session.response is None or session.verification_started:
+                    raise HTTPException(409, "Resources session is not available for verification")
+                task = TerminalBench21SeedSessionRequest.model_validate(session.request.task_data)
+                if task != TerminalBench21SeedSessionRequest.model_validate(body.model_dump()):
+                    raise HTTPException(409, "Verification task does not match the seeded task")
+                session.verification_started = True
+                return await self._verify(request, body, native=True)
+        return await self._verify(request, body, native=False)
+
+    async def _verify(
+        self, request: Request, body: TerminalBench21VerifyRequest, *, native: bool
+    ) -> TerminalBench21VerifyResponse:
         task_folder = Path(body.task_folder)
+        verification_timeout = body.verifier_timeout_seconds or self.config.evaluation_timeout
 
         if self.config.is_verifying_golden_patch:
             if self.config.debug:
@@ -292,51 +455,64 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 print(f"Golden patch output for {body.task_name}: {golden_patch_output}", file=stderr)
         else:
             # Re-use the original sandbox
-            eval_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
+            eval_sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
             golden_patch_output = None
 
-        if self.config.debug:
-            print(f"Running tests for {body.task_name}", file=stderr)
-        start_time = time()
         try:
-            await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
-            eval_result = await eval_sandbox.exec(
-                "bash /tests/test.sh",
-                timeout_s=self.config.evaluation_timeout,
-            )
-            test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
-        except:
-            print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
-            eval_result = None
-            test_output = ""
-        verification_time_taken = time() - start_time
-
-        if self.config.debug:
-            print(f"Test output for {body.task_name}: {test_output}", file=stderr)
-
-        evaluation_completed = False
-        reward = 0.0
-        if eval_result is not None:
+            if self.config.debug:
+                print(f"Running tests for {body.task_name}", file=stderr)
+            start_time = time()
             try:
-                with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
-                    await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
-                    temp_file.seek(0)
-                    reward = float(temp_file.read())
+                await self._upload_folder(
+                    eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name
+                )
+                eval_result = await eval_sandbox.exec(
+                    "bash /tests/test.sh",
+                    timeout_s=verification_timeout,
+                )
+                test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
+            except Exception:
+                print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
+                eval_result = None
+                test_output = ""
+            verification_time_taken = time() - start_time
 
-                evaluation_completed = True
-            except:
-                if self.config.debug:
-                    print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
+            if self.config.debug:
+                print(f"Test output for {body.task_name}: {test_output}", file=stderr)
 
-        try:
-            await eval_sandbox.stop()
-        except:
-            print(f"Hit an exception stopping sandbox: {format_exc()}", file=stderr)
+            evaluation_completed = False
+            reward = 0.0
+            if eval_result is not None:
+                try:
+                    with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
+                        await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
+                        # Docker may replace the destination inode; read the downloaded path.
+                        reward = float(Path(temp_file.name).read_text())
+                        if not isfinite(reward) or not 0.0 <= reward <= 1.0:
+                            raise ValueError("Terminal-Bench reward must be finite and between 0 and 1")
+
+                    evaluation_completed = True
+                except Exception:
+                    reward = 0.0
+                    if self.config.debug:
+                        print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
+        finally:
+            if not native:
+                try:
+                    if self.config.is_verifying_golden_patch:
+                        await eval_sandbox.stop()
+                    else:
+                        await self._stop_session_sandbox(request.session[SESSION_ID_KEY])
+                except Exception:
+                    LOG.exception("Failed to stop Terminal-Bench sandbox after legacy verification")
 
         return TerminalBench21VerifyResponse(
             **body.model_dump(),
             evaluation_completed=evaluation_completed,
             reward=reward,
+            mask_sample=not evaluation_completed,
+            failure_kind=None if evaluation_completed else "verifier_error",
+            failure_reason=None if evaluation_completed else "Terminal-Bench verification produced no valid reward",
             verification_time_taken=verification_time_taken,
             test_output=test_output,
             golden_patch_output=golden_patch_output,

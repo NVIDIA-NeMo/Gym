@@ -142,7 +142,9 @@ class FakeResponse:
     cookies = SimpleCookie()
 
 
-def make_runner(*, execution_mode: str = "embedded") -> tuple[InProcessNOOARunner, MagicMock]:
+def make_runner(
+    *, execution_mode: str = "embedded", context_window: int | None = None
+) -> tuple[InProcessNOOARunner, MagicMock]:
     invocation = NOOAInvocationConfig.model_validate(
         {
             "agent_class": f"{__name__}:ValidAgent",
@@ -158,9 +160,32 @@ def make_runner(*, execution_mode: str = "embedded") -> tuple[InProcessNOOARunne
         server_client=client,
         model_server_name="policy_model",
         max_policy_calls=3,
+        context_window=context_window,
     )
     runner._agent_class = FakeAgent
     return runner, client
+
+
+@pytest.mark.asyncio
+async def test_runner_passes_context_window_and_request_reply_cap_to_nooa() -> None:
+    runner, client = make_runner(context_window=262144)
+
+    async def inspect_limits(agent, request):
+        limits = agent.llm.get_context_limits(fallback_reserve=4096)
+        assert limits.context_window == 262144
+        assert limits.reserved_output_tokens == 32768
+        assert limits.usable_input_tokens == 229376
+        return "limits checked"
+
+    runner._invocation_adapter = inspect_limits
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello", max_output_tokens=32768),
+            model_url_path="/v1/responses",
+        )
+    )
+    assert result.return_value == "limits checked"
+    client.post.assert_not_called()
 
 
 def responses_create_params(customer_id: str) -> NeMoGymResponseCreateParamsNonStreaming:

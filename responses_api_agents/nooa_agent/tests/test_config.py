@@ -98,6 +98,14 @@ def test_agent_config_rejects_nonpositive_policy_call_limits(limit: int) -> None
         agent_config(max_policy_calls=limit)
 
 
+def test_context_window_defaults_to_unknown_and_accepts_known_positive_limit() -> None:
+    assert agent_config().context_window is None
+    assert agent_config(context_window=262144).context_window == 262144
+    for invalid in (0, -1):
+        with pytest.raises(ValidationError, match="context_window"):
+            agent_config(context_window=invalid)
+
+
 def test_sandboxed_execution_mode_is_reserved_for_a_future_runner() -> None:
     assert invocation_config(execution_mode="sandboxed").execution_mode == "sandboxed"
 

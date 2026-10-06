@@ -6228,11 +6228,127 @@ class TestEnvironmentServerRouting:
         assert "reward" not in nested
         assert nested["verification"] == {"reward": 1.0}
 
-    def test_episode_result_may_not_use_collector_keys(self) -> None:
-        reply = self._native_identity("a") | {"result": {"reward": 1.0, "ng_trajectory": {}}}
+    @pytest.mark.parametrize("key", ["_ng_task_index", "_ng_failure_class", "ng_model_call_capture", "ng_perf"])
+    def test_episode_result_may_not_use_collector_keys(self, key: str) -> None:
+        reply = self._native_identity("a") | {"result": {"reward": 1.0, key: {}}}
 
-        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
+        with pytest.raises(ValueError, match="reserved for rollout collection"):
             nemo_gym.rollout_collection._episode_record(reply)
+
+    @pytest.mark.parametrize("failed", [False, True], ids=["graded-result", "episode-failure"])
+    async def test_native_nooa_trajectory_survives_collection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed: bool
+    ) -> None:
+        """A typed NOOA episode keeps its grade/patch or partial evidence in the canonical artifact."""
+        from nemo_gym.single_agent_turn_types import SingleAgentTurnResponse
+
+        task_id = {"taskset": "swe_pro", "task_id": "instance_qutebrowser__qutebrowser-f91ace"}
+        materialized = {
+            "task_id": task_id,
+            "task_input": {"responses_create_params": {"input": "fix the issue"}, "task_data": {}},
+            TASK_INDEX_KEY_NAME: 1,
+        }
+        input_path, output_path = tmp_path / "input.jsonl", tmp_path / "rollouts.jsonl"
+        input_path.write_bytes(orjson.dumps(materialized) + b"\n")
+        response = {
+            "id": "nooa-final",
+            "created_at": 1.0,
+            "model": "policy_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        evidence = {
+            "ng_agent_observations": {"source": "nooa", "records": [], "gaps": []},
+            "ng_trajectory": {
+                "task_id": str(task_id),
+                "rollout_id": "1-0",
+                "invocations": [
+                    {
+                        "invocation_id": "nooa-root",
+                        "status": "completed",
+                        "conversation": [
+                            {"type": "function_call_output", "call_id": "tool-1", "output": "patch saved"}
+                        ],
+                    }
+                ],
+                "turns": [
+                    {
+                        "invocation_id": "nooa-root",
+                        "task_id": str(task_id),
+                        "rollout_id": "1-0",
+                        "turn_no": 1,
+                        "timestamp": 1.0,
+                        "step_count": 0,
+                        "question": "fix the issue",
+                        "answer": "patch saved",
+                    }
+                ],
+                "tool_calls": [{"invocation_id": "nooa-root", "tool_call_id": "tool-1", "output": "patch saved"}],
+            },
+        }
+        payload = {"episode_id": {"rollout_id": "1-0", "attempt": 0}, "task_id": task_id}
+        if failed:
+            payload["failure"] = {
+                "message": "verification unavailable",
+                "terminal": False,
+                "stage": "verification",
+                "partial_response": response,
+                **evidence,
+            }
+        else:
+            payload["result"] = {
+                "responses_create_params": materialized["task_input"]["responses_create_params"],
+                "response": response,
+                "reward": 1.0,
+                "resolved": True,
+                "evaluation_completed": True,
+                "test_results": {"unit-test": "PASSED"},
+                "model_patch": "patch produced by NOOA",
+                **evidence,
+            }
+        # Serialize the production wire type, including its optional ng_trajectory field.
+        wire = SingleAgentTurnResponse.model_validate(payload).model_dump(mode="json")
+        post = AsyncMock(return_value=FakeResponse(200, wire))
+        client = install_fake_server_client(monkeypatch, post)
+        client.global_config_dict = _environment_server_config()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: client.global_config_dict)
+
+        expected = pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts") if failed else nullcontext()
+        with expected:
+            await RolloutCollectionHelper().run_from_config(
+                RolloutCollectionConfig(
+                    input_jsonl_fpath=str(input_path),
+                    output_jsonl_fpath=str(output_path),
+                    environment_routing_mode="taskset",
+                    environment_server_routes={"swe_pro": "environment"},
+                    num_repeats=1,
+                    disable_aggregation=True,
+                    disable_health_check=True,
+                )
+            )
+
+        artifact = _failures_path_for(output_path) if failed else output_path
+        [record] = [orjson.loads(line) for line in artifact.read_bytes().splitlines()]
+        assert record[TASK_INDEX_KEY_NAME] == 1
+        assert record[nemo_gym.rollout_collection.NG_TASK_ID_KEY] == task_id
+        trajectory = record[NG_TRAJECTORY_KEY]
+        assert trajectory["rollout_id"] == "1-0"
+        assert trajectory["invocations"][0]["conversation"][0]["output"] == "patch saved"
+        assert trajectory["turns"][0]["answer"] == "patch saved"
+        assert trajectory["tool_calls"][0]["output"] == "patch saved"
+        if failed:
+            assert record[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+            assert record["_ng_failure_partial_response"]["id"] == "nooa-final"
+            assert "reward" not in record
+            assert not output_path.read_bytes()
+        else:
+            assert (record["reward"], record["resolved"], record["evaluation_completed"]) == (1.0, True, True)
+            assert record["test_results"] == {"unit-test": "PASSED"}
+            assert record["model_patch"] == "patch produced by NOOA"
+            assert not _failures_path_for(output_path).read_bytes()
 
     def test_episode_detection_needs_object_identities_and_an_object_failure(self) -> None:
         """An agent reply echoing identity fields as strings is not an episode reply; a bad failure is an error."""

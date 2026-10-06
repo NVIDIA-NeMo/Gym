@@ -4,6 +4,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from nemo_gym.episode_types import MaterializedTask
 from nemo_gym.single_agent_turn_types import SingleAgentTurnTaskInput
 
@@ -27,6 +29,27 @@ def test_swe_preparation_preserves_grading_metadata(tmp_path: Path) -> None:
     assert row.task_id.task_id == "repo-1"
     assert row.task_input.task_data == {k: v for k, v in task.items() if k != "responses_create_params"}
     assert "private ground truth" not in row.task_input.responses_create_params.model_dump_json()
+
+
+def test_swe_baseline_reply_budget_preserves_prompt_and_verifier_data(tmp_path: Path) -> None:
+    from benchmarks.swebench.pro.prepare_nooa import prepare_native
+
+    source = tmp_path / "source.jsonl"
+    task = {
+        "instance_id": "repo-1",
+        "patch": "private ground truth",
+        "responses_create_params": {"input": [{"role": "user", "content": "canonical prompt"}]},
+    }
+    original = json.dumps(task) + "\n"
+    source.write_text(original)
+    output = prepare_native(source=source, output=tmp_path / "baseline.jsonl", max_output_tokens=32768)
+    row = MaterializedTask[SingleAgentTurnTaskInput].model_validate_json(output.read_text())
+    assert row.task_input.responses_create_params.max_output_tokens == 32768
+    assert row.task_input.responses_create_params.input[0].content == "canonical prompt"
+    assert row.task_input.task_data == {"instance_id": "repo-1", "patch": "private ground truth"}
+    assert source.read_text() == original
+    with pytest.raises(ValueError, match="positive integer"):
+        prepare_native(source=source, max_output_tokens=0)
 
 
 def test_swe_recipe_uses_borrowed_sandbox_and_native_environment() -> None:

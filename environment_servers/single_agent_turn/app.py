@@ -3,6 +3,8 @@
 
 """Resources-backed single-agent environment server."""
 
+import asyncio
+from time import time
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -39,6 +41,7 @@ from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
+from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnFailure,
@@ -251,26 +254,32 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
+        agent_timed_out = False
+        agent_deadline = asyncio.timeout(task_input.agent_timeout_seconds)
         try:
-            agent_http_response = await self.server_client.post(
-                server_name=self.config.agent_server.name,
-                url_path=self._agent_responses_path(request),
-                json=task_input.responses_create_params,
-                cookies=agent_cookies,
-            )
-            await raise_for_status(agent_http_response)
-            response_cookies = _cookies(agent_http_response)
-            if response_cookies:
-                agent_cookies = response_cookies
-            from nemo_gym.openai_utils import NeMoGymResponse
-
-            agent_response = NeMoGymResponse.model_validate(await get_response_json(agent_http_response))
+            async with agent_deadline:
+                agent_http_response = await self.server_client.post(
+                    server_name=self.config.agent_server.name,
+                    url_path=self._agent_responses_path(request),
+                    json=task_input.responses_create_params,
+                    cookies=agent_cookies,
+                )
+                await raise_for_status(agent_http_response)
+                response_cookies = _cookies(agent_http_response)
+                if response_cookies:
+                    agent_cookies = response_cookies
+                agent_response = NeMoGymResponse.model_validate(await get_response_json(agent_http_response))
         except Exception as error:
-            raise self._failure(
-                stage="agent",
-                message=str(error),
-                terminal=not _is_retryable_dependency_error(error),
-            ) from error
+            # An HTTP/socket timeout is still an infrastructure failure. Only this
+            # task's explicit agent deadline authorizes grading the stopped state.
+            if isinstance(error, TimeoutError) and agent_deadline.expired():
+                agent_timed_out = True
+            else:
+                raise self._failure(
+                    stage="agent",
+                    message=str(error),
+                    terminal=not _is_retryable_dependency_error(error),
+                ) from error
 
         # Verification needs this close response: it carries the Agent's observations and final Resources cookies.
         try:
@@ -282,6 +291,27 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
             ) from error
+        if agent_timed_out:
+            # The close receipt confirms that agent execution stopped. Prefer its
+            # actual partial response; an empty envelope explicitly carries no
+            # generated output while permitting artifact-based resource grading.
+            agent_response = agent_close_response.partial_response
+            if agent_response is None:
+                agent_response = NeMoGymResponse(
+                    id=f"agent-timeout-{request.episode_id.capture_key}",
+                    created_at=time(),
+                    model="unknown",
+                    object="response",
+                    output=[],
+                    status="incomplete",
+                    metadata={
+                        "agent_timed_out": "true",
+                        "response_source": "environment_timeout_envelope",
+                    },
+                    parallel_tool_calls=False,
+                    tool_choice="auto",
+                    tools=[],
+                )
         try:
             verify_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -299,6 +329,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             await raise_for_status(verify_http_response)
             verification = SingleAgentTurnResult.model_validate(await get_response_json(verify_http_response))
+            verification.agent_timed_out = agent_timed_out
+            verification.agent_timeout_seconds = task_input.agent_timeout_seconds
         except Exception as error:
             raise self._failure(
                 stage="verification",

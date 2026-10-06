@@ -70,7 +70,8 @@ from nemo_gym.telemetry.setup import (
 
 logger = logging.getLogger(__name__)
 
-ray_version = distribution_version("ray")
+# Task runtimes use the HTTP/config types without installing the Ray orchestrator.
+ray_version: str | None = None
 
 _GLOBAL_CONFIG_DICT = None
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
@@ -1401,7 +1402,7 @@ Found global config dict yaml:
             head_server_deps = [
                 # The ray version is very sensitive. The children ray versions must exactly match those of the parent ray.
                 # The ray extra [default] should also exactly match the extra in the top-level Gym pyproject.toml.
-                f"ray[default]=={ray_version}",
+                f"ray[default]=={ray_version or distribution_version('ray')}",
             ]
             # OpenAI version is also sensitive since it changes so often and may introduce subtle
             # incompatibilities — but only pin the parent's version when nemo-gym's own constraint

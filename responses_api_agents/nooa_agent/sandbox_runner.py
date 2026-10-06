@@ -28,6 +28,7 @@ class SandboxNOOARunner:
         model_base_url: str,
         model_server_name: str,
         max_policy_calls: int | None,
+        context_window: int | None = None,
     ) -> None:
         self.sandbox = sandbox
         self.workdir = workdir
@@ -36,6 +37,7 @@ class SandboxNOOARunner:
         self.model_base_url = model_base_url
         self.model_server_name = model_server_name
         self.max_policy_calls = max_policy_calls
+        self.context_window = context_window
         self.directory = f"/tmp/nemo-gym-nooa/{uuid4().hex}"
         self.launched = False
         self.stopped = False
@@ -63,6 +65,7 @@ class SandboxNOOARunner:
             model_base_url=self.model_base_url,
             model_server_name=self.model_server_name,
             max_policy_calls=self.max_policy_calls,
+            context_window=self.context_window,
         )
         with tempfile.TemporaryDirectory(prefix="nooa-input-") as directory:
             path = Path(directory) / "input.json"
