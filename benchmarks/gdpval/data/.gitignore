@@ -4,3 +4,11 @@
 *train_prepare.jsonl
 *validation_prepare.jsonl
 *example_prepare.jsonl
+
+# Prepared batches may carry private reference/deliverable data (prepared JSONL
+# is written 0600). Never commit a source CSV, a prepared subset JSONL, or a
+# reference-override map. Kept source-agnostic on purpose: patterns keyed to one
+# supplier's filenames silently fail to protect a batch from anywhere else.
+*.csv
+*_prepare*.jsonl
+*.reference_overrides.json
