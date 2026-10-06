@@ -1,0 +1,22 @@
+Copyright (c) 2026 Spring Care, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this application and associated documentation files (the "Material"), to use the Material without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Material, and to permit persons to whom the Material is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Material.
+
+The disclaimer shall also be included in all copies or substantial portions of the Material.
+
+Use of the Material, receipt or publication of a VERA-MH score, or reference to VERA-MH does not constitute or imply certification, endorsement, validation, recommendation, or a determination of safety, effectiveness, clinical appropriateness, legal or regulatory compliance by Spring Care, Inc., any VERA-MH contributor, accrediting body, standards organization, or other third party. You may not imply any of the above solely because an AI system, product, or service  has been evaluated using the Material or has received a VERA-MH score.
+
+THE MATERIAL IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE MATERIAL OR THE USE OR OTHER DEALINGS IN THE MATERIAL.
+
+—-------------
+
+DISCLAIMER: The Material is provided for research, benchmarking, discussion, and feedback. The Material is provided “as is,” and use of the Material does not guarantee the accuracy, relevance, completeness, or reliability of any resulting evaluations, scores, outputs, or validations.
+
+The Material is not a certification, regulatory approval, medical device authorization, clinical guideline, professional standard of care, endorsement, recommendation, or determination that any AI system is safe, effective, clinically appropriate, or legally compliant.
+
+VERA-MH scores and outputs are indicative only, may vary based on how the evaluation is configured and run, and should not be used as the sole basis for deployment, procurement, clinical, compliance, or risk decisions.
+
+The information provided in this document is for general informational purposes only. The Material does not provide medical advice, mental health services, crisis services, legal advice, or compliance determinations. Users remain solely responsible for evaluating their own AI systems, related claims, safeguards, deployment contexts, and applicable obligations.
