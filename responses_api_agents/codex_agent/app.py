@@ -62,6 +62,7 @@ from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBund
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, process_supervisor
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox.session import SandboxSession
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
@@ -88,8 +89,23 @@ for value in sys.argv[2:]:
     if workdir == owned or workdir in owned.parents or owned in workdir.parents:
         raise ValueError("Codex task workdir and adapter paths must be disjoint after resolving symlinks")
 """
+    # Validation and the worker need Python even when the task itself does not.
+    bootstrap = """set -eu
+if ! command -v python3 >/dev/null 2>&1; then
+    [ "$(id -u)" = 0 ] || { echo 'Native Codex requires Python 3: preinstall it or use a root image.' >&2; exit 1; }
+    if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache python3
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3
+    else
+        echo 'Native Codex requires Python 3: preinstall it (automatic installation requires apt-get or apk).' >&2
+        exit 1
+    fi
+fi
+"""
     return (
-        f"python3 -I -c {shlex.quote(validate)} {shlex.quote(workdir)} "
+        bootstrap + f"python3 -I -c {shlex.quote(validate)} {shlex.quote(workdir)} "
         f"{shlex.quote(directory)} {shlex.quote(runtime)} && mkdir -p {shlex.quote(directory + '/home/.codex')}"
     )
 
@@ -439,7 +455,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
     def _session_marker(self, request: Request) -> Optional[str]:
         marker = self._agent_session_id_from_request(request)
         # Cookies from the previous adapter must never fall back to host execution.
-        if marker is None and _SANDBOX_SESSION_KEY in request.scope.get("session", {}):
+        if marker is None and _SANDBOX_SESSION_KEY in getattr(request, "scope", {}).get("session", {}):
             raise HTTPException(409, "Codex session cookie has expired")
         return marker
 
@@ -515,7 +531,13 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 raise
         directory = f"/tmp/nemo-gym-codex-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-codex-node-22.19.0-{self.config.codex_version}"
-        state = CodexSandboxSession(body, sandbox, directory, runtime, workdir=workdir, owns_sandbox=owns_sandbox)
+        state = CodexSandboxSession(
+            request=body,
+            session=SandboxSession(
+                sandbox=sandbox, directory=directory, workdir=workdir, owns_sandbox=owns_sandbox, harness="Codex"
+            ),
+            runtime=runtime,
+        )
         try:
             if owns_sandbox:
                 await sandbox.start(spec)
@@ -526,7 +548,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                         f"Cannot create Codex sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
             prepare = _sandbox_prepare_command(workdir, directory, runtime)
-            prepared = await sandbox.exec(prepare, timeout_s=30)
+            prepared = await sandbox.exec(prepare, timeout_s=self.config.sandbox_install_timeout_seconds)
             if prepared.return_code != 0 or prepared.error_type:
                 raise RuntimeError(
                     f"Cannot prepare Codex session: {prepare}; exit={prepared.return_code}, "
@@ -652,20 +674,20 @@ class CodexAgent(SimpleResponsesAPIAgent):
             self._resolve_call_base_url(state.request.episode_id.capture_key), developer_instructions=system
         )
         await state.upload_text("home/.codex/config.toml", toml_dumps(config))
-        command = self._build_command("-", state.workdir)
+        command = self._build_command("-", state.session.workdir)
         command[0:1] = [
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/codex/node_modules/@openai/codex/bin/codex.js",
         ]
         payload = {
-            "directory": state.directory,
+            "directory": state.session.directory,
             "command": command,
             "prompt": prompt,
-            "cwd": state.workdir,
+            "cwd": state.session.workdir,
             "env": {
-                "HOME": f"{state.directory}/home",
-                "CODEX_HOME": f"{state.directory}/home/.codex",
-                "XDG_CACHE_HOME": f"{state.directory}/home/.cache",
+                "HOME": f"{state.session.directory}/home",
+                "CODEX_HOME": f"{state.session.directory}/home/.codex",
+                "XDG_CACHE_HOME": f"{state.session.directory}/home/.cache",
                 # Gym receives the calls; never copy the direct OpenAI credential into this path.
                 "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
             },
@@ -681,10 +703,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 )
         except BaseException as exc:
             failure = exc
-            try:
-                raw = await state.read_text("events.jsonl")
-            except Exception:
-                LOG.warning("Codex event transcript unavailable after interrupted activation", exc_info=True)
+            if state.session.artifacts is not None:
+                raw = state.session.artifacts
+            else:
+                LOG.warning("Codex event transcript unavailable after interrupted activation")
         events = []
         for line in raw.splitlines():
             try:
@@ -693,7 +715,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     events.append((float(observed_at), event))
             except (ValueError, TypeError):
                 LOG.warning("Skipping malformed Codex event record")
-        cleanup = state.cleanup
+        cleanup = state.session.cleanup
         runtime = state.runtime_info
         terminal_events = [
             event.get("type") for _, event in events if event.get("type") in ("turn.completed", "turn.failed")
@@ -704,7 +726,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         started = False
         successful_exit = (
             cleanup is not None
-            and cleanup["return_code"] == 0
+            and cleanup["return_code"] in (None, 0)
             and not cleanup["timed_out"]
             and not cleanup["error"]
             and failure is None
@@ -739,7 +761,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             include_partial=True,
             conservative_usage_details=True,
         )
-        error = cleanup["error"] if cleanup and runtime else "Codex runner result unavailable"
+        error = cleanup["error"] if cleanup else "Codex runner result unavailable"
         errors = usage.get("errors") or []
         output_limited = (
             bool(errors)
@@ -764,7 +786,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             compaction_warnings = []
         if errors and not output_limited:
             error = error or "; ".join(errors)
-        if cleanup and cleanup["return_code"] != 0 and not cleanup["timed_out"] and not output_limited:
+        if cleanup and cleanup["return_code"] not in (None, 0) and not cleanup["timed_out"] and not output_limited:
             error = error or f"Codex exited with code {cleanup['return_code']}"
         completed = any(event.get("type") == "turn.completed" for _, event in events)
         if cleanup and not completed and not cleanup["timed_out"] and not output_limited:
@@ -798,6 +820,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     ),
                 )
             )
+        if runtime is None:
+            gaps.append(ObservationGap(code="runtime_info_unavailable"))
+        if cleanup is not None and cleanup["return_code"] is None:
+            gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
         if failure is not None:
             gaps.append(ObservationGap(code="agent_activation_interrupted", detail=type(failure).__name__))
         if not events:
@@ -883,8 +909,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             ),
             metadata={
                 "harness_execution": "sandbox",
-                "harness_hostname": runtime.hostname,
-                "harness_pid": str(runtime.pid),
+                **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
                 "codex_version": self.config.codex_version,
             },
         )
@@ -1191,7 +1216,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             rollout_id = request.path_params.get("rollout_id")
             if state.request.episode_id.capture_key != rollout_id:
                 raise HTTPException(409, "Codex activation does not match the seeded session and rollout route")
-            if state.closing:
+            if state.session.closing:
                 raise HTTPException(409, "Codex session is closing")
             prompt, system = self._sandbox_input(body)
             if state.task is None:

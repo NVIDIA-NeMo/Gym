@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from responses_api_agents.codex_agent.app import _sandbox_prepare_command
+
 
 INSTALLER = Path(__file__).parents[1] / "install_codex_runtime.sh"
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Native Codex requires Linux")
@@ -26,6 +28,7 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "getconf",
         "mkdir",
         "cp",
+        "ln",
         "tar",
         "gzip",
         "sha256sum",
@@ -317,4 +320,80 @@ esac
     assert "-xzf libstdc++.apk -C libstdcpp usr/lib" in (root / "extract.log").read_text()
     assert (root / "npm.log").read_text().splitlines() == ["install"]
     assert (root / "runtime/ready").exists()
+    assert not (root / "packages.log").exists()
+
+
+@pytest.mark.parametrize("package_manager", ["apt-get", "apk"])
+def test_missing_python_is_installed_before_runtime_setup(
+    sandbox: tuple[Path, dict[str, str]], package_manager: str
+) -> None:
+    root, env = sandbox
+    (root / "bin/python3").unlink()
+    _replace_command(
+        root,
+        package_manager,
+        'echo "$*" >> "$TEST_ROOT/packages.log"\n'
+        + 'if [[ "$*" == *python3* ]]; then\n'
+        + f'  ln -s "{sys.executable}" "$TEST_ROOT/bin/python3"\n'
+        + "fi\n",
+    )
+    shutil.copy(root / "curl", root / "bin/curl")
+    result = run_prepare(root, env)
+    assert result.returncode == 0, result.stderr
+    expected = (
+        ["add --no-cache python3"]
+        if package_manager == "apk"
+        else ["update", "install -y --no-install-recommends python3"]
+    )
+    assert (root / "packages.log").read_text().splitlines() == expected
+    assert (root / "session/home/.codex").is_dir()
+    assert not (root / "download.log").exists()
+    assert not (root / "runtime/ready").exists()
+
+
+@pytest.mark.parametrize("missing", ["root", "apt-get", "install_failure"])
+def test_python_bootstrap_failure_stops_before_runtime_setup(
+    sandbox: tuple[Path, dict[str, str]], missing: str
+) -> None:
+    root, env = sandbox
+    (root / "bin/python3").unlink()
+    if missing == "root":
+        env["TEST_UID"] = "1000"
+    elif missing == "apt-get":
+        (root / "bin/apt-get").unlink()
+    else:
+        env["TEST_INSTALL_FAIL"] = "1"
+    result = run_prepare(root, env)
+    assert result.returncode == (100 if missing == "install_failure" else 1)
+    assert not (root / "download.log").exists()
+    assert not (root / "runtime").exists()
+    if missing != "install_failure":
+        assert "preinstall it" in result.stderr
+        assert not (root / "packages.log").exists()
+
+
+def run_prepare(root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    workdir = root / "task"
+    workdir.mkdir()
+    return subprocess.run(
+        [
+            str(root / "bin/bash"),
+            "-c",
+            _sandbox_prepare_command(str(workdir), str(root / "session"), str(root / "runtime")),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+    )
+
+
+def test_existing_python_prepares_without_installing_packages(sandbox: tuple[Path, dict[str, str]]) -> None:
+    root, env = sandbox
+    original_python = (root / "bin/python3").resolve()
+    result = run_prepare(root, env | {"TEST_UID": "1000"})
+    assert result.returncode == 0, result.stderr
+    assert (root / "session/home/.codex").is_dir()
+    assert (root / "bin/python3").resolve() == original_python
     assert not (root / "packages.log").exists()

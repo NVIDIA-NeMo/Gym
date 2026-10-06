@@ -448,7 +448,8 @@ class TestSanitizeStreamingBody:
             "content": [{"type": "output_text", "text": "Let me inspect the workload first."}],
         }
         cleaned, _ = sanitize_streaming_responses_body({"input": [item], "stream": True})
-        assert cleaned["input"] == [item]
+        assert cleaned["input"] == [{**item, "content": [{**item["content"][0], "annotations": []}]}]
+        assert "annotations" not in item["content"][0]
         NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
 
     def test_flattens_namespace_tools(self) -> None:
@@ -763,7 +764,9 @@ class TestSynthesizeSSE:
         original = json.loads(json.dumps(response))
         events = self._events("".join(synthesize_responses_sse(response)))
         expected_usage = {
-            "input_tokens": 7, "output_tokens": 3, "total_tokens": 10,
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "total_tokens": 10,
             "input_tokens_details": {"cached_tokens": 0},
             "output_tokens_details": {"reasoning_tokens": 0},
             **expected,
@@ -781,9 +784,15 @@ class TestSynthesizeSSE:
         response = _build_response([_message_item("done")]).model_dump(mode="json")
         response["usage"] = usage
         events = self._events("".join(synthesize_responses_sse(response)))
-        expected = usage if usage is None else {
-            **usage, "input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": 0}
-        }
+        expected = (
+            usage
+            if usage is None
+            else {
+                **usage,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            }
+        )
         assert events[-1]["response"]["usage"] == expected
 
     def test_unknown_usage_details_are_integers_on_the_wire(self) -> None:
@@ -885,6 +894,7 @@ class _IncompleteModel(_EchoModel):
         response = _build_response([ITEM_FIXTURES["reasoning"]]).model_dump(mode="json")
         response.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
         return NeMoGymResponse.model_validate(response)
+
 
 class _HTTPErrorModel(_EchoModel):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
