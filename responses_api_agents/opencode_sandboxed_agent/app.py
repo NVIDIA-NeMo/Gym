@@ -17,6 +17,7 @@ import json
 import sqlite3
 import sys
 from asyncio import Semaphore
+from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 from shlex import quote
@@ -408,7 +409,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_musl_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
-    concurrency: int = Field(default=64, gt=0)
+    concurrency: Optional[int] = Field(default=None)
     preinstalled_opencode: bool = False
     execution_failure_reward_zero: bool = False
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
@@ -485,7 +486,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
 
-        self._sem = Semaphore(self.config.concurrency)
+        self._sem = Semaphore(self.config.concurrency) if self.config.concurrency else nullcontext()
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
