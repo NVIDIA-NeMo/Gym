@@ -122,7 +122,10 @@ class TestSanity:
     @pytest.mark.parametrize("with_mcp", [False, True])
     async def test_sandbox_access_selects_runtime_provider(self, monkeypatch, with_mcp) -> None:
         hermes = HermesAgent(
-            config=_config(enabled_toolsets=["terminal", "web"]),
+            config=_config(
+                enabled_toolsets=["terminal", "web"],
+                sandbox_config={"ttl_s": 123, "workdir": "/unused"},
+            ),
             server_client=MagicMock(spec=ServerClient),
         )
         provider_config = {"opensandbox": {"connection": {}}}
@@ -163,7 +166,10 @@ class TestSanity:
             {"sandbox_id": "sandbox"},
             provider=provider,
         )
+        sandbox.start.assert_not_awaited()
+        assert hermes.config.sandbox_config == {"ttl_s": 123, "workdir": "/unused"}
         assert state.session.sandbox is sandbox
+        assert state.session.owns_sandbox is False
         assert state.session.workdir == "/app"
         assert state.session.session_dir.startswith("/tmp/nemo-gym-hermes-sessions/")
         assert len(state.session.session_dir.rsplit("/", 1)[-1]) == 32
@@ -217,12 +223,30 @@ class TestSanity:
         assert sum("import run_agent" in command for command in commands) == 2
         assert sandbox.upload.await_args_list[0].args[0] == "/usr/bin/uv"
 
-    async def test_missing_sandbox_access_uses_configured_fallback(self, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        "sandbox_config, install_timeout, runner_timeout, expected_ttl",
+        [
+            ({}, 900, 21600, 23100),
+            ({"workdir": "/fallback"}, 2.5, 3.25, 605.75),
+            ({"workdir": "/fallback", "ttl_s": 42}, 900, 21600, 42),
+            ({"workdir": "/fallback", "ttl_s": None}, 900, 21600, None),
+        ],
+    )
+    async def test_missing_sandbox_access_uses_configured_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sandbox_config: dict[str, object],
+        install_timeout: float,
+        runner_timeout: float,
+        expected_ttl: float | None,
+    ) -> None:
         hermes = HermesAgent(
             config=_config(
                 enabled_toolsets=["terminal", "web"],
                 sandbox_provider="runtime",
-                sandbox_config={"workdir": "/fallback"},
+                sandbox_config=sandbox_config,
+                sandbox_install_timeout_seconds=install_timeout,
+                sandbox_runner_timeout_seconds=runner_timeout,
             ),
             server_client=MagicMock(spec=ServerClient),
         )
@@ -230,6 +254,7 @@ class TestSanity:
         sandbox = AsyncMock()
         sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
         sandbox_factory = MagicMock(return_value=sandbox)
+        original_config = hermes.config.sandbox_config.copy()
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.get_global_config_dict",
             lambda: {"runtime": {}},
@@ -252,9 +277,10 @@ class TestSanity:
         )
 
         sandbox_factory.assert_called_once_with(provider)
-        sandbox.start.assert_awaited_once_with(SandboxSpec(workdir="/fallback"))
+        sandbox.start.assert_awaited_once_with(SandboxSpec(**{**original_config, "ttl_s": expected_ttl}))
+        assert hermes.config.sandbox_config == original_config
         assert state.session.sandbox is sandbox
-        assert state.session.workdir == "/fallback"
+        assert state.session.workdir == original_config.get("workdir")
         assert state.session.owns_sandbox is True
         await hermes._close_agent_session_state(state)
         sandbox.stop.assert_awaited_once()

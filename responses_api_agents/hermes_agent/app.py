@@ -405,7 +405,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
         try:
             if owns_sandbox:
                 sandbox = AsyncSandbox(provider)
-                await sandbox.start(SandboxSpec(**self.config.sandbox_config))
+                sandbox_config = self.config.sandbox_config.copy()
+                # Provider TTLs outlive this server; reserve ten minutes for setup/cleanup overhead.
+                sandbox_config.setdefault(
+                    "ttl_s",
+                    self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
+                )
+                await sandbox.start(SandboxSpec(**sandbox_config))
             else:
                 sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
         except BaseException:
