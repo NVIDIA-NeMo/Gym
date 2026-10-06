@@ -879,9 +879,8 @@ class TestApp:
     def test_an_engine_error_the_server_does_not_handle_is_logged_with_its_body(
         self, monkeypatch: MonkeyPatch, caplog, use_completions_api: bool
     ) -> None:
-        # Any engine answer but the handled context-length 400 reaches the caller as a plain
-        # server error that carries only the status; the log keeps the status, the request path,
-        # the rollout id, and the engine's body.
+        # Unhandled engine errors preserve the upstream status/body for SDK classifiers.
+        # The warning also retains the request path and rollout id for diagnosis.
         server = self._setup_server(monkeypatch, use_completions_api=use_completions_api)
         request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
         error = ClientResponseError(request_info, (), status=422, message="Unprocessable Entity")
@@ -902,7 +901,8 @@ class TestApp:
                 json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
             )
 
-        assert response.status_code == 500
+        assert response.status_code == 422
+        assert response.content == error.response_content
         logged = [
             record.getMessage()
             for record in caplog.records
