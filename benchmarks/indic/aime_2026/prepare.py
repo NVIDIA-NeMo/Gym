@@ -22,6 +22,8 @@ PROMPT_PATH = BENCHMARK_DIR.parents[1] / "prompts/generic/math.yaml"
 DEFAULT_LANGUAGES = ("as", "bn", "gu", "hi", "kn", "ml", "mr", "ne", "or", "pa", "sa", "ta", "te", "ur")
 BENCHMARK_ID = "indic/aime_2026"
 SOURCE_ID = "ai4bharat/indic-aime-2026"
+# Public Hugging Face dataset commit, not a credential.
+SOURCE_REVISION = "6cbc9d963bdd9f77e18f28de396f2f9b09bb180a"  # pragma: allowlist secret
 SOURCE_SPLIT = "train"
 SOURCE_LICENSE = "Apache-2.0"
 EXPECTED_PROBLEMS = 30
@@ -147,7 +149,7 @@ def load_source(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Validate source IDs and answers, then select translations without English fallback."""
     selected, question_ids = _selection(languages, config_name, question_ids)
-    source_rows = list(load_dataset(SOURCE_ID, split=SOURCE_SPLIT))
+    source_rows = list(load_dataset(SOURCE_ID, split=SOURCE_SPLIT, revision=SOURCE_REVISION))
     if any(set(row) != SOURCE_COLUMNS for row in source_rows):
         raise ValueError("Unexpected AIME 2026 source columns")
     expected_ids = {str(index) for index in range(1, EXPECTED_PROBLEMS + 1)}
@@ -179,6 +181,7 @@ def load_source(
         coverage[language] = {"published_rows": len(indexed), "selected_rows": len(identities)}
     return records, {
         "source_id": SOURCE_ID,
+        "source_revision": SOURCE_REVISION,
         "source_split": SOURCE_SPLIT,
         "source_license": SOURCE_LICENSE,
         "source_configs": selected,
@@ -198,6 +201,16 @@ def build_rows(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
             "question_id": row["question_id"],
             "language": row["language"],
             "language_name": row["language_name"],
+            # Row defaults stay local to this benchmark; explicit run-level overrides still win.
+            "responses_create_params": {
+                "max_output_tokens": 120000,
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "metadata": {
+                    "chat_template_kwargs": json.dumps({"enable_thinking": True}),
+                    "extra_body": json.dumps({"top_k": 64}),
+                },
+            },
         }
         for row in records
     ]

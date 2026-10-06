@@ -4,13 +4,6 @@ config_paths:
   - resources_servers/math_with_judge/configs/math_with_judge.yaml
 
 num_repeats_add_seed: true
-responses_create_params:
-  max_output_tokens: 120000
-  temperature: 1.0
-  top_p: 0.95
-  metadata:
-    chat_template_kwargs: '{"enable_thinking": true}'
-    extra_body: '{"top_k": 64}'
 
 indic_aime_2026_math_with_judge_resources_server:
   _inherit_from: math_with_judge

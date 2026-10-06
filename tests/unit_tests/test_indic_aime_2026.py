@@ -34,8 +34,8 @@ def source_dataset(monkeypatch):
     def install(replacement):
         rows[:] = replacement
 
-    def load(repo_id, *, split):
-        calls.append((repo_id, split))
+    def load(repo_id, *, split, revision):
+        calls.append((repo_id, split, revision))
         return rows
 
     monkeypatch.setattr(module, "load_dataset", load)
@@ -48,7 +48,7 @@ def test_prompt_and_row_schema_match_english_aime(source_dataset) -> None:
     rows = module.build_rows(records)
     assert [row["question_id"] for row in rows] == ["1", "2", "1", "2"]
     assert len({row["uuid"] for row in rows}) == 4
-    assert calls == [(module.SOURCE_ID, "train")]
+    assert calls == [(module.SOURCE_ID, "train", module.SOURCE_REVISION)]
     assert metadata["source_rows"] == 2
     english_config = yaml.safe_load((module.BENCHMARK_DIR.parents[1] / "aime26/config.yaml").read_text())
     dataset = english_config["aime26_math_with_judge_simple_agent"]["responses_api_agents"]["simple_agent"][
@@ -58,7 +58,7 @@ def test_prompt_and_row_schema_match_english_aime(source_dataset) -> None:
     for row, record in zip(rows, records, strict=True):
         assert row["question"] == record["problem"]
         assert row["expected_answer"] == "472"
-        assert "responses_create_params" not in row
+        assert row["responses_create_params"]["max_output_tokens"] == 120000
         assert "judge_pass_stage" not in row
         messages = apply_prompt_to_row(row, prompt)["responses_create_params"]["input"]
         assert messages == [
@@ -149,6 +149,7 @@ def test_prepare_manifest_and_no_overwrite_when_validation_fails(source_dataset,
     assert manifest["evaluation_protocol"] == "gym_aime26"
     assert manifest["source_id"] == "ai4bharat/indic-aime-2026"
     assert manifest["source_license"] == "Apache-2.0"
+    assert manifest["source_revision"] == module.SOURCE_REVISION
     original = output.read_bytes()
     install([{**source(), "answer": 1000}, source(index=2)])
     with pytest.raises(ValueError, match="integer answers"):
@@ -251,36 +252,17 @@ def test_native_config_reuses_english_components_and_preserves_generation_defaul
     )
     assert agent.datasets[0].num_repeats == 4
     assert indic.get("num_repeats", 1) == 1 and indic.num_repeats_add_seed is True
-    assert indic.responses_create_params.max_output_tokens == 120000
+    assert not indic.get("responses_create_params")
     policy = indic.policy_model.responses_api_models.vllm_model
-    assert indic.responses_create_params.temperature == 1.0
-    assert indic.responses_create_params.top_p == 0.95
-    assert json.loads(indic.responses_create_params.metadata.chat_template_kwargs) == {"enable_thinking": True}
-    assert json.loads(indic.responses_create_params.metadata.extra_body) == {"top_k": 64}
     assert policy.chat_template_kwargs is None
     assert policy.sampling_overrides is None
 
 
-@pytest.mark.parametrize(
-    "flags,expected",
-    [
-        ([], (1.0, 0.95, 120000)),
-        (["--temperature", "0.4", "--top-p", "0.8", "--max-output-tokens", "4096"], (0.4, 0.8, 4096)),
-    ],
-)
-def test_cli_sampling_reaches_vllm_with_four_distinct_seeds(flags, expected, tmp_path) -> None:
-    from unittest.mock import MagicMock
-
+def _resolve_cli_config(flags: list[str]) -> dict:
     from omegaconf import OmegaConf
 
     from nemo_gym.cli.main import _merge_config_paths, build_parser
-    from nemo_gym.config_types import BenchmarkDatasetConfig
     from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-    from nemo_gym.server_utils import ServerClient
-    from nemo_gym.train_data_utils import TrainDataProcessor
-    from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
     args = build_parser().parse_args(
         [
@@ -300,35 +282,24 @@ def test_cli_sampling_reaches_vllm_with_four_distinct_seeds(flags, expected, tmp
         ]
     )
     overrides = _merge_config_paths([token for flag in args._command.flags for token in flag.translate_to_hydra(args)])
-    initial = OmegaConf.from_dotlist([token.lstrip("+") for token in overrides])
     resolved = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
-            initial_global_config_dict=initial,
+            initial_global_config_dict=OmegaConf.from_dotlist([token.lstrip("+") for token in overrides]),
             skip_load_from_cli=True,
             skip_load_from_dotenv=True,
             offline=True,
         )
     )
-    config = OmegaConf.to_container(resolved, resolve=True)
-    agent_name = "indic_aime_2026_math_with_judge_simple_agent"
-    dataset = dict(config[agent_name]["responses_api_agents"]["simple_agent"]["datasets"][0])
-    source_path = tmp_path / "source.jsonl"
-    source_path.write_text(json.dumps({"question": "What is 1+1?", "expected_answer": "2"}) + "\n")
-    dataset["jsonl_fpath"] = str(source_path)
-    lines = list(TrainDataProcessor._iter_dataset_lines(None, BenchmarkDatasetConfig.model_validate(dataset)))
-    prompt = load_prompt_config(dataset["prompt_config"])
-    prepared = tmp_path / "prepared.jsonl"
-    prepared.write_text("".join(json.dumps(apply_prompt_to_row(json.loads(line), prompt)) + "\n" for line in lines))
-    collection = RolloutCollectionConfig.model_validate(
-        config
-        | {
-            "agent_name": agent_name,
-            "input_jsonl_fpath": str(prepared),
-            "output_jsonl_fpath": str(tmp_path / "out.jsonl"),
-        }
-    )
-    rows = RolloutCollectionHelper._preprocess_rows_from_config(None, collection)
-    assert len(rows) == 4
+    return OmegaConf.to_container(resolved, resolve=True)
+
+
+def _outbound_request(config: dict, row: dict) -> dict:
+    from unittest.mock import MagicMock
+
+    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.server_utils import ServerClient
+    from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
+
     policy = VLLMModel(
         config=VLLMModelConfig.model_validate(
             config["policy_model"]["responses_api_models"]["vllm_model"]
@@ -336,12 +307,102 @@ def test_cli_sampling_reaches_vllm_with_four_distinct_seeds(flags, expected, tmp
         ),
         server_client=MagicMock(spec=ServerClient, global_config_dict={}),
     )
+    request = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
+    chat = policy._converter.responses_to_chat_completion_create_params(request)
+    return policy._preprocess_chat_completion_create_params(MagicMock(), chat.model_dump(exclude_unset=True))
+
+
+def _materialize_dataset(config: dict, agent_name: str, source_rows: list[dict], tmp_path: Path) -> list[dict]:
+    from nemo_gym.config_types import BenchmarkDatasetConfig
+    from nemo_gym.train_data_utils import TrainDataProcessor
+
+    dataset = dict(config[agent_name]["responses_api_agents"]["simple_agent"]["datasets"][0])
+    source_path = tmp_path / f"{agent_name}.jsonl"
+    source_path.write_text("".join(json.dumps(row) + "\n" for row in source_rows))
+    dataset["jsonl_fpath"] = str(source_path)
+    prompt = load_prompt_config(dataset["prompt_config"])
+    return [
+        apply_prompt_to_row(json.loads(line), prompt) | {"agent_ref": {"name": agent_name}}
+        for line in TrainDataProcessor._iter_dataset_lines(None, BenchmarkDatasetConfig.model_validate(dataset))
+    ]
+
+
+def _collect_rows(config: dict, source_rows: list[dict], tmp_path: Path) -> list[dict]:
+    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+
+    prepared = tmp_path / "prepared.jsonl"
+    prepared.write_text("".join(json.dumps(row) + "\n" for row in source_rows))
+    collection = RolloutCollectionConfig.model_validate(
+        config | {"input_jsonl_fpath": str(prepared), "output_jsonl_fpath": str(tmp_path / "out.jsonl")}
+    )
+    return RolloutCollectionHelper._preprocess_rows_from_config(None, collection)
+
+
+@pytest.mark.parametrize(
+    "flags,expected",
+    [
+        ([], (1.0, 0.95, 120000)),
+        (["--temperature", "0.4", "--top-p", "0.8", "--max-output-tokens", "4096"], (0.4, 0.8, 4096)),
+    ],
+)
+def test_cli_sampling_reaches_vllm_with_four_distinct_seeds(flags, expected, tmp_path, source_dataset) -> None:
+    config = _resolve_cli_config(flags)
+    records, _ = module.load_source(languages=["hi"], question_ids=[1])
+    source_rows = module.build_rows(records)
+    prepared = _materialize_dataset(config, "indic_aime_2026_math_with_judge_simple_agent", source_rows, tmp_path)
+    rows = _collect_rows(config, prepared, tmp_path)
+    assert len(rows) == 4
     for seed, row in enumerate(rows):
-        request = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
-        chat = policy._converter.responses_to_chat_completion_create_params(request)
-        outbound = policy._preprocess_chat_completion_create_params(MagicMock(), chat.model_dump(exclude_unset=True))
+        outbound = _outbound_request(config, row)
         assert (outbound["temperature"], outbound["top_p"], outbound["max_tokens"]) == expected
         assert outbound["top_k"] == 64
         assert outbound["chat_template_kwargs"]["enable_thinking"] is True
         assert outbound["seed"] == seed
-    assert "seed" not in json.loads(config["responses_create_params"]["metadata"]["extra_body"])
+    assert "seed" not in json.loads(source_rows[0]["responses_create_params"]["metadata"]["extra_body"])
+
+
+@pytest.mark.parametrize("cli_override", [False, True])
+def test_combined_benchmarks_preserve_numb3rs_audio_and_routing(tmp_path, source_dataset, cli_override) -> None:
+    import base64
+    import wave
+
+    from benchmarks.numb3rs.prepare import _format_row
+
+    flags = ["--benchmark", "numb3rs"]
+    if cli_override:
+        flags += ["--temperature", "0.4", "--top-p", "0.8", "--max-output-tokens", "4096"]
+    config = _resolve_cli_config(flags)
+    records, _ = module.load_source(languages=["hi"], question_ids=[1])
+    indic_agent = "indic_aime_2026_math_with_judge_simple_agent"
+    audio_agent = "numb3rs_asr_with_pc_simple_agent"
+    indic = _materialize_dataset(config, indic_agent, module.build_rows(records), tmp_path)
+    audio = _format_row(
+        {"original_text": "forty two", "text": "42", "file_name": "sample.wav", "duration": 5, "category": "NUMBER"},
+        audio_prefix=str(tmp_path),
+    )
+    audio_path = Path(audio["responses_create_params"]["metadata"]["audio_path"])
+    audio_path.parent.mkdir(parents=True)
+    with wave.open(str(audio_path), "wb") as wav:
+        wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        wav.writeframes(b"\0\0" * 160)
+    prepared = indic + _materialize_dataset(config, audio_agent, [audio], tmp_path)
+    rows = _collect_rows(config, prepared, tmp_path)
+    assert len(rows) == 5
+    assert [row["agent_ref"]["name"] for row in rows] == [indic_agent] * 4 + [audio_agent]
+    audio_request = rows[-1]["responses_create_params"]
+    assert audio_request["metadata"]["audio_path"] == str(audio_path)
+    assert "chat_template_kwargs" not in audio_request["metadata"]
+    assert "top_k" not in json.loads(audio_request["metadata"]["extra_body"])
+    if cli_override:
+        assert (audio_request["temperature"], audio_request["top_p"], audio_request["max_output_tokens"]) == (
+            0.4,
+            0.8,
+            4096,
+        )
+    else:
+        assert not {"temperature", "top_p", "max_output_tokens"} & audio_request.keys()
+    outbound = _outbound_request(config, rows[-1])
+    audio_block = outbound["messages"][-1]["content"][0]
+    assert audio_block["type"] == "audio_url"
+    assert base64.b64decode(audio_block["audio_url"]["url"].split(",", 1)[1]) == audio_path.read_bytes()
+    assert [_outbound_request(config, row)["seed"] for row in rows[:4]] == [0, 1, 2, 3]
