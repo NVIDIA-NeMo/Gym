@@ -41,6 +41,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
+    AGENT_POOL_INDEX_KEY_NAME,
     HF_TOKEN_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     GlobalConfigDictParser,
@@ -822,6 +823,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
         task_data_validation: str = "warn",
     ) -> List[Path]:
         paths_to_collate = []
+        # FineEnvs chooses a harness from the task's original dataset index, not
+        # from a worker seed or a transient batch position. Keep one ordinal per
+        # declaring task source and preserve it through trainer shuffles/restarts.
+        next_agent_pool_index: Dict[str, int] = defaultdict(int)
         used_prepare_paths: set[Path] = set()
         for c in server_instance_configs:
             for d in c.datasets:
@@ -859,12 +864,16 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 # for this dataset comes from the declaration, and passing the stale field
                 # through would leak the old coupling into the clean format.
                 legacy_agent_ref_rows = 0
+                dataset_agent_pool_index_start = next_agent_pool_index[c.name]
+                source_row_count = 0
                 validator = None
                 if task_data_validation != "off":
                     validator = self._task_data_validator_for(c, d, server_instance_configs)
                 with open(prepare_path, "w") as target:
                     for row_index, line in enumerate(self._iter_dataset_lines(d)):
                         row = json.loads(line)
+                        source_row_index = row_index // d.num_repeats
+                        source_row_count = source_row_index + 1
 
                         if prompt_cfg:
                             validate_prompt_compatibility([row], prompt_cfg)
@@ -873,11 +882,14 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         if row.pop(AGENT_REF_KEY, None) is not None:
                             legacy_agent_ref_rows += 1
                         row[TASK_SOURCE_KEY_NAME] = c.name
+                        row[AGENT_POOL_INDEX_KEY_NAME] = dataset_agent_pool_index_start + source_row_index
                         # num_repeats duplicates each line consecutively; validate only the first
                         # copy so reports count each source row once, with its jsonl line index.
                         if validator is not None and row_index % d.num_repeats == 0:
                             validator.validate_row(row_index // d.num_repeats, row)
                         target.write(f"{json.dumps(row)}\n")
+
+                next_agent_pool_index[c.name] += source_row_count
 
                 if validator is not None and (not validator.report.clean or validator.report.unknown_keys):
                     summary = validator.report.summary()

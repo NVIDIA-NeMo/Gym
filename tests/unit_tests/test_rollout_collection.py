@@ -42,6 +42,7 @@ from nemo_gym.batch_status import observe_materialized_rows
 from nemo_gym.config_types import AmbiguousEnvironmentServerError, ConfigError, ConfigPathNotFoundError
 from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
+    AGENT_POOL_INDEX_KEY_NAME,
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -7854,6 +7855,96 @@ class TestAgentPool:
 
         assert first[0]["agent_ref"]["name"] == "agent_b"
         assert second[0]["agent_ref"]["name"] == "agent_b"
+
+    def test_dataset_pool_index_wins_over_run_local_task_index(self) -> None:
+        row = self._rcp_row(
+            "q",
+            task_source="shared_rs",
+            **{AGENT_POOL_INDEX_KEY_NAME: 1, TASK_INDEX_KEY_NAME: 4},
+        )
+
+        rows = RolloutCollectionHelper().preprocess_examples(
+            [row],
+            agent_pool={"shared_rs": ["agent_a", "agent_b"]},
+        )
+
+        assert rows[0]["agent_ref"]["name"] == "agent_b"
+
+    def test_fallback_identity_keeps_preexpanded_generations_on_one_agent(self) -> None:
+        rows = [self._rcp_row("same", task_source="shared_rs", _rowidx=i) for i in range(4)]
+
+        RolloutCollectionHelper._apply_agent_pool(rows, {"shared_rs": ["agent_a", "agent_b"]})
+
+        assert len({row["agent_ref"]["name"] for row in rows}) == 1
+
+    def test_environment_server_route_takes_precedence_over_agent_pool(self) -> None:
+        row = self._rcp_row(
+            "q",
+            task_source="shared_rs",
+            agent_ref={"name": "environment_agent"},
+            **{NG_ENVIRONMENT_SERVER_KEY: "explicit_environment"},
+        )
+
+        RolloutCollectionHelper._apply_agent_pool([row], {"shared_rs": ["agent_a", "agent_b"]})
+
+        assert row["agent_ref"]["name"] == "environment_agent"
+
+    async def test_run_examples_applies_pool_from_merged_training_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """NeMo RL and VeRL call run_examples directly, so routing must happen there."""
+        posted = []
+
+        async def fake_post(server_name, url_path, **kwargs):
+            posted.append(server_name)
+            return MagicMock(status=200)
+
+        global_config = {
+            "agent_pool": {"shared_rs": ["agent_a", "agent_b"]},
+            "shared_rs": {"resources_servers": {"impl": {}}},
+        }
+        for agent in ("agent_a", "agent_b"):
+            global_config[agent] = {"responses_api_agents": {"impl": {}}}
+            global_config[f"{agent}_environment_server"] = {
+                "environment_servers": {"legacy_agent": {"agent_server": {"name": agent}}}
+            }
+        mock_client = MagicMock()
+        mock_client.post = fake_post
+        mock_client.global_config_dict = OmegaConf.create(global_config)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *a, **k: mock_client)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={}))
+        rows = [
+            self._rcp_row("q0", task_source="shared_rs", **{AGENT_POOL_INDEX_KEY_NAME: 0}),
+            self._rcp_row("q0", task_source="shared_rs", **{AGENT_POOL_INDEX_KEY_NAME: 0}),
+            self._rcp_row("q1", task_source="shared_rs", **{AGENT_POOL_INDEX_KEY_NAME: 1}),
+            self._rcp_row("q1", task_source="shared_rs", **{AGENT_POOL_INDEX_KEY_NAME: 1}),
+        ]
+
+        for future in RolloutCollectionHelper().run_examples(rows):
+            await future
+
+        assert sorted(posted) == [
+            "agent_a_environment_server",
+            "agent_a_environment_server",
+            "agent_b_environment_server",
+            "agent_b_environment_server",
+        ]
+        assert [row["agent_ref"]["name"] for row in rows] == ["agent_a", "agent_a", "agent_b", "agent_b"]
+
+    def test_run_examples_validates_every_declared_pool_target(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        global_config = OmegaConf.create(
+            {
+                "agent_pool": {"shared_rs": ["agent_a", "missing_agent"]},
+                "agent_a": {"responses_api_agents": {"impl": {}}},
+            }
+        )
+        mock_client = MagicMock(global_config_dict=global_config)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *a, **k: mock_client)
+        rows = [self._rcp_row("q", task_source="shared_rs", **{AGENT_POOL_INDEX_KEY_NAME: 0})]
+
+        with pytest.raises(ValueError, match="missing_agent"):
+            RolloutCollectionHelper().run_examples(rows)
 
     def test_selected_agent_controls_dict_num_repeats(self, tmp_path) -> None:
         fpath = self._write_rows(

@@ -126,6 +126,7 @@ ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME = "NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING"
 ENVIRONMENT_SERVER_NAME_KEY_NAME = "environment_server_name"
 ENVIRONMENT_SERVER_ROUTES_KEY_NAME = "environment_server_routes"
 ENVIRONMENT_ROUTING_MODE_KEY_NAME = "environment_routing_mode"
+AGENT_POOL_KEY_NAME = "agent_pool"
 # When set, an agent without an environment server fails config validation.
 # When unset, Gym generates a legacy_agent relay for the agent and logs a deprecation warning.
 ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME = "error_on_agent_without_environment_server"
@@ -171,6 +172,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ENVIRONMENT_SERVER_NAME_KEY_NAME,
     ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
     ENVIRONMENT_ROUTING_MODE_KEY_NAME,
+    AGENT_POOL_KEY_NAME,
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
@@ -199,6 +201,10 @@ class _AgentInstance:
 # Data keys
 TASK_INDEX_KEY_NAME = "_ng_task_index"
 ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
+# Stable source-dataset ordinal used for deterministic multi-harness assignment.
+# Unlike TASK_INDEX_KEY_NAME, trainers do not replace this value with a run-local
+# admission index, so a task keeps its harness across batches and restarts.
+AGENT_POOL_INDEX_KEY_NAME = "_ng_agent_pool_index"
 # Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
 # (task, rollout) so their captured model calls stay separable.
 ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"

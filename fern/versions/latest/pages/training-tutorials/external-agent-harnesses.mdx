@@ -94,25 +94,41 @@ Both the run-wide `enabled` setting and the agent opt-in are required. To captur
 
 ### Route training tasks across multiple harnesses
 
-Use `agent_pool` to train one policy from several compatible harnesses. Each key is an `agent_ref.name` or `task_source` from the input data. Gym assigns consecutive tasks to the listed agents in deterministic round-robin order:
+Use `agent_pool` to train one policy from several compatible harnesses. Each key is an `agent_ref.name` or `task_source` from the input data. Gym assigns source-dataset tasks to the listed agents in deterministic round-robin order.
+
+Put the routing in a Gym config file so both NeMo RL and VeRL load the same settings:
 
 ```yaml
+# configs/multi_harness.yaml
 agent_pool:
   shared_resources_server:
     - opencode_agent
     - claude_code_agent
     - codex_agent
     - mini_swe_agent
-num_repeats: 8
-
-env:
-  nemo_gym:
-    token_id_capture:
-      enabled: true
-      all_agents: true
+token_id_capture:
+  enabled: true
+  all_agents: true
 ```
 
-Assignment happens before `num_repeats` expansion. All eight rollouts for one task therefore use the same harness and form one harness-consistent training group, while different tasks contribute rollouts from different harnesses to the shared policy update. A rollout never switches harnesses after it starts.
+Add that file and every harness config to the trainer's Gym `config_paths`. For NeMo RL, set the GRPO group size normally:
+
+```yaml
+grpo:
+  num_generations_per_prompt: 8
+env:
+  nemo_gym:
+    config_paths:
+      - configs/multi_harness.yaml
+      - configs/opencode.yaml
+      - configs/claude_code.yaml
+      - configs/codex.yaml
+      - configs/mini_swe.yaml
+```
+
+Run `gym dataset collate` with the same task config before training. Collation stamps a stable source-task ordinal; `run_examples` uses it to select the harness even when NeMo RL or VeRL shuffles the dataset. All eight generations for one prompt therefore use the same harness and form one harness-consistent GRPO group, while different prompts contribute rollouts from different harnesses to the shared policy update. Retries and resumed runs keep the assignment, and a rollout never switches harnesses after it starts.
+
+For `gym eval run`, `+agent_pool=...` composes with `+num_repeats=8` in the same way: selection happens before repeat expansion.
 
 Use the routing option that matches the experiment:
 
@@ -123,6 +139,8 @@ Use the routing option that matches the experiment:
 | `fan_out` | Run every matching task through every listed agent. |
 
 Do not configure the same routing key in both `agent_pool` and `fan_out`. Gym rejects the ambiguous configuration before collection. Every selected agent must be present in the merged config and compatible with the task's resources server through `allowed_agents` when that restriction is declared.
+
+When NeMo RL uses Gym sharding, keep a pool's source route and all of its target agents on the same shard. NeMo RL chooses the Gym actor before the actor applies `agent_pool`; cross-shard harness pools require corresponding routing support in NeMo RL.
 
 Some harnesses probe optional model-server endpoints such as `/v1/models`. Gym does not need to implement or predict these endpoints, and no per-harness route configuration is required. An unimplemented request that returns 404 or 405 cannot contribute policy-generated text and does not make capture incomplete. Any other response from an unrecognized route fails closed because its content could enter a later prompt; the rollout is marked with `mask_sample: true`.
 

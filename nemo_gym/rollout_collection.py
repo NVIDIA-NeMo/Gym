@@ -16,6 +16,7 @@ import asyncio
 import bisect
 import functools
 import glob as glob_module
+import hashlib
 import json
 import logging
 import os
@@ -61,6 +62,8 @@ from nemo_gym.deliverables import is_deliverable
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
+    AGENT_POOL_INDEX_KEY_NAME,
+    AGENT_POOL_KEY_NAME,
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -2095,6 +2098,99 @@ class _BoundedCompletionIterator:
 
 
 class RolloutCollectionHelper(BaseModel):
+    @staticmethod
+    def _agent_pool_from_global_config(global_config_dict: DictConfig) -> Optional[Dict[str, List[str]]]:
+        """Read and validate the run-wide pool used by trainer integrations.
+
+        NeMo RL and VeRL call :meth:`run_examples` directly rather than building a
+        ``RolloutCollectionConfig``. Keeping ``agent_pool`` in the merged Gym config
+        gives both integrations the same routing behavior without trainer changes.
+        """
+        raw_pool = global_config_dict.get(AGENT_POOL_KEY_NAME)
+        if raw_pool is None:
+            return None
+        raw_pool = OmegaConf.to_container(raw_pool, resolve=True) if OmegaConf.is_config(raw_pool) else raw_pool
+        validated = RolloutCollectionConfig(
+            input_jsonl_fpath="<in-memory>",
+            output_jsonl_fpath="<in-memory>",
+            agent_pool=raw_pool,
+        )
+        return validated.agent_pool
+
+    @staticmethod
+    def _fallback_agent_pool_index(row: Mapping[str, Any]) -> int:
+        """Derive a stable task identity for older, un-stamped training data.
+
+        Runtime-only fields differ across generations and retries, so omit them.
+        The resulting digest keeps all copies of one prompt on the same harness.
+        Newly collated data uses ``_ng_agent_pool_index`` and does not need this
+        compatibility path.
+        """
+        runtime_keys = {
+            "_rowidx",
+            TASK_INDEX_KEY_NAME,
+            ROLLOUT_INDEX_KEY_NAME,
+            ATTEMPT_INDEX_KEY_NAME,
+            ROLLOUT_ID_KEY_NAME,
+            "_ng_group_id",
+            "_ng_group_attempt",
+        }
+        stable_row = {key: value for key, value in row.items() if key not in runtime_keys}
+        digest = hashlib.sha256(orjson.dumps(stable_row, option=orjson.OPT_SORT_KEYS)).digest()
+        return int.from_bytes(digest[:8], "big")
+
+    @classmethod
+    def _apply_agent_pool(
+        cls,
+        examples: List[Dict],
+        agent_pool: Dict[str, List[str]],
+    ) -> None:
+        """Select and stamp one harness on every row matched by a run-wide pool."""
+        for row in examples:
+            # Explicit Environment Server routing has always taken precedence over
+            # agent routing, including for tasksets and materialized tasks.
+            if NG_ENVIRONMENT_SERVER_KEY in row:
+                continue
+            agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            task_source = row.get(TASK_SOURCE_KEY_NAME)
+            matched_key = next(
+                (key for key in dict.fromkeys((agent_name, task_source)) if key is not None and key in agent_pool),
+                None,
+            )
+            if matched_key is None:
+                continue
+
+            selection_index = row.get(AGENT_POOL_INDEX_KEY_NAME)
+            if selection_index is None:
+                selection_index = row.get(TASK_INDEX_KEY_NAME)
+            if selection_index is None:
+                selection_index = cls._fallback_agent_pool_index(row)
+            if not isinstance(selection_index, int) or isinstance(selection_index, bool) or selection_index < 0:
+                raise ValueError(
+                    f"{AGENT_POOL_INDEX_KEY_NAME} and {TASK_INDEX_KEY_NAME} must be non-negative integers "
+                    f"when used for agent_pool selection; got {selection_index!r}"
+                )
+
+            pool = agent_pool[matched_key]
+            selected = pool[selection_index % len(pool)]
+            if agent_name != selected:
+                row[AGENT_REF_KEY_NAME] = {"name": selected}
+
+    @classmethod
+    def _validate_agent_pool_destinations(
+        cls,
+        agent_pool: Dict[str, List[str]],
+        global_config_dict: DictConfig,
+    ) -> None:
+        """Fail before dispatch if any declared pool route can never run."""
+        routes = [
+            {AGENT_REF_KEY_NAME: {"name": agent}, TASK_SOURCE_KEY_NAME: routing_key}
+            for routing_key, agents in agent_pool.items()
+            for agent in agents
+        ]
+        cls._validate_agent_names(routes, global_config_dict)
+        cls._validate_agent_pairings(routes, global_config_dict)
+
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
         if config.limit:
@@ -2143,8 +2239,9 @@ class RolloutCollectionHelper(BaseModel):
 
         Public entry point for direct ``run_examples`` callers (e.g. trainer integrations that
         drive dispatch themselves): ``run_examples`` resolves task_sources and validates agent
-        names, but ``agent_map``, ``agent_pool``, ``fan_out`` and ``num_repeats`` are applied only
-        during preprocessing. Call this first, then pass the returned rows to ``run_examples``.
+        names and automatically applies a run-wide ``agent_pool`` from the merged Gym config.
+        Explicit ``agent_map``, ``fan_out`` and ``num_repeats`` arguments are applied only during
+        preprocessing. Call this first when a direct integration needs those expansion knobs.
 
         Pass ``global_config_dict`` (the merged config) to also resolve task_source-only rows to
         their agents here; leave it None to defer that to ``run_examples``, which does it against
@@ -2285,7 +2382,14 @@ class RolloutCollectionHelper(BaseModel):
             elif matched_pool_key is not None:
                 assert config.agent_pool is not None
                 pool = config.agent_pool[matched_pool_key]
-                targets = [pool[row[TASK_INDEX_KEY_NAME] % len(pool)]]
+                selection_index = row.get(AGENT_POOL_INDEX_KEY_NAME)
+                if selection_index is None:
+                    selection_index = row[TASK_INDEX_KEY_NAME]
+                if not isinstance(selection_index, int) or isinstance(selection_index, bool) or selection_index < 0:
+                    raise ValueError(
+                        f"{AGENT_POOL_INDEX_KEY_NAME} must be a non-negative integer; got {selection_index!r}"
+                    )
+                targets = [pool[selection_index % len(pool)]]
             elif config.fan_out and basis is not None and basis in config.fan_out:
                 targets = list(config.fan_out[basis])
             elif agent_name is not None:
@@ -3658,6 +3762,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if environment_server_name is not None:
             for row in examples:
                 row[NG_ENVIRONMENT_SERVER_KEY] = environment_server_name
+        agent_pool = self._agent_pool_from_global_config(server_client.global_config_dict)
+        if agent_pool:
+            self._validate_agent_pool_destinations(agent_pool, server_client.global_config_dict)
+            self._apply_agent_pool(examples, agent_pool)
         self._validate_environment_servers(examples, server_client.global_config_dict)
         self._stamp_environment_server_agent_refs(examples, server_client.global_config_dict)
         direct_agent_examples = [row for row in examples if NG_ENVIRONMENT_SERVER_KEY not in row]
@@ -3794,9 +3902,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         """
         We provide this function as a lower level interface for running rollout collection.
 
-        Rows are dispatched as given: task_sources are resolved and agent names validated here,
-        but run-level knobs (``agent_map``, ``agent_pool``, ``fan_out``, ``num_repeats``) are NOT
-        applied — call ``preprocess_examples`` first if you need them.
+        Rows are dispatched as given except that a run-wide ``agent_pool`` in the merged Gym
+        config is applied before task-source resolution. This is the policy-training path used by
+        NeMo RL and VeRL. Other run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are
+        not applied here; call ``preprocess_examples`` first if a direct caller needs them.
 
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
         that ends every rollout still in flight. It defaults off because those rollouts then leave

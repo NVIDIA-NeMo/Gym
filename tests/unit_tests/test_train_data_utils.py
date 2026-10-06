@@ -24,7 +24,7 @@ import nemo_gym.global_config
 import nemo_gym.train_data_utils
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.config_types import DatasetConfig, ResponsesAPIAgentServerInstanceConfig
-from nemo_gym.global_config import DictConfig, GlobalConfigDictParser
+from nemo_gym.global_config import AGENT_POOL_INDEX_KEY_NAME, DictConfig, GlobalConfigDictParser
 from nemo_gym.train_data_utils import (
     AvgMinMax,
     DatasetMetrics,
@@ -1386,6 +1386,28 @@ class TestCollateTaskSourceStamping:
             assert "responses_create_params" in row
             assert isinstance(row["task_source"], str) and row["task_source"]
             assert "agent_ref" not in row
+            assert row[AGENT_POOL_INDEX_KEY_NAME] == 0
+
+    def test_pool_index_is_stable_across_repeats_and_continues_across_datasets(self, tmp_path, monkeypatch) -> None:
+        first = _dataset(tmp_path, "first", self.ROWS) | {"num_repeats": 3}
+        second = _dataset(
+            tmp_path,
+            "second",
+            [
+                {"responses_create_params": {"input": []}, "question": "q2"},
+                {"responses_create_params": {"input": []}, "question": "q3"},
+            ],
+        )
+        rs = _instance(
+            "math_rs",
+            "resources_servers",
+            {"entrypoint": "app.py", "domain": "math", "datasets": [first, second]},
+        )
+
+        paths = self._collate(tmp_path, monkeypatch, [rs])
+        indices = [row[AGENT_POOL_INDEX_KEY_NAME] for path in paths for row in self._read(path)]
+
+        assert indices == [0, 0, 0, 1, 2]
 
     def test_same_fpath_two_declarations_get_distinct_prepare_files(self, tmp_path, monkeypatch) -> None:
         """Previously the second declaration silently truncated the first's prepared file."""
