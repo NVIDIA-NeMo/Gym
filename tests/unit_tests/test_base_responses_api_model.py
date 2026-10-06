@@ -167,6 +167,7 @@ def _install_capture(app, tmp_path, *, model_server_name: str = "srv") -> None:
         app,
         _capture_config(tmp_path),
         model_server_name=model_server_name,
+        assistant_message_header=b"x-assistant-message-id",
     )
 
 
@@ -216,6 +217,7 @@ def test_build_model_call_record_from_exchange():
     exchange = {
         "model_call_id": "call-1",
         "client_session_id": "session-1",
+        "client_assistant_message_id": "assistant-1",
         "dialect": "responses",
         "model_ref": {"type": "responses_api_models", "name": "srv"},
         "started_at": 100.0,
@@ -243,6 +245,7 @@ def test_build_model_call_record_from_exchange():
     assert rec.model_call_id == "call-1"
     assert rec.response_id == "resp-1"
     assert rec.client_session_id == "session-1"
+    assert rec.client_assistant_message_id == "assistant-1"
     assert rec.call_index == 3
     assert rec.model_ref is not None and rec.model_ref.name == "srv"
     assert rec.model == "m"
@@ -257,10 +260,15 @@ def test_build_model_call_record_from_exchange():
     empty = build_model_call_record({"request": {}, "response": {}}, call_index=0)
     assert empty.request == {}
     assert empty.response == {}
+    assert empty.client_assistant_message_id is None
+    assert (
+        build_model_call_record({"client_assistant_message_id": 123}, call_index=0).client_assistant_message_id is None
+    )
     assert {
         "model_call_id",
         "response_id",
         "client_session_id",
+        "client_assistant_message_id",
         "call_index",
         "model_ref",
         "model",
@@ -339,6 +347,75 @@ def test_unique_request_header_requires_one_value(headers, expected):
     assert _unique_request_header(headers, b"x-session-id") == expected
 
 
+@pytest.mark.parametrize(
+    "headers,expected",
+    [
+        ([], None),
+        ([(b"X-Assistant-Message-Id", b"assistant-1")], "assistant-1"),
+        (
+            [
+                (b"x-assistant-message-id", b"assistant-1"),
+                (b"X-Assistant-Message-Id", b"assistant-1"),
+            ],
+            "assistant-1",
+        ),
+        (
+            [
+                (b"x-assistant-message-id", b"assistant-1"),
+                (b"X-Assistant-Message-Id", b"assistant-2"),
+            ],
+            None,
+        ),
+        ([(b"x-assistant-message-id", b"")], None),
+    ],
+)
+def test_capture_assistant_message_header_round_trip(tmp_path, headers, expected):
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+
+    store = CaptureStore(tmp_path)
+    forwarded_headers = []
+
+    async def app(scope, receive, send):
+        forwarded_headers.extend(scope["headers"])
+        await receive()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b'{"output":[]}', "more_body": False})
+
+    async def receive():
+        return {"type": "http.request", "body": b'{"input":"hi"}', "more_body": False}
+
+    async def send(_message):
+        pass
+
+    request_headers = [(b"x-session-id", b"opencode-session"), *headers]
+    asyncio.run(
+        _CaptureMiddleware(
+            app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+        )(
+            {
+                "type": "http",
+                "path": "/ng-rollout/header-round-trip/v1/responses",
+                "raw_path": b"/ng-rollout/header-round-trip/v1/responses",
+                "headers": request_headers,
+            },
+            receive,
+            send,
+        )
+    )
+
+    assert forwarded_headers == request_headers
+    [exchange] = store.read("header-round-trip")
+    assert exchange.get("client_assistant_message_id") == expected
+    if expected is None:
+        assert "client_assistant_message_id" not in exchange
+    [call] = read_model_call_records(store, "header-round-trip")
+    assert call.client_assistant_message_id == expected
+    assert call.client_session_id == "opencode-session"
+    assert call.response == {"output": []}
+
+
 def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
     import asyncio
 
@@ -367,15 +444,23 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
 
     async def send(message):
         if message["type"] == "http.response.body":
-            durable_call_counts.append(len(store.read("fast-rollout")))
+            exchanges = store.read("fast-rollout")
+            durable_call_counts.append(len(exchanges))
+            if exchanges:
+                assert exchanges[0]["client_assistant_message_id"] == "assistant-stream"
 
     asyncio.run(
-        _CaptureMiddleware(app, store=store, model_server_name="srv")(
+        _CaptureMiddleware(
+            app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+        )(
             {
                 "type": "http",
                 "path": "/ng-rollout/fast-rollout/v1/messages",
                 "raw_path": b"/ng-rollout/fast-rollout/v1/messages",
-                "headers": [(b"x-session-id", b"opencode-session")],
+                "headers": [
+                    (b"x-session-id", b"opencode-session"),
+                    (b"x-assistant-message-id", b"assistant-stream"),
+                ],
             },
             receive,
             send,
@@ -385,6 +470,7 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
     assert durable_call_counts == [0, 1, 1]
     [call] = read_model_call_records(store, "fast-rollout")
     assert call.client_session_id == "opencode-session"
+    assert call.client_assistant_message_id == "assistant-stream"
 
 
 def test_capture_retains_partial_stream_when_downstream_raises(tmp_path):
@@ -411,19 +497,24 @@ def test_capture_retains_partial_stream_when_downstream_raises(tmp_path):
 
     with pytest.raises(RuntimeError, match="stream failed"):
         asyncio.run(
-            _CaptureMiddleware(app, store=store, model_server_name="srv")(
+            _CaptureMiddleware(
+                app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+            )(
                 {
                     "type": "http",
                     "path": "/ng-rollout/partial/v1/responses",
                     "raw_path": b"/ng-rollout/partial/v1/responses",
-                    "headers": [],
+                    "headers": [(b"x-assistant-message-id", b"assistant-partial")],
                 },
                 receive,
                 send,
             )
         )
 
+    [exchange] = store.read("partial")
+    assert exchange["client_assistant_message_id"] == "assistant-partial"
     [call] = read_model_call_records(store, "partial")
+    assert call.client_assistant_message_id == "assistant-partial"
     assert call.status_code == 200
     assert call.error_category == "exception"
     assert call.response_raw == partial.decode()
@@ -454,10 +545,17 @@ def test_http_200_stream_error_is_not_recorded_as_success(tmp_path):
 
     _install_capture(app, tmp_path)
 
-    response = TestClient(app).post("/ng-rollout/r-error/v1/messages", json={"messages": []})
+    response = TestClient(app).post(
+        "/ng-rollout/r-error/v1/messages",
+        json={"messages": []},
+        headers={"X-Assistant-Message-Id": "assistant-stream-error"},
+    )
 
     assert response.status_code == 200
+    [exchange] = CaptureStore(tmp_path).read("r-error")
+    assert exchange["client_assistant_message_id"] == "assistant-stream-error"
     calls = read_model_call_records(CaptureStore(tmp_path), "r-error")
+    assert calls[0].client_assistant_message_id == "assistant-stream-error"
     assert len(calls) == 1 and calls[0].error_category == "upstream_error"
 
 
@@ -475,10 +573,17 @@ def test_failed_call_is_captured_with_error_category(tmp_path):
     _install_capture(app, tmp_path)
     client = TestClient(app)
 
-    r = client.post("/ng-rollout/r-err/v1/responses", json={"input": "x"})
+    r = client.post(
+        "/ng-rollout/r-err/v1/responses",
+        json={"input": "x"},
+        headers={"X-Assistant-Message-Id": "assistant-http-error"},
+    )
     assert r.status_code == 500  # response unchanged
 
+    [exchange] = CaptureStore(tmp_path).read("r-err")
+    assert exchange["client_assistant_message_id"] == "assistant-http-error"
     calls = read_model_call_records(CaptureStore(tmp_path), "r-err")
+    assert calls[0].client_assistant_message_id == "assistant-http-error"
     assert len(calls) == 1
     assert calls[0].model_call_id
     assert calls[0].model_ref is not None and calls[0].model_ref.name == "srv"
@@ -501,10 +606,17 @@ def test_raised_call_is_captured_then_reraised(tmp_path):
     _install_capture(app, tmp_path)
     client = TestClient(app, raise_server_exceptions=False)
 
-    r = client.post("/ng-rollout/r-raise/v1/responses", json={"input": "x"})
+    r = client.post(
+        "/ng-rollout/r-raise/v1/responses",
+        json={"input": "x"},
+        headers={"X-Assistant-Message-Id": "assistant-exception"},
+    )
     assert r.status_code == 500  # error propagated, response unchanged
 
+    [exchange] = CaptureStore(tmp_path).read("r-raise")
+    assert exchange["client_assistant_message_id"] == "assistant-exception"
     calls = read_model_call_records(CaptureStore(tmp_path), "r-raise")
+    assert calls[0].client_assistant_message_id == "assistant-exception"
     assert len(calls) == 1
     assert calls[0].model_call_id
     assert calls[0].model_ref is not None and calls[0].model_ref.name == "srv"
@@ -541,12 +653,14 @@ def test_cancelled_call_is_captured_then_reraised(tmp_path):
             pass
 
         task = asyncio.create_task(
-            _CaptureMiddleware(app, store=store, model_server_name="srv")(
+            _CaptureMiddleware(
+                app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+            )(
                 {
                     "type": "http",
                     "path": "/ng-rollout/r-cancel/v1/responses",
                     "raw_path": b"/ng-rollout/r-cancel/v1/responses",
-                    "headers": [],
+                    "headers": [(b"x-assistant-message-id", b"assistant-cancel")],
                 },
                 receive,
                 send,
@@ -565,9 +679,11 @@ def test_cancelled_call_is_captured_then_reraised(tmp_path):
     assert exchange["response"] is None
     assert exchange["status_code"] is None
     assert exchange["error_category"] == "cancelled"
+    assert exchange["client_assistant_message_id"] == "assistant-cancel"
 
     [call] = read_model_call_records(store, "r-cancel")
     assert call.error_category == "cancelled"
+    assert call.client_assistant_message_id == "assistant-cancel"
     assert call.response is None
 
 
@@ -1866,3 +1982,35 @@ def test_observed_dialect_under_capture_prefix_is_not_marked_incomplete(tmp_path
 
     assert forwarded == ["/v1/chat/completions"]
     assert not token_store.is_incomplete("hole-2")
+
+
+@pytest.mark.parametrize("header", [b"X-Custom-Reply-Id", None])
+def test_capture_uses_supplied_assistant_header_or_none(tmp_path, header):
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def respond():
+        return {"output": []}
+
+    config = ModelCallCaptureConfig(
+        observability_enabled=True,
+        model_call_capture_dir=tmp_path,
+    )
+    install_model_call_capture(app, config, model_server_name="policy", assistant_message_header=header)
+    with TestClient(app) as client:
+        response = client.post(
+            "/ng-rollout/configured-header/v1/responses",
+            json={"input": "hello"},
+            headers={"x-custom-reply-id": "persisted-reply", "x-assistant-message-id": "other-reply"},
+        )
+        assert response.status_code == 200
+        response = client.post(
+            "/ng-rollout/no-configured-header/v1/responses",
+            json={"input": "hello"},
+            headers={"x-assistant-message-id": "other-reply"},
+        )
+        assert response.status_code == 200
+    [captured] = read_model_call_records(CaptureStore(tmp_path), "configured-header")
+    assert captured.client_assistant_message_id == ("persisted-reply" if header else None)
+    [absent] = read_model_call_records(CaptureStore(tmp_path), "no-configured-header")
+    assert absent.client_assistant_message_id is None

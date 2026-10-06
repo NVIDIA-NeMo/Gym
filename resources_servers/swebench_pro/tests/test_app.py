@@ -452,7 +452,7 @@ async def test_episode_close_retains_state_when_sandbox_stop_fails() -> None:
 
 @pytest.mark.parametrize("verdict", ["resolved", "unresolved", "infrastructure_failure"])
 @pytest.mark.parametrize("agent_status", ["completed", "failed"])
-def test_native_episode_http_lifecycle_preserves_verdict_and_private_task_data(
+def test_environment_server_episode_http_lifecycle_preserves_verdict_and_private_task_data(
     monkeypatch: MonkeyPatch, verdict: str, agent_status: str
 ) -> None:
     server = make_server(golden=False, apply_anti_cheating=False, inconclusive_verification_retries=0)
@@ -960,7 +960,7 @@ def test_attempt_budget_takes_the_smaller_of_the_two_ceilings(monkeypatch: Monke
 
 
 @pytest.mark.parametrize("cancel_stop", [False, True])
-async def test_patch_extraction_retains_failed_stop_for_native_close(cancel_stop: bool, caplog) -> None:
+async def test_patch_extraction_retains_failed_stop_for_resources_close(cancel_stop: bool, caplog) -> None:
     server = make_server(golden=False)
     stop_error = asyncio.CancelledError() if cancel_stop else RuntimeError("stop unavailable")
     sandbox = SimpleNamespace(
