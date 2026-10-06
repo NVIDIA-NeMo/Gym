@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from ray import available_resources, cluster_resources
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from requests.exceptions import ConnectionError
+from requests.exceptions import RequestException
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
     cli_env_setup,
@@ -35,7 +35,8 @@ from vllm.entrypoints.openai.api_server import (
 
 from nemo_gym.global_config import (
     DISALLOWED_PORTS_KEY_NAME,
-    find_open_port,
+    PORT_RANGE_HIGH_KEY_NAME,
+    PORT_RANGE_LOW_KEY_NAME,
     get_global_config_dict,
     get_hf_token,
 )
@@ -105,7 +106,7 @@ class LocalVLLMModel(VLLMModel):
     def _configure_vllm_serve(self) -> Tuple[Namespace, Dict[str, str]]:
         server_args = self.config.vllm_serve_kwargs
 
-        port = find_open_port(disallowed_ports=get_global_config_dict()[DISALLOWED_PORTS_KEY_NAME])
+        port = 0  # Reserved on the actual host by LocalVLLMModelActor.
         cache_dir = self.get_cache_dir()
         server_args = server_args | {
             "model": self.config.model,
@@ -245,6 +246,11 @@ Total Ray cluster resources: {cluster_resources()}""")
             server_name=self.config.name,
             debug=self.config.debug,
             show_vllm_engine_stats=self.config.show_vllm_engine_stats,
+            port_range=(
+                get_global_config_dict()[PORT_RANGE_LOW_KEY_NAME],
+                get_global_config_dict()[PORT_RANGE_HIGH_KEY_NAME],
+            ),
+            disallowed_ports=tuple(get_global_config_dict()[DISALLOWED_PORTS_KEY_NAME]),
         )
 
         self.config.base_url = [ray.get(self._local_vllm_model_actor.base_url.remote())]
@@ -261,9 +267,9 @@ Total Ray cluster resources: {cluster_resources()}""")
             assert is_alive, f"{self.config.name} LocalVLLMModel server spinup failed, see the error logs above!"
 
             try:
-                requests.get(url=f"{self.config.base_url[0]}/models")
+                requests.get(url=f"{self.config.base_url[0].removesuffix('/v1')}/health", timeout=5).raise_for_status()
                 return
-            except ConnectionError:
+            except RequestException:
                 if poll_count % 10 == 0:  # Print every 30s
                     print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
 

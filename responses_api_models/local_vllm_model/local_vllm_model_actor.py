@@ -36,10 +36,14 @@ def _get_local_dp_ranks(placement_groups: list[PlacementGroup]) -> list[int]:
     return local_dp_ranks
 
 
-def _vllm_asyncio_task(server_args: Namespace):
-    from vllm.entrypoints.openai.api_server import run_server
+def _vllm_asyncio_task(server_args: Namespace, listen_address: str, server_socket):
+    from vllm.entrypoints.openai.api_server import run_server_worker
 
-    asyncio.run(run_server(server_args))
+    # Keep the actor-local bound socket reserved until the HTTP worker owns it.
+    try:
+        asyncio.run(run_server_worker(listen_address, server_socket, server_args))
+    finally:
+        server_socket.close()
 
 
 @ray.remote
@@ -52,6 +56,9 @@ class LocalVLLMModelActor:
         server_name: str,
         debug: bool,
         show_vllm_engine_stats: bool,
+        *,
+        port_range: tuple[int, int],
+        disallowed_ports: tuple[int, ...],
     ) -> None:
         from os import environ
 
@@ -65,8 +72,6 @@ class LocalVLLMModelActor:
         self.env_vars.pop("CUDA_VISIBLE_DEVICES", None)
 
         node_ip = ray._private.services.get_node_ip_address()
-        self._base_url = f"http://{node_ip}:{self.server_args.port}/v1"
-        print(f"Spinning up local vLLM server at {self._base_url}", file=sys.stderr)
 
         # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
         self.env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
@@ -80,8 +85,27 @@ class LocalVLLMModelActor:
         for k, v in self.env_vars.items():
             environ[k] = v
 
-        self.server_thread = Thread(target=_vllm_asyncio_task, args=(server_args,), daemon=True)
-        self.server_thread.start()
+        from responses_api_models.local_vllm_model.socket_reservation import reserve_server_socket
+
+        # Keep Gym's configured port policy, but bind on the hosting actor.
+        listen_address, server_socket = reserve_server_socket(
+            self.server_args, port_range=port_range, disallowed_ports=disallowed_ports
+        )
+        self.server_args.port = server_socket.getsockname()[1]
+        protocol = "https" if self.server_args.ssl_keyfile and self.server_args.ssl_certfile else "http"
+        url_host = f"[{node_ip}]" if ":" in node_ip else node_ip
+        self._base_url = f"{protocol}://{url_host}:{self.server_args.port}/v1"
+        print(f"Spinning up local vLLM server at {self._base_url}", file=sys.stderr)
+        try:
+            self.server_thread = Thread(
+                target=_vllm_asyncio_task,
+                args=(self.server_args, listen_address, server_socket),
+                daemon=True,
+            )
+            self.server_thread.start()
+        except BaseException:
+            server_socket.close()
+            raise
 
     def _patch_signal_handler(self) -> None:
         # Pass through signal setting not allowed in threads.
