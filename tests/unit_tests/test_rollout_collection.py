@@ -9208,6 +9208,76 @@ class TestEnvironmentServerRouting:
         assert sorted(r[nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] for r in persisted) == ["a", "b"]
         assert all(r[NG_ENVIRONMENT_SERVER_KEY] == "environment" for r in persisted)
 
+    def test_legacy_run_request_body_rebuilds_the_flat_row_an_agent_reads(self) -> None:
+        from nemo_gym.rollout_collection import _legacy_run_request_body
+
+        row = self._materialized_row() | {
+            TASK_INDEX_KEY_NAME: 3,
+            ROLLOUT_INDEX_KEY_NAME: 1,
+            ATTEMPT_INDEX_KEY_NAME: 2,
+            NG_ENVIRONMENT_SERVER_KEY: "legacy_environment",
+        }
+
+        assert _legacy_run_request_body(row, "hermes_legacy") == {
+            "responses_create_params": {"input": "fix it"},
+            "task_data": {"instance_id": "instance"},
+            TASK_INDEX_KEY_NAME: 3,
+            ROLLOUT_INDEX_KEY_NAME: 1,
+            ATTEMPT_INDEX_KEY_NAME: 2,
+            AGENT_REF_KEY_NAME: {"name": "hermes_legacy"},
+        }
+
+    async def test_taskset_routed_to_a_legacy_agent_relay_reaches_the_agent_as_a_run_request(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An unmigrated agent behind a legacy_agent relay serves a taskset with the row it reads today."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        materialized = {
+            "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+            "task_input": {"responses_create_params": {"input": "fix it"}, "instance_id": "instance"},
+        }
+        input_jsonl_fpath.write_bytes(orjson.dumps(materialized) + b"\n")
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        dispatched: list[tuple[str, dict]] = []
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/run":
+                dispatched.append((server_name, json))
+                # An agent's /run result echoes its request row, including collector keys.
+                return FakeResponse(200, json | {"reward": 1.0, "response": {"usage": {"total_tokens": 3}}})
+            assert url_path == "/aggregate_metrics"
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        client.global_config_dict = self._mixed_batch_config()
+
+        await RolloutCollectionHelper().run_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_jsonl_fpath),
+                output_jsonl_fpath=str(output_jsonl_fpath),
+                environment_server_routes={"swe_pro": "legacy_environment"},
+                disable_health_check=True,
+            )
+        )
+
+        assert dispatched == [
+            (
+                "legacy_environment",
+                {
+                    "responses_create_params": {"input": "fix it"},
+                    "instance_id": "instance",
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    AGENT_REF_KEY_NAME: {"name": "hermes_legacy"},
+                },
+            )
+        ]
+        (persisted,) = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert persisted["reward"] == 1.0
+        assert persisted[nemo_gym.rollout_collection.NG_TASK_ID_KEY] == materialized["task_id"]
+        assert persisted[NG_ENVIRONMENT_SERVER_KEY] == "legacy_environment"
+        assert persisted[nemo_gym.rollout_collection.NG_RESULT_TYPE_KEY] == "legacy_agent"
+
 
 class TestMultiAgentEnvironmentServers:
     """An environment server can front several agents through fields other than `agent_server`."""

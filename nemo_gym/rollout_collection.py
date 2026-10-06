@@ -316,6 +316,25 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+# The implementation of the compatibility Environment Server that relays `/run` to an unmigrated agent.
+LEGACY_AGENT_ENVIRONMENT_SERVER_TYPE = "legacy_agent"
+
+
+def _legacy_run_request_body(row: Mapping[str, Any], agent_name: str | None) -> dict[str, Any]:
+    """Rebuild the run request row an unmigrated agent's `/run` reads from a materialized task.
+
+    A `legacy_agent` relay forwards its body to the agent unchanged, and the agent reads task fields
+    and collector keys such as `_ng_task_index` from the top level, as it does for rows routed by agent.
+    """
+    body = dict(row["task_input"])
+    body.update(
+        {key: value for key, value in row.items() if key.startswith("_ng_") and key != NG_ENVIRONMENT_SERVER_KEY}
+    )
+    if agent_name is not None:
+        body[AGENT_REF_KEY_NAME] = {"name": agent_name}
+    return body
+
+
 def _is_episode_response(result: Any) -> bool:
     """True for a ``BaseEpisodeResponse``-shaped reply: object identities plus a ``result`` or ``failure`` key.
 
@@ -2771,6 +2790,9 @@ class RolloutCollectionHelper(BaseModel):
                 if _materialized_taskset(row) is not None and _is_episode_response(result):
                     # The row went out as an episode request, so the reply is a BaseEpisodeResponse.
                     result = _episode_record(result)
+                elif _materialized_taskset(row) is not None:
+                    # A legacy_agent relay returns the agent's own `/run` result; it still records the task.
+                    result[NG_TASK_ID_KEY] = row["task_id"]
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -3631,6 +3653,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             for name, block in server_client.global_config_dict.items()
             if isinstance(block, DictConfig) and isinstance(block.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME), DictConfig)
         }
+        # A legacy_agent relay's agent, named in the run request rows rebuilt for its materialized tasks.
+        agent_for_server = {
+            name: environment_server_attributed_agent(
+                next(iter(server_client.global_config_dict[name][ENVIRONMENT_SERVER_TYPE_KEY_NAME].values()))
+            )
+            for name, server_type in server_types.items()
+            if server_type == LEGACY_AGENT_ENVIRONMENT_SERVER_TYPE
+        }
         semaphore = semaphore or nullcontext()
         tracker = latency_tracker if latency_tracker is not None else DispatchLatencyTracker()
         # `is not None`, not truthiness: 0.0 is a real budget that is already
@@ -3666,7 +3696,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 res = None
                 succeeded = False
                 try:
-                    request_body = _episode_request_body(row) if _materialized_taskset(row) else row
+                    request_body = row
+                    if _materialized_taskset(row) is not None:
+                        request_body = (
+                            _legacy_run_request_body(row, agent_for_server.get(server_name))
+                            if server_type == LEGACY_AGENT_ENVIRONMENT_SERVER_TYPE
+                            else _episode_request_body(row)
+                        )
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
                     result = await get_response_json(res)
