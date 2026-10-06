@@ -71,6 +71,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
 from nemo_gym.registry import (
     EnvironmentCatalogEntry,
     RegistryError,
@@ -424,6 +425,7 @@ class RunHelper:  # pragma: no cover
     _memory_profiler: MemoryProfiler | None
     _memory_profiling_config: MemoryProfilingConfig
     _telemetry_metrics_enabled: bool
+    _h2_ping_sidecar: H2PingSidecarManager | None
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         """Start the head server and every configured server, and wait until all of them are ready.
@@ -434,6 +436,7 @@ class RunHelper:  # pragma: no cover
         """
         self._processes = dict()
         self._head_server = None
+        self._h2_ping_sidecar = None
         try:
             self._start(global_config_dict_parser_config)
         except BaseException:
@@ -462,6 +465,12 @@ class RunHelper:  # pragma: no cover
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
         initialize_ray()
+
+        # Start the HTTP/2 PING sidecar (if `sidecar.enabled`) and point model URLs at it. This
+        # must come before the config is serialized below, which is how every server learns its URLs.
+        # A dry run only builds venvs and talks to no model, so it starts nothing.
+        if not global_config_dict[DRY_RUN_KEY_NAME]:
+            self._h2_ping_sidecar = start_h2_ping_sidecar(global_config_dict)
 
         # Assume Nemo Gym Run is for a single agent.
         config_dict_yaml_str = OmegaConf.to_yaml(global_config_dict)
@@ -598,6 +607,9 @@ class RunHelper:  # pragma: no cover
     def poll(self) -> None:
         if not self._head_server_thread.is_alive():
             raise RuntimeError("Head server finished unexpectedly!")
+
+        if self._h2_ping_sidecar is not None:
+            self._h2_ping_sidecar.check()
 
         for process_name, process in self._processes.items():
             if process.poll() is not None:
@@ -742,6 +754,14 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
                 "they may remain as zombies until this process exits."
             )
         self._processes = dict()
+
+        # After the servers, so requests they were still finishing can drain through it. It gets its
+        # own, longer grace period (`sidecar.shutdown_grace`).
+        h2_ping_sidecar = getattr(self, "_h2_ping_sidecar", None)
+        if h2_ping_sidecar is not None:
+            print("Stopping h2-ping-sidecar...")
+            h2_ping_sidecar.stop()
+            self._h2_ping_sidecar = None
 
         # None before the head server starts and after an earlier shutdown.
         if self._head_server is not None:

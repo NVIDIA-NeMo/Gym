@@ -59,6 +59,7 @@ from nemo_gym.config_types import (
     maybe_get_server_instance_config,
 )
 from nemo_gym.exporters import setup_exporters
+from nemo_gym.h2_ping_sidecar.config import H2_PING_SIDECAR_KEY_NAME
 from nemo_gym.secret_utils import recursively_hide_secrets
 from nemo_gym.telemetry.setup import (
     TELEMETRY_KEY_NAME,
@@ -163,6 +164,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
     TELEMETRY_KEY_NAME,
+    H2_PING_SIDECAR_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
     ENVIRONMENT_SERVER_NAME_KEY_NAME,
     ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
