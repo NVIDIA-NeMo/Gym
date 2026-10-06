@@ -9,8 +9,8 @@ chemcotbench:
       description: ChemCoTBench-V2 molecular editing, optimization, reaction prediction,
         and understanding
       value: Outcome correctness with template adherence and chemical process verification
-      repo_revision: dcd35470de4096a1b10ee9ed6f072bcee983a9cc
-      data_revision: f0bb2fb00c97cb3257294a639e28f960f2da157e
+      repo_revision: dcd35470de4096a1b10ee9ed6f072bcee983a9cc  # pragma: allowlist secret
+      data_revision: f0bb2fb00c97cb3257294a639e28f960f2da157e  # pragma: allowlist secret
       run_layer3: true
       datasets:
       - name: example

@@ -12,7 +12,7 @@ from resources_servers.chembench.task_data import TaskData
 BENCHMARK_DIR = Path(__file__).resolve().parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "test.jsonl"
 
-DATA_REVISION = "6e1d25748952393f44e35b8e85bbe567246a6430"
+DATA_REVISION = "6e1d25748952393f44e35b8e85bbe567246a6430"  # pragma: allowlist secret
 
 
 def build_rows() -> Iterator[dict[str, object]]:

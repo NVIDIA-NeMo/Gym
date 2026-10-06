@@ -15,9 +15,9 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parent
 # PyTDC 0.4.1's immutable Harvard Dataverse artifact IDs and validated SHA-256s.
 ORACLE_ARTIFACTS = {
-    "drd2": (6413411, "ef1f00e47d5e4670a45b0a4178db3c41b2e1aa9dad7113ac9d0f58e3f9d67532"),
-    "gsk3b": (6413412, "d3a20701b80e5179c88c3ad4dc3483dd7ab35c50dc055c6773a7f5b63e89b6d5"),
-    "jnk3": (6413420, "cde8576fb4fa3f60b9f258ff9cf1b9ff346eb50d196d5cbbe25965efc1864889"),
+    "drd2": (6413411, "ef1f00e47d5e4670a45b0a4178db3c41b2e1aa9dad7113ac9d0f58e3f9d67532"),  # pragma: allowlist secret
+    "gsk3b": (6413412, "d3a20701b80e5179c88c3ad4dc3483dd7ab35c50dc055c6773a7f5b63e89b6d5"),  # pragma: allowlist secret
+    "jnk3": (6413420, "cde8576fb4fa3f60b9f258ff9cf1b9ff346eb50d196d5cbbe25965efc1864889"),  # pragma: allowlist secret
 }
 ORACLE_CHECK = """
 import math

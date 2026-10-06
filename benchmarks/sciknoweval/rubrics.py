@@ -11,9 +11,9 @@ from urllib.request import urlopen
 import yaml
 
 
-REVISION = "53addee640092d667439e9a8901bf55f2d92c9ed"
+REVISION = "53addee640092d667439e9a8901bf55f2d92c9ed"  # pragma: allowlist secret
 URL = f"https://raw.githubusercontent.com/HICAI-ZJU/SciKnowEval/{REVISION}/evaluation/utils/prompts/prompt.yaml"
-SHA256 = "9ab53fe9062bc879b029e8daf5a9d4ad77543683a315e793b0a68bdcbf623199"
+SHA256 = "9ab53fe9062bc879b029e8daf5a9d4ad77543683a315e793b0a68bdcbf623199"  # pragma: allowlist secret
 RELATION_TASKS = {
     "drug_drug_relation_extraction": "identifying all drug-drug interactions in a text and extracting them as (drug, interaction, drug) triplets",
     "compound_disease_relation_extraction": "identifying all compound-disease relations in an abstract and extracting them as [compound, disease] pairs",

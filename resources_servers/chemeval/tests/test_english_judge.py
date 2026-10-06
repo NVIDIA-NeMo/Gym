@@ -14,15 +14,15 @@ from resources_servers.chemeval.task_data import TaskData
 
 # SHA-256 of each system message from the team's original V2 module, commit 1f37bdf.
 SYSTEM_HASHES = {
-    "fill_in_the_blank": "9353975f3bc6015514d335fa1a5420888950d8db461d141e5371f741ebdf9732",
-    "short_answer": "e8824cdcb38f955a56ca3556d17527e4161d7e925d76303a3d8df03fc5d55161",
-    "calculation": "2065bced75667fe9033c43436c3a4269f9a84b871cd4575668d47affbab1283e",
-    "abstract_generation": "1638c1d51b05f3c2f44109bb4a86af0acd7d82abd5f9f78790008e1858f0e7e5",
-    "outline_generation": "57883f1ff709ef02d6dd47fd08986b872698a1ac39527c2e3d5d919a0fc8afff",
-    "physicochemical": "355016c271894d9e14909263fe7b2ac9a25b813777bbd0600ec5aa81cd2e0411",
-    "single_step_synthesis": "88dedebae08fb9a8f2d2601543276fbd8740fcf9d400ac2b5c5905ae00277d1b",
-    "multi_step_synthesis": "762e5c14a95aa4d592cea8c75dab423f9d15123c9e73ec480e60f7cecb947c06",
-    "reaction_intermediate": "dd9d067884e9bba93cf022b61adf572c08e95fb1b90a8eef5545aa551a688634",
+    "fill_in_the_blank": "9353975f3bc6015514d335fa1a5420888950d8db461d141e5371f741ebdf9732",  # pragma: allowlist secret
+    "short_answer": "e8824cdcb38f955a56ca3556d17527e4161d7e925d76303a3d8df03fc5d55161",  # pragma: allowlist secret
+    "calculation": "2065bced75667fe9033c43436c3a4269f9a84b871cd4575668d47affbab1283e",  # pragma: allowlist secret
+    "abstract_generation": "1638c1d51b05f3c2f44109bb4a86af0acd7d82abd5f9f78790008e1858f0e7e5",  # pragma: allowlist secret
+    "outline_generation": "57883f1ff709ef02d6dd47fd08986b872698a1ac39527c2e3d5d919a0fc8afff",  # pragma: allowlist secret
+    "physicochemical": "355016c271894d9e14909263fe7b2ac9a25b813777bbd0600ec5aa81cd2e0411",  # pragma: allowlist secret
+    "single_step_synthesis": "88dedebae08fb9a8f2d2601543276fbd8740fcf9d400ac2b5c5905ae00277d1b",  # pragma: allowlist secret
+    "multi_step_synthesis": "762e5c14a95aa4d592cea8c75dab423f9d15123c9e73ec480e60f7cecb947c06",  # pragma: allowlist secret
+    "reaction_intermediate": "dd9d067884e9bba93cf022b61adf572c08e95fb1b90a8eef5545aa551a688634",  # pragma: allowlist secret
 }
 
 

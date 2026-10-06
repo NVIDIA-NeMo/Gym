@@ -10,8 +10,8 @@ from huggingface_hub import snapshot_download
 
 
 REPOSITORY = "https://github.com/fresnellll/ChemCoTBench-V2.git"
-REPO_REVISION = "dcd35470de4096a1b10ee9ed6f072bcee983a9cc"
-DATA_REVISION = "f0bb2fb00c97cb3257294a639e28f960f2da157e"
+REPO_REVISION = "dcd35470de4096a1b10ee9ed6f072bcee983a9cc"  # pragma: allowlist secret
+DATA_REVISION = "f0bb2fb00c97cb3257294a639e28f960f2da157e"  # pragma: allowlist secret
 
 
 def ensure_repository(repo_path: str | None, revision: str = REPO_REVISION) -> Path:

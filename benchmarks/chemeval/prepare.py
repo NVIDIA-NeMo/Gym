@@ -12,7 +12,7 @@ from resources_servers.chemeval.task_data import TaskData
 BENCHMARK_DIR = Path(__file__).resolve().parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "test.jsonl"
 
-DATA_REVISION = "61d82e727865e9c6c110fffd3ab920e0ab2edc42"
+DATA_REVISION = "61d82e727865e9c6c110fffd3ab920e0ab2edc42"  # pragma: allowlist secret
 FAMILIES = ("mcq", "true_false", "rule_based", "regression", "judged")
 
 

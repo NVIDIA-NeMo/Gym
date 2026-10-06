@@ -12,7 +12,7 @@ from resources_servers.sciknoweval.task_data import TaskData
 BENCHMARK_DIR = Path(__file__).resolve().parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "test.jsonl"
 
-DATA_REVISION = "92ef969ad0a8bd6e195e0ac18af2c46e307e0cc2"
+DATA_REVISION = "92ef969ad0a8bd6e195e0ac18af2c46e307e0cc2"  # pragma: allowlist secret
 FAMILIES = ("mcq", "true_false", "filling", "relation_extraction", "open_ended")
 
 
