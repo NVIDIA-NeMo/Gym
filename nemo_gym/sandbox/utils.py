@@ -23,6 +23,22 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.api import AsyncSandbox
 
 
+async def upload_bytes(sandbox: "AsyncSandbox", *, path: str, data: bytes) -> None:
+    """Upload bytes unchanged through file transfer without shell interpolation."""
+    with tempfile.TemporaryDirectory(prefix="sandbox-upload-") as directory:
+        source = Path(directory) / "payload"
+        source.write_bytes(data)
+        await sandbox.upload(source, path)
+
+
+async def read_bytes(sandbox: "AsyncSandbox", *, path: str) -> bytes:
+    """Download file contents unchanged, without text decoding."""
+    with tempfile.TemporaryDirectory(prefix="sandbox-download-") as directory:
+        destination = Path(directory) / "payload"
+        await sandbox.download(path, destination)
+        return destination.read_bytes()
+
+
 async def upload_text(sandbox: "AsyncSandbox", *, path: str, text: str) -> None:
     """Upload UTF-8 text through file transfer without shell interpolation."""
     with tempfile.TemporaryDirectory(prefix="sandbox-upload-") as directory:
