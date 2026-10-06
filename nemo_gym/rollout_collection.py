@@ -57,6 +57,7 @@ from nemo_gym.config_types import (
     UploadRolloutsConfigMixin,
 )
 from nemo_gym.deliverables import is_deliverable
+from nemo_gym.episode_types import is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
@@ -258,9 +259,10 @@ def _environment_server_for_agent(agent_name: str, servers_by_agent: Mapping[str
 
 
 def _materialized_taskset(row: Mapping[str, Any]) -> str | None:
-    task_id = row.get("task_id")
-    if not isinstance(task_id, Mapping) or "task_input" not in row:
+    if not is_materialized_task_row(row):
         return None
+    task_id = row.get("task_id")
+    assert isinstance(task_id, Mapping)
     taskset = task_id.get("taskset")
     return taskset if isinstance(taskset, str) and taskset else None
 
