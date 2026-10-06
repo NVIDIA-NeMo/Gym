@@ -636,6 +636,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                             invocation_id=invocation_id,
                             parent_invocation_id=raw_invocation.get("parent_invocation_id"),
                             status=raw_invocation.get("status", "unknown"),
+                            stop_reason=raw_invocation.get("stop_reason"),
                             # Every call goes to the configured Model Server, so a response ID identifies the call.
                             model_calls=[
                                 ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
@@ -682,6 +683,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             AgentInvocation(
                 invocation_id="root",
                 status=invocation_status,
+                stop_reason=result.get("stop_reason"),
                 conversation=normalize_hermes_messages(messages),
             )
         ]

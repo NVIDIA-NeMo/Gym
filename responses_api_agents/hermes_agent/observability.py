@@ -142,6 +142,16 @@ class HermesAgentObserver:
         self._instrument_safely(agent, self._root_id, wrap_conversation=False)
         return self
 
+    def on_iteration_limit_reached(self, *, invocation_id: str) -> None:
+        """Record this invocation's budget stop once, without affecting its parent or summary."""
+        with self._lock:
+            invocation = self._invocations.get(invocation_id)
+            if invocation is None:
+                self._gap("hermes_observer_error", invocation_id, "iteration_limit: unknown invocation")
+                return
+            invocation.stop_reason = "max_iterations"
+            invocation.status = "incomplete"
+
     def finish(
         self,
         result: dict[str, Any] | None = None,
@@ -184,6 +194,9 @@ class HermesAgentObserver:
                 return
             self._agents.add(agent_id)
             self._invocation_agents[invocation_id] = agent
+
+        agent._gym_invocation_id = invocation_id
+        agent._gym_on_iteration_limit_reached = self.on_iteration_limit_reached
 
         self._chain_callback(agent, "tool_start_callback", self._tool_started, invocation_id)
         self._chain_callback(agent, "tool_complete_callback", self._tool_completed, invocation_id)
@@ -451,7 +464,9 @@ class HermesAgentObserver:
                     status = "incomplete"
             with self._lock:
                 self._invocations[invocation_id].conversation = conversation
-                self._invocations[invocation_id].status = status
+                self._invocations[invocation_id].status = (
+                    "incomplete" if self._invocations[invocation_id].stop_reason == "max_iterations" else status
+                )
         except Exception as exc:
             self._gap("hermes_observer_error", invocation_id, f"conversation: {type(exc).__name__}")
 

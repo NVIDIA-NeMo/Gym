@@ -77,9 +77,13 @@ def test_pinned_hermes_summary_passes_gym_schema_and_retains_call_ownership(
     if sandbox:
         observations = observer.finish(result, None)
         ids = observations["invocations"][0]["model_response_ids"]
+        assert observations["invocations"][0]["stop_reason"] == "max_iterations"
+        assert observations["invocations"][0]["status"] == "incomplete"
     else:
         observations = observer.finish(result)
         ids = [call.response_id for call in observations.records[0].model_calls]
+        assert observations.records[0].stop_reason == "max_iterations"
+        assert observations.records[0].status == "incomplete"
     assert ids == [f"summary-{i + 1}" for i in range(len(requests))]
 
 
@@ -159,9 +163,39 @@ def test_delegated_child_limit_summary_uses_gym_and_belongs_to_child(
         invocations = observer.finish({"messages": [], "completed": True}, None)["invocations"]
         assert invocations[0]["model_response_ids"] == []
         assert invocations[1]["model_response_ids"] == ["child-summary"]
+        assert invocations[0].get("stop_reason") is None
+        assert invocations[0]["status"] == "completed"
+        assert invocations[1]["stop_reason"] == "max_iterations"
+        assert invocations[1]["status"] == "incomplete"
     elif observer_kind == "host":
         invocations = [
             r for r in observer.finish({"messages": [], "completed": True}).records if hasattr(r, "model_calls")
         ]
         assert invocations[0].model_calls == []
         assert [call.response_id for call in invocations[1].model_calls] == ["child-summary"]
+        assert invocations[0].stop_reason is None
+        assert invocations[0].status == "completed"
+        assert invocations[1].stop_reason == "max_iterations"
+        assert invocations[1].status == "incomplete"
+
+
+def test_iteration_limit_hook_fires_once_before_summary_even_when_summary_fails() -> None:
+    events = []
+
+    def fail_summary(_messages, _api_call_count):
+        events.append("summary")
+        raise RuntimeError("summary unavailable")
+
+    agent = SimpleNamespace(
+        _ensure_primary_openai_client=lambda *, reason: None,
+        _handle_max_iterations=fail_summary,
+        _gym_invocation_id="root.child-1",
+        _gym_on_iteration_limit_reached=lambda *, invocation_id: events.append(invocation_id),
+    )
+    install_summary_compat(agent, preserve_reasoning_history=False)
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="summary unavailable"):
+            agent._handle_max_iterations([], 1)
+
+    assert events == ["root.child-1", "summary", "summary"]

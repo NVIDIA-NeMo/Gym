@@ -22,6 +22,7 @@ from tools.mcp_tool import shutdown_mcp_servers
 
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
 from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.rollout_observability import AgentInvocation
 from nemo_gym.sandbox import process_supervisor
 from nemo_gym.server_utils import ServerClient
 from resources_servers.example_mcp_weather.app import (
@@ -31,6 +32,42 @@ from resources_servers.example_mcp_weather.app import (
 from responses_api_agents.hermes_agent.app import HermesAgent, HermesAgentConfig
 from responses_api_agents.hermes_agent.sandbox_runner import _run, _use_model_server
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
+
+
+def test_sandbox_iteration_limit_stays_on_child_when_observations_are_imported() -> None:
+    agent = HermesAgent(
+        config=HermesAgentConfig(
+            host="127.0.0.1",
+            port=0,
+            name="hermes",
+            entrypoint="app.py",
+            model_server={"type": "responses_api_models", "name": "model"},
+            resources_server={"type": "resources_servers", "name": "resources"},
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    raw = {
+        "invocations": [
+            {"invocation_id": "root", "status": "completed"},
+            {
+                "invocation_id": "root.child-1",
+                "parent_invocation_id": "root",
+                "status": "incomplete",
+                "stop_reason": "max_iterations",
+            },
+        ]
+    }
+
+    invocations = [
+        record for record in agent._sandbox_observations({}, raw).records if isinstance(record, AgentInvocation)
+    ]
+
+    assert len(invocations) == 2
+    assert invocations[0].status == "completed"
+    assert invocations[0].stop_reason is None
+    assert invocations[1].parent_invocation_id == "root"
+    assert invocations[1].status == "incomplete"
+    assert invocations[1].stop_reason == "max_iterations"
 
 
 def _completion(message: dict) -> dict:
@@ -257,6 +294,8 @@ def test_iteration_limit_summary_reaches_the_model_server(
             )
             assert output["result"]["final_response"] == "summary of the work"
             assert output["result"]["stop_reason"] == "max_iterations"
+            assert output["observations"]["invocations"][0]["stop_reason"] == "max_iterations"
+            assert output["observations"]["invocations"][0]["status"] == "incomplete"
             assert output["observations"]["invocations"][0]["model_response_ids"] == [
                 "chatcmpl-tool",
                 "chatcmpl-summary",
@@ -303,6 +342,8 @@ def test_iteration_limit_summary_reaches_the_model_server(
             assert output.output[-1].content[0].text == "summary of the work"
             assert output.status == "incomplete"
             assert output.metadata["stop_reason"] == "max_iterations"
+            assert observations[0].records[0].stop_reason == "max_iterations"
+            assert observations[0].records[0].status == "incomplete"
             assert [call.response_id for call in observations[0].records[0].model_calls] == [
                 "chatcmpl-tool",
                 "chatcmpl-summary",
