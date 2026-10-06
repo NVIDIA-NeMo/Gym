@@ -575,7 +575,7 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     from rich.markup import escape
 
     from nemo_gym.config_types import ConfigError
-    from nemo_gym.orchestration.api import SubmitConfig
+    from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
     from nemo_gym.orchestration.submit import submit
 
     _reject_scratch_namespace_additions(overrides)
@@ -612,10 +612,11 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
         raise ConfigError(f"Submit config '{config_path}' is invalid: {'. '.join(parts)}.") from e
 
     if args.resolve_only:
+        # Same form persist() writes as the run's record, so the two diff and hash alike.
         if args.json:
-            print(config.model_dump_json(indent=2))
+            print(config.model_dump_json(indent=2, context={HOST_ENV_REFS: True}))
         else:
-            print(yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False))
+            print(yaml.safe_dump(config.model_dump(mode="json", context={HOST_ENV_REFS: True}), sort_keys=False))
         return
 
     record = submit(config, dry_run=args.dry_run)

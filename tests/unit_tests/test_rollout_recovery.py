@@ -536,8 +536,9 @@ async def test_native_typed_outcomes_reject_foreign_identity_without_stopping_ot
 
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("reference", ["literal", "name", "mapping"])
+@pytest.mark.parametrize("reference_field", ["agent_server", "assistant_agent"])
 def test_resume_identity_includes_environment_protocol_but_ignores_its_runtime_address(
-    saved_manifest, native, reference
+    saved_manifest, native, reference, reference_field
 ):
     source, rows, _, config, _, _, _ = saved_manifest
     servers = {
@@ -562,6 +563,15 @@ def test_resume_identity_includes_environment_protocol_but_ignores_its_runtime_a
         settings["agent_server"] = {"name": "${agent_name}"}
     elif reference == "mapping":
         settings["agent_server"] = "${agent_reference}"
+    if reference_field != "agent_server":
+        # Multi-agent environments use typed fields rather than agent_server.
+        servers["agent_reference"]["type"] = "responses_api_agents"
+        ref = settings.pop("agent_server")
+        if isinstance(ref, dict):
+            ref["type"] = "responses_api_agents"
+        settings[reference_field] = ref
+        settings["user_agent"] = {"type": "responses_api_agents", "name": "partner"}
+        servers["partner"] = {"responses_api_agents": {"impl": {"policy": "first"}}}
     rows = [dict(rows[0], agent_ref={"name": "agent"})]
     if native:
         rows[0]["_ng_environment_server"] = "environment"
@@ -579,6 +589,10 @@ def test_resume_identity_includes_environment_protocol_but_ignores_its_runtime_a
     settings["scenario"] = 1
     servers["judge"]["resources_servers"]["impl"]["scoring_rule"] = 2
     assert RunManifest.create(source, rows, config, servers).config_digest != before
+    if reference_field != "agent_server":
+        servers["judge"]["resources_servers"]["impl"]["scoring_rule"] = 1
+        servers["partner"]["responses_api_agents"]["impl"]["policy"] = "second"
+        assert RunManifest.create(source, rows, config, servers).config_digest != before
 
 
 @pytest.mark.parametrize("route_failures", [False, True])

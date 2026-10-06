@@ -32,6 +32,7 @@ from typing import Annotated, Any, BinaryIO, Literal
 from uuid import uuid4
 
 from omegaconf import OmegaConf
+from omegaconf.errors import InterpolationResolutionError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.config_types import ConfigError
@@ -226,11 +227,23 @@ def _configuration_identity(config: dict, global_config: dict, rows: list[dict])
     if agents:
         for name in servers:
             for settings in context[name].get("environment_servers", {}).values():
-                # Match dispatch's resolved reference, including whole-mapping
-                # interpolations, without resolving unrelated server settings.
-                reference = settings.get("agent_server") if OmegaConf.is_dict(settings) else None
-                if OmegaConf.is_dict(reference) and reference.get("name") in agents:
-                    pending.add(name)
+                if not OmegaConf.is_dict(settings):
+                    continue
+                # Match environment_server_agent_refs: any typed top-level agent
+                # reference, or agent_server without a type. Resolve mapping/name
+                # interpolations, but defer unavailable settings on unused servers.
+                # A selected server is resolved in full below, so its errors remain fatal.
+                for field in settings:
+                    try:
+                        reference = settings[field]
+                        if not OmegaConf.is_dict(reference):
+                            continue
+                        kind = reference.get("type")
+                        if kind == "responses_api_agents" or (field == "agent_server" and kind is None):
+                            if reference.get("name") in agents:
+                                pending.add(name)
+                    except InterpolationResolutionError:
+                        continue
     missing = pending - servers
     if missing:
         raise ConfigError(f"Cannot verify run identity: running configuration is missing servers {sorted(missing)!r}.")

@@ -13,17 +13,12 @@ from environment_servers.single_agent_turn.app import (
 )
 from nemo_gym.episode_types import (
     EpisodeId,
-    MaterializedTask,
-    TaskId,
 )
 from nemo_gym.failure_kinds import ENVIRONMENT_SERVER_FAILED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
-    RESPONSES_CREATE_PARAMS_KEY_NAME,
-    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
-    SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
@@ -32,8 +27,8 @@ from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
-    SingleAgentTurnTaskInput,
 )
+from nemo_gym.task_materialization import materialize_task
 
 
 class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
@@ -51,12 +46,12 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         request = (
             SingleAgentTurnRequest.model_validate(row)
             if "episode_id" in row and "task" in row
-            else self._native_request(row)
+            else self._episode_request_from_row(row)
         )
         response = await self.run_request(request)
         return self._legacy_result(response)
 
-    def _native_request(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
+    def _episode_request_from_row(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
         task_source = row.get(TASK_SOURCE_KEY_NAME, self.config.resources_server.name)
         if not isinstance(task_source, str) or not task_source:
             raise ValueError("task_source must be a non-empty string when provided")
@@ -75,12 +70,6 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             raise ValueError(
                 f"Row agent_ref {row_agent!r} does not match configured agent server {self.config.agent_server.name!r}"
             )
-        task_id = next(
-            (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
-            None,
-        )
-        if task_id is None:
-            task_id = str(row[TASK_INDEX_KEY_NAME])
         attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
         if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
             raise ValueError(f"Invalid episode attempt: {attempt!r}")
@@ -89,27 +78,9 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         rollout_id = maybe_rollout_id_from_run_body(base_identity_row) or (
             f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
         )
-        excluded = {
-            RESPONSES_CREATE_PARAMS_KEY_NAME,
-            AGENT_REF_KEY_NAME,
-            TASK_SOURCE_KEY_NAME,
-            SKILLS_REF_KEY_NAME,
-            ROLLOUT_ID_KEY_NAME,
-            TASK_INDEX_KEY_NAME,
-            ROLLOUT_INDEX_KEY_NAME,
-            ATTEMPT_INDEX_KEY_NAME,
-        }
         return SingleAgentTurnRequest(
             episode_id=EpisodeId(rollout_id=rollout_id, attempt=attempt),
-            task=MaterializedTask(
-                task_id=TaskId(taskset=task_source, task_id=task_id),
-                task_input=SingleAgentTurnTaskInput(
-                    responses_create_params=row[RESPONSES_CREATE_PARAMS_KEY_NAME],
-                    task_data={
-                        key: value for key, value in row.items() if key not in excluded and not key.startswith("_ng_")
-                    },
-                ),
-            ),
+            task=materialize_task(row, taskset=task_source),
         )
 
     def _legacy_result(self, response: SingleAgentTurnResponse) -> dict[str, Any]:
