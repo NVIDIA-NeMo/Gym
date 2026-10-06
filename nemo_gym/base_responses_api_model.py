@@ -37,7 +37,7 @@ import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, ClassVar, Iterable, Literal, Mapping, Optional, TypedDict
+from typing import Any, AsyncIterator, ClassVar, Iterable, Literal, Mapping, NotRequired, Optional, TypedDict
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -106,6 +106,7 @@ _ANTHROPIC_CONVERTER = AnthropicConverter()
 
 
 class ModelExecutionOutcome(TypedDict):
+    error_category: NotRequired[str]
     upstream_attempted: bool
     response_source: Literal["upstream", "local"] | None
     upstream_status_code: int | None
@@ -203,6 +204,25 @@ def _orjson_dispatch_response(content: Any) -> Any:
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     # Exact successful routes whose responses cannot contain policy-generated content.
     token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
+    drop_hosted_tools: bool = Field(
+        default=False,
+        description=(
+            "Drop every tool type other than ``function`` and ``custom`` from a streaming Responses "
+            "request instead of passing it to the backend. That covers the provider-hosted tools (web "
+            "search, file search, code interpreter, image generation, computer use, remote MCP), which a "
+            "backend that serves none of them cannot honor, and also client-executed built-in types such "
+            "as ``local_shell``. Off by default, which passes every valid tool spec through."
+        ),
+    )
+    drop_custom_tools: bool = Field(
+        default=False,
+        description=(
+            "Drop Responses ``custom`` (free-form) tools from streaming requests instead of converting "
+            "them. A backend that expresses function tools only (a vLLM chat route, for example) answers "
+            "a request carrying one with 422, and the client retries the whole request. Off by default "
+            "so a backend with free-form tool support keeps them."
+        ),
+    )
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -290,7 +310,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         delegated to the same ``responses()``, and the complete response is re-emitted as a
         synthesized Responses SSE event stream. A ``responses()`` failure on this path is turned
         into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
-        still fails eagerly, before the stream is committed).
+        and an ``HTTPException`` raised by ``responses()`` still fail eagerly with their status, before
+        the stream is committed).
         """
         if not body.get("stream"):
             params = _validate_responses_params(body)
@@ -299,7 +320,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await self._finalize_served_response(response)
             return dispatched
 
-        cleaned, ns_map = sanitize_streaming_responses_body(body)
+        cleaned, ns_map = sanitize_streaming_responses_body(
+            body,
+            drop_custom_tools=self.config.drop_custom_tools,
+            drop_hosted_tools=self.config.drop_hosted_tools,
+        )
         try:
             params = validate_streaming_responses_params(cleaned)
         except ValidationError as exc:
@@ -313,9 +338,15 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """Serve the same converted response to capture and Responses SSE clients."""
         try:
             response = await self._invoke_responses(request, params)
-            response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
+            response_json = (
+                response.model_dump(mode="json", by_alias=True) if isinstance(response, BaseModel) else dict(response)
+            )
             response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
             return await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
+        except HTTPException:
+            # A status the server chose to return, such as a propagated provider error, is raised
+            # before the stream is committed, so the client receives it like a validation error.
+            raise
         except Exception as exc:
             # The streaming contract is already the response's shape, so a backend failure must be a
             # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.

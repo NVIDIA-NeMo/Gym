@@ -10,6 +10,19 @@ INPUT_CONTAINER=$INPUT_CONTAINER
 OUTPUT_CONTAINER=$OUTPUT_CONTAINER
 MOUNTS=$MOUNTS
 GYM_CONFIG=$GYM_CONFIG
+# Extra configs add environments; keep the base config last so its build settings win.
+gym_config_args=()
+while (( $# )); do
+    if [[ $1 != --config || $# -lt 2 || -z $2 ]]; then
+        echo 'Usage: build_eval_container.sh [--config PATH ...]; set GYM_CONFIG for the base config.' >&2
+        exit 2
+    fi
+    gym_config_args+=(--config "$2")
+    shift 2
+done
+gym_config_args+=(--config "$GYM_CONFIG")
+# Preserve argument boundaries when embedding these arguments in the container's shell.
+printf -v gym_config_args_escaped '%q ' "${gym_config_args[@]}"
 # Benchmark data preparation only applies to configs that declare a `benchmark` dataset.
 # Set to 1 for train-split configs (e.g. reward-profiling sweeps), where `gym eval prepare`
 # would abort with "No benchmark config found".
@@ -48,6 +61,8 @@ export UV_LINK_MODE=hardlink
 
 uv pip install --system --reinstall-package vllm-router "$VLLM_ROUTER_WHEEL"
 uv pip show --system vllm-router
+# Package metadata alone does not catch a wheel built against a newer system libc.
+python3 -c 'import vllm_router_rs'
 
 uv pip install --system fastokens==0.3.1
 
@@ -92,14 +107,14 @@ fi
 ########################################
 
 if [[ "$SKIP_PREPARE" == "0" ]]; then
-    gym eval prepare +num_prepare_benchmark_processes=4 --config $GYM_CONFIG
+    gym eval prepare +num_prepare_benchmark_processes=4 $gym_config_args_escaped
 else
     echo ">>> SKIP_PREPARE=1: skipping benchmark data preparation."
 fi
 
-gym env start \
-    --config $GYM_CONFIG \
-    ++dry_run=true \
+# Install dependencies without initializing services that need runtime data or credentials.
+gym env prefetch \
+    $gym_config_args_escaped \
     ++uv_venv_dir=/opt/uv_venvs
 
 echo ">>> Inner build complete. Container will now be packed into sqsh."
