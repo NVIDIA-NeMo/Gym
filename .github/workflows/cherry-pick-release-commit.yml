@@ -17,12 +17,16 @@ name: Create PR to main with cherry-pick from release
 on:
   push:
     branches:
-      - main
+      - kajalj-cptest-trigger
 
 jobs:
   cherry-pick:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cherry_pick.yml@8ebb3aec4c246c944a25adc7b09107cbd6a76976 # v0.63.0
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cherry_pick.yml@b7c7f7d585ad8f529a111e69afcbf14f0279663e # v1.12.2
+    with:
+      notify-mention: "<@U0ADCAVAH08>"
+      target-branches-pattern: 'zz-release-test-[0-9]+'
+      default-cicd-label: ""
     secrets:
       PAT: ${{ secrets.PAT }}
       SLACK_WEBHOOK_ADMIN: ${{ secrets.SLACK_WEBHOOK_ADMIN }}
-      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
