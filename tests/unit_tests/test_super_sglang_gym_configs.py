@@ -3,6 +3,7 @@
 
 """Keep Gym evaluation settings consistent across SGLang topology recipes."""
 
+import json
 import os
 import subprocess
 import sys
@@ -87,3 +88,49 @@ def test_srt_worker_metrics_config(tmp_path: Path, missing_role: str | None) -> 
     }
     assert '--config "$inference_metrics_config"' in command.split("gym eval run", 1)[1]
     assert all(role["args"]["enable-metrics"] for role in config["roles"].values())
+
+
+def test_hicache_mooncake_prefill_config(tmp_path: Path) -> None:
+    base = yaml.safe_load((CONFIG_DIR / "2P2D.yaml").read_text())
+    config = yaml.safe_load((CONFIG_DIR / "2P2D_hicachemooncake.yaml").read_text())
+    assert config["roles"]["decode"] == base["roles"]["decode"]
+    assert config["frontend"] == base["frontend"]
+    prefill = config["roles"]["prefill"]
+    assert prefill["args"]["enable-hierarchical-cache"]
+    assert prefill["args"]["hicache-storage-backend"] == "mooncake"
+    assert prefill["args"]["disaggregation-transfer-backend"] == "nixl"
+    master, store = config["services"]
+    assert master["placement"]["node"] == "head"
+    assert store["placement"]["node"] == "prefill"
+    assert master["readiness"]["port"] == 50051
+    assert "--port=50051" in master["args"]
+    for service in (master, store):
+        assert service["start"] == "before_workers"
+        assert service["critical"]
+    for index in range(2):
+        substitutions = {"node": f"prefill-{index}", "node_ip": f"10.0.0.{index + 1}", "head_ip": "10.0.0.1"}
+        service_env = {key: str(value).format_map(substitutions) for key, value in store["env"].items()}
+        worker_path = prefill["env"]["SGLANG_HICACHE_MOONCAKE_CONFIG_PATH"].format_map(substitutions)
+        assert worker_path == service_env["HICACHE_CONFIG_PATH"]
+        output = tmp_path / Path(worker_path).name
+        env = (
+            os.environ
+            | service_env
+            | {
+                "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", ""),
+                "HICACHE_CONFIG_PATH": str(output),
+            }
+        )
+        # SRT strips the preamble and joins it to the service command with &&.
+        command = store["preamble"].rstrip() + " && printf service-started"
+        result = subprocess.run(["bash", "-euc", command], env=env, text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "service-started"
+        assert json.loads(output.read_text()) == {
+            "local_hostname": substitutions["node_ip"],
+            "master_server_address": "10.0.0.1:50051",
+            "metadata_server": "P2PHANDSHAKE",
+            "protocol": "rdma",
+            "device_name": "",
+            "global_segment_size": 0,
+        }
