@@ -1,6 +1,6 @@
 environment_server_routes:
   "usersim:example": usersim_environment
-  "usersim:benchmark": usersim_environment
+  "usersim:validation": usersim_environment
 
 user_model_base_url: ${policy_base_url}
 user_model_api_key: ${policy_api_key}
