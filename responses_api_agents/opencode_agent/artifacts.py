@@ -21,6 +21,7 @@ from uuid import uuid4
 
 from openai.types.responses import ResponseInputTextParam
 
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -65,6 +66,7 @@ def _parse_opencode_session(
     fallback_invocation_id: str,
     trajectory: Optional[TrajectoryRecord] = None,
     *,
+    model_ref: ModelServerRef | None = None,
     require_terminal_finish: bool = False,
 ) -> AgentObservationBundle:
     """Read OpenCode's persisted session tree before its workspace is removed."""
@@ -104,7 +106,7 @@ def _parse_opencode_session(
     compaction_parts: list[tuple[str, str, float | None, dict[str, Any]]] = []
     gaps: list[ObservationGap] = []
     summary_text: dict[str, list[str]] = {}
-    summaries_by_parent: dict[str, list[str]] = {}
+    summaries_by_parent: dict[tuple[str, str], list[str]] = {}
     first_item_id_by_message: dict[tuple[str, str], str] = {}
 
     for row in message_rows:
@@ -127,11 +129,11 @@ def _parse_opencode_session(
                     invocation_status[session_id] = "failed"
                 if invocation_status[session_id] != "failed" and completed:
                     invocation_status[session_id] = "completed"
-        if message.get("summary") is True:
+        if message.get("role") == "assistant" and message.get("summary") is True:
             summary_text[row["id"]] = []
             parent_id = message.get("parentID")
             if isinstance(parent_id, str):
-                summaries_by_parent.setdefault(parent_id, []).append(row["id"])
+                summaries_by_parent.setdefault((session_id, parent_id), []).append(row["id"])
 
     for row in part_rows:
         part = _load_json(row["data"])
@@ -275,13 +277,14 @@ def _parse_opencode_session(
 
     compactions: list[ContextCompactionObservation] = []
     for session_id, message_id, observed_at, part in compaction_parts:
-        summary_ids = summaries_by_parent.get(message_id, [])
+        summary_ids = summaries_by_parent.get((session_id, message_id), [])
         summary = "\n".join(summary_text.get(summary_ids[0], [])) if len(summary_ids) == 1 else None
         if len(summary_ids) > 1:
             gaps.append(
                 ObservationGap(
                     code="compaction_summary_ambiguous",
                     invocation_id=session_id,
+                    detail=",".join(summary_ids),
                 )
             )
         trigger = "overflow" if part.get("overflow") is True else "automatic" if part.get("auto") is True else "manual"
@@ -292,6 +295,8 @@ def _parse_opencode_session(
         compactions.append(
             ContextCompactionObservation(
                 invocation_id=session_id,
+                source_message_ids=summary_ids,
+                source_model_ref=model_ref,
                 observed_at=observed_at,
                 trigger=trigger,
                 outcome="completed" if summary else "unknown",
@@ -363,7 +368,7 @@ def _parse_opencode_session(
         gaps.append(ObservationGap(code="agent_transcript_unavailable"))
 
     if trajectory is not None:
-        append_opencode_turns(trajectory, session_ids, message_rows, part_rows)
+        append_opencode_turns(trajectory, session_ids, message_rows, part_rows, model_ref=model_ref)
 
     return AgentObservationBundle(
         source="opencode",
@@ -372,19 +377,32 @@ def _parse_opencode_session(
     )
 
 
-def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
-    """Convert an OpenCode session database into the existing Gym response shape."""
+def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) -> tuple[list[Any], dict[str, int]]:
+    """Convert an OpenCode session database into the existing Gym response shape.
+
+    ``root_session_only`` restricts the transcript to sessions without a
+    parent: a sub-agent spawned by the ``task`` tool runs in its own session
+    (stored with ``parent_id``), and its parts would otherwise interleave with
+    the root conversation. Parts are ordered by creation time and then id,
+    OpenCode's own order, because parallel tool parts can share a creation
+    millisecond.
+    """
     output_items: list[Any] = []
     input_tokens = 0
     output_tokens = 0
+    reasoning_tokens = 0
     if not db_path.is_file():
         return output_items, {"input_tokens": 0, "output_tokens": 0}
 
+    scope = " where session_id in (select id from session where parent_id is null)" if root_session_only else ""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
-        roles = {row["id"]: _load_json(row["data"]).get("role") for row in con.execute("select id, data from message")}
-        rows = con.execute("select message_id, data from part order by time_created").fetchall()
+        roles = {
+            row["id"]: _load_json(row["data"]).get("role")
+            for row in con.execute(f"select id, data from message{scope}")
+        }
+        rows = con.execute(f"select message_id, data from part{scope} order by time_created, id").fetchall()
     finally:
         con.close()
 
@@ -395,7 +413,8 @@ def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
             tokens = part.get("tokens") or {}
             cache = tokens.get("cache") or {}
             input_tokens += int(tokens.get("input") or 0) + int(cache.get("read") or 0)
-            output_tokens += int(tokens.get("output") or 0)
+            output_tokens += int(tokens.get("output") or 0) + int(tokens.get("reasoning") or 0)
+            reasoning_tokens += int(tokens.get("reasoning") or 0)
         elif roles.get(row["message_id"]) == "assistant" and ptype == "text" and (part.get("text") or "").strip():
             output_items.append(
                 NeMoGymResponseOutputMessage(
@@ -411,6 +430,10 @@ def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
             call_id = part.get("callID") or f"call-{uuid4().hex[:8]}"
             tool_input = state.get("input") or {}
             arguments = json.dumps(tool_input) if isinstance(tool_input, (dict, list)) else str(tool_input)
+            # A call OpenCode recorded as errored or aborted carries its error
+            # text in place of an output; the transcript keeps that outcome.
+            status = "completed" if state.get("status") in (None, "completed") else "incomplete"
+            result = state.get("output") if state.get("output") is not None else state.get("error")
             output_items.append(
                 NeMoGymResponseFunctionToolCall(
                     arguments=arguments,
@@ -418,23 +441,24 @@ def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
                     name=part.get("tool", ""),
                     type="function_call",
                     id=call_id,
-                    status="completed",
+                    status=status,
                 )
             )
-            if state.get("output") is not None:
+            if result is not None:
                 output_items.append(
                     NeMoGymFunctionCallOutput(
                         type="function_call_output",
                         call_id=call_id,
-                        output=str(state["output"]),
-                        status="completed",
+                        output=str(result),
+                        status=status,
                     )
                 )
 
-    return output_items, {"input_tokens": input_tokens, "output_tokens": output_tokens}
-
-
-parse_opencode_observations = _parse_opencode_session
+    return output_items, {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": reasoning_tokens,
+    }
 
 
 def parse_opencode_export(opencode_export: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
@@ -512,7 +536,7 @@ def opencode_export_usages(opencode_export: Dict[str, Any]) -> List[NeMoGymRespo
         usage = NeMoGymResponseUsage(
             input_tokens=token_info["input"],
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=token_info["cache"]["read"]),
-            output_tokens=token_info["output"],
+            output_tokens=token_info["output"] + token_info["reasoning"],
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=token_info["reasoning"]),
             total_tokens=token_info.get("total", 0),  # Somehow total may be missing
         )

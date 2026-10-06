@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
+import sqlite3
 import sys
 from asyncio import Semaphore
 from collections.abc import Mapping
@@ -138,6 +140,28 @@ def _extract_opencode_session_id(session_list_stdout: str) -> str:
     return session_id
 
 
+def _read_opencode_child_messages(db_path: Path, root_session_id: str) -> list[dict[str, Any]]:
+    """Read each descendant message once, excluding the separately exported root."""
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            """
+            with recursive descendants(id) as (
+                select id from session where id = ?
+                union
+                select session.id from session join descendants on session.parent_id = descendants.id
+            )
+            select message.data from message join descendants on message.session_id = descendants.id
+            where message.session_id != ?
+            order by message.time_created, message.id
+            """,
+            (root_session_id, root_session_id),
+        ).fetchall()
+    finally:
+        con.close()
+    return [{"info": json.loads(row[0])} for row in rows]
+
+
 class LegacyOpenCodeAgentVerifyRequest(BaseVerifyRequest):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
@@ -249,6 +273,8 @@ class LegacyOpenCodeAgent(SimpleResponsesAPIAgent):
             plugins.append("remaining-context.js")
         if self.config.tool_servers:
             plugins.append("required-mcp.js")
+        if self._model_call_capture_enabled():
+            plugins.append("assistant_message_header.js")
         return plugins
 
     def _agent_sandbox_observation(
@@ -509,13 +535,29 @@ class LegacyOpenCodeAgent(SimpleResponsesAPIAgent):
         trajectory = (
             TrajectoryRecord(task_id="", rollout_id=observation_invocation_id) if collect_observations else None
         )
-        if collect_observations:
-            assert remote_data_home is not None
-            observations_remote_fpath = f"{remote_data_home}/opencode/opencode.db"
-            snapshot_remote_fpath = f"{remote_data_home}/opencode/nemo-gym-observations.db"
+        child_usages = []
+        # Usage includes descendants even when detailed observation collection is disabled.
+        if collect_observations or session_id is not None:
+            snapshot_remote_fpath = (
+                f"{remote_data_home}/opencode/nemo-gym-observations.db"
+                if remote_data_home is not None
+                else f"/tmp/nemo-gym-observations-{uuid4().hex}.db"
+            )
             observations_local_fpath = results_dir / "opencode.db"
             observations_local_fpath.unlink(missing_ok=True)
             try:
+                # Release channels and OPENCODE_DB can change the database filename.
+                database_path_result = await sandbox.exec(
+                    command="export PATH=$HOME/.opencode/bin:$PATH && opencode db path",
+                    env=session_env,
+                )
+                observations_remote_fpath = (database_path_result.stdout or "").strip()
+                if (
+                    database_path_result.return_code != 0
+                    or database_path_result.error_type is not None
+                    or not observations_remote_fpath
+                ):
+                    raise RuntimeError(f"OpenCode database path lookup failed: {database_path_result.stderr}")
                 snapshot_script = (
                     "import sqlite3,sys;"
                     "source=sqlite3.connect(f'file:{sys.argv[1]}?mode=ro',uri=True);"
@@ -530,24 +572,34 @@ class LegacyOpenCodeAgent(SimpleResponsesAPIAgent):
                     timeout_s=self.config.sandbox_timeout,
                 )
                 if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:
-                    raise RuntimeError("OpenCode database snapshot failed")
+                    raise RuntimeError(f"OpenCode database snapshot failed: {snapshot_result.stderr}")
                 await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
-                observations = parse_opencode_observations(
-                    observations_local_fpath, observation_invocation_id, trajectory
-                )
+                if session_id is not None:
+                    child_messages = await asyncio.to_thread(
+                        _read_opencode_child_messages, observations_local_fpath, session_id
+                    )
+                    child_usages = self._opencode_export_to_usages({"messages": child_messages})
+                if collect_observations:
+                    observations = parse_opencode_observations(
+                        observations_local_fpath,
+                        observation_invocation_id,
+                        trajectory,
+                        model_ref=self.config.model_server,
+                    )
             except Exception:
-                trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
-                print("Failed to capture OpenCode observations", format_exc(), file=sys.stderr)
-                observations = AgentObservationBundle(
-                    source="opencode",
-                    records=[AgentInvocation(invocation_id=observation_invocation_id)],
-                    gaps=[
-                        ObservationGap(code="agent_artifact_unavailable"),
-                        ObservationGap(code="agent_transcript_unavailable"),
-                        ObservationGap(code="model_call_ownership_unavailable"),
-                        ObservationGap(code="observation_capture_failed"),
-                    ],
-                )
+                print("Failed to capture OpenCode session usage or observations", format_exc(), file=sys.stderr)
+                if collect_observations:
+                    trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
+                    observations = AgentObservationBundle(
+                        source="opencode",
+                        records=[AgentInvocation(invocation_id=observation_invocation_id)],
+                        gaps=[
+                            ObservationGap(code="agent_artifact_unavailable"),
+                            ObservationGap(code="agent_transcript_unavailable"),
+                            ObservationGap(code="model_call_ownership_unavailable"),
+                            ObservationGap(code="observation_capture_failed"),
+                        ],
+                    )
             finally:
                 observations_local_fpath.unlink(missing_ok=True)
 
@@ -564,7 +616,7 @@ class LegacyOpenCodeAgent(SimpleResponsesAPIAgent):
             opencode_export_found = True
             # Assume only one input message. May change with a system/developer message later on.
             output = self._opencode_export_to_output_items(opencode_export)[1:]
-            usage = NeMoGymResponseUsage.sum_from_list(self._opencode_export_to_usages(opencode_export))
+            usage = NeMoGymResponseUsage.sum_from_list([*self._opencode_export_to_usages(opencode_export), *child_usages])
 
         result_stdout = (result.stdout if result else "") or ""
         result_stderr = (result.stderr if result else "") or ""

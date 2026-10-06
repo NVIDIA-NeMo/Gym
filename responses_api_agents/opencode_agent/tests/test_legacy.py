@@ -233,13 +233,52 @@ class TestLegacyOpenCodeAgent:
 
         assert expected_usages == actual_usages
 
+    @mark.parametrize("reasoning", [0, 4396])
+    def test_usage_includes_reasoning_in_output_total(self, reasoning: int) -> None:
+        export = {
+            "messages": [
+                {"info": {"role": "user"}},
+                {"info": {"role": "assistant"}},
+                *[
+                    {
+                        "info": {
+                            "role": "assistant",
+                            "tokens": {
+                                "input": 100,
+                                "output": output,
+                                "reasoning": reasoning,
+                                "cache": {"read": 0, "write": 0},
+                                "total": 100 + output + reasoning,
+                            },
+                        }
+                    }
+                    for output in (3509, 0)
+                ],
+            ]
+        }
+        usages = OpenCodeSandboxedAgent._opencode_export_to_usages(None, export)
+        assert len(usages) == 2
+        assert usages[0].output_tokens == 3509 + reasoning
+        assert usages[1].output_tokens == reasoning
+        combined = NeMoGymResponseUsage.sum_from_list(usages)
+        assert combined.output_tokens == 3509 + 2 * reasoning
+        assert combined.output_tokens_details.reasoning_tokens == 2 * reasoning
+        assert combined.total_tokens == combined.input_tokens + combined.output_tokens
+
     @mark.parametrize("remaining_context", [False, True])
+    @mark.parametrize("observability_enabled", [False, True])
     async def test_responses_sanity(
-        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch, remaining_context
+        self,
+        opencode_export_test_data: Dict[str, Any],
+        monkeypatch: MonkeyPatch,
+        remaining_context: bool,
+        observability_enabled: bool,
     ) -> None:
         config = self._create_config()
         config.output_token_policy = "remaining_context" if remaining_context else "fixed"
-        server = LegacyOpenCodeAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": observability_enabled}
+        server = LegacyOpenCodeAgent(config=config, server_client=client)
 
         sandbox_mock = MagicMock()
         sandbox_mock.exec = AsyncMock(
@@ -254,7 +293,9 @@ class TestLegacyOpenCodeAgent:
         sandbox_mock.download = AsyncMock()
         sandbox_mock.upload = AsyncMock()
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
-        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+        monkeypatch.setattr(
+            server, "_create_opencode_config", AsyncMock(return_value={"plugin": ["file:///user-plugin.js"]})
+        )
 
         monkeypatch.setattr(
             "responses_api_agents.opencode_agent.legacy.Path.exists",
@@ -282,6 +323,22 @@ class TestLegacyOpenCodeAgent:
                 input=[{"role": "user", "content": "hello"}],
             ),
         )
+        command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        command_config = next(
+            arg.split("=", 1)[1] for arg in shlex.split(command) if arg.startswith("OPENCODE_CONFIG_CONTENT=")
+        )
+        plugins = json.loads(command_config)["plugin"]
+        assert plugins[0] == "file:///user-plugin.js"
+        if observability_enabled:
+            sandbox_mock.upload.assert_any_await(
+                app_module._ASSISTANT_MESSAGE_PLUGIN, app_module._REMOTE_ASSISTANT_MESSAGE_PLUGIN
+            )
+            assert plugins == ["file:///user-plugin.js", f"file://{app_module._REMOTE_ASSISTANT_MESSAGE_PLUGIN}"]
+        else:
+            assert plugins == ["file:///user-plugin.js"]
+
+        assert sandbox_mock.upload.await_count == len(server._runtime_plugins()) + int(observability_enabled)
+
         expected_response = NeMoGymResponse(
             id="resp_",
             created_at=0.0,
@@ -364,12 +421,9 @@ class TestLegacyOpenCodeAgent:
         assert expected_response == actual_response
         # Execution uploads plugins even when a resource supplied this sandbox.
         if remaining_context:
-            sandbox_mock.upload.assert_awaited_once_with(
-                Path(app_module.__file__).parents[1] / "opencode_sandboxed_agent" / "remaining-context.js",
-                "/tmp/nemo-gym-remaining-context.js",
+            sandbox_mock.upload.assert_any_await(
+                Path(app_module.__file__).parents[1] / "opencode_sandboxed_agent" / "remaining-context.js", "/tmp/nemo-gym-remaining-context.js"
             )
-        else:
-            sandbox_mock.upload.assert_not_awaited()
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
         assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["command"]
 
@@ -443,11 +497,26 @@ class TestLegacyOpenCodeAgent:
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
 
+    @mark.parametrize(
+        "database_name,lookup_failure",
+        [
+            ("opencode.db", None),
+            ("opencode-gym-correlation.db", None),
+            ("custom database.sqlite", None),
+            ("opencode.db", "exit"),
+            ("opencode.db", "empty"),
+            ("opencode.db", "execution"),
+        ],
+    )
+    @mark.parametrize("collect_observations", [True, False])
     async def test_run_builds_observations_from_live_wal_snapshot(
         self,
         tmp_path: Path,
         opencode_export_test_data: Dict[str, Any],
         monkeypatch: MonkeyPatch,
+        database_name: str,
+        lookup_failure: str | None,
+        collect_observations: bool,
     ) -> None:
         class Response:
             ok = True
@@ -472,7 +541,7 @@ class TestLegacyOpenCodeAgent:
             def cookies(self) -> dict[str, str]:
                 return self._cookies
 
-        db_path = tmp_path / "source.db"
+        db_path = tmp_path / database_name
         connection = sqlite3.connect(db_path)
         connection.execute("pragma journal_mode=wal")
         connection.execute("create table session (id text, parent_id text, time_created integer)")
@@ -513,6 +582,30 @@ class TestLegacyOpenCodeAgent:
             connection.execute(
                 "insert into part values (?, 'm1', 'root', ?, 2)", (part_id, json.dumps({"type": kind}))
             )
+        for session_id, parent_id, tokens in [
+            ("child", "root", 10),
+            ("grandchild", "child", 20),
+            ("other", None, 999),
+        ]:
+            connection.execute("insert into session values (?, ?, 1)", (session_id, parent_id))
+            connection.execute(
+                "insert into message values (?, ?, ?, 2)",
+                (
+                    session_id + "-message",
+                    session_id,
+                    json.dumps(
+                        {
+                            "role": "assistant",
+                            "tokens": {
+                                "input": tokens,
+                                "output": tokens,
+                                "reasoning": tokens,
+                                "cache": {"read": 0, "write": 0},
+                            },
+                        }
+                    ),
+                ),
+            )
         connection.commit()
         assert db_path.with_name(f"{db_path.name}-wal").stat().st_size > 0
         main_only_path = tmp_path / "main-only.db"
@@ -522,30 +615,35 @@ class TestLegacyOpenCodeAgent:
 
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {
-            "observability_enabled": True,
+            "observability_enabled": collect_observations,
             "token_id_capture": {"enabled": False, "all_agents": False},
         }
         server = LegacyOpenCodeAgent(config=self._create_config(), server_client=server_client)
         server._create_opencode_config = AsyncMock(return_value={})
 
         sandbox = MagicMock()
+        sandbox.upload = AsyncMock()
         sandbox._handle = SandboxHandle(sandbox_id="connected-sandbox", provider_name="opensandbox", raw=None)
         sandbox.exec = AsyncMock(
             side_effect=[
                 SimpleNamespace(
                     stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
                 ),
-                SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
+                SimpleNamespace(stdout='[{"id": "root"}]', stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
+                SimpleNamespace(
+                    stdout="" if lookup_failure == "empty" else f"{db_path}\n",
+                    stderr="path lookup failed" if lookup_failure else "",
+                    return_code=1 if lookup_failure == "exit" else 0,
+                    error_type="execution_failed" if lookup_failure == "execution" else None,
+                ),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
             ]
         )
         snapshot_path = tmp_path / "snapshot.db"
 
         def local_quote(value: str) -> str:
-            if value.endswith("/opencode/opencode.db"):
-                value = str(db_path)
-            elif value.endswith("/opencode/nemo-gym-observations.db"):
+            if value.endswith("/opencode/nemo-gym-observations.db") or value.startswith("/tmp/nemo-gym-observations-"):
                 value = str(snapshot_path)
             return shlex.quote(value)
 
@@ -555,7 +653,9 @@ class TestLegacyOpenCodeAgent:
             if remote_path == "/tmp/opencode_export.json":
                 local_path.write_text(json.dumps(opencode_export_test_data))
             else:
-                assert remote_path.endswith("/opencode/nemo-gym-observations.db")
+                assert remote_path.endswith("/opencode/nemo-gym-observations.db") or remote_path.startswith(
+                    "/tmp/nemo-gym-observations-"
+                )
                 subprocess.run(shlex.split(sandbox.exec.await_args_list[-1].kwargs["command"]), check=True)
                 local_path.write_bytes(snapshot_path.read_bytes())
 
@@ -603,13 +703,38 @@ class TestLegacyOpenCodeAgent:
         finally:
             connection.close()
 
+        parent_usage = NeMoGymResponseUsage.sum_from_list(server._opencode_export_to_usages(opencode_export_test_data))
+        usage = result.response.usage
+        assert usage.input_tokens == parent_usage.input_tokens + (0 if lookup_failure else 30)
+        assert usage.output_tokens == parent_usage.output_tokens + (0 if lookup_failure else 60)
+        assert usage.output_tokens_details.reasoning_tokens == parent_usage.output_tokens_details.reasoning_tokens + (
+            0 if lookup_failure else 30
+        )
+        if not collect_observations:
+            assert result.ng_agent_observations is None
+            assert getattr(result, "ng_trajectory", None) is None
+            assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
+            return
         assert result.ng_agent_observations is not None
+        lookup = sandbox.exec.await_args_list[3].kwargs
+        assert lookup["command"].endswith("opencode db path")
+        assert lookup["env"] == sandbox.exec.await_args_list[1].kwargs["env"]
+        if lookup_failure:
+            # Even a usable default-named database must not hide a failed lookup.
+            assert not TrajectoryRecord.model_validate(result.ng_trajectory).turns
+            assert "observation_capture_failed" in {gap.code for gap in result.ng_agent_observations.gaps}
+            assert result.opencode_export_found
+            assert sandbox.exec.await_count == 4
+            sandbox.download.assert_awaited_once()
+            return
         [turn] = TrajectoryRecord.model_validate(result.ng_trajectory).turns
         assert (turn.task_id, turn.rollout_id, turn.invocation_id) == ("7", "7-2", "root")
         assert turn.answer[0]["call_id"] == "call-1"
         assert not turn.model_calls
         [invocation] = [
-            record for record in result.ng_agent_observations.records if isinstance(record, AgentInvocation)
+            record
+            for record in result.ng_agent_observations.records
+            if isinstance(record, AgentInvocation) and record.invocation_id == "root"
         ]
         assert invocation.invocation_id == "root"
         assert invocation.status == "completed"
@@ -637,10 +762,7 @@ class TestLegacyOpenCodeAgent:
         assert remote_data_home.startswith("/tmp/nemo-gym-opencode-")
         assert f"XDG_DATA_HOME={remote_data_home}" in sandbox.exec.await_args_list[0].kwargs["command"]
         assert export_env["XDG_DATA_HOME"] == remote_data_home
-        assert (
-            "opencode export session-id > /tmp/opencode_export.json"
-            in sandbox.exec.await_args_list[2].kwargs["command"]
-        )
+        assert "opencode export root > /tmp/opencode_export.json" in sandbox.exec.await_args_list[2].kwargs["command"]
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
@@ -1040,3 +1162,12 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
     assert receipt["response"]["output"]
     assert receipt["response"]["status"] == result.response.status
     sandbox.stop.assert_awaited_once()
+
+
+@mark.skipif(shutil.which("node") is None, reason="Node.js is needed to exercise the OpenCode plugin hooks")
+def test_assistant_message_plugin_hooks() -> None:
+    subprocess.run(
+        [shutil.which("node"), "--test", str(Path(__file__).with_name("assistant_message_header.test.mjs"))],
+        check=True,
+        timeout=30,
+    )

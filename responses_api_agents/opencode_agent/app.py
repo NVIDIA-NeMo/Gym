@@ -241,10 +241,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         return base
 
     def _workspace_root(self) -> Path:
-        root = Path(self.config.workspace_root).expanduser() / f"opencode_{uuid4().hex[:8]}"
+        """Create a fresh per-rollout workspace directory and return it.
+
+        The full uuid plus exist_ok=False: a name collision must fail this
+        rollout loudly rather than silently merge two live rollouts' trees.
+        """
+        root = Path(self.config.workspace_root).expanduser() / f"opencode_{uuid4().hex}"
         if not root.is_absolute():
             root = Path.cwd() / root
-        root.mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=False)
         return root
 
     def _repo_dir(self, fallback: Path) -> Path:
@@ -360,7 +365,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             observations = AgentObservationBundle(source="opencode")
             if collect_observations:
                 try:
-                    observations = _parse_opencode_session(db_path, invocation_id, trajectory)
+                    observations = _parse_opencode_session(
+                        db_path, invocation_id, trajectory, model_ref=self.config.model_server
+                    )
                 except Exception:
                     LOG.exception("failed to read OpenCode session artifact")
                     if trajectory is not None:
@@ -460,7 +467,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 input_tokens=input_tokens,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
                 output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(
+                    reasoning_tokens=usage.get("reasoning_tokens", 0)
+                ),
                 total_tokens=input_tokens + output_tokens,
             ),
         )
