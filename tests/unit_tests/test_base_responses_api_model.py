@@ -21,7 +21,7 @@ import pytest
 from fastapi import Body, FastAPI, Response
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
@@ -75,11 +75,16 @@ class _DispatchPayload(BaseModel):
     token_ids: list[int]
 
 
+class _AliasedDispatchPayload(BaseModel):
+    schema_: dict = Field(alias="schema")
+
+
 @pytest.mark.parametrize(
     ("content", "expected"),
     [
         ({"text": "café", "token_ids": [1, 2, 3]}, {"text": "café", "token_ids": [1, 2, 3]}),
         (_DispatchPayload(text="café", token_ids=[1, 2, 3]), {"text": "café", "token_ids": [1, 2, 3]}),
+        (_AliasedDispatchPayload(schema={"type": "object"}), {"schema": {"type": "object"}}),
     ],
 )
 def test_orjson_dispatch_response_serializes_json(content, expected):
