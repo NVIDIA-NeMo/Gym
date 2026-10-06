@@ -1102,7 +1102,10 @@ class TestApp:
         config_cls = SimpleAgentWithCompactionConfig if with_compaction else SimpleAgentConfig
         request_cls = SimpleAgentWithCompactionRunRequest if with_compaction else SimpleAgentRunRequest
         client = MagicMock(spec=ServerClient)
-        client.global_config_dict = {"observability_enabled": False}
+        client.global_config_dict = {
+            "observability_enabled": False,
+            "token_id_capture": {"enabled": with_compaction},
+        }
         server = agent_cls(
             config=config_cls(
                 host="localhost",
@@ -1141,7 +1144,10 @@ class TestApp:
             return _mock_response(kwargs["json"] | {"reward": 0.0})
 
         client.post = AsyncMock(side_effect=post)
-        result = await server.run(request, request_cls(responses_create_params={"input": "question"}))
+        body = {"responses_create_params": {"input": "question"}}
+        if with_compaction:
+            body["_ng_rollout_id"] = "termination_g0"
+        result = await server.run(request, request_cls.model_validate(body))
         saved = json.loads(result.model_dump_json())
         assert "ng_trajectory" not in saved
         assert saved["response"]["status"] == "incomplete"
