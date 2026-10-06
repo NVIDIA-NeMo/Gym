@@ -71,6 +71,8 @@ key, and provider configuration are unchanged.
 - `model`: `<provider>/<model-name>` (see Model id)
 - `model_server`: optional Gym model server used to generate the provider entry
 - `context_window`: context limit for a generated model entry
+- `max_input_tokens`: optional input limit for a generated model entry; use it to reserve room for
+  output and proactive compaction when the backing server has a smaller context window
 - `max_output_tokens`: output limit for a generated model entry
 - `openai_api_key`: passed to the subprocess as `OPENAI_API_KEY`
 - `openai_base_url`: passed to the subprocess as `OPENAI_BASE_URL`

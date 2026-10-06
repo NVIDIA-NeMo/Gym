@@ -527,6 +527,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     extra_args: list[str] = []
     opencode_config: dict[str, Any] = Field(default_factory=dict)
     context_window: int = 262144
+    max_input_tokens: Optional[int] = None
     max_output_tokens: int = 131072
     opencode_version: Optional[str] = None
 
@@ -612,12 +613,18 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 {"baseURL": self._resolve_model_base_url(rollout_id), "apiKey": "EMPTY"}  # pragma: allowlist secret
             )
             model = nemo.setdefault("models", {}).get(self.config.model, {})
+            limits = {
+                "context": self.config.context_window,
+                "output": self.config.max_output_tokens,
+            }
+            if self.config.max_input_tokens is not None:
+                limits["input"] = self.config.max_input_tokens
             self._deep_merge(
                 model,
                 {
                     "name": self.config.model,
                     "interleaved": {"field": "reasoning"},
-                    "limit": {"context": self.config.context_window, "output": self.config.max_output_tokens},
+                    "limit": limits,
                 },
             )
             nemo["models"] = {self.config.model: model}
