@@ -73,6 +73,21 @@ from resources_servers.genrm_compare.utils import (
 
 logger = logging.getLogger(__name__)
 
+
+def _output_budget_exhausted(raw_response: Any) -> bool:
+    """True if a Responses API object was cut off by ``max_output_tokens``.
+
+    The model spent its whole output budget (typically on reasoning) and never emitted a
+    verdict: ``status="incomplete"`` with ``incomplete_details.reason="max_output_tokens"``.
+    Gym's chat->Responses conversion produces this for ``finish_reason="length"``; hosted
+    Responses API backends emit it natively.
+    """
+    if not isinstance(raw_response, dict) or raw_response.get("status") != "incomplete":
+        return False
+    details = raw_response.get("incomplete_details") or {}
+    return isinstance(details, dict) and details.get("reason") == "max_output_tokens"
+
+
 GROUP_ID_KEY_NAME = "_ng_group_id"
 GROUP_ATTEMPT_KEY_NAME = "_ng_group_attempt"
 
@@ -961,6 +976,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
         max_attempts = max(1, int(cfg.genrm_parse_retries) + 1)
         saw_completed_answer = False
+        budget_exhausted_attempts = 0
         for attempt_idx in range(max_attempts):
             try:
                 raw_response = await call()
@@ -984,6 +1000,16 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 and bool(answer.strip())
             )
             saw_completed_answer |= usable
+            if _output_budget_exhausted(raw_response):
+                budget_exhausted_attempts += 1
+                logger.warning(
+                    "GenRM output budget exhausted for pair %s (attempt %s/%s, max_output_tokens=%s): "
+                    "response is incomplete (reason=max_output_tokens) and contains no verdict",
+                    pair_idx,
+                    attempt_idx + 1,
+                    max_attempts,
+                    responses_create_params.max_output_tokens,
+                )
             try:
                 if not usable:
                     raise GenRMOutputParseError("Judge returned an empty or unsuccessful response")
@@ -993,7 +1019,14 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     await asyncio.sleep(float(cfg.genrm_parse_retry_sleep_s))
                     continue
                 if not saw_completed_answer:
-                    raise JudgeError(f"Judge returned no completed answer after {max_attempts} attempts") from error
+                    message = f"Judge returned no completed answer after {max_attempts} attempts"
+                    if budget_exhausted_attempts:
+                        message += (
+                            f" ({budget_exhausted_attempts} of them exhausted max_output_tokens="
+                            f"{responses_create_params.max_output_tokens} without emitting a verdict; "
+                            "raise the budget or constrain the judge's reasoning)"
+                        )
+                    raise JudgeError(message) from error
                 # Preserve the existing fallback for completed, nonempty but malformed answers.
                 logger.warning(
                     "GenRM parse failed for pair %s after %s attempts; using defaults", pair_idx, max_attempts

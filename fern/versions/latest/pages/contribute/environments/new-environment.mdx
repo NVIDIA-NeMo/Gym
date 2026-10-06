@@ -1,15 +1,37 @@
 ---
 title: "New Environment"
-description: ""
+description: "Compose task and harness components, declare a workload manifest, and validate a contribution."
 ---
-An environment includes the dataset, agent harness, verifier, and state. The model is external to the environment. A Gym config connects these components and supplies the runtime wiring.
+# New Environment
+
+An environment is the logical execution composition of a task, agent harness, model bindings, resources, and episode protocol. A Gym config selects and connects these participants. The task defines what must be done and how it is scored; the harness decides how to solve it.
 
 The onboarding flow below covers a complete environment or benchmark. A resources server may be a reusable scoring, tool, or state component, or it may ship a runnable composition and data. Manifest-backed onboarding currently writes canonical workloads under `environments/` and `benchmarks/`; runnable configs still colocated under `resources_servers/` remain visible as `no-manifest` migration entries.
 
 <Tip>
-For a guide to building your first resources server, refer to [Single Step Environment](/environment-tutorials/single-step-environment).
+For a guide to building your first resources server, refer to [Single Step Environment](/main/environment-tutorials/single-step-environment).
 
 </Tip>
+
+## Component Ownership
+
+The agent/environment separation design keeps task behavior independent of the selected harness:
+
+| Part | Responsibility |
+| --- | --- |
+| Task / Resources Server | Task setup, state, tools, verification, task resources such as sandboxes, and their cleanup |
+| Agent Server | Harness behavior, model interaction, dependencies, and harness-local sessions |
+| Model Server | Model inference and provider-specific adaptation |
+| Environment | Configuration that selects the task, participants, model bindings, episode protocol, and run policy |
+| Environment Server | Episode entrypoint and protocol orchestration; legacy adapters delegate episode execution to the agent |
+
+A Resources Server is one participant in an environment. Reuse an existing harness when adding tasks or scoring; a new benchmark does not by itself need a new Agent Server. Expose every tool or artifact the verifier depends on through the task contract. For example, a verifier that reads deliverables must document how any compatible harness can create them, without relying on a private handoff in one agent.
+
+<Note>
+Every runnable agent must be referenced by an Environment Server in Gym config; rollout collection routes `POST /run` through that server. The scaffold currently wires [`legacy_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/legacy_agent), which forwards the agent's existing `/run` and `/aggregate_metrics` contracts without taking over its lifecycle controls. Native protocols such as [`single_agent_turn`](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/single_agent_turn) coordinate participant sessions, verification, timeouts, and cleanup. Migrating legacy components to those protocols is separate from adding the compatibility routing. The manifest describes composition; it does not perform that migration or define an `environment_server` field.
+</Note>
+
+An external framework may expose a reusable harness, task tools and scoring, or an entire episode engine. Adapt the reusable components where possible and document the boundary when the engine cannot be separated. Existing `external-agent-loop` adapters run behind the compatibility Environment Server; moving a fused engine to its own native episode protocol is a separate migration tracked by [the composability epic](https://github.com/NVIDIA-NeMo/Gym/issues/1866).
 
 ## Environment Manifest
 
@@ -22,7 +44,8 @@ The manifest is the place to read this declaration, but not every field is autho
 | Identity and catalog metadata: `name`, `version`, `experimental`, `kind`, `integration_profile`, `domain`, `description`, `modality`, `licensing`, and `authors` | Manifest |
 | Behavioral declarations: `reward`, `determinism`, and optional session, state, sandbox, provenance, and lifecycle fields | Manifest |
 | Composition: `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, and `grading_mode` | Gym config; mirrored read-only in the manifest |
-| Benchmark protocol: `canonical_split` and `standard_prompt_config` | Manifest |
+| Configuration selection: `config_path` and optional `dataset_owner` | Manifest |
+| Benchmark protocol: `canonical_split`, `prompt_source`, and `standard_prompt_config` | Manifest; consistent with preparation and runtime prompting |
 
 When composition changes, edit the Gym config and update its manifest mirror. The runtime continues to resolve and execute the config; it does not use the manifest as a second wiring system. `version` follows Semantic Versioning and is intended to identify the resolved composition rather than the manifest text alone. Validation reports the version but does not yet enforce immutable composition or require version bumps.
 
@@ -72,9 +95,11 @@ New manifests are `experimental: true` by default. The NeMo Gym team can manuall
 | `modality` | string | Required; non-empty |
 | `licensing` | string | Optional; defaults to `unknown`; SPDX expression, `internal`, `proprietary`, or `unknown` |
 | `authors` | list of strings | Required; non-empty and unique |
-| `reward` | object | Required; `range` is two finite increasing numbers and `higher_is_better` is boolean |
+| `reward` | object | Required; `range` is two finite numbers ordered `lower <= upper` (a constant range is allowed) and `higher_is_better` is boolean |
 | `determinism` | string | Optional; `seeded`, `stochastic`, or `unknown` (default) |
-| `resources_server` | string | Required; mirrored from config |
+| `config_path` | string | Optional; defaults to `config.yaml` beside the manifest; must be relative and stay inside the catalog tree |
+| `dataset_owner` | string or null | Optional; selects the dataset-bearing config instance when selection is ambiguous |
+| `resources_server` | string or null | Required; mirrored from config; `null` is permitted except for `custom-gym-verifier` |
 | `agent_server` | string | Required; mirrored from config |
 | `datasets` | list of objects | Required and non-empty; dataset names must be unique |
 | `model_server` | string or null | Required for `custom-gym-verifier` and `custom-gym-agent-loop` |
@@ -84,11 +109,26 @@ New manifests are `experimental: true` by default. The NeMo Gym team can manuall
 | `state` | string or null | Optional; `none` or `per_session` |
 | `sandbox` | string or null | Optional sandbox requirement |
 | `canonical_split` | string or null | Required for benchmarks |
-| `standard_prompt_config` | string or null | Required for benchmarks |
+| `prompt_source` | string | Optional; `template` (default), `prepared`, or `agent`; see below |
+| `standard_prompt_config` | string or null | Required for template benchmarks; absent for prepared prompts; optional for agent-owned prompting |
 | `adopted_from` | object or null | Optional; requires source URL, upstream ref, and reconciliation date |
 | `lifecycle` | string | Optional; `active` (default) or `deprecated` |
 
-Each `datasets` item requires `name`, `type`, and `jsonl_fpath`. `type` is `train`, `validation`, `example`, or `benchmark`; benchmark datasets also require `prepare_script`. `prompt_config` is optional, and `num_repeats` defaults to `1`.
+Each `datasets` item requires `name`, `type`, and `jsonl_fpath`. `type` is `train`, `validation`, `example`, or `benchmark`; benchmark datasets also require `prepare_script`. `num_repeats` defaults to `1`. `canonical_split` records the source split being measured, while dataset `type: benchmark` selects its role in Gym.
+
+For named configs, put the manifest in the workload's catalog directory and set `config_path` relative to it. For example, `benchmarks/my_benchmark/config_with_system/manifest.yaml` can declare `name: my_benchmark/config_with_system` and `config_path: ../config_with_system.yaml`. Shared prompts and suite fragments are not standalone workloads.
+
+`dataset_owner` names a config instance, not a component implementation. It selects the intended dataset declaration when multiple instances have datasets; runtime agent routing must still be unambiguous. New task scaffolds put datasets on the resources-server instance. Existing agent-owned declarations, including the reuse-verifier scaffold, remain supported.
+
+### Prompt Sources
+
+| `prompt_source` | Contract |
+| --- | --- |
+| `template` (default) | Prepared rows contain template fields. For benchmarks, `standard_prompt_config` is required and any dataset `prompt_config` must match it. |
+| `prepared` | Each benchmark row already contains non-empty `responses_create_params.input`. Omit both `standard_prompt_config` and dataset `prompt_config`. |
+| `agent` | The harness or external engine constructs prompts during execution. Omit dataset `prompt_config`; an optional `standard_prompt_config` documents an agent template and is not applied to dataset rows by validation. |
+
+Choose the source that matches the implemented prompting path. Changing this metadata alone does not change runtime prompting.
 
 ### Integration Profiles
 
@@ -101,7 +141,7 @@ Each `datasets` item requires `name`, `type`, and `jsonl_fpath`. `type` is `trai
 | `external-agent-loop` | An external framework owns the episode and adapts its result back to Gym | None | Agent `responses()` and `run()` |
 | `external-rollout-driver` | Rollout coordination runs above the agent | `rollout_driver` | Rollout-driver module |
 
-Every profile also requires a `resources_server`, an `agent_server`, and at least one dataset. `rollout_driver` is valid only for `external-rollout-driver`. A benchmark additionally requires `canonical_split`, `standard_prompt_config`, and at least one benchmark dataset with `prepare_script`; its dataset-level `prompt_config` remains optional.
+Every profile declares `resources_server`, `agent_server`, and at least one dataset. If the workload has no resources server, profiles other than `custom-gym-verifier` may explicitly declare `resources_server: null`. `rollout_driver` is valid only for `external-rollout-driver`. A benchmark additionally requires `canonical_split` and at least one benchmark dataset with `prepare_script`; its prompt requirements depend on `prompt_source` above.
 
 The profile is an authored classification, not a runtime dispatcher. Validation recognizes the default Gym agent loop, custom Gym agent behavior, external agent adapters, and external rollout drivers. It reports `unknown` when static inspection is inconclusive and warns when the declaration disagrees. Runtime behavior remains config-driven; concrete component versions, capabilities, pinning, and swap constraints are not yet enforced.
 
@@ -134,7 +174,7 @@ gym env test my_eval
 gym env publish my_eval
 ```
 
-The scaffold creates a manifest, Gym config, sample data, and README. Names that create Python components must be lowercase Python identifiers. Benchmarks also receive source data, a prompt, and a `prepare()` function. A new scorer adds a resources server and verifier fixture. Non-default templates expose the selected extension point but initially delegate to existing Gym behavior; replace their generated TODO before review. For an external agent loop, replace `run()` with the framework adapter and make `responses()` raise `NotImplementedError`.
+The scaffold creates a manifest, Gym config, sample data, and README. Names that create Python components must be lowercase Python identifiers. Benchmarks also receive source data, a prompt, and a `prepare()` function. A new scorer adds a resources server and verifier fixture. Non-default templates expose the selected extension point but initially delegate to existing Gym behavior; replace their generated TODO before review. An external-loop scaffold is an adapter starting point under the current runtime; document which responsibilities the framework owns and test the actual execution path.
 
 To reuse a scorer that already exports the verifier-fixture contract, declare its reward contract instead of copying its implementation:
 
@@ -144,6 +184,12 @@ gym env init --benchmark my_benchmark --profile custom-gym-verifier \
 ```
 
 Scaffolding is non-destructive: an identical rerun is a no-op, and any conflicting file aborts the complete write set. `gym env validate --sync NAME` updates only mirrored composition fields after all static checks pass. `gym env test --update-expected NAME` updates fixture rewards only after every behavioral check passes. `gym env publish NAME` runs validation and the fixture, rejects manifest metadata placeholders, and confirms that the exact manifest is discoverable. The manifest is the registry record, so this structural check is idempotent and does not commit or push changes.
+
+Run `gym eval prepare --benchmark NAME` before validating a benchmark whose prepared data is not yet present. Static validation reads the declared JSONL but does not execute preparation code.
+
+<Note>
+`gym env test NAME` and `gym env publish NAME` require a resources server exporting `VERIFIER_FIXTURE`. A manifest with `resources_server: null` can pass static validation, but these fixture commands do not support it. Use the external adapter's own scoring tests and representative rollouts, and record the limitation in the PR. `gym env test --resources-server NAME` runs the component's test suite rather than the workload fixture.
+</Note>
 
 `gym list environments` and unqualified `gym search` read manifests and legacy runnable configs together. Entries with `experimental: true` carry an `experimental` annotation; entries with `experimental: false` have no status annotation. Unmigrated entries are labeled `no-manifest`. Reusable resources-server components without agent composition and datasets remain available through `gym list resources-servers` and are not environment entries.
 
@@ -164,7 +210,7 @@ Fixture execution runs directly in the resources server's dependency environment
 
 ## Guiding Principles
 
-Adding a training environment has the same local correctness requirements as [Adding A Benchmark](/contribute/environments/adding-a-benchmark): its manifest must validate and its verifier fixture must pass. Behavior-changing environment or agent work must also run representative real smoke rollouts as required by `AGENTS.md`. A full evaluation, reward profile, or training run can provide stronger evidence about measurement quality and training utility, but it is optional and is not a publication or merge compute gate.
+Adding a training environment has the same local correctness requirements as [Adding A Benchmark](/main/contribute/environments/adding-a-benchmark): its manifest must validate and its verifier fixture must pass where that contract is supported. Behavior-changing environment or agent work must also run representative real smoke rollouts as required by `AGENTS.md`. A full evaluation, reward profile, or training run can provide stronger evidence about measurement quality and training utility, but it is optional and is not a publication or merge compute gate.
 
 When compute is available, a useful training experiment isolates the environment's effect on the targeted capability. GRPO with NeMo RL, 64 prompts per step, and 16 rollouts per prompt is one starting point; adjust it to the environment and available compute.
 
@@ -195,7 +241,7 @@ Contributing a resources server follows this sequence:
 | 2 | Implementation | Build resources server with verification logic |
 | 3 | Testing | Write and run unit tests |
 | 4 | Smoke Rollouts | For behavior changes, run a representative model rollout and inspect agent and verifier behavior |
-| 5 | Reward Profiling | Optionally inspect reward distribution for training environments; benchmarks require profiling |
+| 5 | Reward Profiling | Inspect reward distribution and variance when evaluating benchmark fidelity or training utility |
 | 6 | Training Validation | Optionally test training utility |
 | 7 | Submit PR | Submit pull request with all required information |
 | 8 | Review | Address feedback on the required local checks and contribution metadata |
@@ -214,7 +260,7 @@ Prepare the dataset for your environment:
 Build your resources server:
 
 - Run `gym env init --resources-server my_server` to scaffold the new resources server
-- Follow the [Single Step Environment](/environment-tutorials/single-step-environment) guide to implement your specific logic
+- Follow the [Single Step Environment](/main/environment-tutorials/single-step-environment) guide to implement your specific logic
 - Implement verification logic for your tasks by defining the `verify()` function
 - Set the `domain` field in your resources server configuration (see `Domain`).
 - Complete the auto-generated `README.md` with licensing information
@@ -246,7 +292,7 @@ Document the commands and observed behavior in the PR. For a manifest-backed wor
 
 ### 5. Reward Profiling (Optional for Training Environments)
 
-Fixed evaluation benchmarks must follow the reward-profiling requirements in [Adding A Benchmark](/contribute/environments/adding-a-benchmark). For training environments, profiling remains optional:
+For benchmark fidelity checks, follow the reward-profiling guidance in [Add a benchmark](/main/contribute/environments/adding-a-benchmark). For training environments, profiling remains optional:
 
 Run inference to inspect reward distribution:
 
@@ -357,5 +403,5 @@ For multi-step scenarios, the model returns training information on response mes
 
 ## Reference
 
-- [Single Step Environment](/environment-tutorials/single-step-environment) - Introductory tutorial for creating your first resources server
-- [Environment Components](/about/architecture) - Environment component architecture
+- [Single Step Environment](/main/environment-tutorials/single-step-environment) - Introductory tutorial for creating your first resources server
+- [Environment Components](/main/about/architecture) - Environment component architecture

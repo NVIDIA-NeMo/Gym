@@ -13,15 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import hashlib
 import json
 import logging
 from copy import deepcopy
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
-from aiohttp import ClientResponseError
+from aiohttp import ClientResponseError, RequestInfo
 from fastapi.testclient import TestClient
+from multidict import CIMultiDict, CIMultiDictProxy
 from pytest import MonkeyPatch, mark, raises
+from yarl import URL
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
@@ -56,8 +59,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
+    PermanentEndpointError,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
     CaptureContext,
     InMemoryLineageStore,
@@ -73,6 +77,7 @@ from responses_api_models.vllm_model.app import (
     VLLMModel,
     VLLMModelConfig,
     _append_transport_io,
+    _redacted_error_repr,
     _transport_images,
     _transport_log_context,
 )
@@ -163,6 +168,15 @@ def test_transport_log_context_reads_generic_headers_without_body_fields() -> No
         "step": 3,
         "parse_attempt": 1,
     }
+
+
+def test_redacted_error_repr_without_request_info() -> None:
+    # NeMoGymAsyncOpenAI raises this with no request details after a permanent auth or quota failure.
+    error = PermanentEndpointError(request_info=None, history=(), status=401, message="spent key", headers=None)
+
+    assert _redacted_error_repr(error) == (
+        "PermanentEndpointError(status=401, message='spent key', method=None, url=None)"
+    )
 
 
 class FakeUUID:
@@ -766,13 +780,27 @@ PARAMETERIZE_DATA = [
 ]
 
 
+def _engine_bad_request_error(message: str, status: int = 400) -> ClientResponseError:
+    """Build an engine refusal in vLLM's error format: a JSON body with a top-level message and integer code."""
+    request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+    error = ClientResponseError(request_info, (), status=status, message="Bad Request")
+    error.response_content = json.dumps(
+        {"object": "error", "message": message, "type": "BadRequestError", "param": None, "code": status}
+    ).encode()
+    return error
+
+
 class TestApp:
     def _setup_server(
         self,
         monkeypatch: MonkeyPatch,
         *,
         propagate_context_overflow_errors: bool = False,
+        use_completions_api: bool = False,
         external_staging_backend: str | None = None,
+        route_around_failing_endpoints: bool = False,
+        endpoint_failure_threshold: int = 3,
+        endpoint_retry_after_s: float = 60.0,
         forward_session_id_as_conversation_id: bool = False,
     ):
         config = VLLMModelConfig(
@@ -786,6 +814,10 @@ class TestApp:
             return_token_id_information=False,
             uses_reasoning_parser=False,
             propagate_context_overflow_errors=propagate_context_overflow_errors,
+            use_completions_api=use_completions_api,
+            route_around_failing_endpoints=route_around_failing_endpoints,
+            endpoint_failure_threshold=endpoint_failure_threshold,
+            endpoint_retry_after_s=endpoint_retry_after_s,
             forward_session_id_as_conversation_id=forward_session_id_as_conversation_id,
         )
 
@@ -842,6 +874,86 @@ class TestApp:
                 assert response.json()["incomplete_details"] == {"reason": "max_output_tokens"}
             else:
                 assert '"finish_reason": "length"' in response.text
+
+    @mark.parametrize("use_completions_api", [False, True])
+    def test_an_engine_error_the_server_does_not_handle_is_logged_with_its_body(
+        self, monkeypatch: MonkeyPatch, caplog, use_completions_api: bool
+    ) -> None:
+        # Any engine answer but the handled context-length 400 reaches the caller as a plain
+        # server error that carries only the status; the log keeps the status, the request path,
+        # the rollout id, and the engine's body.
+        server = self._setup_server(monkeypatch, use_completions_api=use_completions_api)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=422, message="Unprocessable Entity")
+        error.response_content = (
+            b'{"object":"error","message":"tools.3.type: Input should be \'function\'","type":"BadRequestError",'
+            b'"param":null,"code":422}'
+        )
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        mock_client.create_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            response = TestClient(app).post(
+                "/ng-rollout/r0/v1/chat/completions",
+                json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        assert response.status_code == 500
+        logged = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING and "engine answered" in record.getMessage()
+        ]
+        assert len(logged) == 1
+        assert "engine answered 422" in logged[0]
+        assert "/v1/chat/completions" in logged[0]
+        assert "(rollout r0)" in logged[0]
+        assert "Input should be 'function'" in logged[0]
+
+    def test_transport_log_error_event_omits_request_headers(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        log_path = tmp_path / "model-io-transport.jsonl"
+        monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
+        fake_api_key = "sk-FAKE-transport-log-key"  # pragma: allowlist secret
+        server = self._setup_server(monkeypatch)
+        # A failed model call with the bearer token in its request headers. The key is in the URL query too, so
+        # that logging `str(e)` (which includes the URL) also fails this test.
+        url = URL(f"http://vllm.test/v1/chat/completions?api-key={fake_api_key}")
+        request_info = RequestInfo(
+            url=url,
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict({"Authorization": f"Bearer {fake_api_key}"})),
+            real_url=url,
+        )
+        response = MagicMock(ok=False, request_info=request_info)
+        response.raise_for_status.side_effect = ClientResponseError(
+            request_info=request_info, history=(), status=400, message="Bad Request"
+        )
+
+        async def failed_call(**kwargs: Any) -> None:
+            # The real `raise_for_status` keeps the request headers on the exception it raises.
+            await raise_for_status(response, b'{"error":{"message":"invalid request","code":400}}')
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=failed_call)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        TestClient(app).post(
+            "/v1/chat/completions", json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]}
+        )
+
+        log_text = log_path.read_text(encoding="utf-8")
+        assert fake_api_key not in log_text
+        (error_event,) = [json.loads(line) for line in log_text.splitlines() if "transport_error_response" in line]
+        assert error_event["error"] == (
+            "ClientResponseError(status=400, message='Bad Request', method='POST', "
+            "url='http://vllm.test/v1/chat/completions')"
+        )
 
     def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
@@ -1020,6 +1132,170 @@ class TestApp:
             client_indices.append(next(i for i, client in enumerate(worker._clients) if client is selected_client))
 
         assert client_indices[0] == client_indices[1]
+
+    @staticmethod
+    def _request_for_session(session_id: str) -> MagicMock:
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: session_id}
+        request.url.path = "/v1/chat/completions"
+        return request
+
+    @staticmethod
+    def _hashed_client_idx(session_id: str, n_clients: int) -> int:
+        digest = hashlib.sha256(session_id.encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], byteorder="big") % n_clients
+
+    def _setup_routing_server(self, monkeypatch: MonkeyPatch, *, route_around: bool, **config_kwargs) -> VLLMModel:
+        server = self._setup_server(monkeypatch, route_around_failing_endpoints=route_around, **config_kwargs)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI, base_url=f"http://engine-{i}/v1") for i in range(4)]
+        return server
+
+    def test_a_failing_endpoint_loses_its_sessions_and_takes_no_new_ones(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_routing_server(monkeypatch, route_around=True, endpoint_failure_threshold=3)
+        pinned = server._resolve_client(self._request_for_session("session-a"))
+        server._note_endpoint_failure(pinned)
+        server._note_endpoint_failure(pinned)
+        # Two failures are below the threshold: the session stays where its id hashes.
+        assert server._resolve_client(self._request_for_session("session-a")) is pinned
+
+        server._note_endpoint_failure(pinned)
+        moved = server._resolve_client(self._request_for_session("session-a"))
+        assert moved is not pinned
+        # The move is sticky, and new sessions spread over the serving endpoints only.
+        assert server._resolve_client(self._request_for_session("session-a")) is moved
+        new_clients = {server._resolve_client(self._request_for_session(f"new-{i}")) for i in range(64)}
+        assert new_clients == set(server._clients) - {pinned}
+
+    def test_without_the_gate_a_failing_endpoint_keeps_its_sessions(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_routing_server(monkeypatch, route_around=False)
+        pinned = server._resolve_client(self._request_for_session("session-a"))
+        for _ in range(5):
+            server._note_endpoint_failure(pinned)
+        assert server._resolve_client(self._request_for_session("session-a")) is pinned
+        hashed = server._clients[self._hashed_client_idx("new-0", len(server._clients))]
+        assert server._resolve_client(self._request_for_session("new-0")) is hashed
+
+    def test_a_good_answer_resets_the_consecutive_failure_count(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_routing_server(monkeypatch, route_around=True, endpoint_failure_threshold=3)
+        pinned = server._resolve_client(self._request_for_session("session-a"))
+        server._note_endpoint_failure(pinned)
+        server._note_endpoint_failure(pinned)
+        server._note_endpoint_success(pinned)
+        server._note_endpoint_failure(pinned)
+        server._note_endpoint_failure(pinned)
+        assert server._resolve_client(self._request_for_session("session-a")) is pinned
+
+    def test_a_failed_endpoint_takes_one_trial_call_per_retry_interval(self, monkeypatch: MonkeyPatch) -> None:
+        clock = [1000.0]
+        monkeypatch.setattr("responses_api_models.vllm_model.app.monotonic", lambda: clock[0])
+        server = self._setup_routing_server(
+            monkeypatch, route_around=True, endpoint_failure_threshold=1, endpoint_retry_after_s=60.0
+        )
+        failed = server._clients[0]
+        server._note_endpoint_failure(failed)
+        # New sessions whose id hashes onto the failed endpoint.
+        probes = [f"probe-{i}" for i in range(400) if self._hashed_client_idx(f"probe-{i}", 4) == 0]
+        assert len(probes) >= 6
+
+        clock[0] += 59.0
+        assert server._resolve_client(self._request_for_session(probes[0])) is not failed
+        clock[0] += 1.0
+        # The interval has run out: the first new session is the trial and restarts the interval.
+        assert server._resolve_client(self._request_for_session(probes[1])) is failed
+        assert server._resolve_client(self._request_for_session(probes[2])) is not failed
+        # A failed trial waits a whole interval again.
+        server._note_endpoint_failure(failed)
+        clock[0] += 59.0
+        assert server._resolve_client(self._request_for_session(probes[3])) is not failed
+        clock[0] += 1.0
+        assert server._resolve_client(self._request_for_session(probes[4])) is failed
+        # A good answer, here from the trial, puts the endpoint back in the pool.
+        server._note_endpoint_success(failed)
+        assert not server._endpoint_failed(failed)
+        assert server._resolve_client(self._request_for_session(probes[5])) is failed
+
+    def test_a_moved_session_returns_to_its_own_endpoint_when_it_serves_again(self, monkeypatch: MonkeyPatch) -> None:
+        clock = [1000.0]
+        monkeypatch.setattr("responses_api_models.vllm_model.app.monotonic", lambda: clock[0])
+        server = self._setup_routing_server(
+            monkeypatch, route_around=True, endpoint_failure_threshold=1, endpoint_retry_after_s=60.0
+        )
+        request = self._request_for_session("session-a")
+        own = server._resolve_client(request)
+        server._note_endpoint_failure(own)
+        moved = server._resolve_client(request)
+        assert moved is not own
+        clock[0] += 59.0
+        assert server._resolve_client(request) is moved
+        # With no new sessions in a wave, the moved session is what tries its own
+        # endpoint once the interval has run out; a failed trial sends it back.
+        clock[0] += 1.0
+        assert server._resolve_client(request) is own
+        server._note_endpoint_failure(own)
+        assert server._resolve_client(request) is moved
+        clock[0] += 60.0
+        assert server._resolve_client(request) is own
+        server._note_endpoint_success(own)
+        assert server._resolve_client(request) is own
+        assert server._resolve_client(request) is own
+
+    @staticmethod
+    def _served_completion(content: str) -> dict:
+        return NeMoGymChatCompletion(
+            id="chtcmpl",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content=content, tool_calls=[]),
+                )
+            ],
+        ).model_dump()
+
+    async def test_engine_server_errors_move_the_session_to_a_serving_endpoint(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch, route_around_failing_endpoints=True, endpoint_failure_threshold=2)
+        dead = MagicMock(spec=NeMoGymAsyncOpenAI, base_url="http://dead/v1")
+        dead.create_chat_completion = AsyncMock(
+            side_effect=_engine_bad_request_error("Internal Server Error", status=500)
+        )
+        live = MagicMock(spec=NeMoGymAsyncOpenAI, base_url="http://live/v1")
+        live.create_chat_completion = AsyncMock(return_value=self._served_completion("served"))
+        server._clients = [dead, live]
+        server._session_id_to_client["session-a"] = dead
+        request = self._request_for_session("session-a")
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            model="dummy_model", messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hi")]
+        )
+
+        for _ in range(2):
+            with raises(ClientResponseError):
+                await server.chat_completions(request, body)
+        result = await server.chat_completions(request, body)
+
+        assert result.choices[0].message.content == "served"
+        assert dead.create_chat_completion.await_count == 2
+        assert live.create_chat_completion.await_count == 1
+
+    async def test_an_engine_refusal_does_not_count_against_its_endpoint(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch, route_around_failing_endpoints=True, endpoint_failure_threshold=1)
+        refusing = MagicMock(spec=NeMoGymAsyncOpenAI, base_url="http://refusing/v1")
+        refusing.create_chat_completion = AsyncMock(
+            side_effect=_engine_bad_request_error("tools.3.type: Input should be 'function'", status=422)
+        )
+        server._clients = [refusing, MagicMock(spec=NeMoGymAsyncOpenAI, base_url="http://other/v1")]
+        server._session_id_to_client["session-a"] = refusing
+        request = self._request_for_session("session-a")
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            model="dummy_model", messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hi")]
+        )
+
+        with raises(ClientResponseError):
+            await server.chat_completions(request, body)
+
+        assert server._resolve_client(request) is refusing
 
     @mark.parametrize("forward", [False, True])
     async def test_chat_completions_forwards_session_id_as_conversation_id(

@@ -62,6 +62,9 @@ apt-get purge -y \
 
 apt-get autoremove -y
 
+# CVE-2026-45447: PKCS#7/S-MIME use-after-free in OpenSSL's PKCS7_verify().
+apt-get install -y --only-upgrade openssl libssl3t64
+
 # Install enroot for the EnrootProvider sandbox backend.
 # GitHub releases provide signed .debs for amd64 and arm64.
 arch=$(dpkg --print-architecture)
@@ -287,10 +290,12 @@ fi
 # ray's bundled Java worker jar ships an outdated httpcore5 with a known CVE
 # (GHSA-hf6x-8p5f-cgmf). Gym never uses Ray's Java cross-language worker, and
 # removing the jar doesn't affect ray.init(), remote tasks, actors, or
-# ray.serve (verified locally). Scoped to installed venvs (site-packages)
-# only, not uv's raw cache: deleting a file uv's cache expects to still be
-# there could break hardlinking a fresh venv for a server not prefetched here.
-find /opt -path "*/site-packages/ray/jars/ray_dist.jar" -delete
+# ray.serve (verified locally). Covers both installed venvs (site-packages)
+# and uv's own cache (archive-v0): confirmed uv silently skips a missing
+# cached file and installs everything else fine, even fully offline, so
+# purging it from the cache too doesn't break installing a fresh venv later
+# for a server not prefetched here.
+find /opt -name ray_dist.jar -delete
 
 # Keep ownership changes for generated caches and server venvs in the layer
 # that creates them so later layers do not duplicate their contents.
