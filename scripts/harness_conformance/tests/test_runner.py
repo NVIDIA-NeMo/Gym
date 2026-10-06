@@ -172,6 +172,8 @@ def test_verifier_records_actual_final_answer(tmp_path, name, reward):
         client.post("/seed_session", json={})
         response = client.post("/ng-rollout/0-0/verify", json=body)
     assert response.json()["reward"] == reward
+    assert response.json()["evaluation_completed"] is True
+    assert response.json()["mask_sample"] is False
     assert probe.verifications == [{"reward": reward, "answer_seen": True}]
     assert probe.seeded == 1
 
@@ -181,7 +183,9 @@ def retained_episode(tmp_path):
     # Contract fixture only: used to prove a green artifact cannot hide a missing live probe.
     raw = evidence_record()
     record = hydrate_record(raw)
-    calls = record["ng_model_call_capture"]["calls"]
+    calls = [
+        {**c, "status_code": c["response_metadata"]["status_code"]} for c in record["ng_trajectory"]["model_calls"]
+    ]
     witness = {
         "seeded": 1,
         "finished": True,
@@ -220,7 +224,7 @@ def test_behavior_failure_does_not_erase_artifact_success(retained_episode):
     assert result["verdict"] == "not_fulfilled"
     assert result["behavioral_status"] == "fail"
     assert all(v["verdict"] == "fulfilled" for v in result["evidence"].values())
-    assert "retained model attempts differ" in " ".join(result["issues"])
+    assert "canonical" in " ".join(result["issues"])
 
 
 def test_execution_status_does_not_erase_retained_results(retained_episode):
@@ -276,7 +280,7 @@ def test_tool_witness_rejects_lost_or_changed_evidence(retained_episode, mutatio
 
 
 @pytest.mark.parametrize("surface", ["trajectory", "observations"])
-def test_tool_witness_supports_retained_surface_fallbacks(retained_episode, surface):
+def test_tool_witness_uses_only_designated_surface(retained_episode, surface):
     directory, _ = retained_episode
     bundle = directory / "rollouts.jsonl"
     record = json.loads(bundle.read_text())
@@ -287,7 +291,8 @@ def test_tool_witness_supports_retained_surface_fallbacks(retained_episode, surf
         del record["ng_trajectory"]["invocations"]
     bundle.write_text(json.dumps(record) + "\n")
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
-    assert result["verdict"] == "fulfilled", result["issues"]
+    assert bool(result["issues"]) == (surface == "observations")
+    assert result["verdict"] == ("fulfilled" if surface == "trajectory" else "not_fulfilled")
 
 
 @pytest.mark.parametrize("failed", [True, False])
@@ -354,7 +359,7 @@ def test_witness_detects_changed_payload_even_when_attempt_identity_matches(reta
     (directory / "witness.json").write_text(json.dumps(witness))
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
     assert result["verdict"] == "not_fulfilled"
-    assert "retained model attempts differ" in " ".join(result["issues"])
+    assert "canonical" in " ".join(result["issues"])
 
 
 def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch):
@@ -385,3 +390,125 @@ def test_interrupted_run_does_not_publish_completed_summary(tmp_path, monkeypatc
     with pytest.raises(KeyboardInterrupt):
         run_suite(harnesses=["pi"], scenarios=SCENARIOS[:1], output=output, timeout=1)
     assert not (output / "conformance_summary.json").exists()
+
+
+@pytest.mark.parametrize(
+    "mutation", ["missing_calls", "response_id", "finish_reason", "prompt_tokens", "missing_tokens", "request_order"]
+)
+def test_canonical_behavioral_checks_use_the_independent_witness(retained_episode, mutation):
+    from scripts.harness_conformance.runner import _canonical_witness_issues
+
+    directory, witness = retained_episode
+    raw = json.loads((directory / "rollouts.jsonl").read_text())
+    assert _canonical_witness_issues(raw, witness["attempts"]) == []
+    call = raw["ng_trajectory"]["model_calls"][1]
+    if mutation == "missing_calls":
+        del raw["ng_trajectory"]["model_calls"]
+    elif mutation in ("response_id", "finish_reason"):
+        call["response_metadata"][mutation] = "fabricated"
+    elif mutation == "prompt_tokens":
+        call["token_stats"]["prompt_tokens"] = 999
+    elif mutation == "missing_tokens":
+        del call["token_stats"]
+    else:
+        call["request"]["input"].reverse()
+    issues = _canonical_witness_issues(raw, witness["attempts"])
+    assert issues
+    assert any("canonical" in issue for issue in issues)
+
+
+def test_canonical_error_response_cannot_invent_an_id():
+    from scripts.harness_conformance.runner import _canonical_witness_issues
+
+    request = {"input": []}
+    response = {"error": {"message": "prescribed HTTP 400"}}
+    attempts = [{"request": request, "response": response, "status_code": 400}]
+    metadata = {"status_code": 400, "response_id": None, "response_status": None, "finish_reason": None}
+    call = {"request": request, "response": response, "response_metadata": metadata}
+    record = {"ng_trajectory": {"model_calls": [call]}}
+    assert not _canonical_witness_issues(record, attempts)
+    metadata["response_id"] = "invented"
+    assert _canonical_witness_issues(record, attempts) == [
+        "canonical response metadata differs from the independent endpoint witness"
+    ]
+
+
+@pytest.mark.parametrize(
+    "field", ["prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens", "cached_tokens"]
+)
+def test_canonical_omitted_usage_must_stay_unavailable(field):
+    from scripts.harness_conformance.runner import _canonical_witness_issues
+
+    request = {"messages": [{"role": "user", "content": "hello"}]}
+    response = {"id": "r", "object": "chat.completion", "created": 123, "choices": [{"finish_reason": "stop"}]}
+    call = {
+        "request": request,
+        "response": copy.deepcopy(response),
+        "response_metadata": {"status_code": 200, "response_id": "r", "finish_reason": "stop"},
+    }
+    call["response"].pop("created")  # The documented Chat decoder exception.
+    record = {"ng_trajectory": {"model_calls": [call]}}
+    attempts = [{"request": request, "response": response, "status_code": 200}]
+    assert not _canonical_witness_issues(record, attempts)
+    call["token_stats"] = {field: 0}
+    assert _canonical_witness_issues(record, attempts) == [
+        "canonical token counts differ from the independent endpoint witness"
+    ]
+
+
+def test_canonical_counts_cannot_be_swapped_between_calls(retained_episode):
+    from scripts.harness_conformance.runner import _canonical_witness_issues
+
+    directory, witness = retained_episode
+    record = json.loads((directory / "rollouts.jsonl").read_text())
+    calls = record["ng_trajectory"]["model_calls"]
+    # Give the calls distinct, independently known counts.
+    for i, call in enumerate(calls):
+        call["token_stats"]["prompt_tokens"] = 10 + i
+        witness["attempts"][i]["response"]["usage"]["input_tokens"] = 10 + i
+        call["response"]["usage"]["input_tokens"] = 10 + i
+    assert not _canonical_witness_issues(record, witness["attempts"])
+    calls[0]["token_stats"], calls[1]["token_stats"] = calls[1]["token_stats"], calls[0]["token_stats"]
+    assert _canonical_witness_issues(record, witness["attempts"]) == [
+        "canonical token counts differ from the independent endpoint witness"
+    ]
+
+
+@pytest.mark.parametrize(
+    "collection,field,value",
+    [("turns", "resolved", "wrong"), ("model_calls", "response_metadata", False), ("tool_calls", "tool_call_id", [])],
+)
+def test_malformed_evidence_keeps_other_check_results(retained_episode, collection, field, value):
+    directory, _ = retained_episode
+    path = directory / "rollouts.jsonl"
+    record = json.loads(path.read_text())
+    record["ng_trajectory"][collection][0][field] = value
+    path.write_text(json.dumps(record) + "\n")
+    result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
+    checks = {c["id"]: c for c in result["checks"]}
+    assert any(c["status"] == "fail" for c in checks.values())
+    assert checks["tokens.prompt_tokens"]["status"] == "pass"
+
+
+def test_missing_tool_request_blocks_only_request_comparison(retained_episode):
+    from scripts.harness_conformance.behavior import tool_checks
+
+    directory, witness = retained_episode
+    record = json.loads((directory / "rollouts.jsonl").read_text())
+    inv = record["ng_trajectory"]["invocations"][0]
+    inv["conversation"] = [i for i in inv["conversation"] if i.get("call_id") != "tool-1"]
+    checks = {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}
+    assert checks["tools.witness_join"]["status"] == "fail"
+    assert checks["tools.witness_request"]["status"] == "not_assessed"
+    assert checks["tools.witness_status"]["status"] == "pass"
+    assert checks["tools.witness_output"]["status"] == "pass"
+
+
+def test_missing_witness_does_not_fail_retained_evidence(retained_episode):
+    directory, _ = retained_episode
+    (directory / "witness.json").unlink()
+    result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
+    assert all(
+        c["status"] in {"not_assessed", "not_applicable"} for c in result["checks"] if c["kind"] == "behavioral"
+    )
+    assert all(v["verdict"] == "fulfilled" for v in result["evidence"].values())

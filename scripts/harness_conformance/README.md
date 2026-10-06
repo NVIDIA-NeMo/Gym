@@ -109,8 +109,9 @@ rejected, so previous rollouts cannot accidentally qualify a new run.
   execution markers, returned tool results, and verifier outcomes.
 - `<harness>/<scenario>/scenario_result.json` and `evidence/`: execution gaps,
   input hashes, and the existing artifact checker reports.
-- `conformance_summary.json` and `conformance_report.md`: harness × evidence
-  matrix with passing / exercised / required scenario counts.
+- `conformance_summary.json` and `conformance_report.md`: individual results and
+  one table per harness, with check rows and scenario columns. Artifact and
+  behavioral results stay independent; execution status is recorded separately.
 
 A scenario counts as passing only when its independent observations agree with
 the retained rollout and the relevant evidence checks pass. Attempt comparison

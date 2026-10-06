@@ -63,6 +63,8 @@ def evidence_record() -> dict:
         calls.append(
             {
                 "model_call_id": reference["model_call_id"],
+                "started_at": float(number),
+                "completed_at": float(number) + 0.5,
                 "response_metadata": {key: value for key, value in metadata.items() if key != "client_session_id"},
                 "request": request,
                 "response": response,
@@ -111,6 +113,8 @@ def evidence_record() -> dict:
         "_ng_task_index": 0,
         "_ng_rollout_index": 0,
         "reward": 0.0,
+        "evaluation_completed": True,
+        "mask_sample": False,
         "response": {"output": deepcopy(conversation[1:])},
         "ng_model_call_capture": {"rollout_id": "0-0", "calls": deepcopy(captures)},
         "ng_agent_observations": {
