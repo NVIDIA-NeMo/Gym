@@ -850,8 +850,8 @@ class TestBenchmarkLifecycle:
         sandbox.stop.assert_awaited_once()
 
 
-@mark.parametrize("failure", ["command", "download", "empty"])
-async def test_export_failure_propagates_instead_of_scoring_zero(tmp_path, monkeypatch, failure):
+@mark.parametrize("failure", ["exception", "command", "download", "empty"])
+async def test_export_failure_returns_empty_failed_response(tmp_path, failure):
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)
     config.execution_failure_reward_zero = True
@@ -861,12 +861,15 @@ async def test_export_failure_propagates_instead_of_scoring_zero(tmp_path, monke
         side_effect=[
             SimpleNamespace(stdout="Shell: bash\nOpenCode run finished", stderr="", return_code=0, error_type=None),
             SimpleNamespace(stdout='[{"id":"session"}]', stderr="", return_code=0, error_type=None),
-            SimpleNamespace(stdout="", stderr="", return_code=1 if failure == "command" else 0, error_type=None),
+            OSError("export unavailable")
+            if failure == "exception"
+            else SimpleNamespace(stdout="", stderr="", return_code=1 if failure == "command" else 0, error_type=None),
         ]
     )
 
     async def download(remote, local):
         if failure == "download":
+            local.write_text('{"messages":[')
             raise OSError("export unavailable")
         local.write_text("{}")
 
@@ -880,9 +883,18 @@ async def test_export_failure_propagates_instead_of_scoring_zero(tmp_path, monke
     (tmp_path / "session").mkdir()
     (tmp_path / "session" / "export.json").write_text('{"messages":[{"info":{"role":"assistant"}}]}')
     body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
-    with raises((RuntimeError, OSError)):
-        await server.responses(request, body)
-    assert server._sandbox_id_to_run_result == {}
+    response = await server.responses(request, body)
+    assert response.output == []
+    assert response.usage is None
+    assert response.incomplete_details is None
+    run_result = server._sandbox_id_to_run_result["session"]
+    assert run_result["opencode_failed"] is True
+    assert run_result["opencode_export_found"] is False
+    assert run_result["opencode_results_fpath"] == ""
+    if failure != "empty":
+        assert not (tmp_path / "session" / "export.json").exists()
+    if failure in ("exception", "command"):
+        sandbox.download.assert_not_awaited()
 
 
 async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
