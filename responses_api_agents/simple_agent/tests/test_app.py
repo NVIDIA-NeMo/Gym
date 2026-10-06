@@ -419,6 +419,89 @@ class TestApp:
         assert [record["invocation_id"] for record in records] == ["root", "activation-2"]
         assert [record["model_calls"][0]["response_id"] for record in records] == ["resp-1", "resp-2"]
 
+    async def test_agent_session_can_return_unresolved_tool_calls(self) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="simple",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            execute_tools=False,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {"observability_enabled": False}
+        server_client.post = AsyncMock(
+            return_value=_mock_response(
+                {
+                    "id": "resp-tool",
+                    "created_at": 1.0,
+                    "model": "model",
+                    "object": "response",
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "output": [
+                        {
+                            "id": "fc-1",
+                            "call_id": "call-1",
+                            "name": "get_weather",
+                            "arguments": '{"city":"San Francisco"}',
+                            "type": "function_call",
+                            "status": "completed",
+                        }
+                    ],
+                }
+            )
+        )
+        client = TestClient(SimpleAgent(config=config, server_client=server_client).setup_webserver())
+        seed = client.post(
+            "/v1/agent_sessions",
+            json=AgentSeedSessionRequest(
+                agent_session_id="agent-session",
+                episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+                task_id=TaskId(taskset="example", task_id="0"),
+            ).model_dump(mode="json"),
+        )
+        assert seed.status_code == 200
+
+        result = client.post("/v1/responses", json={"input": "weather?"})
+
+        assert result.status_code == 200
+        assert [item["type"] for item in result.json()["output"]] == ["function_call"]
+        assert result.json()["output"][0]["call_id"] == "call-1"
+        server_client.post.assert_awaited_once()
+        assert server_client.post.await_args.kwargs["server_name"] == "model"
+
+    def test_execute_tools_defaults_to_true(self) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="simple",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+        )
+
+        assert config.execute_tools is True
+        assert "agent-session" in SimpleAgentConfig.model_fields["execute_tools"].description
+
+    async def test_execute_tools_false_is_rejected_outside_agent_session(self) -> None:
+        server, server_client = _make_agent(False)
+        server = type(server)(
+            config=server.config.model_copy(update={"execute_tools": False}), server_client=server_client
+        )
+        request = MagicMock(session={}, path_params={}, cookies={})
+        error = "execute_tools=false is supported only for agent-session requests"
+
+        with pytest.raises(ValueError, match=error):
+            await server.responses(
+                request,
+                Response(),
+                NeMoGymResponseCreateParamsNonStreaming(input="question"),
+            )
+        with pytest.raises(ValueError, match=error):
+            await server.run(request, SimpleAgentRunRequest(responses_create_params={"input": "question"}))
+        server_client.post.assert_not_called()
+
     async def test_agent_session_rejects_required_mcp_access(self) -> None:
         server, _ = _make_agent(False)
         request = MagicMock(session={})

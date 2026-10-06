@@ -98,9 +98,10 @@ def is_rename(instance: dict) -> bool:
 def needs_environment_server(instance: dict) -> bool:
     """True for an agent instance a run dispatches to, so it needs a server in front of it.
 
-    Two kinds are skipped. An unbound template leaves `resources_server.name` unset for
-    composition to fill. A shared overlay names several benchmarks' agents to override one field
-    on each; without an entrypoint or an `_inherit_from` supplying one, that name is not a server
+    Unbound templates leave `resources_server.name` unset for composition to fill, or
+    explicitly select a native session interface without Resources. A shared overlay names
+    several benchmarks' agents to override one field on each; without an entrypoint or an
+    `_inherit_from` supplying one, that name is not a server
     a run can start, and declaring a server for it strands the reference in every run that merges
     the overlay without the agent.
     """
@@ -110,7 +111,12 @@ def needs_environment_server(instance: dict) -> bool:
     agent = instance.get("responses_api_agents", {}).get(agent_type) if agent_type else None
     if not isinstance(agent, dict):
         return False
-    if (agent.get("resources_server") or {}).get("name") == "???":
+    resources_server = agent.get("resources_server", {})
+    if (resources_server or {}).get("name") == "???":
+        return False
+    # Explicitly unbound native templates do not use the compatibility /run route.
+    # A legacy relay here would conflict with the Environment Server supplied by composition.
+    if agent_type in {"hermes_agent", "codex_agent"} and resources_server is None:
         return False
     return bool(agent.get("entrypoint") or instance.get("_inherit_from"))
 
