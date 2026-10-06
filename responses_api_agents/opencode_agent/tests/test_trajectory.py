@@ -102,7 +102,15 @@ def test_native_turns_enable_content_health_without_call_references(tmp_path, pa
         "trajectory_capture_mismatch",
         "model_call_runaway_generation",
     } & set(verdict["unobserved"])
-    assert "rollout_token_count_mismatch" in verdict["unobserved"]
+    # Invocation ownership is sufficient to compare aggregate usage, even without turn links.
+    assert "rollout_token_count_mismatch" not in verdict["unobserved"]
+    mismatch = next(f for f in verdict["findings"] if f["check"] == "rollout_token_count_mismatch")
+    assert mismatch["detail"] == {
+        "transcript_prompt": 999,
+        "transcript_completion": 999,
+        "capture_prompt": 10,
+        "capture_completion": 2,
+    }
     assert summary["run"]["artifacts"]["coverage"]["task_no_successful_model_calls"]["unobserved"] == 1
 
 

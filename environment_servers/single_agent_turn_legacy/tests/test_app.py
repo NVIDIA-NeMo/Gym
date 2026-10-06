@@ -3,6 +3,7 @@
 
 import runpy
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import orjson
 import pytest
@@ -171,6 +172,44 @@ def test_legacy_adapter_forwards_aggregate_metrics_to_resources() -> None:
     assert [(server, path) for server, path, _ in client.calls] == [("resources", "/aggregate_metrics")]
 
 
+def test_legacy_adapter_preserves_task_identity_and_data():
+    row = {
+        "problem_id": "problem-1",
+        "instance_id": "instance-1",
+        "responses_create_params": {"input": "fix it", "temperature": 0.4},
+        "run_script": "verifier\nscript\n",
+        "verifier_metadata": {"answer": "expected"},
+        "agent_ref": {"name": "old-agent"},
+        "skills_ref": "old-skills",
+        "task_source": "old-source",
+        "_ng_task_index": 7,
+        "_ng_rollout_index": 2,
+        "_ng_attempt_index": 1,
+    }
+    row.update(task_source="resources", agent_ref={"name": "agent"})
+    adapter = SingleAgentTurnLegacyEnvironmentServer(
+        config=SingleAgentTurnEnvironmentServerConfig(
+            name="environment",
+            host="localhost",
+            port=1,
+            entrypoint="app.py",
+            cleanup_timeout_seconds=10,
+            resources_server={"type": "resources_servers", "name": "resources"},
+            agent_server={"type": "responses_api_agents", "name": "agent"},
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    request = adapter._episode_request_from_row(row)
+    assert (request.task.task_id.taskset, request.task.task_id.task_id) == ("resources", "problem-1")
+    assert request.task.task_input.task_data == {
+        "problem_id": "problem-1",
+        "instance_id": "instance-1",
+        "run_script": "verifier\nscript\n",
+        "verifier_metadata": {"answer": "expected"},
+    }
+    assert request.episode_id.attempt == 1
+
+
 @pytest.mark.parametrize("task_id_field", ["task_id", "problem_id", "instance_id"])
 def test_explicit_identity_does_not_require_collector_indexes(task_id_field: str) -> None:
     environment_server, client = _environment_server()
@@ -199,7 +238,7 @@ def test_task_identity_preserves_index_fallback_and_zero(task_fields: dict[str, 
     environment_server, client = _environment_server()
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
 
-    request = adapter._native_request(
+    request = adapter._episode_request_from_row(
         {
             **task_fields,
             "_ng_task_index": 3,
@@ -218,7 +257,7 @@ def test_task_source_may_name_the_bound_resources_server_or_agent(task_source: s
     environment_server, client = _environment_server()
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
 
-    request = adapter._native_request(
+    request = adapter._episode_request_from_row(
         {
             "task_source": task_source,
             "_ng_task_index": 0,
@@ -236,7 +275,7 @@ def test_task_source_naming_another_instance_is_rejected() -> None:
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
 
     with pytest.raises(ValueError, match="names none of this Environment Server's instances"):
-        adapter._native_request(
+        adapter._episode_request_from_row(
             {
                 "task_source": "other_agent",
                 "_ng_task_index": 0,
@@ -246,16 +285,16 @@ def test_task_source_naming_another_instance_is_rejected() -> None:
         )
 
 
-async def test_legacy_and_native_envelopes_project_the_same_result() -> None:
+async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:
     legacy_environment, legacy_client = _environment_server()
-    native_environment, native_client = _environment_server()
+    episode_environment, episode_client = _environment_server()
     legacy_adapter = SingleAgentTurnLegacyEnvironmentServer(
         config=legacy_environment.config,
         server_client=legacy_client,
     )
-    native_adapter = SingleAgentTurnLegacyEnvironmentServer(
-        config=native_environment.config,
-        server_client=native_client,
+    episode_adapter = SingleAgentTurnLegacyEnvironmentServer(
+        config=episode_environment.config,
+        server_client=episode_client,
     )
     flat_row = {
         "_ng_task_index": 3,
@@ -265,7 +304,7 @@ async def test_legacy_and_native_envelopes_project_the_same_result() -> None:
         "benchmark_field": "input",
         "responses_create_params": {"input": "task"},
     }
-    native_request = SingleAgentTurnRequest(
+    episode_request = SingleAgentTurnRequest(
         episode_id=EpisodeId(rollout_id="3-2", attempt=1),
         task=MaterializedTask(
             task_id=TaskId(taskset="resources", task_id="task"),
@@ -277,6 +316,6 @@ async def test_legacy_and_native_envelopes_project_the_same_result() -> None:
     )
 
     legacy_result = await legacy_adapter.run_legacy(flat_row)
-    native_result = await native_adapter.run_legacy(native_request.model_dump(mode="json"))
+    episode_result = await episode_adapter.run_legacy(episode_request.model_dump(mode="json"))
 
-    assert native_result == legacy_result
+    assert episode_result == legacy_result

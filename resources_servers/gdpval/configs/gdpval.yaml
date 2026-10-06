@@ -12,3 +12,4 @@ gdpval_resources_server:
         type: responses_api_models
         name: gdpval_judge_model
       judge_responses_create_params_overrides: {}
+      judge_telemetry_output_dir: null
