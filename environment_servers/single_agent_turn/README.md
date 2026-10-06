@@ -33,4 +33,4 @@ model_call_capture_dir: /absolute/path/to/run/model-calls
 
 Input counts include cached input; output counts include reasoning. Anthropic cache-read and cache-write tokens are folded into input counts. Optional details remain `null` when unavailable. Missing counts on any exchange, truncated streams, or unavailable/damaged capture yield `usage: null`, not zero or a partial sum. The shared count covers only traffic routed through Gym Model Servers with the episode's rollout prefix; it is not a provider billing audit. Custom Environment Servers can use `nemo_gym.model_usage.ModelUsageCapture` around their own agent lifecycle.
 
-When observability is disabled, or when calling an Agent Server directly, usage remains whatever that harness reports. Direct calls do not get this Environment Server accounting.
+When observability is disabled, or when calling an Agent Server directly, usage remains whatever that harness reports. Direct calls do not get this Environment Server accounting. Hermes also uses the shared capture helper in its legacy `/run` lifecycle; see its [usage requirements](../../responses_api_agents/hermes_agent/README.md).

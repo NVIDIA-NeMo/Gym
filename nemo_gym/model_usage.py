@@ -57,7 +57,8 @@ def aggregate_model_usage(calls: Sequence[ModelCallRecord]) -> NeMoGymResponseUs
 class ModelUsageCapture:
     """Read usage appended during one agent lifecycle from the shared capture store.
 
-    Start after Resources seeding and read after Agent close, before verification.
+    Start after Resources seeding and read when agent execution has finished,
+    including Agent close for session-based lifecycles, before verification.
     This excludes pre-existing calls and judge usage without depending on native
     transcript IDs, which some harnesses omit. The episode must exclusively own
     its rollout ID, as required by the Environment Server lifecycle.

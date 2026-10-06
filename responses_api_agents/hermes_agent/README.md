@@ -107,7 +107,9 @@ For SWE-bench Pro, use [`hermes.yaml`](../../benchmarks/swebench/pro/hermes.yaml
 See [Evaluate SWE-bench Pro with Hermes](../../fern/versions/latest/pages/evaluation-tutorials/hermes-swe-bench-pro.mdx)
 for task preparation, Environment Server configuration, evaluation commands, and session limits.
 
-Agent Server responses use `usage: null`. The shared [single-agent-turn Environment Server](../../environment_servers/single_agent_turn/README.md) supplies provider counts when Model Server capture is enabled, including delegated and auxiliary calls routed through the episode's Model Server URL. Direct Agent Server calls leave usage unknown.
+With Model Server capture enabled, Hermes `/run` supplies provider-reported `response.usage`, including when called through `legacy_agent` as in `hermes_reasoning_gym`. It counts the current agent execution after Resources seeding and before verification, excluding prior captures and judge calls. Session-based pairings get the same accounting from the shared [single-agent-turn Environment Server](../../environment_servers/single_agent_turn/README.md).
+
+Set `observability_enabled: true` and an absolute `model_call_capture_dir` shared by the Model Server and the server owning the lifecycle (Hermes for legacy `/run`, or the Environment Server for session-based pairings). Legacy run requests need Gym rollout identity, which `gym eval run` supplies. Counts include only exchanges routed through that rollout's Model Server URL. Missing identity, disabled capture, or incomplete usage leaves `usage: null`; direct `/v1/responses` calls also leave usage unknown. Training token-ID capture alone does not enable usage accounting.
 
 ## Sandbox-mode requirements
 
