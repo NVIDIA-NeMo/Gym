@@ -1,0 +1,31 @@
+name: timewarp
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: agent
+description: TimeWarp web-agent robustness benchmark; the 103 test goals on Wiki, News and Shop sites, each run in six
+  UI eras (618 rows), with a Playwright browser per rollout and TimeWarp's deterministic answer verifiers.
+modality: text
+licensing: MIT
+authors:
+- farhanishmam
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: timewarp
+agent_server: simple_agent
+datasets:
+- name: timewarp
+  type: benchmark
+  jsonl_fpath: benchmarks/timewarp/data/timewarp_benchmark.jsonl
+  prepare_script: benchmarks/timewarp/prepare.py
+  prompt_config: benchmarks/timewarp/prompt.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: test
+standard_prompt_config: benchmarks/timewarp/prompt.yaml
+lifecycle: active
