@@ -550,7 +550,6 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
 
     async def _run_usersim(self, bridge: _ConversationBridge, resolved_row: dict[str, Any]) -> dict[str, Any]:
         from usersim.engine.external import (
-            EpisodeContractError,
             EpisodeLifecycleComplete,
             HostRoleModel,
             ProbeEpisodeRuntime,
@@ -571,13 +570,9 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
                 activation_index = len(bridge.invocations) - 1
                 if event.model_alias == "assistant_model":
                     final_assistant_index = activation_index
-                try:
-                    event = await runtime.advance(activation_result)
-                except EpisodeContractError as error:
-                    if event.model_alias != "assistant_model":
-                        raise
-                    policy_error = ValueError(f"UserSim rejected the assistant activation: {error}")
-                    raise _ParticipantActivationError("assistant_model", policy_error) from error
+                    if policy_error := _assistant_response_validation_error(event, activation_result):
+                        raise _ParticipantActivationError("assistant_model", policy_error)
+                event = await runtime.advance(activation_result)
             if final_assistant_index is not None:
                 bridge.record_state(final_assistant_index, await runtime.evidence())
             return event.result
@@ -807,6 +802,33 @@ def _response_tool_calls(response: NeMoGymResponse) -> list[SimpleNamespace] | N
     return calls or None
 
 
+def _assistant_response_validation_error(activation: Any, result: Any) -> ValueError | None:
+    """Return a policy-attributed error for invalid Assistant tool calls."""
+    tool_calls = result.response.get("tool_calls") or []
+    if not tool_calls:
+        return None
+    allowed_tools = {_to_responses_tool(tool)["name"] for tool in activation.tools}
+    if not allowed_tools:
+        return ValueError(f"Assistant activation {activation.activation_id!r} returned tool calls with tools disabled")
+    seen_call_ids: set[str] = set()
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, Mapping):
+            return ValueError("Assistant tool calls must be mappings")
+        call_id = tool_call.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            return ValueError("Assistant tool calls require a non-empty id")
+        if call_id in seen_call_ids:
+            return ValueError(f"Assistant tool call id {call_id!r} is repeated in one response")
+        seen_call_ids.add(call_id)
+        function = tool_call.get("function")
+        tool_name = function.get("name") if isinstance(function, Mapping) else None
+        if not isinstance(tool_name, str) or tool_name not in allowed_tools:
+            return ValueError(
+                f"Assistant called unoffered tool {tool_name!r}; available tools: {sorted(allowed_tools)}"
+            )
+    return None
+
+
 def _finalize_termination(invocations: list[UserSimInvocation], result: UserSimSimulationResult) -> None:
     participant_indexes = [
         index for index, invocation in enumerate(invocations) if invocation.role in _PARTICIPANT_ROLES
@@ -831,9 +853,12 @@ def _cookies(response: Any) -> dict[str, str]:
 
 def _is_retryable_dependency_error(error: Exception) -> bool:
     if isinstance(error, _ParticipantActivationError):
-        error = error.error
+        original = error.error
+        if isinstance(original, ClientResponseError):
+            return original.status in {404, 408, 409, 425, 429} or original.status >= 500
+        return isinstance(original, (ClientError, TimeoutError))
     if isinstance(error, ClientResponseError):
-        return error.status in {404, 408, 409, 425, 429} or error.status >= 500
+        return error.status in {408, 425, 429} or error.status >= 500
     return isinstance(error, (ClientError, TimeoutError))
 
 

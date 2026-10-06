@@ -20,6 +20,7 @@ from environment_servers.nemo_user_sim.app import (
     UserSimEnvironmentServerConfig,
     _AgentSession,
     _apply_activation_parameters,
+    _assistant_response_validation_error,
     _ConversationBridge,
     _GymEmbeddingFacade,
     _GymModelFacade,
@@ -352,7 +353,7 @@ async def test_environment_drives_probe_runtime_at_activation_boundaries(
 
 
 @pytest.mark.asyncio
-async def test_real_probe_runtime_routes_unoffered_assistant_tool_call_to_policy_failure() -> None:
+async def test_real_probe_runtime_routes_tools_disabled_response_to_policy_failure() -> None:
     assert usersim_external.ProbeEpisodeRuntime is not None
     examples_path = Path(__file__).parents[3] / "resources_servers/nemo_user_sim/data/example.jsonl"
     example = orjson.loads(next(line for line in examples_path.read_bytes().splitlines() if line))
@@ -438,12 +439,94 @@ async def test_real_probe_runtime_routes_unoffered_assistant_tool_call_to_policy
             ),
         },
     )
-    with pytest.raises(_ParticipantActivationError, match="UserSim rejected the assistant activation") as error:
+    with pytest.raises(_ParticipantActivationError, match="returned tool calls with tools disabled") as error:
         await server._run_usersim(bridge, example["resolved_row"])
 
     assert error.value.alias == "assistant_model"
     assert isinstance(error.value.error, ValueError)
     assert [invocation.role for invocation in bridge.invocations] == ["user", "judge", "assistant"]
+
+
+def test_assistant_response_validation_rejects_unoffered_tool_name() -> None:
+    activation = SimpleNamespace(
+        activation_id="assistant-0",
+        tools=(
+            {
+                "type": "function",
+                "function": {
+                    "name": "offered_tool",
+                    "description": "The only offered tool.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ),
+    )
+    result = SimpleNamespace(
+        response={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-unoffered",
+                    "type": "function",
+                    "function": {"name": "unoffered_tool", "arguments": "{}"},
+                }
+            ],
+        }
+    )
+
+    error = _assistant_response_validation_error(activation, result)
+
+    assert error is not None
+    assert str(error) == "Assistant called unoffered tool 'unoffered_tool'; available tools: ['offered_tool']"
+
+
+@pytest.mark.asyncio
+async def test_runtime_contract_error_after_valid_assistant_response_is_infrastructure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    activation = usersim_external.ActivationRequest(
+        activation_id="assistant-0",
+        role="assistant",
+        model_alias="assistant_model",
+        messages=({"role": "user", "content": "Hello"},),
+        parameters={},
+    )
+    activation_result = usersim_external.ActivationResult(
+        activation_id="assistant-0",
+        response={"role": "assistant", "content": "Hello"},
+    )
+
+    class HostFailureRuntime:
+        @classmethod
+        def from_resolved_row(cls, _row: dict[str, Any], *, models: dict[str, object]) -> "HostFailureRuntime":
+            return cls()
+
+        async def advance(self, result: usersim_external.ActivationResult | None = None) -> Any:
+            if result is None:
+                return activation
+            raise usersim_external.EpisodeContractError("activation_id is not the pending activation")
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(usersim_external, "ProbeEpisodeRuntime", HostFailureRuntime)
+    monkeypatch.setattr("environment_servers.nemo_user_sim.app._configured_model_name", lambda _server, alias: alias)
+    server, _ = _lifecycle_server()
+
+    async def invoke_activation(_activation: Any) -> usersim_external.ActivationResult:
+        bridge.invocations.append("assistant")
+        return activation_result
+
+    bridge = SimpleNamespace(
+        environment_server=server,
+        invocations=[],
+        invoke_activation=AsyncMock(side_effect=invoke_activation),
+        record_state=MagicMock(),
+    )
+
+    with pytest.raises(usersim_external.EpisodeContractError, match="not the pending activation"):
+        await server._run_usersim(bridge, {"trajectory_id": "trajectory-0"})
 
 
 class _Cookie:
@@ -906,6 +989,11 @@ def test_wrapped_participant_http_infrastructure_failures_are_retryable(status: 
 
     assert _is_retryable_dependency_error(_ParticipantActivationError("assistant_model", original)) is True
     assert _is_retryable_dependency_error(_ParticipantActivationError("user_model", original)) is True
+
+
+@pytest.mark.parametrize("status", [404, 409])
+def test_non_participant_http_contract_failures_are_not_retryable(status: int) -> None:
+    assert _is_retryable_dependency_error(ClientResponseError(MagicMock(), (), status=status)) is False
 
 
 def test_wrapped_assistant_invalid_response_is_not_retryable() -> None:
