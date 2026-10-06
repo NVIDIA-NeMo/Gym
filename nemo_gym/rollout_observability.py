@@ -96,7 +96,15 @@ class TrajectoryTurn(ObservationModel):
 
 
 class AgentInvocation(ObservationModel):
-    """One root Agent or subagent conversation observed by a harness."""
+    """One root Agent or subagent conversation observed by a harness.
+
+    Harness adapters should report an iteration-limit event through an
+    ``on_iteration_limit_reached(*, invocation_id: str) -> None`` observer hook.
+    The hook records ``stop_reason="max_iterations"`` once on that invocation,
+    leaving parent invocations, budgets, and summary generation alone. Harnesses
+    with native stop events can call it directly; compatibility shims may call it
+    at the point where the harness detects its limit.
+    """
 
     kind: Literal["agent_invocation"] = "agent_invocation"
     invocation_id: str
@@ -104,6 +112,10 @@ class AgentInvocation(ObservationModel):
     spawned_by_tool_call_id: Optional[str] = None
     status: Literal["completed", "failed", "incomplete", "unknown"] = Field(
         default="unknown", description="Harness-reported invocation outcome; unknown when not explicit."
+    )
+    stop_reason: Optional[str] = Field(
+        default=None,
+        description="Explicit reason this invocation stopped, such as max_iterations; scoped to invocation_id.",
     )
     duration_ms: Optional[float] = Field(default=None, ge=0)
     error_type: Optional[str] = None

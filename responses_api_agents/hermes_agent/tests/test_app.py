@@ -710,6 +710,7 @@ class TestResultClassification:
             {"partial": True, "error": "Context length exceeded (100 tokens). Cannot compress further."},
             {"partial": True, "error": "Model generated invalid tool call: invalid"},
             {"completed": True},
+            {"completed": False, "stop_reason": "max_iterations"},
         ],
     )
     def test_model_outcomes_remain_gradable_with_partial_trajectory(self, outcome) -> None:
@@ -721,6 +722,10 @@ class TestResultClassification:
         )
         assert response.output[0].content[0].text == "Applied a partial patch"
         assert response.metadata["partial"] == str(bool(outcome.get("partial"))).lower()
+        if outcome.get("stop_reason") == "max_iterations":
+            assert response.status == "incomplete"
+            assert response.error is None
+            assert response.metadata["stop_reason"] == "max_iterations"
 
     async def test_host_path_also_rejects_provider_failure(self, monkeypatch) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
