@@ -146,6 +146,7 @@ def test_unseeded_responses_run_local_cli(shipped_config: bool, path: str, monke
                     {"input_tokens": 3, "output_tokens": 2},
                     "local-model",
                     AgentObservationBundle(source="opencode"),
+                    False,
                 )
             ),
         ) as local,
