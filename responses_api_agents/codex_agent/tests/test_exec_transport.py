@@ -12,9 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.sandbox import process_supervisor
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.sandbox.session import SandboxSession
 from responses_api_agents.codex_agent import sandbox_runner
 from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
 from responses_api_agents.codex_agent.tests.test_native_sessions import seed
@@ -74,18 +73,17 @@ def make_session(tmp_path):
     state = CodexSandboxSession(
         request=request,
         session=SandboxSession(
-            sandbox=provider, directory=str(directory), workdir=request.sandbox_access.workdir, harness="Codex"
+            sandbox=provider, session_dir=str(directory), workdir=request.sandbox_access.workdir, harness="Codex"
         ),
         runtime=str(tmp_path / "runtime"),
     )
     shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
-    shutil.copyfile(process_supervisor.__file__, directory / "process_supervisor.py")
     return state, provider, workdir
 
 
 def payload(state, code, timeout=0.5):
     return {
-        "directory": state.session.directory,
+        "directory": state.session.session_dir,
         "prompt": "task",
         "cwd": state.request.sandbox_access.workdir,
         "command": [sys.executable, "-c", code],
@@ -131,7 +129,7 @@ async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
         await state.close(3)
         await state.close(3)
         assert provider.disconnected
-        assert not Path(state.session.directory).exists()
+        assert not Path(state.session.session_dir).exists()
     finally:
         if not state.session.closed:
             await state.close(3)
@@ -148,7 +146,7 @@ async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
     provider.lost_launch = False
     await provider.exec(provider.delayed_command, cwd=str(workdir))
     assert not (workdir / "started").exists()
-    assert not Path(state.session.directory).exists()
+    assert not Path(state.session.session_dir).exists()
 
 
 async def test_failed_receipt_keeps_files_and_can_retry(tmp_path):
@@ -160,7 +158,7 @@ async def test_failed_receipt_keeps_files_and_can_retry(tmp_path):
         "cleanup_confirmed": False,
         "error": "descendants remain",
     }
-    path = Path(state.session.directory) / "cleanup.json"
+    path = Path(state.session.session_dir) / "cleanup.json"
     path.write_text(json.dumps(receipt))
     with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
         await state.close(3)
@@ -181,10 +179,10 @@ async def test_confirmed_cleanup_cancels_stuck_transport(tmp_path):
         "cleanup_confirmed": True,
         "error": None,
     }
-    (Path(state.session.directory) / "cleanup.json").write_text(json.dumps(receipt))
+    (Path(state.session.session_dir) / "cleanup.json").write_text(json.dumps(receipt))
     state.session._exec_task = asyncio.create_task(asyncio.Event().wait())
     await asyncio.sleep(0)
     await state.close(0.5)
     assert state.session._exec_task.cancelled()
     assert state.session.closed and provider.disconnected
-    assert not Path(state.session.directory).exists()
+    assert not Path(state.session.session_dir).exists()

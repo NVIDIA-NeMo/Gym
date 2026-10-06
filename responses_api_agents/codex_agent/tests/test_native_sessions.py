@@ -19,10 +19,10 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
+from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.supervisor_client import parse_cleanup_receipt
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig
 
@@ -111,7 +111,7 @@ class Sandbox:
     async def execute(self, command, **kwargs):
         if "exec python3 -I " in command and "process_supervisor.py" in command:
             return await self.launch(command=command, **kwargs)
-        if "touch " in command and "runner.stop" in command:
+        if "touch " in command and "stop.request" in command:
             self.signals.append("SIGTERM")
             if hasattr(self, "directory"):
                 self.result["timed_out"] = True
@@ -176,7 +176,8 @@ def test_http_native_flow_runs_codex_in_borrowed_sandbox(setup):
             created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
             assert created.status_code == 200, created.text
             session_id = created.json()["agent_session_id"]
-            directory = agent._session_records[session_id].state.session.directory
+            directory = agent._session_records[session_id].state.session.session_dir
+            assert f"{directory}/process_supervisor.py" not in sandbox.files
             installer = f"{directory}/install_codex_runtime.sh"
             assert installer in sandbox.files
             assert agent.config.resources_server is None
@@ -187,6 +188,7 @@ def test_http_native_flow_runs_codex_in_borrowed_sandbox(setup):
             assert install_call.kwargs["timeout_s"] == agent.config.sandbox_install_timeout_seconds
             result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix the code"})
             assert result.status_code == 200, result.text
+            assert f"{directory}/process_supervisor.py" in sandbox.files
             body = result.json()
             assert body["status"] == "completed"
             assert [item["type"] for item in body["output"]] == [
@@ -657,6 +659,37 @@ async def test_disconnect_failure_retains_session_for_retry(setup):
     assert agent._session_records[session_id].state is None
 
 
+@pytest.mark.parametrize("log_available", [False, True])
+async def test_missing_events_use_shared_session_log_without_blocking_close(setup, log_available):
+    agent, sandbox = setup
+    download = sandbox.download
+    log_reads = []
+
+    async def download_artifact(source, destination):
+        if source.endswith("/events.jsonl"):
+            raise FileNotFoundError("events unavailable")
+        if source.endswith("/output.log"):
+            log_reads.append(source)
+            if not log_available:
+                raise FileNotFoundError("log unavailable")
+            Path(destination).write_text("diagnostic from shared supervisor")
+            return
+        await download(source, destination)
+
+    sandbox.download = AsyncMock(side_effect=download_artifact)
+    request, session_id, task = await activate(agent, sandbox)
+    with pytest.raises(RuntimeError, match="Codex sandbox runner returned no valid result") as failure:
+        await task
+    assert ("diagnostic from shared supervisor" in str(failure.value)) is log_available
+    assert isinstance(failure.value.__cause__, FileNotFoundError)
+    state = agent._session_records[session_id].state
+    assert log_reads == [f"{state.session.session_dir}/output.log"]
+    assert state.session.cleanup["cleanup_confirmed"] is True
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
 def test_cleanup_receipt_is_required():
     with pytest.raises(ValueError):
         parse_cleanup_receipt({"return_code": 0, "error": None})
@@ -980,7 +1013,7 @@ async def test_independent_sessions_do_not_share_identity_or_configuration(setup
     other = seed().model_copy(update={"agent_session_id": "codex-other", "episode_id": EpisodeId(rollout_id="other")})
     b = (await agent.seed_agent_session(second, other)).agent_session_id
     assert a != b
-    assert agent._session_records[a].state.session.directory != agent._session_records[b].state.session.directory
+    assert agent._session_records[a].state.session.session_dir != agent._session_records[b].state.session.session_dir
     with pytest.raises(HTTPException):
         await agent.close_agent_session(second, AgentCloseSessionRequest(**close_body(a)))
     assert agent._session_records[a].state is not None and agent._session_records[b].state is not None
@@ -1204,7 +1237,7 @@ async def test_caller_identifier_is_not_a_filesystem_path(setup):
     request = Request({"type": "http", "session": {}})
     created = await agent.seed_agent_session(request, body)
     assert created.agent_session_id == body.agent_session_id
-    directory = Path(agent._session_records[created.agent_session_id].state.session.directory)
+    directory = Path(agent._session_records[created.agent_session_id].state.session.session_dir)
     assert directory.parent == Path("/tmp/nemo-gym-codex-sessions")
     assert len(directory.name) == 32
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(created.agent_session_id)))
@@ -1420,11 +1453,9 @@ async def local_session(setup, tmp_path):
     state = agent._session_records[body.agent_session_id].state
     directory = tmp_path / "session"
     directory.mkdir()
-    state.session.directory = str(directory)
-    from nemo_gym.sandbox import process_supervisor
+    state.session.session_dir = str(directory)
     from responses_api_agents.codex_agent import sandbox_runner
 
-    shutil.copyfile(process_supervisor.__file__, directory / "process_supervisor.py")
     shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
     sandbox.upload = AsyncMock(side_effect=shutil.copyfile)
     sandbox.download = AsyncMock(side_effect=shutil.copyfile)
@@ -1479,11 +1510,11 @@ async def test_close_fences_delayed_launch_before_and_after_removing_session(loc
         state.task.cancel()
     with pytest.raises(asyncio.CancelledError if failure == "cancel" else OSError):
         await state.task
-    directory = Path(state.session.directory)
+    directory = Path(state.session.session_dir)
     assert state.session.cleanup["cleanup_confirmed"] is True
     assert (directory / "launch.claim").readlink() == Path("stop")
     assert (await execute(commands[0])).return_code == 0
-    assert not (directory / "runner.pid").exists()
+    assert not (directory / "supervisor.pid").exists()
     await state.close(2)
     assert not directory.exists()
     assert (await execute(commands[0])).return_code == 0
@@ -1495,7 +1526,7 @@ async def test_close_fences_delayed_launch_before_and_after_removing_session(loc
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
 async def test_launch_claim_without_receipt_blocks_close(local_session):
     state, _ = local_session
-    (Path(state.session.directory) / "launch.claim").symlink_to("launch")
+    (Path(state.session.session_dir) / "launch.claim").symlink_to("launch")
     state.session.launch_started = True
     with pytest.raises(RuntimeError, match="launch outcome is unknown"):
         await state.close(1)
@@ -1507,7 +1538,7 @@ async def test_launch_claim_without_receipt_blocks_close(local_session):
 async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_session):
     state, _ = local_session
     payload = {
-        "directory": state.session.directory,
+        "directory": state.session.session_dir,
         "cwd": state.request.sandbox_access.workdir,
         "command": [sys.executable, "-c", "import json,sys; print(json.dumps({'prompt':sys.stdin.read()}))"],
         "env": {},
@@ -1519,21 +1550,21 @@ async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_ses
     assert state.session.cleanup["cleanup_confirmed"] and state.session.cleanup["return_code"] == 0
     assert state.runtime_info.hostname
     await state.close(2)
-    assert not Path(state.session.directory).exists()
+    assert not Path(state.session.session_dir).exists()
     state.session.sandbox.stop.assert_not_awaited()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
 async def test_close_confirms_cleanup_before_provider_cancellation(local_session):
     state, _ = local_session
-    processes_path = Path(state.session.directory).parent / "children.json"
+    processes_path = Path(state.session.session_dir).parent / "children.json"
     code = (
         "import json,os,subprocess,sys,time; from pathlib import Path; "
         "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
         f"Path({str(processes_path)!r}).write_text(json.dumps([os.getpid(),child.pid])); time.sleep(60)"
     )
     payload = {
-        "directory": state.session.directory,
+        "directory": state.session.session_dir,
         "cwd": state.request.sandbox_access.workdir,
         "command": [sys.executable, "-c", code],
         "env": {},
@@ -1546,7 +1577,7 @@ async def test_close_confirms_cleanup_before_provider_cancellation(local_session
             while not processes_path.exists():
                 await asyncio.sleep(0.01)
         processes = json.loads(processes_path.read_text())
-        processes.append(json.loads((Path(state.session.directory) / "runtime.json").read_text())["pid"])
+        processes.append(json.loads((Path(state.session.session_dir) / "runtime.json").read_text())["pid"])
         await state.close(3)
         assert state.session.closed and state.session.cleanup["cleanup_confirmed"] is True
         assert all(not Path(f"/proc/{pid}").exists() for pid in processes)
@@ -1568,9 +1599,9 @@ async def test_close_confirms_cleanup_before_provider_cancellation(local_session
 async def test_receipt_read_failure_does_not_signal_reused_pid(local_session):
     state, _ = local_session
     unrelated = await asyncio.create_subprocess_exec(sys.executable, "-c", "import time; time.sleep(60)")
-    directory = Path(state.session.directory)
+    directory = Path(state.session.session_dir)
     (directory / "launch.claim").symlink_to("launch")
-    (directory / "runner.pid").write_text(str(unrelated.pid))
+    (directory / "supervisor.pid").write_text(str(unrelated.pid))
     (directory / "cleanup.json").write_text(json.dumps({"cleanup_confirmed": True, "error": None}))
     state.session.launch_started = True
     downloads = 0
@@ -1584,7 +1615,7 @@ async def test_receipt_read_failure_does_not_signal_reused_pid(local_session):
 
     state.session.sandbox.download.side_effect = download
     try:
-        await state.session.stop_runner(timeout=2)
+        await state.session.stop_harness(timeout=2)
         assert state.session.cleanup["cleanup_confirmed"] is True
         assert unrelated.returncode is None
         os.kill(unrelated.pid, 0)
