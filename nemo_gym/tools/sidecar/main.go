@@ -53,6 +53,7 @@ func main() {
 	shutdownGrace := flag.Duration("shutdown-grace", 15*time.Minute, "on SIGTERM, wait up to this long for in-flight requests")
 	insecure := flag.Bool("insecure-skip-verify", false, "skip upstream TLS verification (testing only)")
 	retryBodyLimit := flag.Int64("retry-body-limit", 16<<20, "request bodies up to this many bytes are buffered in memory so they can be re-sent when the upstream closes the connection (GOAWAY); larger bodies stream through unbuffered and are not retried. 0 disables buffering")
+	maxConnAge := flag.Duration("max-conn-age", 50*time.Minute, "retire the upstream connection after 90-100% of this age: in-flight requests finish on it and new requests use a fresh connection. Keep it below the upstream's client keep-alive limit (AWS ALB default 3600s) so large bodies never see its GOAWAY. 0 disables")
 	readyFile := flag.String("ready-file", "", "write this file once the listener is bound, so a supervisor can distinguish our listener from a port already in use by something else")
 	flag.Parse()
 
@@ -75,18 +76,30 @@ func main() {
 	protocols := new(http.Protocols)
 	protocols.SetHTTP2(true)
 
-	transport := &http.Transport{
-		Protocols: protocols,
-		HTTP2: &http.HTTP2Config{
-			SendPingTimeout: *pingInterval,
-			PingTimeout:     *pingTimeout,
-		},
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: *insecure},
-		TLSHandshakeTimeout: 30 * time.Second,
-		DialContext:         (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		// ResponseHeaderTimeout is deliberately unset. Waiting a long time for
-		// the first response byte is the entire purpose of this proxy; the
-		// client decides its own deadline.
+	newTransport := func() *http.Transport {
+		return &http.Transport{
+			Protocols: protocols,
+			HTTP2: &http.HTTP2Config{
+				SendPingTimeout: *pingInterval,
+				PingTimeout:     *pingTimeout,
+			},
+			TLSClientConfig:     &tls.Config{InsecureSkipVerify: *insecure},
+			TLSHandshakeTimeout: 30 * time.Second,
+			DialContext:         (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			// ResponseHeaderTimeout is deliberately unset. Waiting a long time for
+			// the first response byte is the entire purpose of this proxy; the
+			// client decides its own deadline.
+		}
+	}
+
+	var transport http.RoundTripper
+	stopRotation := make(chan struct{})
+	if *maxConnAge > 0 {
+		rotating := newRotatingTransport(newTransport)
+		go rotating.rotateEvery(*maxConnAge, stopRotation)
+		transport = rotating
+	} else {
+		transport = newTransport()
 	}
 
 	proxy := &httputil.ReverseProxy{
@@ -153,6 +166,7 @@ func main() {
 		if err := server.Shutdown(ctx); err != nil {
 			log.Printf("graceful shutdown incomplete: %v", err)
 		}
+		close(stopRotation)
 		close(idle)
 	}()
 

@@ -21,6 +21,7 @@ base URLs at a local sidecar that forwards over HTTP/2 and sends the PINGs itsel
 This module imports only pydantic, so it is safe to import from Gym's config machinery.
 """
 
+import ipaddress
 import re
 from typing import List, Literal, Optional, Union
 from urllib.parse import urlsplit
@@ -32,6 +33,9 @@ H2_PING_SIDECAR_KEY_NAME = "sidecar"
 
 # AWS Global Accelerator's fixed idle timeout. A ping interval at or above it defeats the sidecar.
 GLOBAL_ACCELERATOR_IDLE_TIMEOUT_SECONDS = 340.0
+
+# AWS ALB's default client keep-alive: it closes a connection with a GOAWAY once it is this old.
+LOAD_BALANCER_KEEP_ALIVE_SECONDS = 3600.0
 
 _DEFAULT_LISTEN = "127.0.0.1:1250"
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
@@ -64,6 +68,17 @@ def upstream_origin(url: str) -> str:
     if parts.scheme != "https" or not parts.netloc:
         raise ValueError(f"{url!r} must be an https:// URL (the sidecar speaks HTTP/2 over TLS)")
     return f"https://{parts.netloc.lower()}"
+
+
+def is_loopback_host(host: str) -> bool:
+    """Whether ``host`` (a name or IP literal, optionally in brackets) only accepts local connections."""
+    host = host.strip().strip("[]").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class SidecarInstanceConfig(BaseModel, extra="forbid"):
@@ -134,6 +149,11 @@ class H2PingSidecarConfig(BaseModel, extra="forbid"):
     GOAWAY can be re-sent on a fresh connection. Larger bodies stream through and are not retried. Peak
     memory is roughly this limit times the number of concurrent requests. ``0`` disables buffering."""
 
+    max_conn_age: str = "50m"
+    """Retire the upstream connection after 90-100% of this age: in-flight requests finish on it and new
+    requests use a fresh connection, at the cost of one TLS handshake. Keep it below the load balancer's
+    client keep-alive limit (3600s by default) so large bodies never meet its GOAWAY. ``0s`` disables."""
+
     insecure_skip_verify: bool = False
     """Skip upstream TLS verification. For tests only."""
 
@@ -153,7 +173,7 @@ class H2PingSidecarConfig(BaseModel, extra="forbid"):
     """Rewrite ``policy_base_url`` and every ``*base_url`` under ``responses_api_models`` that points at
     an instance's upstream so it targets that instance's local address instead."""
 
-    @field_validator("ping_interval", "ping_timeout", "shutdown_grace", mode="before")
+    @field_validator("ping_interval", "ping_timeout", "shutdown_grace", "max_conn_age", mode="before")
     @classmethod
     def _check_duration(cls, value: Union[str, int, float]) -> str:
         return _normalize_duration(value)
@@ -182,6 +202,12 @@ class H2PingSidecarConfig(BaseModel, extra="forbid"):
             )
         if parse_duration_seconds(self.ping_timeout) <= 0:
             raise ValueError("ping_timeout must be above 0")
+        max_conn_age = parse_duration_seconds(self.max_conn_age)
+        if max_conn_age >= LOAD_BALANCER_KEEP_ALIVE_SECONDS:
+            raise ValueError(
+                f"max_conn_age {self.max_conn_age!r} must be below the {LOAD_BALANCER_KEEP_ALIVE_SECONDS:g}s load "
+                "balancer client keep-alive it exists to stay ahead of (use '0s' to disable rotation)"
+            )
 
         names = [instance.name for instance in self.instances]
         if len(set(names)) != len(names):

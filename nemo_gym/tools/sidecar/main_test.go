@@ -239,3 +239,86 @@ func TestSidecarRetriesRequestsRefusedAfterGoaway(t *testing.T) {
 		t.Fatalf("%d of 40 requests failed even with body buffering", failures)
 	}
 }
+
+// newAddrOrigin serves each request with the remote address of the HTTP/2 connection it arrived on; /slow blocks until released.
+func newAddrOrigin(t *testing.T, slowStarted chan struct{}, slowRelease chan struct{}) *httptest.Server {
+	t.Helper()
+	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slow" {
+			close(slowStarted)
+			<-slowRelease
+		}
+		_, _ = io.WriteString(w, r.RemoteAddr)
+	}))
+	origin.EnableHTTP2 = true
+	origin.StartTLS()
+	t.Cleanup(origin.Close)
+	return origin
+}
+
+func get(t *testing.T, client *http.Client, url string) string {
+	t.Helper()
+	resp, err := client.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("status=%d err=%v body=%q", resp.StatusCode, err, body)
+	}
+	return string(body)
+}
+
+func TestSidecarRotatesUpstreamConnections(t *testing.T) {
+	origin := newAddrOrigin(t, make(chan struct{}), make(chan struct{}))
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	// Jitter keeps a rotation within 90-100% of max-conn-age, so 700ms covers at least one at 400ms.
+	rotating := startSidecar(t, origin.URL, "-max-conn-age", "400ms")
+	before := get(t, client, "http://"+rotating+"/addr")
+	if again := get(t, client, "http://"+rotating+"/addr"); again != before {
+		t.Fatalf("connection changed without a rotation: %s vs %s", before, again)
+	}
+	time.Sleep(700 * time.Millisecond)
+	if after := get(t, client, "http://"+rotating+"/addr"); after == before {
+		t.Fatalf("still on the same upstream connection %s after max-conn-age", before)
+	}
+
+	// 0 disables rotation: the connection is reused indefinitely.
+	steady := startSidecar(t, origin.URL, "-max-conn-age", "0")
+	first := get(t, client, "http://"+steady+"/addr")
+	time.Sleep(700 * time.Millisecond)
+	if later := get(t, client, "http://"+steady+"/addr"); later != first {
+		t.Fatalf("connection changed with -max-conn-age 0: %s vs %s", first, later)
+	}
+}
+
+func TestSidecarRotationLetsInFlightRequestsFinish(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	origin := newAddrOrigin(t, started, release)
+	client := &http.Client{Timeout: 20 * time.Second}
+	addr := startSidecar(t, origin.URL, "-max-conn-age", "300ms")
+
+	slow := make(chan string, 1)
+	go func() { slow <- get(t, client, "http://"+addr+"/slow") }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("origin did not receive the slow request")
+	}
+
+	// The slow request is still open across at least one rotation. New requests use a fresh connection.
+	time.Sleep(700 * time.Millisecond)
+	fresh := get(t, client, "http://"+addr+"/addr")
+	close(release)
+
+	select {
+	case slowAddr := <-slow:
+		if slowAddr == fresh {
+			t.Fatalf("new request shared the retired connection %s", slowAddr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight request did not finish after rotation")
+	}
+}

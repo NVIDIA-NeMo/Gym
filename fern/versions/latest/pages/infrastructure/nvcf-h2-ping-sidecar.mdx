@@ -23,7 +23,8 @@ Gym model server --HTTP/1.1--> 127.0.0.1:1250  h2-ping-sidecar --HTTPS + HTTP/2 
 ```
 
 The sidecar holds no credentials. Your NVCF API key stays in Gym's config (`policy_api_key`) and the
-`Authorization` header passes through unchanged. Never bind the sidecar to a non-loopback address.
+`Authorization` header passes through unchanged. The sidecar has no authentication of its own, so keep it
+on a loopback address; Gym prints a warning at startup if an instance's `listen` is not one.
 
 ## Enable it
 
@@ -60,6 +61,12 @@ Gym rewrites every model URL that points at an instance's upstream: `policy_base
 `default_headers` are untouched. Only `scheme://host[:port]` of an upstream is used; the path stays
 on each request.
 
+Gym matches the *resolved* URL, so a URL that comes from a resolver such as
+`policy_base_url: ${oc.env:POLICY_URL}` is routed through the sidecar too, and becomes a literal local
+address in Gym's in-memory config for that run. An alias such as `openai_base_url: ${policy_base_url}`
+stays an alias and follows the key it points at, and a list that aliases another list is rewritten as a
+copy, so the list it points at is never changed.
+
 ## Settings
 
 All keys are optional except `enabled`.
@@ -79,6 +86,7 @@ All keys are optional except `enabled`.
 | `startup_timeout_seconds` | `30` | How long to wait for each sidecar to bind its port. |
 | `log_dir` | `nemo_gym_log_dir`, else a temp dir | Where `h2ping-<instance>-<host>.log` is written. |
 | `retry_body_limit` | `16777216` | Request bodies up to this many bytes are buffered so a request refused with a GOAWAY is re-sent on a fresh connection. Peak memory is about this limit times the concurrent requests; `0` disables it. |
+| `max_conn_age` | `50m` | Retire the upstream connection after 90-100% of this age (jittered): requests in flight finish on it and new ones use a fresh connection, at the cost of one TLS handshake. Must be below 3600s, the load balancer's default client keep-alive; `0s` disables it. |
 | `insecure_skip_verify` | `false` | Skip upstream TLS verification. Tests only. |
 | `rewrite_base_urls` | `true` | Rewrite model URLs automatically. Set `false` to point URLs at the sidecar yourself. |
 
@@ -138,12 +146,12 @@ and exits.
 
 - **HTTP/2 only.** The sidecar never falls back to HTTP/1.1, which has no PING frames.
 - **Load balancer idle timeout.** The load balancer behind Global Accelerator has its own idle timeout
-  that PINGs do not reset (3600 s on per-function `*.invocation.api.nvcf.nvidia.com` hosts, 1200 s on
-  `integrate.api.nvidia.com`). A request silent for longer than that fails with or without the sidecar;
+  that PINGs do not reset (3600 s on per-function `*.invocation.api.nvcf.nvidia.com` hosts, lower on
+  `integrate.api.nvidia.com`, 1200 s at the time of writing). A request silent for longer than that fails with or without the sidecar;
   use the per-function hostname for the longest requests.
-- **Connection rotation.** When the load balancer closes a long-lived connection with a GOAWAY, the sidecar re-sends requests it had already written on a fresh connection, as long as the body is within `retry_body_limit`. Larger bodies are not retried. The sidecar does not retire connections on its own schedule.
+- **Connection rotation.** The load balancer closes a client connection with a GOAWAY once it is about an hour old. The sidecar retires its upstream connection first (`max_conn_age`), so new requests move to a fresh connection and requests in flight finish on the old one. A request that is still running when the limit is reached can still meet the GOAWAY; a body within `retry_body_limit` is re-sent on a fresh connection, a larger one is not. A very long request can therefore still fail once, and Gym's normal retries apply.
 - **Do not replace aiohttp.** Gym stays on aiohttp and HTTP/1.1 (see
-  [aiohttp vs httpx](/infrastructure/engineering-notes/aiohttp-vs-httpx)); the sidecar is what speaks HTTP/2.
+  [aiohttp vs httpx](/main/infrastructure/engineering-notes/aiohttp-vs-httpx)); the sidecar is what speaks HTTP/2.
 - **Only `gym env start`, `gym eval run` and the other commands that start servers** launch the sidecar.
   Servers started some other way (for example one `srun` step per server) must start their own, as
   described in `nemo_gym/tools/sidecar/README.md`.

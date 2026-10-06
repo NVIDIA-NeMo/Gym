@@ -23,7 +23,7 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.h2_ping_sidecar import launcher
-from nemo_gym.h2_ping_sidecar.config import H2PingSidecarConfig, parse_duration_seconds
+from nemo_gym.h2_ping_sidecar.config import H2PingSidecarConfig, is_loopback_host, parse_duration_seconds
 from nemo_gym.h2_ping_sidecar.launcher import (
     H2PingSidecarManager,
     NodeSidecars,
@@ -135,6 +135,17 @@ class TestConfig:
         with pytest.raises(ValidationError):
             _cfg(retry_body_limit=-1)
 
+    def test_max_conn_age(self):
+        assert _cfg().max_conn_age == "50m"
+        assert _cfg(max_conn_age="0s").max_conn_age == "0s"
+        assert _cfg(max_conn_age=0).max_conn_age == "0s"
+        assert _cfg(max_conn_age="59m").max_conn_age == "59m"
+        for too_long in ("60m", "1h", "2h", 3600):
+            with pytest.raises(ValidationError, match="max_conn_age"):
+                _cfg(max_conn_age=too_long)
+        with pytest.raises(ValidationError):
+            _cfg(max_conn_age="soon")
+
     def test_gomaxprocs_must_be_positive(self):
         with pytest.raises(ValidationError):
             _cfg(gomaxprocs=0)
@@ -238,6 +249,7 @@ class TestCommandAndEnv:
             "-ping-timeout", "10s",
             "-shutdown-grace", "2m",
             "-retry-body-limit", "16777216",
+            "-max-conn-age", "50m",
             "-ready-file", "/tmp/ready",
             "-insecure-skip-verify",
         ]  # fmt: skip
@@ -331,17 +343,40 @@ class TestNodeSidecars:
             node.start()
 
     def test_stale_ready_file_is_not_readiness(self, tmp_path):
-        node = self._start(
-            tmp_path,
-            "import time; time.sleep(60)",
-        )
+        node = self._start(tmp_path, "import time; time.sleep(60)")
         node._config = node._config.model_copy(update={"startup_timeout_seconds": 0.5})
         logs = tmp_path / "logs"
         logs.mkdir()
-        stale = logs / f"h2ping-nvcf-{node._host}.ready"
+        stale = Path(node._ready_path(node._instances[0]))
         stale.write_text("999\n")
         with pytest.raises(SidecarError, match="not ready after"):
             node.start()
+        assert not stale.exists()
+
+    def test_owners_never_share_a_ready_marker(self, tmp_path):
+        """Concurrent runs with the same instance names in one log dir must not touch each other's marker."""
+        binary = _fake_binary(tmp_path, READY_THEN_IDLE)
+
+        def owner(port):
+            return NodeSidecars(
+                _cfg(startup_timeout_seconds=5, shutdown_grace="1s"),
+                [launcher.SidecarInstanceConfig(name="nvcf", upstream=NVCF, listen=f"127.0.0.1:{port}")],
+                str(binary),
+                str(tmp_path / "logs"),
+            )
+
+        a, b = owner(1250), owner(1251)
+        assert a._ready_path(a._instances[0]) != b._ready_path(b._instances[0])
+
+        (tmp_path / "logs").mkdir()
+        a._spawn(a._instances[0])  # A has bound and written its marker, but is not waiting on it yet
+        b.start()
+        b.stop()  # B's cleanup runs while A is between spawn and wait
+        try:
+            a._wait_ready(a._instances[0])
+            assert Path(a._ready_path(a._instances[0])).exists()
+        finally:
+            a.stop()
 
     def test_crash_after_start_is_reported(self, tmp_path):
         node = self._start(
@@ -536,3 +571,192 @@ class TestStartH2PingSidecar:
         from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
 
         assert "sidecar" in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+
+
+class TestResolverBackedUrls:
+    """URLs that come from a resolver are rewritten too; aliases stay aliases."""
+
+    def _instances(self):
+        return [launcher.SidecarInstanceConfig(name="nvcf", upstream=NVCF)]
+
+    def test_env_backed_policy_url_routes_policy_and_its_alias(self, monkeypatch):
+        monkeypatch.setenv("POLICY_URL", f"{NVCF}/v1")
+        gcd = OmegaConf.create(
+            {
+                "policy_base_url": "${oc.env:POLICY_URL}",
+                "policy_model": {"responses_api_models": {"openai_model": {"openai_base_url": "${policy_base_url}"}}},
+            }
+        )
+
+        changes = rewrite_base_urls(gcd, self._instances())
+
+        assert gcd.policy_base_url == "http://127.0.0.1:1250/v1"
+        assert gcd.policy_model.responses_api_models.openai_model.openai_base_url == "http://127.0.0.1:1250/v1"
+        raw = OmegaConf.to_container(gcd)
+        assert raw["policy_model"]["responses_api_models"]["openai_model"]["openai_base_url"] == "${policy_base_url}"
+        assert len(changes) == 1
+
+    def test_env_backed_judge_scalar(self, monkeypatch):
+        monkeypatch.setenv("JUDGE_URL", f"{NVCF}/v1")
+        gcd = OmegaConf.create({"judge": {"responses_api_models": {"m": {"openai_base_url": "${oc.env:JUDGE_URL}"}}}})
+        changes = rewrite_base_urls(gcd, self._instances())
+        assert gcd.judge.responses_api_models.m.openai_base_url == "http://127.0.0.1:1250/v1"
+        assert [c.location for c in changes] == ["judge.responses_api_models.m.openai_base_url"]
+
+    def test_list_alias_rewrites_a_copy_and_leaves_the_pool_alone(self):
+        pool = [f"{NVCF}/v1", "https://other.example/v1"]
+        gcd = OmegaConf.create({"pool": pool, "judge": {"responses_api_models": {"m": {"base_url": "${pool}"}}}})
+
+        changes = rewrite_base_urls(gcd, self._instances())
+
+        assert list(gcd.judge.responses_api_models.m.base_url) == [
+            "http://127.0.0.1:1250/v1",
+            "https://other.example/v1",
+        ]
+        assert list(gcd.pool) == pool
+        assert len(changes) == 1
+
+    def test_list_alias_with_no_match_stays_an_alias(self):
+        gcd = OmegaConf.create(
+            {"pool": ["https://other.example/v1"], "judge": {"responses_api_models": {"m": {"base_url": "${pool}"}}}}
+        )
+        assert rewrite_base_urls(gcd, self._instances()) == []
+        assert OmegaConf.to_container(gcd)["judge"]["responses_api_models"]["m"]["base_url"] == "${pool}"
+
+    def test_element_alias_inside_a_literal_list_is_kept(self):
+        gcd = OmegaConf.create(
+            {
+                "policy_base_url": f"{NVCF}/v1",
+                "judge": {"responses_api_models": {"m": {"base_url": ["${policy_base_url}"]}}},
+            }
+        )
+        rewrite_base_urls(gcd, self._instances())
+        assert OmegaConf.to_container(gcd)["judge"]["responses_api_models"]["m"]["base_url"] == ["${policy_base_url}"]
+        assert list(gcd.judge.responses_api_models.m.base_url) == ["http://127.0.0.1:1250/v1"]
+
+    def test_unresolvable_value_is_left_for_the_server_to_report(self, monkeypatch):
+        monkeypatch.delenv("NOT_SET_ANYWHERE", raising=False)
+        gcd = OmegaConf.create({"policy_base_url": "${oc.env:NOT_SET_ANYWHERE}"})
+        assert rewrite_base_urls(gcd, self._instances()) == []
+
+    def test_malformed_url_names_its_location(self):
+        gcd = OmegaConf.create({"judge": {"responses_api_models": {"m": {"openai_base_url": "https://[invalid/v1"}}}})
+        with pytest.raises(SidecarError, match=r"judge\.responses_api_models\.m\.openai_base_url"):
+            rewrite_base_urls(gcd, self._instances())
+
+
+class TestStartIsTransactional:
+    def _gcd(self, tmp_path, binary, judge_url=None):
+        gcd = {
+            "policy_base_url": f"{NVCF}/v1",
+            "sidecar": {
+                "enabled": True,
+                "binary": str(binary),
+                "log_dir": str(tmp_path / "logs"),
+                "shutdown_grace": "1s",
+            },
+        }
+        if judge_url is not None:
+            gcd["judge"] = {"responses_api_models": {"m": {"openai_base_url": judge_url}}}
+        return OmegaConf.create(gcd)
+
+    def test_malformed_url_fails_before_any_process_starts(self, tmp_path):
+        binary = _fake_binary(tmp_path, READY_THEN_IDLE)
+        gcd = self._gcd(tmp_path, binary, judge_url="https://[invalid/v1")
+
+        with patch.object(H2PingSidecarManager, "start") as start:
+            with pytest.raises(SidecarError, match="not a valid URL"):
+                start_h2_ping_sidecar(gcd)
+
+        start.assert_not_called()
+        assert gcd.policy_base_url == f"{NVCF}/v1"
+        assert not (tmp_path / "logs").exists()
+
+    def test_failure_after_start_stops_the_proxy(self, tmp_path):
+        binary = _fake_binary(tmp_path, READY_THEN_IDLE)
+        gcd = self._gcd(tmp_path, binary)
+        real = launcher.rewrite_base_urls
+        calls = []
+
+        def flaky(config, instances):
+            calls.append(1)
+            if len(calls) == 1:  # the dry run before anything starts
+                return real(config, instances)
+            raise RuntimeError("boom after start")
+
+        with patch.object(launcher, "rewrite_base_urls", side_effect=flaky):
+            with patch.object(
+                H2PingSidecarManager, "stop", autospec=True, side_effect=H2PingSidecarManager.stop
+            ) as stop:
+                with pytest.raises(RuntimeError, match="boom after start"):
+                    start_h2_ping_sidecar(gcd)
+
+        stop.assert_called_once()
+        assert list((tmp_path / "logs").glob("*.ready")) == []
+
+    def test_interrupt_after_start_stops_the_proxy(self, tmp_path):
+        binary = _fake_binary(tmp_path, READY_THEN_IDLE)
+        gcd = self._gcd(tmp_path, binary)
+        real = launcher.rewrite_base_urls
+        calls = []
+
+        def interrupted(config, instances):
+            calls.append(1)
+            if len(calls) == 1:
+                return real(config, instances)
+            raise KeyboardInterrupt
+
+        with patch.object(launcher, "rewrite_base_urls", side_effect=interrupted):
+            with pytest.raises(KeyboardInterrupt):
+                start_h2_ping_sidecar(gcd)
+
+        assert list((tmp_path / "logs").glob("*.ready")) == []
+
+
+class TestLoopbackWarning:
+    @pytest.mark.parametrize("host", ["127.0.0.1", "127.1.2.3", "localhost", "LOCALHOST", "::1", "[::1]"])
+    def test_loopback(self, host):
+        assert is_loopback_host(host)
+
+    @pytest.mark.parametrize("host", ["0.0.0.0", "::", "10.0.0.5", "example.com", "", "192.168.1.2"])
+    def test_not_loopback(self, host):
+        assert not is_loopback_host(host)
+
+    def test_non_loopback_listen_is_accepted_but_warned_about(self, tmp_path, capsys):
+        binary = _fake_binary(tmp_path, READY_THEN_IDLE)
+        gcd = OmegaConf.create(
+            {
+                "policy_base_url": f"{NVCF}/v1",
+                "sidecar": {
+                    "enabled": True,
+                    "binary": str(binary),
+                    "log_dir": str(tmp_path / "logs"),
+                    "shutdown_grace": "1s",
+                    "instances": [{"name": "nvcf", "upstream": NVCF, "listen": "0.0.0.0:1250"}],
+                },
+            }
+        )
+        manager = start_h2_ping_sidecar(gcd)
+        try:
+            assert "not a loopback address" in capsys.readouterr().out
+        finally:
+            manager.stop()
+
+    def test_loopback_listen_is_not_warned_about(self, tmp_path, capsys):
+        binary = _fake_binary(tmp_path, READY_THEN_IDLE)
+        gcd = OmegaConf.create(
+            {
+                "policy_base_url": f"{NVCF}/v1",
+                "sidecar": {
+                    "enabled": True,
+                    "binary": str(binary),
+                    "log_dir": str(tmp_path / "logs"),
+                    "shutdown_grace": "1s",
+                },
+            }
+        )
+        manager = start_h2_ping_sidecar(gcd)
+        try:
+            assert "not a loopback address" not in capsys.readouterr().out
+        finally:
+            manager.stop()

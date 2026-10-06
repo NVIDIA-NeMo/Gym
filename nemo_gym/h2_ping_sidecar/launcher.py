@@ -26,12 +26,15 @@ import socket
 import subprocess
 import tempfile
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
 from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
+from omegaconf.errors import OmegaConfBaseException
 
 from nemo_gym.global_config import (
     CACHE_DIR_KEY_NAME,
@@ -43,6 +46,7 @@ from nemo_gym.h2_ping_sidecar.config import (
     H2_PING_SIDECAR_KEY_NAME,
     H2PingSidecarConfig,
     SidecarInstanceConfig,
+    is_loopback_host,
     upstream_origin,
 )
 
@@ -168,8 +172,11 @@ class RewrittenUrl:
     new: str
 
 
-def _local_url(url: str, instances_by_origin: Dict[str, SidecarInstanceConfig]) -> Optional[str]:
-    parts = urlsplit(url)
+def _local_url(url: str, instances_by_origin: Dict[str, SidecarInstanceConfig], location: str) -> Optional[str]:
+    try:
+        parts = urlsplit(url)
+    except ValueError as e:
+        raise SidecarError(f"{location} is not a valid URL ({url!r}): {e}") from e
     if parts.scheme != "https" or not parts.netloc:
         return None
     instance = instances_by_origin.get(f"https://{parts.netloc.lower()}")
@@ -182,31 +189,53 @@ def rewrite_base_urls(global_config_dict: DictConfig, instances: List[SidecarIns
     """Point every model URL aimed at an instance's upstream at that instance's local address, in place.
 
     Covers ``policy_base_url`` and any ``*base_url`` key (a string or a list of strings) of a model
-    server under ``responses_api_models``. A value that is an OmegaConf interpolation such as
-    ``${policy_base_url}`` is left alone: it follows the key it points at.
+    server under ``responses_api_models``. The *resolved* value is what gets matched, so a URL that
+    comes from a resolver such as ``${oc.env:POLICY_URL}`` is routed through the sidecar too, and is
+    materialized as a literal in memory. An alias such as ``${policy_base_url}`` stays an alias: once
+    its root is rewritten it resolves to an ``http://`` URL, which no instance matches. A field that
+    aliases a whole list is rewritten as a resolved copy, so the list it points at is never changed.
+    Raises ``SidecarError`` for a value that is not a parseable URL.
     """
     by_origin = {instance.upstream: instance for instance in instances}
     changes: List[RewrittenUrl] = []
 
     def rewrite_value(container: Any, key: Any, location: str) -> None:
-        if OmegaConf.is_interpolation(container, key):
+        try:
+            old = container[key]
+        except OmegaConfBaseException:
+            # A value that cannot be resolved cannot be loaded by the server either; leave it for it to report.
             return
-        old = container[key]
         if not isinstance(old, str):
             return
-        new = _local_url(old, by_origin)
+        new = _local_url(old, by_origin, location)
         if new is not None:
             container[key] = new
             changes.append(RewrittenUrl(location, old, new))
 
+    def rewrite_aliased_list(container: Any, key: Any, location: str, value: ListConfig) -> None:
+        resolved = list(value)
+        for index, item in enumerate(resolved):
+            if not isinstance(item, str):
+                continue
+            new = _local_url(item, by_origin, f"{location}[{index}]")
+            if new is not None:
+                resolved[index] = new
+                changes.append(RewrittenUrl(f"{location}[{index}]", item, new))
+        if any(change.location.startswith(f"{location}[") for change in changes):
+            container[key] = resolved
+
     with open_dict(global_config_dict):
-        if POLICY_BASE_URL_KEY_NAME in global_config_dict:
+        # `in` would resolve the value; `keys()` does not, so an unresolvable policy URL is left for the servers.
+        if POLICY_BASE_URL_KEY_NAME in global_config_dict.keys():
             rewrite_value(global_config_dict, POLICY_BASE_URL_KEY_NAME, POLICY_BASE_URL_KEY_NAME)
 
         for top_level_path in list(global_config_dict.keys()):
             if top_level_path in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS:
                 continue
-            top_level_value = global_config_dict[top_level_path]
+            try:
+                top_level_value = global_config_dict[top_level_path]
+            except OmegaConfBaseException:
+                continue
             if not isinstance(top_level_value, DictConfig):
                 continue
             model_servers = top_level_value.get(_MODEL_SERVER_TYPE)
@@ -219,12 +248,16 @@ def rewrite_base_urls(global_config_dict: DictConfig, instances: List[SidecarIns
                     if not str(key).endswith(_BASE_URL_KEY_SUFFIX):
                         continue
                     location = f"{top_level_path}.{_MODEL_SERVER_TYPE}.{server_name}.{key}"
-                    if OmegaConf.is_interpolation(server_config, key):
+                    try:
+                        value = server_config[key]
+                    except OmegaConfBaseException:
                         continue
-                    value = server_config[key]
                     if isinstance(value, ListConfig):
-                        for index in range(len(value)):
-                            rewrite_value(value, index, f"{location}[{index}]")
+                        if OmegaConf.is_interpolation(server_config, key):
+                            rewrite_aliased_list(server_config, key, location, value)
+                        else:
+                            for index in range(len(value)):
+                                rewrite_value(value, index, f"{location}[{index}]")
                     else:
                         rewrite_value(server_config, key, location)
     return changes
@@ -252,6 +285,8 @@ def sidecar_command(
         config.shutdown_grace,
         "-retry-body-limit",
         str(config.retry_body_limit),
+        "-max-conn-age",
+        config.max_conn_age,
         "-ready-file",
         ready_path,
     ]
@@ -293,6 +328,9 @@ class NodeSidecars:
         self._binary = binary
         self._log_dir = log_dir
         self._host = socket.gethostname()
+        # Distinct owners (concurrent runs, or two actors) must never share or delete one another's
+        # readiness marker, even with the same instance names in the same log directory.
+        self._ready_id = uuid4().hex
         self._processes: Dict[str, subprocess.Popen] = {}
         self._log_paths: Dict[str, str] = {}
 
@@ -315,7 +353,7 @@ class NodeSidecars:
         return [f"{self._host}: {i.name} listening on {i.listen} -> {i.upstream}" for i in self._instances]
 
     def _ready_path(self, instance: SidecarInstanceConfig) -> str:
-        return os.path.join(self._log_dir, f"h2ping-{instance.name}-{self._host}.ready")
+        return os.path.join(self._log_dir, f"h2ping-{instance.name}-{self._host}-{self._ready_id}.ready")
 
     def _spawn(self, instance: SidecarInstanceConfig) -> None:
         ready_path = self._ready_path(instance)
@@ -528,12 +566,29 @@ def start_h2_ping_sidecar(global_config_dict: DictConfig) -> Optional[H2PingSide
     Returns the manager to poll and stop later, or None when the feature is off. Raises
     ``SidecarError`` (after stopping anything it started) when it cannot be brought up. Call it after
     ``initialize_ray()`` and before the config is serialized for the servers.
+
+    Everything that can be checked without side effects is checked first, so a bad config fails with
+    no process started and the live config untouched. Once the proxy is running, any later failure or
+    interrupt stops it before the error propagates, because nothing else owns it yet.
     """
     config = h2_ping_sidecar_config_from_global_config(global_config_dict)
     if not config.enabled:
         return None
 
     instances = resolve_instances(config, global_config_dict)
+    if config.rewrite_base_urls:
+        # Dry run on a copy: surfaces malformed URLs before a proxy exists.
+        rewrite_base_urls(deepcopy(global_config_dict), instances)
+    for instance in instances:
+        host = instance.listen.rpartition(":")[0]
+        if not is_loopback_host(host):
+            print(
+                f"WARNING: h2-ping-sidecar instance `{instance.name}` listens on {instance.listen}, which is not a "
+                "loopback address. The proxy has no authentication, so anything that can reach this address can "
+                f"send requests, with its own credentials, to {instance.upstream}. Use 127.0.0.1 unless you "
+                "have a reason not to."
+            )
+
     manager = H2PingSidecarManager(
         config,
         instances,
@@ -542,13 +597,17 @@ def start_h2_ping_sidecar(global_config_dict: DictConfig) -> Optional[H2PingSide
     )
     manager.start()
 
-    if config.rewrite_base_urls:
-        changes = rewrite_base_urls(global_config_dict, instances)
-        for change in changes:
-            print(f"h2-ping-sidecar: {change.location}: {change.old} -> {change.new}")
-        if not changes:
-            print(
-                "WARNING: h2-ping-sidecar is running but no model base URL points at its upstream "
-                f"({', '.join(i.upstream for i in instances)}), so nothing is routed through it."
-            )
+    try:
+        if config.rewrite_base_urls:
+            changes = rewrite_base_urls(global_config_dict, instances)
+            for change in changes:
+                print(f"h2-ping-sidecar: {change.location}: {change.old} -> {change.new}")
+            if not changes:
+                print(
+                    "WARNING: h2-ping-sidecar is running but no model base URL points at its upstream "
+                    f"({', '.join(i.upstream for i in instances)}), so nothing is routed through it."
+                )
+    except BaseException:
+        manager.stop()
+        raise
     return manager

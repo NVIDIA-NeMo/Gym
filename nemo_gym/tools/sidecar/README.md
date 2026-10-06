@@ -18,10 +18,11 @@ go build -buildvcs=false -trimpath -o h2-ping-sidecar .
 | `-shutdown-grace` | `15m` | On SIGTERM/SIGINT, wait this long for in-flight requests. |
 | `-insecure-skip-verify` | `false` | Skip upstream TLS verification (testing only). |
 | `-retry-body-limit` | `16777216` | Buffer request bodies up to this many bytes so a request refused with a GOAWAY can be re-sent on a fresh connection. `0` disables buffering. |
+| `-max-conn-age` | `50m` | Retire the upstream connection after 90-100% of this age: in-flight requests finish on it and new requests use a fresh connection. Keep it below the upstream's client keep-alive limit (AWS ALB default 3600s). `0` disables. |
 | `-ready-file` | (none) | Write the PID here after the listener is bound; removed on normal exit. |
 
 Resource limits come from the Go runtime environment: `GOMEMLIMIT` (for example `1GiB`) and `GOMAXPROCS`.
 
 Build and test need Go 1.27 or newer: `go vet ./... && go test ./...`. The test builds the binary and runs it against a local fake HTTP/2 origin only.
 
-Limitation: the sidecar does not retire long-lived upstream connections on its own schedule. When the load balancer closes one with a GOAWAY, requests whose bodies are within `-retry-body-limit` are re-sent on a fresh connection; larger bodies are not retried.
+Connection lifetime: the load balancer closes a client connection with a GOAWAY once it is about an hour old. By default the sidecar retires its upstream connection after 45-50 minutes (`-max-conn-age`); requests in flight finish on the old connection and new ones use a fresh one. A request still running when the limit is reached can meet the GOAWAY: bodies within `-retry-body-limit` are re-sent on a fresh connection, larger ones are not retried.
