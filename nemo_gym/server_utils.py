@@ -23,6 +23,8 @@ import time
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
+from functools import partial
+from importlib import import_module
 from ipaddress import ip_network
 from os import environ, getenv
 from pathlib import Path
@@ -55,6 +57,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
@@ -268,17 +271,33 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
 
     global_aiohttp_client_request_debug: bool = False
 
+    # Bounds match the Linux kernel limits; values outside them make setsockopt fail with EINVAL.
     global_aiohttp_tcp_keepalive_idle_seconds: int = Field(
         default=60,
-        description=("TCP_KEEPIDLE: seconds a socket must be idle before the kernel starts sending keepalive probes."),
+        ge=1,
+        le=32767,
+        description=(
+            "TCP_KEEPIDLE: seconds a socket must be idle before the kernel starts sending keepalive probes. "
+            "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
+        ),
     )
     global_aiohttp_tcp_keepalive_interval_seconds: int = Field(
         default=10,
-        description=("TCP_KEEPINTVL: seconds between successive keepalive probes."),
+        ge=1,
+        le=32767,
+        description=(
+            "TCP_KEEPINTVL: seconds between successive keepalive probes. "
+            "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
+        ),
     )
     global_aiohttp_tcp_keepalive_probes: int = Field(
         default=3,
-        description=("TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection."),
+        ge=1,
+        le=127,
+        description=(
+            "TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection. "
+            "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
+        ),
     )
 
 
@@ -300,6 +319,18 @@ def get_global_aiohttp_client(
     return set_global_aiohttp_client(cfg)
 
 
+def _set_tcp_keepalive(sock: socket.socket, idle_seconds: int, interval_seconds: int, probes: int) -> None:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    for opt, opt_value in (
+        # macOS has no TCP_KEEPIDLE; CPython exposes its equivalent as TCP_KEEPALIVE.
+        (getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None)), idle_seconds),
+        (getattr(socket, "TCP_KEEPINTVL", None), interval_seconds),
+        (getattr(socket, "TCP_KEEPCNT", None), probes),
+    ):
+        if opt is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, opt, opt_value)
+
+
 def _make_keepalive_socket_factory(
     idle_seconds: int,
     interval_seconds: int,
@@ -308,18 +339,34 @@ def _make_keepalive_socket_factory(
     def factory(addr_info) -> socket.socket:
         family, type_, proto, _canonname, _sockaddr = addr_info
         sock = socket.socket(family=family, type=type_, proto=proto)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        for opt_name, opt_value in (
-            ("TCP_KEEPIDLE", idle_seconds),
-            ("TCP_KEEPINTVL", interval_seconds),
-            ("TCP_KEEPCNT", probes),
-        ):
-            opt = getattr(socket, opt_name, None)
-            if opt is not None:
-                sock.setsockopt(socket.IPPROTO_TCP, opt, opt_value)
+        _set_tcp_keepalive(sock, idle_seconds, interval_seconds, probes)
         return sock
 
     return factory
+
+
+class KeepaliveHttpToolsProtocol(HttpToolsProtocol):
+    """Uvicorn's httptools protocol with TCP keepalive on every accepted connection.
+
+    A model server answers only after generation finishes, so a client connection can carry no bytes for many
+    minutes. Stateful network hops on some paths evict flows that stay idle that long, which silently drops the
+    eventual reply and leaves the client waiting on a half-open connection. Keepalive probes keep the flow alive and
+    let the kernel reap peers that are really gone. Uses the same ``global_aiohttp_tcp_keepalive_*`` settings as the
+    outgoing client connections.
+
+    Handed to uvicorn as ``partial(KeepaliveHttpToolsProtocol, keepalive=(idle, interval, probes))``: multi-worker
+    uvicorn pickles its config into worker processes, so this class must stay importable at module level.
+    """
+
+    def __init__(self, *args: Any, keepalive: Tuple[int, int, int], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._keepalive = keepalive
+
+    def connection_made(self, transport: asyncio.Transport) -> None:
+        sock = transport.get_extra_info("socket")
+        if sock is not None and sock.family in (socket.AF_INET, socket.AF_INET6):
+            _set_tcp_keepalive(sock, *self._keepalive)
+        super().connection_made(transport)
 
 
 def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
@@ -402,6 +449,7 @@ async def request(
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
+    _max_num_tries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -414,7 +462,14 @@ async def request(
     ``ServerClient`` server name, ``remote_agent_service`` for the remote agent's external
     service, or ``None`` for the fallback label ``external``. It is retained across retries
     and redirects and is not forwarded to aiohttp.
+
+    ``_max_num_tries`` caps this call's total attempts on every exception path. It replaces the
+    default generic-error limit (``MAX_NUM_TRIES`` attempts for external calls, unbounded for
+    internal ones). A ``_max_connection_retries`` limit still applies as well.
     """
+    if _max_num_tries is not None and _max_num_tries < 1:
+        raise ValueError("_max_num_tries must be at least 1")
+
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
         kwargs["data"] = orjson.dumps(kwargs.pop("json"))
@@ -428,6 +483,7 @@ async def request(
             method,
             url,
             _internal=_internal,
+            _max_num_tries=_max_num_tries,
             _max_connection_retries=_max_connection_retries,
             _server_name=_server_name,
             **kwargs,
@@ -436,6 +492,7 @@ async def request(
         method,
         url,
         _internal=_internal,
+        _max_num_tries=_max_num_tries,
         _max_connection_retries=_max_connection_retries,
         _server_name=_server_name,
         **kwargs,
@@ -448,6 +505,7 @@ async def _traced_request(
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
+    _max_num_tries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -486,6 +544,7 @@ async def _traced_request(
             method,
             url,
             _internal=_internal,
+            _max_num_tries=_max_num_tries,
             _max_connection_retries=_max_connection_retries,
             _server_name=_server_name,
             **kwargs,
@@ -538,6 +597,7 @@ async def _request_with_retries(
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
+    _max_num_tries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
@@ -545,15 +605,20 @@ async def _request_with_retries(
     token = set_server_name(_server_name or "external") if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY else None
     try:
         num_tries = 1
+        explicit_tries = 0
         retries = 0
         retry_start = time.monotonic()
         while True:
+            if _max_num_tries is not None:
+                explicit_tries += 1
             try:
                 return await client.request(method=method, url=url, **kwargs)
             except ServerDisconnectedError:
                 global _NUM_SERVER_DISCONNECTED_ERROR
                 _NUM_SERVER_DISCONNECTED_ERROR += 1
                 retries += 1
+                if _max_num_tries is not None and explicit_tries >= _max_num_tries:
+                    raise
                 if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                     print(
                         f"[request_retry url={url} error=ServerDisconnectedError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
@@ -570,6 +635,8 @@ async def _request_with_retries(
                 global _NUM_CLIENT_OS_ERROR
                 _NUM_CLIENT_OS_ERROR += 1
                 retries += 1
+                if _max_num_tries is not None and explicit_tries >= _max_num_tries:
+                    raise
                 if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                     print(
                         f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
@@ -585,11 +652,16 @@ async def _request_with_retries(
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                     print_exc()
 
-                if _max_connection_retries is not None and num_tries >= _max_connection_retries:
+                # num_tries only advances on the default path, so count explicit attempts when capped.
+                attempts = explicit_tries if _max_num_tries is not None else num_tries
+                if _max_connection_retries is not None and attempts >= _max_connection_retries:
                     raise
 
+                if _max_num_tries is not None:
+                    if explicit_tries >= _max_num_tries:
+                        raise
                 # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
-                if not _internal:
+                elif not _internal:
                     print(
                         f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
 Sleeping 0.5s and retrying...
@@ -611,7 +683,9 @@ async def raise_for_status(response: ClientResponse, content: Optional[bytes] = 
         if content is None:
             content = await response.content.read()
         if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
-            print(f"""Request info: {response.request_info}
+            # Not the full `request_info`: its headers carry `Authorization: Bearer <api key>`.
+            request_info = response.request_info
+            print(f"""Request info: {request_info.method} {_redacted_url(str(request_info.real_url))}
 Response content: {content}""")
 
         try:
@@ -652,6 +726,28 @@ class ServerClient(BaseModel):
 
     # Resolved base URLs, cached by server name.
     _server_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    def assistant_message_header(self, model_server_name: str) -> bytes | None:
+        """Read the optional header property of harnesses using this model server.
+
+        The property lives on the harness package so model workers need not import
+        an agent's app or install its runtime dependencies.
+        """
+        headers = set()
+        for instance in self.global_config_dict.values():
+            if not isinstance(instance, (dict, DictConfig)):
+                continue
+            for harness, config in instance.get("responses_api_agents", {}).items():
+                model = config.get("model_server") or {}
+                if model.get("name") != model_server_name or model.get("type") != "responses_api_models":
+                    continue
+                package = import_module(f"responses_api_agents.{harness}")
+                header = getattr(package, "_assistant_message_header", None)
+                if header is not None:
+                    headers.add(header.lower())
+        if len(headers) > 1:
+            raise ValueError(f"Harnesses using model server {model_server_name!r} declare different assistant headers")
+        return next(iter(headers), None)
 
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
@@ -1340,6 +1436,7 @@ repr(e): {repr(e)}"""
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
         uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
+        keepalive_cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
         if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok and is_main_fastapi_proc:
             print(
                 "Disabling a uvicorn access logging so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
@@ -1354,10 +1451,17 @@ repr(e): {repr(e)}"""
             timeout_worker_healthcheck=global_config_dict.get(UVICORN_TIMEOUT_WORKER_HEALTHCHECK, 30),
             # Ensure server keepalive > client keepalive
             timeout_keep_alive=30,
-            # Parse HTTP with httptools instead of pure-Python h11.
-            # Explicit selection prevents Uvicorn from silently falling back to h11.
-            # A missing or incompatible httptools wheel now fails during startup.
-            http="httptools",
+            # Parse HTTP with httptools instead of pure-Python h11, and enable TCP keepalive on every accepted
+            # connection. Explicit selection prevents Uvicorn from silently falling back to h11; a missing or
+            # incompatible httptools wheel fails at import.
+            http=partial(
+                KeepaliveHttpToolsProtocol,
+                keepalive=(
+                    keepalive_cfg.global_aiohttp_tcp_keepalive_idle_seconds,
+                    keepalive_cfg.global_aiohttp_tcp_keepalive_interval_seconds,
+                    keepalive_cfg.global_aiohttp_tcp_keepalive_probes,
+                ),
+            ),
             access_log=uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
             # Internal-only by default. Enabling this requires an explicit trusted-proxy allowlist,
             # so forwarded headers are never honored from an arbitrary peer.

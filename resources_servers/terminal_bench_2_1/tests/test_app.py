@@ -3,12 +3,16 @@
 
 import subprocess
 from pathlib import Path
+from shlex import quote
+from shutil import copyfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
+from fastapi import Request
 
 import resources_servers.terminal_bench_2_1.app as terminal_bench_app
+from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_2_1.app import (
     _BULLSEYE_SECURITY_SNAPSHOT_SETUP,
@@ -117,6 +121,7 @@ class TestApp:
         assert sandbox.exec.await_args_list == [
             call("pwd"),
             call("bash /app/solve.sh", timeout_s=timeout, preserve_background_services=True),
+            call("mkdir -p /logs/verifier", timeout_s=timeout),
             call("bash /tests/test.sh", timeout_s=timeout),
         ]
 
@@ -191,6 +196,80 @@ class TestApp:
                     task_folder=str(tmp_path),
                 )
             )
+
+    @pytest.mark.parametrize("test_exit_code", [0, 1, 127])
+    @pytest.mark.parametrize("logs_state", ["missing", "directory", "file"])
+    async def test_verify_prepares_reward_directory(
+        self, monkeypatch, tmp_path: Path, test_exit_code: int, logs_state: str
+    ) -> None:
+        verifier_dir = tmp_path / "logs" / "verifier"
+        if logs_state == "directory":
+            verifier_dir.mkdir(parents=True)
+        elif logs_state == "file":
+            verifier_dir.parent.mkdir()
+            verifier_dir.write_text("not a directory")
+        script = tmp_path / "test.sh"
+        # Like the benchmark scripts, report the test command's outcome without
+        # relying on a test runner to create the output directory as a side effect.
+        script.write_text(
+            f"bash -c 'exit {test_exit_code}'\n"
+            f"if [ $? -eq 0 ]; then echo 1; else echo 0; fi > {quote(str(verifier_dir))}/reward.txt\n"
+        )
+
+        async def execute(command, **kwargs):
+            command = command.replace("/logs/verifier", quote(str(verifier_dir)))
+            command = command.replace("/tests/test.sh", quote(str(script)))
+            result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=10)
+            return MagicMock(return_code=result.returncode, stdout=result.stdout, stderr=result.stderr)
+
+        async def download(remote_path, local_path):
+            assert remote_path == "/logs/verifier/reward.txt"
+            copyfile(verifier_dir / "reward.txt", local_path)
+
+        sandbox = AsyncMock()
+        sandbox.exec.side_effect = execute
+        sandbox.download.side_effect = download
+        server = TerminalBench21ResourcesServer(
+            config=TerminalBench21ResourcesServerConfig(
+                sandbox_provider="test",
+                sandbox_config={},
+                evaluation_timeout=30,
+                host="",
+                port=0,
+                entrypoint="",
+                name="",
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        server._session_id_to_sandbox["test-session"] = sandbox
+        monkeypatch.setattr(TerminalBench21ResourcesServer, "_upload_folder", AsyncMock())
+        body = TerminalBench21VerifyRequest(
+            task_name="terminal-bench/test-task",
+            docker_image="test-task:latest",
+            task_folder=str(tmp_path),
+            responses_create_params={"input": []},
+            response=NeMoGymResponse(
+                id="response",
+                created_at=0,
+                model="test",
+                object="response",
+                output=[],
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
+            ),
+        )
+
+        result = await server.verify(Request({"type": "http", "session": {SESSION_ID_KEY: "test-session"}}), body)
+
+        assert result.evaluation_completed == (logs_state != "file")
+        assert result.reward == (1.0 if test_exit_code == 0 and logs_state != "file" else 0.0)
+        if logs_state == "file":
+            sandbox.download.assert_not_awaited()
+            assert not any("test.sh" in call.args[0] for call in sandbox.exec.await_args_list)
+        assert result.test_output == ""
+        sandbox.stop.assert_awaited_once()
+        assert "test-session" not in server._session_id_to_sandbox
 
 
 @pytest.mark.parametrize("distro", ["debian:bullseye", "debian:bookworm", "ubuntu:noble"])
