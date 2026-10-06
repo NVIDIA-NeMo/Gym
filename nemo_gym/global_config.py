@@ -1890,8 +1890,10 @@ def resolve_dataset_agent(
     """Resolve the agent that runs a dataset declared by ``declaring_instance_name``.
 
     Shared by benchmark discovery, preparation, manifest validation, and flat-row dispatch.
-    A declared ``taskset`` resolves through ``environment_server_routes`` and the bound
-    Environment Server's ``agent_server``. It does not require an agent -> resources edge.
+    A declared ``taskset`` resolves through ``environment_server_routes`` to the agents the bound
+    Environment Server references (``environment_server_agent_refs``). When it references several,
+    such as a user and an assistant, the dataset's ``agent`` pin chooses one. It does not require
+    an agent -> resources edge.
     Otherwise, first hit wins:
 
     1. ``pin`` (the dataset's ``agent:`` key) — validated: it must name the declaring agent
@@ -1915,23 +1917,38 @@ def resolve_dataset_agent(
         environment_config = next(iter(servers.values()))
         if not isinstance(environment_config, DictConfig):
             raise ConfigError(f"Environment Server {environment_name!r} must have a configuration mapping.")
-        agent_ref = environment_config.get(AGENT_SERVER_REF_KEY_NAME)
-        agent_name = agent_ref.get("name") if isinstance(agent_ref, DictConfig) else None
-        agent = global_config_dict.get(agent_name) if isinstance(agent_name, str) else None
-        if (
-            not isinstance(agent, DictConfig)
-            or AGENT_SERVER_TYPE_KEY_NAME not in agent
-            or agent_ref.get("type", AGENT_SERVER_TYPE_KEY_NAME) != AGENT_SERVER_TYPE_KEY_NAME
-        ):
+        agent_names = []
+        for agent_ref in environment_server_agent_refs(environment_config):
+            name = agent_ref.get("name")
+            agent = global_config_dict.get(name) if isinstance(name, str) else None
+            if not isinstance(agent, DictConfig) or AGENT_SERVER_TYPE_KEY_NAME not in agent:
+                raise ConfigError(
+                    f"Environment Server {environment_name!r} references {name!r}, which is not an agent. "
+                    "Its agent_server and other agent references must name agents."
+                )
+            agent_names.append(name)
+        if not agent_names:
             raise ConfigError(
                 f"Environment Server {environment_name!r} must bind a valid agent_server for this dataset."
             )
-        if pin is not None and pin != agent_name:
+        if pin is not None:
+            if pin not in agent_names:
+                raise ConfigError(
+                    f"Taskset {taskset!r} pins agent {pin!r}, but Environment Server {environment_name!r} "
+                    f"runs {', '.join(repr(name) for name in agent_names)}. "
+                    "Remove the pin or make it match the route."
+                )
+            agent_name = pin
+        elif is_agent:
+            agent_name = declaring_instance_name
+        elif len(agent_names) == 1:
+            agent_name = agent_names[0]
+        else:
             raise ConfigError(
-                f"Taskset {taskset!r} pins agent {pin!r}, but Environment Server {environment_name!r} "
-                f"runs {agent_name!r}. Remove the pin or make it match the route."
+                f"Taskset {taskset!r} routes to Environment Server {environment_name!r}, which runs several agents: "
+                f"{', '.join(repr(name) for name in agent_names)}. Pin one with the dataset's `agent` key."
             )
-        if is_agent and declaring_instance_name != agent_name:
+        if is_agent and (declaring_instance_name != agent_name or agent_name not in agent_names):
             raise ConfigError(f"Taskset {taskset!r} must route to its declaring agent {declaring_instance_name!r}.")
         if not is_agent:
             resources_ref = environment_config.get("resources_server")

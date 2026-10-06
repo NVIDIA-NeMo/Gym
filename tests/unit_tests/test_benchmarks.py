@@ -1119,6 +1119,73 @@ class TestNativeTasksetBenchmark:
         with pytest.raises(ConfigError, match="must route to its declaring agent"):
             resolve_dataset_agent(config, "other", taskset="swe:test")
 
+    @pytest.fixture
+    def multi_agent_config(self, config):
+        config.user = {"responses_api_agents": {"impl": {"entrypoint": "app.py"}}}
+        server = config.environment.environment_servers.single_agent_turn
+        del server["agent_server"]
+        server.user_agent = {"type": "responses_api_agents", "name": "user"}
+        server.assistant_agent = {"type": "responses_api_agents", "name": "agent"}
+        return config
+
+    def test_multi_agent_route_resolves_the_pinned_agent(self, multi_agent_config):
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        assert resolve_dataset_agent(multi_agent_config, "resources", pin="agent", taskset="swe:test") == "agent"
+        assert resolve_dataset_agent(multi_agent_config, "resources", pin="user", taskset="swe:test") == "user"
+
+    def test_multi_agent_route_requires_a_pin(self, multi_agent_config):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        with pytest.raises(ConfigError, match="runs several agents: 'user', 'agent'"):
+            resolve_dataset_agent(multi_agent_config, "resources", taskset="swe:test")
+
+    def test_multi_agent_route_rejects_a_pin_it_does_not_run(self, multi_agent_config):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        multi_agent_config.other = {"responses_api_agents": {"impl": {"entrypoint": "app.py"}}}
+        with pytest.raises(ConfigError, match="pins agent 'other'.*runs 'user', 'agent'"):
+            resolve_dataset_agent(multi_agent_config, "resources", pin="other", taskset="swe:test")
+
+    def test_multi_agent_route_accepts_a_declaring_participant(self, multi_agent_config):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        assert resolve_dataset_agent(multi_agent_config, "user", taskset="swe:test") == "user"
+        multi_agent_config.other = {"responses_api_agents": {"impl": {"entrypoint": "app.py"}}}
+        with pytest.raises(ConfigError, match="must route to its declaring agent"):
+            resolve_dataset_agent(multi_agent_config, "other", taskset="swe:test")
+
+    def test_multi_agent_route_rejects_a_reference_to_a_non_agent(self, multi_agent_config):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        multi_agent_config.environment.environment_servers.single_agent_turn.user_agent.name = "resources"
+        with pytest.raises(ConfigError, match="references 'resources', which is not an agent"):
+            resolve_dataset_agent(multi_agent_config, "resources", pin="agent", taskset="swe:test")
+
+    def test_collation_routes_a_pinned_multi_agent_taskset(self, multi_agent_config, tmp_path):
+        import json
+
+        from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+        from nemo_gym.train_data_utils import TrainDataProcessor
+
+        (tmp_path / "source.jsonl").write_text(json.dumps({"instance_id": "task", "answer": "expected"}) + "\n")
+        multi_agent_config.resources.resources_servers.impl.datasets[0].agent = "agent"
+        multi_agent_config.update({"mode": "train_preparation", "output_dirpath": str(tmp_path / "collated")})
+        TrainDataProcessor().run(multi_agent_config)
+        (loaded,) = RolloutCollectionHelper()._preprocess_rows_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(tmp_path / "collated/benchmark.jsonl"),
+                output_jsonl_fpath="unused",
+                environment_server_routes={"swe:test": "environment"},
+            )
+        )
+        assert loaded["_ng_environment_server"] == "environment"
+        assert loaded["task_input"]["answer"] == "expected"
+
 
 class TestAgentPinDiscoveryCollateRollout:
     """The agent discovery resolves for a pinned benchmark is the agent rollout dispatch routes
