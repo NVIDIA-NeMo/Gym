@@ -251,6 +251,40 @@ def test_task_identity_preserves_index_fallback_and_zero(task_fields: dict[str, 
     assert request.episode_id == EpisodeId(rollout_id="3-2", attempt=0)
 
 
+@pytest.mark.parametrize("task_source", ["resources", "agent"])
+def test_task_source_may_name_the_bound_resources_server_or_agent(task_source: str) -> None:
+    # Collation stamps task_source with the instance that declares the dataset, usually the agent.
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    request = adapter._episode_request_from_row(
+        {
+            "task_source": task_source,
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "responses_create_params": {"input": "task"},
+        }
+    )
+
+    assert request.task.task_id.taskset == task_source
+    assert "task_source" not in request.task.task_input.task_data
+
+
+def test_task_source_naming_another_instance_is_rejected() -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    with pytest.raises(ValueError, match="names none of this Environment Server's instances"):
+        adapter._episode_request_from_row(
+            {
+                "task_source": "other_agent",
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": "task"},
+            }
+        )
+
+
 async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:
     legacy_environment, legacy_client = _environment_server()
     episode_environment, episode_client = _environment_server()
