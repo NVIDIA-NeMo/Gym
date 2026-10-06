@@ -6,9 +6,9 @@ position: 6
 
 Start with the output files:
 
-- `results/usersim/rollouts.jsonl` contains completed episode responses, including measured failures.
-- `results/usersim/rollouts_failures.jsonl` contains attempts that failed before Gym could save a completed episode.
-- `results/usersim/quality_summary.json` summarizes rollout health when health checks are enabled.
+- `results/nemo_user_sim/rollouts.jsonl` contains completed episode responses, including measured failures.
+- `results/nemo_user_sim/rollouts_failures.jsonl` contains attempts that failed before Gym could save a completed episode.
+- `results/nemo_user_sim/quality_summary.json` summarizes rollout health when health checks are enabled.
 
 A zero reward does not by itself mean that the Assistant performed poorly. Check the failure stage and
 `mask_sample` before interpreting it.
@@ -25,7 +25,7 @@ jq '{
   class: ._ng_failure_class,
   stage: ._ng_failure_stage,
   message: ._ng_failure_message
-}' results/usersim/rollouts_failures.jsonl
+}' results/nemo_user_sim/rollouts_failures.jsonl
 ```
 
 The stage commonly identifies `admission`, `seed`, `agent`, `verification`, or `cleanup`. These are infrastructure or
@@ -42,7 +42,7 @@ jq '{
   mask_sample,
   failure_kind,
   failure_reason
-}' results/usersim/rollouts.jsonl
+}' results/nemo_user_sim/rollouts.jsonl
 ```
 
 Interpret attribution carefully:
@@ -69,7 +69,7 @@ jq '{
   scorer_state: .verification.verifier_data.scorer_state,
   scorer_result: .verification.verifier_data.scorer_result,
   assistant_eval: .verification.verifier_data.assistant_eval
-}' results/usersim/rollouts.jsonl
+}' results/nemo_user_sim/rollouts.jsonl
 ```
 
 The main cases are:
@@ -112,7 +112,7 @@ The digest proves that the row remained unchanged during the episode; it does no
 row equals an earlier preparation artifact. Regenerate the validation rows with:
 
 ```bash
-python environments/usersim/prepare.py
+python environments/nemo_user_sim/prepare.py
 ```
 
 ## Session cleanup failures

@@ -105,21 +105,21 @@ export SUPPORT_MODEL_API_KEY="<your-api-key>"
 Run the environment's preparation script:
 
 ```bash
-python environments/usersim/prepare.py
+python environments/nemo_user_sim/prepare.py
 ```
 
 The script runs the pinned NeMo User Sim materializer in an isolated dependency environment and writes
-`environments/usersim/data/usersim.jsonl`. Its 14 deterministic rows contain one task for each first-party
-probe. NeMo User Sim resolves the persona, scenario, tools, seed, trajectory identity, and provenance before
-rollout collection begins.
+`environments/nemo_user_sim/data/nemo_user_sim.jsonl`. Its 14 deterministic rows contain one task for each
+first-party probe. NeMo User Sim resolves the persona, scenario, tools, seed, trajectory identity, and provenance
+before rollout collection begins.
 
 Confirm that all probe tasks were generated and inspect them:
 
 ```bash
-wc -l environments/usersim/data/usersim.jsonl
+wc -l environments/nemo_user_sim/data/nemo_user_sim.jsonl
 jq '.resolved_row | {
   probe_type, trajectory_id, usersim_provenance, usersim_config
-}' environments/usersim/data/usersim.jsonl
+}' environments/nemo_user_sim/data/nemo_user_sim.jsonl
 ```
 
 The Resources Server validates required fields and the pinned NeMo User Sim revision when it seeds a session.
@@ -131,13 +131,13 @@ the episode.
 Start with one task and one repeat:
 
 ```bash
-mkdir -p results/usersim/model-calls
-capture_dir="$(pwd)/results/usersim/model-calls"
+mkdir -p results/nemo_user_sim/model-calls
+capture_dir="$(pwd)/results/nemo_user_sim/model-calls"
 
 gym eval run \
-  --environment usersim \
+  --environment nemo_user_sim \
   --split validation \
-  --output results/usersim/rollouts.jsonl \
+  --output results/nemo_user_sim/rollouts.jsonl \
   --limit 1 \
   --num-repeats 1 \
   +user_model_uses_reasoning_parser=false \
@@ -152,10 +152,10 @@ separate reasoning field that Gym must parse.
 
 A successful run writes:
 
-- `results/usersim/rollouts.jsonl`: completed episodes and scores.
-- `results/usersim/rollouts_materialized_inputs.jsonl`: the exact input used for each attempt.
-- `results/usersim/rollouts_failures.jsonl`: attempts that failed before a completed episode was saved.
-- `results/usersim/model-calls/`: captured participant model calls.
+- `results/nemo_user_sim/rollouts.jsonl`: completed episodes and scores.
+- `results/nemo_user_sim/rollouts_materialized_inputs.jsonl`: the exact input used for each attempt.
+- `results/nemo_user_sim/rollouts_failures.jsonl`: attempts that failed before a completed episode was saved.
+- `results/nemo_user_sim/model-calls/`: captured participant model calls.
 
 ## Inspect the result
 
@@ -167,7 +167,7 @@ jq '{
   conversation: .usersim_result.conversation_messages,
   reward,
   mask_sample
-}' results/usersim/rollouts.jsonl
+}' results/nemo_user_sim/rollouts.jsonl
 ```
 
 `reward` is the mean of normalized helpfulness, accuracy, and coherence when `scenario_completed` is `true`
@@ -180,7 +180,7 @@ Inspect the exact participant requests and responses:
 jq '.invocations[]
   | select(.role == "user" or .role == "assistant")
   | {sequence, role, request, response, termination_reason}' \
-  results/usersim/rollouts.jsonl
+  results/nemo_user_sim/rollouts.jsonl
 ```
 
 The smoke run is complete when the rollout contains alternating User and Assistant messages, a non-error
@@ -192,9 +192,9 @@ After the smoke rollout succeeds, remove `--limit 1` to run all 14 generated pro
 
 ```bash
 gym eval run \
-  --environment usersim \
+  --environment nemo_user_sim \
   --split validation \
-  --output results/usersim/all-probes.jsonl \
+  --output results/nemo_user_sim/all-probes.jsonl \
   --num-repeats 1 \
   +user_model_uses_reasoning_parser=false \
   +policy_uses_reasoning_parser=false \
@@ -205,9 +205,9 @@ gym eval run \
 
 ## Next steps
 
-- [Inspect NeMo User Sim rollouts](/tutorials/evaluation-tutorials/usersim-rollout-inspection) for
+- [Inspect NeMo User Sim rollouts](/tutorials/evaluation-tutorials/nemo-user-sim-rollout-inspection) for
   conversations, tools, scores, invocations, and model-call captures.
-- [Troubleshoot NeMo User Sim rollouts](/tutorials/evaluation-tutorials/usersim-rollout-troubleshooting) for
+- [Troubleshoot NeMo User Sim rollouts](/tutorials/evaluation-tutorials/nemo-user-sim-rollout-troubleshooting) for
   collection, simulation, and grading failures.
-- [NeMo User Sim integration reference](/tutorials/evaluation-tutorials/usersim-integration-reference) for
+- [NeMo User Sim integration reference](/tutorials/evaluation-tutorials/nemo-user-sim-integration-reference) for
   architecture, ownership, contracts, and field semantics.
