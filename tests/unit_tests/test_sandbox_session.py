@@ -7,8 +7,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, supervisor_client
-from nemo_gym.sandbox.session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils import supervisor_client
+from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 
 
 RECEIPT = {"cleanup_confirmed": True, "return_code": 0, "timed_out": False, "error": None}

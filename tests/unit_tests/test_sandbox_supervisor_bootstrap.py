@@ -10,13 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.sandbox import process_supervisor
-from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.sandbox.supervisor_client import (
+from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.agent_utils.supervisor_client import (
     remove_session_directory,
     stop_and_confirm_cleanup,
     supervised_launch_command,
 )
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 
 
 class LocalSandbox:

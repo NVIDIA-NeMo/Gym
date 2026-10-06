@@ -12,15 +12,15 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.sandbox import process_supervisor
-from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.sandbox.supervisor_client import (
+from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.agent_utils.supervisor_client import (
     HarnessProcessInfo,
     parse_cleanup_receipt,
     parse_runtime_info,
     stop_and_confirm_cleanup,
     supervised_launch_command,
 )
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.utils import read_text, upload_text
 
 

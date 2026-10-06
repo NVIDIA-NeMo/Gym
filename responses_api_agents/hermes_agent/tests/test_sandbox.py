@@ -17,11 +17,11 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest, _AgentSessionRecord
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
-from nemo_gym.sandbox.session import SandboxSession
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.hermes_agent import sandbox as hermes_sandbox
 from responses_api_agents.hermes_agent.app import (

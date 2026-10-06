@@ -12,12 +12,12 @@ from shlex import quote
 
 from pydantic import JsonValue
 
+from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.supervisor_client import HarnessProcessInfo, parse_runtime_info
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.sandbox import process_supervisor
-from nemo_gym.sandbox.session import SandboxCommand, SandboxSession
-from nemo_gym.sandbox.supervisor_client import HarnessProcessInfo, parse_runtime_info
 from nemo_gym.sandbox.utils import read_text, upload_text
 
 

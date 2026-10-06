@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Controller-side transport for the shared sandbox process supervisor.
 
-Session ownership and cancellation live in session.py; output parsing stays with the adapter.
+Session ownership and cancellation live in sandbox_session.py; output parsing stays with the adapter.
 Unlike process_supervisor.py, this module is not uploaded to the task sandbox.
 """
 
@@ -13,8 +13,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
+from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
 from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.process_supervisor import CleanupReceipt
 from nemo_gym.sandbox.utils import read_text
 
 

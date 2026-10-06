@@ -8,14 +8,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import cast
 
-from nemo_gym.sandbox.api import AsyncSandbox
-from nemo_gym.sandbox.process_supervisor import CleanupReceipt, exec_timeout
-from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.sandbox.supervisor_client import (
+from nemo_gym.agent_utils.process_supervisor import CleanupReceipt, exec_timeout
+from nemo_gym.agent_utils.supervisor_client import (
     remove_session_directory,
     stop_and_confirm_cleanup,
     supervised_launch_command,
 )
+from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 
 
 LOG = logging.getLogger(__name__)

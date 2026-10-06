@@ -22,6 +22,7 @@ import pytest
 import yaml
 from fastapi import HTTPException
 
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
@@ -41,7 +42,6 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.sandbox.session import SandboxSession
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.hermes_agent.app import (
