@@ -1,10 +1,23 @@
 # NeMo User Sim environment
 
 This environment runs population-grounded, multi-turn user simulation with
-NeMo User Sim. Its benchmark includes one task for each first-party User Sim
-probe and exercises the environment's supported interaction shapes.
+NeMo User Sim. It includes a committed five-task validation split for immediate
+smoke evaluation and a prepared benchmark with one task for each first-party
+User Sim probe.
 
-## Prepare tasks
+## Validation split
+
+The committed `environments/usersim/data/validation.jsonl` contains five
+synthetic tasks and requires no NGC access or preparation:
+
+```bash
+gym eval run \
+  --environment usersim \
+  --split validation \
+  --output results/usersim.jsonl
+```
+
+## Prepare the complete benchmark
 
 Preparation runs the pinned User Sim package in an isolated dependency
 environment and asks its canonical sampler to materialize one fully resolved
@@ -63,7 +76,7 @@ may match when one provider satisfies multiple roles.
 ```bash
 gym eval run \
   --environment usersim \
-  --split benchmark \
+  --split validation \
   --output results/usersim.jsonl \
   +user_model_uses_reasoning_parser=false \
   +policy_uses_reasoning_parser=false \
