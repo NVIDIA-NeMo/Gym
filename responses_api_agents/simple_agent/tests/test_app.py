@@ -647,7 +647,6 @@ class TestApp:
             collect_trajectory=True,
             task_id="task",
             rollout_id="rollout",
-            invocation_id="assistant-0",
         )
 
         assert server_client.post.await_count == 1
