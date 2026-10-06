@@ -181,7 +181,7 @@ roles:
   decode:
     nodes: 4
     workers: 4
-    gpus: 16
+    gpus: 4
     env:
       CUDA_VISIBLE_DEVICES: 0,1,2,3
       UCX_NET_DEVICES: mlx5_0,mlx5_1,mlx5_3,mlx5_4
