@@ -68,7 +68,13 @@ candidate per task and is not a new policy execution.
 ## Run the pinned judge-only driver
 
 Use a dedicated installation of the pinned Gym revision in the approved GDP
-controller runtime, which includes LibreOffice and document conversion tools.
+controller runtime. It needs LibreOffice, a functional Java runtime and LibreOffice's
+Java support (`javaldx`), plus the document conversion tools. On Debian-derived
+images, the Java components are provided by `default-jre-headless` and
+`libreoffice-java-common`. LibreOffice's version check alone does not establish
+readiness: run the pinned driver's native startup check and convert a real Office
+document to PDF under the same UID and container settings used for judging before
+launching comparisons. Preserve the runtime image hash and conversion receipt.
 The preserved artifacts and every configured reference directory must be visible
 at the same absolute paths to the agent and Resources processes. Use the same frozen 18-reference manifest for a comparable run and verify its
 paths are available to your controller. Copy reference deliverables into a private
