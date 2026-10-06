@@ -11,10 +11,10 @@ environment and asks its canonical sampler to materialize one fully resolved
 input for every registered probe:
 
 ```bash
-python environments/usersim/prepare.py
+python environments/nemo_user_sim/prepare.py
 ```
 
-The resulting `environments/usersim/data/usersim.jsonl` contains 14 rows. Each
+The resulting `environments/nemo_user_sim/data/nemo_user_sim.jsonl` contains 14 rows. Each
 generated row contains a
 stable string `task_id` and the complete User Sim row under `resolved_row`.
 Gym adds the remaining task metadata when it materializes the dataset for a
@@ -63,9 +63,9 @@ may match when one provider satisfies multiple roles.
 
 ```bash
 gym eval run \
-  --environment usersim \
+  --environment nemo_user_sim \
   --split validation \
-  --output results/usersim.jsonl \
+  --output results/nemo_user_sim.jsonl \
   +user_model_uses_reasoning_parser=false \
   +policy_uses_reasoning_parser=false \
   +support_model_uses_reasoning_parser=false \
