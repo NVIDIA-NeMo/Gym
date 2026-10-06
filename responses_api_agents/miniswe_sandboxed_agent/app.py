@@ -234,9 +234,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         budget = min(seed.agent_timeout_sec, self.config.agent_max_timeout_sec or float("inf"))
                         deadline = monotonic() + budget
                         agent_started = True
+                        # The harness relabels a run that reached this deadline as a timeout.
                         response, termination, extra = await harness.execute(max(0, deadline - monotonic()))
-                        if monotonic() >= deadline:
-                            termination.reason = "timeout"
                 except asyncio.CancelledError:
                     termination = HarnessOutcome(reason="cancelled")
                 except Exception as exc:

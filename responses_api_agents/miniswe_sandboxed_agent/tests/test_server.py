@@ -20,6 +20,7 @@ from resources_servers.terminal_bench_4.app import (
 from resources_servers.terminal_bench_4.models import SandboxedVerifyRequest
 from resources_servers.terminal_bench_4.task import TaskSettings
 from resources_servers.terminal_bench_4.tests.test_environment import environment_config
+from resources_servers.terminal_bench_4.verifier import VerifierTimeoutError
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
 
@@ -340,6 +341,27 @@ async def test_agent_outcomes_still_collect_and_grade(fixture, monkeypatch, reas
     assert result.reward == 0.75 and result.evaluation_completed
     assert bool(result.infrastructure_error) == (reason == "infrastructure_error")
     assert all(env.closed for env in f.envs)
+
+
+async def test_verifier_timeout_after_agent_timeout_reports_the_verifier(fixture, monkeypatch):
+    f = fixture
+    original = module.MiniSWEHarness
+
+    def harness(**kw):
+        h = original(**kw)
+        h.execute.side_effect = None
+        h.execute.return_value = module.empty_response(kw["params"], "model"), HarnessOutcome(reason="timeout"), {}
+        return h
+
+    monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    f.grade.side_effect = VerifierTimeoutError("Verifier execution timed out after 1 seconds")
+    result = await f.agent.run(f.request, f.body)
+    assert result.termination["reason"] == "timeout"
+    assert result.reward == 0 and not result.evaluation_completed
+    assert result.infrastructure_error == result.failure_reason == "VerifierTimeoutError"
+    recorded = f.server._sessions[result.session_id].result
+    assert recorded["exception_info"]["exception_type"] == "AgentTimeoutError"
+    assert recorded["verifier_exception_info"]["exception_type"] == "VerifierTimeoutError"
 
 
 @pytest.mark.parametrize("stage", ["setup", "execute", "grade"])

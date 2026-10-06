@@ -59,6 +59,9 @@ class Session:
 def exception(session, error, error_type=None):
     record = {"exception_type": error_type or type(error).__name__, "exception_message": str(error)}
     session.result.setdefault("exception_info", record)
+    if session.subphase in ("verifier_setup", "verifier_execution"):
+        # An earlier agent exception keeps exception_info; the missing reward is the verifier's.
+        session.result.setdefault("verifier_exception_info", record)
     session.diagnostics.append({"phase": session.phase, "subphase": session.subphase, **record})
 
 
