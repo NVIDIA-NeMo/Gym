@@ -18,6 +18,8 @@ opencode_agent:
       native_model_id: dummy_model
       native_provider_npm: "@ai-sdk/openai-compatible"
       native_model_options: {}
+      native_model_catalog: native
+      native_output_token_max: null
       native_env: {}
       native_session_title: null
       native_auxiliary_model: native_default

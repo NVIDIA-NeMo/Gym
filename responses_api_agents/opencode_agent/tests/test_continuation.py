@@ -299,6 +299,42 @@ async def test_resume_requires_confirmed_prior_cleanup(setup):
     assert sandbox.launch.call_count == 0
 
 
+@pytest.mark.parametrize("cap,expected", [(None, None), (32000, "32000"), ("model_limit", "4096")])
+def test_native_catalog_and_output_cap_are_independent(setup, tmp_path, cap, expected):
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    agent.config.native_model_catalog = "native"
+    agent.config.native_model_options = {"reasoning": True}
+    agent.config.native_output_token_max = cap
+    request = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=request.model_dump(mode="json")).status_code == 200
+        response = client.post(
+            "/v1/agent_sessions/activate",
+            json={
+                "agent_session_id": request.agent_session_id,
+                "episode_id": request.episode_id.model_dump(),
+                "activation_id": 0,
+                "responses_create_params": {"input": "Check native settings"},
+            },
+        )
+        assert response.status_code == 200, response.text
+        env = payloads[0]["env"]
+        config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        assert config["provider"]["nemo_gym"]["models"]["dummy_model"] == {"reasoning": True}
+        assert env.get("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX") == expected
+        metadata = response.json()["response"]["metadata"]
+        assert metadata["opencode_output_token_max"] == (expected or "native_default")
+        assert metadata["opencode_model_catalog"] == "native"
+        assert (
+            client.post(
+                "/v1/agent_sessions/close",
+                json={"agent_session_id": request.agent_session_id, "episode_id": request.episode_id.model_dump()},
+            ).status_code
+            == 200
+        )
+
+
 def test_event_projection_preserves_failures_tool_details_and_reasoning():
     raw = "\n".join(
         json.dumps(event)

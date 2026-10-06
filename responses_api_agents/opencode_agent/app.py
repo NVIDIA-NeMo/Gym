@@ -161,6 +161,8 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
         "@ai-sdk/openai-compatible"
     )
     native_model_options: dict[str, Any] = Field(default_factory=dict)
+    native_model_catalog: Literal["configured", "native"] = "configured"
+    native_output_token_max: int | Literal["model_limit"] | None = "model_limit"
     native_env: dict[str, str] = Field(default_factory=dict)
     native_session_title: str | None = "NeMo Gym"
     native_auxiliary_model: Literal["primary", "native_default"] = "primary"
@@ -797,6 +799,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         }
         if unsupported_model:
             raise HTTPException(422, f"Unsupported native model options: {sorted(unsupported_model)}")
+        if isinstance(self.config.native_output_token_max, int) and self.config.native_output_token_max <= 0:
+            raise HTTPException(422, "Native output-token override must be positive or null")
         if self.config.reasoning_effort:
             variants = self.config.native_model_options.get("variants")
             if (
@@ -1214,6 +1218,20 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         timeout: float | None = None,
     ) -> NeMoGymResponse:
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
+        model_options = copy.deepcopy(self.config.native_model_options)
+        if self.config.native_model_catalog == "configured":
+            model_options = {
+                "interleaved": {"field": "reasoning_content"},
+                **model_options,
+                "limit": {
+                    "context": self.config.context_window,
+                    "input": self.config.context_window,
+                    "output": self.config.max_output_tokens,
+                },
+            }
+        output_token_max = self.config.native_output_token_max
+        if output_token_max == "model_limit":
+            output_token_max = self.config.max_output_tokens
         config = {
             "model": f"{self.config.native_provider_id}/{self.config.native_model_id}",
             "enabled_providers": [self.config.native_provider_id],
@@ -1227,17 +1245,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         "apiKey": "dummy_key",
                         "timeout": False,
                     },  # pragma: allowlist secret
-                    "models": {
-                        self.config.native_model_id: {
-                            "interleaved": {"field": "reasoning_content"},
-                            **copy.deepcopy(self.config.native_model_options),
-                            "limit": {
-                                "context": self.config.context_window,
-                                "input": self.config.context_window,
-                                "output": self.config.max_output_tokens,
-                            },
-                        }
-                    },
+                    "models": {self.config.native_model_id: model_options},
                 }
             },
             **self.config.opencode_config,
@@ -1272,7 +1280,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
                 "OPENCODE_DISABLE_PROJECT_CONFIG": str(not self.config.native_load_project_config).lower(),
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
-                "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
+                **({"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(output_token_max)} if output_token_max else {}),
             },
         }
         error = None
@@ -1413,6 +1421,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "opencode_provider_npm": self.config.native_provider_npm,
                 "opencode_provider_id": self.config.native_provider_id,
                 "opencode_model_id": self.config.native_model_id,
+                "opencode_model_catalog": self.config.native_model_catalog,
+                "opencode_output_token_max": str(output_token_max) if output_token_max else "native_default",
                 "opencode_auxiliary_model": self.config.native_auxiliary_model,
                 "opencode_session_title": self.config.native_session_title or "native_default",
                 **(

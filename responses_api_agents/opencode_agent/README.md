@@ -25,6 +25,13 @@ The harness settings remain independent of benchmark prompts and stopping policy
   native project configuration discovery. The minimal definition preserves these native defaults.
 - Select `native_provider_npm` for the configured Gym model route, and use `native_model_options`
   for reasoning capability, interleaved reasoning, variants, or provider options.
+- The minimal definition uses `native_model_catalog: native` to inherit catalog limits and
+  capabilities from the pinned executable. `configured` retains explicit `context_window` /
+  `max_output_tokens` registration and the compatibility reasoning-content field.
+- `native_output_token_max` independently controls OpenCode's experimental per-call output
+  cap. `null` preserves the runtime default, an integer sets an explicit cap, and `model_limit`
+  retains the existing behavior of copying `max_output_tokens`. The minimal definition uses
+  `null`: a catalog output limit does not imply that native requests use that entire limit.
 - `reasoning_effort` selects an explicit variant. Configure `reasoning: true` and the matching
   entry in `native_model_options.variants`; unsupported profiles fail during setup.
 - For offline runtime setup, supply `local_opencode_binary_path` and its required
