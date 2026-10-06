@@ -3,13 +3,18 @@
 # Derived from utopia-group/VeriSoftBench `Dockerfile` at commit
 # d066523f2b087f28b793c05eacb29bf2e42c0504 (MIT; see THIRD_PARTY_NOTICES.txt in the
 # build context for the licences of the 23 Lean repositories the image contains).
-# Two changes, both to the build tooling and neither to what gets built:
+# Three changes, all to the build tooling and none to what gets built:
 #   1. One RUN layer per repository instead of a single layer for all 23, so a
 #      failure late in the ~1 h build does not discard the repositories already built.
 #   2. `scripts/build_repo.sh` is the patched copy from this directory, which
-#      pre-seeds Lake packages by SHA (see the comment in that file).
+#      pre-seeds Lake packages at their pinned revisions and verifies the final
+#      revisions after the build (see the comments in that file).
+#   3. `build_config/` carries per-repo `nemo-gym-build.json` overrides from this
+#      directory recording repairs a repository needs beyond upstream's protocol
+#      (currently lean-mlir: `lake build --try-cache` fallback plus three extra
+#      targets); `build_repo.sh` reads them.
 # Build with `build_image.sh`, which assembles the context from a pinned upstream
-# checkout and overlays the patched script.
+# checkout and overlays the patched script and overrides.
 
 FROM ubuntu:22.04
 
@@ -42,7 +47,9 @@ RUN $B Lentil --clone $CFG $OUT
 RUN $B LeroyCompilerVerificationCourse --clone $CFG $OUT
 RUN $B verified-compiler --clone $CFG $OUT
 
-# Mathlib-dependent repos (the `|| echo WARNING` cases are upstream's own)
+# Mathlib-dependent repos. The `|| echo WARNING` tolerances reproduce upstream's
+# Dockerfile exactly: only the repositories whose partial failure upstream's own
+# protocol tolerates get one, and no others.
 RUN $B CvxLean --clone $CFG $OUT
 RUN $B pcf-lean --clone $CFG $OUT
 RUN $B lean-formal-reasoning-program --clone $CFG $OUT

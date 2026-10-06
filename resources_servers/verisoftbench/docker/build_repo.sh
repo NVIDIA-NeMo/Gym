@@ -3,7 +3,11 @@
 # Derived from utopia-group/VeriSoftBench scripts/build_repo.sh at commit
 # d066523f2b087f28b793c05eacb29bf2e42c0504 (MIT License, Copyright (c) 2026 VeriSoftBench
 # Authors). NVIDIA modifications (Apache-2.0): the "Pre-seed lake packages" step below,
-# which fetches every Lake dependency at its pinned revision by SHA before `lake build`.
+# which puts every Lake dependency — newly cloned or already present — at its pinned
+# lake-manifest revision before `lake build`; the optional per-repo
+# `nemo-gym-build.json` overrides (fallback and extra build targets a repository
+# needs beyond upstream's protocol); and the post-build revision verification,
+# which fails the build when any package ends off its pinned revision.
 # Everything else is upstream's, unchanged.
 #
 # build_repo.sh — Build a single Lean repository for VeriSoftBench evaluation.
@@ -140,10 +144,38 @@ fi
 echo "Overlaying build config from ${REPO_CFG}..."
 for f in "${REPO_CFG}"/*; do
     if [ -f "$f" ]; then
+        # nemo-gym-build.json is a build override for this script, not a repo file.
+        if [ "$(basename "$f")" = "nemo-gym-build.json" ]; then
+            continue
+        fi
         cp "$f" "${REPO_OUT}/$(basename "$f")"
         echo "  Copied: $(basename "$f")"
     fi
 done
+
+# --- Per-repo build overrides (NeMo Gym addition) ---
+# An optional ${REPO_CFG}/nemo-gym-build.json documents repairs a repository needs
+# beyond upstream's protocol: `try_cache_fallback` retries a failed `lake build`
+# with `--try-cache`, and `extra_targets` lists targets `lake build` does not reach
+# on its own but verification requires. A `reason` field records why.
+BUILD_OVERRIDES="${REPO_CFG}/nemo-gym-build.json"
+TRY_CACHE_FALLBACK=false
+EXTRA_TARGETS=""
+if [ -f "${BUILD_OVERRIDES}" ]; then
+    TRY_CACHE_FALLBACK=$(python3 -c "
+import json
+with open('${BUILD_OVERRIDES}') as f:
+    cfg = json.load(f)
+print('true' if cfg.get('try_cache_fallback') else 'false')
+")
+    EXTRA_TARGETS=$(python3 -c "
+import json
+with open('${BUILD_OVERRIDES}') as f:
+    cfg = json.load(f)
+print(' '.join(cfg.get('extra_targets', [])))
+")
+    echo "Build overrides: try_cache_fallback=${TRY_CACHE_FALLBACK}, extra_targets=[${EXTRA_TARGETS}]"
+fi
 
 # --- Resolve lakefile conflicts ---
 # Lake prefers lakefile.lean over lakefile.toml; remove the other
@@ -185,20 +217,16 @@ fi
 # --- Build ---
 cd "${REPO_OUT}"
 
-# For mathlib repos, fetch cached oleans first
-if [ "${HAS_MATHLIB}" = true ]; then
-    echo "Fetching mathlib cache..."
-    lake exe cache get || {
-        echo "WARNING: lake exe cache get failed (may not be available for this mathlib version)"
-    }
-fi
-
 # --- Pre-seed lake packages at their pinned revisions (NeMo Gym addition) ---
 # Lake clones each dependency and runs `git checkout <rev>`. When upstream's pinned
 # revision is no longer reachable from any branch of the dependency (observed for
 # quote4 9371548b, required by iris-lean: the `stable` branch was rewritten), that
 # checkout fails with git exit 128 and the whole image build dies. Fetching the
 # revision by SHA first keeps the pin exact and lets Lake find the package in place.
+# A package directory that already exists (e.g. left by an earlier cache or build
+# attempt) is re-pinned the same way rather than trusted (observed for Cli in
+# lean-mlir, left on the wrong revision before anything compiled). This runs before
+# `lake exe cache get` so that cache resolution starts from the pinned revisions.
 if [ -f "${REPO_OUT}/lake-manifest.json" ]; then
     echo "Pre-seeding lake packages from lake-manifest.json..."
     python3 - "${REPO_OUT}" <<'PYSEED'
@@ -209,41 +237,85 @@ pkgs_dir = root / manifest.get("packagesDir", ".lake/packages")
 for pkg in manifest.get("packages", []):
     if pkg.get("type") != "git":
         continue
+    rev = pkg["rev"]
     dest = pkgs_dir / pkg["name"]
-    if dest.exists():
-        continue
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    print(f"  seeding {pkg['name']} @ {pkg['rev'][:12]} from {pkg['url']}", flush=True)
-    subprocess.run(["git", "clone", "--quiet", pkg["url"], str(dest)], check=True)
-    subprocess.run(["git", "-C", str(dest), "fetch", "--quiet", "origin", pkg["rev"]], check=True)
-    subprocess.run(["git", "-C", str(dest), "checkout", "--quiet", "--detach", pkg["rev"]], check=True)
+    if not dest.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        print(f"  seeding {pkg['name']} @ {rev[:12]} from {pkg['url']}", flush=True)
+        subprocess.run(["git", "clone", "--quiet", pkg["url"], str(dest)], check=True)
+    elif not (dest / ".git").exists():
+        raise SystemExit(f"ERROR: {dest} exists without .git; cannot pin {pkg['name']} to {rev}")
+    head = subprocess.run(
+        ["git", "-C", str(dest), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    if head != rev:
+        print(f"  pinning existing {pkg['name']}: {head[:12]} -> {rev[:12]}", flush=True)
+        subprocess.run(["git", "-C", str(dest), "fetch", "--quiet", "origin", rev], check=True)
+        subprocess.run(["git", "-C", str(dest), "checkout", "--quiet", "--detach", rev], check=True)
 PYSEED
 fi
 
+# For mathlib repos, fetch cached oleans first
+if [ "${HAS_MATHLIB}" = true ]; then
+    echo "Fetching mathlib cache..."
+    lake exe cache get || {
+        echo "WARNING: lake exe cache get failed (may not be available for this mathlib version)"
+    }
+fi
+
 echo "Running: lake build"
-lake build
+if ! lake build; then
+    if [ "${TRY_CACHE_FALLBACK}" = true ]; then
+        echo "lake build failed; retrying with --try-cache (declared in nemo-gym-build.json)"
+        lake build --try-cache
+    else
+        echo "ERROR: lake build failed for ${REPO_NAME}"
+        exit 1
+    fi
+fi
+
+if [ -n "${EXTRA_TARGETS}" ]; then
+    echo "Building extra targets: ${EXTRA_TARGETS}"
+    # shellcheck disable=SC2086  # EXTRA_TARGETS is a space-separated target list
+    lake build ${EXTRA_TARGETS}
+fi
 
 # --- Make every manifest revision checkout-able for `lake env` (NeMo Gym addition) ---
 # `lake build` may leave a transitive package at a revision other than the one the
 # top-level manifest pins (observed for Cli in lean-mlir). At verification time
 # `lake env lean` then tries `git checkout <rev>` and dies with git exit 128 because
-# the revision was never fetched. Fetch each pinned revision so that checkout succeeds.
+# the revision was never fetched. Fetch and check out each pinned revision, then
+# verify every package really ends on it; a package left off its pin fails the build
+# instead of being reported as success.
 if [ -f "${REPO_OUT}/lake-manifest.json" ]; then
     python3 - "${REPO_OUT}" <<'PYFETCH'
 import json, pathlib, subprocess, sys
 root = pathlib.Path(sys.argv[1])
 manifest = json.loads((root / "lake-manifest.json").read_text())
 pkgs_dir = root / manifest.get("packagesDir", ".lake/packages")
+
+def head_of(dest):
+    return subprocess.run(
+        ["git", "-C", str(dest), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+
+checked = 0
+failed = []
 for pkg in manifest.get("packages", []):
     rev = pkg.get("rev")
     dest = pkgs_dir / pkg["name"]
     if pkg.get("type") != "git" or not rev or not (dest / ".git").exists():
         continue
-    head = subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-    if head != rev:
-        print(f"  {pkg['name']}: at {head[:8]}, manifest wants {rev[:8]}; fetching and checking out", flush=True)
-        subprocess.run(["git", "-C", str(dest), "fetch", "--quiet", "origin", rev], check=False)
-        subprocess.run(["git", "-C", str(dest), "checkout", "--quiet", "--detach", rev], check=False)
+    checked += 1
+    if head_of(dest) != rev:
+        print(f"  {pkg['name']}: at {head_of(dest)[:8]}, manifest wants {rev[:8]}; fetching and checking out", flush=True)
+        fetch = subprocess.run(["git", "-C", str(dest), "fetch", "--quiet", "origin", rev])
+        checkout = subprocess.run(["git", "-C", str(dest), "checkout", "--quiet", "--detach", rev])
+        if fetch.returncode != 0 or checkout.returncode != 0 or head_of(dest) != rev:
+            failed.append(pkg["name"])
+if failed:
+    raise SystemExit(f"ERROR: packages left off their manifest revisions: {', '.join(failed)}")
+print(f"  verified {checked} packages at their manifest revisions", flush=True)
 PYFETCH
 fi
 

@@ -18,5 +18,7 @@ mkdir -p "$CTX/scripts"
 cp "$UPSTREAM/scripts/docker_repo_patches.sh" "$UPSTREAM/scripts/generate_repo_index.py" "$CTX/scripts/"
 cp -r "$UPSTREAM/scripts/chunking" "$CTX/scripts/chunking"
 cp "$HERE/build_repo.sh" "$CTX/scripts/build_repo.sh"
+# Per-repo nemo-gym-build.json overrides (repairs beyond upstream's protocol).
+cp -r "$HERE/build_config/." "$CTX/build_config/"
 cp "$HERE/Dockerfile" "$CTX/Dockerfile"
 exec docker build -t "$TAG" "$CTX"
