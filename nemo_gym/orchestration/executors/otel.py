@@ -55,11 +55,11 @@ def driver_telemetry_env(gym_job_id: str, span_groups: str, *, logs: bool = True
         "NEMO_GYM_OTEL_RUN_ID": gym_job_id,
         "NEMO_GYM_OTEL_SPAN_GROUPS": span_groups,
         "NEMO_GYM_OTEL_LOGS_ENABLED": "1" if logs else "0",
+        # One endpoint and one protocol for every signal. nemo-lens picks each signal's exporter
+        # from the protocol setting (the pin since #3890), so no per-signal endpoint is needed; an
+        # OTLP/HTTP log exporter aimed at the gRPC port only gets its connection reset.
         "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://localhost:{OTLP_HTTP_PORT}",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-        # nemo-lens builds its log exporter over gRPC regardless of the protocol setting, so logs
-        # get the collector's gRPC port explicitly (the SDK's per-signal endpoint takes precedence).
-        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": f"http://localhost:{OTLP_GRPC_PORT}",
     }
 
 
