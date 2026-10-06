@@ -207,11 +207,6 @@ class TestLoop:
         assert final.total_rounds == 1
 
 
-class TestSanity:
-    def test_construct(self) -> None:
-        _agent(MagicMock(spec=ServerClient))
-
-
 class TestResponses:
     @pytest.mark.asyncio
     async def test_responses_forwards_to_the_policy_model_and_wraps_string_input(self) -> None:

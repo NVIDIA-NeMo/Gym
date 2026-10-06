@@ -40,7 +40,7 @@ from app import (
     VeriSoftBenchVerifyRequest,
 )
 from fastapi.testclient import TestClient
-from upstream import UpstreamError, VerificationOutcome
+from upstream import GYM_ROOT, UpstreamError, VerificationOutcome
 
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponse
@@ -126,9 +126,9 @@ def fake_harness(monkeypatch):
 
 
 def make_server(**overrides) -> VeriSoftBenchResourcesServer:
-    config = VeriSoftBenchResourcesServerConfig(
-        host="0.0.0.0", port=8080, entrypoint="", name="verisoftbench", upstream_dir="/nonexistent", **overrides
-    )
+    kwargs = dict(host="0.0.0.0", port=8080, entrypoint="", name="verisoftbench", upstream_dir="/nonexistent")
+    kwargs.update(overrides)
+    config = VeriSoftBenchResourcesServerConfig(**kwargs)
     return VeriSoftBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
@@ -325,6 +325,15 @@ class TestHarnessFaults:
         with pytest.raises(RuntimeError, match="not running"):
             make_server()
         make_server(require_container_at_startup=False)
+
+    def test_startup_resolves_a_relative_upstream_dir_against_the_gym_root_not_the_cwd(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        # Servers start with the server directory as cwd; the shipped config's relative
+        # ``cache/...`` value must reach the harness root-resolved, never cwd-resolved.
+        monkeypatch.chdir(tmp_path)
+        server = make_server(upstream_dir="cache/verisoftbench/checkout")
+        assert Path(server._harness.upstream_dir) == GYM_ROOT / "cache/verisoftbench/checkout"
 
     @pytest.mark.asyncio
     async def test_unusable_upstream_checkout_reports_every_rollout_as_backend_error(self, monkeypatch) -> None:
