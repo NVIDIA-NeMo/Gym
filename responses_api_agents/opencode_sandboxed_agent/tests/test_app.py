@@ -22,8 +22,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
+from pydantic import ValidationError
 from pytest import MonkeyPatch, fixture, mark, raises
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -211,18 +212,27 @@ class TestOpenCodeSandboxedAgent:
 
         assert expected_usages == actual_usages
 
+    @mark.parametrize("stage_ripgrep", [False, True])
     @mark.parametrize("remaining_context", [False, True])
     @mark.parametrize("freeze_prompt_date", [False, True])
     async def test_responses_sanity(
         self,
         opencode_export_test_data: Dict[str, Any],
         monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+        stage_ripgrep: bool,
         remaining_context,
         freeze_prompt_date: bool,
     ) -> None:
         config = self._create_config()
         config.output_token_policy = "remaining_context" if remaining_context else "fixed"
         config.freeze_system_prompt_date = freeze_prompt_date
+        if stage_ripgrep:
+            binary = tmp_path / "rg with spaces"
+            binary.write_text("#!/bin/sh\necho 'ripgrep test'\n")
+            config = OpenCodeSandboxedAgentConfig.model_validate(
+                config.model_dump() | {"local_ripgrep_binary_path": str(binary)}
+            )
         plugin_source = Path(app_module.__file__).with_name("stable_prompt_date.mjs").read_text()
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -348,15 +358,35 @@ class TestOpenCodeSandboxedAgent:
         )
 
         assert expected_response == actual_response
-        # Execution uploads plugins even when a resource supplied this sandbox.
+        # Execution uploads plugins even when a resource supplied this sandbox, and rg before OpenCode starts.
+        expected_uploads = []
         if remaining_context:
-            sandbox_mock.upload.assert_awaited_once_with(
-                Path(app_module.__file__).with_name("remaining-context.js"), "/tmp/nemo-gym-remaining-context.js"
+            expected_uploads.append(
+                call(Path(app_module.__file__).with_name("remaining-context.js"), "/tmp/nemo-gym-remaining-context.js")
             )
+        if stage_ripgrep:
+            expected_uploads.append(call(binary, "/tmp/nemo-gym-ripgrep-"))
+        assert sandbox_mock.upload.await_args_list == expected_uploads
+        assert [mock_call[0] for mock_call in sandbox_mock.mock_calls[: len(expected_uploads) + 1]] == [
+            *(["upload"] * len(expected_uploads)),
+            "exec",
+        ]
+        if stage_ripgrep:
+            # Copied as the execution user (an upload may be root-owned), then checked before OpenCode runs.
+            install = 'cp /tmp/nemo-gym-ripgrep- "$HOME/.opencode/bin/rg"'
+            assert install in run_command
+            assert run_command.index(install) < run_command.index('"$HOME/.opencode/bin/rg" --version')
+            assert run_command.index('"$HOME/.opencode/bin/rg" --version') < run_command.index("opencode run")
         else:
-            sandbox_mock.upload.assert_not_awaited()
+            assert "nemo-gym-ripgrep" not in run_command
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
         assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["command"]
+
+    def test_missing_local_ripgrep_is_rejected(self, tmp_path: Path) -> None:
+        with raises(ValidationError, match="Path does not point to a file"):
+            OpenCodeSandboxedAgentConfig.model_validate(
+                self._create_config().model_dump() | {"local_ripgrep_binary_path": str(tmp_path / "missing-rg")}
+            )
 
     @mark.parametrize("return_code,error_type", [(125, "TimeoutError"), (124, "timeout"), (124, None)])
     def test_agent_sandbox_observation_classifies_timeout_errors(self, return_code, error_type) -> None:
