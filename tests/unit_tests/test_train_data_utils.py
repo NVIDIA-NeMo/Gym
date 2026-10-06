@@ -1409,6 +1409,24 @@ class TestCollateTaskSourceStamping:
 
         assert indices == [0, 0, 0, 1, 2]
 
+    def test_pool_index_survives_shuffle_and_collation_restart(self, tmp_path, monkeypatch) -> None:
+        rows = [{"responses_create_params": {"input": []}, "question": f"q{i}"} for i in range(4)]
+        rs = _instance(
+            "math_rs",
+            "resources_servers",
+            {"entrypoint": "app.py", "domain": "math", "datasets": [_dataset(tmp_path, "stable", rows)]},
+        )
+
+        first_path = self._collate(tmp_path, monkeypatch, [rs])[0]
+        first = self._read(first_path)
+        shuffled = list(reversed(first))
+        restarted_path = self._collate(tmp_path, monkeypatch, [rs])[0]
+        restarted = self._read(restarted_path)
+
+        expected = {row["question"]: row[AGENT_POOL_INDEX_KEY_NAME] for row in first}
+        assert {row["question"]: row[AGENT_POOL_INDEX_KEY_NAME] for row in shuffled} == expected
+        assert {row["question"]: row[AGENT_POOL_INDEX_KEY_NAME] for row in restarted} == expected
+
     def test_same_fpath_two_declarations_get_distinct_prepare_files(self, tmp_path, monkeypatch) -> None:
         """Previously the second declaration silently truncated the first's prepared file."""
         shared = _dataset(tmp_path, "shared", self.ROWS)

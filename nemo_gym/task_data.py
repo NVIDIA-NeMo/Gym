@@ -65,6 +65,7 @@ RESERVED_ROW_KEYS = frozenset(
         "_ng_task_index",
         "_ng_rollout_index",
         "_ng_agent_pool_index",
+        "_ng_agent_pool_assignment",
     }
 )
 

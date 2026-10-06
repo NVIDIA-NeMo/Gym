@@ -62,6 +62,7 @@ from nemo_gym.deliverables import is_deliverable
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
+    AGENT_POOL_ASSIGNMENT_KEY_NAME,
     AGENT_POOL_INDEX_KEY_NAME,
     AGENT_POOL_KEY_NAME,
     AGENT_REF_KEY_NAME,
@@ -2152,6 +2153,20 @@ class RolloutCollectionHelper(BaseModel):
             if NG_ENVIRONMENT_SERVER_KEY in row:
                 continue
             agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            recorded_assignment = row.get(AGENT_POOL_ASSIGNMENT_KEY_NAME)
+            if recorded_assignment is not None:
+                if not isinstance(recorded_assignment, str) or not recorded_assignment:
+                    raise ValueError(
+                        f"{AGENT_POOL_ASSIGNMENT_KEY_NAME} must be a non-empty agent name; got {recorded_assignment!r}"
+                    )
+                if agent_name != recorded_assignment:
+                    raise ValueError(
+                        f"{AGENT_POOL_ASSIGNMENT_KEY_NAME} records {recorded_assignment!r}, but "
+                        f"agent_ref.name is {agent_name!r}"
+                    )
+                # A materialized or retried row has already made the one-time
+                # selection. Reapplying a reordered pool would change harnesses.
+                continue
             task_source = row.get(TASK_SOURCE_KEY_NAME)
             matched_key = next(
                 (key for key in dict.fromkeys((agent_name, task_source)) if key is not None and key in agent_pool),
@@ -2175,6 +2190,7 @@ class RolloutCollectionHelper(BaseModel):
             selected = pool[selection_index % len(pool)]
             if agent_name != selected:
                 row[AGENT_REF_KEY_NAME] = {"name": selected}
+            row[AGENT_POOL_ASSIGNMENT_KEY_NAME] = selected
 
     @classmethod
     def _validate_agent_pool_destinations(
@@ -2341,6 +2357,17 @@ class RolloutCollectionHelper(BaseModel):
             # its task_source (resolved to an agent by resolve_task_sources once the merged config
             # is in hand). agent_map[<basis>] > agent_map._default > row agent_ref > task_source.
             agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            recorded_assignment = row.get(AGENT_POOL_ASSIGNMENT_KEY_NAME)
+            if recorded_assignment is not None:
+                if not isinstance(recorded_assignment, str) or not recorded_assignment:
+                    raise ValueError(
+                        f"{AGENT_POOL_ASSIGNMENT_KEY_NAME} must be a non-empty agent name; got {recorded_assignment!r}"
+                    )
+                if agent_name != recorded_assignment:
+                    raise ValueError(
+                        f"{AGENT_POOL_ASSIGNMENT_KEY_NAME} records {recorded_assignment!r}, but "
+                        f"agent_ref.name is {agent_name!r}"
+                    )
             basis = agent_name if agent_name is not None else task_source
             if environment_server is not None:
                 basis = taskset or task_source or environment_server
@@ -2362,6 +2389,8 @@ class RolloutCollectionHelper(BaseModel):
                         overridden_agents.add((agent_name, mapped))
                     agent_name = mapped
                     row[AGENT_REF_KEY_NAME] = {"name": agent_name}
+                    row.pop(AGENT_POOL_ASSIGNMENT_KEY_NAME, None)
+                    recorded_assignment = None
 
             # Agent pool: choose one harness per task before repetition. Fan-out instead runs
             # every listed harness. Otherwise use the row's known agent or defer task_source
@@ -2381,16 +2410,24 @@ class RolloutCollectionHelper(BaseModel):
                 targets = [None]
             elif matched_pool_key is not None:
                 assert config.agent_pool is not None
-                pool = config.agent_pool[matched_pool_key]
-                selection_index = row.get(AGENT_POOL_INDEX_KEY_NAME)
-                if selection_index is None:
-                    selection_index = row[TASK_INDEX_KEY_NAME]
-                if not isinstance(selection_index, int) or isinstance(selection_index, bool) or selection_index < 0:
-                    raise ValueError(
-                        f"{AGENT_POOL_INDEX_KEY_NAME} must be a non-negative integer; got {selection_index!r}"
-                    )
-                targets = [pool[selection_index % len(pool)]]
+                if recorded_assignment is not None:
+                    targets = [recorded_assignment]
+                else:
+                    pool = config.agent_pool[matched_pool_key]
+                    selection_index = row.get(AGENT_POOL_INDEX_KEY_NAME)
+                    if selection_index is None:
+                        selection_index = row[TASK_INDEX_KEY_NAME]
+                    if (
+                        not isinstance(selection_index, int)
+                        or isinstance(selection_index, bool)
+                        or selection_index < 0
+                    ):
+                        raise ValueError(
+                            f"{AGENT_POOL_INDEX_KEY_NAME} must be a non-negative integer; got {selection_index!r}"
+                        )
+                    targets = [pool[selection_index % len(pool)]]
             elif config.fan_out and basis is not None and basis in config.fan_out:
+                row.pop(AGENT_POOL_ASSIGNMENT_KEY_NAME, None)
                 targets = list(config.fan_out[basis])
             elif agent_name is not None:
                 targets = [agent_name]
@@ -2458,6 +2495,8 @@ class RolloutCollectionHelper(BaseModel):
                     # the row's agent_ref dict byte-for-byte (it may carry extra fields like type).
                     if target is not None and (row.get(AGENT_REF_KEY_NAME) or {}).get("name") != target:
                         row[AGENT_REF_KEY_NAME] = {"name": target}
+                    if matched_pool_key is not None and target is not None:
+                        row[AGENT_POOL_ASSIGNMENT_KEY_NAME] = target
 
                     # Resolve rollout index
                     row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]

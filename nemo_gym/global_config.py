@@ -205,6 +205,10 @@ ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
 # Unlike TASK_INDEX_KEY_NAME, trainers do not replace this value with a run-local
 # admission index, so a task keeps its harness across batches and restarts.
 AGENT_POOL_INDEX_KEY_NAME = "_ng_agent_pool_index"
+# The concrete agent selected from a pool. Materialized inputs retain this
+# stamp so resume treats the recorded assignment as authoritative even if the
+# run config is later reordered.
+AGENT_POOL_ASSIGNMENT_KEY_NAME = "_ng_agent_pool_assignment"
 # Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
 # (task, rollout) so their captured model calls stay separable.
 ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"

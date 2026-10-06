@@ -42,6 +42,7 @@ from nemo_gym.batch_status import observe_materialized_rows
 from nemo_gym.config_types import AmbiguousEnvironmentServerError, ConfigError, ConfigPathNotFoundError
 from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
+    AGENT_POOL_ASSIGNMENT_KEY_NAME,
     AGENT_POOL_INDEX_KEY_NAME,
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -7869,6 +7870,39 @@ class TestAgentPool:
         )
 
         assert rows[0]["agent_ref"]["name"] == "agent_b"
+        assert rows[0][AGENT_POOL_ASSIGNMENT_KEY_NAME] == "agent_b"
+
+    def test_recorded_assignment_survives_pool_reordering(self) -> None:
+        row = self._rcp_row("q", task_source="shared_rs", **{AGENT_POOL_INDEX_KEY_NAME: 0})
+
+        RolloutCollectionHelper._apply_agent_pool([row], {"shared_rs": ["agent_a", "agent_b"]})
+        RolloutCollectionHelper._apply_agent_pool([row], {"shared_rs": ["agent_b", "agent_a"]})
+
+        assert row["agent_ref"]["name"] == "agent_a"
+        assert row[AGENT_POOL_ASSIGNMENT_KEY_NAME] == "agent_a"
+
+    @pytest.mark.parametrize("assignment", ["", 1, False])
+    def test_invalid_recorded_assignment_is_rejected(self, assignment) -> None:
+        row = self._rcp_row(
+            "q",
+            task_source="shared_rs",
+            agent_ref={"name": "agent_a"},
+            **{AGENT_POOL_ASSIGNMENT_KEY_NAME: assignment},
+        )
+
+        with pytest.raises(ValueError, match=AGENT_POOL_ASSIGNMENT_KEY_NAME):
+            RolloutCollectionHelper._apply_agent_pool([row], {"shared_rs": ["agent_a", "agent_b"]})
+
+    def test_recorded_assignment_must_match_agent_ref(self) -> None:
+        row = self._rcp_row(
+            "q",
+            task_source="shared_rs",
+            agent_ref={"name": "agent_b"},
+            **{AGENT_POOL_ASSIGNMENT_KEY_NAME: "agent_a"},
+        )
+
+        with pytest.raises(ValueError, match="agent_ref.name is 'agent_b'"):
+            RolloutCollectionHelper._apply_agent_pool([row], {"shared_rs": ["agent_a", "agent_b"]})
 
     def test_fallback_identity_keeps_preexpanded_generations_on_one_agent(self) -> None:
         rows = [self._rcp_row("same", task_source="shared_rs", _rowidx=i) for i in range(4)]
@@ -7888,6 +7922,84 @@ class TestAgentPool:
         RolloutCollectionHelper._apply_agent_pool([row], {"shared_rs": ["agent_a", "agent_b"]})
 
         assert row["agent_ref"]["name"] == "environment_agent"
+
+    def test_interleaving_changes_order_without_changing_task_assignment(self, tmp_path) -> None:
+        fpath = self._write_rows(
+            tmp_path,
+            [self._rcp_row(f"q{i}", task_source="shared_rs") for i in range(2)],
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            agent_pool={"shared_rs": ["agent_a", "agent_b"]},
+            num_repeats=2,
+            interleave_repeats=True,
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert [(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME], row["agent_ref"]["name"]) for row in rows] == [
+            (0, 0, "agent_a"),
+            (1, 0, "agent_b"),
+            (0, 1, "agent_a"),
+            (1, 1, "agent_b"),
+        ]
+
+    def test_disjoint_map_pool_and_fan_out_routes_compose(self, tmp_path) -> None:
+        fpath = self._write_rows(
+            tmp_path,
+            [
+                self._rcp_row("map", task_source="map_source"),
+                self._rcp_row("pool", task_source="pool_source"),
+                self._rcp_row("fan", task_source="fan_source"),
+            ],
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            agent_map={"map_source": "mapped_agent"},
+            agent_pool={"pool_source": ["pool_a", "pool_b"]},
+            fan_out={"fan_source": ["fan_a", "fan_b"]},
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert [row["agent_ref"]["name"] for row in rows] == [
+            "mapped_agent",
+            "pool_b",
+            "fan_a",
+            "fan_b",
+        ]
+        assert AGENT_POOL_ASSIGNMENT_KEY_NAME not in rows[0]
+        assert rows[1][AGENT_POOL_ASSIGNMENT_KEY_NAME] == "pool_b"
+        assert all(AGENT_POOL_ASSIGNMENT_KEY_NAME not in row for row in rows[2:])
+
+    def test_materialized_resume_keeps_original_assignment_when_pool_reorders(self, tmp_path) -> None:
+        input_path = self._write_rows(tmp_path, [self._rcp_row("q", task_source="shared_rs")])
+        output_path = tmp_path / "out.jsonl"
+        first_config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_path),
+            output_jsonl_fpath=str(output_path),
+            agent_pool={"shared_rs": ["agent_a", "agent_b"]},
+            num_repeats=2,
+        )
+        materialized = RolloutCollectionHelper._preprocess_rows_from_config(None, first_config)
+        first_config.materialized_jsonl_fpath.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in materialized))
+        output_path.write_bytes(orjson.dumps(materialized[0] | {"reward": 1.0}) + b"\n")
+
+        resumed_config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_path),
+            output_jsonl_fpath=str(output_path),
+            agent_pool={"shared_rs": ["agent_b", "agent_a"]},
+            num_repeats=2,
+        )
+        pending, *_ = RolloutCollectionHelper()._load_from_cache(resumed_config)
+        assert len(pending) == 1
+
+        RolloutCollectionHelper._apply_agent_pool(pending, resumed_config.agent_pool)
+
+        assert pending[0]["agent_ref"]["name"] == "agent_a"
+        assert pending[0][AGENT_POOL_ASSIGNMENT_KEY_NAME] == "agent_a"
 
     async def test_run_examples_applies_pool_from_merged_training_config(
         self, monkeypatch: pytest.MonkeyPatch
@@ -7945,6 +8057,21 @@ class TestAgentPool:
 
         with pytest.raises(ValueError, match="missing_agent"):
             RolloutCollectionHelper().run_examples(rows)
+
+    def test_pool_rejects_agent_incompatible_with_task_source(self) -> None:
+        global_config = OmegaConf.create(
+            {
+                "shared_rs": {"resources_servers": {"impl": {"allowed_agents": ["accepted_impl"]}}},
+                "bad_agent": {
+                    "responses_api_agents": {
+                        "bad_impl": {"resources_server": {"name": "shared_rs"}},
+                    }
+                },
+            }
+        )
+
+        with pytest.raises(ValueError, match="accepts only: accepted_impl"):
+            RolloutCollectionHelper._validate_agent_pool_destinations({"shared_rs": ["bad_agent"]}, global_config)
 
     def test_selected_agent_controls_dict_num_repeats(self, tmp_path) -> None:
         fpath = self._write_rows(
