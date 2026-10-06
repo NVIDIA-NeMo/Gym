@@ -1217,6 +1217,8 @@ class NeMoGymChatCompletionAssistantMessageForTrainingParam(
 class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
     # Override the iterable which is annoying to work with.
     content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+    # Provider SDKs may include the tool name when replaying tool results.
+    name: NotRequired[str]
 
 
 class NeMoGymFunctionToolParam(FunctionToolParam):

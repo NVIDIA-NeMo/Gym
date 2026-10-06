@@ -1452,8 +1452,8 @@ repr(e): {repr(e)}"""
             )
 
         uvicorn_kwargs = dict(
-            host=server.config.host,
-            port=server.config.port,
+            host=server.config.bind_host or server.config.host,
+            port=server.config.port if server.config.bind_port is None else server.config.bind_port,
             # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
             timeout_graceful_shutdown=0.5,
             # Some workers may take a while for imports and setup_webserver.
@@ -1561,8 +1561,8 @@ class HeadServer(BaseServer):
 
         config = uvicorn.Config(
             app,
-            host=server.config.host,
-            port=server.config.port,
+            host=server.config.bind_host or server.config.host,
+            port=server.config.port if server.config.bind_port is None else server.config.bind_port,
             proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
             forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
         )
