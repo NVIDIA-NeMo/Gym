@@ -228,7 +228,16 @@ from {agent_module} import {agent_class}, {agent_cfg_class}
 _mock_client = ServerClient.model_construct(global_config_dict={{}})
 _mock_client._build_server_base_url = lambda cfg: MODEL_URL
 
-_cfg_sampling = {{k: v for k, v in SAMPLING.items() if k in {agent_cfg_class}.model_fields}}
+_config_fields = {agent_cfg_class}.model_fields
+_cfg_sampling = {{k: v for k, v in SAMPLING.items() if k in _config_fields}}
+_request_sampling = dict(SAMPLING)
+# Some harnesses (for example Hermes) expose a per-model-call max_tokens
+# configuration instead of the Responses API's total max_output_tokens budget.
+# Adapt the limit at the AnyTerminal boundary so one training row can be routed
+# to either kind of harness without the latter rejecting an otherwise valid run.
+if "max_output_tokens" in SAMPLING and "max_tokens" in _config_fields and "max_output_tokens" not in _config_fields:
+    _cfg_sampling["max_tokens"] = SAMPLING["max_output_tokens"]
+    _request_sampling.pop("max_output_tokens")
 
 _model_server = ModelServerRef(name="policy_model", type="responses_api_models") if MODEL_URL else None
 config = {agent_cfg_class}(
@@ -254,7 +263,7 @@ if MODEL_URL:
 body = NeMoGymResponseCreateParamsNonStreaming(
     input=[NeMoGymEasyInputMessage(role="user", content=INSTRUCTION)],
     model=MODEL_NAME,
-    **SAMPLING,
+    **_request_sampling,
 )
 response = asyncio.run(agent.responses(request=Request({{"type": "http", "path_params": {{}}}}), body=body))
 Path("/trajectories_mount/response.json").write_text(response.model_dump_json())

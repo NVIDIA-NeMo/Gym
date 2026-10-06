@@ -101,8 +101,13 @@ class TestRunnerTemplate:
         compile(rendered, "<runner>", "exec")
         # Read from env, forwarded onto the body, and filtered to the agent config's fields.
         assert "NGTB_SAMPLING" in rendered
-        assert "**SAMPLING," in rendered
+        assert "**_request_sampling," in rendered
         assert "HermesAgentConfig.model_fields" in rendered
+
+    def test_max_output_tokens_adapts_to_harness_max_tokens(self) -> None:
+        rendered = self._render()
+        assert '_cfg_sampling["max_tokens"] = SAMPLING["max_output_tokens"]' in rendered
+        assert '_request_sampling.pop("max_output_tokens")' in rendered
 
 
 class TestAgentKey:

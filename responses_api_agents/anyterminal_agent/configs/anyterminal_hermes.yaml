@@ -10,6 +10,7 @@ anyterminal_hermes:
       agent_server_class: HermesAgent
       agent_config_class: HermesAgentConfig
       agent_kwargs:
+        model: model
         max_turns: 90
         terminal_backend: local
         terminal_timeout: 180
