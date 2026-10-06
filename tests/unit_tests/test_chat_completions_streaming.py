@@ -133,10 +133,18 @@ class TestSanitizeStreamingChatBody:
             "thinking": True,
             "output_config": {"effort": "high"},
         }
-        assert set(extensions) == CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+        assert set(extensions) == CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS - {"reasoning", "usage"}
         cleaned, _ = sanitize_streaming_chat_body({"messages": [], "stream": True, **extensions})
         assert set(cleaned) == {"messages"}
         NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_preserves_native_reasoning_configuration(self) -> None:
+        reasoning = {"max_tokens": 4096, "enabled": True, "exclude": False}
+        cleaned, _ = sanitize_streaming_chat_body({"messages": [], "stream": True, "reasoning": reasoning})
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(cleaned)
+        assert params.reasoning == reasoning
+        assert params.reasoning_effort is None
 
     def test_keeps_known_sampling_and_tool_fields(self) -> None:
         body = {
@@ -500,6 +508,27 @@ class TestChatDispatchRoute:
         assert server.last_params.stream is None
         rebuilt = _reconstruct_chat_sse(_parse_sse_events(resp.text.encode()))
         assert rebuilt["choices"][0]["message"]["content"] == "hello"
+
+    def test_native_usage_request_preserves_accounting_and_reasoning(self) -> None:
+        client, server = _client(_EchoChatModel)
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "stream": True,
+                "usage": {"include": True},
+                "reasoning": {"effort": "high"},
+                "reasoningEffort": "medium",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+
+        assert response.status_code == 200
+        assert server.last_params.reasoning == {"effort": "high"}
+        assert server.last_params.reasoning_effort is None
+        assert server.last_params.usage == {"include": True}
+        usage_chunks = [event for event in _events(response.text) if event.get("usage") is not None]
+        assert len(usage_chunks) == 1
+        assert usage_chunks[0]["usage"]["total_tokens"] == 10
 
     def test_streaming_request_strips_bookkeeping_and_options(self) -> None:
         client, server = _client(_EchoChatModel)

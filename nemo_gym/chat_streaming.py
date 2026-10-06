@@ -32,8 +32,8 @@ Only the SSE envelope is synthesized -- there is no true token-by-token streamin
 sends keepalive comments while the backend computes, then emits the complete answer. Backend
 failures after the stream starts become terminal SSE errors. External staging stores training
 tokens separately; token ids and training logprobs are not carried in the ``chat.completion.chunk``
-schema. A client that does not set ``stream_options.include_usage``
-gets no usage chunk, so a model-call record reconstructed from this stream will lack token counts.
+schema. A client that sets neither ``stream_options.include_usage`` nor the provider-native
+``usage.include`` option gets no usage chunk, so a model-call record reconstructed from this stream will lack token counts.
 """
 
 import json
@@ -49,12 +49,12 @@ from nemo_gym.openai_utils import (
 
 LOG = logging.getLogger(__name__)
 
-# Provider extension fields are accepted on the non-streaming path only. Streaming harnesses
-# (e.g. OpenClaw's ``chat_template_kwargs``) have always had them dropped here, so they stay
-# dropped rather than reaching the backend.
+# Keep the established filtering of template/thinking extensions, while forwarding
+# native OpenRouter reasoning configuration on both streaming and regular requests.
+_STREAMING_PROVIDER_EXTENSION_FIELDS = frozenset({"reasoning", "usage"})
 _PARAM_FIELDS = (
     frozenset(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields) - CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
-)
+) | _STREAMING_PROVIDER_EXTENSION_FIELDS
 
 
 def _wants_usage(stream_options: Any) -> bool:
@@ -67,7 +67,7 @@ def sanitize_streaming_chat_body(body: dict[str, Any]) -> tuple[dict[str, Any], 
 
     Returns the cleaned body dict (ready for ``NeMoGymChatCompletionCreateParamsNonStreaming``
     validation) and whether a terminal usage chunk was requested via
-    ``stream_options.include_usage``.
+    ``stream_options.include_usage`` or provider-native ``usage.include``.
 
     ``stream`` and ``stream_options`` are removed: the params model's ``stream`` field is typed
     ``Literal[False]``, and ``stream_options`` is only meaningful with ``stream: true``, so it has
@@ -75,7 +75,10 @@ def sanitize_streaming_chat_body(body: dict[str, Any]) -> tuple[dict[str, Any], 
     fields, so a harness's extra bookkeeping never reaches the backend.
     """
     body = deepcopy(body)
-    include_usage = _wants_usage(body.get("stream_options"))
+    provider_usage = body.get("usage")
+    include_usage = _wants_usage(body.get("stream_options")) or (
+        isinstance(provider_usage, dict) and provider_usage.get("include") is True
+    )
     body.pop("stream", None)
     body.pop("stream_options", None)
 

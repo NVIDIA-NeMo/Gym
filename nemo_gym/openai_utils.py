@@ -1244,7 +1244,15 @@ NeMoGymChatCompletionMessageParam: TypeAlias = Annotated[
 # Provider extensions accepted by the strict chat request model beyond the
 # OpenAI SDK's own field set. Tests pin the model's fields to SDK ∪ this set so
 # unknown keys keep failing validation while these documented contracts pass.
-CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS = frozenset({"chat_template_kwargs", "thinking", "output_config"})
+CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS = frozenset(
+    {"chat_template_kwargs", "thinking", "output_config", "reasoning", "usage"}
+)
+
+
+class NeMoGymChatCompletionUsageParam(TypedDict, total=False):
+    """OpenRouter's request-side usage accounting option."""
+
+    include: bool
 
 
 class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
@@ -1299,6 +1307,10 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     thinking: Optional[Dict[str, Any]] = None
     output_config: Optional[Dict[str, Any]] = None
+    # OpenRouter preserves provider-native effort, token budgets, and other
+    # reasoning controls as one object; do not rewrite it as reasoning_effort.
+    reasoning: Optional[Dict[str, Any]] = None
+    usage: Optional[NeMoGymChatCompletionUsageParam] = None
 
     # Disallow deprecated args
     # function_call: FunctionCall

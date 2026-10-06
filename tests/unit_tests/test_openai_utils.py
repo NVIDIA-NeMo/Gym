@@ -1113,6 +1113,8 @@ class TestNeMoGymChatCompletionSchemas:
             "chat_template_kwargs": {"enable_thinking": False},
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": "high"},
+            "reasoning": {"effort": "high", "exclude": False},
+            "usage": {"include": True},
         }
         assert set(extensions) == CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
 
