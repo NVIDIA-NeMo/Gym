@@ -195,7 +195,7 @@ class TestOpenCodeSandboxedAgent:
         actual_usages = OpenCodeSandboxedAgent._opencode_export_to_usages(None, opencode_export_test_data)
         expected_usages = [
             NeMoGymResponseUsage(
-                input_tokens=55,
+                input_tokens=7863,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=7808),
                 output_tokens=10,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
@@ -211,6 +211,69 @@ class TestOpenCodeSandboxedAgent:
         ]
 
         assert expected_usages == actual_usages
+
+    @mark.parametrize(
+        "cache_read,cache_write,expected_input",
+        [(0, 0, 122), (5760, 0, 5882), (0, 5760, 5882), (5000, 760, 5882)],
+    )
+    def test_usage_includes_cache_in_input_total(self, cache_read: int, cache_write: int, expected_input: int) -> None:
+        export = {
+            "messages": [
+                {
+                    "info": {
+                        "role": "assistant",
+                        "tokens": {
+                            "input": 122,
+                            "output": 22,
+                            "reasoning": 0,
+                            "cache": {"read": cache_read, "write": cache_write},
+                            "total": expected_input + 22,
+                        },
+                    }
+                }
+            ]
+        }
+        (usage,) = OpenCodeSandboxedAgent._opencode_export_to_usages(None, export)
+        assert usage.input_tokens == expected_input
+        assert usage.input_tokens_details.cached_tokens == cache_read
+        assert usage.output_tokens == 22
+        assert usage.total_tokens == expected_input + 22
+
+    def test_cached_input_aggregate_matches_prompt_usage(self) -> None:
+        export = {
+            "messages": [
+                {
+                    "info": {
+                        "role": "assistant",
+                        "tokens": {
+                            "input": 5709,
+                            "output": 161,
+                            "reasoning": 0,
+                            "cache": {"read": 0, "write": 0},
+                            "total": 5870,
+                        },
+                    }
+                },
+                {
+                    "info": {
+                        "role": "assistant",
+                        "tokens": {
+                            "input": 122,
+                            "output": 22,
+                            "reasoning": 0,
+                            "cache": {"read": 5760, "write": 0},
+                            "total": 5904,
+                        },
+                    }
+                },
+            ]
+        }
+        usage = NeMoGymResponseUsage.sum_from_list(OpenCodeSandboxedAgent._opencode_export_to_usages(None, export))
+        assert usage.input_tokens == 11591
+        assert usage.input_tokens_details.cached_tokens == 5760
+        assert usage.output_tokens == 183
+        assert usage.total_tokens == 11774
+        assert usage.total_tokens == usage.input_tokens + usage.output_tokens
 
     @mark.parametrize("reasoning", [0, 4396])
     def test_usage_includes_reasoning_in_output_total(self, reasoning: int) -> None:
@@ -384,7 +447,7 @@ class TestOpenCodeSandboxedAgent:
             top_logprobs=None,
             truncation=None,
             usage=NeMoGymResponseUsage(
-                input_tokens=8747,
+                input_tokens=16555,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=7808),
                 output_tokens=81,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
