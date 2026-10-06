@@ -3,6 +3,7 @@ openclaw_agent_native:
     openclaw_agent:
       entrypoint: app.py
       num_workers: 1
+      resources_server: null
       model_server: {type: responses_api_models, name: policy_model}
       model: ${policy_model_name}
       openclaw_version: 2026.6.11
