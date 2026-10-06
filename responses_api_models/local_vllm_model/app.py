@@ -16,8 +16,8 @@ import os
 import sys
 from argparse import Namespace
 from pathlib import Path
-from time import sleep
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
+from time import monotonic, sleep
+from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple, Union
 
 import ray
 import requests
@@ -25,7 +25,6 @@ from pydantic import BaseModel, Field
 from ray import available_resources, cluster_resources
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from requests.exceptions import ConnectionError
 from vllm.entrypoints.openai.api_server import (
     FlexibleArgumentParser,
     cli_env_setup,
@@ -58,6 +57,11 @@ class LocalVLLMModelConfig(VLLMModelConfig):
     show_vllm_engine_stats: bool = False
     debug: bool = False
 
+    # With base_url set (an external server, e.g. a load balancer in front of vLLM
+    # replicas that may still be loading), startup blocks until every URL answers
+    # GET /models with HTTP 200, for at most this many seconds. None waits indefinitely.
+    external_server_ready_timeout_s: Optional[float] = 3600.0
+
     def model_post_init(self, context):
         # Default to the .cache/huggingface in this directory.
         if not self.hf_home:
@@ -65,6 +69,49 @@ class LocalVLLMModelConfig(VLLMModelConfig):
             self.hf_home = str(current_directory / ".cache" / "huggingface")
 
         return super().model_post_init(context)
+
+
+def wait_for_models_endpoint(
+    urls: List[str],
+    server_name: str,
+    *,
+    timeout_s: Optional[float] = None,
+    is_alive: Optional[Callable[[], bool]] = None,
+    poll_interval_s: float = 3.0,
+    request_timeout_s: float = 10.0,
+) -> None:
+    """Block until every URL in ``urls`` answers ``GET {url}/models`` with HTTP 200.
+
+    Args:
+        urls: OpenAI-compatible base URLs (ending in /v1) to probe, in order.
+        server_name: Name used in progress and error messages.
+        timeout_s: Overall limit across all URLs; None waits indefinitely.
+        is_alive: Checked before every probe; when it returns False the server is
+            treated as failed instead of waited on.
+        poll_interval_s: Delay between probes of a URL that is not ready.
+        request_timeout_s: Timeout of each individual probe request.
+
+    Raises:
+        RuntimeError: ``is_alive`` returned False.
+        TimeoutError: A URL was not ready within ``timeout_s``.
+    """
+    deadline = None if timeout_s is None else monotonic() + timeout_s
+    for url in urls:
+        poll_count = 0
+        while True:
+            if is_alive is not None and not is_alive():
+                raise RuntimeError(f"{server_name} vLLM server spinup failed, see the error logs above!")
+            try:
+                if requests.get(url=f"{url}/models", timeout=request_timeout_s).status_code == 200:
+                    break
+            except requests.exceptions.RequestException:
+                pass
+            if deadline is not None and monotonic() >= deadline:
+                raise TimeoutError(f"{server_name}: {url}/models did not return HTTP 200 within {timeout_s}s")
+            if poll_count % 10 == 0:  # Print every 30s at the default poll interval
+                print(f"Waiting for {server_name} server at {url} to become ready...")
+            poll_count += 1
+            sleep(poll_interval_s)
 
 
 class GetInnerVLLMConfigResponse(BaseModel):
@@ -211,6 +258,13 @@ Environment variables: {env_vars_to_print}""")
         if self.config.base_url:
             print(f"External base_url configured: {self.config.base_url}. Skipping local vLLM launch.")
             self._post_init()
+            # The endpoint may still be loading (e.g. a load balancer with no healthy
+            # backend yet answers 503). Do not report ready until it serves, so no
+            # request can reach it early.
+            base_urls = self.config.base_url if isinstance(self.config.base_url, list) else [self.config.base_url]
+            wait_for_models_endpoint(
+                base_urls, self.config.name, timeout_s=self.config.external_server_ready_timeout_s
+            )
             return
 
         if self.config.debug:
@@ -255,20 +309,11 @@ Total Ray cluster resources: {cluster_resources()}""")
         self.await_server_ready()
 
     def await_server_ready(self) -> None:
-        poll_count = 0
-        while True:
-            is_alive = ray.get(self._local_vllm_model_actor.is_alive.remote())
-            assert is_alive, f"{self.config.name} LocalVLLMModel server spinup failed, see the error logs above!"
-
-            try:
-                requests.get(url=f"{self.config.base_url[0]}/models")
-                return
-            except ConnectionError:
-                if poll_count % 10 == 0:  # Print every 30s
-                    print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
-
-                poll_count += 1
-                sleep(3)
+        wait_for_models_endpoint(
+            [self.config.base_url[0]],
+            self.config.name,
+            is_alive=lambda: ray.get(self._local_vllm_model_actor.is_alive.remote()),
+        )
 
 
 if __name__ == "__main__":

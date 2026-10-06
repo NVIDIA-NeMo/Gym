@@ -18,12 +18,18 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+import requests
 from vllm import platforms
 from vllm.platforms import resolve_obj_by_qualname
 
 import responses_api_models.local_vllm_model.app
 from nemo_gym.global_config import DISALLOWED_PORTS_KEY_NAME, DictConfig
-from responses_api_models.local_vllm_model.app import LocalVLLMModel, LocalVLLMModelConfig
+from responses_api_models.local_vllm_model.app import (
+    LocalVLLMModel,
+    LocalVLLMModelConfig,
+    wait_for_models_endpoint,
+)
 from responses_api_models.local_vllm_model.local_vllm_model_actor import _get_local_dp_ranks
 
 
@@ -246,3 +252,85 @@ class TestApp:
             get_cache_dir = LocalVLLMModel.get_cache_dir
 
         LocalVLLMModel._configure_vllm_serve(DummyLocalVLLMModel())
+
+
+class _Response:
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+
+
+class TestWaitForModelsEndpoint:
+    """wait_for_models_endpoint: the readiness probe shared by local and external servers."""
+
+    @staticmethod
+    def _patch(monkeypatch, outcomes):
+        """Replace requests.get / sleep in the app module; outcomes maps URL -> list of results.
+
+        A result is an HTTP status code, or an exception instance to raise.
+        """
+        app = responses_api_models.local_vllm_model.app
+        calls = []
+
+        def fake_get(url, timeout):
+            calls.append(url)
+            result = outcomes[url.removesuffix("/models")].pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return _Response(result)
+
+        monkeypatch.setattr(app.requests, "get", fake_get)
+        monkeypatch.setattr(app, "sleep", lambda _s: None)
+        return calls
+
+    def test_waits_through_unavailable_and_connection_errors(self, monkeypatch) -> None:
+        calls = self._patch(
+            monkeypatch,
+            {"http://lb:9000/v1": [requests.exceptions.ConnectionError(), 503, 503, 200]},
+        )
+        wait_for_models_endpoint(["http://lb:9000/v1"], "judge")
+        assert calls == ["http://lb:9000/v1/models"] * 4
+
+    def test_checks_every_url(self, monkeypatch) -> None:
+        calls = self._patch(monkeypatch, {"http://a/v1": [200], "http://b/v1": [503, 200]})
+        wait_for_models_endpoint(["http://a/v1", "http://b/v1"], "judge")
+        assert calls == ["http://a/v1/models", "http://b/v1/models", "http://b/v1/models"]
+
+    def test_times_out_with_a_clear_error(self, monkeypatch) -> None:
+        self._patch(monkeypatch, {"http://lb/v1": [503] * 10})
+        clock = iter([0.0, 5.0, 11.0])  # deadline at 10 s; the third check is past it
+        monkeypatch.setattr(responses_api_models.local_vllm_model.app, "monotonic", lambda: next(clock))
+        with pytest.raises(TimeoutError, match=r"http://lb/v1/models did not return HTTP 200 within 10"):
+            wait_for_models_endpoint(["http://lb/v1"], "judge", timeout_s=10)
+
+    def test_fails_fast_when_the_server_died(self, monkeypatch) -> None:
+        calls = self._patch(monkeypatch, {"http://local/v1": [503, 200]})
+        alive = iter([True, False])
+        with pytest.raises(RuntimeError, match="spinup failed"):
+            wait_for_models_endpoint(["http://local/v1"], "policy", is_alive=lambda: next(alive))
+        assert calls == ["http://local/v1/models"]
+
+    @pytest.mark.parametrize("base_url", ["http://lb/v1", ["http://lb/v1", "http://lb2/v1"]])
+    def test_external_base_url_waits_before_returning(self, monkeypatch, base_url) -> None:
+        app = responses_api_models.local_vllm_model.app
+        waited = MagicMock()
+        monkeypatch.setattr(app, "wait_for_models_endpoint", waited)
+        server = MagicMock()
+        server.config = LocalVLLMModelConfig(
+            host="",
+            port=0,
+            entrypoint="",
+            name="judge",
+            model="m",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            vllm_serve_env_vars=dict(),
+            vllm_serve_kwargs=dict(),
+            base_url=base_url,
+            external_server_ready_timeout_s=42.0,
+        )
+
+        LocalVLLMModel.start_vllm_server(server)
+
+        server._post_init.assert_called_once()
+        expected = base_url if isinstance(base_url, list) else [base_url]
+        waited.assert_called_once_with(expected, "judge", timeout_s=42.0)
