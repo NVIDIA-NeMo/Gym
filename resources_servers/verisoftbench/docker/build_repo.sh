@@ -1,14 +1,54 @@
 #!/usr/bin/env bash
 #
-# Derived from utopia-group/VeriSoftBench scripts/build_repo.sh at commit
-# d066523f2b087f28b793c05eacb29bf2e42c0504 (MIT License, Copyright (c) 2026 VeriSoftBench
-# Authors). NVIDIA modifications (Apache-2.0): the "Pre-seed lake packages" step below,
-# which puts every Lake dependency — newly cloned or already present — at its pinned
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# This file is derived from utopia-group/VeriSoftBench `scripts/build_repo.sh`
+# (https://github.com/utopia-group/VeriSoftBench) at commit
+# d066523f2b087f28b793c05eacb29bf2e42c0504 and remains under its original MIT
+# terms (reproduced below). Modifications Copyright (c) 2026 NVIDIA CORPORATION &
+# AFFILIATES and contributors, licensed under the Apache License 2.0 (SPDX header
+# above). NVIDIA modifications: the "Pre-seed lake packages" step below, which puts
+# every Lake dependency — newly cloned or already present — at its pinned
 # lake-manifest revision before `lake build`; the optional per-repo
 # `nemo-gym-build.json` overrides (fallback and extra build targets a repository
 # needs beyond upstream's protocol); and the post-build revision verification,
 # which fails the build when any package ends off its pinned revision.
 # Everything else is upstream's, unchanged.
+#
+# MIT License
+#
+# Copyright (c) 2026 VeriSoftBench Authors
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 #
 # build_repo.sh — Build a single Lean repository for VeriSoftBench evaluation.
 #

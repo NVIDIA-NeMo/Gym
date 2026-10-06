@@ -4,10 +4,12 @@
 [code](https://github.com/utopia-group/VeriSoftBench) (MIT) and
 [paper](https://arxiv.org/abs/2602.18307) (Xin, Chen, Durrett and Dillig, 2026).
 
-500 Lean 4 proof obligations drawn from 23 open-source formal-methods repositories
+500 Lean 4 proof obligations drawn from 23 public formal-methods repositories
 (compiler verification, type systems, zero-knowledge proofs, smart contracts,
-semantic frameworks). The model receives curated context — the definitions and
-lemmas static analysis found relevant, plus the file content before the theorem —
+semantic frameworks) — 22 under open-source licences and one, `IntroEffects`,
+redistributed by written consent (see Licensing). The model receives curated
+context — the definitions and lemmas static analysis found relevant, plus the file
+content before the theorem —
 and must return the proof body of the target theorem. The proof is inserted into
 the repository, compiled with that repository's own Lean toolchain, and accepted only
 if the kernel accepts it. A candidate that fails gets upstream's error-feedback
@@ -211,7 +213,10 @@ gym eval run --no-serve \
 Regenerate the committed example artifacts. `example.jsonl` is five synthetic rows
 written for this repository (elementary `Nat`, `Bool` and `List` facts placed at the
 root of five repositories the image contains); the benchmark's own theorems are
-third-party content and are not redistributed here.
+third-party content and are not redistributed here. Because upstream's prompt
+template embeds its one-shot worked example (`prompts/templates/examples/e1.txt`,
+MIT) in every user prompt, that upstream text does appear verbatim inside the
+tracked example files; it is attributed in the repository-level `ATTRIBUTIONS.md`.
 
 ```bash
 python resources_servers/verisoftbench/scripts/make_example_data.py
@@ -236,11 +241,17 @@ VeriSoftBench harness and dataset: MIT (`LICENSE` of utopia-group/VeriSoftBench;
 the Hugging Face dataset card also declares MIT). The harness is not vendored; it is
 cloned at the pinned commit at preparation time. `docker/Dockerfile` and
 `docker/build_repo.sh` are derived from upstream's `Dockerfile` and
-`scripts/build_repo.sh` (MIT) with the changes described above.
+`scripts/build_repo.sh` (MIT) with the changes described above; each derived file
+reproduces the complete upstream MIT permission notice at the top.
 
 The 23 Lean repositories compiled into the image retain their own licences
-(Apache-2.0, MIT, BSD and one "written consent" repository, `IntroEffects`); upstream
-lists them in `THIRD_PARTY_NOTICES.txt`, which the image carries together with the
-licence files under `/workspace/THIRD_PARTY_LICENSES/`. Task content (theorem
+(Apache-2.0, MIT, BSD and one "written consent" repository, `IntroEffects`, which is
+not under an open-source licence); upstream lists them in
+`THIRD_PARTY_NOTICES.txt`, which the image carries together with the licence files
+under `/workspace/THIRD_PARTY_LICENSES/`. Task and corpus content (theorem
 statements, file context, reference proofs) is drawn from those repositories and is
-downloaded at run time, not committed here.
+downloaded at run time, not committed here. The one piece of upstream content that
+is committed: the prompt template embeds upstream's one-shot worked example
+(`prompts/templates/examples/e1.txt`, MIT) in every user prompt, so it appears
+verbatim inside the tracked synthetic example files under `data/`; it is attributed
+in the repository-level `ATTRIBUTIONS.md`.

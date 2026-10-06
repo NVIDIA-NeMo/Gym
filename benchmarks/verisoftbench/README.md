@@ -58,4 +58,7 @@ declared with any result.
 ## Licensing
 
 Harness and dataset: MIT. The 23 source Lean repositories retain their own licences
-and their content is downloaded at run time, not committed; see the server README.
+(open-source except `IntroEffects`, which is redistributed by written consent), and
+their task/corpus content is downloaded at run time, not committed. The one upstream
+text that is committed is the one-shot worked example the prompt template embeds in
+every user prompt (MIT, attributed in `ATTRIBUTIONS.md`); see the server README.

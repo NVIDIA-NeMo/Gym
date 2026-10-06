@@ -4,10 +4,11 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: math
-description: 'VeriSoftBench: 500 Lean 4 proof obligations from 23 open-source formal-methods
-  repositories, kernel-verified inside each repository''s own toolchain with upstream''s
-  error-feedback repair loop (three rounds per candidate). Curated-context condition;
-  any-of-8 estimand with eight draws per task.'
+description: 'VeriSoftBench: 500 Lean 4 proof obligations from 23 public formal-methods
+  repositories (22 open-source, one redistributed by written consent), kernel-verified
+  inside each repository''s own toolchain with upstream''s error-feedback repair loop
+  (three rounds per candidate). Curated-context condition; any-of-8 estimand with
+  eight draws per task.'
 modality: text
 licensing: MIT
 authors:
