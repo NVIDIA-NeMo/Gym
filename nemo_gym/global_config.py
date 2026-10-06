@@ -1210,8 +1210,29 @@ For example, on the command line:
 
     def _recursively_swap_keys(self, dict_config: DictConfig) -> None:
         frozen_dict_config = deepcopy(dict_config)
+        original_agents = {agent.name for agent in self._agent_instances(frozen_dict_config)}
+        destinations: dict[str, list[str]] = defaultdict(list)
+        # Only a top-level move of an agent can retarget its environment server. Copies and
+        # nested inheritance do not rename the instance, and multiple destinations are ambiguous.
+        for name, value in frozen_dict_config.items_ex(resolve=False):
+            source = None
+            if isinstance(value, str) and value.startswith("${inherit_from:"):
+                source = value.removeprefix("${inherit_from:").removesuffix("}")
+            elif isinstance(value, DictConfig) and not OmegaConf.is_missing(value, INHERIT_FROM_KEY_NAME):
+                source = value.get(INHERIT_FROM_KEY_NAME)
+            if isinstance(source, str) and source in original_agents:
+                destinations[source].append(name)
+
         with open_dict(dict_config):
             self._recursively_swap_keys_helper(dict_config, dict_config, frozen_dict_config)
+            final_agents = {agent.name for agent in self._agent_instances(dict_config)}
+            renames = {
+                source: targets[0]
+                for source, targets in destinations.items()
+                if source not in dict_config and len(targets) == 1 and targets[0] in final_agents
+            }
+            if renames:
+                self._retarget_environment_servers(dict_config, renames)
 
     def _recursively_swap_keys_helper(
         self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
