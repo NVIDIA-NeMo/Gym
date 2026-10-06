@@ -1,0 +1,124 @@
+---
+title: "Troubleshoot NeMo User Sim Rollouts"
+description: "Diagnose collection, simulation, and grading failures in NeMo User Sim evaluations."
+position: 6
+---
+
+Start with the output files:
+
+- `results/usersim/rollouts.jsonl` contains completed episode responses, including measured failures.
+- `results/usersim/rollouts_failures.jsonl` contains attempts that failed before Gym could save a completed episode.
+- `results/usersim/quality_summary.json` summarizes rollout health when health checks are enabled.
+
+A zero reward does not by itself mean that the Assistant performed poorly. Check the failure stage and
+`mask_sample` before interpreting it.
+
+## Collection and Environment failures
+
+Exceptions that escape the Environment runtime do not produce `usersim_result`. Gym records them in the failures
+sidecar. This includes participant transport failures, provider failures, session errors, and unexpected runtime
+exceptions:
+
+```bash
+jq '{
+  rollout_id: "\(._ng_task_index):\(._ng_rollout_index)",
+  class: ._ng_failure_class,
+  stage: ._ng_failure_stage,
+  message: ._ng_failure_message
+}' results/usersim/rollouts_failures.jsonl
+```
+
+The stage commonly identifies `admission`, `seed`, `agent`, `verification`, or `cleanup`. These are infrastructure or
+execution failures, not measured Assistant-quality results.
+
+## User Sim-reported simulation failures
+
+Failures that NeMo User Sim handles internally can still produce a completed episode response. Inspect:
+
+```bash
+jq '{
+  simulation_outcome: .usersim_result.simulation_outcome,
+  reward,
+  mask_sample,
+  failure_kind,
+  failure_reason
+}' results/usersim/rollouts.jsonl
+```
+
+Interpret attribution carefully:
+
+- A simulation failure attributed to `assistant_model` is a measured Assistant failure: `reward` is `0.0` and
+  `mask_sample` is `false`.
+- A simulation failure attributed elsewhere is not evidence about the Assistant: `reward` is `0.0` and
+  `mask_sample` is `true`.
+
+Assistant-caused invalid responses and non-retryable Assistant 4xx responses follow the measured-failure path.
+Timeouts, provider/transport failures, retryable status codes, and session-plumbing failures remain failures
+outside the scored episode.
+
+## Grading failures
+
+The Resources Server evaluates a completed conversation and runs an applicable probe scorer. Inspect its evidence:
+
+```bash
+jq '{
+  reward,
+  mask_sample,
+  failure_kind,
+  failure_reason,
+  scorer_state: .verification.verifier_data.scorer_state,
+  scorer_result: .verification.verifier_data.scorer_result,
+  assistant_eval: .verification.verifier_data.assistant_eval
+}' results/usersim/rollouts.jsonl
+```
+
+The main cases are:
+
+- A probe returns `status_proposal: false`: measured policy failure, unmasked zero reward.
+- A probe returns `status_proposal: null`: inconclusive result, masked as `usersim:scorer_inconclusive`.
+- A scorer or trajectory evaluator raises or returns an error: masked as `verifier_error`.
+- A completed scenario has no Assistant quality score: masked as `judge_failed`.
+- A verifier timeout: masked; `failure_reason` reports the configured evaluation timeout.
+
+NeMo User Sim scorer results classified as `not_applicable`, including its documented skipped sentinel, do not
+gate the episode.
+
+## Support-model schema errors
+
+All configured upstream URLs must expose an OpenAI-compatible Chat Completions API. The support endpoint must
+accept JSON Schema response formats. Schema rejection during judging or probe scoring produces a masked verifier
+failure rather than a measured Assistant result.
+
+Verify the `support_model_base_url`, credentials, model name, and structured-output support in `env.yaml`.
+
+## Missing or unexpected captures
+
+`ng_model_call_capture` contains calls routed through the participating User and Assistant Agents. Support calls
+and final verifier calls use plain model routes and are not part of that per-rollout capture.
+
+Use these sources instead:
+
+- Top-level `invocations`: Environment-owned User, Assistant, judge, summary, and tool-simulation calls.
+- `verification.verifier_data`: final evaluator and probe-scorer evidence.
+- Server logs: provider request failures and schema errors.
+
+## Prepared-row mismatch
+
+At seed time, Resources validates required fields and the pinned NeMo User Sim revision. It stores a canonical
+digest of the materialized row. At verification, a changed row or mismatched task, episode, or trajectory identity
+is rejected.
+
+The digest proves that the row remained unchanged during the episode; it does not independently prove that the
+row equals an earlier preparation artifact. Regenerate stale task files with:
+
+```bash
+gym eval prepare --config environments/usersim/config.yaml
+```
+
+## Session cleanup failures
+
+The Environment registers cleanup before seeding and closes participant and Resources sessions on every outcome.
+Cleanup is idempotent. Unknown or expired active Resources sessions return HTTP 404 during verification.
+
+When diagnosing session errors, preserve the failure stage and HTTP status. Session-related 404 and 409 responses
+are infrastructure failures, not Assistant-policy failures.
