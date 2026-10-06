@@ -169,3 +169,30 @@ def test_musl_bootstraps_with_apk_and_downloads_matching_binary(sandbox: tuple[P
     assert (root / "packages.log").read_text().splitlines() == ["add --no-cache curl ca-certificates"]
     arch = {"x86_64": "x64-baseline", "aarch64": "arm64"}[os.uname().machine]
     assert f"opencode-linux-{arch}-musl.tar.gz" in (root / "download.log").read_text()
+
+
+def test_explicit_python_bootstraps_without_python_on_path(sandbox):
+    root, env = sandbox
+    (root / "bin/python3").unlink()
+    binary = root / "staged-opencode"
+    binary.write_text("#!/bin/bash\necho 1.17.11\n")
+    binary.chmod(0o755)
+    result = subprocess.run(
+        [
+            str(root / "bin/bash"),
+            str(INSTALLER),
+            str(root / "runtime"),
+            "1.17.11",
+            str(binary),
+            "",
+            "",
+            sys.executable,
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not (root / "bin/python3").exists()
+    assert not (root / "download.log").exists()

@@ -162,6 +162,7 @@ def setup():
     module = "responses_api_agents.opencode_agent.app"
     with (
         patch(f"{module}.ensure_opencode", side_effect=AssertionError("Native sessions must not install on the host")),
+        patch(f"{module}.ensure_python", AsyncMock(return_value="python3")),
         patch(f"{module}.resolve_provider_config"),
         patch(f"{module}.get_global_config_dict", return_value={}),
         patch(f"{module}.create_provider"),

@@ -17,11 +17,25 @@ opencode_agent:
       token_id_capture: true
 
       opencode_version: 1.17.11
+      native_model_id: dummy_model
+      native_provider_npm: "@ai-sdk/openai-compatible"
+      native_model_options: {}
+      native_env: {}
+      native_session_title: NeMo Gym
+      native_auxiliary_model: primary
+      native_load_project_config: false
+      reasoning_effort: null
+      # Optional offline installation: host-prefetched binary and required SHA-256.
+      python_runtime_url: null
+      python_runtime_sha256: null
+      local_opencode_binary_path: null
+      local_opencode_binary_sha256: null
       # Set this to the actual model context window; it is metadata, not an output-token limit.
       context_window: 262144
       timeout: 10800
       setup_timeout: 600
       session_close_timeout_seconds: 30
+      session_execution_timeout_seconds: null
       session_close_retry_window_seconds: 300
 
       remote_opencode_install_script_path: null
