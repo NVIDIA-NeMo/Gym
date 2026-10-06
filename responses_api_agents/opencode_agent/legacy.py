@@ -481,7 +481,7 @@ class LegacyOpenCodeAgent(SimpleResponsesAPIAgent):
         echo "Shell: $SHELL" \
         && {install_str} \
         {ripgrep_install_str} \
-        && export PATH=$HOME/.opencode/bin:$PATH \
+        && export PATH="$HOME/.opencode/bin:$PATH" \
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
         && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
@@ -523,7 +523,7 @@ class LegacyOpenCodeAgent(SimpleResponsesAPIAgent):
         try:
             session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
             session_list_result = await sandbox.exec(
-                command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
+                command='export PATH="$HOME/.opencode/bin:$PATH" && opencode session list --format json',
                 env=session_env,
                 timeout_s=self.config.sandbox_timeout,
             )
@@ -532,7 +532,7 @@ class LegacyOpenCodeAgent(SimpleResponsesAPIAgent):
             session_id = _extract_opencode_session_id(session_list_result.stdout or "")
             export_result = await sandbox.exec(
                 command=(
-                    "export PATH=$HOME/.opencode/bin:$PATH "
+                    'export PATH="$HOME/.opencode/bin:$PATH" '
                     f"&& opencode export {quote(session_id)} > {quote(export_remote_fpath)}"
                 ),
                 env=session_env,
@@ -572,7 +572,7 @@ class LegacyOpenCodeAgent(SimpleResponsesAPIAgent):
             try:
                 # Release channels and OPENCODE_DB can change the database filename.
                 database_path_result = await sandbox.exec(
-                    command="export PATH=$HOME/.opencode/bin:$PATH && opencode db path",
+                    command='export PATH="$HOME/.opencode/bin:$PATH" && opencode db path',
                     env=session_env,
                 )
                 observations_remote_fpath = (database_path_result.stdout or "").strip()
