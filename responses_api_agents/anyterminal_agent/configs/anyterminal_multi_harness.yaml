@@ -35,21 +35,13 @@ anyterminal_hermes:
 # row still has a valid fallback, but normal multi-harness runs replace it with
 # one or all of the four explicitly named harnesses above.
 anyterminal_multi_harness:
+  # Copy rather than inherit: Hermes must remain available as one of the
+  # explicit fan-out destinations.
+  _copy: anyterminal_hermes
   responses_api_agents:
     anyterminal_agent:
-      entrypoint: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.entrypoint}
-      domain: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.domain}
       description: Shared Terminal-Bench source for multi-harness routing.
       value: Route one Terminal-Bench dataset across multiple Gym agents.
-      agent_server_module: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.agent_server_module}
-      agent_server_class: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.agent_server_class}
-      agent_config_class: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.agent_config_class}
-      agent_request_sampling_fields: >-
-        ${anyterminal_hermes.responses_api_agents.anyterminal_agent.agent_request_sampling_fields}
-      agent_kwargs: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.agent_kwargs}
-      container_formatter: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.container_formatter}
-      concurrency: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.concurrency}
-      model_server: ${anyterminal_hermes.responses_api_agents.anyterminal_agent.model_server}
       datasets:
         - name: terminal_bench_multi_harness
           type: train
