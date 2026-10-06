@@ -1,0 +1,23 @@
+config_paths:
+  - responses_api_agents/claweval_agent/configs/claweval_agent.yaml
+
+claweval_multi_turn_agent:
+  _inherit_from: claweval_agent
+  responses_api_agents:
+    claweval_agent:
+      claweval_config: ${oc.env:CLAW_EVAL_MULTI_TURN_CONFIG,config_user_agent.yaml}
+      datasets:
+        - name: claweval_multi_turn
+          type: benchmark
+          jsonl_fpath: benchmarks/claweval/data/multi_turn.jsonl
+          prepare_script: benchmarks/claweval/prepare_multi_turn.py
+          prompt_config: null
+          num_repeats: 3
+          license: MIT
+
+claweval_multi_turn_environment_server:
+  _inherit_from: claweval_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: claweval_multi_turn_agent

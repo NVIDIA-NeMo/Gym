@@ -378,7 +378,9 @@ class GymInstallConfig(_StrictModel):
 
 
 class DriverConfig(_StrictModel):
-    container: str = "python:3.12"
+    # None runs on the allocated host, for native harnesses that launch their own
+    # Slurm/Pyxis steps and need the host's scheduler client and authentication.
+    container: str | None = "python:3.12"
     gym_install: GymInstallConfig | None = None
     # Name of a service in `services:` to use as the policy model. When set, injects
     # policy_base_url/policy_model_name/policy_api_key into each benchmark's run config.
@@ -404,6 +406,12 @@ class DriverConfig(_StrictModel):
     # Pyxis-style bind mounts passed as --container-mounts.
     # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
     mounts: list[str] = []
+
+    @model_validator(mode="after")
+    def _validate_host_driver(self) -> "DriverConfig":
+        if self.container is None and self.mounts:
+            raise ValueError("A host driver (container: null) cannot use container mounts; use host paths")
+        return self
 
     @field_validator("env")
     @classmethod
