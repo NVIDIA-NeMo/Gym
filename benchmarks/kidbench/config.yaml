@@ -1,0 +1,23 @@
+# KIDBench (https://arxiv.org/abs/2605.25510), single-turn track: 500 prompts x 10 cue
+# conditions = 5,000 rows, judged by deepseek-v4-pro on the paper's 1-5 rubric.
+# See benchmarks/kidbench/README.md for the protocol and METRICS.md for every divergence.
+config_paths:
+  - resources_servers/kidbench/configs/kidbench.yaml
+
+# Inherits the resources server, judge and policy wiring from kidbench_simple_agent and points
+# it at the whole-track JSONL built by prepare.py. Rows already carry a fully built
+# responses_create_params.input (upstream's system prompt per condition), so no template applies.
+kidbench_benchmark_simple_agent:
+  _inherit_from: kidbench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: kidbench
+        type: benchmark
+        jsonl_fpath: benchmarks/kidbench/data/kidbench_benchmark.jsonl
+        prepare_script: benchmarks/kidbench/prepare.py
+        prompt_config: null
+        # Gym's entry for terms that match no named licence; the terms are in the README.
+        license: TBD
+        # Upstream runs each cell once.
+        num_repeats: 1
