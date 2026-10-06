@@ -824,10 +824,14 @@ def plan_gpus(config: "SubmitConfig") -> dict[str, dict[str, str]]:
 def _resolve_auto_pool(config: SubmitConfig, compute: SlurmComputeConfig, pool_name: str) -> None:
     """Size a `nodes: auto` pool and pin each of its vLLM services to a node of it.
 
-    The policy goes first, on the pool's first node, where the driver reaches it on localhost.
-    The rest go biggest first into the first node with room. A service bigger than one node
-    gets ceil(need / gpus_per_node) whole nodes to itself. More than one node splits the pool
-    into sub-pools named `<pool>-<i>`, which the rest of the executor places like any pool.
+    For a prefill/decode tier pool, the node count is ceil(TP * PP * instances / gpus_per_node).
+    server_per_node tiers need an explicit count because each node runs one server regardless of
+    instances.
+
+    For a plain vLLM pool, the policy goes first on node 0 (where the driver reaches it on
+    localhost). The rest go biggest-first into the first node with room. A service bigger than
+    one node gets ceil(need / gpus_per_node) whole nodes to itself. More than one node splits
+    the pool into sub-pools named `<pool>-<i>`, which the rest of the executor places like any pool.
     """
     pool = compute.node_pools[pool_name]
     gpus_per_node = pool.gpus_per_node
@@ -836,17 +840,29 @@ def _resolve_auto_pool(config: SubmitConfig, compute: SlurmComputeConfig, pool_n
             f"Node pool '{pool_name}' has nodes: auto but no gpus_per_node, so Gym cannot size it. "
             "Set gpus_per_node, or give the pool an explicit node count."
         )
-    pd_users = [
-        name
+    pd_tiers = [
+        (name, service.server_per_node, tier)
         for name, service in config.services.items()
         if isinstance(service, VllmPDServiceConfig)
-        and pool_name in (service.node_pool, service.prefill.node_pool, service.decode.node_pool)
+        for tier in (service.prefill, service.decode)
+        if tier.node_pool == pool_name
     ]
-    if pd_users:
-        raise ValueError(
-            f"Node pool '{pool_name}' has nodes: auto, but vllm_pd service {', '.join(map(repr, pd_users))} "
-            "uses it. A prefill/decode pool needs an explicit node count."
-        )
+    if pd_tiers:
+        if len(pd_tiers) > 1:
+            names = ", ".join(repr(n) for n, _, _ in pd_tiers)
+            raise ValueError(
+                f"Node pool '{pool_name}' has nodes: auto but {len(pd_tiers)} prefill/decode tiers use it "
+                f"({names}). Each tier needs its own pool."
+            )
+        pd_name, spn, tier = pd_tiers[0]
+        if spn:
+            raise ValueError(
+                f"Node pool '{pool_name}' has nodes: auto, but vllm_pd service '{pd_name}' has "
+                "server_per_node: true. Give this pool an explicit node count."
+            )
+        total_gpus = tier.tensor_parallel_size * tier.pipeline_parallel_size * tier.number_of_instances
+        compute.node_pools[pool_name] = pool.model_copy(update={"nodes": -(-total_gpus // gpus_per_node)})
+        return
     sole_pool = len(compute.node_pools) == 1
     members = {
         name: service
