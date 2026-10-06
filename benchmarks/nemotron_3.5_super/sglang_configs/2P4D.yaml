@@ -1,0 +1,248 @@
+# Nemotron 3.5 Super GA MTP-boosted BF16 — 2P4D.
+# Analytical candidate; full-scale startup, accuracy and throughput are unmeasured.
+# P/D counts mean whole four-GPU nodes. Larger D roles are one shared engine.
+# Source checkpoint: nim-mtp-boosted-09212026 (83 registry-hash-verified files).
+# Runtime: SGLang 0.5.20, git 94602c9c2b7cbdb8efd5c52802dac6a1c180089e;
+# Torch 2.13.0+cu130, FlashInfer 0.6.18, NIXL 1.4.1, router 0.3.2,
+# mooncake-transfer-engine-cuda13 0.3.13. Bind the container alias to this runtime.
+# Image tag recorded; installed digest was not freshly exposed by the devbox API.
+# Benchmark hardware was GB300 with 189470 MiB free/GPU before loading.
+# This is a GB200 memory-capacity simulation, not measured GB200 compute speed.
+# Do not allocate VRAM balloons on real GB200 GPUs.
+# BF16 weights/dispatch, FP8 KV/TRT-LLM Q, FP32 recurrent state; no added quantization.
+# Keep SGLANG_MOE_NVFP4_DISPATCH and SGLANG_CUTEDSL_MOE_NVFP4_DISPATCH unset.
+# All participating nodes need compatible IMEX/MNNVL fabric and local weights.
+# Adapt eth0 to the site's control-network interface if needed.
+# Writable HF/JIT caches use /tmp in-container; model/draft paths use the /model mount.
+# External SWE-bench driver: frozen 500 IDs, default thinking, 250 steps,
+# temperature 1/top-p .95, max output 32768, context 262144, seed-42 task order.
+# Measured 1P1D agent concurrency: 128; server request/graph ceilings remain 256.
+# Serving capacity does not enlarge the external CPU/sandbox resource budget.
+
+schema: 2
+name: nemotron35-ga-gb200-2p4d-theoretical
+model:
+  path: "$MODEL"
+  container: sglang-nemotron35-v0520-validated
+  precision: bf16
+resources:
+  gpu_type: gb200
+  gpus_per_node: 4
+engine: sglang
+dynamo:
+  install: false
+identity:
+  container:
+    image: lmsysorg/sglang:v0.5.20
+  frameworks:
+    sglang: 0.5.20
+frontend:
+  type: sglang-router
+  enable_multiple_frontends: false
+  num_additional_frontends: 0
+  args:
+    request-timeout-secs: 1200
+    worker-startup-timeout-secs: 1200
+    max-concurrent-requests: 512
+    pool-max-idle-per-host: 0
+    pool-idle-timeout-secs: 2
+    health-check-interval-secs: 5
+    log-level: info
+    dp-aware: false
+    prefill-policy: cache_aware
+    decode-policy: cache_aware
+    balance-abs-threshold: 64
+# Keep the Gym checkout and its results visible outside the evaluation container.
+# SRT already mounts its job log directory at /logs and the checkpoint at /model.
+container_mounts:
+  "$GYM_REPO": /opt/Gym
+
+# Gym's inference-metrics collector handles vLLM metrics; SRT collects engine telemetry here.
+observability:
+  enabled: true
+
+benchmark:
+  type: custom
+  container_image: gym-eval
+  client_placement: last_decode
+  stream_output: true
+  env:
+    GYM_CONFIG: benchmarks/swebench/verified/opencode.yaml
+    POLICY_MODEL_NAME: &served_model_name nemotron-3.5-super-ga-mtp-boosted
+    EXPERIMENT_NAME: sglang-2p4d-gym
+    EXPORT_TO_CSV: '0'
+    EXPORT_CSV_TO_MODEL_DIR: '0'
+  command: |
+    set -euo pipefail
+    source /opt/Gym_venv/bin/activate
+    cd /opt/Gym
+
+    : "${SRT_FRONTEND_HOST:?SRT must provide the router host}"
+    : "${SRT_FRONTEND_PORT:?SRT must provide the router port}"
+    export NEMO_GYM_RUN_ID="${SLURM_JOB_ID:?Must run inside a Slurm job}"
+    export NEMO_GYM_USER="${NEMO_GYM_USER:-${SLURM_JOB_USER:-$USER}}"
+
+    experiment_name="${EXPERIMENT_NAME}/slurm_job_id_${SLURM_JOB_ID}"
+    output_dir="/logs/gym/${EXPERIMENT_NAME}"
+    mkdir -p "$output_dir"
+    rollouts_fpath="$output_dir/rollouts.jsonl"
+
+    gym eval prepare --config $GYM_CONFIG +use_cached_prepared_benchmarks=true
+
+    gym eval run \
+      --config $GYM_CONFIG \
+      --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
+      --config benchmarks/nemotron_3.5_super/policy_model_override.yaml \
+      "+wandb_project=${NEMO_GYM_USER}-gym-eval" \
+      "+wandb_name=$experiment_name" \
+      +uv_venv_dir=/opt/uv_venvs \
+      "+nemo_gym_log_dir=$output_dir/logs" \
+      +skip_venv_if_present=true \
+      "++output_jsonl_fpath=$rollouts_fpath" \
+      ++overwrite_metrics_conflicts=true \
+      ++split=benchmark \
+      ++use_absolute_ip=true \
+      ++reuse_existing_data_preparation=true \
+      "++policy_base_url=http://${SRT_FRONTEND_HOST}:${SRT_FRONTEND_PORT}/v1" \
+      ++policy_api_key=dummy_api_key \
+      "++policy_model_name=$POLICY_MODEL_NAME" \
+      ++upload_rollouts=false \
+      ++global_aiohttp_connector_limit_per_host=16384 \
+      ++port_range_low=63000 \
+      ++port_range_high=64000 \
+      ++model_endpoint_readiness_timeout_seconds=1200
+
+roles:
+  prefill:
+    nodes: 2
+    workers: 2
+    gpus: 4
+    env:
+      CUDA_VISIBLE_DEVICES: 0,1,2,3
+      UCX_NET_DEVICES: mlx5_0,mlx5_1,mlx5_3,mlx5_4
+      SGLANG_DISAGGREGATION_NIXL_BACKEND: UCX
+      UCX_TLS: rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc
+      UCX_RNDV_SCHEME: get_zcopy
+      UCX_RNDV_THRESH: '0'
+      SGLANG_MOONCAKE_CUSTOM_MEM_POOL: NVLINK
+      UCX_CUDA_IPC_ENABLE_MNNVL: y
+      NCCL_MNNVL_ENABLE: '1'
+      NCCL_CUMEM_ENABLE: '1'
+      UCX_PROTO_INFO: y
+      UCX_LOG_LEVEL: error
+      SGLANG_DISABLE_USAGE_REPORT: '1'
+      HF_HOME: /tmp/nemotron35-hf
+      HF_HUB_CACHE: /tmp/nemotron35-hf/hub
+      HF_MODULES_CACHE: /tmp/nemotron35-hf/modules
+      SGLANG_CACHE_DIR: /tmp/nemotron35-sglang
+      CUDA_ENABLE_COREDUMP_ON_EXCEPTION: '0'
+      CUDA_ENABLE_CPU_COREDUMP_ON_EXCEPTION: '0'
+      SGLANG_CUDA_COREDUMP: '0'
+      SGLANG_CUDA_COREDUMP_BEFORE_CRASH: '0'
+      PYTHONDONTWRITEBYTECODE: '1'
+      SGLANG_DISAGGREGATION_FORCE_QUERY_PREFILL_DP_RANK: '1'
+    args:
+      model-path: /model
+      served-model-name: *served_model_name
+      disaggregation-mode: prefill
+      skip-server-warmup: true
+      attention-backend: trtllm_mha
+      chunked-prefill-size: 8192
+      context-length: 262144
+      disaggregation-transfer-backend: nixl
+      dtype: bfloat16
+      enable-cache-report: true
+      enable-metrics: true
+      ep-size: 4
+      kv-cache-dtype: fp8_e4m3
+      linear-attn-backend: triton
+      mamba-backend: flashinfer
+      mamba-full-memory-ratio: 4
+      mamba-radix-cache-strategy: extra_buffer
+      mamba-ssm-dtype: float32
+      max-prefill-tokens: 16384
+      max-running-requests: 256
+      mem-fraction-static: 0.9
+      moe-a2a-backend: none
+      page-size: 64
+      random-seed: 42
+      reasoning-parser: nemotron_3
+      speculative-algorithm: EAGLE
+      speculative-draft-model-path: /model
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+      speculative-num-steps: 3
+      tokenizer-worker-num: 4
+      tool-call-parser: qwen3_coder
+      tp-size: 4
+      trust-remote-code: true
+      weight-loader-drop-cache-after-load: true
+      log-level-http: warning
+  decode:
+    nodes: 4
+    workers: 4
+    gpus: 16
+    env:
+      CUDA_VISIBLE_DEVICES: 0,1,2,3
+      UCX_NET_DEVICES: mlx5_0,mlx5_1,mlx5_3,mlx5_4
+      SGLANG_DISAGGREGATION_NIXL_BACKEND: UCX
+      UCX_TLS: rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc
+      UCX_RNDV_SCHEME: get_zcopy
+      UCX_RNDV_THRESH: '0'
+      SGLANG_MOONCAKE_CUSTOM_MEM_POOL: NVLINK
+      UCX_CUDA_IPC_ENABLE_MNNVL: y
+      NCCL_MNNVL_ENABLE: '1'
+      NCCL_CUMEM_ENABLE: '1'
+      UCX_PROTO_INFO: y
+      UCX_LOG_LEVEL: error
+      SGLANG_DISABLE_USAGE_REPORT: '1'
+      HF_HOME: /tmp/nemotron35-hf
+      HF_HUB_CACHE: /tmp/nemotron35-hf/hub
+      HF_MODULES_CACHE: /tmp/nemotron35-hf/modules
+      SGLANG_CACHE_DIR: /tmp/nemotron35-sglang
+      CUDA_ENABLE_COREDUMP_ON_EXCEPTION: '0'
+      CUDA_ENABLE_CPU_COREDUMP_ON_EXCEPTION: '0'
+      SGLANG_CUDA_COREDUMP: '0'
+      SGLANG_CUDA_COREDUMP_BEFORE_CRASH: '0'
+      PYTHONDONTWRITEBYTECODE: '1'
+      SGLANG_DISAGGREGATION_FORCE_QUERY_PREFILL_DP_RANK: '1'
+    args:
+      model-path: /model
+      served-model-name: *served_model_name
+      disaggregation-mode: decode
+      skip-server-warmup: true
+      attention-backend: trtllm_mha
+      context-length: 262144
+      cuda-graph-max-bs-decode: 128
+      disaggregation-decode-extra-slots: 0
+      disaggregation-transfer-backend: nixl
+      dtype: bfloat16
+      enable-cache-report: true
+      enable-metrics: true
+      ep-size: 4
+      kv-cache-dtype: fp8_e4m3
+      linear-attn-backend: triton
+      mamba-backend: flashinfer
+      mamba-radix-cache-strategy: extra_buffer
+      mamba-ssm-dtype: float32
+      max-running-requests: 128
+      max-total-tokens: 16777216
+      mem-fraction-static: 0.8
+      moe-a2a-backend: none
+      page-size: 64
+      random-seed: 42
+      reasoning-parser: nemotron_3
+      speculative-algorithm: EAGLE
+      speculative-draft-model-path: /model
+      speculative-eagle-topk: 1
+      speculative-num-draft-tokens: 4
+      speculative-num-steps: 3
+      tokenizer-worker-num: 4
+      tool-call-parser: qwen3_coder
+      tp-size: 4
+      trust-remote-code: true
+      weight-loader-drop-cache-after-load: true
+      dp-size: 1
+      enable-dp-attention: false
+      enable-dp-lm-head: false
+      log-level-http: warning

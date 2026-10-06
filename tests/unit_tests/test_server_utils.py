@@ -404,6 +404,82 @@ class TestServerUtils:
         )
         assert "my mock response" == actual_response
 
+    @mark.parametrize("tracing_enabled", [False, True])
+    @mark.parametrize("internal", [False, True])
+    @mark.parametrize("error_type", [RuntimeError, ClientOSError, nemo_gym.server_utils.ServerDisconnectedError])
+    async def test_explicit_transport_attempt_cap_disables_request_retry(
+        self,
+        monkeypatch: MonkeyPatch,
+        tracing_enabled: bool,
+        internal: bool,
+        error_type: type[Exception],
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
+        client = MagicMock()
+        client.request = AsyncMock(side_effect=error_type("transport failed"))
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_aiohttp_client",
+            lambda: client,
+        )
+
+        with raises(error_type, match="transport failed"):
+            await nemo_gym.server_utils.request(
+                method="POST",
+                url="https://example.test",
+                _internal=internal,
+                _max_num_tries=1,
+            )
+
+        assert client.request.await_count == 1
+
+    @mark.parametrize("attempt_cap", [0, -1])
+    async def test_explicit_transport_attempt_cap_rejects_nonpositive_values(
+        self, monkeypatch: MonkeyPatch, attempt_cap: int
+    ) -> None:
+        client = self._mock_global_client(monkeypatch, connection_errors=0)
+        with raises(ValueError, match="_max_num_tries must be at least 1"):
+            await nemo_gym.server_utils.request("POST", "https://example.test", _max_num_tries=attempt_cap)
+        client.request.assert_not_awaited()
+
+    @mark.parametrize("tracing_enabled", [False, True])
+    async def test_explicit_transport_attempt_cap_counts_mixed_errors(
+        self,
+        monkeypatch: MonkeyPatch,
+        tracing_enabled: bool,
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
+        client = MagicMock()
+        client.request = AsyncMock(
+            side_effect=[
+                RuntimeError("generic failure"),
+                nemo_gym.server_utils.ClientOSError("socket failure"),
+                "must not be reached",
+            ]
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_aiohttp_client",
+            lambda: client,
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_utils.asyncio,
+            "sleep",
+            AsyncMock(),
+        )
+
+        with raises(
+            nemo_gym.server_utils.ClientOSError,
+            match="socket failure",
+        ):
+            await nemo_gym.server_utils.request(
+                method="POST",
+                url="https://example.test",
+                _max_num_tries=2,
+            )
+
+        assert client.request.await_count == 2
+
     async def test_ServerClient_preserves_external_capture_url(self, monkeypatch: MonkeyPatch) -> None:
         server_client = ServerClient(
             head_server_config=BaseServerConfig(host="head", port=12345),
@@ -1584,11 +1660,36 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
         return client
 
-    async def test_request_bounded_connection_retries_surface_dead_endpoint(self, monkeypatch: MonkeyPatch) -> None:
+    @mark.parametrize("tracing_enabled", [False, True])
+    @mark.parametrize(("attempt_cap", "expected_attempts"), [(None, 3), (1, 1), (5, 3)])
+    async def test_request_bounded_connection_retries_surface_dead_endpoint(
+        self, monkeypatch: MonkeyPatch, tracing_enabled: bool, attempt_cap: int | None, expected_attempts: int
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
         client = self._mock_global_client(monkeypatch, connection_errors=10)
         with raises(ClientOSError):
-            await nemo_gym.server_utils.request("POST", "http://dead-host:1/v1", _max_connection_retries=3)
-        assert client.request.await_count == 3
+            await nemo_gym.server_utils.request(
+                "POST", "http://dead-host:1/v1", _max_num_tries=attempt_cap, _max_connection_retries=3
+            )
+        assert client.request.await_count == expected_attempts
+        assert "_max_num_tries" not in client.request.call_args.kwargs
+        assert "_max_connection_retries" not in client.request.call_args.kwargs
+
+    @mark.parametrize(("attempt_cap", "expected_attempts"), [(1, 1), (5, 3)])
+    async def test_request_caps_generic_errors_at_the_lower_attempt_limit(
+        self, monkeypatch: MonkeyPatch, attempt_cap: int, expected_attempts: int
+    ) -> None:
+        client = MagicMock()
+        client.request = AsyncMock(side_effect=TimeoutError("upstream timed out"))
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+
+        with raises(TimeoutError, match="upstream timed out"):
+            await nemo_gym.server_utils.request(
+                "POST", "http://slow-host:1/v1", _max_num_tries=attempt_cap, _max_connection_retries=3
+            )
+
+        assert client.request.await_count == expected_attempts
 
     async def test_request_connection_retries_unbounded_by_default(self, monkeypatch: MonkeyPatch) -> None:
         client = self._mock_global_client(monkeypatch, connection_errors=4)
@@ -2006,3 +2107,64 @@ class TestHeadServerProxyKwargs:
 
         assert kwargs["proxy_headers"] is True
         assert kwargs["forwarded_allow_ips"] == ["10.0.0.1"]
+
+
+@mark.parametrize("header", [None, b"X-Other-Harness-Reply"])
+def test_model_header_comes_from_its_harness_property(monkeypatch, header):
+    import sys
+    from types import ModuleType
+
+    harness = ModuleType("responses_api_agents.test_header_harness")
+    harness._assistant_message_header = header
+    plain = ModuleType("responses_api_agents.test_plain_harness")
+    monkeypatch.setitem(sys.modules, harness.__name__, harness)
+    monkeypatch.setitem(sys.modules, plain.__name__, plain)
+    client = ServerClient(
+        head_server_config={"host": "localhost", "port": 0},
+        global_config_dict=OmegaConf.create(
+            {
+                "first": {
+                    "responses_api_agents": {
+                        "test_header_harness": {
+                            "model_server": {"type": "responses_api_models", "name": "first_model"},
+                        }
+                    }
+                },
+                "second": {
+                    "responses_api_agents": {
+                        "test_plain_harness": {
+                            "model_server": {"type": "responses_api_models", "name": "second_model"},
+                        }
+                    }
+                },
+                "observability_enabled": True,
+            }
+        ),
+    )
+    assert client.assistant_message_header("first_model") == (header.lower() if header else None)
+    assert client.assistant_message_header("second_model") is None
+    assert client.assistant_message_header("unused_model") is None
+
+
+def test_shared_model_rejects_conflicting_harness_headers(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    config = {}
+    for index, header in enumerate((b"x-one-reply", b"x-two-reply")):
+        name = f"test_header_{index}"
+        harness = ModuleType(f"responses_api_agents.{name}")
+        harness._assistant_message_header = header
+        monkeypatch.setitem(sys.modules, harness.__name__, harness)
+        config[name] = {
+            "responses_api_agents": {
+                name: {
+                    "model_server": {"type": "responses_api_models", "name": "policy"},
+                }
+            }
+        }
+    client = ServerClient(
+        head_server_config={"host": "localhost", "port": 0}, global_config_dict=OmegaConf.create(config)
+    )
+    with raises(ValueError, match="different assistant headers"):
+        client.assistant_message_header("policy")
