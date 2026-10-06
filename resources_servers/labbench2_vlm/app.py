@@ -143,6 +143,7 @@ def _extract_generated_answer(response: NeMoGymResponse) -> str:
 
 
 class LabbenchVLMResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: LabbenchVLMConfig
 
     def model_post_init(self, __context: Any) -> None:

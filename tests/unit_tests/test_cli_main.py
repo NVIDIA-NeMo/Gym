@@ -151,6 +151,7 @@ class TestEvalRunFlags:
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--limit", "1024"], "+limit=1024"),
             (["--num-repeats", "4"], "+num_repeats=4"),
+            (["--interleave-repeats"], "+interleave_repeats=true"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
             (["--prompt-config", "p.yaml"], "+prompt_config=p.yaml"),
             (["--split", "benchmark"], "+split=benchmark"),
@@ -262,6 +263,36 @@ class TestEvalRunFlags:
         assert "+config_paths=[b.yaml]" in overrides
         assert "+agent_name=a" in overrides
         assert "+responses_create_params.tool_choice=auto" in overrides  # unknown +override passes through
+
+
+class TestEvalExportFlags:
+    def test_flags_dispatch_as_hydra_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "export",
+                "--format",
+                "atif",
+                "--rollouts",
+                "rollouts.jsonl",
+                "--output-dir",
+                "atif",
+                "--session-id",
+                "evaluation-42",
+                "--agent-version",
+                "2.3.1",
+            ],
+        )
+
+        assert target == "nemo_gym.cli.eval:export_rollouts_as_atif"
+        assert set(overrides) == {
+            "+format=atif",
+            '+rollouts_jsonl_fpath="rollouts.jsonl"',
+            '+output_dirpath="atif"',
+            '+session_id="evaluation-42"',
+            '+agent_version="2.3.1"',
+        }
 
 
 class TestEnvTestResourceServerFlag:
@@ -669,8 +700,10 @@ class TestEvalReverifyFlags:
     @pytest.mark.parametrize(
         "flag_argv, expected_override",
         [
+            (["--input-format", "atif"], "+input_format=atif"),
             (["--inputs", "in.jsonl"], "+materialized_inputs_jsonl_fpath=in.jsonl"),
             (["--rollouts", "r.jsonl"], "+rollouts_jsonl_fpath=r.jsonl"),
+            (["--atif-manifest", "manifest.jsonl"], "+atif_manifest_jsonl_fpath=manifest.jsonl"),
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
@@ -1667,7 +1700,8 @@ class TestListEnvironmentsRouting:
         assert error.value.code == 1
         assert "Unknown benchmark 'gsm8kk'" in " ".join(capsys.readouterr().out.split())
 
-    def test_catalog_filters_translate_to_reserved_keys(self, monkeypatch: MonkeyPatch) -> None:
+    @pytest.mark.parametrize("status", ["experimental", "no-manifest"])
+    def test_catalog_filters_translate_to_reserved_keys(self, monkeypatch: MonkeyPatch, status: str) -> None:
         target, overrides = _dispatch_for(
             monkeypatch,
             [
@@ -1682,7 +1716,7 @@ class TestListEnvironmentsRouting:
                 "--licensing",
                 "Apache-2.0",
                 "--status",
-                "experimental",
+                status,
                 "--lifecycle",
                 "active",
             ],
@@ -1693,7 +1727,7 @@ class TestListEnvironmentsRouting:
             "+catalog_kind=benchmark",
             '+modality="text"',
             '+licensing="Apache-2.0"',
-            "+status=experimental",
+            f"+status={status}",
             "+lifecycle=active",
         }
 

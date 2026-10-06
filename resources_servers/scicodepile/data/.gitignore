@@ -1,0 +1,13 @@
+*train.jsonl
+*validation.jsonl
+*train_prepare.jsonl
+*validation_prepare.jsonl
+*example_prepare.jsonl
+# Incidental products of `gym eval run`; only example.jsonl, example_metrics.json
+# and example_rollouts.jsonl are committed, matching the sibling code servers.
+*_materialized_inputs.jsonl
+*_failures.jsonl
+*_aggregate_metrics.json
+quality_summary.json
+rollout_verdicts.jsonl
+preprocessed_datasets/
