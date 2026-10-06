@@ -336,8 +336,16 @@ class DatasetMetrics(Accumulator):
         )
 
     def model_dump_for_output(self) -> Dict[str, Any]:
-        """Serialize existing metrics, adding task metrics only for materialized rows."""
-        exclude = {"number_of_tasks", "task_input_json_dumped_number_of_words"} if self.number_of_tasks == 0 else set()
+        """Serialize existing metrics, adding task metrics only for the rows that produce them.
+
+        The task-input size is reported for datasets with rows that are not run requests, and the
+        task count for materialized rows, so sidecars of run request rows keep their existing keys.
+        """
+        exclude = set()
+        if self.number_of_tasks == 0:
+            exclude.add("number_of_tasks")
+        if self.task_input_json_dumped_number_of_words.total == 0:
+            exclude.add("task_input_json_dumped_number_of_words")
         return self.model_dump(mode="json", by_alias=True, exclude=exclude)
 
 
@@ -382,10 +390,19 @@ def _materialized_task_parts(sample: Mapping[str, Any]) -> tuple[TaskId, Mapping
     return TaskId.model_validate(task_id), task_input
 
 
-def compute_sample_metrics(sample_dict_str: str, *, require_responses: bool = True) -> Tuple[DatasetMetrics, bool]:
+def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
+    """Metrics for one row, and whether the row is offending.
+
+    Every JSON object is an example. Run request rows also get the Responses API metrics, and
+    materialized rows the task count. Other rows, such as task rows for an environment server with
+    its own input, are validated by their task schema; their size is the task-input size, so a change
+    inside nested fields is still a metrics conflict.
+    """
     try:
         sample_dict = json.loads(sample_dict_str)
     except json.JSONDecodeError:
+        return DatasetMetrics(), True
+    if not isinstance(sample_dict, dict):
         return DatasetMetrics(), True
 
     try:
@@ -408,11 +425,10 @@ def compute_sample_metrics(sample_dict_str: str, *, require_responses: bool = Tr
     try:
         sample = BaseRunRequest.model_validate(sample_dict)
     except ValidationError:
-        if not require_responses and isinstance(sample_dict, dict):
-            # The selected Environment Server owns task-input validation. Response-specific
-            # metrics are unavailable for these rows, but they are still dataset examples.
-            return DatasetMetrics(number_of_examples=1), False
-        return DatasetMetrics(), True
+        task_fields = {key: value for key, value in sample_dict.items() if not key.startswith("_ng_")}
+        task_input_words = AvgMinMax()
+        task_input_words.observe(len(json.dumps(task_fields).split()))
+        return DatasetMetrics(number_of_examples=1, task_input_json_dumped_number_of_words=task_input_words), False
 
     responses_create_params = sample.responses_create_params
     responses_create_params = responses_create_params.model_dump(exclude_unset=True)
@@ -743,10 +759,9 @@ class TrainDataProcessor(BaseModel):
         sample_idx: int,
         sample_dict_str: str,
         *,
-        require_responses: bool = True,
         dataset_metrics_hook: DatasetMetricHook | None = None,
     ) -> None:
-        metrics, is_offending = compute_sample_metrics(sample_dict_str, require_responses=require_responses)
+        metrics, is_offending = compute_sample_metrics(sample_dict_str)
         if is_offending:
             state.offending_example_idxs.append(sample_idx)
             return
@@ -800,7 +815,6 @@ class TrainDataProcessor(BaseModel):
                 state,
                 sample_idx,
                 sample_dict_str,
-                require_responses=dataset_config.taskset is None,
                 dataset_metrics_hook=dataset_metrics_hook,
             )
 

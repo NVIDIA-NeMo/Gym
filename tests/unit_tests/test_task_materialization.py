@@ -301,6 +301,43 @@ def test_flat_and_taskset_declarations_share_metrics_sidecar(tmp_path):
     assert not (tmp_path / "source_metrics_conflict.json").exists()
 
 
+def _write_metrics(tmp_path, rows, *, overwrite=False):
+    source = tmp_path / "source.jsonl"
+    source.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    dataset = {"name": "d", "type": "example", "jsonl_fpath": str(source)}
+    configs = GlobalConfigDictParser().filter_for_server_instance_configs(
+        OmegaConf.create(_resources_server("resources", [dataset]))
+    )
+    TrainDataProcessor().validate_samples_and_aggregate_metrics(configs, overwrite_metrics_conflicts=overwrite)
+    return json.loads((tmp_path / "source_metrics.json").read_text())
+
+
+TASK_INPUT_WORDS = "Json-dumped task-input words (proxy for token count)"
+
+
+def test_task_rows_are_examples_and_their_size_is_fingerprinted(tmp_path):
+    # Task rows for an environment server with its own input carry no responses_create_params.
+    def task(words):
+        return {"task_id": "a", "resolved_row": {"persona": words}}
+
+    metrics = _write_metrics(tmp_path, [task("short"), task("a longer persona")])
+    assert metrics["Number of examples"] == 2
+    assert "Number of tasks" not in metrics
+    assert metrics[TASK_INPUT_WORDS]["Min"] < metrics[TASK_INPUT_WORDS]["Max"]
+
+    # A change inside nested task fields, which the scalar field summary cannot see, is a metrics conflict.
+    with pytest.raises(ValueError, match="conflicting aggregate metrics"):
+        _write_metrics(tmp_path, [task("short"), task("a much longer persona than before")])
+    assert (tmp_path / "source_metrics_conflict.json").exists()
+
+
+def test_run_request_rows_keep_their_metrics_keys(tmp_path):
+    metrics = _write_metrics(tmp_path, [{"responses_create_params": {"input": "x"}, "expected_answer": "4"}])
+    assert metrics["Number of examples"] == 1
+    assert TASK_INPUT_WORDS not in metrics
+    assert "Number of tasks" not in metrics
+
+
 @pytest.mark.parametrize("taskset", [None, "code"])
 def test_collation_rejects_misplaced_fields_before_materialization(tmp_path, taskset):
     source = tmp_path / "source.jsonl"
