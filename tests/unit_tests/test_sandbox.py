@@ -890,6 +890,29 @@ def test_sync_loop_runner_times_out_async_operations() -> None:
         runner.close()
 
 
+def test_sync_loop_runner_keeps_an_operations_own_timeout() -> None:
+    runner = _AsyncLoopRunner(wait_timeout_s=60)
+
+    operation_error = TimeoutError("command submit after 240s")
+    call_error = TimeoutError("call after 5s")
+
+    async def provider_times_out() -> None:
+        raise operation_error
+
+    def call_times_out() -> None:
+        raise call_error
+
+    try:
+        with pytest.raises(TimeoutError, match="command submit after 240s") as raised:
+            runner.run("exec", provider_times_out)
+        assert raised.value is operation_error
+        with pytest.raises(TimeoutError, match="call after 5s") as raised:
+            runner.call("exec", call_times_out)
+        assert raised.value is call_error
+    finally:
+        runner.close()
+
+
 def test_sync_sandbox_file_operations(tmp_path: Path) -> None:
     provider = FakeSandboxProvider()
     with Sandbox(provider) as sandbox:
