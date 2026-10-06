@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Shared auxiliary-model connections for container builds and core evaluation.
+# Callers supply nv_inference_api_key; limits and benchmark settings stay in each recipe.
+
+# Tau2 simulated customer.
+gpt-5_2-2025-12-11:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_api_key: ${nv_inference_api_key}
+      openai_model: openai/openai/gpt-5.2
+
+# Tau3 Banking simulated customer.
+gpt-5_4-mini-2026-03-17:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_api_key: ${nv_inference_api_key}
+      openai_model: azure/openai/gpt-5.4-mini
+
+# AA-LCR judge.
+Qwen3-235B-A22B-Instruct-2507-FP8:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: https://inference-api.nvidia.com/v1
+      api_key: ${nv_inference_api_key}
+      model: nvidia/qwen/qwen-235b
+
+# HLE judge; the batch inherits this under its existing instance name.
+hle_benchmark_equivalence_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_api_key: ${nv_inference_api_key}
+      openai_model: azure/openai/gpt-4o
+
+# AA-Omniscience judge.
+# TODO @bxyu-nvidia: Need to properly rename this and add this Gemini config.
+genrm_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_api_key: ${nv_inference_api_key}
+      openai_model: gcp/google/gemini-3-flash-preview

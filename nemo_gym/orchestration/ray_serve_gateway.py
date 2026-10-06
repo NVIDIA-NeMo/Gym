@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 HEALTH_PATH = "/health"
 HEALTH_POLL_INTERVAL_S = 5.0
 HEALTH_TIMEOUT_S = 900.0
+# Each replica only proxies to its own vLLM, which batches and queues itself. Ray Serve's
+# default of 5 in-flight requests per replica would cap every instance at 5 concurrent requests.
+MAX_ONGOING_REQUESTS_PER_INSTANCE = 65536
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -82,6 +85,17 @@ def max_replicas_per_node(
         return None
     tp_pp = tensor_parallel_size * pipeline_parallel_size
     return max(1, gpus_per_node // tp_pp)
+
+
+def deployment_options(args: argparse.Namespace) -> dict:
+    """Ray Serve options for the VLLMInstance deployment."""
+    return {
+        "num_replicas": args.number_of_instances,
+        "max_replicas_per_node": max_replicas_per_node(
+            args.tensor_parallel_size, args.pipeline_parallel_size, args.gpus_per_node
+        ),
+        "max_ongoing_requests": MAX_ONGOING_REQUESTS_PER_INSTANCE,
+    }
 
 
 def build_instance_command(
@@ -197,12 +211,7 @@ def main(argv: list[str] | None = None) -> None:
         # No existing cluster to join - start a local one.
         ray.init()
 
-    deployment = VLLMInstance.options(
-        num_replicas=args.number_of_instances,
-        max_replicas_per_node=max_replicas_per_node(
-            args.tensor_parallel_size, args.pipeline_parallel_size, args.gpus_per_node
-        ),
-    ).bind(
+    deployment = VLLMInstance.options(**deployment_options(args)).bind(
         model=args.model,
         tensor_parallel_size=args.tensor_parallel_size,
         pipeline_parallel_size=args.pipeline_parallel_size,

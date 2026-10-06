@@ -79,12 +79,6 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
-        id="model_call_failed",
-        evaluation_scope=CheckScope.ROLLOUT,
-        subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
-    ),
-    CheckSpec(
         id="rollout_token_count_mismatch",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.ROLLOUT,
@@ -119,7 +113,13 @@ def normalize_ignored_checks(checks: Sequence[str] | str | None) -> tuple[str, .
     if checks is None:
         return ()
     raw_checks = checks.split(",") if isinstance(checks, str) else checks
-    normalized = tuple(dict.fromkeys(check.strip() for check in raw_checks if check.strip()))
+    normalized = tuple(
+        dict.fromkeys(
+            "rollout_ended_on_failed_model_call" if check.strip() == "model_call_failed" else check.strip()
+            for check in raw_checks
+            if check.strip()
+        )
+    )
     known_checks = {spec.id for spec in CHECK_REGISTRY}
     unknown_checks = sorted(set(normalized) - known_checks)
     if unknown_checks:
@@ -277,6 +277,9 @@ def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, A
                 "response_status": metadata.get("response_status"),
                 "finish_reason": metadata.get("finish_reason"),
                 "error_category": metadata.get("error_category"),
+                "upstream_attempted": metadata.get("upstream_attempted"),
+                "upstream_status_code": metadata.get("upstream_status_code"),
+                "local_response_reason": metadata.get("local_response_reason"),
                 "tokens_in": tokens.get("prompt_tokens"),
                 "tokens_out": tokens.get("completion_tokens"),
                 "request": raw.get("request"),
@@ -299,6 +302,18 @@ def _is_failed(call: dict[str, Any]) -> bool:
 def _is_successful(call: dict[str, Any]) -> bool:
     status = call.get("status_code")
     return not _is_failed(call) and (status is None or (isinstance(status, int) and 200 <= status < 400))
+
+
+def _is_context_overflow_rejection(call: dict[str, Any]) -> bool:
+    """Exclude only explicit upstream context rejections, never inferred empty generations."""
+    return (
+        call.get("upstream_attempted") is True
+        and call.get("upstream_status_code") == 400
+        and (
+            call.get("local_response_reason") == "context_length_exceeded"
+            or call.get("error_category") == "context_length_exceeded"
+        )
+    )
 
 
 def _call_identity(call: dict[str, Any]) -> str | None:
@@ -497,7 +512,7 @@ def _model_call_zero_completion_tokens(bindings: _CallBindings, subject: dict[st
             detail={"completion_tokens": 0},
         )
         for position, call in enumerate(bindings.matched_calls)
-        if call.get("tokens_out") == 0
+        if not _is_context_overflow_rejection(call) and call.get("tokens_out") == 0
     ]
 
 
@@ -516,7 +531,8 @@ def _model_call_missing_token_counts(bindings: _CallBindings, subject: dict[str,
             },
         )
         for position, call in enumerate(bindings.matched_calls)
-        if call.get("tokens_in") is None or call.get("tokens_out") is None
+        if not _is_context_overflow_rejection(call)
+        and (call.get("tokens_in") is None or call.get("tokens_out") is None)
     ]
 
 
@@ -574,31 +590,6 @@ def _trajectory_capture_mismatch(
             )
         )
     return findings
-
-
-def _model_call_failed(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
-    terminal_call_index = max(
-        (call["call_index"] for call in bindings.matched_calls if type(call.get("call_index")) is int),
-        default=None,
-    )
-    return [
-        Finding(
-            check="model_call_failed",
-            subject=subject,
-            locator=_call_locator(call, position),
-            detail={
-                "status": call.get("status_code"),
-                "error_category": call.get("error_category"),
-                "terminal": (
-                    bindings.complete
-                    and terminal_call_index is not None
-                    and call.get("call_index") == terminal_call_index
-                ),
-            },
-        )
-        for position, call in enumerate(bindings.matched_calls)
-        if _is_failed(call)
-    ]
 
 
 def _model_chains(calls: Sequence[dict[str, Any]]) -> dict[Any, list[dict[str, Any]]]:
@@ -712,7 +703,8 @@ def _model_call_runaway_generation(bindings: _CallBindings, subject: dict[str, i
             detail={"finish_reason": call.get("finish_reason")},
         )
         for position, call in enumerate(bindings.matched_calls)
-        if call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
+        if not _is_context_overflow_rejection(call)
+        and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
         and not _response_has_content(call.get("response"))
     ]
 
@@ -743,7 +735,6 @@ _ROLLOUT_CHECKS: dict[
     "trajectory_capture_mismatch": lambda record, trajectory, bindings, subject: _trajectory_capture_mismatch(
         trajectory, bindings, subject
     ),
-    "model_call_failed": lambda record, trajectory, bindings, subject: _model_call_failed(bindings, subject),
     "rollout_token_count_mismatch": lambda record, trajectory, bindings, subject: _rollout_token_count_mismatch(
         record, bindings, subject
     ),

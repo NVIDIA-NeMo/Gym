@@ -285,8 +285,22 @@ class ResponsesConverter(BaseModel):
 
         text = responses_create_params.pop("text", None)
         if text is not None:
-            if text.get("format") is not None:
-                raise NotImplementedError("Responses text format has no implemented Chat Completions conversion.")
+            text_format = text.get("format")
+            if text_format is not None:
+                format_type = text_format.get("type")
+                if format_type == "json_schema":
+                    json_schema = {"name": text_format["name"], "schema": text_format["schema"]}
+                    for key in ("strict", "description"):
+                        if text_format.get(key) is not None:
+                            json_schema[key] = text_format[key]
+                    responses_create_params["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": json_schema,
+                    }
+                elif format_type == "json_object":
+                    responses_create_params["response_format"] = {"type": "json_object"}
+                elif format_type != "text":
+                    raise NotImplementedError(f"Unsupported Responses text format type {format_type!r}.")
             if text.get("verbosity") is not None:
                 responses_create_params["verbosity"] = text["verbosity"]
 

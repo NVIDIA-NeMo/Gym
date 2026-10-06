@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,6 +22,7 @@ from omegaconf import OmegaConf
 from yaml import safe_load
 
 import nemo_gym.global_config
+from benchmarks.lmarena_v2 import prepare as lmarena_prepare
 from nemo_gym.cli.eval import list_benchmarks, prepare_benchmark
 
 
@@ -269,6 +272,78 @@ class TestDiscoverBenchmarksInDir:
         assert BenchmarkConfig.from_config_path(suite, strict=False) is None
         err = capsys.readouterr().err
         assert "2 benchmark datasets" in err and "eval suite" in err
+
+    @pytest.mark.parametrize(
+        ("suite_name", "expected_config_paths", "expected_concurrency"),
+        [
+            pytest.param(
+                "core_text.yaml",
+                [
+                    "benchmarks/tau2/configs/tau2.yaml",
+                    "benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml",
+                    "benchmarks/scicode/config.yaml",
+                    "benchmarks/hle/config.yaml",
+                    "benchmarks/gpqa/config.yaml",
+                    "benchmarks/omniscience/config.yaml",
+                    "benchmarks/aalcr/config.yaml",
+                    "benchmarks/apex_shortlist/config.yaml",
+                    "benchmarks/lmarena_v2/config.yaml",
+                    "benchmarks/livecodebench/v6_2408_2505/cascade.yaml",
+                    "benchmarks/ifbench/config.yaml",
+                ],
+                512,
+                id="core_text",
+            ),
+            pytest.param(
+                "swebench_verified_multilingual.yaml",
+                [
+                    "benchmarks/swebench/verified/opencode.yaml",
+                    "benchmarks/swebench/multilingual/opencode.yaml",
+                ],
+                1024,
+                id="swebench_verified_multilingual",
+            ),
+        ],
+    )
+    def test_nemotron_3_5_super_suite_membership_and_defaults(
+        self,
+        suite_name: str,
+        expected_config_paths: list[str],
+        expected_concurrency: int,
+    ) -> None:
+        repo_root = Path(__file__).parents[2]
+        suite = safe_load((repo_root / "benchmarks/nemotron_3.5_super" / suite_name).read_text())
+
+        assert suite == {
+            "config_paths": expected_config_paths,
+            "num_samples_in_parallel": expected_concurrency,
+        }
+        assert "benchmarks/swebench/pro/opencode.yaml" not in suite["config_paths"]
+
+    @pytest.mark.parametrize(
+        ("suite_name", "expected_benchmark_count"),
+        [
+            pytest.param("core_text.yaml", 11, id="core_text"),
+            pytest.param("swebench_verified_multilingual.yaml", 2, id="swebench_verified_multilingual"),
+        ],
+    )
+    def test_nemotron_3_5_super_suite_resolves_every_member(
+        self, suite_name: str, expected_benchmark_count: int, capsys, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.benchmarks import BenchmarkConfig
+
+        monkeypatch.setattr(
+            nemo_gym.global_config,
+            "_nemo_gym_openai_requirement",
+            lambda: f"openai=={nemo_gym.global_config.openai_version}",
+        )
+        repo_root = Path(__file__).parents[2]
+        suite_path = repo_root / "benchmarks/nemotron_3.5_super" / suite_name
+
+        assert BenchmarkConfig.from_config_path(suite_path, strict=False) is None
+        err = capsys.readouterr().err
+        assert f"{expected_benchmark_count} benchmark datasets" in err
+        assert "eval suite" in err
 
     def test_every_repo_benchmark_appears_in_listing(self, capsys) -> None:
         # Every config that declares a `type: benchmark` dataset must surface as its own listing entry —
@@ -574,6 +649,95 @@ class TestPrepareBenchmark:
             prepare_benchmark()
 
         assert mock_module.prepare.call_count == 0
+
+    def _prepare_with_cached_file(self, tmp_path: Path, module: object, *, use_cache: bool = True) -> None:
+        bench_dir, config_path = self._make_bench_dir(tmp_path)
+        (tmp_path / "output.jsonl").write_text("cached rows")
+        config = {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
+        if use_cache:
+            config["use_cached_prepared_benchmarks"] = True
+        with (
+            patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
+            patch("nemo_gym.cli.eval.importlib.import_module", return_value=module),
+        ):
+            prepare_benchmark()
+
+    def test_cached_file_is_prepared_again_when_the_script_reports_it_stale(self, tmp_path: Path, capsys) -> None:
+        module = MagicMock()
+        module.prepare.return_value = tmp_path / "output.jsonl"
+        module.is_prepared_data_current.return_value = False
+
+        self._prepare_with_cached_file(tmp_path, module)
+
+        module.is_prepared_data_current.assert_called_once_with(tmp_path / "output.jsonl")
+        module.prepare.assert_called_once_with()
+        assert "is out of date" in " ".join(capsys.readouterr().out.split())
+
+    def test_cached_file_is_kept_when_the_script_reports_it_current(self, tmp_path: Path) -> None:
+        module = MagicMock()
+        module.is_prepared_data_current.return_value = True
+
+        self._prepare_with_cached_file(tmp_path, module)
+
+        module.is_prepared_data_current.assert_called_once_with(tmp_path / "output.jsonl")
+        assert module.prepare.call_count == 0
+
+    def test_staleness_check_is_not_consulted_without_the_cache_option(self, tmp_path: Path) -> None:
+        module = MagicMock()
+        module.prepare.return_value = tmp_path / "output.jsonl"
+
+        self._prepare_with_cached_file(tmp_path, module, use_cache=False)
+
+        assert module.is_prepared_data_current.call_count == 0
+        module.prepare.assert_called_once_with()
+
+    def test_cached_file_is_kept_when_the_script_has_no_staleness_check(self, tmp_path: Path) -> None:
+        module = SimpleNamespace(prepare=MagicMock())
+
+        self._prepare_with_cached_file(tmp_path, module)
+
+        assert module.prepare.call_count == 0
+
+    def test_cached_lmarena_file_without_generation_defaults_is_prepared_again(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Older prepared rows keep their own limits unless the cache check sends them back through prepare()."""
+        repo_root = Path(__file__).parents[2]
+        output = tmp_path / "lmarena_v2_validation.jsonl"
+        old_row = {"responses_create_params": {"input": [], "temperature": 0.2, "max_output_tokens": 65536}}
+        output.write_text(json.dumps(old_row) + "\n")
+
+        def fake_download(download_config) -> None:
+            Path(download_config.output_fpath).write_text(json.dumps(old_row) + "\n")
+
+        monkeypatch.chdir(repo_root)
+        monkeypatch.setattr(lmarena_prepare, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(lmarena_prepare, "OUTPUT_FPATH", output)
+        monkeypatch.setattr(lmarena_prepare, "download_jsonl_dataset", fake_download)
+        config = {
+            "use_cached_prepared_benchmarks": True,
+            "lmarena_agent": {
+                "responses_api_agents": {
+                    "simple_agent": {
+                        "datasets": [
+                            {
+                                "name": "lmarena_v2",
+                                "type": "benchmark",
+                                "jsonl_fpath": str(output),
+                                "prepare_script": "benchmarks/lmarena_v2/prepare.py",
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+
+        with patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)):
+            prepare_benchmark()
+
+        params = json.loads(output.read_text().splitlines()[0])["responses_create_params"]
+        assert {key: params[key] for key in lmarena_prepare.GENERATION_DEFAULTS} == lmarena_prepare.GENERATION_DEFAULTS
+        assert lmarena_prepare.is_prepared_data_current(output)
 
     def test_two_declarations_resolving_to_one_agent_both_prepare(self, tmp_path: Path) -> None:
         """Keying by resolved agent used to silently drop all but the last declaration."""
