@@ -13,7 +13,7 @@ from nemo_gym.rollout_collection import (
     RolloutCollectionConfig,
     RolloutCollectionHelper,
     _environment_server_for_config_row,
-    _native_episode_request_body,
+    _episode_request_body,
 )
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
 from nemo_gym.task_data import TaskDataValidator
@@ -181,7 +181,7 @@ def test_collation_routes_declared_taskset_without_rewriting_shared_source(tmp_p
     loaded = RolloutCollectionHelper()._preprocess_rows_from_config(routing)
     assert len(loaded) == 8
     assert loaded[0]["_ng_environment_server"] == "swe-environment"
-    request = SingleAgentTurnRequest.model_validate(_native_episode_request_body(loaded[0]))
+    request = SingleAgentTurnRequest.model_validate(_episode_request_body(loaded[0]))
     assert request.task.task_input.task_data["run_script"] == "verifier\nscript\n"
     assert loaded[-1]["task_source"] == "flat"
     assert source.read_bytes() == original
@@ -249,7 +249,7 @@ def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, expl
     )
     (loaded,) = RolloutCollectionHelper()._preprocess_rows_from_config(config)
     assert loaded["_ng_task_index"] == task_index
-    request = SingleAgentTurnRequest.model_validate(_native_episode_request_body(loaded))
+    request = SingleAgentTurnRequest.model_validate(_episode_request_body(loaded))
     assert request.episode_id.rollout_id == (f"shard-{task_index}" if explicit_rollout_id else f"{task_index}-0")
     assert request.episode_id.attempt == 2
 
@@ -349,9 +349,7 @@ def test_custom_task_collation_metrics_validation_and_dispatch(tmp_path):
         environment_server_routes={"custom": "environment"},
     )
     loaded = RolloutCollectionHelper()._preprocess_rows_from_config(config)
-    requests = [
-        BaseEpisodeRequest[CustomTaskInput].model_validate(_native_episode_request_body(row)) for row in loaded
-    ]
+    requests = [BaseEpisodeRequest[CustomTaskInput].model_validate(_episode_request_body(row)) for row in loaded]
     assert [request.episode_id.rollout_id for request in requests] == ["0-0", "0-1"]
     assert all(request.task.task_input.model_dump() == row for request in requests)
     assert source.read_bytes() == original
