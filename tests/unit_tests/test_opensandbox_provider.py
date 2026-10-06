@@ -1639,6 +1639,63 @@ async def test_connect_honours_skip_health_check_opt_out(fake_opensandbox_sdk: N
     assert FakeSandbox.connected_kwargs["skip_health_check"] is True
 
 
+class FlakyConnectSandbox(FakeSandbox):
+    failures: list[BaseException] = []
+    calls = 0
+
+    @classmethod
+    async def connect(cls, *args: Any, **kwargs: Any) -> "FakeSandbox":
+        cls.calls += 1
+        if cls.failures:
+            raise cls.failures.pop(0)
+        return cls(str(args[0]))
+
+
+@pytest.fixture
+def flaky_connect_sdk(monkeypatch: pytest.MonkeyPatch) -> type[FlakyConnectSandbox]:
+    FlakyConnectSandbox.failures = []
+    FlakyConnectSandbox.calls = 0
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (FlakyConnectSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
+    return FlakyConnectSandbox
+
+
+async def test_connect_retries_a_connect_timeout(flaky_connect_sdk: type[FlakyConnectSandbox]) -> None:
+    """One connect timeout under load used to fail the whole rollout."""
+    flaky_connect_sdk.failures = [TimeoutError(110, "Connect call failed ('10.0.0.1', 80)")]
+    provider = opensandbox_provider.OpenSandboxProvider(create={"retries": 2, "retry_delay_s": 0})
+
+    handle = await provider.connect({"sandbox_id": "sandbox-9"})
+
+    assert handle.sandbox_id == "sandbox-9"
+    assert flaky_connect_sdk.calls == 2
+
+
+async def test_connect_gives_up_after_create_retries(flaky_connect_sdk: type[FlakyConnectSandbox]) -> None:
+    flaky_connect_sdk.failures = [ConnectionError("connection refused")] * 3
+    provider = opensandbox_provider.OpenSandboxProvider(create={"retries": 1, "retry_delay_s": 0})
+
+    with pytest.raises(ConnectionError):
+        await provider.connect({"sandbox_id": "sandbox-9"})
+    assert flaky_connect_sdk.calls == 2
+
+
+async def test_connect_does_not_retry_a_missing_sandbox(flaky_connect_sdk: type[FlakyConnectSandbox]) -> None:
+    from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
+
+    not_found = SandboxApiException("not found")
+    not_found.status_code = 404
+    flaky_connect_sdk.failures = [not_found]
+    provider = opensandbox_provider.OpenSandboxProvider(create={"retries": 2, "retry_delay_s": 0})
+
+    with pytest.raises(SandboxApiException):
+        await provider.connect({"sandbox_id": "sandbox-9"})
+    assert flaky_connect_sdk.calls == 1
+
+
 @pytest.mark.asyncio
 async def test_exec_retries_backend_connect_502_despite_zero_command_retries(
     monkeypatch: pytest.MonkeyPatch,
