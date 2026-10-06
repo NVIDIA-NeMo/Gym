@@ -67,6 +67,9 @@ provider configuration is unchanged.
   is reinstalled, so changing the override or the config pin takes effect on the next
   startup. After an install, the launcher selected on `PATH` must report the requested
   version, or startup fails.
+  Note: releases ≥ 2026.9.0 store session history in SQLite instead of JSONL, which
+  the agent's transcript reader does not support yet — tool results and interrupted
+  sessions are not captured, so stick to 2026.6.11 until that lands.
 - `node_bin_dir`: directory put before `PATH` when running `openclaw`. Setup uses the
   same order for its version probes and for `npm`, so a bundled runtime is checked
   as the rollout will use it.

@@ -48,7 +48,7 @@ Examples:
 
     Pin a version explicitly (a config value, typically)::
 
-        >>> ensure_openclaw("2026.9.4")
+        >>> ensure_openclaw("2026.6.11")
 
     Override both versions from the environment::
 
@@ -57,7 +57,7 @@ Examples:
     Inspect the resolved versions without touching the filesystem::
 
         >>> resolve_openclaw_version(None), resolve_node_version()
-        ('2026.9.4', '24.21.0')
+        ('2026.6.11', '24.21.0')
 """
 
 import ctypes
@@ -80,13 +80,16 @@ LOG = logging.getLogger(__name__)
 
 _OPENCLAW_PKG = "openclaw"
 
-#: Newest published ``openclaw`` release; used when no override is supplied.
-DEFAULT_OPENCLAW_VERSION = "2026.9.4"
+#: Version the agent installs when no override or config value is supplied. 2026.9.4
+#: is deliberately NOT the default yet: it stores session history in SQLite, which
+#: this agent's JSONL session reader cannot parse, so tool-using and interrupted
+#: rollouts lose their transcripts. Bump this after the session reader understands it.
+DEFAULT_OPENCLAW_VERSION = "2026.6.11"
 
-#: Newest release of the Node.js 24 LTS line, which is the line OpenClaw's own
-#: installer provisions on Linux (``NODE_LINUX_DEFAULT_MAJOR=24``). OpenClaw
-#: declares ``engines.node = ">=24.16.0 <25 || >=26.1.0"``, so 24.21.0 is the
-#: latest *stable* runtime that satisfies it.
+#: Node.js version downloaded when ``npm`` is absent: the newest release of the
+#: Node 24 LTS line, which is the line OpenClaw's own installer provisions on
+#: Linux (``NODE_LINUX_DEFAULT_MAJOR=24``). It satisfies the ``engines.node``
+#: range of every pinned release.
 DEFAULT_NODE_VERSION = "24.21.0"
 
 OPENCLAW_VERSION_ENV = "OPENCLAW_VERSION"
@@ -102,6 +105,10 @@ OPENCLAW_ENGINES_NODE = {
     "2026.6.11": ">=22.19.0",
     "2026.9.4": ">=24.16.0 <25 || >=26.1.0",
 }
+
+#: Range assumed for a release missing from the table when the registry cannot
+#: be asked; deliberately the newest known, not the default pin's.
+_NEWEST_KNOWN_ENGINES_NODE = OPENCLAW_ENGINES_NODE["2026.9.4"]
 
 #: The only accepted ``openclaw`` version form: an exact semver, optionally with a
 #: prerelease tag. npm ranges are rejected so "installed == requested" is a plain
@@ -467,7 +474,7 @@ def _engines_node(version: str, node_bin_dir: str | None) -> str:
             completed = None
         if completed is not None and completed.returncode == 0 and completed.stdout.strip():
             return completed.stdout.strip()
-    fallback = OPENCLAW_ENGINES_NODE[DEFAULT_OPENCLAW_VERSION]
+    fallback = _NEWEST_KNOWN_ENGINES_NODE
     LOG.warning("cannot read engines.node of openclaw %s; assuming %r", version, fallback)
     return fallback
 

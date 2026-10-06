@@ -298,10 +298,10 @@ class TestResolveVersions:
     def test_prerelease_is_an_exact_version(self):
         assert setup_openclaw.resolve_openclaw_version("2026.9.4-beta.1") == "2026.9.4-beta.1"
 
-    def test_default_node_satisfies_default_openclaw_engine_range(self):
-        """openclaw 2026.9.4 declares engines.node '>=24.16.0 <25 || >=26.1.0'."""
-        major, minor, _ = (int(p) for p in setup_openclaw.DEFAULT_NODE_VERSION.split("."))
-        assert (major == 24 and minor >= 16) or (major, minor) >= (26, 1)
+    def test_default_node_satisfies_every_pinned_engine_range(self):
+        """The default Node must satisfy every release in OPENCLAW_ENGINES_NODE."""
+        for engines in setup_openclaw.OPENCLAW_ENGINES_NODE.values():
+            assert setup_openclaw._satisfies_range(setup_openclaw.DEFAULT_NODE_VERSION, engines)
 
 
 class TestSatisfiesRange:
@@ -504,7 +504,7 @@ class TestEngineRangePerRelease:
         fake = _FakeExecutables(monkeypatch)
         fake.install("npm", "/usr/bin/npm", "10.9.0")
 
-        assert setup_openclaw._engines_node("2026.10.1", None) == setup_openclaw.OPENCLAW_ENGINES_NODE["2026.9.4"]
+        assert setup_openclaw._engines_node("2026.10.1", None) == setup_openclaw._NEWEST_KNOWN_ENGINES_NODE
 
     def test_incompatible_configured_runtime_raises(self, monkeypatch, tmp_path, provisioning):
         """node_bin_dir precedes any private toolchain at rollout time, so provisioning cannot help."""
@@ -629,9 +629,9 @@ class TestEnsureOpenclawRespectsRequestedVersion:
         setup_openclaw.ensure_openclaw("2026.9.4")
         assert installed == []
 
-    def test_version_override_reinstalls_old_release(self, monkeypatch):
+    def test_version_override_reinstalls_other_release(self, monkeypatch):
         """An override must take effect even when openclaw is already installed."""
-        fake = self._fake_openclaw(monkeypatch, "2026.6.11")
+        fake = self._fake_openclaw(monkeypatch, "2026.9.4")
         installed = self._record_install(monkeypatch, fake)
 
         setup_openclaw.ensure_openclaw()
