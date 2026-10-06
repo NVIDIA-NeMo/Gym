@@ -279,3 +279,8 @@ def test_finds_the_agent_references_gym_finds() -> None:
 def test_server_names_match_the_relays_gym_generates(agent_name: str, agent_type: str) -> None:
     # The deprecation warning prints a block to paste; it must match what this script writes.
     assert migration.server_name(agent_name, agent_type) == legacy_environment_server_name(agent_name, agent_type)
+
+
+def test_repository_configs_declare_every_environment_server(capsys: pytest.CaptureFixture[str]) -> None:
+    """Every agent in the repository's configs has an environment server, so no run needs a generated relay."""
+    assert migration.main(["--check"]) == 0, capsys.readouterr().out

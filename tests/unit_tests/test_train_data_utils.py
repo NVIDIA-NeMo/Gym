@@ -27,6 +27,7 @@ from nemo_gym.config_types import DatasetConfig, ResponsesAPIAgentServerInstance
 from nemo_gym.global_config import DictConfig, GlobalConfigDictParser
 from nemo_gym.train_data_utils import (
     AvgMinMax,
+    CategoricalMetrics,
     DatasetMetrics,
     DatasetValidatorState,
     StringMetrics,
@@ -766,6 +767,127 @@ class TestValidateSamplesAndAggregateMetrics:
             ),
         )
         assert expected_metrics.model_dump() == state.metrics.model_dump()
+
+    def test_non_responses_rows_keep_existing_zero_metrics(self) -> None:
+        processor = TrainDataProcessor()
+        state = DatasetValidatorState()
+
+        processor._validate_samples_and_aggregate_metrics_single_sample(
+            state=state,
+            sample_idx=0,
+            sample_dict_str=json.dumps({"environment_owned_input": "value"}),
+            require_responses=False,
+        )
+
+        output = state.metrics.aggregate().model_dump_for_output()
+        assert output["Number of examples"] == 1
+        for name in (
+            "Number of tools",
+            "Json-dumped number of words (proxy for token count)",
+            "Number of turns",
+            "Temperature",
+        ):
+            assert output[name] == {
+                "Total # non-null values": 0,
+                "Average": 0,
+                "Min": 0,
+                "Max": 0,
+                "Standard deviation": 0,
+            }
+        assert "Number of tasks" not in output
+        assert "Json-dumped task-input words (proxy for token count)" not in output
+
+    def test_validate_materialized_task_metrics_with_owner_hook(self) -> None:
+        processor = TrainDataProcessor()
+        state = DatasetValidatorState()
+        sample = {
+            "task_id": {"taskset": "test_environment:example", "task_id": "1042"},
+            "task_input": {
+                "category": "reasoning",
+                "context": {},
+            },
+        }
+
+        processor._validate_samples_and_aggregate_metrics_single_sample(
+            state=state,
+            sample_idx=0,
+            sample_dict_str=json.dumps(sample),
+            dataset_metrics_hook=lambda task_input: {
+                "Categories": task_input["category"],
+                "Context coverage": bool(task_input["context"]),
+            },
+        )
+
+        assert state.offending_example_idxs == []
+        assert state.metrics.number_of_examples == 1
+        assert state.metrics.number_of_tasks == 1
+        output = state.metrics.aggregate().model_dump_for_output()
+        zero_metric = {
+            "Total # non-null values": 0,
+            "Average": 0,
+            "Min": 0,
+            "Max": 0,
+            "Standard deviation": 0,
+        }
+        assert output == {
+            "Number of examples": 1,
+            "Number of tasks": 1,
+            "Number of tools": zero_metric,
+            "Json-dumped number of words (proxy for token count)": zero_metric,
+            "Json-dumped task-input words (proxy for token count)": {
+                "Total # non-null values": 1,
+                "Average": len(json.dumps(sample["task_input"]).split()),
+                "Min": len(json.dumps(sample["task_input"]).split()),
+                "Max": len(json.dumps(sample["task_input"]).split()),
+                "Standard deviation": 0,
+            },
+            "Number of turns": zero_metric,
+            "Temperature": zero_metric,
+            "Tasksets": {
+                "counts": {"test_environment:example": 1},
+                "unique_count": 1,
+                "total_count": 1,
+            },
+            "Categories": {
+                "counts": {"reasoning": 1},
+                "unique_count": 1,
+                "total_count": 1,
+            },
+            "Context coverage": {
+                "Total # non-null values": 1,
+                "Average": 0,
+                "Min": 0,
+                "Max": 0,
+                "Standard deviation": 0,
+            },
+        }
+
+    def test_categorical_metrics_merge_distributions(self) -> None:
+        left = CategoricalMetrics()
+        left.observe("first")
+        right = CategoricalMetrics()
+        right.observe("second")
+        right.observe("first")
+
+        left.add(right)
+
+        assert left.aggregate().model_dump() == {
+            "counts": {"first": 2, "second": 1},
+            "unique_count": 2,
+            "total_count": 3,
+        }
+
+    def test_categorical_metrics_caps_labels_with_other_bucket(self) -> None:
+        metrics = CategoricalMetrics()
+        for index in range(nemo_gym.train_data_utils.MAX_CATEGORICAL_LABELS + 2):
+            metrics.observe(f"label-{index}")
+
+        aggregated = metrics.aggregate()
+
+        assert len(aggregated.counts) == nemo_gym.train_data_utils.MAX_CATEGORICAL_LABELS + 1
+        assert aggregated.counts["Other"] == 2
+        assert aggregated.unique_count == nemo_gym.train_data_utils.MAX_CATEGORICAL_LABELS + 1
+        assert aggregated.total_count == nemo_gym.train_data_utils.MAX_CATEGORICAL_LABELS + 2
 
     def test_numeric_close_tolerance_validation(self, monkeypatch: MonkeyPatch) -> None:
         """Test numeric_close with various numeric values to validate tolerance thresholds"""
