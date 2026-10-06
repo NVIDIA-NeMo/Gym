@@ -165,7 +165,9 @@ def test_counter_rates_reset_and_nonfinite():
     assert sample("NaN", 17) == {}
 
 
-@pytest.mark.parametrize("metric_prefix,namespace", [("vllm:", "vllm"), ("vllm_router_", "router")])
+@pytest.mark.parametrize(
+    "metric_prefix,namespace", [("vllm:", "vllm"), ("sglang:", "sglang"), ("vllm_router_", "router")]
+)
 def test_histogram_samples_rates_resets_and_allowlist(metric_prefix, namespace):
     collector = InferenceMetricsCollector(config())
     metric_name = metric_prefix + "iteration_tokens_total"
@@ -207,11 +209,12 @@ def test_histogram_samples_rates_resets_and_allowlist(metric_prefix, namespace):
     assert restricted.parse("replica0", first_payload, 10) == {prefix + "_sum": 104}
 
 
-async def test_real_http_scrape_publishes(monkeypatch):
+@pytest.mark.parametrize("namespace", ["vllm", "sglang"])
+async def test_real_http_scrape_publishes(monkeypatch, namespace):
     app = web.Application()
 
     async def serve(request):
-        return web.Response(text=GAUGES)
+        return web.Response(text=GAUGES.replace("vllm:", namespace + ":"))
 
     app.router.add_get("/metrics", serve)
     publish = MagicMock()
@@ -221,8 +224,8 @@ async def test_real_http_scrape_publishes(monkeypatch):
         cfg = InferenceMetricsConfig(enabled=True, endpoints={"replica0": str(server.make_url("/metrics"))})
         await InferenceMetricsCollector(cfg).scrape("replica0", cfg.endpoints["replica0"])
     payload = publish.call_args.args[0]
-    assert payload["vllm/replica0/num_requests_running"] == 7
-    assert all(key.startswith("vllm/replica0/") for key in payload)
+    assert payload[f"{namespace}/replica0/num_requests_running"] == 7
+    assert all(key.startswith(f"{namespace}/replica0/") for key in payload)
     assert publish.call_args.kwargs == {}
 
 
@@ -606,3 +609,70 @@ def test_router_routes_are_readable_metric_paths():
     assert first == {"router/main/requests_total/route/v1/chat/completions": 10}
     second = collector.parse("main", payload.replace(" 10", " 20"), 12)
     assert second["router/main/requests_per_second/route/v1/chat/completions"] == 5
+
+
+def test_sglang_rates_and_rank_labels():
+    collector = InferenceMetricsCollector(config())
+    payload = """# TYPE sglang:realtime_tokens_total counter
+sglang:realtime_tokens_total{model_name="test",engine_type="decode",dp_rank="0",mode="decode"} 100
+sglang:realtime_tokens_total{model_name="test",engine_type="decode",dp_rank="1",mode="decode"} 200
+# TYPE sglang:token_usage gauge
+sglang:token_usage{model_name="test",engine_type="decode",dp_rank="0"} 0.2
+sglang:token_usage{model_name="test",engine_type="decode",dp_rank="1"} 0.8
+"""
+    first = collector.parse("decode0", payload, 10)
+    assert first["sglang/decode0/token_usage/dp_rank/0"] == 0.2
+    assert first["sglang/decode0/token_usage/dp_rank/1"] == 0.8
+    assert not any("per_second" in key for key in first)
+    second = collector.parse("decode0", payload.replace(" 100", " 120").replace(" 200", " 260"), 12)
+    assert second["sglang/decode0/realtime_tokens_per_second/dp_rank/0/mode/decode"] == 10
+    assert second["sglang/decode0/realtime_tokens_per_second/dp_rank/1/mode/decode"] == 30
+    reset = collector.parse("decode0", payload, 14)
+    assert not any("per_second" in key for key in reset)
+
+
+@pytest.mark.parametrize("missing", [False, True])
+async def test_sglang_aggregates_counts_but_not_ratios(monkeypatch, missing):
+    cfg = InferenceMetricsConfig(
+        enabled=True,
+        endpoints={"prefill0": "http://localhost:8000/metrics", "decode0": "http://localhost:8001/metrics"},
+    )
+    collector = InferenceMetricsCollector(cfg)
+    stop = asyncio.Event()
+
+    async def scrape(replica, url):
+        stop.set()
+        if missing and replica == "decode0":
+            return None
+        role, count, usage = ("prefill", 3, 0.2) if replica == "prefill0" else ("decode", 7, 0.6)
+        payload = f'''# TYPE sglang:num_running_reqs gauge
+sglang:num_running_reqs{{model_name="test",engine_type="{role}",tp_rank="0"}} {count}
+# TYPE sglang:token_usage gauge
+sglang:token_usage{{model_name="test",engine_type="{role}",tp_rank="0"}} {usage}
+# TYPE sglang:cache_hit_rate gauge
+sglang:cache_hit_rate{{model_name="test",engine_type="{role}",tp_rank="0"}} {usage}
+# TYPE sglang:num_queue_reqs gauge
+sglang:num_queue_reqs{{model_name="test",engine_type="{role}",tp_rank="0"}} {count}
+# TYPE sglang:generation_tokens_total counter
+sglang:generation_tokens_total{{model_name="test",engine_type="{role}",is_streaming="True"}} 100
+'''
+        collector.parse(replica, payload, 10)
+        return collector.parse(replica, payload.replace(" 100", f" {100 + count * 2}"), 12)
+
+    monkeypatch.setattr(collector, "scrape", scrape)
+    publish = MagicMock()
+    monkeypatch.setattr(metrics_module, "export_metrics", publish)
+    await collector.run(stop)
+    if missing:
+        publish.assert_not_called()
+        return
+    result = publish.call_args.args[0]
+    assert result["sglang/total/num_running_reqs/tp_rank/0"] == 10
+    assert result["sglang/total/generation_tokens_per_second/is_streaming/True"] == 10
+    assert result["sglang/max/num_queue_reqs/tp_rank/0"] == 7
+    for name in ("token_usage", "cache_hit_rate"):
+        assert f"sglang/total/{name}/tp_rank/0" not in result
+        assert result[f"sglang/mean/{name}/tp_rank/0"] == pytest.approx(0.4)
+        assert result[f"sglang/max/{name}/tp_rank/0"] == 0.6
+    assert result["sglang/min/cache_hit_rate/tp_rank/0"] == 0.2
+    assert all(key.startswith("sglang/") for key in result)

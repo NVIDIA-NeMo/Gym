@@ -32,10 +32,27 @@ from nemo_gym.server_utils import request
 
 logger = logging.getLogger(__name__)
 MOONCAKE_STORAGE_GAUGES = {"master_allocated_bytes", "master_total_capacity_bytes"}
+# These SGLang gauges describe ratios or averages, not additive quantities.
+SGLANG_MEAN_GAUGES = {
+    "token_usage",
+    "full_token_usage",
+    "swa_token_usage",
+    "mamba_usage",
+    "pending_prealloc_token_usage",
+    "cache_hit_rate",
+    "spec_accept_length",
+    "spec_accept_rate",
+    "spec_cap_length",
+    "spec_block_accept_length",
+    "utilization",
+    "fwd_occupancy",
+    "new_token_ratio",
+    "lora_pool_utilization",
+}
 
 
 class InferenceMetricsConfig(BaseModel, extra="forbid"):
-    """Opt-in sampling of vLLM, router, and Mooncake Prometheus endpoints."""
+    """Opt-in sampling of vLLM, SGLang, router, and Mooncake Prometheus endpoints."""
 
     enabled: bool = False
     endpoints: dict[str, HttpUrl] = Field(default_factory=dict, description="Replica name to full /metrics URL.")
@@ -48,7 +65,7 @@ class InferenceMetricsConfig(BaseModel, extra="forbid"):
     metrics: list[str] | None = Field(
         default=None,
         description=(
-            "Optional exact sample allowlist; by default export all vLLM and router gauges, counters, "
+            "Optional exact sample allowlist; by default export all vLLM, SGLang and router gauges, counters, "
             "and histogram samples plus Mooncake storage gauges, excluding creation timestamps."
         ),
     )
@@ -90,7 +107,7 @@ class InferenceMetricsCollector:
                     replica == "mooncake" and family.type == "gauge" and sample.name in MOONCAKE_STORAGE_GAUGES
                 )
                 if (
-                    (not sample.name.startswith(("vllm:", "vllm_router_")) and not is_mooncake_storage)
+                    (not sample.name.startswith(("vllm:", "sglang:", "vllm_router_")) and not is_mooncake_storage)
                     # Prometheus exposes creation timestamps as separate gauges.
                     or sample.name.endswith("_created")
                     or (self.config.metrics is not None and sample.name not in self.config.metrics)
@@ -101,18 +118,25 @@ class InferenceMetricsCollector:
                     # Master gauges already describe all segments; never sum them with per-segment usage.
                     result[f"mooncake/total/{sample.name.removeprefix('master_')}"] = sample.value
                     continue
-                namespace = "router" if sample.name.startswith("vllm_router_") else "vllm"
-                name = sample.name.removeprefix("vllm_router_").removeprefix("vllm:")
+                if sample.name.startswith("vllm_router_"):
+                    namespace, name = "router", sample.name.removeprefix("vllm_router_")
+                else:
+                    namespace, name = sample.name.split(":", 1)
                 labels = urlencode(sorted(sample.labels.items()))
                 suffix = "".join(
                     f"/{label}/{value.strip('/')}"
                     for label, value in sorted(sample.labels.items())
                     if label not in {"engine", "model_name"}
+                    # Role is already captured by replica names (prefill0/decode0).
+                    # Keep rank, mode, priority and histogram labels distinct.
+                    and not (namespace == "sglang" and label == "engine_type")
                 )
                 key = f"{namespace}/{replica}/{name}{suffix}"
                 series_key = f"{key}/{labels}"
                 result[key] = result.get(key, 0.0) + sample.value
-                if family.type == "gauge" and name == "kv_cache_usage_perc":
+                if family.type == "gauge" and (
+                    name == "kv_cache_usage_perc" or (namespace == "sglang" and name in SGLANG_MEAN_GAUGES)
+                ):
                     gauge_counts[key] = gauge_counts.get(key, 0) + 1
                 if family.type in {"counter", "histogram"}:
                     previous = self.previous.get(series_key)
@@ -189,30 +213,34 @@ class InferenceMetricsCollector:
             snapshots = await asyncio.gather(
                 *(self.scrape(name, url) for name, url in endpoints),
             )
-            # Match metric and label paths; missing replicas/series are not zeros.
-            replica_metrics = [
-                {
-                    key.removeprefix(f"vllm/{replica}/"): value
-                    for key, value in (snapshot or {}).items()
-                    if key.startswith(f"vllm/{replica}/")
-                }
-                for replica, snapshot in zip(self.config.endpoints, snapshots)
-            ]
-            shared_metrics = (
-                set.intersection(*(set(metrics) for metrics in replica_metrics)) if replica_metrics else set()
-            )
             aggregates = {}
-            for metric in sorted(shared_metrics):
-                values = [metrics[metric] for metrics in replica_metrics]
-                total = sum(values)
-                name = metric.split("/", 1)[0]
-                if name != "prefix_cache_hit_rate":
-                    aggregates[f"vllm/total/{metric}"] = total
-                aggregates[f"vllm/mean/{metric}"] = total / len(replica_metrics)
-                if name in {"kv_cache_usage_perc", "num_requests_waiting"}:
-                    aggregates[f"vllm/max/{metric}"] = max(values)
-                elif name == "prefix_cache_hit_rate":
-                    aggregates[f"vllm/min/{metric}"] = min(values)
+            for namespace in ("vllm", "sglang"):
+                # Match metric and label paths; missing replicas/series are not zeros.
+                replica_metrics = [
+                    {
+                        key.removeprefix(f"{namespace}/{replica}/"): value
+                        for key, value in (snapshot or {}).items()
+                        if key.startswith(f"{namespace}/{replica}/")
+                    }
+                    for replica, snapshot in zip(self.config.endpoints, snapshots)
+                ]
+                shared_metrics = (
+                    set.intersection(*(set(metrics) for metrics in replica_metrics)) if replica_metrics else set()
+                )
+                for metric in sorted(shared_metrics):
+                    values = [metrics[metric] for metrics in replica_metrics]
+                    total = sum(values)
+                    name = metric.split("/", 1)[0]
+                    nonadditive = namespace == "sglang" and name in SGLANG_MEAN_GAUGES
+                    if name != "prefix_cache_hit_rate" and not nonadditive:
+                        aggregates[f"{namespace}/total/{metric}"] = total
+                    aggregates[f"{namespace}/mean/{metric}"] = total / len(replica_metrics)
+                    if name in {"kv_cache_usage_perc", "num_requests_waiting"} or (
+                        namespace == "sglang" and (nonadditive or name.endswith("queue_reqs"))
+                    ):
+                        aggregates[f"{namespace}/max/{metric}"] = max(values)
+                    if name in {"prefix_cache_hit_rate", "cache_hit_rate"}:
+                        aggregates[f"{namespace}/min/{metric}"] = min(values)
             self.add_derived_metrics(aggregates, "vllm/total/")
             if aggregates:
                 export_metrics(aggregates)

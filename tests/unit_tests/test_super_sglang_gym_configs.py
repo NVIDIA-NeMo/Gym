@@ -3,9 +3,15 @@
 
 """Keep Gym evaluation settings consistent across SGLang topology recipes."""
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
+
+from nemo_gym.inference_metrics import InferenceMetricsConfig
 
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "benchmarks/nemotron_3.5_super/sglang_configs"
@@ -42,3 +48,42 @@ def test_gym_benchmark_sections_match() -> None:
         assert benchmark == reference, (
             f"{path.name}: benchmark differs from {reference_path.name}; only benchmark.env.EXPERIMENT_NAME may differ"
         )
+
+
+@pytest.mark.parametrize("missing_role", [None, "prefill", "decode"])
+def test_srt_worker_metrics_config(tmp_path: Path, missing_role: str | None) -> None:
+    config = yaml.safe_load((CONFIG_DIR / "2P2D.yaml").read_text())
+    command = config["benchmark"]["command"]
+    syntax = subprocess.run(["bash", "-n"], input=command, text=True, capture_output=True)
+    assert syntax.returncode == 0, syntax.stderr
+    # Execute the recipe's actual config generation with SRT's documented endpoint format.
+    setup = (
+        "inference_metrics_config=" + command.split("inference_metrics_config=", 1)[1].split("gym eval prepare", 1)[0]
+    )
+    env = os.environ | {
+        # The recipe activates Gym's venv before this block.
+        "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", ""),
+        "output_dir": str(tmp_path),
+        "SRT_PREFILL_ENDPOINTS": "10.0.0.1:6100,10.0.0.2:6100",
+        "SRT_DECODE_ENDPOINTS": "10.0.0.3:6200,10.0.0.3:6201",
+    }
+    if missing_role:
+        env.pop(f"SRT_{missing_role.upper()}_ENDPOINTS")
+    result = subprocess.run(["bash", "-euc", setup], env=env, text=True, capture_output=True)
+    output = tmp_path / "inference-metrics.yaml"
+    if missing_role:
+        assert result.returncode != 0
+        assert f"SRT must provide SRT_{missing_role.upper()}_ENDPOINTS" in result.stderr
+        assert not output.exists()
+        return
+    assert result.returncode == 0, result.stderr
+    metrics = InferenceMetricsConfig.model_validate(yaml.safe_load(output.read_text())["inference_metrics"])
+    assert metrics.enabled
+    assert {name: str(url) for name, url in metrics.endpoints.items()} == {
+        "prefill0": "http://10.0.0.1:6100/metrics",
+        "prefill1": "http://10.0.0.2:6100/metrics",
+        "decode0": "http://10.0.0.3:6200/metrics",
+        "decode1": "http://10.0.0.3:6201/metrics",
+    }
+    assert '--config "$inference_metrics_config"' in command.split("gym eval run", 1)[1]
+    assert all(role["args"]["enable-metrics"] for role in config["roles"].values())
