@@ -569,13 +569,12 @@ class EnrootProvider:
                     f"enroot start exited early (code={instance.proc.returncode}) for {instance.name!r}: {stderr}"
                 )
             pid, present = await self._lookup_container(instance.name)
-            if pid is None and present:
+            if pid is None and self._proc_scan_allowed(present):
                 # Nested-in-pyxis fallback: when enroot runs as real root
-                # (ENROOT_ALLOW_SUPERUSER) it does not create a per-container user
-                # namespace, so `enroot list` shows the container as present but cannot
-                # map a PID to it. The detached `enroot start` stays in the foreground
-                # for the container lifetime, so its init is a descendant — find it by
-                # walking the start process's tree for the init command.
+                # (ENROOT_ALLOW_SUPERUSER) it may omit the named container entirely or
+                # show it without a PID. When PID namespaces are explicitly disabled,
+                # scan even if `enroot list` could not associate the rootfs name. The
+                # unique marker prevents matching another concurrent sandbox.
                 pid = await loop.run_in_executor(
                     None,
                     _find_container_init_pid,
@@ -591,6 +590,10 @@ class EnrootProvider:
                     f"{self._create_config.start_timeout_s:g}s: {stderr}"
                 )
             await asyncio.sleep(self._create_config.start_poll_s)
+
+    def _proc_scan_allowed(self, present: bool) -> bool:
+        """Whether container discovery may fall back to scanning ``/proc``."""
+        return present or not self._create_config.unshare_pid
 
     @staticmethod
     def _read_temp(handle: IO[bytes]) -> str:

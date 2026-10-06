@@ -273,6 +273,9 @@ def test_constructor_can_disable_pid_namespace_for_nested_runtime(
 
     assert isolated._enroot_env["ENROOT_UNSHARE_PID"] == "yes"
     assert "ENROOT_UNSHARE_PID" not in nested._enroot_env
+    assert isolated._proc_scan_allowed(present=False) is False
+    assert isolated._proc_scan_allowed(present=True) is True
+    assert nested._proc_scan_allowed(present=False) is True
 
 
 def test_constructor_pins_enroot_env(fake_binary: str, tmp_path: Path) -> None:
