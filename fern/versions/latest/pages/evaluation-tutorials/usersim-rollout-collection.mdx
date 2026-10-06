@@ -1,12 +1,12 @@
 ---
 title: "Run Multi-turn User Simulation with NeMo User Sim"
-description: "Prepare NeMo User Sim tasks, evaluate an assistant, and inspect one rollout."
+description: "Evaluate an assistant on a committed NeMo User Sim validation task and inspect the rollout."
 position: 4
 ---
 
 <Info>
-**Goal:** Prepare the included NeMo User Sim benchmark, run one multi-turn conversation with the assistant you
-want to evaluate, and confirm that the rollout contains a conversation and score.
+**Goal:** Run one committed NeMo User Sim validation task with the assistant you want to evaluate, then confirm
+that the rollout contains a conversation and score.
 </Info>
 
 [NeMo User Sim](https://github.com/NVIDIA-NeMo/UserSim) supplies simulated users and conversation scenarios.
@@ -23,7 +23,7 @@ summaries, simulating selected tool results, and running probe-specific checks.
 
 ```mermaid
 sequenceDiagram
-    participant P as Offline preparation
+    participant P as Committed validation data
     participant C as Gym rollout collector
     participant E as Environment Server
     participant R as Resources Server
@@ -59,19 +59,6 @@ run commands from the repository root:
 source .venv/bin/activate
 ```
 
-NeMo User Sim downloads personas from the extended Nemotron-Personas dataset on NGC. If `en_US` is not already
-cached under `~/.data-designer/managed-assets/datasets/`, install and configure the NGC CLI:
-
-```bash
-uvx --from "git+https://github.com/NVIDIA-NeMo/UserSim.git@a5f676bf6dc5a73914c8a0860f97c10dd2c214ee" \
-  usersim setup-ngc
-export NGC_CLI_API_KEY="<your-ngc-key>"
-```
-
-See the [NGC CLI installation guide](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#installing-ngc-catalog-cli)
-and [API key guide](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#ngc-api-keys) if setup needs
-manual credentials.
-
 Create or update `env.yaml` in the repository root:
 
 ```yaml
@@ -100,48 +87,23 @@ export POLICY_API_KEY="<your-api-key>"
 export SUPPORT_MODEL_API_KEY="<your-api-key>"
 ```
 
-## Prepare the tasks
+## Inspect the validation tasks
 
-Run preparation once:
+The validation split contains five committed synthetic tasks and requires no NGC credentials or preparation.
+The tasks cover general, educational, health-disclosure, and financial-services scenarios.
 
-```bash
-gym eval prepare --config environments/usersim/config.yaml
-```
-
-Preparation writes `environments/usersim/data/usersim.jsonl`. Its 14 rows contain one materialized task for
-each first-party probe. NeMo User Sim resolves the persona, scenario, tools, seed, trajectory identity, and
-provenance before rollout collection begins.
-
-The Resources Server validates required fields and the pinned NeMo User Sim revision when it seeds a session.
-It also stores a digest and compares it during verification, proving that the materialized row did not change
-during the episode.
-
-Confirm that preparation produced all tasks:
+Inspect the source rows:
 
 ```bash
-wc -l environments/usersim/data/usersim.jsonl
+wc -l environments/usersim/data/validation.jsonl
 jq '.resolved_row | {
   probe_type, trajectory_id, usersim_provenance, usersim_config
-}' environments/usersim/data/usersim.jsonl
+}' environments/usersim/data/validation.jsonl
 ```
 
-<Accordion title="Optional: reproduce the tool-calling input with the User Sim CLI">
-
-Preparation derives a stable per-probe seed as the first four bytes of
-`SHA-256("<base seed>\0<probe name>")`. With the default base seed `1042`, `tool_calling` uses `3786248005`.
-
-```bash
-uvx --from "git+https://github.com/NVIDIA-NeMo/UserSim.git@a5f676bf6dc5a73914c8a0860f97c10dd2c214ee" \
-  usersim simulate \
-  --locale en_US \
-  --num-rows 1 \
-  --probe-mix tool_calling=1 \
-  --random-seed 3786248005 \
-  --materialize-inputs \
-  --out episode-inputs.jsonl
-```
-
-</Accordion>
+The Resources Server validates required fields and the pinned NeMo User Sim revision when it seeds a session.
+It stores a digest and compares it during verification, proving that the materialized row did not change during
+the episode.
 
 ## Collect one rollout
 
@@ -153,7 +115,7 @@ capture_dir="$(pwd)/results/usersim/model-calls"
 
 gym eval run \
   --environment usersim \
-  --split benchmark \
+  --split validation \
   --output results/usersim/rollouts.jsonl \
   --limit 1 \
   --num-repeats 1 \
@@ -203,6 +165,46 @@ jq '.invocations[]
 The smoke run is complete when the rollout contains alternating User and Assistant messages, a non-error
 verification object, and the expected `mask_sample` value.
 
+## Run the complete benchmark
+
+The benchmark split materializes one task for each of NeMo User Sim's 14 first-party probes. Unlike the
+committed validation split, preparation samples personas from the extended Nemotron-Personas dataset on NGC.
+
+If `en_US` is not already cached under `~/.data-designer/managed-assets/datasets/`, configure the NGC CLI:
+
+```bash
+uvx --from "git+https://github.com/NVIDIA-NeMo/UserSim.git@a5f676bf6dc5a73914c8a0860f97c10dd2c214ee" \
+  usersim setup-ngc
+export NGC_CLI_API_KEY="<your-ngc-key>"
+```
+
+See the [NGC CLI installation guide](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#installing-ngc-catalog-cli)
+and [API key guide](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#ngc-api-keys) if setup needs
+manual credentials.
+
+Prepare the benchmark:
+
+```bash
+gym eval prepare --config environments/usersim/config.yaml
+wc -l environments/usersim/data/usersim.jsonl
+```
+
+Preparation writes 14 deterministic materialized rows to `environments/usersim/data/usersim.jsonl`. Run each
+task once:
+
+```bash
+gym eval run \
+  --environment usersim \
+  --split benchmark \
+  --output results/usersim/all-probes.jsonl \
+  --num-repeats 1 \
+  +user_model_uses_reasoning_parser=false \
+  +policy_uses_reasoning_parser=false \
+  +support_model_uses_reasoning_parser=false \
+  ++observability_enabled=true \
+  ++model_call_capture_dir="${capture_dir}"
+```
+
 ## Next steps
 
 - [Inspect NeMo User Sim rollouts](/tutorials/evaluation-tutorials/usersim-rollout-inspection) for
@@ -211,5 +213,3 @@ verification object, and the expected `mask_sample` value.
   collection, simulation, and grading failures.
 - [NeMo User Sim integration reference](/tutorials/evaluation-tutorials/usersim-integration-reference) for
   architecture, ownership, contracts, and field semantics.
-
-To run every prepared probe, remove `--limit 1` and choose a new output filename.
