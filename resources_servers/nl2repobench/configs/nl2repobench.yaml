@@ -12,6 +12,14 @@ nl2repobench_resources_server:
       sandbox_provider: sandbox
       enforce_agent_no_network: true
       sandbox_model_server: null
+      # official: reproduces today's behavior exactly (honors enforce_agent_no_network/
+      #   sandbox_model_server above as-is).
+      # no_internet_preinstalled: agent boots from the pinned per-task image (deps pre-installed,
+      #   real tests stripped) with deny-all-except-policy_model egress, regardless of the two
+      #   flags above.
+      # block_target: open egress, but pip/pip3/git are wrapped to refuse installing/cloning the
+      #   specific task's own package/repo.
+      agent_network_mode: official
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200
