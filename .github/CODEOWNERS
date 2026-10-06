@@ -27,6 +27,13 @@ docker/ @nvidia-nemo/automation
 pyproject.toml @nvidia-nemo/automation
 uv.lock @nvidia-nemo/automation
 
+# BioNeMo
+/benchmarks/larp* @nvidia-nemo/gym_bionemo
+/environments/larp/ @nvidia-nemo/gym_bionemo
+/responses_api_agents/larp_agent/ @nvidia-nemo/gym_bionemo
+/resources_servers/larp/ @nvidia-nemo/gym_bionemo
+/resources_servers/litmus_agent/ @nvidia-nemo/gym_bionemo
+
 # ── Suggested (advisory only, see header) ───────────────────────────────────
 # Path → team map below mirrors the ownership proposal from PR #2439 (not
 # merged/enforced — kept here as suggestions only). Teams verified to exist
@@ -102,10 +109,3 @@ uv.lock @nvidia-nemo/automation
 # suggest: /Makefile @nvidia-nemo/automation
 # suggest: /codecov.yml @nvidia-nemo/automation
 # suggest: /.pre-commit-config.yaml @nvidia-nemo/automation
-
-# BioNeMo (placed last so it overrides the broader gym_env_benchmarks rules above)
-# suggest: /benchmarks/larp* @nvidia-nemo/gym_bionemo
-# suggest: /environments/larp/ @nvidia-nemo/gym_bionemo
-# suggest: /responses_api_agents/larp_agent/ @nvidia-nemo/gym_bionemo
-# suggest: /resources_servers/larp/ @nvidia-nemo/gym_bionemo
-# suggest: /resources_servers/litmus_agent/ @nvidia-nemo/gym_bionemo
