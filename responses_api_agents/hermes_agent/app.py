@@ -82,6 +82,22 @@ from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
 
 
+def _usage_from_result(result: dict[str, Any]) -> Optional[NeMoGymResponseUsage]:
+    # Hermes' prompt total already includes cache reads/writes, and its completion
+    # total includes reasoning. Early returns can omit these native aggregates.
+    prompt_tokens = result.get("prompt_tokens")
+    completion_tokens = result.get("completion_tokens")
+    if prompt_tokens is None or completion_tokens is None:
+        return None
+    return NeMoGymResponseUsage(
+        input_tokens=prompt_tokens,
+        input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=result.get("cache_read_tokens")),
+        output_tokens=completion_tokens,
+        output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=result.get("reasoning_tokens")),
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+
+
 def _trajectory_to_output_items(messages, n_input):
     output_items = []
     for item in messages[n_input:]:
@@ -951,13 +967,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
-            usage=NeMoGymResponseUsage(
-                input_tokens=0,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
-                output_tokens=0,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
-                total_tokens=0,
-            ),
+            usage=_usage_from_result(result),
         )
 
     async def _create_response(
