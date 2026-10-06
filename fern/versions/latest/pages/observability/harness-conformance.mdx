@@ -16,10 +16,7 @@ python scripts/inspect_harness_conformance.py \
 
 The `gym-p0/v1` profile checks trajectory evidence across TE-1–TE-9. Each check
 declares `tier`: `P0`, `P1` or `P2`. Every applicable P0 check must pass on every rollout.
-Invocation call references, parent relationships, call ownership and call-to-step
-attribution checks are P1: they still run and report failures but do not block P0.
-Shared prerequisites needed by P0 step and tool checks remain P0, including saved
-invocations and their identities.
+All current checks are P0, including ownership and call-to-step attribution.
 TE labels group results for reporting; they do not determine priority or schedule checks.
 This guide and the check definitions maintain the implemented requirements.
 

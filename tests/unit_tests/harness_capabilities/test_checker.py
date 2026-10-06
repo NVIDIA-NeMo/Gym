@@ -118,7 +118,7 @@ def test_tool_record_does_not_require_p1_clocks(record):
     assert verdict(record, "TE-5") == "fulfilled"
 
 
-def test_missing_call_ownership_fails_p1_without_blocking_p0():
+def test_missing_call_ownership_blocks_p0():
     record = evidence_record()
     for inv in record["ng_trajectory"]["invocations"]:
         if inv["kind"] == "agent_invocation":
@@ -126,9 +126,9 @@ def test_missing_call_ownership_fails_p1_without_blocking_p0():
     result = inspect_record(record)
     assert result["evidence"]["TE-8"]["verdict"] == "not_fulfilled"
     assert result["evidence"]["TE-9"]["verdict"] == "fulfilled"
-    assert result["verdict"] == "fulfilled"
+    assert result["verdict"] == "not_fulfilled"
     check = next(c for c in result["checks"] if c["id"] == "ownership.call_owner")
-    assert check["tier"] == "P1" and check["status"] == "fail"
+    assert check["tier"] == "P0" and check["status"] == "fail"
 
 
 def test_duplicated_step_ref_fails_without_closure_requirement():

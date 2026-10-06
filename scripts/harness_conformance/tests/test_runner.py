@@ -540,7 +540,7 @@ def test_scenario_gate_uses_individual_priority(retained_episode, monkeypatch, t
     assert all(c["status"] in {"pass", "not_applicable"} for c in result["checks"] if c["id"] != "independent.test")
 
 
-def test_p1_step_attribution_failure_does_not_block_scenario_p0(retained_episode):
+def test_step_attribution_failure_blocks_scenario_p0(retained_episode):
     directory, _ = retained_episode
     bundle = directory / "rollouts.jsonl"
     record = json.loads(bundle.read_text())
@@ -550,7 +550,7 @@ def test_p1_step_attribution_failure_does_not_block_scenario_p0(retained_episode
     result = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
     assert result["evidence"]["TE-8"]["verdict"] == "fulfilled"
     assert result["evidence"]["TE-9"]["verdict"] == "not_fulfilled"
-    assert result["verdict"] == "fulfilled"
+    assert result["verdict"] == "not_fulfilled"
 
 
 @pytest.mark.parametrize("delivery", ["missing", "failure_record"])

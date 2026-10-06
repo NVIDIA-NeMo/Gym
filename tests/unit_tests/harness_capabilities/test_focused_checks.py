@@ -155,15 +155,15 @@ def test_parent_reference_is_resolved_without_global_native_validation():
     assert result["calls.outcome"]["status"] == "pass"
 
 
-def test_missing_step_call_references_fail_p1_without_blocking_p0():
+def test_missing_step_call_references_block_p0():
     record = evidence_record()
     for turn in record["ng_trajectory"]["turns"]:
         turn.pop("model_calls")
     result = inspect_record(record)
     by_id = {c["id"]: c for c in result["checks"]}
-    assert result["verdict"] == "fulfilled"
+    assert result["verdict"] == "not_fulfilled"
     assert result["evidence"]["TE-9"]["verdict"] == "not_fulfilled"
-    assert by_id["steps.references"]["tier"] == "P1"
+    assert by_id["steps.references"]["tier"] == "P0"
     assert by_id["steps.references"]["status"] == "fail"
     assert by_id["steps.call_target"]["blocked_by"] == ["steps.references"]
     assert by_id["steps.number"]["tier"] == "P0"

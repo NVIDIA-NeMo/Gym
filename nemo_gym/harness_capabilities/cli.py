@@ -123,7 +123,7 @@ def inspect_bundle(
                 "TE-6 checks shipped Gym reward/resolution; extended verifier provenance is not certified",
                 "sandbox rows are reported under TE-6; record presence is enforced only with require_sandbox",
                 "all applicable individual P0 checks must pass; TE labels only group results",
-                "P1 ownership and call-to-step checks are reported but do not block P0; no P2 checks are defined",
+                "all current checks are P0, including ownership and call-to-step checks",
             ],
             **manifest,
         }
