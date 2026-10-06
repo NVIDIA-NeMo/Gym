@@ -12,10 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
 from time import time
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import Body, HTTPException, Request
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -51,11 +52,50 @@ class NativeClaudeCodeConfig(BaseResponsesAPIAgentConfig):
     timeout: float = Field(default=1200, gt=0)
     close_timeout: float = Field(default=90, gt=0)
     runtime_archive: str | None = None
+    runtime_archive_url: str | None = None
+    runtime_archive_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
     runtime_executable: str | None = None
     install_runtime: bool = True
     debug_log: bool = False
     python_runtime_url: str | None = None
     python_runtime_sha256: str | None = None
+
+    @model_validator(mode="after")
+    def validate_runtime_download(self):
+        if bool(self.runtime_archive_url) != bool(self.runtime_archive_sha256):
+            raise ValueError("runtime_archive_url and runtime_archive_sha256 must be supplied together")
+        if self.runtime_archive_url:
+            parsed = urlsplit(self.runtime_archive_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("runtime_archive_url must be an HTTP(S) URL")
+        return self
+
+
+# Run with the independently bootstrapped Python inside the borrowed sandbox.
+# Copy one checked regular file instead of extracting arbitrary archive paths.
+DOWNLOAD_RUNTIME = """
+import hashlib, os, shutil, sys, tarfile, urllib.request
+url, expected, archive, executable = sys.argv[1:]
+digest = hashlib.sha256()
+with urllib.request.urlopen(url, timeout=60) as response, open(archive, "wb") as output:
+    while True:
+        block = response.read(1024 * 1024)
+        if not block:
+            break
+        digest.update(block)
+        output.write(block)
+if digest.hexdigest() != expected.lower():
+    os.unlink(archive)
+    raise ValueError("Claude runtime archive SHA-256 mismatch")
+with tarfile.open(archive, "r:gz") as source:
+    members = source.getmembers()
+    if len(members) != 1 or members[0].name not in {"claude", "./claude"} or not members[0].isfile():
+        raise ValueError("Claude runtime archive must contain only the regular file claude")
+    with source.extractfile(members[0]) as content, open(executable, "wb") as output:
+        shutil.copyfileobj(content, output)
+os.chmod(executable, 0o700)
+os.unlink(archive)
+"""
 
 
 @dataclass
@@ -106,6 +146,20 @@ class NativeClaudeCodeAgent(SimpleResponsesAPIAgent):
                         self.config.claude_code_version + " "
                     ):
                         executable = existing
+            if not executable and self.config.runtime_archive_url:
+                executable = directory + "/runtime/claude"
+                command = [
+                    state.python_executable,
+                    "-c",
+                    DOWNLOAD_RUNTIME,
+                    self.config.runtime_archive_url,
+                    self.config.runtime_archive_sha256,
+                    directory + "/runtime.tar.gz",
+                    executable,
+                ]
+                result = await sandbox.exec(" ".join(quote(value) for value in command), timeout_s=300)
+                if result.return_code or result.error_type:
+                    raise RuntimeError("Cannot download verified Claude runtime: " + (result.stderr or ""))
             if not executable and self.config.runtime_archive:
                 await sandbox.upload(Path(self.config.runtime_archive), directory + "/runtime.tar.gz")
                 result = await sandbox.exec(

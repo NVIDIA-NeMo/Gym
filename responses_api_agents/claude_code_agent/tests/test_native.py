@@ -1,10 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import hashlib
+import io
 import json
+import sys
+import tarfile
+import urllib.request
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
@@ -169,3 +175,97 @@ async def test_native_seed_reconnects_provider_and_reuses_verified_binary(monkey
     assert connector.await_args.kwargs["provider"] is provider
     assert state.executable == "/usr/local/bin/claude" and state.version == "2.1.108 (Claude Code)"
     assert not sandbox.upload.called
+
+
+def runtime_config(**kwargs):
+    return native.NativeClaudeCodeConfig(
+        name="judge",
+        host="127.0.0.1",
+        port=18313,
+        entrypoint="native.py",
+        model_server={"type": "responses_api_models", "name": "judge_model"},
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"runtime_archive_url": "https://runtime.example/claude.tar.gz"},
+        {"runtime_archive_sha256": "0" * 64},
+        {"runtime_archive_url": "file:///tmp/runtime.tar.gz", "runtime_archive_sha256": "0" * 64},
+        {"runtime_archive_url": "https://runtime.example/runtime.tar.gz", "runtime_archive_sha256": "bad"},
+    ],
+)
+def test_native_remote_runtime_requires_http_url_and_sha256(values):
+    with pytest.raises(ValidationError):
+        runtime_config(**values)
+
+
+@pytest.mark.parametrize("case", ["valid", "digest_mismatch", "traversal", "symlink", "extra_file"])
+def test_runtime_download_checks_digest_and_archive_paths(tmp_path, monkeypatch, case):
+    binary = b"#!/bin/sh\nprintf '2.1.108 (Claude Code)\\n'\n"
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        entry = tarfile.TarInfo("../claude" if case == "traversal" else "claude")
+        if case == "symlink":
+            entry.type = tarfile.SYMTYPE
+            entry.linkname = "/usr/bin/false"
+        else:
+            entry.size = len(binary)
+        archive.addfile(entry, io.BytesIO(binary))
+        if case == "extra_file":
+            archive.addfile(tarfile.TarInfo("unexpected"))
+    payload = buffer.getvalue()
+    expected = "0" * 64 if case == "digest_mismatch" else hashlib.sha256(payload).hexdigest()
+    target = tmp_path / "runtime" / "claude"
+    target.parent.mkdir()
+    download = tmp_path / "runtime.tar.gz"
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: io.BytesIO(payload))
+    monkeypatch.setattr(
+        sys, "argv", ["download", "https://runtime.example/archive", expected, str(download), str(target)]
+    )
+    if case == "valid":
+        exec(native.DOWNLOAD_RUNTIME, {})
+        assert target.read_bytes() == binary
+        assert target.stat().st_mode & 0o777 == 0o700
+        assert not download.exists()
+    else:
+        with pytest.raises(ValueError, match="SHA-256 mismatch|must contain only"):
+            exec(native.DOWNLOAD_RUNTIME, {})
+        assert not target.exists()
+        assert not (tmp_path / "claude").exists()
+
+
+@pytest.mark.asyncio
+async def test_remote_runtime_avoids_upload_and_still_checks_version(monkeypatch):
+    def result(stdout="", return_code=0):
+        return SimpleNamespace(return_code=return_code, stdout=stdout, stderr="", error_type=None)
+
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(side_effect=[result(), result(return_code=1), result(), result("2.1.108 (Claude Code)")]),
+        upload=AsyncMock(),
+    )
+    monkeypatch.setattr(native, "ensure_python", AsyncMock(return_value="/portable/python3"))
+    monkeypatch.setattr(native.AsyncSandbox, "connect", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(native, "create_provider", lambda config: object())
+    instance = agent()
+    instance.config = runtime_config(
+        runtime_archive="/local/fallback.tar.gz",
+        runtime_archive_url="https://runtime.example/claude.tar.gz",
+        runtime_archive_sha256="1" * 64,
+        install_runtime=False,
+    )
+    instance.server_client = SimpleNamespace(global_config_dict={"sandbox": {"opensandbox": {}}})
+    state = await instance._seed_agent_session_state(seed())
+    assert state.version == "2.1.108 (Claude Code)"
+    assert state.executable.endswith("/runtime/claude")
+    assert not sandbox.upload.called
+    assert "/portable/python3" in sandbox.exec.await_args_list[2].args[0]
+    assert "https://runtime.example/claude.tar.gz" in sandbox.exec.await_args_list[2].args[0]
+    assert "--version" in sandbox.exec.await_args_list[3].args[0]
+
+    sandbox.exec.side_effect = [result(), result(return_code=1), result(), result("2.1.107 (Claude Code)")]
+    monkeypatch.setattr(native.SandboxSession, "close", AsyncMock())
+    with pytest.raises(RuntimeError, match="version mismatch"):
+        await instance._seed_agent_session_state(seed())
