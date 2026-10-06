@@ -73,7 +73,9 @@ def test_migrates_a_config_outside_the_repository(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("resources", [None, {"type": "resources_servers", "name": "my_resources"}])
-@pytest.mark.parametrize("agent_type", ["hermes_agent", "openclaw_agent", "opencode_agent", "osworld_agent"])
+@pytest.mark.parametrize(
+    "agent_type", ["hermes_agent", "pi_agent", "codex_agent", "openclaw_agent", "opencode_agent", "osworld_agent"]
+)
 def test_migration_respects_native_session_templates(
     tmp_path: Path, resources: dict[str, str] | None, agent_type: str
 ) -> None:
@@ -95,7 +97,7 @@ def test_migration_respects_native_session_templates(
         assert _environment_servers(yaml.safe_load(config.read_text())) == {"my_agent": ["my_environment_server"]}
 
 
-@pytest.mark.parametrize("agent_type", ["hermes_agent", "openclaw_agent", "opencode_agent"])
+@pytest.mark.parametrize("agent_type", ["hermes_agent", "pi_agent", "codex_agent", "openclaw_agent", "opencode_agent"])
 def test_native_capable_overlay_keeps_inherited_resources(tmp_path: Path, agent_type: str) -> None:
     base = tmp_path / "base.yaml"
     base.write_text(AGENT_CONFIG.replace("simple_agent", agent_type))
