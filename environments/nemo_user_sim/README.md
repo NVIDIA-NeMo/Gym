@@ -1,33 +1,21 @@
 # NeMo User Sim environment
 
 This environment runs population-grounded, multi-turn user simulation with
-NeMo User Sim. It includes a committed five-task validation split for immediate
-smoke evaluation and a prepared benchmark with one task for each first-party
-User Sim probe.
+NeMo User Sim. Its generated validation set includes one task for each
+first-party User Sim probe.
 
-## Validation split
-
-The committed `environments/usersim/data/validation.jsonl` contains five
-synthetic tasks and requires no NGC access or preparation:
-
-```bash
-gym eval run \
-  --environment usersim \
-  --split validation \
-  --output results/usersim.jsonl
-```
-
-## Prepare the complete benchmark
+## Generate validation tasks
 
 Preparation runs the pinned User Sim package in an isolated dependency
 environment and asks its canonical sampler to materialize one fully resolved
 input for every registered probe:
 
 ```bash
-gym eval prepare --config environments/usersim/config.yaml
+python environments/usersim/prepare.py
 ```
 
-Each generated row in `environments/usersim/data/usersim.jsonl` contains a
+The resulting `environments/usersim/data/usersim.jsonl` contains 14 rows. Each
+generated row contains a
 stable string `task_id` and the complete User Sim row under `resolved_row`.
 Gym adds the remaining task metadata when it materializes the dataset for a
 run. User Sim owns persona, probe, theme, toolset, locale, configuration,

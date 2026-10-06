@@ -109,11 +109,10 @@ digest of the materialized row. At verification, a changed row or mismatched tas
 is rejected.
 
 The digest proves that the row remained unchanged during the episode; it does not independently prove that the
-row equals an earlier source artifact. Validation rows are committed at
-`environments/usersim/data/validation.jsonl`. Regenerate only the prepared benchmark rows with:
+row equals an earlier preparation artifact. Regenerate the validation rows with:
 
 ```bash
-gym eval prepare --config environments/usersim/config.yaml
+python environments/usersim/prepare.py
 ```
 
 ## Session cleanup failures
