@@ -16,6 +16,7 @@ import json
 import warnings
 from abc import abstractmethod
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from itertools import chain, count
 from math import sqrt
 from pathlib import Path
@@ -39,6 +40,13 @@ from nemo_gym.config_types import (
     DownloadJsonlDatasetHuggingFaceConfig,
     ServerInstanceConfig,
 )
+from nemo_gym.dataset_metrics import (
+    DatasetMetricHook,
+    DatasetMetricsHookError,
+    DatasetMetricValue,
+    load_dataset_metrics_hook,
+)
+from nemo_gym.episode_types import TaskId, is_materialized_task_row
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
     AGENT_POOL_INDEX_KEY_NAME,
@@ -221,13 +229,63 @@ class StringMetrics(BaseModel):
     total_count: int
 
 
+MAX_CATEGORICAL_LABELS = 100
+
+
+class CategoricalMetrics(Accumulator):
+    """Accumulate a bounded categorical distribution."""
+
+    counts: Dict[str, int] = Field(default_factory=dict)
+    other_count: int = Field(default=0, exclude=True)
+    unique_count: int = 0
+    total_count: int = 0
+
+    def observe(self, value: str) -> None:
+        if value in self.counts:
+            self.counts[value] += 1
+        elif len(self.counts) < MAX_CATEGORICAL_LABELS:
+            self.counts[value] = 1
+        else:
+            self.other_count += 1
+        self.unique_count = len(self.counts) + bool(self.other_count)
+        self.total_count += 1
+
+    def _add(self: Self, other: Self) -> None:
+        for value, occurrences in other.counts.items():
+            if value in self.counts:
+                self.counts[value] += occurrences
+            elif len(self.counts) < MAX_CATEGORICAL_LABELS:
+                self.counts[value] = occurrences
+            else:
+                self.other_count += occurrences
+        self.other_count += other.other_count
+        self.unique_count = len(self.counts) + bool(self.other_count)
+        self.total_count += other.total_count
+
+    def _aggregate(self: Self) -> Self:
+        counts = dict(sorted(self.counts.items()))
+        if self.other_count:
+            label = "Other" if "Other" not in counts else "Other (overflow)"
+            counts[label] = self.other_count
+        return CategoricalMetrics(
+            counts=counts,
+            unique_count=len(counts),
+            total_count=self.total_count,
+        )
+
+
 class DatasetMetrics(Accumulator):
     model_config = ConfigDict(extra="allow")  # Allow any arbitrary fields
 
     number_of_examples: int = Field(serialization_alias="Number of examples", default=0)
+    number_of_tasks: int = Field(serialization_alias="Number of tasks", default=0)
     number_of_tools: AvgMinMax = Field(serialization_alias="Number of tools", default_factory=AvgMinMax)
     json_dumped_number_of_words: AvgMinMax = Field(
         serialization_alias="Json-dumped number of words (proxy for token count)",
+        default_factory=AvgMinMax,
+    )
+    task_input_json_dumped_number_of_words: AvgMinMax = Field(
+        serialization_alias="Json-dumped task-input words (proxy for token count)",
         default_factory=AvgMinMax,
     )
     number_of_turns: AvgMinMax = Field(serialization_alias="Number of turns", default_factory=AvgMinMax)
@@ -237,15 +295,25 @@ class DatasetMetrics(Accumulator):
 
     def _add(self: Self, other: Self) -> None:
         self.number_of_examples += other.number_of_examples
+        self.number_of_tasks += other.number_of_tasks
         self.number_of_tools.add(other.number_of_tools)
         self.json_dumped_number_of_words.add(other.json_dumped_number_of_words)
+        self.task_input_json_dumped_number_of_words.add(other.task_input_json_dumped_number_of_words)
         self.number_of_turns.add(other.number_of_turns)
         self.temperature.add(other.temperature)
 
-        # Merge extra fields safely
         if other.model_extra:
             for k, v in other.model_extra.items():
                 if k in DatasetMetrics.model_fields.keys():
+                    continue
+                current = (self.model_extra or {}).get(k)
+                if isinstance(v, Accumulator) and not v.is_aggregated:
+                    if current is None:
+                        setattr(self, k, v.model_copy(deep=True))
+                    elif isinstance(current, type(v)) and not current.is_aggregated:
+                        current.add(v)
+                    else:
+                        raise TypeError(f"Cannot merge incompatible dataset metric {k!r}")
                     continue
                 setattr(self, k, v)
 
@@ -255,15 +323,22 @@ class DatasetMetrics(Accumulator):
             for k, v in self.model_extra.items():
                 if k in DatasetMetrics.model_fields.keys():
                     continue
-                extras[k] = v
+                extras[k] = v.aggregate() if isinstance(v, Accumulator) and not v.is_aggregated else v
         return DatasetMetrics(
             number_of_examples=self.number_of_examples,
+            number_of_tasks=self.number_of_tasks,
             number_of_tools=self.number_of_tools.aggregate(),
             json_dumped_number_of_words=self.json_dumped_number_of_words.aggregate(),
+            task_input_json_dumped_number_of_words=self.task_input_json_dumped_number_of_words.aggregate(),
             number_of_turns=self.number_of_turns.aggregate(),
             temperature=self.temperature.aggregate(),
             **extras,
         )
+
+    def model_dump_for_output(self) -> Dict[str, Any]:
+        """Serialize existing metrics, adding task metrics only for materialized rows."""
+        exclude = {"number_of_tasks", "task_input_json_dumped_number_of_words"} if self.number_of_tasks == 0 else set()
+        return self.model_dump(mode="json", by_alias=True, exclude=exclude)
 
 
 def aggregate_other_metrics(metrics: Dict[str, Any], sample: Dict[str, Any]) -> None:
@@ -296,11 +371,39 @@ def postprocess_other_metrics(metrics: DatasetMetrics, other_metrics: Dict[str, 
             setattr(metrics, k, StringMetrics(unique_count=len(v), total_count=sum(v.values())))
 
 
+def _materialized_task_parts(sample: Mapping[str, Any]) -> tuple[TaskId, Mapping[str, Any]] | None:
+    if not is_materialized_task_row(sample):
+        return None
+    task_id = sample.get("task_id")
+    task_input = sample.get("task_input")
+    assert isinstance(task_id, Mapping)
+    if not isinstance(task_input, Mapping):
+        raise ValueError(f"task_input must be an object, got {type(task_input).__name__}")
+    return TaskId.model_validate(task_id), task_input
+
+
 def compute_sample_metrics(sample_dict_str: str, *, require_responses: bool = True) -> Tuple[DatasetMetrics, bool]:
     try:
         sample_dict = json.loads(sample_dict_str)
     except json.JSONDecodeError:
         return DatasetMetrics(), True
+
+    try:
+        materialized_task = _materialized_task_parts(sample_dict) if isinstance(sample_dict, Mapping) else None
+    except (ValidationError, ValueError):
+        return DatasetMetrics(), True
+    if materialized_task is not None:
+        _, task_input = materialized_task
+        task_input_words = AvgMinMax()
+        task_input_words.observe(len(json.dumps(task_input).split()))
+        return (
+            DatasetMetrics(
+                number_of_examples=1,
+                number_of_tasks=1,
+                task_input_json_dumped_number_of_words=task_input_words,
+            ),
+            False,
+        )
 
     try:
         sample = BaseRunRequest.model_validate(sample_dict)
@@ -345,6 +448,40 @@ def compute_sample_metrics(sample_dict_str: str, *, require_responses: bool = Tr
         temperature=temperature_metrics,
     )
     return metrics, False
+
+
+def _observe_task_metric(metrics: DatasetMetrics, name: str, value: DatasetMetricValue) -> None:
+    if not name:
+        raise ValueError("Dataset metric names must not be empty")
+    reserved_names = set(DatasetMetrics.model_fields)
+    reserved_names.update(
+        field.serialization_alias for field in DatasetMetrics.model_fields.values() if field.serialization_alias
+    )
+    if name in reserved_names:
+        raise ValueError(f"Dataset metric hook cannot replace framework metric {name!r}")
+
+    values = value if isinstance(value, list) else [value]
+    for item in values:
+        if item is None:
+            continue
+        current = (metrics.model_extra or {}).get(name)
+        if isinstance(item, str):
+            if current is None:
+                current = CategoricalMetrics()
+                setattr(metrics, name, current)
+            if not isinstance(current, CategoricalMetrics):
+                raise TypeError(f"Dataset metric {name!r} mixes categorical and numeric values")
+            current.observe(item)
+            continue
+        if isinstance(item, (bool, int, float)):
+            if current is None:
+                current = AvgMinMax()
+                setattr(metrics, name, current)
+            if not isinstance(current, AvgMinMax):
+                raise TypeError(f"Dataset metric {name!r} mixes numeric and categorical values")
+            current.observe(int(item) if isinstance(item, bool) else item)
+            continue
+        raise TypeError(f"Dataset metric {name!r} returned unsupported value {item!r}")
 
 
 class DatasetValidatorState(BaseModel):
@@ -578,7 +715,13 @@ class TrainDataProcessor(BaseModel):
     ########################################
 
     def _validate_samples_and_aggregate_metrics_single_sample(
-        self, state: DatasetValidatorState, sample_idx: int, sample_dict_str: str, *, require_responses: bool = True
+        self,
+        state: DatasetValidatorState,
+        sample_idx: int,
+        sample_dict_str: str,
+        *,
+        require_responses: bool = True,
+        dataset_metrics_hook: DatasetMetricHook | None = None,
     ) -> None:
         metrics, is_offending = compute_sample_metrics(sample_dict_str, require_responses=require_responses)
         if is_offending:
@@ -589,7 +732,22 @@ class TrainDataProcessor(BaseModel):
         state.key_counts.update(sample_dict.keys())
         state.metrics.add(metrics)
 
-        aggregate_other_metrics(state.other_metrics, sample_dict)
+        materialized_task = _materialized_task_parts(sample_dict)
+        if materialized_task is None:
+            aggregate_other_metrics(state.other_metrics, sample_dict)
+            return
+
+        task_id, task_input = materialized_task
+        _observe_task_metric(state.metrics, "Tasksets", task_id.taskset)
+        if dataset_metrics_hook is None:
+            return
+        task_metrics = dataset_metrics_hook(task_input)
+        if not isinstance(task_metrics, Mapping):
+            raise TypeError("compute_task_metrics(task_input) must return a mapping")
+        for name, value in task_metrics.items():
+            if not isinstance(name, str):
+                raise TypeError("compute_task_metrics(task_input) metric names must be strings")
+            _observe_task_metric(state.metrics, name, value)
 
     def _iter_dataset_lines(self, dataset_config: DatasetConfig):
         repeats = dataset_config.num_repeats
@@ -607,13 +765,21 @@ class TrainDataProcessor(BaseModel):
                     yield line
 
     def _validate_samples_and_aggregate_metrics_single_dataset(
-        self, dataset_config: DatasetConfig
+        self,
+        dataset_config: DatasetConfig,
+        dataset_metrics_hook: DatasetMetricHook | None = None,
     ) -> DatasetValidatorState:
         state = DatasetValidatorState()
 
         map_fn = self._validate_samples_and_aggregate_metrics_single_sample
         for sample_idx, sample_dict_str in enumerate(self._iter_dataset_lines(dataset_config)):
-            map_fn(state, sample_idx, sample_dict_str, require_responses=dataset_config.taskset is None)
+            map_fn(
+                state,
+                sample_idx,
+                sample_dict_str,
+                require_responses=dataset_config.taskset is None,
+                dataset_metrics_hook=dataset_metrics_hook,
+            )
 
         postprocess_other_metrics(state.metrics, state.other_metrics)
 
@@ -716,13 +882,14 @@ class TrainDataProcessor(BaseModel):
         dataset_type_to_aggregate_metrics: Dict[str, DatasetMetrics] = defaultdict(DatasetMetrics)
         for c in server_instance_configs:
             for d in c.datasets:
-                state = self._validate_samples_and_aggregate_metrics_single_dataset(d)
+                dataset_metrics_hook = self._dataset_metrics_hook_for(c, server_instance_configs)
+                state = self._validate_samples_and_aggregate_metrics_single_dataset(d, dataset_metrics_hook)
 
                 dataset_type_to_aggregate_metrics[d.type].add(state.metrics)
 
                 aggregate_metrics = state.metrics.aggregate()
 
-                aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
+                aggregate_metrics_dict = aggregate_metrics.model_dump_for_output()
                 # Agent and taskset select routing, not source data. Exclude both so taskset
                 # and flat declarations of the same file can share its metrics sidecar.
                 aggregate_metrics_dict = (
@@ -837,6 +1004,29 @@ This could be due to a change in how metrics are calculated, leading to outdated
         if adapter is None:
             return None
         return TaskDataValidator(server_name=impl_key, adapter=adapter, dataset_fpath=str(d.jsonl_fpath))
+
+    @classmethod
+    def _dataset_metrics_hook_for(
+        cls,
+        c: ServerInstanceConfig,
+        server_instance_configs: List[ServerInstanceConfig],
+    ) -> DatasetMetricHook | None:
+        impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
+        base_folder = "resources_servers"
+        if impl_key is None:
+            if c.SERVER_TYPE != "responses_api_agents":
+                return None
+            if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
+                return None
+            impl_key = next(iter(c.responses_api_agents))
+            base_folder = "responses_api_agents"
+        server_dir = find_server_dir(impl_key, base_folder=base_folder)
+        if server_dir is None:
+            return None
+        try:
+            return load_dataset_metrics_hook(server_dir)
+        except DatasetMetricsHookError as error:
+            raise ValueError(f"Invalid dataset metrics hook for {impl_key}: {error}") from error
 
     def _collate_samples_single_type(
         self,
@@ -964,7 +1154,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
             aggregate_metrics = dataset_type_to_aggregate_metrics[type]
             aggregate_metrics = aggregate_metrics.aggregate()
 
-            aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
+            aggregate_metrics_dict = aggregate_metrics.model_dump_for_output()
             d = next(
                 (dataset for c in server_instance_configs for dataset in c.datasets if dataset.type == type),
                 None,

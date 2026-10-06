@@ -49,6 +49,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from pydantic import BaseModel, TypeAdapter
 
+from nemo_gym.episode_types import is_materialized_task_row
+
 
 TASK_DATA_MODULE_NAME = "task_data"
 TASK_DATA_EXPORT_NAME = "TaskData"
@@ -231,13 +233,21 @@ class TaskDataValidator:
         # New materialized tasks keep the flat source fields; historical single-agent
         # tasks use task_input.task_data. Normalize both through the existing schema path.
         task_input = row.get("task_input")
-        materialized = isinstance(row.get("task_id"), Mapping) and isinstance(task_input, Mapping)
+        materialized = is_materialized_task_row(row)
         if materialized:
-            if "task_data" in task_input and not isinstance(task_input["task_data"], Mapping):
+            if not isinstance(task_input, Mapping):
                 self.report.error_rows += 1
                 if len(self.report.errors) < TaskDataValidationReport.MAX_RECORDED_ERRORS:
                     self.report.errors.append(
-                        f"{row_index}: task_input.task_data must be an object, got {type(task_input['task_data']).__name__}"
+                        f"{row_index}: task_input must be an object, got {type(task_input).__name__}"
+                    )
+                return
+            task_data = task_input.get("task_data")
+            if "task_data" in task_input and not isinstance(task_data, Mapping):
+                self.report.error_rows += 1
+                if len(self.report.errors) < TaskDataValidationReport.MAX_RECORDED_ERRORS:
+                    self.report.errors.append(
+                        f"{row_index}: task_input.task_data must be an object, got {type(task_data).__name__}"
                     )
                 return
             materialized = "task_data" in task_input
