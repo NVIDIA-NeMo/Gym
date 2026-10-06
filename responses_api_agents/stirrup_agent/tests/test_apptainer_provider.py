@@ -111,3 +111,33 @@ async def test_normal_exit_closes_stderr_handle_and_tempdir() -> None:
     assert provider._stderr_fh is None
     assert not temp_dir.exists()
     assert provider._temp_dir is None
+
+
+async def test_configured_home_is_used_for_apptainer_and_serialization() -> None:
+    """Benchmark strategies can select a home path without changing GDPval's default."""
+    provider = ApptainerCodeExecToolProvider(
+        sif_path="/fake image.sif",
+        home_dir="/home/user",
+        isolated_home=True,
+        disable_network=True,
+        capture_git_diff=False,
+    )
+    fake_proc = _make_fake_process()
+    create_mock = AsyncMock(return_value=fake_proc)
+
+    with (
+        patch("asyncio.create_subprocess_shell", new=create_mock),
+        patch.object(ApptainerCodeExecToolProvider, "_exec", new=AsyncMock(return_value=(0, b"", b""))),
+        patch.object(ApptainerCodeExecToolProvider, "get_code_exec_tool", new=MagicMock(return_value=MagicMock())),
+    ):
+        await provider.__aenter__()
+        await provider.__aexit__(None, None, None)
+
+    command = create_mock.call_args.args[0]
+    assert "--home " in command and ":/home/user" in command
+    assert "--net --network none" in command
+    assert "'/fake image.sif'" in command
+    assert "env HOME=/home/user bash" in command
+    assert provider._serializable_kwargs()["home_dir"] == "/home/user"
+    assert provider._serializable_kwargs()["isolated_home"] is True
+    assert provider._serializable_kwargs()["disable_network"] is True
