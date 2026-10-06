@@ -36,6 +36,10 @@ The harness settings remain independent of benchmark prompts and stopping policy
 - On images without Python 3.8+, configure `python_runtime_url` and `python_runtime_sha256`
   with a pinned standalone Python install-only archive. The adapter independently prepares
   its supervisor prerequisite outside the task repository; no Resources installation is assumed.
+- For restricted network environments, set `prefetched_ripgrep_url`, `prefetched_ripgrep_sha256`
+  (the release tar.gz digest), and `ripgrep_version` to the utility release required by the
+  pinned OpenCode runtime. Setup preserves a system `rg` when present; otherwise it verifies
+  and places the executable in OpenCode's persistent private cache before any activation.
 
 `timeout` limits each supervised activation. Optional `session_execution_timeout_seconds`
 also caps wall time from the first activation, including waits between user turns;
@@ -45,6 +49,9 @@ tools are confirmed stopped. Per-activation native event ordering, raw logs,
 visible text, reasoning, tool evidence, and native step counts are preserved.
 The raw-log fallback excludes dedicated reasoning events, which remain in typed evidence.
 Provider-call counts remain a separate captured-model measurement.
+Only native `length` termination is a model budget limit. A process that exits after an
+unfinished tool turn or content-filter result fails the activation, preserving its evidence
+for diagnosis and cleanup; a zero process exit code alone does not make it a healthy turn.
 
 Native sessions use ordinary sandbox `exec`, not a PTY. The supervisor enforces the
 runner deadline and confirms descendant cleanup before verification; uncertain

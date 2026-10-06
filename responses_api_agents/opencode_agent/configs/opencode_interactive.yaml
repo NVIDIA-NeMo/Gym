@@ -37,3 +37,7 @@ opencode_agent:
       # Optional keyless gzip artifact URL; SHA-256 covers decompressed executable bytes.
       prefetched_opencode_binary_url: null
       prefetched_opencode_binary_sha256: null
+      # Optional ripgrep release tar.gz; SHA-256 covers the archive bytes.
+      prefetched_ripgrep_url: null
+      prefetched_ripgrep_sha256: null
+      ripgrep_version: null

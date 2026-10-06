@@ -54,6 +54,7 @@ class OpenCodeSandboxSession(AgentSessionState):
     model_ref: ModelServerRef | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
+    ripgrep_info: dict[str, str] | None = None
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     session_directory: str | None = None

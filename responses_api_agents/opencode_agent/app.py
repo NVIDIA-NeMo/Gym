@@ -172,6 +172,9 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     python_runtime_sha256: str | None = None
     prefetched_opencode_binary_url: str | None = None
     prefetched_opencode_binary_sha256: str | None = None
+    prefetched_ripgrep_url: str | None = None
+    prefetched_ripgrep_sha256: str | None = None
+    ripgrep_version: str | None = None
     local_opencode_binary_path: str | None = None
     local_opencode_binary_sha256: str | None = None
     remote_opencode_install_script_path: str | None = None
@@ -865,6 +868,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 raise HTTPException(422, "Prefetched OpenCode binary SHA-256 mismatch")
         elif self.config.local_opencode_binary_sha256:
             raise HTTPException(422, "OpenCode binary digest requires local_opencode_binary_path")
+        if any(
+            (self.config.prefetched_ripgrep_url, self.config.prefetched_ripgrep_sha256, self.config.ripgrep_version)
+        ):
+            url = urlparse(self.config.prefetched_ripgrep_url or "")
+            if url.scheme not in {"https", "http"} or not url.hostname or url.username or url.password:
+                raise HTTPException(422, "Prefetched ripgrep requires an HTTP(S) URL without embedded credentials")
+            if not re.fullmatch(r"[a-fA-F0-9]{64}", self.config.prefetched_ripgrep_sha256 or ""):
+                raise HTTPException(422, "Prefetched ripgrep requires the archive SHA-256")
+            if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", self.config.ripgrep_version or ""):
+                raise HTTPException(422, "Prefetched ripgrep requires an exact release version")
         if self.config.remote_opencode_install_script_path and not self.config.remote_opencode_binary_path:
             raise HTTPException(422, "A staged OpenCode installer requires remote_opencode_binary_path")
         if self.config.remote_opencode_musl_binary_path and not self.config.remote_opencode_install_script_path:
@@ -999,6 +1012,28 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     timeout_s=30,
                 )
                 self._check_native_setup("verify installed OpenCode binary", checked)
+            if self.config.prefetched_ripgrep_url:
+                script = "install_ripgrep.py"
+                await sandbox.upload(Path(__file__).with_name(script), f"{directory}/{script}")
+                installed = await sandbox.exec(
+                    " ".join(
+                        quote(arg)
+                        for arg in (
+                            state.python,
+                            "-I",
+                            f"{directory}/{script}",
+                            self.config.prefetched_ripgrep_url,
+                            self.config.prefetched_ripgrep_sha256.lower(),
+                            self.config.ripgrep_version,
+                            f"{state.persistent_directory}/cache/opencode/bin/rg",
+                        )
+                    ),
+                    env=self.config.native_env,
+                    cwd="/",
+                    timeout_s=self.config.setup_timeout,
+                )
+                self._check_native_setup("prepare native ripgrep", installed)
+                state.ripgrep_info = json.loads(installed.stdout)
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
         except BaseException as error:
             try:
@@ -1308,10 +1343,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if assistants and not incomplete:
             last = assistants[-1]
             finish = last.get("finish")
-            if finish in {"length", "content-filter", "tool-calls"}:
+            if finish == "length":
                 incomplete = True
             elif finish != "stop" or not last.get("time", {}).get("completed"):
                 error = error or f"OpenCode ended without a successful terminal assistant result (finish={finish!r})"
+                last_message = next(message for message in reversed(export["messages"]) if message["info"] is last)
+                for part in last_message.get("parts", []):
+                    if part.get("type") == "tool" and part.get("state", {}).get("error"):
+                        error += f"; {part.get('tool', 'tool')}: {part['state']['error']}"
         status = "failed" if error else "incomplete" if incomplete else "completed"
         # Artifact message completion records a model turn, not the entire invocation.
         for record in state.observations.records:
@@ -1392,6 +1431,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 **({"opencode_session_id": state.native_session_id} if state.native_session_id else {}),
                 **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
                 **({"harness_python": runtime.python} if runtime and runtime.python else {}),
+                **(
+                    {f"ripgrep_{key}": value for key, value in state.ripgrep_info.items()}
+                    if state.ripgrep_info
+                    else {}
+                ),
             },
         )
 

@@ -172,6 +172,124 @@ def test_interactive_http_resumes_same_store_replays_and_closes_cumulative(setup
         assert client.post("/v1/agent_sessions/activate", json={**body, "activation_id": 2}).status_code == 409
 
 
+@pytest.mark.parametrize("finish", ["tool-calls", "content-filter", "length"])
+def test_native_terminal_reason_distinguishes_failure_from_model_budget(setup, tmp_path, finish):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    launch = sandbox.launch.side_effect
+    denial = "The user rejected permission to use this specific tool call."
+
+    async def interrupted(**kwargs):
+        result = await launch(**kwargs)
+        path = f"{sandbox.directory}/export.json"
+        export = json.loads(sandbox.files[path])
+        message = export["messages"][-1]
+        message["info"]["finish"] = finish
+        if finish == "tool-calls":
+            message["parts"].append(
+                {
+                    "type": "tool",
+                    "tool": "read",
+                    "state": {"status": "error", "input": {"filePath": "/"}, "error": denial},
+                }
+            )
+        sandbox.files[path] = json.dumps(export)
+        with sqlite3.connect(tmp_path / "session.db") as con:
+            con.execute("update message set data=? where id='a0'", (json.dumps(message["info"]),))
+            if finish == "tool-calls":
+                con.execute(
+                    "insert into part values('denied', 'a0', 'native-session', ?, 20)",
+                    (json.dumps(message["parts"][-1]),),
+                )
+        sandbox.files[f"{sandbox.directory}/stdout.jsonl"] = json.dumps(
+            {"type": "step_finish", "part": {"reason": finish}}
+        )
+        return result
+
+    sandbox.launch.side_effect = interrupted
+    request = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=request.model_dump(mode="json")).status_code == 200
+        body = {
+            "agent_session_id": request.agent_session_id,
+            "episode_id": request.episode_id.model_dump(),
+            "activation_id": 0,
+            "responses_create_params": {"input": "Inspect the task"},
+        }
+        response = client.post("/v1/agent_sessions/activate", json=body)
+        if finish == "length":
+            assert response.status_code == 200, response.text
+            assert response.json()["response"]["status"] == "incomplete"
+            assert response.json()["stop_reason"] == "model_budget_exhausted"
+        else:
+            assert response.status_code == 502, response.text
+            assert "terminal assistant result" in response.json()["detail"]
+            if finish == "tool-calls":
+                assert denial in response.json()["detail"]
+            assert client.post("/v1/agent_sessions/activate", json=body).status_code == 502
+            assert sandbox.launch.await_count == 1
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": request.agent_session_id, "episode_id": request.episode_id.model_dump()},
+        )
+        assert close.status_code == 200, close.text
+        assert close.json()["cleanup_confirmed"] is True
+        records = close.json()["agent_observations"]["records"]
+        root = next(record for record in records if record["kind"] == "agent_invocation")
+        assert root["status"] == ("incomplete" if finish == "length" else "failed")
+        if finish == "tool-calls":
+            assert denial in json.dumps(records)
+
+
+async def test_ripgrep_setup_uses_private_native_cache_and_records_provenance(setup):
+    agent, sandbox = setup
+    agent.config.prefetched_ripgrep_url = "https://runtime.example/rg.tar.gz"
+    agent.config.prefetched_ripgrep_sha256 = "a" * 64
+    agent.config.ripgrep_version = "15.1.0"
+    execute = sandbox.exec.side_effect
+
+    async def install(command, **kwargs):
+        result = await execute(command, **kwargs)
+        if "install_ripgrep.py" in command:
+            import shlex
+
+            path = shlex.split(command)[-1]
+            return SimpleNamespace(
+                return_code=0,
+                error_type=None,
+                stderr="",
+                stdout=json.dumps({"path": path, "version": "ripgrep 15.1.0", "source": "prefetched"}),
+            )
+        return result
+
+    sandbox.exec.side_effect = install
+    state = await agent._seed_agent_session_state(seed())
+    assert state.ripgrep_info["path"] == f"{state.persistent_directory}/cache/opencode/bin/rg"
+    assert state.ripgrep_info["path"].startswith("/tmp/nemo-gym-opencode-sessions/")
+    await state.close(1)
+
+
+@pytest.mark.parametrize(
+    "url,digest,version",
+    [
+        ("file:///rg", "a" * 64, "15.1.0"),
+        ("https://example/rg", None, "15.1.0"),
+        ("https://example/rg", "a" * 64, None),
+    ],
+)
+async def test_invalid_ripgrep_pin_fails_before_connect(setup, url, digest, version):
+    from fastapi import HTTPException
+
+    agent, sandbox = setup
+    agent.config.prefetched_ripgrep_url = url
+    agent.config.prefetched_ripgrep_sha256 = digest
+    agent.config.ripgrep_version = version
+    with pytest.raises(HTTPException) as error:
+        await agent._seed_agent_session_state(seed())
+    assert error.value.status_code == 422
+    sandbox.exec.assert_not_awaited()
+
+
 async def test_resume_requires_confirmed_prior_cleanup(setup):
     agent, sandbox = setup
     state = await agent._seed_agent_session_state(seed())

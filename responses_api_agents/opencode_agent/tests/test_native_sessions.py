@@ -756,8 +756,8 @@ def test_partial_output_survives_model_failure_and_timeout(setup, kind, tmp_path
     [
         ("stop", "completed"),
         ("length", "incomplete"),
-        ("content-filter", "incomplete"),
-        ("tool-calls", "incomplete"),
+        ("content-filter", "failed"),
+        ("tool-calls", "failed"),
         ("error", "failed"),
         ("unknown", "failed"),
         (None, "failed"),
