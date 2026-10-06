@@ -28,11 +28,11 @@ pyproject.toml @nvidia-nemo/automation
 uv.lock @nvidia-nemo/automation
 
 # BioNeMo
-/benchmarks/larp* @nvidia-nemo/gym_bionemo
-/environments/larp/ @nvidia-nemo/gym_bionemo
-/responses_api_agents/larp_agent/ @nvidia-nemo/gym_bionemo
-/resources_servers/larp/ @nvidia-nemo/gym_bionemo
-/resources_servers/litmus_agent/ @nvidia-nemo/gym_bionemo
+/benchmarks/larp* @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
+/environments/larp/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
+/responses_api_agents/larp_agent/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
+/resources_servers/larp/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
+/resources_servers/litmus_agent/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
 
 # ── Suggested (advisory only, see header) ───────────────────────────────────
 # Path → team map below mirrors the ownership proposal from PR #2439 (not
