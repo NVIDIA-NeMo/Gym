@@ -69,9 +69,9 @@ LOG = logging.getLogger("nemo_gym.vllm_model")
 def _log_unhandled_engine_error(request: Request, status: int, body: str, route: str) -> None:
     """Log an engine answer the server does not handle, once, before it is re-raised.
 
-    The caller receives only the HTTP status. The engine's body names the rejected field or
-    the engine's reason, and the rollout id (set by the capture route's prefix) names the
-    caller, so both are kept here together with the request path.
+    The shared model error handler preserves the upstream status and body. The log
+    additionally ties that error to the request path and rollout id (set by the
+    capture route's prefix).
     """
     LOG.warning(
         "engine answered %s to a %s for %s (rollout %s): %s",
