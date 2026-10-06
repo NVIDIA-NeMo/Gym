@@ -16,43 +16,8 @@
 
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-
-if TYPE_CHECKING:
-    from nemo_gym.sandbox.api import AsyncSandbox
-
-
-async def upload_bytes(sandbox: "AsyncSandbox", *, path: str, data: bytes) -> None:
-    """Upload bytes unchanged through file transfer without shell interpolation."""
-    with tempfile.TemporaryDirectory(prefix="sandbox-upload-") as directory:
-        source = Path(directory) / "payload"
-        source.write_bytes(data)
-        await sandbox.upload(source, path)
-
-
-async def read_bytes(sandbox: "AsyncSandbox", *, path: str) -> bytes:
-    """Download file contents unchanged, without text decoding."""
-    with tempfile.TemporaryDirectory(prefix="sandbox-download-") as directory:
-        destination = Path(directory) / "payload"
-        await sandbox.download(path, destination)
-        return destination.read_bytes()
-
-
-async def upload_text(sandbox: "AsyncSandbox", *, path: str, text: str) -> None:
-    """Upload UTF-8 text through file transfer without shell interpolation."""
-    with tempfile.TemporaryDirectory(prefix="sandbox-upload-") as directory:
-        source = Path(directory) / "payload"
-        source.write_text(text, encoding="utf-8")
-        await sandbox.upload(source, path)
-
-
-async def read_text(sandbox: "AsyncSandbox", *, path: str) -> str:
-    """Download UTF-8 text, replacing invalid bytes in partial process output."""
-    with tempfile.TemporaryDirectory(prefix="sandbox-download-") as directory:
-        destination = Path(directory) / "payload"
-        await sandbox.download(path, destination)
-        return destination.read_text(encoding="utf-8", errors="replace")
+from nemo_gym.sandbox.api import AsyncSandbox
 
 
 # Parallelism caps for CPU-limited sandboxes, each set by cpu_cap_env() to the
@@ -86,6 +51,38 @@ CPU_CAP_ENV_VARS: tuple[str, ...] = (
     "UV_THREADPOOL_SIZE",
     "CMAKE_BUILD_PARALLEL_LEVEL",
 )
+
+
+async def upload_bytes(sandbox: AsyncSandbox, *, path: str, data: bytes) -> None:
+    """Upload bytes unchanged through file transfer without shell interpolation."""
+    with tempfile.TemporaryDirectory(prefix="sandbox-upload-") as directory:
+        source = Path(directory) / "payload"
+        source.write_bytes(data)
+        await sandbox.upload(source, path)
+
+
+async def read_bytes(sandbox: AsyncSandbox, *, path: str) -> bytes:
+    """Download file contents unchanged, without text decoding."""
+    with tempfile.TemporaryDirectory(prefix="sandbox-download-") as directory:
+        destination = Path(directory) / "payload"
+        await sandbox.download(path, destination)
+        return destination.read_bytes()
+
+
+async def upload_text(sandbox: AsyncSandbox, *, path: str, text: str) -> None:
+    """Upload UTF-8 text through file transfer without shell interpolation."""
+    with tempfile.TemporaryDirectory(prefix="sandbox-upload-") as directory:
+        source = Path(directory) / "payload"
+        source.write_text(text, encoding="utf-8")
+        await sandbox.upload(source, path)
+
+
+async def read_text(sandbox: AsyncSandbox, *, path: str) -> str:
+    """Download UTF-8 text, replacing invalid bytes in partial process output."""
+    with tempfile.TemporaryDirectory(prefix="sandbox-download-") as directory:
+        destination = Path(directory) / "payload"
+        await sandbox.download(path, destination)
+        return destination.read_text(encoding="utf-8", errors="replace")
 
 
 def cpu_cap_env(cpu: float | int | None) -> dict[str, str]:
