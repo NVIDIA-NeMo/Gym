@@ -735,6 +735,61 @@ class TestSigtermHandler:
         assert hermes.interrupted_agents == set()
 
 
+class TestResultUsage:
+    @pytest.mark.parametrize("partial", [False, True])
+    def test_reports_cache_inclusive_native_totals(self, partial) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        response = hermes._response_from_result(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            result={
+                "messages": [{"role": "assistant", "content": "done"}],
+                "partial": partial,
+                "input_tokens": 100,
+                "cache_read_tokens": 200,
+                "cache_write_tokens": 300,
+                "prompt_tokens": 600,
+                "completion_tokens": 80,
+                "reasoning_tokens": 30,
+            },
+            model_name="model",
+        )
+        assert response.usage.input_tokens == 600
+        assert response.usage.input_tokens_details.cached_tokens == 200
+        assert response.usage.output_tokens == 80
+        assert response.usage.output_tokens_details.reasoning_tokens == 30
+        assert response.usage.total_tokens == 680
+
+    @pytest.mark.parametrize(
+        "usage",
+        [{}, {"prompt_tokens": 10}, {"completion_tokens": 20}, {"prompt_tokens": None, "completion_tokens": 20}],
+    )
+    def test_missing_native_totals_remain_unknown(self, usage) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        response = hermes._response_from_result(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            result={"messages": [{"role": "assistant", "content": "partial answer"}], **usage},
+            model_name="model",
+        )
+        assert response.usage is None
+
+    def test_missing_details_remain_unknown(self) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        response = hermes._response_from_result(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            result={
+                "messages": [{"role": "assistant", "content": "done"}],
+                "prompt_tokens": 10,
+                "completion_tokens": 20,
+            },
+            model_name="model",
+        )
+        assert response.usage.input_tokens == 10
+        assert response.usage.output_tokens == 20
+        assert response.usage.total_tokens == 30
+        assert response.usage.input_tokens_details.cached_tokens is None
+        assert response.usage.output_tokens_details.reasoning_tokens is None
+
+
 class TestResultClassification:
     @pytest.mark.parametrize(
         "error",
