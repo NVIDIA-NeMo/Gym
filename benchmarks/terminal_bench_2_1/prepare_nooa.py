@@ -14,7 +14,7 @@ from resources_servers.terminal_bench_2_1.task_metadata import read_image_startu
 
 BENCHMARK_DIR = Path(__file__).resolve().parent
 TASK_REPOSITORY = "https://github.com/harbor-framework/terminal-bench-2-1"
-TASK_REVISION = "7131e4375048a0e408a8fb404b5f499d726b695b"
+TASK_REVISION = "7131e4375048a0e408a8fb404b5f499d726b695b"  # pragma: allowlist secret
 TASK_COUNT = 89
 
 

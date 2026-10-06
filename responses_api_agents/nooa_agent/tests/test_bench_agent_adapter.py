@@ -144,8 +144,9 @@ def test_benchagent_runtime_profile_changes_fingerprint_without_replacing_defaul
         with tarfile.open(fileobj=io.BytesIO(blob)) as archive:
             return archive.extractfile("runtime-requirements.txt").read().decode()
 
-    assert "051472343211914222e24ce36d8752f4e86bbe43" in requirements(default)
+    # Public source revisions, not credentials.
+    assert "051472343211914222e24ce36d8752f4e86bbe43" in requirements(default)  # pragma: allowlist secret
     actual = requirements(selected)
-    assert actual.count("564a34014a354f11009cf7dda44a81b039a04273") == 3
+    assert actual.count("564a34014a354f11009cf7dda44a81b039a04273") == 3  # pragma: allowlist secret
     assert "subdirectory=packages/nooa-cli" in actual and "subdirectory=packages/nooa-bench" in actual
-    assert "051472343211914222e24ce36d8752f4e86bbe43" not in actual
+    assert "051472343211914222e24ce36d8752f4e86bbe43" not in actual  # pragma: allowlist secret

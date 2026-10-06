@@ -11,8 +11,8 @@ import tempfile
 from pathlib import Path, PurePosixPath
 
 
-JUDGE_GYM_COMMIT = "183ef8601aad3a3c5b933065b05c8cb87442560e"
-REFERENCE_EFB_COMMIT = "3737282b3890c83cc50306955f59e326362d9c7c"
+JUDGE_GYM_COMMIT = "183ef8601aad3a3c5b933065b05c8cb87442560e"  # pragma: allowlist secret
+REFERENCE_EFB_COMMIT = "3737282b3890c83cc50306955f59e326362d9c7c"  # pragma: allowlist secret
 
 
 def _digest(path: Path) -> str:

@@ -174,7 +174,15 @@ def test_existing_endpoint_manifest_needs_no_slurm_and_never_saves_key(tmp_path:
         serving.validated_model(tmp_path)
 
 
-@pytest.mark.parametrize("url", ["https://user:secret@example/v1", "https://example/v1?key=secret", "file:///tmp/a"])
+# Invalid fixture credentials exercise rejection; these are not a usable secret.
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:secret@example/v1",  # pragma: allowlist secret
+        "https://example/v1?key=secret",
+        "file:///tmp/a",
+    ],
+)
 def test_endpoint_registration_rejects_embedded_credentials(tmp_path: Path, url: str) -> None:
     with pytest.raises(ValueError, match="without embedded credentials"):
         serving.register_endpoint(

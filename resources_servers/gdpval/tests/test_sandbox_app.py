@@ -171,7 +171,10 @@ def test_unsafe_reference_paths_rejected(name):
         {"reference_files": ["x"], "reference_file_urls": []},
         {"reference_files": ["x", "reference_files/x"], "reference_file_urls": ["https://example.com/x"] * 2},
         {"reference_files": ["x"], "reference_file_urls": ["file:///secret"]},
-        {"reference_files": ["x"], "reference_file_urls": ["https://user:secret@example.com/x"]},
+        {
+            "reference_files": ["x"],
+            "reference_file_urls": ["https://user:secret@example.com/x"],  # pragma: allowlist secret
+        },
     ],
 )
 def test_bad_reference_metadata_rejected(fields):
