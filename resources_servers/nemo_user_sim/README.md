@@ -1,7 +1,7 @@
 # NeMo UserSim runtime
 
 This directory contains the Resources Server half of the UserSim runtime. The
-paired Environment Server lives in `environment_servers/usersim`.
+paired Environment Server lives in `environment_servers/nemo_user_sim`.
 
 Dataset preparation is intentionally separate. Each episode request must
 already contain a materialized UserSim row:

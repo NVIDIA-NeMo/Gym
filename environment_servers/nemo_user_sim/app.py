@@ -54,7 +54,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.server_utils import request as http_request
-from resources_servers.usersim.episode_contracts import (
+from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimEpisodeFailure,
     UserSimEpisodeRequest,
     UserSimEpisodeResponse,

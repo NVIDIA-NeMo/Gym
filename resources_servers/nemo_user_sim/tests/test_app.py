@@ -16,8 +16,8 @@ from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import JUDGE_FAILED, VERIFIER_ERROR
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
-from resources_servers.usersim import app as usersim_app
-from resources_servers.usersim.app import (
+from resources_servers.nemo_user_sim import app as usersim_app
+from resources_servers.nemo_user_sim.app import (
     PROBE_SCORERS,
     UserSimResourcesServer,
     UserSimResourcesServerConfig,
@@ -26,7 +26,7 @@ from resources_servers.usersim.app import (
     _scorer_for_row,
     _validate_resolved_row,
 )
-from resources_servers.usersim.episode_contracts import (
+from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSimulationResult,
     UserSimVerificationInput,
     UserSimVerifyRequest,
@@ -58,7 +58,7 @@ def _server() -> UserSimResourcesServer:
             host="127.0.0.1",
             port=12345,
             entrypoint="app.py",
-            name="usersim_resources",
+            name="nemo_user_sim_resources",
             probe_scorer_model=model,
         ),
         server_client=MagicMock(spec=ServerClient),
@@ -71,7 +71,7 @@ def test_probe_scorer_model_is_required() -> None:
             host="127.0.0.1",
             port=12345,
             entrypoint="app.py",
-            name="usersim_resources",
+            name="nemo_user_sim_resources",
         )
 
 
@@ -83,7 +83,7 @@ def _seed_body(row: dict) -> ResourcesSeedSessionRequest:
     return ResourcesSeedSessionRequest(
         resources_session_id="resources-session-0",
         episode_id=EpisodeId(rollout_id="0-0", attempt=0),
-        task_id=TaskId(taskset="usersim:example", task_id="0"),
+        task_id=TaskId(taskset="nemo_user_sim:example", task_id="0"),
         task_data={"resolved_row": row},
     )
 
@@ -133,7 +133,7 @@ async def _verify(
         request,
         UserSimVerifyRequest(
             episode_id=EpisodeId(rollout_id="0-0", attempt=0),
-            task_id=TaskId(taskset="usersim:example", task_id="0"),
+            task_id=TaskId(taskset="nemo_user_sim:example", task_id="0"),
             verification_input=UserSimVerificationInput(
                 resolved_row=row,
                 usersim_result=_usersim_result(str(row["probe_type"])),
@@ -174,7 +174,7 @@ async def test_verify_accepts_assistant_activation_failure_as_terminal_zero_rewa
     monkeypatch.setattr(server, "_evaluate", AsyncMock(side_effect=AssertionError("must not evaluate failed policy")))
     body = UserSimVerifyRequest(
         episode_id=EpisodeId(rollout_id="0-0", attempt=0),
-        task_id=TaskId(taskset="usersim:example", task_id="0"),
+        task_id=TaskId(taskset="nemo_user_sim:example", task_id="0"),
         verification_input=UserSimVerificationInput(
             resolved_row=row,
             usersim_result={
@@ -249,7 +249,7 @@ async def test_verify_rejects_mutated_prepared_row() -> None:
     changed = {**row, "trajectory_id": "different"}
     body = UserSimVerifyRequest(
         episode_id=EpisodeId(rollout_id="0-0", attempt=0),
-        task_id=TaskId(taskset="usersim:example", task_id="0"),
+        task_id=TaskId(taskset="nemo_user_sim:example", task_id="0"),
         verification_input=UserSimVerificationInput(
             resolved_row=changed,
             usersim_result=_usersim_result(),

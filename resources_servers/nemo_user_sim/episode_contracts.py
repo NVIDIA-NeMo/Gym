@@ -16,10 +16,10 @@ from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, Epis
 from nemo_gym.failure_kinds import validate_failure_kind
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
-from resources_servers.usersim.task_data import (
+from resources_servers.nemo_user_sim.task_data import (
     TaskData as UserSimTaskInput,
 )
-from resources_servers.usersim.task_data import (
+from resources_servers.nemo_user_sim.task_data import (
     UserSimAgentRole,
 )
 

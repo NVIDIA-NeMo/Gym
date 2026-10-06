@@ -15,7 +15,7 @@ from aiohttp import ClientConnectionError, ClientResponseError
 from omegaconf import OmegaConf
 from pydantic import ConfigDict
 
-from environment_servers.usersim.app import (
+from environment_servers.nemo_user_sim.app import (
     UserSimEnvironmentServer,
     UserSimEnvironmentServerConfig,
     _AgentSession,
@@ -32,8 +32,8 @@ from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServe
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.rollout_collection import _episode_record
 from nemo_gym.server_utils import SESSION_ID_KEY, BaseServerConfig, ServerClient
-from resources_servers.usersim.app import UserSimResourcesServer, UserSimResourcesServerConfig
-from resources_servers.usersim.episode_contracts import (
+from resources_servers.nemo_user_sim.app import UserSimResourcesServer, UserSimResourcesServerConfig
+from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimEpisodeRequest,
     UserSimEpisodeResult,
     UserSimSimulationResult,
@@ -45,18 +45,18 @@ from resources_servers.usersim.episode_contracts import (
 def _server() -> UserSimEnvironmentServer:
     return UserSimEnvironmentServer(
         config=UserSimEnvironmentServerConfig(
-            name="usersim_environment",
+            name="nemo_user_sim_environment",
             host="127.0.0.1",
             port=8000,
             entrypoint="app.py",
             cleanup_timeout_seconds=10,
-            user_agent=AgentServerRef(type="responses_api_agents", name="usersim_user"),
-            assistant_agent=AgentServerRef(type="responses_api_agents", name="usersim_assistant"),
+            user_agent=AgentServerRef(type="responses_api_agents", name="nemo_user_sim_user"),
+            assistant_agent=AgentServerRef(type="responses_api_agents", name="nemo_user_sim_assistant"),
             judge_model=ModelServerRef(type="responses_api_models", name="support_model"),
             summary_model=ModelServerRef(type="responses_api_models", name="support_model"),
             tool_simulation_model=ModelServerRef(type="responses_api_models", name="support_model"),
             embedding_model=ModelServerRef(type="responses_api_models", name="embedding_model"),
-            resources_server=ResourcesServerRef(type="resources_servers", name="usersim_resources"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="nemo_user_sim_resources"),
         ),
         server_client=MagicMock(spec=ServerClient),
     )
@@ -65,8 +65,8 @@ def _server() -> UserSimEnvironmentServer:
 def test_aliases_route_participants_and_support_roles() -> None:
     config = _server().config
 
-    assert config.target_for_alias("user_model").name == "usersim_user"
-    assert config.target_for_alias("assistant_model").name == "usersim_assistant"
+    assert config.target_for_alias("user_model").name == "nemo_user_sim_user"
+    assert config.target_for_alias("assistant_model").name == "nemo_user_sim_assistant"
     assert config.target_for_alias("judge_model").name == "support_model"
     assert config.target_for_alias("summary_model").name == "support_model"
     assert config.target_for_alias("api_response_model").name == "support_model"
@@ -101,7 +101,7 @@ def test_episode_result_projects_verification_into_gym_scoring_contract() -> Non
     record = _episode_record(
         {
             "episode_id": {"rollout_id": "0-0", "attempt": 0},
-            "task_id": {"taskset": "usersim:example", "task_id": "0"},
+            "task_id": {"taskset": "nemo_user_sim:example", "task_id": "0"},
             "result": result.model_dump(mode="json"),
         }
     )
@@ -308,7 +308,7 @@ async def test_environment_drives_probe_runtime_at_activation_boundaries(
     external.HostRoleModel = HostRoleModel
     external.ProbeEpisodeRuntime = FakeRuntime
     monkeypatch.setitem(sys.modules, "usersim.engine.external", external)
-    monkeypatch.setattr("environment_servers.usersim.app._configured_model_name", lambda _server, alias: alias)
+    monkeypatch.setattr("environment_servers.nemo_user_sim.app._configured_model_name", lambda _server, alias: alias)
     server, _ = _lifecycle_server()
 
     async def invoke_activation(activation: ActivationRequest) -> ActivationResult:
@@ -354,7 +354,7 @@ async def test_environment_drives_probe_runtime_at_activation_boundaries(
 @pytest.mark.asyncio
 async def test_real_probe_runtime_routes_unoffered_assistant_tool_call_to_policy_failure() -> None:
     assert usersim_external.ProbeEpisodeRuntime is not None
-    examples_path = Path(__file__).parents[3] / "resources_servers/usersim/data/example.jsonl"
+    examples_path = Path(__file__).parents[3] / "resources_servers/nemo_user_sim/data/example.jsonl"
     example = orjson.loads(next(line for line in examples_path.read_bytes().splitlines() if line))
     server, client = _lifecycle_server()
     client.responses = [
@@ -414,7 +414,7 @@ async def test_real_probe_runtime_routes_unoffered_assistant_tool_call_to_policy
     request = UserSimEpisodeRequest(
         episode_id=EpisodeId(rollout_id="real-runtime", attempt=0),
         task=MaterializedTask(
-            task_id=TaskId(taskset="usersim:example", task_id=example["task_id"]),
+            task_id=TaskId(taskset="nemo_user_sim:example", task_id=example["task_id"]),
             task_input=UserSimTaskInput.model_validate(example),
         ),
     )
@@ -564,7 +564,7 @@ class _Client(ServerClient):
 def _lifecycle_server() -> tuple[UserSimEnvironmentServer, _Client]:
     global_config = OmegaConf.create(
         {
-            "resources": {"resources_servers": {"usersim": {"entrypoint": "app.py"}}},
+            "resources": {"resources_servers": {"nemo_user_sim": {"entrypoint": "app.py"}}},
             "user": {
                 "responses_api_agents": {
                     "simple_agent": {
@@ -603,7 +603,7 @@ def _lifecycle_server() -> tuple[UserSimEnvironmentServer, _Client]:
     )
     server = UserSimEnvironmentServer(
         config=UserSimEnvironmentServerConfig(
-            name="usersim-environment",
+            name="nemo-user-sim-environment",
             host="environment",
             port=8005,
             entrypoint="app.py",
@@ -727,7 +727,7 @@ async def test_embedding_facade_routes_to_configured_model_endpoint(monkeypatch:
         }
     )
     request = AsyncMock(return_value=response)
-    monkeypatch.setattr("environment_servers.usersim.app.http_request", request)
+    monkeypatch.setattr("environment_servers.nemo_user_sim.app.http_request", request)
     facade = _GymEmbeddingFacade(SimpleNamespace(environment_server=server))
 
     embeddings = await facade.agenerate_text_embeddings(["first", "second"])
@@ -745,7 +745,7 @@ def _request() -> UserSimEpisodeRequest:
     return UserSimEpisodeRequest(
         episode_id=EpisodeId(rollout_id="rollout", attempt=0),
         task=MaterializedTask(
-            task_id=TaskId(taskset="usersim:example", task_id="task"),
+            task_id=TaskId(taskset="nemo_user_sim:example", task_id="task"),
             task_input=UserSimTaskInput(
                 task_id="task",
                 resolved_row=_resolved_row(),
