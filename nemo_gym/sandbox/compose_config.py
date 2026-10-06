@@ -45,6 +45,13 @@ def resolve_compose(document: dict, main_image: str, image_configs: dict) -> dic
     if not isinstance(resolved, dict) or not isinstance(resolved.get("services"), dict):
         raise ValueError("Compose requires a services mapping")
     services = resolved["services"]
+    for name, service in services.items():
+        # ``main:`` with no body is how Compose spells "the base service, unchanged"; a null
+        # override leaves Harbor's base ``main`` in place, so it reads as an empty mapping here.
+        if service is None:
+            services[name] = {}
+        elif not isinstance(service, dict):
+            raise ValueError(f"Service {name!r} must be a mapping")
     services["main"] = {
         "image": main_image,
         "command": ["sh", "-c", "sleep infinity"],

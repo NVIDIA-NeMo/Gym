@@ -134,6 +134,24 @@ class TestTaskConfig:
             "verifier.environment.nope",
         ]
 
+    def test_healthcheck_at_harbor_lower_bounds_loads(self):
+        # The ``[environment.healthcheck]`` block published by billxbf/mimo-v26-* (hub content hash
+        # 00a4f9b1136d…, 564 sampled tasks, six datasets); only the base64 payload inside ``command`` is
+        # elided. Harbor's HealthcheckConfig takes plain numbers, so ``retries = 0`` must load.
+        block = """
+[environment.healthcheck]
+# one-time setup before the agent (environment/setup/setup.sh)
+command = "bash -c 'test -f /var/lib/mimo/ready || { mkdir -p /var/lib/mimo && echo H4sI... | base64 -d | tar xz -C /var/lib/mimo && bash /var/lib/mimo/setup.sh; }'"
+timeout_sec = 1200.0
+retries = 0
+interval_sec = 5.0
+"""
+        config = HarborTaskConfig.model_validate(tomllib.loads(block))
+        check = config.environment.healthcheck
+        assert check.retries == 0 and check.timeout_sec == 1200.0 and check.interval_sec == 5.0
+        assert (check.start_period_sec, check.start_interval_sec) == (0.0, 5.0)
+        assert check.command.startswith("bash -c 'test -f /var/lib/mimo/ready")
+
     def test_mcp_server_needs_command_or_url(self):
         with pytest.raises(ValueError, match="stdio needs"):
             HarborTaskConfig.model_validate({"environment": {"mcp_servers": [{"name": "t", "transport": "stdio"}]}})
