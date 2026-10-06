@@ -18,43 +18,46 @@ Keep task data, preparation, verification, and sandbox requirements with the ben
 
 Bind their references through [EnvironmentServer](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/single_agent_turn) and submit episodes to its `/run`. A compatible pairing should require only composition changes, without a pair-specific launcher, adapter, or preset.
 
-Use this single-agent flow when Resources supplies a task sandbox through EnvironmentServer `/run`:
+Use this single-agent flow when Resources supplies a task sandbox through EnvironmentServer `/run` (Hermes's model API is shown). FastAPI implements the Gym server endpoints, which exchange JSON over HTTP. Sandbox execution and file transfer use the selected provider's transport.
 
 ```mermaid
 sequenceDiagram
-    participant E as EnvironmentServer
-    participant R as Resources
-    participant A as Agent adapter
-    participant S as Task sandbox
-    participant M as Model Server
+    participant E as Environment Server<br/>(FastAPI)
+    participant R as Resources Server<br/>(FastAPI)
+    participant A as Agent Server<br/>(FastAPI adapter)
+    participant S as Task sandbox<br/>(provider runtime)
+    participant M as Model Server<br/>(FastAPI)
 
-    E->>R: Seed task
-    R->>S: Create sandbox and prepare task
-    R-->>E: SandboxAccess
-    E->>A: Open session with SandboxAccess
-    A->>S: Reuse or install pinned runtime
-    E->>A: Run agent
-    A->>S: Upload supervisor and start harness
+    Note over R,S: Provider examples: OpenSandbox HTTP(S), OpenShell gRPC,<br/>Docker CLI, Local subprocess
+    E->>R: HTTP/JSON: POST /seed_session
+    R->>S: Provider API/CLI: create, exec, upload
+    R-->>E: HTTP/JSON: SandboxAccess
+    E->>A: HTTP/JSON: POST /v1/agent_sessions
+    A->>S: Provider exec/files: reuse or install runtime
+    E->>A: HTTP/JSON: POST .../v1/responses
+    A->>S: Provider upload + exec: stage input, launch supervisor
     loop Model and tool calls
-        S->>M: Harness model request with rollout identity
-        M-->>S: Model response
-        S->>S: Harness executes tools
+        S->>M: HTTP/JSON: POST .../v1/chat/completions
+        M-->>S: HTTP/JSON: model response
+        S->>S: SDK / local subprocess: execute tools
     end
-    A->>S: Confirm harness and descendant cleanup
-    S-->>A: Cleanup receipt
-    A->>S: Collect output and observations
-    S-->>A: Harness artifacts
-    A-->>E: Agent response
-    E->>A: Close agent session
-    A->>S: Release session files and connection
-    A-->>E: Close result and observations
-    E->>R: Verify result
-    R-->>E: Reward and grading evidence
-    E->>R: Close resources session
-    R->>S: Destroy sandbox
+    A->>S: Provider exec: stop/check process-tree cleanup
+    S-->>A: Provider download: cleanup.json (JSON receipt)
+    A->>S: Provider download: collect output and observations
+    S-->>A: File bytes: harness JSON and artifacts
+    A-->>E: HTTP/JSON: Responses API result
+    E->>A: HTTP/JSON: POST /v1/agent_sessions/close
+    A->>S: Provider exec + disconnect: release session
+    A-->>E: HTTP/JSON: close result and observations
+    E->>R: HTTP/JSON: POST /verify
+    R-->>E: HTTP/JSON: reward and grading evidence
+    E->>R: HTTP/JSON: POST /close_session
+    R->>S: Provider API/CLI: destroy sandbox
 ```
 
 Resources owns the sandbox. The agent borrows it. **Agent close must succeed before verification.**
+
+The `...` in agent and model routes represents Gym's rollout and optional token-capture prefix; preserve it when forwarding requests.
 
 On interruption, close joins or retries finalization: confirm cleanup, capture available artifacts, then release resources. Output collection must finish before deleting session files or stopping an agent-owned sandbox.
 
@@ -78,30 +81,38 @@ When a Resources-owned sandbox was supplied, setup or connection failure must pr
 Use these responsibilities when organizing a new adapter under `responses_api_agents/<harness>/`. A `sandbox.py` module runs on the Agent Server; a `sandbox_runner.py` shim runs inside the sandbox.
 
 <Note>
-The shared lifecycle below follows [Hermes #3961 at `2093960be`](https://github.com/NVIDIA-NeMo/Gym/tree/2093960be523e5b2ce615e30b4db492f9ca67a14). [Pi #3626 at `6140623b7`](https://github.com/NVIDIA-NeMo/Gym/tree/6140623b77aac2cbce263afa71fb73e971c28481) and [Codex #3640 at `65186e38f`](https://github.com/NVIDIA-NeMo/Gym/tree/65186e38f4af99d5ac14cc899c12abaf2aa4063b) already compose `SandboxSession`, but still import its earlier `nemo_gym.sandbox.session` API and shared runtime-metadata parser. Adopting the new base requires the `agent_utils` imports, `session_dir` and `stage_activation` names, the simplified `SandboxCommand`, and adapter-local runtime metadata. Test host-only startup too, because these modules are imported before dispatch.
+The shared lifecycle below follows [Hermes #3961 at `a309dfb9a`](https://github.com/NVIDIA-NeMo/Gym/tree/a309dfb9a5cb8c65b6bd7366260c189c3dcd3284). [Pi #3626 at `d91469b81`](https://github.com/NVIDIA-NeMo/Gym/tree/d91469b81aa9d0f3178026e469fe119f10a6f316) and [Codex #3640 at `5151a3a74`](https://github.com/NVIDIA-NeMo/Gym/tree/5151a3a746b9846995435a99c5b0e403abddf22b) now use the same `agent_utils` session API, `session_dir` and `stage_activation` names, simplified `SandboxCommand`, and adapter-local runtime metadata. These revisions establish the code layout; validate installation and runtime support for each pairing separately. Test host-only startup too, because these modules are imported before dispatch.
 </Note>
 
-Dashed boxes mark planned installation and mount helpers; the host path is selected by a sessionless request.
+Dashed boxes mark planned installation and mount helpers; the host path is selected by a sessionless request. Edges inside the Agent Server represent Python calls unless labeled otherwise. Cross-process edges identify HTTP/JSON, provider transport, subprocess/signals, or file I/O.
 
 ```mermaid
 flowchart TB
-    subgraph AS["Agent Server"]
-        APP["app.py: request mapping and dispatch"]
+    ENTRY["Environment Server or API client"]
+
+    subgraph AS["Agent Server: FastAPI endpoints and Python helpers"]
+        APP["app.py: HTTP/JSON endpoints, mapping and dispatch"]
         LOCAL["Host harness: SDK or CLI"]
         ADAPTER["sandbox.py: harness-specific session and hooks"]
         SESSION["agent_utils/sandbox_session.py: SandboxSession lifecycle"]
         INSTALL["harness_install.py: ensure runtime (planned)"]
         CLIENT["agent_utils/supervisor_client.py: shell and file protocol"]
         FILES["sandbox/utils.py: upload_text and read_text"]
-        APP -->|"No agent session"| LOCAL
+        PROVIDER["AsyncSandbox / provider<br/>Examples: OpenSandbox HTTP(S)<br/>OpenShell gRPC<br/>Docker CLI / Local subprocess"]
+        APP -->|"Python SDK / subprocess; no agent session"| LOCAL
         APP -->|"Episode session"| ADAPTER
         ADAPTER -->|"install_runtime at seed"| INSTALL
         ADAPTER -->|"execute with stage_activation/collect; close"| SESSION
         SESSION --> CLIENT
         ADAPTER --> FILES
         CLIENT --> FILES
+        INSTALL -->|"exec + upload: runtime setup"| PROVIDER
+        SESSION -->|"upload: supervisor source"| PROVIDER
+        CLIENT -->|"exec: launch / stop shell command"| PROVIDER
+        FILES -->|"upload / download: file bytes"| PROVIDER
     end
 
+    ENTRY -->|"HTTP/JSON: Responses API + session endpoints"| APP
     MOUNTS["Provider default_mounts (planned)"]
 
     subgraph SB["Task sandbox"]
@@ -111,20 +122,20 @@ flowchart TB
         HARNESS["Harness SDK or CLI and its tools"]
         CLEANUP["cleanup.json"]
         OUTPUT["Harness output and optional diagnostics"]
-        SUPERVISOR -->|"Supervise harness process and descendants"| SHIM
-        SHIM -->|"Invoke and collect output"| HARNESS
+        SUPERVISOR -->|"Subprocess argv + OS signals"| SHIM
+        SHIM -->|"Python SDK / CLI subprocess"| HARNESS
         RUNTIME -->|"Provides executable and dependencies"| HARNESS
-        SUPERVISOR -->|"Write after cleanup attempt"| CLEANUP
-        SHIM -->|"Write"| OUTPUT
+        SUPERVISOR -->|"Local file I/O: JSON receipt"| CLEANUP
+        SHIM -->|"Local file I/O: JSON output"| OUTPUT
     end
 
-    INSTALL -->|"Reuse runtime or upload artifacts and run installer"| RUNTIME
-    MOUNTS -->|"Optional read-only runtime at sandbox creation"| RUNTIME
-    SESSION -->|"Upload supervisor into session_dir"| SUPERVISOR
-    CLIENT -->|"Launch or request stop through AsyncSandbox"| SUPERVISOR
-    CLIENT -.->|"Read and validate cleanup receipt"| CLEANUP
-    FILES -.->|"Read output after cleanup, before release"| OUTPUT
-    HARNESS -->|"Model HTTP requests; Hermes uses Chat Completions"| MODEL["Gym Model Server"]
+    PROVIDER -->|"Provider exec/files: install or reuse"| RUNTIME
+    MOUNTS -->|"Filesystem mount at creation"| RUNTIME
+    PROVIDER -->|"Provider upload + exec: launch / stop"| SUPERVISOR
+    PROVIDER -.->|"Provider download: JSON receipt"| CLEANUP
+    PROVIDER -.->|"Provider download: harness artifacts"| OUTPUT
+    HARNESS -->|"HTTP/JSON: Chat Completions for Hermes"| MODEL["Gym Model Server: FastAPI"]
+    LOCAL -->|"HTTP/JSON: harness model API"| MODEL
 
     classDef planned stroke-dasharray: 5 5;
     class INSTALL,MOUNTS planned;
@@ -196,8 +207,8 @@ Run in `SandboxAccess.workdir`. Route model calls through a sandbox-reachable Gy
 
 | Connection | Protocol and responsibility |
 | --- | --- |
-| Environment Server to Agent Server | Gym session endpoints and the agent's Responses API request/response contract. |
-| Agent Server to task sandbox | `AsyncSandbox.exec()` launches or stops processes through the configured provider; `upload()` / `download()` transfer files. The supervisor client implements a shell-and-file protocol, without a Responses API endpoint. |
+| Environment Server to Agent or Resources Server | HTTP/JSON endpoints implemented with FastAPI: seed/close, the agent's Responses API contract, and Resources verification. |
+| Agent Server to task sandbox | `AsyncSandbox.exec()` and `upload()` / `download()` delegate to the configured provider. For command execution, OpenSandbox uses HTTP(S) with SSE or background polling, OpenShell uses streaming gRPC, Docker invokes its CLI, and Local uses a subprocess. File transfer follows the provider's implementation. The supervisor client implements a shell-and-file protocol, without a Responses API endpoint. |
 | Process supervisor to harness | Starts the harness subprocess, enforces its deadline, signals and reaps its process tree, and writes `cleanup.json`. It does not send model requests or parse model responses. |
 | Harness to Model Server | The harness's model HTTP protocol. The current Hermes adapter uses Chat Completions (`.../v1/chat/completions`); other harnesses may use Responses. Preserve the rollout-qualified base URL passed by Gym. |
 
@@ -264,7 +275,7 @@ For both borrowed and agent-owned sandboxes, finalize in this order: confirm rem
 
 Borrowed close retires session paths and disconnects. Agent-owned close attempts the same graceful finalization before stopping the sandbox; if graceful cleanup fails, confirmed provider teardown remains its cleanup authority, with unavailable artifacts recorded as such. Failed teardown retains state for retry. Preserve launch fences and reject late activation in either mode.
 
-Execution completion retains the sandbox until explicit close; `closed` means resource release succeeded. For agent-server crashes, arrange provider-enforced expiry or an external cleanup mechanism for owned sandboxes, with time for installation, execution, and cleanup. The reviewed Hermes code passes `sandbox_config` through and does not supply a default `ttl_s`; check that the chosen provider actually enforces the configured lifetime.
+Execution completion retains the sandbox until explicit close; `closed` means resource release succeeded. For agent-server crashes, arrange provider-enforced expiry or an external cleanup mechanism for owned sandboxes, with time for installation, execution, and cleanup. When `sandbox_config` omits `ttl_s`, Hermes now supplies `sandbox_install_timeout_seconds + sandbox_runner_timeout_seconds + 600`. An explicit value, including `null`, is preserved. This default applies only when Hermes creates the sandbox; borrowed sandboxes retain their owner's lifetime policy. Check that the chosen provider actually enforces the configured lifetime.
 
 These receipts coordinate lifecycle behavior; files writable by the model are not a trusted channel for training trajectories. Validate training support separately.
 
