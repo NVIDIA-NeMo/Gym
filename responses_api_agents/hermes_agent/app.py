@@ -71,6 +71,7 @@ from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.sandbox.session import SandboxSession
+from nemo_gym.sandbox.supervisor_client import HarnessProcessInfo
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs
@@ -291,7 +292,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if state.observations is None and output is not None:
             result = output.get("result")
             state.observations = self._sandbox_observations(
-                result if isinstance(result, dict) else {"failed": True}, output.get("observations")
+                result if isinstance(result, dict) else {"failed": True},
+                output.get("observations"),
+                runtime_info=state.runtime_info,
             )
         observations = state.observations or AgentObservationBundle(
             source="hermes", gaps=[ObservationGap(code="observation_capture_failed")]
@@ -439,7 +442,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
         self,
         result: dict[str, Any],
         raw_observations: Any,
+        *,
+        runtime_info: HarnessProcessInfo | None,
     ) -> AgentObservationBundle:
+        gaps = [] if runtime_info is not None else [ObservationGap(code="runtime_info_unavailable")]
         if isinstance(raw_observations, dict):
             try:
                 records: list[AgentInvocation | ToolCallObservation | ContextCompactionObservation] = []
@@ -473,17 +479,18 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 return AgentObservationBundle(
                     source="hermes",
                     records=records,
-                    gaps=[ObservationGap.model_validate(gap) for gap in raw_observations.get("gaps") or []],
+                    gaps=[*gaps, *(ObservationGap.model_validate(gap) for gap in raw_observations.get("gaps") or [])],
                 )
             except Exception as error:
                 LOG.exception("failed to validate sandbox Hermes observations")
                 return AgentObservationBundle(
                     source="hermes",
                     gaps=[
+                        *gaps,
                         ObservationGap(
                             code="observation_capture_failed",
                             detail=type(error).__name__,
-                        )
+                        ),
                     ],
                 )
 
@@ -516,7 +523,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                         status="completed",
                     )
                 )
-        return AgentObservationBundle(source="hermes", records=records)
+        return AgentObservationBundle(source="hermes", records=records, gaps=gaps)
 
     async def _run_sandbox_episode(
         self,
@@ -573,13 +580,16 @@ class HermesAgent(SimpleResponsesAPIAgent):
         response.metadata = {
             **(response.metadata or {}),
             "harness_execution": "sandbox",
-            "harness_hostname": runtime.hostname,
-            "harness_pid": str(runtime.pid),
-            "harness_python": runtime.python or "",
         }
+        if runtime is not None:
+            response.metadata.update(
+                harness_hostname=runtime.hostname,
+                harness_pid=str(runtime.pid),
+                harness_python=runtime.python or "",
+            )
         return AgentEpisode(
             response=response,
-            observations=self._sandbox_observations(result, output.get("observations")),
+            observations=self._sandbox_observations(result, output.get("observations"), runtime_info=runtime),
         )
 
     def _validate_request(

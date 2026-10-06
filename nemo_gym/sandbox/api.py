@@ -576,20 +576,6 @@ class AsyncSandbox:
     async def download(self, remote_path: str, local_path: Path | str) -> None:
         await self._provider.download_file(self._require_handle(), remote_path, Path(local_path))
 
-    async def upload_text(self, path: str, *, text: str) -> None:
-        """Upload UTF-8 text through file transfer without shell interpolation."""
-        with tempfile.TemporaryDirectory(prefix="sandbox-upload-") as directory:
-            source = Path(directory) / "payload"
-            source.write_text(text, encoding="utf-8")
-            await self.upload(source, path)
-
-    async def read_text(self, path: str) -> str:
-        """Download UTF-8 text, replacing invalid bytes in partial process output."""
-        with tempfile.TemporaryDirectory(prefix="sandbox-download-") as directory:
-            destination = Path(directory) / "payload"
-            await self.download(path, destination)
-            return destination.read_text(encoding="utf-8", errors="replace")
-
     async def status(self) -> SandboxStatus:
         if self._handle is None:
             return SandboxStatus.UNKNOWN

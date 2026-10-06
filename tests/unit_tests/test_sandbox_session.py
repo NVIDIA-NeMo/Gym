@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, supervisor_client
 from nemo_gym.sandbox.session import SandboxCommand, SandboxSession
 
 
@@ -16,16 +16,22 @@ OK = SandboxExecResult(stdout="", stderr="", return_code=0)
 
 
 @pytest.fixture
-def session():
+def receipt_reader(monkeypatch):
+    reader = AsyncMock(return_value=json.dumps(RECEIPT))
+    monkeypatch.setattr(supervisor_client, "read_text", reader)
+    return reader
+
+
+@pytest.fixture
+def session(receipt_reader):
     sandbox = AsyncMock(spec=AsyncSandbox)
     sandbox.exec.return_value = OK
-    sandbox.read_text.return_value = json.dumps(RECEIPT)
     return SandboxSession(sandbox=sandbox, directory="/session", workdir="/app", harness="test")
 
 
 async def execute(session, *, collect=None, prepare=None, timeout=1):
     return await session.execute(
-        prepare=prepare or AsyncMock(return_value=SandboxCommand(argv=["worker"])),
+        prepare=prepare or AsyncMock(return_value=SandboxCommand(argv=["worker"], python="/runtime/python")),
         collect=collect or AsyncMock(return_value="transcript"),
         timeout=10,
         close_timeout=timeout,
@@ -129,7 +135,7 @@ async def test_close_joins_collection_started_by_normal_completion(session):
     collector.assert_awaited_once()
 
 
-async def test_close_during_input_preparation_prevents_launch(session):
+async def test_close_during_input_preparation_prevents_launch(session, receipt_reader):
     preparing = asyncio.Event()
 
     async def prepare():
@@ -145,7 +151,7 @@ async def test_close_during_input_preparation_prevents_launch(session):
     assert not session.launch_started
     assert session.cleanup is None
     collector.assert_not_awaited()
-    session.sandbox.read_text.assert_not_awaited()
+    receipt_reader.assert_not_awaited()
     # Only session-directory removal ran.
     assert session.sandbox.exec.await_count == 1
     assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
@@ -190,8 +196,8 @@ async def test_capture_timeout_does_not_block_resource_release(session):
     assert session.closed
 
 
-async def test_borrowed_cleanup_failure_retains_state_and_retries_capture(session):
-    session.sandbox.read_text.return_value = json.dumps(RECEIPT | {"cleanup_confirmed": False})
+async def test_borrowed_cleanup_failure_retains_state_and_retries_capture(session, receipt_reader):
+    receipt_reader.return_value = json.dumps(RECEIPT | {"cleanup_confirmed": False})
     collector = AsyncMock(return_value="recovered transcript")
     with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
         await execute(session, collect=collector)
@@ -203,14 +209,14 @@ async def test_borrowed_cleanup_failure_retains_state_and_retries_capture(sessio
     session.sandbox.disconnect.assert_not_awaited()
     session.sandbox.stop.assert_not_awaited()
     assert all("rm -rf" not in call.args[0] for call in session.sandbox.exec.await_args_list)
-    session.sandbox.read_text.return_value = json.dumps(RECEIPT)
+    receipt_reader.return_value = json.dumps(RECEIPT)
     await session.close(timeout=1)
     collector.assert_awaited_once()
     assert session.artifacts == "recovered transcript"
     assert session.closed
 
 
-async def test_owned_cleanup_deadline_falls_back_to_provider_stop(session):
+async def test_owned_cleanup_deadline_falls_back_to_provider_stop(session, receipt_reader):
     session.owns_sandbox = True
     launched = asyncio.Event()
 
@@ -218,11 +224,11 @@ async def test_owned_cleanup_deadline_falls_back_to_provider_stop(session):
         launched.set()
         await asyncio.Future()
 
-    async def unavailable(path):
+    async def unavailable(*args, **kwargs):
         await asyncio.Future()
 
     session.sandbox.exec.side_effect = provider_exec
-    session.sandbox.read_text.side_effect = unavailable
+    receipt_reader.side_effect = unavailable
     collector = AsyncMock()
     running = asyncio.create_task(execute(session, collect=collector, timeout=0.02))
     await asyncio.wait_for(launched.wait(), 2)
@@ -252,8 +258,25 @@ async def test_release_failure_retries_without_recollecting(session, owned):
     collector.assert_awaited_once()
 
 
-async def test_nonzero_worker_exit_still_passes_artifacts_to_adapter(session):
+@pytest.mark.parametrize("return_code", [1, None, "malformed"])
+async def test_nonzero_worker_exit_still_passes_artifacts_to_adapter(session, receipt_reader, return_code):
     session.sandbox.exec.return_value = SandboxExecResult("", "worker error", 1)
-    session.sandbox.read_text.return_value = json.dumps(RECEIPT | {"return_code": 1})
+    receipt_reader.return_value = json.dumps(RECEIPT | {"return_code": return_code})
     assert await execute(session) == "transcript"
-    assert session.cleanup["return_code"] == 1
+    assert session.cleanup["return_code"] == (return_code if type(return_code) is int else None)
+
+
+async def test_bootstrap_failure_preserves_stderr_and_still_releases(session, receipt_reader):
+    receipt_reader.return_value = json.dumps({"cleanup_confirmed": True, "error": None})
+    session.sandbox.exec.return_value = SandboxExecResult("", "/runtime/python: not found", 127)
+    collector = AsyncMock(side_effect=FileNotFoundError("no worker output"))
+    with pytest.raises(RuntimeError, match="sandbox execution failed.*127.*python: not found") as error:
+        await execute(session, collect=collector)
+    assert isinstance(error.value.__cause__, FileNotFoundError)
+    assert session.cleanup["cleanup_confirmed"] is True
+    assert session.cleanup["return_code"] is None
+    collector.assert_awaited_once()
+    session.sandbox.exec.return_value = OK
+    await session.close(timeout=1)
+    assert session.closed
+    session.sandbox.disconnect.assert_awaited_once()

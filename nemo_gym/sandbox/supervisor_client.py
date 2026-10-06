@@ -7,16 +7,19 @@ Unlike process_supervisor.py, this module is not uploaded to the task sandbox.
 """
 
 import json
+import logging
 from shlex import join, quote
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.process_supervisor import CleanupReceipt
+from nemo_gym.sandbox.utils import read_text
 
 
 _CLEANUP_RECEIPT = TypeAdapter(CleanupReceipt)
+LOG = logging.getLogger(__name__)
 
 
 class HarnessProcessInfo(BaseModel):
@@ -33,14 +36,34 @@ class HarnessProcessInfo(BaseModel):
 
 
 def parse_cleanup_receipt(payload: object) -> CleanupReceipt:
-    """Validate the supervisor's existing schema without adding worker dependencies.
+    """Require positive cleanup evidence, tolerating malformed optional diagnostics.
 
     Older stop-before-launch receipts contain only acknowledgement and error.
     Normalize that form without inventing a successful worker exit code.
     """
-    if isinstance(payload, dict) and payload.keys() == {"cleanup_confirmed", "error"}:
+    if not isinstance(payload, dict) or payload.get("cleanup_confirmed") is not True:
+        raise ValueError("Sandbox cleanup was not confirmed")
+    if payload.keys() == {"cleanup_confirmed", "error"}:
         payload = {**payload, "return_code": None, "timed_out": False}
-    return _CLEANUP_RECEIPT.validate_python(payload, strict=True, extra="forbid")
+    try:
+        return _CLEANUP_RECEIPT.validate_python(payload, strict=True, extra="forbid")
+    except ValidationError:
+        LOG.warning("Cleanup was confirmed, but its diagnostic fields did not match the receipt schema")
+    return {
+        "cleanup_confirmed": True,
+        "return_code": payload.get("return_code") if type(payload.get("return_code")) is int else None,
+        "timed_out": payload.get("timed_out") is True,
+        "error": payload.get("error") if isinstance(payload.get("error"), str) else None,
+    }
+
+
+def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
+    """Read optional worker diagnostics without failing an otherwise valid episode."""
+    try:
+        return HarnessProcessInfo.model_validate(payload)
+    except ValidationError:
+        LOG.warning("Harness runtime metadata is missing or malformed")
+        return None
 
 
 def supervised_launch_command(
@@ -49,18 +72,22 @@ def supervised_launch_command(
     command: list[str],
     timeout: float,
     cleanup_timeout: float,
-    python: str = "python3",
+    python: str,
     supervisor_path: str | None = None,
 ) -> str:
     """Fence delayed launches and run a harness command under the shared supervisor.
 
-    Use a private interpreter and supervisor path when the harness installs its
-    own runtime. Supervisor and worker diagnostics are combined in runner.log.
+    The adapter must install or select the interpreter explicitly. Check that it
+    can load the supervisor before claiming a launch: a failed bootstrap cannot
+    write a cleanup receipt. Supervisor and worker diagnostics share runner.log.
     """
+    supervisor = quote(supervisor_path or directory + "/process_supervisor.py")
     return (
+        f"[ -d {quote(directory)} ] && [ ! -L {quote(directory + '/launch.claim')} ] || exit 0; "
+        f"{quote(python)} -I {supervisor} --help >/dev/null || exit $?; "
         f"trap '' TERM; ln -s launch {quote(directory + '/launch.claim')} 2>/dev/null || exit 0; "
         f"echo $$ > {quote(directory + '/runner.pid')} && "
-        f"exec {quote(python)} -I {quote(supervisor_path or directory + '/process_supervisor.py')} "
+        f"exec {quote(python)} -I {supervisor} "
         f"--timeout {timeout} --cleanup-timeout {cleanup_timeout} "
         f"--stop-file {quote(directory + '/runner.stop')} "
         f"--receipt {quote(directory + '/cleanup.json')} -- {join(command)} "
@@ -79,10 +106,10 @@ async def stop_and_confirm_cleanup(
     """
     receipt_path = f"{directory}/cleanup.json"
     try:
-        receipt = json.loads(await sandbox.read_text(receipt_path))
+        receipt = json.loads(await read_text(sandbox, path=receipt_path))
     except Exception:
         receipt = {}
-    if receipt.get("cleanup_confirmed") is not True:
+    if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
         pid_path = quote(f"{directory}/runner.pid")
         stop_path = quote(f"{directory}/runner.stop")
         claim_path = quote(f"{directory}/launch.claim")
@@ -100,11 +127,12 @@ async def stop_and_confirm_cleanup(
         )
         await sandbox.exec(script, cwd=workdir, timeout_s=timeout + 5)
         try:
-            receipt = json.loads(await sandbox.read_text(receipt_path))
+            receipt = json.loads(await read_text(sandbox, path=receipt_path))
         except Exception as error:
             raise RuntimeError(f"{harness} launch outcome is unknown; cannot confirm termination") from error
-        if receipt.get("cleanup_confirmed") is not True:
-            raise RuntimeError(f"{harness} sandbox cleanup was not confirmed: {receipt.get('error')}")
+        if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
+            detail = receipt.get("error") if isinstance(receipt, dict) else "cleanup receipt is not a JSON object"
+            raise RuntimeError(f"{harness} sandbox cleanup was not confirmed: {detail}")
     return parse_cleanup_receipt(receipt)
 
 

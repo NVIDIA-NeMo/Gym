@@ -26,7 +26,7 @@ class SandboxCommand:
     """Harness argv and the interpreter/path used to launch its supervisor."""
 
     argv: list[str]
-    python: str = "python3"
+    python: str
     supervisor_path: str | None = None
 
 
@@ -117,6 +117,10 @@ class SandboxSession[Artifacts]:
                 LOG.exception("%s cleanup remains unconfirmed; close must retry", self.harness)
             raise
         await self._finish(timeout=close_timeout)
+        if result.return_code != 0 and self.capture_error is not None:
+            raise RuntimeError(
+                f"{self.harness} sandbox execution failed (exit {result.return_code}): {result.stderr or ''}"
+            ) from self.capture_error
         if self.capture_error is not None:
             raise self.capture_error
         # Collection either returned artifacts (including a valid None) or recorded an error.

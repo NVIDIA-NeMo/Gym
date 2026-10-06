@@ -17,7 +17,8 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import process_supervisor
 from nemo_gym.sandbox.session import SandboxCommand, SandboxSession
-from nemo_gym.sandbox.supervisor_client import HarnessProcessInfo
+from nemo_gym.sandbox.supervisor_client import HarnessProcessInfo, parse_runtime_info
+from nemo_gym.sandbox.utils import read_text, upload_text
 
 
 def _sandbox_hermes_install() -> tuple[str, str]:
@@ -106,12 +107,12 @@ class HermesSandboxSession(AgentSessionState):
 
     async def upload_json(self, name: str, payload: dict[str, JsonValue]) -> None:
         """Write a Hermes input under the session directory using file transfer."""
-        await self.session.sandbox.upload_text(f"{self.session.directory}/{name}", text=json.dumps(payload))
+        await upload_text(self.session.sandbox, path=f"{self.session.directory}/{name}", text=json.dumps(payload))
 
     async def read_json(self, name: str) -> dict[str, JsonValue]:
         """Read a Hermes output object without mixing it with the cleanup contract."""
         path = f"{self.session.directory}/{name}"
-        payload = json.loads(await self.session.sandbox.read_text(path))
+        payload = json.loads(await read_text(self.session.sandbox, path=path))
         if not isinstance(payload, dict):
             raise TypeError(f"Hermes sandbox payload at {path} is not an object")
         return payload
@@ -135,7 +136,7 @@ class HermesSandboxSession(AgentSessionState):
     async def execute(
         self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float
     ) -> dict[str, JsonValue]:
-        """Use the common lifecycle, then validate Hermes-specific result metadata."""
+        """Use the common lifecycle, then check the Hermes-specific result."""
         output = await self.session.execute(
             prepare=lambda: self.prepare_execution(payload),
             collect=self.collect_artifacts,
@@ -144,10 +145,6 @@ class HermesSandboxSession(AgentSessionState):
         )
         if output.get("error") is not None:
             raise RuntimeError(f"Hermes sandbox runner failed: {output['error']}\n{output.get('traceback', '')}")
-        try:
-            self.runtime_info = HarnessProcessInfo.model_validate(output.get("runtime"))
-        except ValueError as error:
-            raise RuntimeError("Hermes sandbox runner returned invalid runtime metadata") from error
         return output
 
     async def prepare_execution(self, payload: dict[str, JsonValue]) -> SandboxCommand:
@@ -167,7 +164,7 @@ class HermesSandboxSession(AgentSessionState):
     async def collect_artifacts(self) -> dict[str, JsonValue]:
         """Copy Hermes output before close removes files, including interrupted output."""
         try:
-            return await self.read_json("output.json")
+            output = await self.read_json("output.json")
         except Exception as error:
             logs = await self.session.sandbox.exec(
                 f"cat {quote(self.session.directory + '/runner.log')} 2>/dev/null || true",
@@ -175,3 +172,5 @@ class HermesSandboxSession(AgentSessionState):
                 timeout_s=30,
             )
             raise RuntimeError(f"Hermes sandbox runner exited without output: {logs.stdout or ''}") from error
+        self.runtime_info = parse_runtime_info(output.get("runtime"))
+        return output

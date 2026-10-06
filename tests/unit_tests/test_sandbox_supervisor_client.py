@@ -12,20 +12,19 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.sandbox import AsyncSandbox, process_supervisor
+from nemo_gym.sandbox import process_supervisor
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.supervisor_client import (
     HarnessProcessInfo,
     parse_cleanup_receipt,
+    parse_runtime_info,
     stop_and_confirm_cleanup,
     supervised_launch_command,
 )
+from nemo_gym.sandbox.utils import read_text, upload_text
 
 
 class LocalSandbox:
-    upload_text = AsyncSandbox.upload_text
-    read_text = AsyncSandbox.read_text
-
     async def upload(self, source, destination):
         shutil.copyfile(source, destination)
 
@@ -52,11 +51,11 @@ async def test_file_transport_keeps_contents_out_of_shell(session):
     sandbox.exec = AsyncMock(side_effect=AssertionError("file transfer must not invoke a shell"))
     path = str(directory / "input.json")
     payload = '{"prompt": "$(touch unwanted); `echo surprise`"}\n'
-    await sandbox.upload_text(path, text=payload)
+    await upload_text(sandbox, path=path, text=payload)
     assert Path(path).read_text() == payload
-    assert await sandbox.read_text(path) == payload
+    assert await read_text(sandbox, path=path) == payload
     Path(path).write_bytes(b"partial output\xff\n")
-    assert await sandbox.read_text(path) == "partial output\ufffd\n"
+    assert await read_text(sandbox, path=path) == "partial output\ufffd\n"
     sandbox.exec.assert_not_awaited()
 
 
@@ -72,6 +71,35 @@ async def test_confirmed_receipt_does_not_signal_stored_pid(session):
     sandbox.exec.assert_not_awaited()
 
 
+async def test_confirmed_receipt_with_malformed_diagnostics_still_allows_cleanup(session, caplog):
+    sandbox, directory = session
+    receipt = {"cleanup_confirmed": True, "return_code": "0", "error": {"secret": "do not log"}, "version": 2}
+    (directory / "cleanup.json").write_text(json.dumps(receipt))
+    sandbox.exec = AsyncMock(side_effect=AssertionError("must not signal a possibly reused PID"))
+    assert await stop_and_confirm_cleanup(
+        sandbox, directory=str(directory), workdir=str(directory.parent), timeout=1, harness="test"
+    ) == {"cleanup_confirmed": True, "return_code": None, "timed_out": False, "error": None}
+    assert "diagnostic fields" in caplog.text
+    assert "do not log" not in caplog.text
+    sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("receipt", [[], "stopped", None, 1])
+async def test_nonobject_cleanup_receipt_is_unconfirmed_without_signalling_a_stale_pid(session, receipt):
+    sandbox, directory = session
+    path = directory / "cleanup.json"
+    path.write_text(json.dumps(receipt))
+    (directory / "runner.pid").write_text("2147483647")
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="cleanup receipt is not a JSON object"):
+            await stop_and_confirm_cleanup(
+                sandbox, directory=str(directory), workdir=str(directory.parent), timeout=1, harness="test"
+            )
+    assert json.loads(path.read_text()) == receipt
+    assert not (directory / "runner.stop").exists()
+    assert not (directory / "launch.claim").exists()
+
+
 async def test_stop_wins_claim_and_fences_delayed_launch(session):
     sandbox, directory = session
     receipt = await stop_and_confirm_cleanup(
@@ -81,7 +109,11 @@ async def test_stop_wins_claim_and_fences_delayed_launch(session):
     assert (directory / "launch.claim").readlink() == Path("stop")
     assert (directory / "runner.stop").exists()
     command = supervised_launch_command(
-        directory=str(directory), command=["touch", str(directory / "started")], timeout=1, cleanup_timeout=1
+        directory=str(directory),
+        command=["touch", str(directory / "started")],
+        timeout=1,
+        cleanup_timeout=1,
+        python=sys.executable,
     )
     assert (await sandbox.exec(command)).return_code == 0
     assert not (directory / "runner.pid").exists()
@@ -106,13 +138,13 @@ async def test_missing_receipt_after_launch_is_not_cleanup_confirmation(session)
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
 @pytest.mark.parametrize("private_runtime", [False, True])
-async def test_launch_supervises_worker_with_default_or_private_runtime(session, tmp_path, private_runtime):
+async def test_launch_supervises_worker_with_selected_or_private_runtime(session, tmp_path, private_runtime):
     sandbox, directory = session
     runtime = tmp_path / "runtime's files"
     runtime.mkdir()
     supervisor = (runtime if private_runtime else directory) / "process_supervisor.py"
     shutil.copyfile(process_supervisor.__file__, supervisor)
-    options = {}
+    options = {"python": sys.executable}
     if private_runtime:
         python = runtime / "python interpreter"
         python.symlink_to(sys.executable)
@@ -162,30 +194,42 @@ def test_cleanup_and_runtime_are_independent():
     runtime = HarnessProcessInfo.model_validate({"hostname": "sandbox", "pid": 123})
     assert runtime.hostname == "sandbox" and runtime.pid == 123
     assert runtime.python is None
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValueError, match="cleanup was not confirmed"):
         parse_cleanup_receipt(runtime.model_dump())
     with pytest.raises(ValidationError):
         HarnessProcessInfo.model_validate(cleanup)
-    for field in cleanup:
-        with pytest.raises(ValidationError):
-            parse_cleanup_receipt({key: value for key, value in cleanup.items() if key != field})
 
 
 @pytest.mark.parametrize(
-    "invalid", [{"return_code": "0"}, {"timed_out": "false"}, {"cleanup_confirmed": 1}, {"hostname": "worker"}]
+    "invalid,normalized",
+    [
+        ({"return_code": "0"}, {"return_code": None}),
+        ({"return_code": True}, {"return_code": None}),
+        ({"timed_out": "false"}, {"timed_out": False}),
+        ({"error": {"message": "failed"}}, {"error": None}),
+        ({"hostname": "worker"}, {}),
+    ],
 )
-def test_cleanup_receipt_keeps_strict_validation(invalid):
-    with pytest.raises(ValidationError):
-        parse_cleanup_receipt(
-            {"return_code": 0, "timed_out": False, "cleanup_confirmed": True, "error": None, **invalid}
-        )
+def test_confirmed_cleanup_keeps_valid_diagnostics_and_ignores_malformed_fields(invalid, normalized):
+    cleanup = {"return_code": 0, "timed_out": False, "cleanup_confirmed": True, "error": None}
+    assert parse_cleanup_receipt(cleanup | invalid) == cleanup | normalized
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [None, [], "true", {}, {"cleanup_confirmed": False}, {"cleanup_confirmed": "true"}, {"cleanup_confirmed": 1}],
+)
+def test_cleanup_receipt_requires_positive_boolean_evidence(payload):
+    with pytest.raises(ValueError, match="cleanup was not confirmed"):
+        parse_cleanup_receipt(payload)
 
 
 def test_absent_exit_code_is_not_success():
     full = {"return_code": None, "timed_out": False, "cleanup_confirmed": True, "error": None}
     assert parse_cleanup_receipt(full) == full
     assert parse_cleanup_receipt({"cleanup_confirmed": True, "error": None}) == full
-    with pytest.raises(ValidationError):
+    assert parse_cleanup_receipt({"cleanup_confirmed": True}) == full
+    with pytest.raises(ValueError, match="cleanup was not confirmed"):
         parse_cleanup_receipt({"return_code": 0, "error": None})
 
 
@@ -195,9 +239,26 @@ def test_runtime_info_keeps_strict_validation(invalid):
         HarnessProcessInfo.model_validate({"hostname": "sandbox", "pid": 123, **invalid})
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        {},
+        {"hostname": "sandbox", "pid": "123"},
+        {"hostname": "sandbox", "pid": 123, "python": {"secret": "do not log"}},
+    ],
+)
+def test_malformed_runtime_info_is_optional_and_logs_without_payload(payload, caplog):
+    assert parse_runtime_info(payload) is None
+    assert "runtime metadata" in caplog.text
+    assert "do not log" not in caplog.text
+
+
 def test_hermes_runtime_uses_the_same_schema():
     payload = {"hostname": "sandbox", "pid": 123, "python": "/opt/hermes/bin/python"}
     assert HarnessProcessInfo.model_validate(payload).model_dump() == payload
+    assert parse_runtime_info(payload).model_dump() == payload
     for field in ("hostname", "pid"):
         with pytest.raises(ValidationError):
             HarnessProcessInfo.model_validate({key: value for key, value in payload.items() if key != field})

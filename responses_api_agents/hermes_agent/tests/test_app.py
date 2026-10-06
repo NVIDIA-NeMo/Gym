@@ -15,7 +15,7 @@
 import asyncio
 import json
 from pathlib import Path
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -39,7 +39,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec
+from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.session import SandboxSession
 from nemo_gym.server_utils import ServerClient
@@ -134,7 +134,7 @@ class TestSanity:
         monkeypatch.setattr("responses_api_agents.hermes_agent.sandbox.shutil.which", lambda name: "/test/uv")
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.get_global_config_dict",
-            lambda: {"runtime": {"hostname": "sandbox", "pid": 123}},
+            lambda: {"runtime": {}},
         )
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", resolve)
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: provider)
@@ -158,7 +158,7 @@ class TestSanity:
             ),
         )
 
-        resolve.assert_called_once_with("runtime", {"runtime": {"hostname": "sandbox", "pid": 123}})
+        resolve.assert_called_once_with("runtime", {"runtime": {}})
         connect.assert_awaited_once_with(
             {"sandbox_id": "sandbox"},
             provider=provider,
@@ -188,7 +188,7 @@ class TestSanity:
         sandbox.exec.side_effect = exec_
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.get_global_config_dict",
-            lambda: {"runtime": {"hostname": "sandbox", "pid": 123}},
+            lambda: {"runtime": {}},
         )
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", MagicMock())
         monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: AsyncMock())
@@ -233,7 +233,7 @@ class TestSanity:
         sandbox_factory = MagicMock(return_value=sandbox)
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.get_global_config_dict",
-            lambda: {"runtime": {"hostname": "sandbox", "pid": 123}},
+            lambda: {"runtime": {}},
         )
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.resolve_provider_config",
@@ -398,20 +398,24 @@ class TestSanity:
             session={"agent_session_id": "session"},
             path_params={"rollout_id": seed.episode_id.capture_key},
         )
-        sandbox.upload_text = MethodType(AsyncSandbox.upload_text, sandbox)
+        original_download = sandbox.download
 
-        async def read_text(remote_path):
+        async def download(remote_path, local_path):
             if remote_path.endswith("/cleanup.json"):
                 commands = getattr(sandbox, "commands", None)
-                return json.dumps(
-                    {
-                        "cleanup_confirmed": commands is None or any("kill -TERM" in cmd for cmd in commands),
-                        "error": None,
-                    }
+                Path(local_path).write_text(
+                    json.dumps(
+                        {
+                            "cleanup_confirmed": commands is None or any("kill -TERM" in cmd for cmd in commands),
+                            "error": None,
+                        }
+                    ),
+                    encoding="utf-8",
                 )
-            return await AsyncSandbox.read_text(sandbox, remote_path)
+            else:
+                await original_download(remote_path, local_path)
 
-        sandbox.read_text = AsyncMock(side_effect=read_text)
+        sandbox.download = AsyncMock(side_effect=download)
         return hermes, request, seed
 
     async def test_sandbox_activation_calls_the_model_server_directly(self, monkeypatch) -> None:
@@ -537,6 +541,9 @@ class TestSanity:
 
             async def disconnect(self) -> None:
                 pass
+
+            async def download(self, remote_path, local_path) -> None:
+                raise FileNotFoundError("worker was interrupted")
 
             # Mirrors AsyncSandbox.exec so an unsupported argument fails here too.
             async def exec(
