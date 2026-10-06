@@ -26,3 +26,25 @@ jobs:
       PAT: ${{ secrets.PAT }}
       SLACK_WEBHOOK_ADMIN: ${{ secrets.SLACK_WEBHOOK_ADMIN }}
       SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+
+  # SLACK_TEAM_CHANNEL_WEBHOOK is an environment secret, and a job that calls a
+  # reusable workflow cannot set `environment`, so alert from a separate job.
+  notify-failure:
+    name: Notify cherry-pick failure
+    needs: cherry-pick
+    if: ${{ always() && needs.cherry-pick.result == 'failure' }}
+    runs-on: ubuntu-latest
+    environment: main
+    steps:
+      - name: Notify Gym alerts channel
+        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@f07495d7a01aad5578a407db8e0c4f4e395375f6 # v1.9.1
+        with:
+          webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
+          message: |
+            :rotating_light: Release cherry-pick failed after merge to ${{ github.ref_name }}
+
+            • Repository: ${{ github.repository }}
+            • Commit: `${{ github.sha }}`
+            • Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>
+
+            A release-labeled PR likely conflicted with its release branch. Resolve manually and open the cp: PR by hand.
