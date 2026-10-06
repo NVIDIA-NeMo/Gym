@@ -112,6 +112,11 @@ Every acquired provider session is released exactly once — including when the
 CDP connect fails after the session was created, and however often `close()` is
 called (`tests/test_registry_and_sessions.py`).
 
+A session seeded by an Environment Server carries its episode (`rollout_id`,
+`attempt`) to the provider as session metadata, and `remote_cdp` logs the
+provider's session id next to it when the session is acquired. That log line is
+the join between a provider-side session and the rollout record that held it.
+
 ## Run
 
 ### 1. Backend contract tests (no GPU, no Gym serving stack)

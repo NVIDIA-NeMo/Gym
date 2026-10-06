@@ -246,7 +246,10 @@ class NeMoGymResponseReasoningItem(BaseModel):
 
 class NeMoGymResponseOutputText(BaseModel):
     # Override the Iterable to avoid lazy iterators in Pydantic validation.
-    annotations: List[Annotation]
+    # The default is the empty list because a client that replays an output message it received
+    # may omit `annotations` (the Responses API accepts that on input, and the Codex CLI does it).
+    # Gym still emits `[]` on output.
+    annotations: List[Annotation] = Field(default_factory=list)
     text: str
     type: Literal["output_text"] = "output_text"
     logprobs: Optional[List[Logprob]] = None

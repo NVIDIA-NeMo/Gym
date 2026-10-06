@@ -385,19 +385,31 @@ def _parse_opencode_session(
     )
 
 
-def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
-    """Convert an OpenCode session database into the existing Gym response shape."""
+def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) -> tuple[list[Any], dict[str, int]]:
+    """Convert an OpenCode session database into the existing Gym response shape.
+
+    ``root_session_only`` restricts the transcript to sessions without a
+    parent: a sub-agent spawned by the ``task`` tool runs in its own session
+    (stored with ``parent_id``), and its parts would otherwise interleave with
+    the root conversation. Parts are ordered by creation time and then id,
+    OpenCode's own order, because parallel tool parts can share a creation
+    millisecond.
+    """
     output_items: list[Any] = []
     input_tokens = 0
     output_tokens = 0
     if not db_path.is_file():
         return output_items, {"input_tokens": 0, "output_tokens": 0}
 
+    scope = " where session_id in (select id from session where parent_id is null)" if root_session_only else ""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
-        roles = {row["id"]: _load_json(row["data"]).get("role") for row in con.execute("select id, data from message")}
-        rows = con.execute("select message_id, data from part order by time_created").fetchall()
+        roles = {
+            row["id"]: _load_json(row["data"]).get("role")
+            for row in con.execute(f"select id, data from message{scope}")
+        }
+        rows = con.execute(f"select message_id, data from part{scope} order by time_created, id").fetchall()
     finally:
         con.close()
 
@@ -424,6 +436,10 @@ def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
             call_id = part.get("callID") or f"call-{uuid4().hex[:8]}"
             tool_input = state.get("input") or {}
             arguments = json.dumps(tool_input) if isinstance(tool_input, (dict, list)) else str(tool_input)
+            # A call OpenCode recorded as errored or aborted carries its error
+            # text in place of an output; the transcript keeps that outcome.
+            status = "completed" if state.get("status") in (None, "completed") else "incomplete"
+            result = state.get("output") if state.get("output") is not None else state.get("error")
             output_items.append(
                 NeMoGymResponseFunctionToolCall(
                     arguments=arguments,
@@ -431,16 +447,16 @@ def parse_opencode_session(db_path: Path) -> tuple[list[Any], dict[str, int]]:
                     name=part.get("tool", ""),
                     type="function_call",
                     id=call_id,
-                    status="completed",
+                    status=status,
                 )
             )
-            if state.get("output") is not None:
+            if result is not None:
                 output_items.append(
                     NeMoGymFunctionCallOutput(
                         type="function_call_output",
                         call_id=call_id,
-                        output=str(state["output"]),
-                        status="completed",
+                        output=str(result),
+                        status=status,
                     )
                 )
 
@@ -545,10 +561,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         return base
 
     def _workspace_root(self) -> Path:
-        root = Path(self.config.workspace_root).expanduser() / f"opencode_{uuid4().hex[:8]}"
+        """Create a fresh per-rollout workspace directory and return it.
+
+        The full uuid plus exist_ok=False: a name collision must fail this
+        rollout loudly rather than silently merge two live rollouts' trees.
+        """
+        root = Path(self.config.workspace_root).expanduser() / f"opencode_{uuid4().hex}"
         if not root.is_absolute():
             root = Path.cwd() / root
-        root.mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=False)
         return root
 
     def _repo_dir(self, fallback: Path) -> Path:

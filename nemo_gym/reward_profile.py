@@ -21,14 +21,17 @@ import warnings
 from collections import Counter, defaultdict
 from numbers import Real
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import orjson
 from pandas import DataFrame, Series, notna
 from pandas.core.groupby.generic import DataFrameGroupBy
 from pydantic import Field
 from scipy import stats
-from wandb import Histogram
+
+
+if TYPE_CHECKING:
+    from wandb import Histogram
 
 from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
@@ -175,11 +178,27 @@ class RewardProfiler:
 
         return rollout_info
 
-    def histogram(self, data: Series) -> Optional[Histogram]:
+    def histogram(self, data: Series) -> Optional["Histogram"]:
         # W&B doesn't accept empty histograms
         data = data.dropna()
         if data.empty:
             return
+
+        # wandb is an optional extra (`nemo-gym[wandb]`). This stat is always dropped by
+        # prepare_for_serialization before it reaches any JSON output or exporter (it exists
+        # only for a wandb-native run that reads group_level_metrics/agent_metrics directly),
+        # so skipping it when wandb isn't installed changes nothing observable.
+        try:
+            from wandb import Histogram
+        except ImportError:
+            # warnings.warn's default filter shows this once per (module, lineno), so it
+            # doesn't spam once per column per describe_dataframe call.
+            warnings.warn(
+                "wandb is not installed, so the histogram/* stats are being skipped. "
+                "Install with: pip install nemo-gym[wandb]",
+                stacklevel=2,
+            )
+            return None
 
         return Histogram(data)
 
@@ -708,7 +727,9 @@ def compute_subset_metrics(
     """
     subsets: Dict[str, List[List[Dict[str, Any]]]] = {}
     for task_rollouts in tasks:
-        value = task_rollouts[0].get(subset_key) if task_rollouts else None
+        # The first rollout that has it: a row counted as zero for a rollout that never ran can
+        # come first in its task and lack the fields its verifier would have computed.
+        value = next((rollout[subset_key] for rollout in task_rollouts if rollout.get(subset_key)), None)
         if value:
             subsets.setdefault(value, []).append(task_rollouts)
 

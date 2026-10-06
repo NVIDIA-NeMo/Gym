@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import bisect
+import functools
 import glob as glob_module
 import json
 import logging
@@ -22,7 +23,7 @@ import tempfile
 import time
 import warnings
 from asyncio import Future, Semaphore
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from collections.abc import Mapping
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ from datetime import timedelta
 from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from aiohttp import ClientError
@@ -46,6 +47,7 @@ from nemo_gym.base_responses_api_model import (
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
 )
+from nemo_gym.batch_status import AGGREGATION_ERROR_KEY, BatchStatusTracker
 from nemo_gym.config_types import (
     AgentWithoutEnvironmentServerError,
     AmbiguousEnvironmentServerError,
@@ -79,7 +81,7 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
+from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, materialized_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -113,6 +115,7 @@ from nemo_gym.token_id_capture import (
     TokenIdCaptureConfig,
     clear_token_captures_for_rollouts,
     installed_token_source,
+    mask_incomplete_when_attributed_from_config,
     token_id_capture_dirs_from_config,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
@@ -383,6 +386,40 @@ class _CompletedRollout:
     environment_server_type: Optional[str] = None
 
 
+def _round_robin_by_agent(examples: List[Dict]) -> List[Dict]:
+    """Interleave resolved rows by environment server or agent, preserving each input order.
+
+    Agent order is the order in which each name first appears. Rows are returned unchanged, so
+    task/rollout indexes, repeat seeds, and the identities used by resume remain intact.
+    """
+    queues: Dict[str, deque[Dict]] = {}
+    for row in examples:
+        dispatch_name = RolloutCollectionHelper._dispatch_name(row)
+        queues.setdefault(dispatch_name, deque()).append(row)
+
+    interleaved: List[Dict] = []
+    while queues:
+        for agent_name in list(queues):
+            interleaved.append(queues[agent_name].popleft())
+            if not queues[agent_name]:
+                del queues[agent_name]
+    return interleaved
+
+
+def _batch_status_row(result: Dict, agent_refs_by_key: Dict[Tuple[int, int], Dict]) -> Dict:
+    """Keep status identities and failure classes without retaining rollout payloads."""
+    status_row = {
+        key: result[key]
+        for key in (AGENT_REF_KEY_NAME, TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, NG_FAILURE_CLASS_KEY)
+        if key in result
+    }
+    if AGENT_REF_KEY_NAME not in status_row:
+        key = (result.get(TASK_INDEX_KEY_NAME), result.get(ROLLOUT_INDEX_KEY_NAME))
+        if key in agent_refs_by_key:
+            status_row[AGENT_REF_KEY_NAME] = agent_refs_by_key[key]
+    return status_row
+
+
 def _nonnegative_int(value: Any) -> Optional[int]:
     return value if type(value) is int and value >= 0 else None
 
@@ -504,10 +541,12 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     tools: list[TrajectoryToolCall] = []
     model_calls: list[TrajectoryModelCall] = []
 
+    producer_turns_observed = False
     raw_trajectory = result.get(NG_TRAJECTORY_KEY)
     if isinstance(raw_trajectory, dict):
         try:
             trajectory = TrajectoryRecord.model_validate(raw_trajectory)
+            producer_turns_observed = True
             mismatches = [
                 field
                 for field, producer, canonical in (
@@ -645,7 +684,11 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         turns = _turns_from_model_calls(task_id, rollout_id, invocations, model_calls, result.get("resolved"))
     if not model_calls:
         gaps.append(ObservationGap(code="model_calls_unavailable"))
-    if not turns:
+    if not turns and not producer_turns_observed:
+        # A producer that published a trajectory and reported no turns has told
+        # us something; only the absence of a producer leaves turns unavailable.
+        # Without this, `rollout_missing_agent_turns` is skipped in exactly the
+        # case it exists to catch.
         gaps.append(ObservationGap(code="turns_unavailable"))
     if not any(invocation.conversation for invocation in invocations):
         gaps.append(ObservationGap(code="conversation_unavailable"))
@@ -922,6 +965,13 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
 
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
+    batch_manifest_fpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional Eval Factory batch_manifest.json. Gym validates it against materialized inputs and writes "
+            "batch_status.json alongside it."
+        ),
+    )
     require_complete: bool = Field(
         default=False, description="Fail on missing rollouts; enabled by default by eval submit."
     )
@@ -986,6 +1036,27 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
             "Failure classes from the failures sidecar to count in aggregate metrics, e.g. "
             "['agent_run_error'], so a failed rollout lands in the denominator. A row that carries "
             "no reward is scored zero for the metrics only; no artifact is changed."
+        ),
+    )
+
+    count_missing_rollouts_as_zero: bool = Field(
+        default=False,
+        description=(
+            "Count a materialized rollout that produced no row at all as a zero in aggregate "
+            "metrics. Covers what the failure classes cannot: a rollout killed mid-flight leaves "
+            "nothing in either file, so without this it leaves the denominator too and the score "
+            "reads higher than the run earned. A row dispatch_budget_s never started leaves nothing "
+            "either and is counted the same way: resume_from_cache still dispatches it, and the "
+            "resumed run scores it. Scores the metrics only; no artifact is changed. With "
+            "disable_aggregation this run scores nothing, so a run with no row still fails. "
+            "Off by default. Needs the run's materialized inputs; a shard without them is warned "
+            "about and skipped. A rollout recorded in the failures sidecar is never counted here, "
+            "whatever its class, so this does not override count_failure_classes_as_zero. The "
+            "count is reported separately as coverage/imputed. Known limitation, shared with "
+            "count_failure_classes_as_zero: the added row carries its task's dataset fields, but no "
+            "response and no field its verifier would have computed, so a benchmark metric hook "
+            "that needs those cannot score it, and a few score it as a measurement instead of "
+            "skipping it."
         ),
     )
 
@@ -1127,6 +1198,17 @@ class DispatchLatencyTracker:
         if seconds > 0:
             bisect.insort(self._durations, seconds)
 
+    def record_failure(self, seconds: float) -> None:
+        """Record a failed attempt only when it ran at least as long as the median so far.
+
+        A task that timed out or died late shows how long tasks can run, so it can raise the
+        drain margin. One that failed at once says nothing about duration and would drag the
+        p75 toward zero, so it is ignored, as is any failure before a real completion exists.
+        """
+        median = self.quantile(0.5)
+        if median is not None and seconds >= median:
+            self.record(seconds)
+
     def record_drained(self) -> None:
         self._drained += 1
 
@@ -1161,12 +1243,12 @@ class DispatchLatencyTracker:
         else:
             total = sum(self._durations)
             lines = [
-                f"Per-task latency over {len(self._durations)} completed rollout(s): "
+                f"Per-task latency over {len(self._durations)} finished attempt(s): "
                 f"median {self.quantile(0.5) / 60:.1f} min, "
                 f"p90 {self.quantile(0.9) / 60:.1f} min, "
                 f"p99 {self.quantile(0.99) / 60:.1f} min, "
                 f"max {max(self._durations) / 60:.1f} min",
-                f"Task-time delivered: {total / 3600:.1f} task-hours",
+                f"Task-time observed: {total / 3600:.1f} task-hours",
             ]
         if self._drained:
             lines.append(
@@ -1424,9 +1506,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             "Useful for mean@k."
         ),
     )
-    num_repeats_add_seed: bool = Field(
+    num_repeats_add_seed: Union[bool, Dict[str, bool]] = Field(
         default=False,
-        description='When num_repeats > 1, pass a per-rollout "seed" via metadata.extra_body (honored by vLLM model servers).',
+        description=(
+            'Whether to pass a per-rollout "seed" via metadata.extra_body (honored by vLLM model servers). '
+            "Either a bool applied to every row or a dict with the same dispatched-agent/original-routing-key "
+            "lookup and _default fallback semantics as num_repeats."
+        ),
     )
     interleave_repeats: bool = Field(
         default=False,
@@ -1485,9 +1571,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     @model_validator(mode="after")
     def _validate_dispatch_concurrency(self) -> "RolloutCollectionConfig":
-        if self.dispatch_budget_s is not None and self.num_samples_in_parallel is None:
+        if (
+            self.dispatch_budget_s is not None
+            and self.num_samples_in_parallel is None
+            and self.max_resident_rollout_tasks is None
+        ):
             raise ValueError(
-                "dispatch_budget_s requires a finite positive num_samples_in_parallel; "
+                "dispatch_budget_s requires num_samples_in_parallel or max_resident_rollout_tasks; "
                 "unbounded dispatch can POST the entire queue before the budget is re-checked"
             )
         return self
@@ -1510,8 +1600,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     @property
     def materialized_jsonl_fpath(self) -> Path:
-        output_fpath = Path(self.output_jsonl_fpath)
-        return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+        return materialized_path_for(Path(self.output_jsonl_fpath))
 
     dispatch_budget_s: Optional[float] = Field(
         default=None,
@@ -1621,6 +1710,44 @@ def _truncated_body(body: Optional[bytes]) -> Optional[str]:
     return text[:_MAX_FAILURE_BODY_CHARS] + ("…" if len(body) > _MAX_FAILURE_BODY_CHARS else "")
 
 
+def _aggregation_error_entry(
+    agent_name: str, exc: BaseException, response_status: Optional[int] = None
+) -> Dict[str, Any]:
+    """Build the metrics-file placeholder for one agent whose aggregation failed."""
+    message = str(exc) or repr(exc)
+    if len(message) > _MAX_FAILURE_BODY_CHARS:
+        message = message[:_MAX_FAILURE_BODY_CHARS] + "…"
+    return {
+        AGENT_REF_KEY_NAME: {"name": agent_name},
+        "agent_metrics": {},
+        "key_metrics": {},
+        "group_level_metrics": [],
+        "repeat_level_metrics": [],
+        AGGREGATION_ERROR_KEY: {
+            "type": type(exc).__name__,
+            "message": message,
+            "http_status": getattr(exc, "status", None) or response_status,
+        },
+    }
+
+
+def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
+    """Signal failure after partial metrics and any batch status have been saved."""
+    if metrics_fpath is None:
+        return
+    failed_agents = sorted(
+        entry[AGENT_REF_KEY_NAME]["name"]
+        for entry in orjson.loads(metrics_fpath.read_bytes())
+        if AGGREGATION_ERROR_KEY in entry
+    )
+    if failed_agents:
+        raise RuntimeError(
+            f"Aggregation failed for agents: {', '.join(failed_agents)}. "
+            f"Metrics and error details were saved to {metrics_fpath}. "
+            "Retry with `gym eval aggregate` after resolving the aggregation errors."
+        )
+
+
 def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], Dict[str, Any]]:
     """The last attempt recorded for each rollout across the failures sidecars."""
     latest_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
@@ -1656,22 +1783,158 @@ def _failure_rows_counted_as_zero(
 
     latest_by_key = _latest_failure_rows(failures_fpaths)
     wanted = set(failure_classes)
-    counted = []
-    for key, row in latest_by_key.items():
-        if key in scored_keys or row.get(NG_FAILURE_CLASS_KEY) not in wanted:
+    return [
+        _counted_failure_row(row)
+        for key, row in latest_by_key.items()
+        if key not in scored_keys and row.get(NG_FAILURE_CLASS_KEY) in wanted
+    ]
+
+
+def _counted_failure_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """The metric-input copy of a sidecar row counted as zero."""
+    # Diagnostics stay in the sidecar: an HTTP status is a number, and the aggregator
+    # averages every number it is handed.
+    scored = {
+        k: v
+        for k, v in row.items()
+        if not k.startswith("_ng_failure_") and k not in ("failure_kind", "failure_reason")
+    }
+    # This metrics-only copy honors the explicit denominator policy. The original
+    # answer, failure diagnostics, and training mask remain untouched in the sidecar.
+    scored["mask_sample"] = False
+    scored.setdefault("reward", 0.0)
+    return scored
+
+
+def _rollout_order_key(row: Dict[str, Any]) -> tuple:
+    """Task then repeat: metrics that read a task's repeats positionally need that order."""
+    return (row.get(TASK_INDEX_KEY_NAME) or 0, row.get(ROLLOUT_INDEX_KEY_NAME) or 0)
+
+
+def _routing_identity(row: Mapping[str, Any]) -> Optional[str]:
+    """The agent a rollout ran on, or for a native taskset row, which names none, its environment server.
+
+    A materialized row, its result and its sidecar row all name the same one.
+    """
+    return (row.get(AGENT_REF_KEY_NAME) or {}).get("name") or row.get(NG_ENVIRONMENT_SERVER_KEY)
+
+
+def _metrics_group(row: Mapping[str, Any], servers_by_agent: Callable[[], Mapping[str, list[str]]]) -> Optional[str]:
+    """The environment server a rollout is scored under, as `_call_aggregate_metrics` groups it.
+
+    The row's stamp, else the one server that fronts its agent, looked up only for an unstamped
+    row: a materialized row routed by its agent has no stamp while its result has one, and both
+    must land in the same group. Runs of one agent behind two servers stay apart this way. An agent
+    behind no server or several stays its own group; `_call_aggregate_metrics` rejects such a row.
+    """
+    stamp = row.get(NG_ENVIRONMENT_SERVER_KEY)
+    if isinstance(stamp, str):
+        return stamp
+    agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+    servers = servers_by_agent().get(agent_name, []) if agent_name else []
+    return servers[0] if len(servers) == 1 else agent_name
+
+
+def _identity_key(row: Mapping[str, Any], group: Callable[[Mapping[str, Any]], Optional[str]]) -> tuple:
+    """A rollout's key across runs, which each number their tasks from 0."""
+    return (group(row), row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
+
+
+def _fill_task_fields(
+    added_rows: List[Dict[str, Any]],
+    real_rows: List[Dict[str, Any]],
+    materialized_fpaths: List[Path],
+    group: Callable[[Mapping[str, Any]], Optional[str]],
+) -> None:
+    """Give the rows the metric input adds, counted failures and imputed zeros, their task's dataset fields.
+
+    Rows are ordered by repeat, so an added row can come first in its task, and metric hooks read
+    task-level fields such as a subset label or a weight from a task's first rollout. The fields come
+    from the task's materialized row, and only those that real rows of the same group carry: the
+    aggregator averages every number it is handed, so a field no real row reports would become a
+    metric of its own. A field the verifier computes is not in the materialized row, so the added row
+    lacks it.
+    """
+    wanted = {_identity_key(row, group): row for row in added_rows}
+    if not wanted:
+        return
+    carried: Dict[Optional[str], set] = defaultdict(set)
+    for row in real_rows:
+        carried[group(row)].update(row)
+    for materialized_fpath in materialized_fpaths:
+        if not materialized_fpath.exists():
             continue
-        # Diagnostics stay in the sidecar: an HTTP status is a number, and the aggregator
-        # averages every number it is handed.
-        scored = {
-            k: v
-            for k, v in row.items()
-            if not k.startswith("_ng_failure_") and k not in ("failure_kind", "failure_reason")
-        }
-        # This metrics-only copy honors the explicit denominator policy. The original
-        # answer, failure diagnostics, and training mask remain untouched in the sidecar.
-        scored["mask_sample"] = False
-        scored.setdefault("reward", 0.0)
-        counted.append(scored)
+        with open(materialized_fpath, "rb") as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                source = loads_jsonl_line(line, materialized_fpath, line_no)
+                target = wanted.get(_identity_key(source, group))
+                if target is None:
+                    continue
+                for key in carried[group(source)] & source.keys():
+                    if not key.startswith("_") and key not in (RESPONSES_CREATE_PARAMS_KEY_NAME, "response"):
+                        target.setdefault(key, source[key])
+
+
+def _missing_rollout_rows_counted_as_zero(
+    materialized_fpaths: List[Path], failures_fpaths: List[Path], scored_keys: set
+) -> List[Dict[str, Any]]:
+    """Materialized rollouts that produced no row anywhere, counted as zeros.
+
+    The failure classes reach a rollout that failed and said so. This reaches the one that never
+    got that far -- killed mid-flight, or dispatched and lost -- which leaves nothing in the
+    rollouts jsonl and nothing in the sidecar. Without it such a rollout leaves the denominator as
+    well as the numerator, so the score reads higher the more of the run went missing.
+
+    The sidecar is read here rather than trusted from the caller. A failure whose class the caller
+    left out of ``count_failure_classes_as_zero`` is absent from the scored keys, and counting it
+    here would score the very rollouts that selection excluded -- silently turning the selection
+    into a no-op.
+
+    The zero carries the rollout's identity: its agent, and its environment server stamp when the
+    row has one, which a native taskset row needs because it names no agent. `_fill_task_fields`
+    adds the task's dataset fields. A row that names neither cannot reach any server's metrics, so
+    it is warned about rather than counted. The score enters the metric input and nothing else, the
+    same way a counted failure row does.
+    """
+    recorded_failures = set(_latest_failure_rows(failures_fpaths))
+    counted = []
+    unroutable = 0
+    for materialized_fpath in materialized_fpaths:
+        if not materialized_fpath.exists():
+            # Without the inventory there is nothing to compare the rollouts against, so the
+            # option silently does nothing for this shard -- which is the very shape of run it
+            # exists to expose.
+            print(f"[WARNING] {materialized_fpath} is missing; rollouts owed by that shard cannot be counted")
+            continue
+        with open(materialized_fpath, "rb") as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                row = loads_jsonl_line(line, materialized_fpath, line_no)
+                key = (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
+                if key in scored_keys or key in recorded_failures:
+                    continue
+                if _routing_identity(row) is None:
+                    unroutable += 1
+                    continue
+                scored_keys.add(key)
+                zero = {
+                    TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
+                    ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+                    AGENT_REF_KEY_NAME: row.get(AGENT_REF_KEY_NAME),
+                    "reward": 0.0,
+                }
+                if NG_ENVIRONMENT_SERVER_KEY in row:
+                    zero[NG_ENVIRONMENT_SERVER_KEY] = row[NG_ENVIRONMENT_SERVER_KEY]
+                counted.append(zero)
+    if unroutable:
+        print(
+            f"[WARNING] {unroutable} materialized rollout(s) name no agent or environment server and are not counted"
+        )
     return counted
 
 
@@ -1680,21 +1943,27 @@ def _read_jsonl(path: Path) -> List[Dict]:
         return [orjson.loads(line) for line in f if line.strip()]
 
 
-def _coverage_report(expected: int, scored: int, failure_counts: Counter, failures_hint: Any) -> str:
+def _coverage_report(
+    expected: int, scored: int, failure_counts: Counter, failures_hint: Any, *, imputed: int = 0
+) -> str:
     """State how much of the input the score covers, for the runs where it is not all of it.
 
     Silence here is what makes a partial run look complete, so this reports against the
-    materialized input rather than the rollouts one hop happened to dispatch.
+    materialized input rather than the rollouts one hop happened to dispatch, and names the
+    rollouts that are in the score only as imputed zeros.
     """
+    report = ""
     missing = expected - scored
-    if missing <= 0:
-        return ""
-    routed = ", ".join(f"{count} {name}" for name, count in sorted(failure_counts.items()))
-    routed = f"{routed} routed this run; " if routed else ""
-    return (
-        f"\nRollouts missing from the score: {missing} of {expected} materialized ({routed}see {failures_hint})"
-        f"\nMetrics cover: {scored} of {expected} rollouts"
-    )
+    if missing > 0:
+        routed = ", ".join(f"{count} {name}" for name, count in sorted(failure_counts.items()))
+        routed = f"{routed} routed this run; " if routed else ""
+        report = (
+            f"\nRollouts missing from the score: {missing} of {expected} materialized ({routed}see {failures_hint})"
+            f"\nMetrics cover: {scored} of {expected} rollouts"
+        )
+    if imputed:
+        report += f"\nScored as zero because they left no row: {imputed} of {expected} rollouts"
+    return report
 
 
 class _BoundedCompletionIterator:
@@ -1836,7 +2105,7 @@ class RolloutCollectionHelper(BaseModel):
         agent_map: Optional[Dict[str, str]] = None,
         fan_out: Optional[Dict[str, List[str]]] = None,
         num_repeats: Union[int, Dict[str, int]] = 1,
-        num_repeats_add_seed: bool = False,
+        num_repeats_add_seed: Union[bool, Dict[str, bool]] = False,
         global_config_dict: Optional[DictConfig] = None,
     ) -> List[Dict]:
         """Apply run-level routing and repetition to caller-held rows.
@@ -1870,7 +2139,17 @@ class RolloutCollectionHelper(BaseModel):
 
     @staticmethod
     def _preprocess_raw_rows(raw_rows: List[Tuple[int, str, Dict]], config: RolloutCollectionConfig) -> List[Dict]:
-        if config.num_repeats_add_seed:
+        if isinstance(config.num_repeats_add_seed, bool):
+            fixed_add_seed: Optional[bool] = config.num_repeats_add_seed
+            per_agent_add_seed: Dict[str, bool] = {}
+            default_add_seed: Optional[bool] = None
+        else:
+            fixed_add_seed = None
+            per_agent_add_seed = {k: v for k, v in config.num_repeats_add_seed.items() if k != "_default"}
+            default_add_seed = config.num_repeats_add_seed.get("_default")
+            print(f"Per-agent num_repeats_add_seed: {dict(config.num_repeats_add_seed)}")
+
+        if fixed_add_seed:
             print(
                 "Adding unique `seed` values to each input via metadata.extra_body (only honored by vLLM model servers)"
             )
@@ -1914,6 +2193,7 @@ class RolloutCollectionHelper(BaseModel):
         task_idx_to_rollout_idx: Dict[int, int] = Counter()
         row_idxs_missing_agent_ref: List[int] = []
         agents_missing_from_num_repeats: set[str] = set()
+        agents_missing_from_seed_policy: set[str] = set()
         rows: List[Dict] = []
         overridden_agents: set[Tuple[str, str]] = set()
         for row_idx, row_str, row in tqdm(raw_rows, desc="Preprocessing and repeating rows"):
@@ -1966,10 +2246,6 @@ class RolloutCollectionHelper(BaseModel):
                     raise ValueError("responses_create_params overrides are not supported for materialized task rows")
                 if skills_ref_dict is not None:
                     raise ValueError("run-level skills are not supported for materialized task rows")
-                if config.num_repeats_add_seed:
-                    # The seed is written into the top-level responses_create_params, which a
-                    # materialized row keeps under task_input; the planner does not modify task_input.
-                    raise ValueError("num_repeats_add_seed is not supported for materialized task rows")
             else:
                 row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
                     row[RESPONSES_CREATE_PARAMS_KEY_NAME] | responses_create_params_overrides
@@ -2008,6 +2284,21 @@ class RolloutCollectionHelper(BaseModel):
                     agents_missing_from_num_repeats.add(" / ".join(repeat_keys))
                     continue
 
+                if fixed_add_seed is not None:
+                    row_add_seed = fixed_add_seed
+                elif (seed_matched := next((k for k in repeat_keys if k in per_agent_add_seed), None)) is not None:
+                    row_add_seed = per_agent_add_seed[seed_matched]
+                elif default_add_seed is not None:
+                    row_add_seed = default_add_seed
+                else:
+                    agents_missing_from_seed_policy.add(" / ".join(repeat_keys))
+                    continue
+
+                if taskset is not None and row_add_seed:
+                    # The seed is written into the top-level responses_create_params, which a
+                    # materialized row keeps under task_input; the planner does not modify task_input.
+                    raise ValueError("num_repeats_add_seed is not supported for materialized task rows")
+
                 for _ in range(row_num_repeats):
                     row = base_row.copy()
                     # Restamp only when fan-out routes this copy somewhere else; otherwise keep
@@ -2019,7 +2310,7 @@ class RolloutCollectionHelper(BaseModel):
                     row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]
                     task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
 
-                    if config.num_repeats_add_seed:
+                    if row_add_seed:
                         row[RESPONSES_CREATE_PARAMS_KEY_NAME] = row[RESPONSES_CREATE_PARAMS_KEY_NAME].copy()
                         metadata = (row[RESPONSES_CREATE_PARAMS_KEY_NAME].get("metadata") or {}).copy()
                         row[RESPONSES_CREATE_PARAMS_KEY_NAME]["metadata"] = metadata
@@ -2049,11 +2340,26 @@ class RolloutCollectionHelper(BaseModel):
                 f"and no '_default' fallback. Listed keys: {sorted(per_agent_repeats)}"
             )
 
+        if agents_missing_from_seed_policy:
+            raise ValueError(
+                "num_repeats_add_seed dict has no entry for routing keys "
+                f"{sorted(agents_missing_from_seed_policy)} and no '_default' fallback. "
+                f"Listed keys: {sorted(per_agent_add_seed)}"
+            )
+
         unknown_agents = set(per_agent_repeats) - agents_seen
         if unknown_agents:
             warnings.warn(
                 f"num_repeats dict contains agent names that never appeared in input rows "
                 f"(possible typo?): {sorted(unknown_agents)}",
+                stacklevel=2,
+            )
+
+        unknown_seed_agents = set(per_agent_add_seed) - agents_seen
+        if unknown_seed_agents:
+            warnings.warn(
+                "num_repeats_add_seed dict contains agent names that never appeared in input rows "
+                f"(possible typo?): {sorted(unknown_seed_agents)}",
                 stacklevel=2,
             )
 
@@ -2211,6 +2517,7 @@ class RolloutCollectionHelper(BaseModel):
 
         persisted_success_keys: set = set()
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
+            should_clear_outputs = False
             _drop_truncated_tail(output_fpath)
             if failures_fpath.exists():
                 _drop_truncated_tail(failures_fpath)
@@ -2227,6 +2534,7 @@ class RolloutCollectionHelper(BaseModel):
             persisted_rows = list(rows)
             persisted_results = list(results)
         else:
+            should_clear_outputs = True
             if config.resume_from_cache:
                 if not output_fpath.exists():
                     print(f"Skipping resume_from_cache because output_fpath {output_fpath} doesn't exist!")
@@ -2262,15 +2570,46 @@ class RolloutCollectionHelper(BaseModel):
                     environment_server_client.global_config_dict,
                 )
 
+        batch_tracker = None
+        batch_agent_refs: Dict[Tuple[int, int], Dict] = {}
+        if config.batch_manifest_fpath:
+            materialized_rows = input_rows
+            if not should_clear_outputs:
+                # A resume validates the full dataset, including attempts already completed.
+                with config.materialized_jsonl_fpath.open("rb") as materialized_file:
+                    materialized_rows = [orjson.loads(line) for line in materialized_file if line.strip()]
+            batch_tracker = BatchStatusTracker(Path(config.batch_manifest_fpath), materialized_rows)
+            batch_agent_refs = {
+                (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row[AGENT_REF_KEY_NAME]
+                for row in materialized_rows
+            }
+
+        if should_clear_outputs:
+            # Validate before replacing any saved inputs or clearing their corresponding results.
             with config.materialized_jsonl_fpath.open("wb") as f:
                 for row in tqdm(input_rows, desc="Writing materialized rows"):
                     f.write(orjson.dumps(row) + b"\n")
-
             output_fpath.unlink(missing_ok=True)
             # A fresh run must not inherit retry attempts or published metrics
             # from an older run that used the same output path.
             failures_fpath.unlink(missing_ok=True)
             aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
+
+        batch_completed_rows: List[Dict] = []
+        batch_failure_rows: List[Dict] = []
+        if batch_tracker is not None:
+            if output_fpath.exists():
+                with output_fpath.open("rb") as existing_results:
+                    batch_completed_rows = [
+                        _batch_status_row(orjson.loads(line), batch_agent_refs)
+                        for line in existing_results
+                        if line.strip()
+                    ]
+            batch_failure_rows = [
+                _batch_status_row(row, batch_agent_refs) for row in _latest_failure_rows([failures_fpath]).values()
+            ]
+            batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
+            print(f"Validated batch manifest and initialized status at {batch_tracker.status_fpath}")
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -2286,6 +2625,9 @@ class RolloutCollectionHelper(BaseModel):
         )
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         observability_enabled = observability_enabled_from_config(global_config)
+        # How a finalized rollout with an incomplete capture is treated
+        # (token_id_capture.mask_incomplete_when_attributed): read once, applied to every rebuild below.
+        mask_incomplete_when_attributed = mask_incomplete_when_attributed_from_config(global_config)
         # Resolve the training-token store directory once.
         # Training capture is independent of evaluation capture.
         # An empty result disables training-token capture.
@@ -2372,6 +2714,8 @@ class RolloutCollectionHelper(BaseModel):
         completion_iterator = None
         upload_spool = None
         failure_counts: Counter = Counter()
+        if len(dispatched_per_agent) > 1:
+            print(f"Dispatching rollouts round-robin across {len(dispatched_per_agent)} agents")
         completed_count = 0
         persisted_count = len(persisted_success_keys)
         collection_succeeded = False
@@ -2411,6 +2755,7 @@ class RolloutCollectionHelper(BaseModel):
                 semaphore=semaphore,
                 route_failures_to_sidecar=config.route_failures_to_sidecar,
                 max_resident_tasks=config.max_resident_rollout_tasks,
+                interleave_by_agent=True,
                 dispatch_budget_s=config.dispatch_budget_s,
                 drain_margin_s=config.drain_margin_s,
                 latency_tracker=latency_tracker,
@@ -2478,7 +2823,9 @@ class RolloutCollectionHelper(BaseModel):
                     global_config,
                     self._agent_name_for_row(row, global_config),
                 ):
-                    token_capture_build = await finalize_rollout_token_capture(result, token_source)
+                    token_capture_build = await finalize_rollout_token_capture(
+                        result, token_source, mask_incomplete_when_attributed=mask_incomplete_when_attributed
+                    )
                     if token_capture_build is not None:
                         finalized_count += 1
                         if token_capture_build.get(MASK_SAMPLE_KEY):
@@ -2534,6 +2881,8 @@ class RolloutCollectionHelper(BaseModel):
                     )
                     failures_file.write(serialized + b"\n")
                     failures_file.flush()
+                    if batch_tracker is not None:
+                        batch_failure_rows.append(_batch_status_row(result, batch_agent_refs))
                 else:
                     # Success → main jsonl.
                     results_file.write(serialized + b"\n")
@@ -2543,6 +2892,8 @@ class RolloutCollectionHelper(BaseModel):
                     if config.retain_results_in_memory:
                         persisted_rows.append(row)
                         persisted_results.append(result)
+                    if batch_tracker is not None:
+                        batch_completed_rows.append(_batch_status_row(result, batch_agent_refs))
                     try:
                         rollout_id = maybe_rollout_id_from_run_body(result)
                     except (TypeError, ValueError) as error:
@@ -2563,6 +2914,9 @@ class RolloutCollectionHelper(BaseModel):
                 counts_left[dispatch_name] -= 1
                 if counts_left[dispatch_name] <= 0:
                     counts_left.pop(dispatch_name)
+
+                if batch_tracker is not None:
+                    batch_tracker.write_status(batch_completed_rows, batch_failure_rows)
 
                 agent_name = dispatch_name
                 if not no_result:
@@ -2642,7 +2996,21 @@ class RolloutCollectionHelper(BaseModel):
             counted = _failure_rows_counted_as_zero(
                 [failures_fpath], config.count_failure_classes_as_zero, persisted_success_keys
             )
-            if input_rows and persisted_count == 0 and not counted:
+            # Opted-in missing rollouts are scored as well, so a run they fill still has a score. Only
+            # when this run aggregates: otherwise it scores nothing, and an empty run must still fail.
+            missing: List[Dict[str, Any]] = (
+                _missing_rollout_rows_counted_as_zero(
+                    [config.materialized_jsonl_fpath],
+                    [failures_fpath],
+                    persisted_success_keys
+                    | {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in counted},
+                )
+                if config.count_missing_rollouts_as_zero and not config.disable_aggregation
+                else []
+            )
+            if input_rows and persisted_count == 0 and not counted and not missing:
+                if batch_tracker is not None:
+                    batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
                 drained_note = (
                     f" {latency_tracker.drained} of them were never started because dispatch_budget_s ran out; "
                     "resume_from_cache dispatches them in the next run."
@@ -2696,8 +3064,9 @@ class RolloutCollectionHelper(BaseModel):
         persisted_rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         persisted_results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
-        # Aggregate persisted results plus explicitly counted metrics-only failures,
-        # matching `gym eval aggregate` without changing either rollout artifact.
+        # Aggregate persisted results plus explicitly counted metrics-only failures and missing
+        # rollouts, matching `gym eval aggregate` without changing either rollout artifact.
+        imputed: List[Dict[str, Any]] = []
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -2710,13 +3079,34 @@ class RolloutCollectionHelper(BaseModel):
                 print(
                     f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
                 )
-            aggregate_results = persisted_results + counted
-            aggregate_rows = persisted_rows + counted if config.retain_results_in_memory else aggregate_results
+            if config.count_missing_rollouts_as_zero:
+                imputed = missing
+                print(f"Counting {len(imputed)} materialized rollout(s) with no row as scored zeros")
+                counted.extend(imputed)
+            # One run never reuses a (task, rollout), so its rows need no server to tell them apart.
+            _fill_task_fields(counted, persisted_results, [config.materialized_jsonl_fpath], _routing_identity)
+            # Appending leaves a missing early repeat behind the repeats that did land. The two
+            # lists are zipped positionally downstream, so they are reordered together.
+            scored_rows = persisted_results + counted
+            metadata_rows = persisted_rows + counted if config.retain_results_in_memory else scored_rows
+            order = sorted(range(len(scored_rows)), key=lambda i: _rollout_order_key(scored_rows[i]))
             aggregate_metrics_fpath = await self._call_aggregate_metrics(
-                aggregate_results,
-                aggregate_rows,
+                [scored_rows[i] for i in order],
+                [metadata_rows[i] for i in order],
                 output_fpath,
+                raise_on_error=False,  # Write batch status before reporting aggregation failures below.
             )
+
+        if batch_tracker is not None:
+            batch_tracker.write_status(
+                batch_completed_rows,
+                batch_failure_rows,
+                aggregate_metrics_fpath=aggregate_metrics_fpath,
+                aggregation_deferred=config.disable_aggregation,
+                force=True,
+            )
+
+        _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
         expected_rollouts = (
             sum(1 for _ in config.materialized_jsonl_fpath.open("rb"))
@@ -2724,13 +3114,16 @@ class RolloutCollectionHelper(BaseModel):
             else len(input_rows) + persisted_count
         )
         scored_rollouts = persisted_count + len(counted)
-        coverage = _coverage_report(expected_rollouts, scored_rollouts, failure_counts, failures_fpath)
+        coverage = _coverage_report(
+            expected_rollouts, scored_rollouts, failure_counts, failures_fpath, imputed=len(imputed)
+        )
         if get_exporters():  # pragma: no cover
             export_metrics(
                 {
                     "coverage/expected": expected_rollouts,
                     "coverage/scored": scored_rollouts,
                     "coverage/missing": expected_rollouts - scored_rollouts,
+                    **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
                 }
             )
 
@@ -2764,6 +3157,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         results: List[Dict],
         rows: List[Dict],
         output_fpath: Path,
+        *,
+        raise_on_error: bool = True,
     ) -> Optional[Path]:
         """Call /aggregate_metrics on the environment server each rollout ran through.
 
@@ -2773,6 +3168,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         uses, across shards and resumed runs alike. Writes a single _aggregate_metrics.json with one
         entry per environment server (same shape as the old _agent_metrics.json, plus the server
         name). Returns the file path.
+        Failed requests retain an entry with empty metric collections and ``aggregation_error``.
+        By default, re-raise the first original exception after saving partial metrics, preserving
+        its type and traceback for direct callers such as custom evaluation drivers. Collection and
+        aggregation entrypoints pass ``raise_on_error=False`` to write batch status first, then call
+        ``_raise_for_aggregation_errors`` for a summary error.
         """
         if not results:
             return None
@@ -2813,8 +3213,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # `agent_ref` keep today's shape. Servers that front the same agent (a native server and its
         # legacy_agent twin) are each labelled by their own name, whatever order their rows arrive in.
         labels = label_runs(server_agents)
+        first_error: Optional[Exception] = None
 
         async def _fetch_agent_metrics(server_name: str, agent_name: str, agent_result_list: List[Dict]) -> Dict:
+            nonlocal first_error
             # Strip heavyweight fields before sending, but preserve response.usage and response.incomplete_details if present.
             stripped = []
             for r in agent_result_list:
@@ -2842,14 +3244,27 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     entry["response"] = response_metadata
                 stripped.append(entry)
 
-            agg_request = AggregateMetricsRequest(verify_responses=stripped)
-            agg_response = await server_client.post(
-                server_name=server_name,
-                url_path="/aggregate_metrics",
-                json=agg_request,
-            )
-            await raise_for_status(agg_response)
-            agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+            agg_response = None
+            try:
+                agg_request = AggregateMetricsRequest(verify_responses=stripped)
+                agg_response = await server_client.post(
+                    server_name=server_name,
+                    url_path="/aggregate_metrics",
+                    json=agg_request,
+                )
+                await raise_for_status(agg_response)
+                agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+                logger.exception(
+                    "Aggregate-metrics request failed for agent '%s'; writing a repairable error entry.",
+                    agent_name,
+                )
+                return {
+                    **_aggregation_error_entry(agent_name, exc, getattr(agg_response, "status", None)),
+                    NG_ENVIRONMENT_SERVER_KEY: server_name,
+                }
 
             agent_entry = {
                 AGENT_REF_KEY_NAME: {"name": agent_name},
@@ -2873,8 +3288,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             all_agent_metrics.append(agent_entry)
 
             agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
+            if AGGREGATION_ERROR_KEY in agent_entry:
+                print(
+                    f"\nAggregate metrics failed for {agent_name}:\n"
+                    + json.dumps(agent_entry[AGGREGATION_ERROR_KEY], indent=4)
+                )
+                continue
             key_metrics = agent_entry.get("key_metrics", {})
             print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
+
+        all_agent_metrics.sort(key=lambda entry: entry[AGENT_REF_KEY_NAME]["name"])
 
         primitive_types = (bool, int, float, str, type(None))
         metrics_to_log = dict()
@@ -2900,6 +3323,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # Write single file with all agents
         metrics_fpath = aggregate_metrics_path_for(output_fpath)
         metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
+
+        if raise_on_error and first_error is not None:
+            raise first_error
 
         return metrics_fpath
 
@@ -3155,6 +3581,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         environment_server_name: str | None = None,
         *,
         max_resident_tasks: Optional[int] = None,
+        interleave_by_agent: bool = False,
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
@@ -3174,6 +3601,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         that carries ``rollout_latency_ms`` alongside the raw ``/run`` result instead of inside it,
         so internal-only timing never has to be smuggled through (and stripped back out of) a dict
         that a direct caller of ``run_examples`` could also observe.
+
+        ``interleave_by_agent`` is enabled by the full evaluation path. Lower-level callers retain
+        the order they supplied.
         """
         server_client = self.setup_server_client(head_server_config)
         if environment_server_name is not None:
@@ -3186,6 +3616,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         self._validate_agent_names(direct_agent_examples, server_client.global_config_dict)
         self._validate_agent_pairings(direct_agent_examples, server_client.global_config_dict)
         # Resolve every agent-routed row before dispatch, so an unroutable agent fails the run instead of one future.
+        if interleave_by_agent:
+            examples = _round_robin_by_agent(examples)
         servers_by_agent = _environment_servers_by_agent(server_client.global_config_dict)
         server_for_agent = {
             agent_name: _environment_server_for_agent(agent_name, servers_by_agent)
@@ -3229,6 +3661,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started = time.monotonic()
                 started_at = time.time()
                 res = None
+                succeeded = False
                 try:
                     request_body = _native_episode_request_body(row) if _materialized_taskset(row) else row
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
@@ -3237,7 +3670,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000
-                    tracker.record(time.monotonic() - started)
+                    succeeded = True
                     return _CompletedRollout(
                         row=row,
                         result=result,
@@ -3266,6 +3699,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server=server_name,
                         environment_server_type=server_type,
                     )
+                finally:
+                    # Failed and timed-out tasks inform the adaptive margin too, but only by
+                    # raising it: see ``DispatchLatencyTracker.record_failure``.
+                    elapsed = time.monotonic() - started
+                    if succeeded:
+                        tracker.record(elapsed)
+                    else:
+                        tracker.record_failure(elapsed)
 
         awaitables = map(_post_subroutine, examples)
         if max_resident_tasks is not None:
@@ -3390,6 +3831,20 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
             "the merged-rollouts file."
         ),
     )
+    batch_manifest_fpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional Eval Factory batch_manifest.json. Gym validates it and refreshes the sibling "
+            "batch_status.json after aggregation."
+        ),
+    )
+    materialized_inputs_jsonl_fpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "Full materialized-inputs JSONL used to validate a batch manifest. Defaults to the standard "
+            "sibling derived from output_jsonl_fpath."
+        ),
+    )
     merge_shards: bool = Field(
         default=True,
         description="Concatenate the matched shard JSONLs into output_jsonl_fpath alongside the metrics file.",
@@ -3399,7 +3854,21 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
         description=(
             "Failure classes from the failures sidecar to count in aggregate metrics, e.g. "
             "['agent_run_error'], so a failed rollout lands in the denominator. A row that carries "
-            "no reward is scored zero for the metrics only; no artifact is changed."
+            "no reward is scored zero for the metrics only; no artifact is changed. Each shard's "
+            "sidecar is read against that shard's own rows, so runs on different environment "
+            "servers that reuse task indices do not hide each other's failures."
+        ),
+    )
+    count_missing_rollouts_as_zero: bool = Field(
+        default=False,
+        description=(
+            "Count a materialized rollout that produced no row at all as a zero, checking each "
+            "shard against its own rows, materialized inputs and failures sidecar, so runs on "
+            "different environment servers that reuse task indices do not hide each other's lost "
+            "rollouts. A rollout another shard landed or recorded for the same environment server "
+            "is not counted. Same contract as the "
+            "collection-time flag, including that a recorded failure is never counted here and "
+            "the same metric-hook limitation."
         ),
     )
     disable_health_check: bool = Field(
@@ -3441,7 +3910,8 @@ def _expand_input_glob(input_glob: str) -> List[str]:
     seen: Dict[str, None] = {}  # preserve insertion order while deduping
     for pattern in patterns:
         for path in sorted(glob_module.glob(pattern)):
-            if Path(path).stem.endswith("_failures"):
+            # A shard's sidecar and its materialized inputs sit next to it and match its glob.
+            if Path(path).stem.endswith(("_failures", "_materialized_inputs")):
                 continue
             seen.setdefault(path, None)
     return list(seen)
@@ -3457,13 +3927,17 @@ class RolloutAggregationHelper(BaseModel):
             print(f"  - {p}")
 
         results: List[Dict] = []
+        shard_keys: Dict[str, set] = {}
         for shard_path in input_paths:
+            keys = shard_keys[shard_path] = set()
             with open(shard_path, "rb") as f:
                 for line_no, line in enumerate(f, 1):
                     line = line.strip()
                     if not line:
                         continue
-                    results.append(loads_jsonl_line(line, shard_path, line_no))
+                    result = loads_jsonl_line(line, shard_path, line_no)
+                    keys.add((result.get(TASK_INDEX_KEY_NAME), result.get(ROLLOUT_INDEX_KEY_NAME)))
+                    results.append(result)
         print(f"Loaded {len(results)} rollout record(s) from {len(input_paths)} shard(s)")
 
         # Sort for deterministic aggregation ordering (matches run_from_config's post-collection sort)
@@ -3472,34 +3946,113 @@ class RolloutAggregationHelper(BaseModel):
         output_fpath = Path(config.output_jsonl_fpath)
         output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
+        failures_fpaths = [failures_path_for(Path(path)) for path in input_paths]
+        latest_failure_rows = _latest_failure_rows(failures_fpaths)
+        batch_tracker = None
+        if config.batch_manifest_fpath:
+            materialized_fpath = (
+                Path(config.materialized_inputs_jsonl_fpath)
+                if config.materialized_inputs_jsonl_fpath
+                else output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+            )
+            if not materialized_fpath.exists():
+                raise ConfigPathNotFoundError(
+                    f"Materialized inputs not found at '{materialized_fpath}'. Pass "
+                    "+materialized_inputs_jsonl_fpath=<path> when aggregating a batch from shards."
+                )
+            with materialized_fpath.open("rb") as materialized_file:
+                materialized_rows = [orjson.loads(line) for line in materialized_file if line.strip()]
+            batch_tracker = BatchStatusTracker(Path(config.batch_manifest_fpath), materialized_rows)
+            batch_agent_refs = {
+                (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row[AGENT_REF_KEY_NAME]
+                for row in materialized_rows
+            }
+            batch_completed_rows = [_batch_status_row(row, batch_agent_refs) for row in results]
+            batch_failure_rows = [_batch_status_row(row, batch_agent_refs) for row in latest_failure_rows.values()]
+            batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
+
         if config.merge_shards:
             print(f"Merging shards into {output_fpath}")
             with output_fpath.open("wb") as out:
                 for r in results:
                     out.write(orjson.dumps(r) + b"\n")
 
-        failures_fpaths = [failures_path_for(Path(path)) for path in input_paths]
-        scored_keys = {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in results}
-        counted = _failure_rows_counted_as_zero(
-            failures_fpaths,
-            config.count_failure_classes_as_zero,
-            scored_keys,
-        )
-        if config.count_failure_classes_as_zero:
-            print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
-
         # `_call_aggregate_metrics` groups by the `_ng_environment_server` stamp, falling back to
         # AGENT_REF_KEY_NAME; result rows carry both from the run that produced them.
         helper = RolloutCollectionHelper()
-        scored = results + counted
-        aggregate_metrics_fpath = await helper._call_aggregate_metrics(scored, scored, output_fpath)
+
+        @functools.cache
+        def servers_by_agent() -> Mapping[str, list[str]]:
+            # With nothing to score and nothing to count, only the coverage report keys rollouts, and an
+            # agent's name does for that: the head server is reached for scoring alone.
+            if not (results or config.count_failure_classes_as_zero or config.count_missing_rollouts_as_zero):
+                return {}
+            return _environment_servers_by_agent(helper.setup_server_client().global_config_dict)
+
+        def group(row: Mapping[str, Any]) -> Optional[str]:
+            return _metrics_group(row, servers_by_agent)
+
+        # Each shard is checked against its own rows and its own sidecar, and rollouts are keyed by
+        # the server that scores them: separate runs number their tasks from 0, so one run's row must
+        # not hide another run's failed or lost rollout. A rollout another shard landed for the same
+        # server is still not counted, and of the attempts recorded for one rollout the last stands.
+        latest_failures: Dict[tuple, Dict[str, Any]] = {}
+        for path, failures_fpath in zip(input_paths, failures_fpaths):
+            for key, row in _latest_failure_rows([failures_fpath]).items():
+                if key not in shard_keys[path]:
+                    latest_failures[_identity_key(row, group)] = row
+        result_ids = (
+            {_identity_key(r, group) for r in results}
+            if latest_failures or config.count_missing_rollouts_as_zero
+            else set()
+        )
+        wanted = set(config.count_failure_classes_as_zero)
+        # A row that names no agent and no server cannot reach any server's metrics; it stays a dropped one.
+        counted = [
+            _counted_failure_row(row)
+            for identity, row in latest_failures.items()
+            if identity not in result_ids
+            and row.get(NG_FAILURE_CLASS_KEY) in wanted
+            and _routing_identity(row) is not None
+        ]
+        if config.count_failure_classes_as_zero:
+            print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
+        materialized_fpaths = [materialized_path_for(Path(path)) for path in input_paths]
+        missing: List[Dict[str, Any]] = []
+        if config.count_missing_rollouts_as_zero:
+            accounted = result_ids | set(latest_failures)
+            for path, materialized_fpath, failures_fpath in zip(input_paths, materialized_fpaths, failures_fpaths):
+                for zero in _missing_rollout_rows_counted_as_zero(
+                    [materialized_fpath], [failures_fpath], set(shard_keys[path])
+                ):
+                    if _identity_key(zero, group) not in accounted:
+                        accounted.add(_identity_key(zero, group))
+                        missing.append(zero)
+            print(f"Counting {len(missing)} materialized rollout(s) with no row as scored zeros")
+            counted.extend(missing)
+        if counted:
+            _fill_task_fields(counted, results, materialized_fpaths, group)
+
+        scored = sorted(results + counted, key=_rollout_order_key)
+        aggregate_metrics_fpath = await helper._call_aggregate_metrics(
+            scored, scored, output_fpath, raise_on_error=False
+        )
+        if batch_tracker is not None:
+            batch_tracker.write_status(
+                batch_completed_rows,
+                batch_failure_rows,
+                aggregate_metrics_fpath=aggregate_metrics_fpath,
+                force=True,
+            )
+
+        _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
         # The shards' own sidecars say which rollouts never made it into the files just scored.
-        counted_keys = {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in counted}
+        counted_ids = {_identity_key(r, group) for r in counted}
         dropped = Counter(
             row.get(NG_FAILURE_CLASS_KEY) or "unknown"
-            for key, row in _latest_failure_rows(failures_fpaths).items()
-            if key not in scored_keys and key not in counted_keys
+            for identity, row in latest_failures.items()
+            if identity not in result_ids and identity not in counted_ids
         )
         scored_rollouts = len(results) + len(counted)
         coverage = _coverage_report(
@@ -3507,6 +4060,7 @@ class RolloutAggregationHelper(BaseModel):
             scored_rollouts,
             dropped,
             "the shards' _failures.jsonl sidecars",
+            imputed=len(missing),
         )
         if get_exporters():  # pragma: no cover
             export_metrics(
@@ -3514,6 +4068,7 @@ class RolloutAggregationHelper(BaseModel):
                     "coverage/expected": scored_rollouts + sum(dropped.values()),
                     "coverage/scored": scored_rollouts,
                     "coverage/missing": sum(dropped.values()),
+                    **({"coverage/imputed": len(missing)} if config.count_missing_rollouts_as_zero else {}),
                 }
             )
 
