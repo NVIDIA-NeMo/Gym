@@ -1113,6 +1113,8 @@ class TestNeMoGymChatCompletionSchemas:
             "chat_template_kwargs": {"enable_thinking": False},
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": "high"},
+            "reasoning": {"effort": "high", "exclude": False},
+            "usage": {"include": True},
         }
         assert set(extensions) == CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
 
@@ -1161,6 +1163,24 @@ class TestNeMoGymChatCompletionSchemas:
         assert params.tools[0]["type"] == "custom"
         assert params.messages[0]["tool_calls"][0]["type"] == "custom"
         assert params.messages[0]["generation_token_ids"] == [2]
+
+    def test_named_tool_result_history_round_trips_without_mutating_input(self) -> None:
+        payload = {
+            "model": "gpt-test",
+            "messages": [{"role": "tool", "tool_call_id": "call-1", "name": "bash", "content": "result"}],
+        }
+        original = deepcopy(payload)
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+        round_tripped = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate_json(params.model_dump_json())
+
+        assert params.messages == original["messages"]
+        assert round_tripped.messages == original["messages"]
+        assert payload == original
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+                {"messages": [{**payload["messages"][0], "not_a_real_field": True}]}
+            )
 
     def test_tool_call_strips_only_the_outer_name_without_mutating_input(self) -> None:
         payload = {

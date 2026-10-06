@@ -209,6 +209,11 @@ class UnsupportedAgentOverrideError(ConfigError, ValueError):
     """A command line override configures an agent that no instance ends up running."""
 
 
+class HeadServerUnreachableError(ConfigError, ValueError):
+    """Nothing answered at the configured head server address, so the merged config could not be fetched
+    from it (the head server is not running, or `head_server.host` / `head_server.port` point elsewhere)."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
@@ -621,6 +626,16 @@ class Domain(str, Enum):
 class BaseServerConfig(BaseModel):
     host: str
     port: int
+    bind_host: Optional[str] = Field(
+        default=None,
+        description="Local listening address; defaults to host. Client connections continue to use host.",
+    )
+    bind_port: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=65535,
+        description="Local listening port; defaults to port. Client connections continue to use port.",
+    )
     num_workers: Optional[int] = None
 
 

@@ -65,6 +65,7 @@ from nemo_gym.config_types import (
     TOKEN_CAPTURE_PATH_SEGMENT,
     BaseRunServerInstanceConfig,
     BaseServerConfig,
+    HeadServerUnreachableError,
 )
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
@@ -779,8 +780,16 @@ class ServerClient(BaseModel):
                 f"{head_server_url}/global_config_dict_yaml",
             )
         except ConnectionError as e:
-            raise ValueError(
-                f"Could not connect to the head server at {head_server_url}. Perhaps you are not running a server or your head server is on a different port?"
+            # requests' ConnectionError also covers proxy and name-resolution failures; keep the real reason
+            # (with its traceback) for --verbose, since the ConfigError below is printed without its cause.
+            logger.debug(
+                "Could not fetch the global config from the head server at %s", head_server_url, exc_info=True
+            )
+            # A ConfigError so the CLI prints just this message (no traceback); the cause stays chained.
+            raise HeadServerUnreachableError(
+                f"Could not connect to the head server at {head_server_url}. Is the head server running? "
+                "Start it with: `gym env start`. If it is already running on a different host or port, pass "
+                "`++head_server.host=<host>` / `++head_server.port=<port>` so this command can find it."
             ) from e
 
         global_config_dict_yaml = response.content.decode()
@@ -1443,8 +1452,8 @@ repr(e): {repr(e)}"""
             )
 
         uvicorn_kwargs = dict(
-            host=server.config.host,
-            port=server.config.port,
+            host=server.config.bind_host or server.config.host,
+            port=server.config.port if server.config.bind_port is None else server.config.bind_port,
             # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
             timeout_graceful_shutdown=0.5,
             # Some workers may take a while for imports and setup_webserver.
@@ -1552,8 +1561,8 @@ class HeadServer(BaseServer):
 
         config = uvicorn.Config(
             app,
-            host=server.config.host,
-            port=server.config.port,
+            host=server.config.bind_host or server.config.host,
+            port=server.config.port if server.config.bind_port is None else server.config.bind_port,
             proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
             forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
         )

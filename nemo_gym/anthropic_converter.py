@@ -302,9 +302,16 @@ class AnthropicConverter:
         """
         params: Dict[str, Any] = {"input": self._anthropic_messages_to_input_items(anthropic_body)}
 
-        instructions = self._anthropic_system_to_instructions(anthropic_body.get("system"))
-        if instructions:
-            params["instructions"] = instructions
+        system = anthropic_body.get("system")
+        if isinstance(system, str):
+            if system:
+                params["instructions"] = system
+        elif system:
+            # Responses instructions is a string. Carry block-shaped system input
+            # as content parts so downstream providers can process each block intact.
+            parts = [{"type": "input_text", "text": block["text"]} for block in system if block.get("type") == "text"]
+            if parts:
+                params["input"].insert(0, NeMoGymEasyInputMessage(role="system", content=parts, type="message"))
 
         if anthropic_body.get("model") is not None:
             params["model"] = anthropic_body["model"]
@@ -323,13 +330,6 @@ class AnthropicConverter:
             params["tool_choice"] = tool_choice
 
         return NeMoGymResponseCreateParamsNonStreaming(**params)
-
-    def _anthropic_system_to_instructions(self, system: Any) -> str:
-        if system is None:
-            return ""
-        if isinstance(system, str):
-            return system
-        return "\n".join(block["text"] for block in system if block.get("type") == "text" and block.get("text"))
 
     def _anthropic_messages_to_input_items(self, anthropic_body: Dict[str, Any]) -> List[Any]:
         items: List[Any] = []
@@ -629,7 +629,7 @@ class AnthropicConverter:
         role = item["role"]
         content = item.get("content", "")
         if role in ("system", "developer"):
-            system_parts.append(self._content_to_text(content))
+            system_parts.extend(self._content_to_text_parts(content))
             return
         if role not in ("user", "assistant"):
             raise NotImplementedError(f"Unsupported Responses API role for Anthropic: {role}")
@@ -706,9 +706,9 @@ class AnthropicConverter:
 
         return media_type, data
 
-    def _content_to_text(self, content: Any) -> str:
+    def _content_to_text_parts(self, content: Any) -> List[str]:
         if isinstance(content, str):
-            return content
+            return [content]
         texts = []
         for part in content:
             part_type = part.get("type")
@@ -716,10 +716,10 @@ class AnthropicConverter:
                 texts.append(part["text"])
             else:
                 raise NotImplementedError(f"Unsupported system content part for Anthropic: {part_type}")
-        return "\n".join(texts)
+        return texts
 
     def _system_parts_to_anthropic_blocks(self, system_parts: List[str]) -> List[Dict[str, str]]:
-        return [{"type": "text", "text": text} for text in system_parts if text]
+        return [{"type": "text", "text": text} for text in system_parts]
 
     def _reasoning_item_to_anthropic_blocks(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
         blocks = []

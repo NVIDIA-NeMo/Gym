@@ -3767,7 +3767,9 @@ class TestVLLMConverter:
         assert expected_messages == actual_messages
 
     @staticmethod
-    def _chat_client_capturing_upstream(**config_overrides: Any) -> tuple[TestClient, dict[str, Any]]:
+    def _chat_client_capturing_upstream(
+        completion_usage: dict | None = None, **config_overrides: Any
+    ) -> tuple[TestClient, dict[str, Any]]:
         """Chat-path vllm_model behind a TestClient; returns the kwargs sent upstream."""
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -3793,6 +3795,7 @@ class TestVLLMConverter:
                 object="chat.completion",
                 created=FIXED_TIME,
                 model="dummy_model",
+                usage=completion_usage,
                 choices=[
                     NeMoGymChoice(
                         index=0,
@@ -3899,6 +3902,70 @@ class TestVLLMConverter:
         )
         assert response.status_code == 200
         assert {field: captured_kwargs[field] for field in extensions} == extensions
+
+    @mark.parametrize("stream", [False, True])
+    def test_anthropic_system_blocks_reach_chat_backend_intact(self, stream):
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+        blocks = [
+            {"type": "text", "text": "x-anthropic-billing-header: cc_version=example;"},
+            {"type": "text", "text": "You are an evaluation assistant."},
+            {"type": "text", "text": "Grade each goal and return JSON using goal_results and judge_score."},
+        ]
+
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "dummy_model",
+                "max_tokens": 100,
+                "stream": stream,
+                "system": blocks,
+                "messages": [{"role": "user", "content": "Inspect the result."}],
+            },
+        )
+
+        assert response.status_code == 200
+        assert captured_kwargs["messages"][0] == {"role": "system", "content": blocks}
+        assert captured_kwargs["messages"][1] == {"role": "user", "content": "Inspect the result."}
+
+    @mark.parametrize("stream", [False, True])
+    @mark.parametrize("reasoning", [{"effort": "high"}, {"max_tokens": 4096, "enabled": True, "exclude": False}])
+    def test_native_reasoning_configuration_reaches_backend(self, stream, reasoning):
+        usage = {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+        client, captured_kwargs = self._chat_client_capturing_upstream(completion_usage=usage)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": stream,
+                "reasoning": reasoning,
+                "usage": {"include": True},
+            },
+        )
+
+        assert response.status_code == 200
+        assert captured_kwargs["reasoning"] == reasoning
+        assert captured_kwargs["usage"] == {"include": True}
+        assert "reasoning_effort" not in captured_kwargs
+        if stream:
+            events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
+            usage_chunks = [event for event in events if event.get("usage") is not None]
+            assert len(usage_chunks) == 1
+            assert usage_chunks[0]["usage"]["total_tokens"] == 10
+        else:
+            assert response.json()["usage"]["total_tokens"] == 10
+
+    @mark.parametrize("stream", [False, True])
+    def test_native_reasoning_configuration_requires_an_object(self, stream):
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "stream": stream, "reasoning": "high"},
+        )
+
+        assert response.status_code == 422
+        assert captured_kwargs == {}
 
     def test_metadata_chat_template_kwargs_override(self, monkeypatch: MonkeyPatch):
         config = VLLMModelConfig(
