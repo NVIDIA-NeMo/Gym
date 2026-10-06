@@ -13,6 +13,11 @@ Set `driver.benchmarks.<name>.run.observability_enabled: false` to opt out, or s
 `driver.benchmarks.<name>.run.model_call_capture_dir` to an absolute path to customize the directory.
 Other entry points, including local evaluations and training, remain opt-in.
 
+When telemetry is on, the same middleware also aggregates every captured call into the
+`gym.model_call.*` instruments (latency, time to first token, token usage, finish reason), so a
+run's model-call behaviour is on the metrics backend while it is still going. See
+[Metrics](/main/observability/metrics#model-call-metrics).
+
 ## Run an evaluation with capture
 
 This example extends the [quickstart](/main/get-started/quickstart) MCQA evaluation. It assumes that your

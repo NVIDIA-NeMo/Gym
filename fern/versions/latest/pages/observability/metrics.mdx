@@ -28,6 +28,10 @@ would disagree the first time one dropped a sample.
 | `gym.verify.duration_ms` | Histogram | ms | Wall-clock duration of one verification. |
 | `gym.verify.success_rate` | Gauge | fraction | Cumulative fraction of verifications that completed. See below. |
 | `gym.servers.active` | Gauge | count | Number of servers the orchestrator started. |
+| `gym.model_call.duration_ms` | Histogram | ms | Wall-clock time of one model call at a Gym model server, success or failure. See below. |
+| `gym.model_call.ttft_ms` | Histogram | ms | Time to the first streamed chunk of one model call. Streamed responses only. |
+| `gym.model_call.tokens` | Histogram | tokens | Token usage one model call reported, one sample per token type. |
+| `gym.model_call.finish_total` | Counter | count | Model responses by the finish reason the provider reported. |
 | `gym.http.connection_pool.queue_duration_ms` | Histogram | ms | Time one queued connection acquisition waited for an aiohttp pool slot. |
 | `gym.http.connection_pool.connect_total` | Observable counter | count | All outbound aiohttp connection attempts (`connect()` calls), including attempts that later fail or are abandoned. |
 | `gym.server.memory.usage` | Gauge | bytes | Current RSS or PSS for one managed server and its descendants. |
@@ -40,6 +44,36 @@ would disagree the first time one dropped a sample.
 
 Rollout duration is recorded even when a rollout fails. A crashed rollout still consumed
 wall-clock time, and dropping those samples would bias the histogram toward the fast path.
+
+### Model-Call Metrics
+
+The model server's capture middleware records these for every exchange it captures, so they
+require `observability_enabled` (`gym eval submit` turns it on; see
+[Model-Call Capture](/main/model-server/model-call-capture)). They are the running aggregate of what
+the per-rollout capture files hold in full, computed from the same normalised record, and they
+export on the metrics interval while the run is in progress. A model reached through an external
+endpoint, which no Prometheus scrape covers, gets its latency and token volume on the board this way.
+
+All four carry `nemo.gym.server.name` (the model server, so a policy and a judge separate; the same
+key the `gym.model.*` spans use) and `nemo.gym.model_call.dialect` (`chat`, `responses` or
+`messages`).
+
+- `gym.model_call.duration_ms` adds `nemo.gym.model_call.outcome`: `ok`, or the capture's
+  `error_category` (`timeout`, `rate_limit`, `upstream_error`, `context_length_exceeded`,
+  `stream_truncated`, ...). Its count is the call count, so an error rate is the non-`ok` share.
+- `gym.model_call.ttft_ms` is recorded for streamed responses only. For a JSON response the first
+  chunk is the whole body, and recording it would make TTFT read as total latency.
+- `gym.model_call.tokens` adds `nemo.gym.model_call.token.type`: `input`, `output` or `reasoning`,
+  each recorded only when the provider reported it. The histogram sum is the token volume; the
+  distribution is the prompt or completion size per call. Input follows the capture's convention:
+  for Anthropic Messages with prompt caching, cache-read and cache-creation tokens are folded in.
+- `gym.model_call.finish_total` adds `nemo.gym.model_call.finish_reason` in the dialect's own
+  vocabulary: `stop` / `length` / `tool_calls` for Chat Completions, `completed` or the
+  `incomplete_details.reason` for Responses, `end_turn` / `max_tokens` / `tool_use` for Messages.
+  The `length`-class values are the truncation signal.
+
+Rollout id is deliberately not an attribute. Per-rollout detail stays in the capture files and in
+traces, joined by rollout id; the metrics carry only bounded dimensions.
 
 ### Memory Metrics
 

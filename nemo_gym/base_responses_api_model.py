@@ -72,6 +72,7 @@ from nemo_gym.server_utils import (
     SimpleServer,
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint
+from nemo_gym.telemetry.gym_metrics import metrics_exporting, record_model_call
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
     CaptureContext,
@@ -1337,8 +1338,13 @@ def _record(
     ttft_ms: Optional[float] = None,
     response_raw: Optional[str] = None,
     execution: Optional[ModelExecutionOutcome] = None,
+    streaming: bool = False,
 ) -> None:
-    """Append one exchange (success or failure). Best-effort: never raises."""
+    """Append one exchange (success or failure). Best-effort: never raises.
+
+    When telemetry is exporting, the exchange is also aggregated into the ``gym.model_call.*``
+    instruments before the durable write, so the metrics ship whether or not the write succeeds.
+    """
     request_body = None
     request_raw = None
     if request_bytes:
@@ -1375,6 +1381,8 @@ def _record(
             exchange["request_raw"] = request_raw
         if response_raw is not None:
             exchange["response_raw"] = response_raw
+        if metrics_exporting():
+            _record_model_call_metrics(exchange, streaming=streaming)
         store.record(rollout_id, exchange)
     except Exception:
         logger.warning("Model-call capture failed for one %s call.", dialect, exc_info=True)
@@ -1382,6 +1390,30 @@ def _record(
             store.mark_incomplete(rollout_id)
         except Exception:
             logger.warning("Could not mark rollout %s capture as incomplete.", rollout_id, exc_info=True)
+
+
+def _record_model_call_metrics(exchange: dict[str, Any], *, streaming: bool) -> None:
+    """Aggregate one captured exchange into the model-call instruments. Best-effort: never raises.
+
+    Reuses the capture record's normalisation so the metrics agree with the per-rollout files:
+    the same token totals across dialects, the same finish reason, the same ``error_category``.
+    TTFT is dropped for a JSON response, whose first chunk is the whole body.
+    """
+    try:
+        record = build_model_call_record(exchange, call_index=0)
+        record_model_call(
+            server_name=record.model_ref.name if record.model_ref is not None else None,
+            dialect=record.dialect,
+            latency_ms=record.latency_total_ms,
+            ttft_ms=record.latency_ttft_ms if streaming else None,
+            error_category=record.error_category,
+            finish_reason=record.finish_reason or record.response_status,
+            tokens_in=record.tokens_in,
+            tokens_out=record.tokens_out,
+            tokens_reasoning=record.tokens_reasoning,
+        )
+    except Exception:
+        logger.debug("Model-call metrics skipped for one %s call.", exchange.get("dialect"), exc_info=True)
 
 
 async def _fail_uncommitted_external_call(context: CaptureContext | None) -> None:
@@ -1686,6 +1718,7 @@ class _CaptureMiddleware:
                     ttft_ms=state["ttft_ms"],
                     response_raw=upstream_body.decode("utf-8", errors="replace") if upstream_body else None,
                     execution=request_state.get("nemo_gym_model_execution"),
+                    streaming=state["streaming"],
                 )
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
@@ -1756,6 +1789,7 @@ class _CaptureMiddleware:
                 ttft_ms=ttft_ms,
                 response_raw=response_raw,
                 execution=request_state.get("nemo_gym_model_execution"),
+                streaming=streaming,
             )
 
         try:

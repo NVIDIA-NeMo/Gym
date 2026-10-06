@@ -37,6 +37,29 @@ Retrying is provider-internal, so each provider that retries records it from its
 
 All four carry ``nemo.gym.sandbox.provider``.
 
+Model calls
+-----------
+Recorded by the model server's capture middleware for every exchange it captures, so they
+need ``observability_enabled`` (``gym eval submit`` turns it on). They carry the aggregate
+the per-rollout capture files hold in full, keyed by model server and dialect, and ship on the
+metrics export interval while the run is in progress.
+
+``gym.model_call.duration_ms`` (histogram): wall-clock of one call, success or failure, with
+``nemo.gym.model_call.outcome`` set to ``ok`` or the capture's ``error_category``. Its count is the
+call count; filter the outcome for error rates.
+
+``gym.model_call.ttft_ms`` (histogram): time to the first streamed chunk. Streamed responses
+only: for a JSON response the first chunk is the whole body and would read as the total latency.
+
+``gym.model_call.tokens`` (histogram): token usage from the response, one sample per
+``nemo.gym.model_call.token.type`` (``input``, ``output``, ``reasoning``) the provider reported.
+The sum is the token volume; the distribution is the prompt or completion size per call.
+
+``gym.model_call.finish_total`` (counter): responses by ``nemo.gym.model_call.finish_reason``,
+in the dialect's own vocabulary (``stop`` / ``length`` / ``tool_calls`` for Chat Completions,
+``completed`` or the ``incomplete_details.reason`` for Responses, ``end_turn`` / ``max_tokens`` /
+``tool_use`` for Messages). ``length``-class values are the truncation signal.
+
 HTTP connection pool
 --------------------
 ``gym.http.connection_pool.queue_duration_ms`` (histogram): connection-acquisition wait
@@ -68,6 +91,17 @@ HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT = "gym.http.connection_pool.connect_tota
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
 HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_outcome"
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
+MODEL_CALL_DURATION_INSTRUMENT = "gym.model_call.duration_ms"
+MODEL_CALL_TTFT_INSTRUMENT = "gym.model_call.ttft_ms"
+MODEL_CALL_TOKENS_INSTRUMENT = "gym.model_call.tokens"
+MODEL_CALL_FINISH_INSTRUMENT = "gym.model_call.finish_total"
+#: Same key as the model server's span attribute, so span- and metric-derived series share the label.
+MODEL_CALL_SERVER_NAME_ATTRIBUTE = "nemo.gym.server.name"
+MODEL_CALL_DIALECT_ATTRIBUTE = "nemo.gym.model_call.dialect"
+MODEL_CALL_OUTCOME_ATTRIBUTE = "nemo.gym.model_call.outcome"
+MODEL_CALL_TOKEN_TYPE_ATTRIBUTE = "nemo.gym.model_call.token.type"
+MODEL_CALL_FINISH_REASON_ATTRIBUTE = "nemo.gym.model_call.finish_reason"
+MODEL_CALL_OUTCOME_OK = "ok"
 
 #: Milliseconds. Provisioning a remote sandbox takes tens of seconds and a long command can run
 #: for minutes; the SDK's default boundaries end at 10 s and would put most of both in +Inf.
@@ -104,6 +138,55 @@ HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
     1_000,
     5_000,
     30_000,
+)
+
+#: Milliseconds. A reasoning model's call runs for minutes under load; the SDK default ends at 10 s.
+MODEL_CALL_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
+    100,
+    250,
+    500,
+    1_000,
+    2_000,
+    5_000,
+    10_000,
+    30_000,
+    60_000,
+    120_000,
+    300_000,
+    600_000,
+    1_800_000,
+)
+
+#: Milliseconds. Time to first chunk is sub-second when the engine has room and tens of seconds when queued.
+MODEL_CALL_TTFT_BOUNDARIES_MS: tuple[float, ...] = (
+    50,
+    100,
+    250,
+    500,
+    1_000,
+    2_000,
+    5_000,
+    10_000,
+    30_000,
+    60_000,
+    120_000,
+    300_000,
+)
+
+#: Tokens. Spans a short completion to a prompt near a million-token context window.
+MODEL_CALL_TOKEN_BOUNDARIES: tuple[float, ...] = (
+    16,
+    64,
+    256,
+    1_024,
+    4_096,
+    16_384,
+    32_768,
+    65_536,
+    131_072,
+    262_144,
+    524_288,
+    1_048_576,
 )
 
 _INSTRUMENT_LOCK = threading.Lock()
@@ -276,6 +359,70 @@ def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[st
         )
     except Exception:
         logger.debug("nemo-lens: failed to register %s", HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT, exc_info=True)
+
+
+def metrics_exporting() -> bool:
+    """True when a recorder below would reach an exporting meter. The call-site gate for work done only for metrics."""
+    return _meter() is not None
+
+
+def record_model_call(
+    *,
+    server_name: Optional[str],
+    dialect: Optional[str],
+    latency_ms: Optional[float],
+    ttft_ms: Optional[float],
+    error_category: Optional[str],
+    finish_reason: Optional[str],
+    tokens_in: Optional[int],
+    tokens_out: Optional[int],
+    tokens_reasoning: Optional[int],
+) -> None:
+    """Record one captured model call: duration with outcome, TTFT, token usage and finish reason.
+
+    ``ttft_ms`` is recorded as given; the caller passes ``None`` for a non-streamed response.
+    Token types and the finish reason are recorded only when the provider reported them, so an
+    absent count is unknown rather than zero.
+    """
+    identity = {
+        MODEL_CALL_SERVER_NAME_ATTRIBUTE: server_name or "unknown",
+        MODEL_CALL_DIALECT_ATTRIBUTE: dialect or "unknown",
+    }
+    if latency_ms is not None:
+        _record_histogram(
+            MODEL_CALL_DURATION_INSTRUMENT,
+            "ms",
+            "Wall-clock time of one model call at a Gym model server, success or failure.",
+            latency_ms,
+            {**identity, MODEL_CALL_OUTCOME_ATTRIBUTE: error_category or MODEL_CALL_OUTCOME_OK},
+            boundaries=MODEL_CALL_DURATION_BOUNDARIES_MS,
+        )
+    if ttft_ms is not None:
+        _record_histogram(
+            MODEL_CALL_TTFT_INSTRUMENT,
+            "ms",
+            "Time to the first streamed chunk of one model call.",
+            ttft_ms,
+            identity,
+            boundaries=MODEL_CALL_TTFT_BOUNDARIES_MS,
+        )
+    for token_type, count in (("input", tokens_in), ("output", tokens_out), ("reasoning", tokens_reasoning)):
+        if count is None:
+            continue
+        _record_histogram(
+            MODEL_CALL_TOKENS_INSTRUMENT,
+            "{token}",
+            "Token usage one model call reported, by token type.",
+            count,
+            {**identity, MODEL_CALL_TOKEN_TYPE_ATTRIBUTE: token_type},
+            boundaries=MODEL_CALL_TOKEN_BOUNDARIES,
+        )
+    if finish_reason is not None:
+        _record_counter(
+            MODEL_CALL_FINISH_INSTRUMENT,
+            "Model responses by the finish reason the provider reported.",
+            {**identity, MODEL_CALL_FINISH_REASON_ATTRIBUTE: finish_reason},
+        )
 
 
 def _reset_for_testing() -> None:
