@@ -3,9 +3,9 @@
 
 """Wire contracts for the built-in single-agent-turn protocol."""
 
-from typing import Literal
+from collections.abc import Mapping
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import BaseModel, ConfigDict, JsonValue, model_validator
 
 from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.episode_types import (
@@ -25,6 +25,25 @@ class SingleAgentTurnTaskInput(BaseModel):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     task_data: dict[str, JsonValue]
 
+    @model_validator(mode="before")
+    @classmethod
+    def accept_flat_task_input(cls, value: object) -> object:
+        """Accept flat task input while preserving the canonical ``task_data`` container.
+
+        ``task_data`` is reserved for that container; non-conflicting flat fields are merged into it.
+        """
+        if not isinstance(value, Mapping):
+            return value
+        fields = dict(value)
+        response_params = fields.pop("responses_create_params", None)
+        task_data = fields.pop("task_data", {})
+        if not isinstance(task_data, Mapping):
+            return value  # Let the field validator report the malformed canonical container.
+        for key in fields.keys() & task_data.keys():
+            if fields[key] != task_data[key]:
+                raise ValueError(f"Conflicting task field {key!r} inside and outside task_data")
+        return {"responses_create_params": response_params, "task_data": dict(task_data) | fields}
+
 
 class SingleAgentTurnResult(BaseVerifyResponse):
     """Successful single-agent-turn output: the Resources verify response plus agent observations.
@@ -40,9 +59,8 @@ class SingleAgentTurnResult(BaseVerifyResponse):
 
 
 class SingleAgentTurnFailure(EpisodeFailure):
-    """Add the failing protocol stage and any usable agent response."""
+    """Extend the shared failure with any usable agent response for diagnostics."""
 
-    stage: Literal["seed", "agent", "verification", "cleanup"] | None = None
     partial_response: NeMoGymResponse | None = None
 
 

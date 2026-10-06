@@ -16,6 +16,10 @@ import asyncio
 import importlib
 import json
 import logging
+import site
+import subprocess
+import sys
+import sysconfig
 from collections.abc import Sequence
 from copy import deepcopy
 from multiprocessing import Pool
@@ -59,6 +63,7 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
     resolve_dataset_agent,
+    taskset_environment_server_name,
 )
 
 
@@ -80,7 +85,8 @@ def _inspect_benchmark(name: str, benchmarks: dict, global_config_dict) -> None:
     domain, description = read_config_metadata(bench.path)
     details = {
         "config": str(bench.path.resolve()),
-        "agent": bench.agent_name,
+        "agent": bench.agent_name or "",
+        "environment server": bench.environment_server or "",
         "num repeats": str(bench.num_repeats),
         "dataset": str(bench.dataset.jsonl_fpath),
         "prepare script": str(bench.dataset.prepare_script),
@@ -137,6 +143,7 @@ def list_benchmarks() -> None:
             {
                 "name": name,
                 "agent_name": bench.agent_name,
+                "environment_server": bench.environment_server,
                 "domain": metadata[name][0] or "",
                 "num_repeats": bench.num_repeats,
                 "description": metadata[name][1] or "",
@@ -165,7 +172,9 @@ def list_benchmarks() -> None:
 
     for name, bench in benchmarks.items():
         domain, description = metadata[name]
-        table.add_row(name, domain or "", description or "", bench.agent_name, str(bench.num_repeats))
+        # A taskset routed to a server that fronts several agents has no single agent; name the server instead.
+        agent = bench.agent_name or f"{bench.environment_server} (environment server)"
+        table.add_row(name, domain or "", description or "", agent, str(bench.num_repeats))
 
     print_rich_table(table)
 
@@ -176,6 +185,10 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
 
     The benchmark is identified from a config_paths entry pointing to a
     benchmarks/*/config.yaml file.
+
+    With `use_cached_prepared_benchmarks=true`, an existing prepared file is reused. A prepare.py whose output
+    depends on its own code (for example, settings written into each row) can define
+    `is_prepared_data_current(fpath: Path) -> bool`; when it returns False, the cached file is prepared again.
 
     Examples:
 
@@ -210,6 +223,33 @@ def _multiprocess_benchmark_prepare_fn(args):
             f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
         )
     print(f"Benchmark data prepared at: {output_fpath}")
+
+
+def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
+    """Install what a benchmark's prepare script imports, before importing it.
+
+    Gym cannot depend on every benchmark's data-prep requirements, so a benchmark
+    needing something extra had to shell out to pip from inside the prepare script
+    itself. Declaring it on the dataset puts it in the config instead.
+    """
+    dependencies = benchmark_config.dataset.prepare_dependencies
+    if not dependencies:
+        return
+    logger.info("Installing prepare dependencies for %s: %s", benchmark_config.name, " ".join(dependencies))
+    try:
+        subprocess.run(["uv", "pip", "install", "--python", sys.executable, *dependencies], check=True)
+        # An editable install only adds a .pth file, which `site` reads at
+        # interpreter startup -- this process would not see it otherwise.
+        importlib.invalidate_caches()
+        site.addsitedir(sysconfig.get_paths()["purelib"])
+    except FileNotFoundError as exc:
+        raise ConfigError(
+            f"`uv` is required to install prepare_dependencies for benchmark '{benchmark_config.name}'."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise ConfigError(
+            f"Could not install prepare_dependencies for benchmark '{benchmark_config.name}': {' '.join(dependencies)}"
+        ) from exc
 
 
 @exit_cleanly_on_config_error
@@ -258,7 +298,9 @@ def prepare_benchmark() -> None:
         dataset = datasets[0]
 
         try:
-            agent_name = resolve_dataset_agent(global_config_dict, str(server_instance_name), pin=dataset.agent)
+            agent_name = resolve_dataset_agent(
+                global_config_dict, str(server_instance_name), pin=dataset.agent, taskset=dataset.taskset
+            )
         except ConfigError as e:
             raise ConfigError(f"Benchmark dataset {dataset.name!r}: {e}") from e
 
@@ -270,6 +312,7 @@ def prepare_benchmark() -> None:
             agent_name=agent_name,
             num_repeats=dataset.num_repeats,
             dataset=dataset,
+            environment_server=taskset_environment_server_name(global_config_dict, dataset.taskset),
         )
 
     if not benchmarks_dict:
@@ -296,6 +339,7 @@ def prepare_benchmark() -> None:
             continue
 
         prepare_module_path = ".".join(prepare_script_path.with_suffix("").parts)
+        _install_prepare_dependencies(benchmark_config)
         module = importlib.import_module(prepare_module_path)
         if not hasattr(module, "prepare"):
             prepare_function_missing.append(benchmark_config)
@@ -303,8 +347,15 @@ def prepare_benchmark() -> None:
 
         is_already_prepared = benchmark_config.dataset.jsonl_fpath.exists()
         if prepare_benchmark_config.use_cached_prepared_benchmarks and is_already_prepared:
-            already_prepared.append(benchmark_config)
-            continue
+            is_current = getattr(module, "is_prepared_data_current", None)
+            if callable(is_current) and not is_current(benchmark_config.dataset.jsonl_fpath):
+                print(
+                    f"The cached file for {benchmark_config.name} ({benchmark_config.dataset.jsonl_fpath}) "
+                    "is out of date, so it will be prepared again."
+                )
+            else:
+                already_prepared.append(benchmark_config)
+                continue
 
         validated.append((benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args)))
 
