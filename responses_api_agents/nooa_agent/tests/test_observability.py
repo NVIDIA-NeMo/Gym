@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+from types import ModuleType
 
 import pytest
 from pydantic import BaseModel
@@ -96,6 +97,32 @@ def test_no_model_call_preserves_original_responses_input_with_tool_events() -> 
     assert invocation.conversation[0].content == "original row input"
     assert [item.type for item in invocation.conversation[1:]] == ["function_call", "function_call_output"]
     assert trajectory.turns == []
+
+
+def test_code_output_snapshots_imported_modules_and_mutable_locals() -> None:
+    from nooa.events import ExecutionResult
+
+    trace = GymTraceHooks()
+    execution = trace.before_code_execution(code="import math", execution_id="exec-1", tool_call_id="call-1")
+    variables = {"math": ModuleType("math"), "values": [1]}
+    result = ExecutionResult(stdout="done", captured_locals=variables, returned_value=variables["values"])
+    trace.after_code_execution(context=execution, result=result, exception=None)
+    variables["values"].append(2)
+
+    episode, trajectory = trace.project(
+        create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        state=RolloutLLMState(max_policy_calls=1),
+        task_id="task",
+        rollout_id="0-0",
+    )
+
+    output = json.loads(trajectory.tool_calls[0].output)
+    assert output["stdout"] == "done"
+    assert output["returned_value"] == [1]
+    assert "captured_locals" not in output
+    assert trajectory.tool_calls[0].status == "completed"
+    assert episode.response.output[-1].output == trajectory.tool_calls[0].output
+    TrajectoryRecord.model_validate_json(trajectory.model_dump_json())
 
 
 @pytest.mark.parametrize("error", [ValueError("bad code"), asyncio.CancelledError()])
