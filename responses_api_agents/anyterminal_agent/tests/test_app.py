@@ -108,7 +108,9 @@ class TestRunnerTemplate:
     def test_max_output_tokens_adapts_to_harness_max_tokens(self) -> None:
         rendered = self._render()
         assert '_cfg_sampling["max_tokens"] = SAMPLING["max_output_tokens"]' in rendered
-        assert '_request_sampling.pop("max_output_tokens")' in rendered
+        # The request allowlist may already have omitted max_output_tokens. The
+        # adapter must still populate max_tokens without raising KeyError.
+        assert '_request_sampling.pop("max_output_tokens", None)' in rendered
 
     def test_request_sampling_allowlist_omits_unsupported_fields(self) -> None:
         rendered = self._render()

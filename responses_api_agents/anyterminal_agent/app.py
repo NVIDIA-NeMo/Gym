@@ -240,7 +240,7 @@ _request_sampling = {{
 # to either kind of harness without the latter rejecting an otherwise valid run.
 if "max_output_tokens" in SAMPLING and "max_tokens" in _config_fields and "max_output_tokens" not in _config_fields:
     _cfg_sampling["max_tokens"] = SAMPLING["max_output_tokens"]
-    _request_sampling.pop("max_output_tokens")
+    _request_sampling.pop("max_output_tokens", None)
 
 _model_server = ModelServerRef(name="policy_model", type="responses_api_models") if MODEL_URL else None
 config = {agent_cfg_class}(
