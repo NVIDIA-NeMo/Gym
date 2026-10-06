@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.sandbox import process_supervisor
+from nemo_gym.agent_utils import process_supervisor
 from responses_api_agents.pi_agent import sandbox_runner
 
 

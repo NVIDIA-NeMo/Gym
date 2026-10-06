@@ -7,8 +7,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, supervisor_client
-from nemo_gym.sandbox.session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils import supervisor_client
+from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 
 
 RECEIPT = {"cleanup_confirmed": True, "return_code": 0, "timed_out": False, "error": None}
@@ -26,12 +27,13 @@ def receipt_reader(monkeypatch):
 def session(receipt_reader):
     sandbox = AsyncMock(spec=AsyncSandbox)
     sandbox.exec.return_value = OK
-    return SandboxSession(sandbox=sandbox, directory="/session", workdir="/app", harness="test")
+    return SandboxSession(sandbox=sandbox, session_dir="/session", workdir="/app", harness="test")
 
 
-async def execute(session, *, collect=None, prepare=None, timeout=1):
+async def execute(session, *, collect=None, stage_activation=None, timeout=1):
     return await session.execute(
-        prepare=prepare or AsyncMock(return_value=SandboxCommand(argv=["worker"], python="/runtime/python")),
+        stage_activation=stage_activation
+        or AsyncMock(return_value=SandboxCommand(argv=["worker"], python="/runtime/python")),
         collect=collect or AsyncMock(return_value="transcript"),
         timeout=10,
         close_timeout=timeout,
@@ -138,12 +140,12 @@ async def test_close_joins_collection_started_by_normal_completion(session):
 async def test_close_during_input_preparation_prevents_launch(session, receipt_reader):
     preparing = asyncio.Event()
 
-    async def prepare():
+    async def stage_activation():
         preparing.set()
         await asyncio.Future()
 
     collector = AsyncMock()
-    running = asyncio.create_task(execute(session, prepare=prepare, collect=collector))
+    running = asyncio.create_task(execute(session, stage_activation=stage_activation, collect=collector))
     await asyncio.wait_for(preparing.wait(), 2)
     await session.close(timeout=1)
     with pytest.raises(asyncio.CancelledError):
@@ -267,7 +269,7 @@ async def test_nonzero_worker_exit_still_passes_artifacts_to_adapter(session, re
 
 
 async def test_bootstrap_failure_preserves_stderr_and_still_releases(session, receipt_reader):
-    receipt_reader.return_value = json.dumps({"cleanup_confirmed": True, "error": None})
+    receipt_reader.return_value = json.dumps(RECEIPT | {"return_code": None})
     session.sandbox.exec.return_value = SandboxExecResult("", "/runtime/python: not found", 127)
     collector = AsyncMock(side_effect=FileNotFoundError("no worker output"))
     with pytest.raises(RuntimeError, match="sandbox execution failed.*127.*python: not found") as error:
@@ -280,3 +282,132 @@ async def test_bootstrap_failure_preserves_stderr_and_still_releases(session, re
     await session.close(timeout=1)
     assert session.closed
     session.sandbox.disconnect.assert_awaited_once()
+
+
+async def test_session_uploads_supervisor_before_launch(session):
+    from pathlib import Path
+
+    from nemo_gym.agent_utils import process_supervisor
+    from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_FILE
+
+    events = []
+
+    async def upload(source, destination):
+        assert Path(source).read_bytes() == Path(process_supervisor.__file__).read_bytes()
+        assert destination == f"/session/{SUPERVISOR_FILE}"
+        events.append("upload")
+
+    async def launch(*args, **kwargs):
+        assert events == ["upload"]
+        events.append("launch")
+        return OK
+
+    session.sandbox.upload.side_effect = upload
+    session.sandbox.exec.side_effect = launch
+    assert await execute(session) == "transcript"
+    assert events == ["upload", "launch"]
+    assert not session.closing and not session.closed
+    session.sandbox.stop.assert_not_awaited()
+    session.sandbox.disconnect.assert_not_awaited()
+
+
+@pytest.mark.parametrize("owned", [False, True])
+async def test_close_during_supervisor_upload_joins_staging_before_release(session, receipt_reader, owned):
+    session.owns_sandbox = owned
+    uploading = asyncio.Event()
+    events = []
+
+    async def upload(*args):
+        uploading.set()
+        try:
+            await asyncio.Future()
+        finally:
+            events.append("upload_settled")
+
+    session.sandbox.upload.side_effect = upload
+    release = session.sandbox.stop if owned else session.sandbox.disconnect
+    release.side_effect = lambda: events.append("release")
+    collector = AsyncMock()
+    running = asyncio.create_task(execute(session, collect=collector))
+    await asyncio.wait_for(uploading.wait(), 2)
+    await session.close(timeout=1)
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert events == ["upload_settled", "release"]
+    assert not session.launch_started
+    assert session.closed and session.closing
+    collector.assert_not_awaited()
+    receipt_reader.assert_not_awaited()
+    assert all("exec " not in call.args[0] for call in session.sandbox.exec.await_args_list)
+
+
+async def test_supervisor_upload_failure_preserves_error_and_allows_close(session, receipt_reader):
+    session.sandbox.upload.side_effect = OSError("supervisor upload failed")
+    collector = AsyncMock()
+    with pytest.raises(OSError, match="supervisor upload failed"):
+        await execute(session, collect=collector)
+    assert not session.launch_started
+    assert not session.closing
+    collector.assert_not_awaited()
+    receipt_reader.assert_not_awaited()
+    session.sandbox.exec.assert_not_awaited()
+    await session.close(timeout=1)
+    assert session.closed
+    session.sandbox.disconnect.assert_awaited_once()
+
+
+async def test_cancelled_close_stays_closing_and_can_retry(session):
+    release_started = asyncio.Event()
+
+    async def disconnect():
+        release_started.set()
+        await asyncio.Future()
+
+    session.sandbox.disconnect.side_effect = disconnect
+    closing = asyncio.create_task(session.close(timeout=1))
+    await asyncio.wait_for(release_started.wait(), 2)
+    session._close_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    assert session.closing and not session.closed
+    with pytest.raises(RuntimeError, match="closing or already activated"):
+        await execute(session)
+    session.sandbox.disconnect.side_effect = None
+    await session.close(timeout=1)
+    assert session.closed
+
+
+async def test_failure_log_is_read_before_session_release(session, monkeypatch):
+    from nemo_gym.agent_utils import sandbox_session
+
+    async def read_log(sandbox, *, path):
+        sandbox.disconnect.assert_not_awaited()
+        assert path == "/session/output.log"
+        return "diagnostic output"
+
+    monkeypatch.setattr(sandbox_session, "read_text", read_log)
+
+    async def collect():
+        log = await session.read_output_log()
+        raise FileNotFoundError(f"Missing artifacts: {log}")
+
+    with pytest.raises(FileNotFoundError, match="Missing artifacts: diagnostic output"):
+        await execute(session, collect=collect)
+    await session.close(timeout=1)
+    session.sandbox.disconnect.assert_awaited_once()
+
+
+async def test_missing_failure_log_does_not_mask_capture_failure(session, monkeypatch):
+    from nemo_gym.agent_utils import sandbox_session
+
+    monkeypatch.setattr(sandbox_session, "read_text", AsyncMock(side_effect=OSError("download failed")))
+
+    async def collect():
+        log = await session.read_output_log()
+        raise FileNotFoundError(f"Missing artifacts: {log}")
+
+    with pytest.raises(FileNotFoundError, match="Missing artifacts"):
+        await execute(session, collect=collect)
+    assert session.cleanup == RECEIPT
+    await session.close(timeout=1)
+    assert session.closed
