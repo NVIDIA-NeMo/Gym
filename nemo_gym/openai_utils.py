@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import random
 from asyncio import sleep
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import (
     Annotated,
     Any,
@@ -1274,6 +1277,39 @@ RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [404, 408, 500]
 PERMANENT_QUOTA_CODES = ("budget_exceeded", "insufficient_quota")
 PERMANENT_AUTH_CODES = ("invalid_api_key", "invalid_api_token", "authentication_error")
 
+# Retries back off exponentially with jitter: the n-th retry waits a uniform draw from [d/2, d]
+# with d = min(max_delay, base_delay * 2 ** (n - 1)), so clients throttled together do not come
+# back together and none comes back at once. A server's Retry-After is a floor on the wait.
+DEFAULT_RETRY_BASE_DELAY = 1.0
+DEFAULT_RETRY_MAX_DELAY = 60.0
+
+
+def retry_backoff_delay(tries: int, base_delay: float, max_delay: float) -> float:
+    """Seconds to wait after failed attempt number ``tries`` (1 for the first failure)."""
+    ceiling = min(max_delay, base_delay * 2 ** (tries - 1))
+    return random.uniform(ceiling / 2, ceiling)
+
+
+def retry_after_seconds(headers: Any) -> Optional[float]:
+    """The pause a ``Retry-After`` header asks for (delta-seconds or an HTTP date), or None."""
+    if not headers:
+        return None
+    value = headers.get("Retry-After") or headers.get("retry-after")
+    if not value:
+        return None
+    value = str(value).strip()
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+
 
 def _decode_error_text(content: bytes | str) -> str:
     return content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
@@ -1335,6 +1371,24 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     )
 
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
+
+    retry_base_delay: float = Field(
+        default=DEFAULT_RETRY_BASE_DELAY,
+        gt=0,
+        description=(
+            "Exponential backoff with jitter between HTTP retries: the n-th retry waits a "
+            "uniform draw from [d/2, d] seconds, d = min(retry_max_delay, retry_base_delay * 2 ** (n - 1))."
+        ),
+    )
+
+    retry_max_delay: float = Field(
+        default=DEFAULT_RETRY_MAX_DELAY,
+        gt=0,
+        description=(
+            "Cap on one backoff, in seconds. A Retry-After header is waited out in full; one "
+            "asking for longer than this ends the retries instead of being cut short."
+        ),
+    )
 
     default_headers: Dict[str, str] = Field(
         default_factory=dict,
@@ -1418,12 +1472,22 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             if tries >= max_num_tries:
                 await raise_for_status(response, content)
 
+            # Exponential backoff with jitter, and at least as long as the server's Retry-After;
+            # a Retry-After beyond what this client waits ends the retries rather than coming
+            # back early.
+            delay = retry_backoff_delay(tries, self.retry_base_delay, self.retry_max_delay)
+            retry_after = retry_after_seconds(getattr(response, "headers", None))
+            if retry_after is not None:
+                if retry_after > self.retry_max_delay:
+                    await raise_for_status(response, content)
+                delay = max(delay, retry_after + random.uniform(0, 1))
+
             kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error"
             print(
-                f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content.decode('utf-8', errors='replace')[:200]}]",
+                f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} wait_s={delay:.1f} error_msg={content.decode('utf-8', errors='replace')[:200]}]",
                 flush=True,
             )
-            await sleep(0.5)
+            await sleep(delay)
 
         await raise_for_status(response)
 

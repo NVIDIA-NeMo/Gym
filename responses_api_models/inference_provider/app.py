@@ -33,6 +33,9 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
+    DEFAULT_RETRY_BASE_DELAY,
+    DEFAULT_RETRY_MAX_DELAY,
+    MAX_NUM_TRIES,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -52,6 +55,11 @@ class InferenceProviderConfig(BaseResponsesAPIModelConfig):
     num_concurrent_requests: int = 1000
     extra_body: Dict[str, Any] = Field(default_factory=dict)
 
+    # HTTP retries (429, 5xx, 404, 408): exponential backoff with jitter, Retry-After honoured
+    max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
+    retry_base_delay: float = Field(default=DEFAULT_RETRY_BASE_DELAY, gt=0)
+    retry_max_delay: float = Field(default=DEFAULT_RETRY_MAX_DELAY, gt=0)
+
 
 class InferenceProvider(SimpleResponsesAPIModel):
     ray_enabled = False
@@ -61,6 +69,9 @@ class InferenceProvider(SimpleResponsesAPIModel):
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.base_url,
             api_key=self.config.api_key,
+            max_http_attempts=self.config.max_http_attempts,
+            retry_base_delay=self.config.retry_base_delay,
+            retry_max_delay=self.config.retry_max_delay,
         )
         self._converter = ResponsesConverter(
             return_token_id_information=False,

@@ -24,6 +24,8 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
+    DEFAULT_RETRY_BASE_DELAY,
+    DEFAULT_RETRY_MAX_DELAY,
     MAX_NUM_TRIES,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
@@ -41,6 +43,8 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
+    retry_base_delay: float = Field(default=DEFAULT_RETRY_BASE_DELAY, gt=0)
+    retry_max_delay: float = Field(default=DEFAULT_RETRY_MAX_DELAY, gt=0)
 
     max_concurrent_requests: Optional[int] = Field(
         default=None,
@@ -72,6 +76,8 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             api_key=self.config.openai_api_key,
             default_headers=self.config.openai_default_headers,
             max_http_attempts=self.config.max_http_attempts,
+            retry_base_delay=self.config.retry_base_delay,
+            retry_max_delay=self.config.retry_max_delay,
         )
         self._semaphore = (
             asyncio.Semaphore(self.config.max_concurrent_requests)

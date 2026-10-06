@@ -12,7 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import random
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from types import SimpleNamespace, UnionType
 from typing import (
     Annotated,
@@ -71,6 +74,7 @@ from pydantic import ValidationError
 
 from nemo_gym.openai_utils import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
+    DEFAULT_RETRY_MAX_DELAY,
     MAX_NUM_TRIES,
     RESPONSES_TO_TRAIN,
     NeMoGymAsyncOpenAI,
@@ -109,6 +113,8 @@ from nemo_gym.openai_utils import (
     _error_body_is_permanent_auth,
     _error_body_is_permanent_quota,
     accumulate_response_usage,
+    retry_after_seconds,
+    retry_backoff_delay,
     training_variant_of,
 )
 from nemo_gym.responses_converter import (
@@ -156,13 +162,14 @@ class TestOpenAIUtils:
         assert request.await_count == MAX_NUM_TRIES
 
     @pytest.mark.parametrize("status", [404, 408])
-    async def test_retry_reuses_request_with_fixed_delay(self, monkeypatch, status):
+    async def test_retry_reuses_request_with_backoff(self, monkeypatch, status):
         failure = SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=b"temporary")))
         success = SimpleNamespace(status=200)
         request = AsyncMock(side_effect=[failure, failure, success])
         sleep = AsyncMock()
         monkeypatch.setattr("nemo_gym.openai_utils.request", request)
         monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.openai_utils.random.uniform", lambda low, high: high)
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
         payload = {"model": "judge", "input": [{"role": "user", "content": "preserved answer"}]}
         original = deepcopy(payload)
@@ -173,7 +180,7 @@ class TestOpenAIUtils:
         assert request.await_count == 3
         assert all(c.kwargs["json"] == original for c in request.await_args_list)
         assert payload == original
-        assert sleep.await_args_list == [call(0.5), call(0.5)]
+        assert sleep.await_args_list == [call(1.0), call(2.0)]  # 1 s, then doubled
 
     async def test_non_retryable_http_errors_are_returned_once(self, monkeypatch):
         response = SimpleNamespace(status=400)
@@ -185,6 +192,78 @@ class TestOpenAIUtils:
 
         assert await client._request_with_retry() is response
         request.assert_awaited_once()
+        sleep.assert_not_awaited()
+
+    def test_invalid_backoff_configuration_rejected(self):
+        for bad in ({"retry_base_delay": 0}, {"retry_max_delay": -1.0}):
+            with pytest.raises(ValidationError):
+                NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", **bad)
+
+    def test_backoff_doubles_with_jitter_up_to_the_cap(self):
+        random.seed(0)
+        for tries in range(1, 10):
+            ceiling = min(10.0, 1.0 * 2 ** (tries - 1))
+            waits = [retry_backoff_delay(tries, 1.0, 10.0) for _ in range(200)]
+            assert all(ceiling / 2 <= w <= ceiling for w in waits)
+            assert len(set(waits)) > 1  # jittered, not a fixed delay
+
+    @pytest.mark.parametrize(
+        "headers,expected",
+        [
+            ({"Retry-After": "7"}, 7.0),
+            ({"retry-after": "2.5"}, 2.5),
+            ({"Retry-After": "-3"}, 0.0),
+            ({"Retry-After": "soon"}, None),
+            ({}, None),
+            (None, None),
+        ],
+    )
+    def test_retry_after_seconds(self, headers, expected):
+        assert retry_after_seconds(headers) == expected
+
+    def test_retry_after_http_date(self):
+        when = datetime.now(timezone.utc) + timedelta(seconds=30)
+        seconds = retry_after_seconds({"Retry-After": format_datetime(when, usegmt=True)})
+        assert 28 <= seconds <= 31
+
+    async def test_retry_after_is_waited_out(self, monkeypatch):
+        failure = SimpleNamespace(
+            status=429,
+            headers={"Retry-After": "7"},
+            content=SimpleNamespace(read=AsyncMock(return_value=b"Too Many Requests")),
+        )
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[failure, success])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.openai_utils.random.uniform", lambda low, high: low)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        assert await client._request_with_retry() is success
+        assert sleep.await_args_list == [call(7.0)]  # the server's pause, not the 0.5 s backoff
+
+    async def test_retry_after_beyond_the_cap_ends_the_retries(self, monkeypatch):
+        failure = SimpleNamespace(
+            status=429,
+            headers={"Retry-After": str(DEFAULT_RETRY_MAX_DELAY + 60)},
+            content=SimpleNamespace(read=AsyncMock(return_value=b"Too Many Requests")),
+        )
+        request = AsyncMock(side_effect=[failure, SimpleNamespace(status=200)])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+
+        async def raise_status(response, content=None):
+            assert response is failure
+            raise RuntimeError("rate limited")
+
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        with pytest.raises(RuntimeError, match="rate limited"):
+            await client._request_with_retry()
+        request.assert_awaited_once()  # no early comeback
         sleep.assert_not_awaited()
 
     @pytest.mark.parametrize("status", [404, 408])
@@ -199,6 +278,7 @@ class TestOpenAIUtils:
         sleep = AsyncMock()
         monkeypatch.setattr("nemo_gym.openai_utils.request", request)
         monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.openai_utils.random.uniform", lambda low, high: high)
 
         async def raise_status(response, content=None):
             assert response is replies[-1]
@@ -215,7 +295,7 @@ class TestOpenAIUtils:
         with pytest.raises(RuntimeError, match="terminal error"):
             await client._request_with_retry()
         assert request.await_count == attempts
-        assert sleep.await_args_list == [call(0.5)] * (attempts - 1)
+        assert sleep.await_args_list == [call(float(2**i)) for i in range(attempts - 1)]
 
     @pytest.mark.parametrize(
         "body,expected",
@@ -284,6 +364,7 @@ class TestOpenAIUtils:
         sleep = AsyncMock()
         monkeypatch.setattr("nemo_gym.openai_utils.request", request)
         monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.openai_utils.random.uniform", lambda low, high: low)  # the first backoff's floor
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
 
         result = await client._request_with_retry(url="https://example.com/v1/responses")
@@ -302,6 +383,7 @@ class TestOpenAIUtils:
         sleep = AsyncMock()
         monkeypatch.setattr("nemo_gym.openai_utils.request", request)
         monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.openai_utils.random.uniform", lambda low, high: low)  # the first backoff's floor
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
 
         result = await client._request_with_retry(url="https://example.com/v1/responses")
