@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.harness.process_supervisor import DEFAULT_CLEANUP_TIMEOUT
+from nemo_gym.agent_utils.process_supervisor import DEFAULT_CLEANUP_TIMEOUT
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient

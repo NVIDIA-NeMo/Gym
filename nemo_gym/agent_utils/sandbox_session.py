@@ -9,9 +9,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from nemo_gym.harness import process_supervisor
-from nemo_gym.harness.process_supervisor import CleanupReceipt
-from nemo_gym.harness.supervisor_client import (
+from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
+from nemo_gym.agent_utils.supervisor_client import (
     OUTPUT_LOG_FILE,
     STOP_REQUEST_FILE,
     SUPERVISOR_FILE,

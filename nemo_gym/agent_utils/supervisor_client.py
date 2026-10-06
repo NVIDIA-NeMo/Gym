@@ -26,7 +26,7 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.harness.process_supervisor import CLEANUP_PHASE_COUNT, CleanupReceipt, exec_timeout
+from nemo_gym.agent_utils.process_supervisor import CLEANUP_PHASE_COUNT, CleanupReceipt, exec_timeout
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.utils import read_text
 

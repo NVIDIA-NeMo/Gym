@@ -21,8 +21,8 @@ import uvicorn
 from run_agent import AIAgent
 from tools.mcp_tool import shutdown_mcp_servers
 
-from nemo_gym.harness import process_supervisor
-from nemo_gym.harness.supervisor_client import STOP_REQUEST_FILE
+from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
 from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient

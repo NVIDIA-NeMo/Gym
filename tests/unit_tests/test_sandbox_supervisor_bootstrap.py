@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.harness import process_supervisor
-from nemo_gym.harness.supervisor_client import (
+from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.agent_utils.supervisor_client import (
     CLEANUP_RECEIPT_FILE,
     LAUNCH_CLAIM_FILE,
     SUPERVISOR_FILE,

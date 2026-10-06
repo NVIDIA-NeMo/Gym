@@ -22,6 +22,7 @@ import pytest
 import yaml
 from fastapi import HTTPException
 
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
@@ -29,7 +30,6 @@ from nemo_gym.base_responses_api_agent import (
     _AgentSessionRecord,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.harness.sandbox_session import SandboxSession
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,

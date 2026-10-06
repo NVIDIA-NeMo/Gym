@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.harness import supervisor_client
-from nemo_gym.harness.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils import supervisor_client
+from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 
 
@@ -287,8 +287,8 @@ async def test_bootstrap_failure_preserves_stderr_and_still_releases(session, re
 async def test_session_uploads_supervisor_before_launch(session):
     from pathlib import Path
 
-    from nemo_gym.harness import process_supervisor
-    from nemo_gym.harness.supervisor_client import SUPERVISOR_FILE
+    from nemo_gym.agent_utils import process_supervisor
+    from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_FILE
 
     events = []
 
@@ -378,7 +378,7 @@ async def test_cancelled_close_stays_closing_and_can_retry(session):
 
 
 async def test_failure_log_is_read_before_session_release(session, monkeypatch):
-    from nemo_gym.harness import sandbox_session
+    from nemo_gym.agent_utils import sandbox_session
 
     async def read_log(sandbox, *, path):
         sandbox.disconnect.assert_not_awaited()
@@ -398,7 +398,7 @@ async def test_failure_log_is_read_before_session_release(session, monkeypatch):
 
 
 async def test_missing_failure_log_does_not_mask_capture_failure(session, monkeypatch):
-    from nemo_gym.harness import sandbox_session
+    from nemo_gym.agent_utils import sandbox_session
 
     monkeypatch.setattr(sandbox_session, "read_text", AsyncMock(side_effect=OSError("download failed")))
 
