@@ -391,15 +391,24 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 )
             if mode == "no_internet_preinstalled":
                 # agent_image above is task_image(task), which also ships this task's real
-                # held-out tests - strip them before the agent's session is usable (seed_session
-                # can't return until this function returns, so there's no window where the agent
-                # could read them first).
-                test_file_paths = " ".join(shlex.quote(f"/workspace/{path}") for path in task.test_files.files)
-                strip_result = await sandbox.exec(command=f"rm -rf {test_file_paths}", cwd="/", timeout_s=60)
-                if strip_result.return_code != 0:
+                # held-out tests AND the real repo's own root-level packaging/scaffolding files
+                # (setup.py, pyproject.toml, requirements*.txt, .pytest_cache/, ...) - confirmed
+                # live: deleting only task.test_files.files left setup.py/pyproject.toml/
+                # requirements.txt sitting in /workspace across most tasks (e.g. icecream's real
+                # setup.py), leaking real dependency versions/package metadata the agent was
+                # never supposed to see. Wipe /workspace entirely instead of targeting the known
+                # test-file list - the task's pre-installed Python deps live in system
+                # site-packages (e.g. /usr/local/lib/python3.*/site-packages), not /workspace, so
+                # this can't lose them. Must happen before the agent's session is usable
+                # (seed_session can't return until this function returns, so there's no window
+                # where the agent could read any of it first).
+                wipe_result = await sandbox.exec(
+                    command="find /workspace -mindepth 1 -delete", cwd="/", timeout_s=60
+                )
+                if wipe_result.return_code != 0:
                     raise RuntimeError(
-                        f"Failed to strip held-out test files from agent sandbox for {task_id(task)!r}: "
-                        f"{strip_result.stderr or strip_result.stdout or '(no output)'}"
+                        f"Failed to wipe pre-existing /workspace contents in agent sandbox for {task_id(task)!r}: "
+                        f"{wipe_result.stderr or wipe_result.stdout or '(no output)'}"
                     )
             elif mode == "block_target":
                 await self._install_pip_git_guard(sandbox, task)
