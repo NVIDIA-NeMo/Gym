@@ -39,6 +39,9 @@ def test_profile_composes_all_four_terminal_harnesses_with_one_dataset_owner() -
         "anyterminal_hermes": "HermesAgent",
     }
     assert all(config[name].responses_api_agents.anyterminal_agent.agent_kwargs.model == "model" for name in POOL)
+    assert list(config.anyterminal_hermes.responses_api_agents.anyterminal_agent.agent_request_sampling_fields) == [
+        "temperature"
+    ]
 
     dataset_owners = []
     for instance_name, block in config.items():

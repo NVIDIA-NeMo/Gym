@@ -215,6 +215,7 @@ MODEL_NAME   = os.environ["NGTB_MODEL_NAME"]
 INSTRUCTION  = Path("/trajectories_mount/instruction.txt").read_text()
 AGENT_KWARGS = json.loads(os.environ.get("NGTB_AGENT_KWARGS", "{{}}"))
 SAMPLING     = json.loads(os.environ.get("NGTB_SAMPLING", "{{}}"))
+REQUEST_SAMPLING_FIELDS = {request_sampling_fields!r}
 
 openclaw_defaults = AGENT_KWARGS.get("openclaw_config", {{}}).get("agents", {{}}).get("defaults", {{}})
 if openclaw_defaults.get("workspace") == ".":
@@ -230,7 +231,9 @@ _mock_client._build_server_base_url = lambda cfg: MODEL_URL
 
 _config_fields = {agent_cfg_class}.model_fields
 _cfg_sampling = {{k: v for k, v in SAMPLING.items() if k in _config_fields}}
-_request_sampling = dict(SAMPLING)
+_request_sampling = {{
+    k: v for k, v in SAMPLING.items() if REQUEST_SAMPLING_FIELDS is None or k in REQUEST_SAMPLING_FIELDS
+}}
 # Some harnesses (for example Hermes) expose a per-model-call max_tokens
 # configuration instead of the Responses API's total max_output_tokens budget.
 # Adapt the limit at the AnyTerminal boundary so one training row can be routed
@@ -354,6 +357,7 @@ class GymAgentHarnessProcessor(BaseModel):
             agent_class=cfg.agent_server_class,
             agent_cfg_class=cfg.agent_config_class,
             agent_class_lower=cfg.agent_server_class.lower(),
+            request_sampling_fields=cfg.agent_request_sampling_fields,
         )
         (cfg.persistent_dir / "agent_runner.py").write_text(runner)
         return "/agent_deps_mount/bin/python /trajectories_mount/agent_runner.py"
@@ -369,6 +373,10 @@ class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
     agent_server_class: str = Field(description="Agent class name")
     agent_config_class: str = Field(description="Agent config class name")
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
+    agent_request_sampling_fields: Optional[list[str]] = Field(
+        default=None,
+        description="Optional allowlist of sampling fields passed on the harness Responses API request.",
+    )
 
     container_formatter: str | list[str] = Field(
         default="docker://{docker_image}",

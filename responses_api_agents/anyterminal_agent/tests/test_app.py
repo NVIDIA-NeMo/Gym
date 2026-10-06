@@ -81,6 +81,7 @@ class TestRunnerTemplate:
             agent_class="HermesAgent",
             agent_cfg_class="HermesAgentConfig",
             agent_class_lower="hermesagent",
+            request_sampling_fields=["temperature"],
         )
 
     def test_renders_valid_python(self) -> None:
@@ -108,6 +109,11 @@ class TestRunnerTemplate:
         rendered = self._render()
         assert '_cfg_sampling["max_tokens"] = SAMPLING["max_output_tokens"]' in rendered
         assert '_request_sampling.pop("max_output_tokens")' in rendered
+
+    def test_request_sampling_allowlist_omits_unsupported_fields(self) -> None:
+        rendered = self._render()
+        assert "REQUEST_SAMPLING_FIELDS = ['temperature']" in rendered
+        assert "k in REQUEST_SAMPLING_FIELDS" in rendered
 
 
 class TestAgentKey:
