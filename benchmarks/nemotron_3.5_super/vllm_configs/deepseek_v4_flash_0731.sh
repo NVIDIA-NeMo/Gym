@@ -32,16 +32,14 @@ VLLM_COMMON_ARGS=(
     --moe-backend deep_gemm_mega_moe
     --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"greedy"}'
 )
-PREFILL_KV_TRANSFER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
-DECODE_KV_TRANSFER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
 
 VLLM_PREFILL_ARGS=(
-    --kv-transfer-config "$PREFILL_KV_TRANSFER_CONFIG"
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
 )
 VLLM_DECODE_ARGS=(
-    --kv-transfer-config "$DECODE_KV_TRANSFER_CONFIG"
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     --max-cudagraph-capture-size 2048
     --max-num-batched-tokens 33920
