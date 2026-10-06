@@ -6,8 +6,9 @@ RL environment which allows access to web search (Search Provider: Tavily)
 Follow [Tavily search access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/tavily-search)
 for the required exclusion policy, service credentials, and datasets.
 
-NVIDIA users can start with @rgala. External users can contact the maintainers
-to discuss policy and dataset access options before running this recipe.
+NVIDIA users should use their team's internal access-request channels. External
+users can contact the maintainers to discuss policy and dataset access options
+before running this recipe.
 
 
 ### Performance Metrics
