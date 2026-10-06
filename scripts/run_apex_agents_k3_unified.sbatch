@@ -182,6 +182,25 @@ validate_local() {
 # `gym eval run` starts its servers on random localhost ports. A port clash ("address already in use") makes it exit
 # within seconds, before any rollout runs, and the shard then stays unrun until the next rotation. Retry only such
 # early exits; `--resume` makes a rerun safe. A failure after WORKER_STARTUP_WINDOW_SECONDS is returned unchanged.
+
+# The servers of a failed attempt can outlive `gym eval` and keep their ports, so stop the whole process group and
+# wait until it is gone before retrying; force-kill whatever is left after WORKER_STOP_GRACE_SECONDS.
+stop_process_group() {
+    local pgid="$1" grace="${WORKER_STOP_GRACE_SECONDS:-30}" waited=0
+    kill -TERM -- "-${pgid}" 2>/dev/null || return 0
+    while kill -0 -- "-${pgid}" 2>/dev/null; do
+        if (( waited >= grace )); then
+            log "Worker ${SHARD_INDEX:-?}: process group ${pgid} still alive after ${grace}s; force-killing"
+            kill -KILL -- "-${pgid}" 2>/dev/null || true
+            for _ in 1 2 3 4 5; do kill -0 -- "-${pgid}" 2>/dev/null || return 0; sleep 1; done
+            log "Worker ${SHARD_INDEX:-?}: process group ${pgid} survived SIGKILL; retrying anyway"
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+}
+
 run_eval_with_startup_retry() {
     local attempts="${WORKER_START_ATTEMPTS:-3}"
     local window="${WORKER_STARTUP_WINDOW_SECONDS:-300}"
@@ -196,7 +215,7 @@ run_eval_with_startup_retry() {
         elapsed=$((SECONDS - started))
         if (( rc != 0 && elapsed < window && attempt < attempts )); then
             log "Worker ${SHARD_INDEX:-?}: gym eval exited rc=${rc} ${elapsed}s after start (startup failure); retrying $((attempt + 1))/${attempts}"
-            kill -TERM -- "-${eval_pid}" 2>/dev/null || true
+            stop_process_group "${eval_pid}"
             attempt=$((attempt + 1))
             sleep "${delay}"
             continue
