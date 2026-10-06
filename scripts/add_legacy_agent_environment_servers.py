@@ -115,6 +115,7 @@ def needs_environment_server(instance: dict) -> bool:
     if (resources_server or {}).get("name") == "???":
         return False
     # These adapters require Resources for compatibility /run; explicit null is a native template.
+    # A legacy relay would conflict with the Environment Server supplied by composition.
     # An omitted binding can inherit Resources and must still migrate.
     if agent_type in {"hermes_agent", "openclaw_agent", "opencode_agent"} and resources_server is None:
         return False

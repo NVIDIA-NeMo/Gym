@@ -126,6 +126,25 @@ def test_native_opencode_template_composes_with_one_environment(tmp_path: Path) 
     assert resolved.opencode_agent.responses_api_agents.opencode_agent.resources_server is None
 
 
+def test_hermes_overlay_keeps_its_inherited_resources_binding(tmp_path: Path) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(AGENT_CONFIG.replace("simple_agent", "hermes_agent"))
+    overlay = tmp_path / "overlay.yaml"
+    overlay.write_text(
+        "renamed_agent:\n"
+        "  _inherit_from: my_hermes_agent\n"
+        "  responses_api_agents:\n"
+        "    hermes_agent:\n"
+        "      max_turns: 7\n"
+    )
+
+    assert migration.main([str(base), str(overlay)]) == 0
+
+    resolved = _parse(base, overlay, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["renamed_environment_server"]}
+    assert resolved.renamed_agent.responses_api_agents.hermes_agent.resources_server.name == "my_resources"
+
+
 def test_default_hermes_composes_with_exactly_one_native_environment(tmp_path: Path) -> None:
     config = tmp_path / "hermes.yaml"
     default = SCRIPT.parents[1] / "responses_api_agents/hermes_agent/configs/hermes_agent.yaml"
