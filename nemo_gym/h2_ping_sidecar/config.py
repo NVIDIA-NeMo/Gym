@@ -128,9 +128,10 @@ class H2PingSidecarConfig(BaseModel, extra="forbid"):
     build_if_missing: bool = True
     """Run ``go build`` on the launching node when the binary does not exist yet. Needs Go on PATH."""
 
-    nodes: Union[Literal["local", "all"], List[str]] = "local"
-    """Where to run it. ``local``: the node running ``gym env start``. ``all``: every alive Ray node.
-    A list of node IPs: only those Ray nodes."""
+    nodes: Union[Literal["local", "all"], List[str]] = "all"
+    """Where to run it. ``all`` (default): every alive Ray node, so each node that runs a Gym process
+    gets its own sidecar (the proxy listens on loopback). ``local``: only the node running
+    ``gym env start``, started as a plain child process without Ray. A list of node IPs: only those Ray nodes."""
 
     instances: List[SidecarInstanceConfig] = Field(default_factory=list)
     """One entry per upstream. Empty means one instance whose upstream is the host of ``policy_base_url``."""

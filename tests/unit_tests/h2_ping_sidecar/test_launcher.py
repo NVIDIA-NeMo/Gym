@@ -42,7 +42,8 @@ NVCF = "https://abc123.invocation.api.nvcf.nvidia.com"
 
 
 def _cfg(**kwargs) -> H2PingSidecarConfig:
-    return H2PingSidecarConfig.model_validate({"enabled": True, **kwargs})
+    # The shipped default is `nodes: all` (needs Ray); most tests run the proxy locally.
+    return H2PingSidecarConfig.model_validate({"enabled": True, "nodes": "local", **kwargs})
 
 
 def _fake_binary(tmp_path: Path, script: str) -> Path:
@@ -120,6 +121,9 @@ class TestConfig:
     def test_gomemlimit_rejects(self, value):
         with pytest.raises(ValidationError, match="gomemlimit"):
             _cfg(gomemlimit=value)
+
+    def test_nodes_defaults_to_all(self):
+        assert H2PingSidecarConfig(enabled=True).nodes == "all"
 
     def test_nodes(self):
         assert _cfg().nodes == "local"
@@ -522,6 +526,7 @@ class TestStartH2PingSidecar:
                 "policy_base_url": f"{NVCF}/v1",
                 "sidecar": {
                     "enabled": True,
+                    "nodes": "local",
                     "binary": str(binary),
                     "log_dir": str(tmp_path / "logs"),
                     "shutdown_grace": "1s",
@@ -542,6 +547,7 @@ class TestStartH2PingSidecar:
                 "policy_base_url": f"{NVCF}/v1",
                 "sidecar": {
                     "enabled": True,
+                    "nodes": "local",
                     "binary": str(binary),
                     "log_dir": str(tmp_path / "logs"),
                     "shutdown_grace": "1s",
@@ -560,11 +566,32 @@ class TestStartH2PingSidecar:
         gcd = OmegaConf.create(
             {
                 "policy_base_url": f"{NVCF}/v1",
+                "sidecar": {
+                    "enabled": True,
+                    "nodes": "local",
+                    "binary": str(binary),
+                    "log_dir": str(tmp_path / "logs"),
+                },
+            }
+        )
+        with pytest.raises(SidecarError, match="exited with code 1"):
+            start_h2_ping_sidecar(gcd)
+        assert gcd.policy_base_url == f"{NVCF}/v1"
+
+    def test_default_nodes_runs_on_every_ray_node(self, tmp_path):
+        """With no `nodes` setting the sidecar is started on Ray nodes, so it needs Ray and says so."""
+        binary = _fake_binary(tmp_path, READY_THEN_IDLE)
+        gcd = OmegaConf.create(
+            {
+                "policy_base_url": f"{NVCF}/v1",
                 "sidecar": {"enabled": True, "binary": str(binary), "log_dir": str(tmp_path / "logs")},
             }
         )
-        with pytest.raises(SidecarError):
-            start_h2_ping_sidecar(gcd)
+        ray = MagicMock()
+        ray.is_initialized.return_value = False
+        with patch.object(launcher, "_get_ray", return_value=ray):
+            with pytest.raises(SidecarError, match="Ray is not initialized"):
+                start_h2_ping_sidecar(gcd)
         assert gcd.policy_base_url == f"{NVCF}/v1"
 
     def test_block_is_not_a_server_instance(self):
@@ -651,6 +678,7 @@ class TestStartIsTransactional:
             "policy_base_url": f"{NVCF}/v1",
             "sidecar": {
                 "enabled": True,
+                "nodes": "local",
                 "binary": str(binary),
                 "log_dir": str(tmp_path / "logs"),
                 "shutdown_grace": "1s",
@@ -729,6 +757,7 @@ class TestLoopbackWarning:
                 "policy_base_url": f"{NVCF}/v1",
                 "sidecar": {
                     "enabled": True,
+                    "nodes": "local",
                     "binary": str(binary),
                     "log_dir": str(tmp_path / "logs"),
                     "shutdown_grace": "1s",
@@ -749,6 +778,7 @@ class TestLoopbackWarning:
                 "policy_base_url": f"{NVCF}/v1",
                 "sidecar": {
                     "enabled": True,
+                    "nodes": "local",
                     "binary": str(binary),
                     "log_dir": str(tmp_path / "logs"),
                     "shutdown_grace": "1s",

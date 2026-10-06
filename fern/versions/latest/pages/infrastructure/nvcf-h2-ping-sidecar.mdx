@@ -76,7 +76,7 @@ All keys are optional except `enabled`.
 | `enabled` | `false` | Master switch. When false Gym starts nothing and leaves every URL untouched. |
 | `binary` | `<cache_dir>/h2-ping-sidecar/h2-ping-sidecar` | Path to the compiled sidecar. Gym builds it here when it is missing. |
 | `build_if_missing` | `true` | Run `go build` on the launching node when `binary` does not exist. Needs Go on PATH (see `nemo_gym/tools/sidecar/go.mod` for the version). Set `false` to require a prebuilt binary. |
-| `nodes` | `local` | `local`: the node running `gym env start`. `all`: every alive Ray node. A list of node IPs: only those Ray nodes. |
+| `nodes` | `all` | `all`: every alive Ray node. `local`: only the node running `gym env start`, as a plain child process without Ray. A list of node IPs: only those Ray nodes. |
 | `instances` | one, from `policy_base_url` | List of `{name, upstream, listen}`. `listen` defaults to `127.0.0.1:1250`; give each instance its own port. |
 | `ping_interval` | `60s` | Idle time before a PING. Must be below 340s. |
 | `ping_timeout` | `15s` | Close the upstream connection if a PING is not acknowledged in time. |
@@ -96,11 +96,12 @@ Durations use Go syntax: `60s`, `15m`, `1m30s`.
 
 The sidecar listens on loopback, so every node that runs a Gym model server needs its own.
 
-- **`nodes: local`** (default) runs it on the node running `gym env start`. Use it when every Gym
-  server runs on that node.
-- **`nodes: all`** runs one sidecar per alive Ray node, each pinned to its node by a small Ray actor.
-  The `binary` path must be readable at the same path on every node (a shared filesystem), and Gym
-  must be importable on every node. Gym reports a node that cannot start it and aborts the run.
+- **`nodes: all`** (default) runs one sidecar per alive Ray node, each pinned to its node by a small Ray actor.
+  On a single machine this is one sidecar on that machine. On a cluster, the `binary` path must be readable
+  at the same path on every node (a shared filesystem), and Gym must be importable on every node. Gym
+  reports a node that cannot start it and aborts the run.
+- **`nodes: local`** runs one sidecar on the node running `gym env start`, as a plain child process with no
+  Ray actor. Use it when every Gym server runs on that node, or when the nodes do not share a filesystem.
 - **`nodes: [10.0.0.1, 10.0.0.2]`** runs it on just those Ray nodes, matched by the node IP Ray reports.
 - **`enabled: false`** (or no block) turns the feature off.
 
