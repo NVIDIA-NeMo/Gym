@@ -19,11 +19,13 @@ import sysconfig
 from pathlib import Path
 from textwrap import dedent
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import DictConfig
 
 import nemo_gym.cli.eval as cli_eval
+import nemo_gym.rollout_reverification as rollout_reverification
 from nemo_gym.cli.eval import _validate_prepared_split_file_exists, _validate_split_datasets_declared
 from nemo_gym.config_types import ConfigError, ResponsesAPIAgentServerInstanceConfig
 
@@ -229,3 +231,70 @@ class TestPrepareDependencies:
 
         with pytest.raises(ConfigError, match="prepare_dependencies for benchmark 'b'"):
             cli_eval._install_prepare_dependencies(self._benchmark(["nope"]))
+
+
+def _configure_reverify(monkeypatch: pytest.MonkeyPatch, *, error: BaseException | None = None) -> MagicMock:
+    config = object()
+    runner = MagicMock()
+    helper = MagicMock()
+
+    async def run_from_config(actual_config: object) -> None:
+        assert actual_config is config
+        if error is not None:
+            raise error
+
+    helper.run_from_config = run_from_config
+    monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: {"configured": True})
+    monkeypatch.setattr(cli_eval, "RunHelper", MagicMock(return_value=runner))
+    monkeypatch.setattr(
+        rollout_reverification.RolloutReverificationConfig,
+        "model_validate",
+        MagicMock(return_value=config),
+    )
+    monkeypatch.setattr(
+        rollout_reverification,
+        "RolloutReverificationHelper",
+        MagicMock(return_value=helper),
+    )
+    return runner
+
+
+def test_reverify_rollouts_shuts_down_servers_after_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _configure_reverify(monkeypatch)
+
+    cli_eval.reverify_rollouts()
+
+    runner.start.assert_called_once_with(None)
+    runner.shutdown.assert_called_once_with()
+
+
+def test_reverify_rollouts_shuts_down_servers_after_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _configure_reverify(monkeypatch, error=RuntimeError("verification failed"))
+
+    with pytest.raises(RuntimeError, match="verification failed"):
+        cli_eval.reverify_rollouts()
+
+    runner.shutdown.assert_called_once_with()
+
+
+def test_reverify_rollouts_shuts_down_servers_after_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _configure_reverify(monkeypatch, error=KeyboardInterrupt())
+
+    cli_eval.reverify_rollouts()
+
+    runner.shutdown.assert_called_once_with()
+
+
+def test_reverify_rollouts_validates_config_before_starting_servers(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = _configure_reverify(monkeypatch)
+    monkeypatch.setattr(
+        rollout_reverification.RolloutReverificationConfig,
+        "model_validate",
+        MagicMock(side_effect=ValueError("invalid reverification config")),
+    )
+
+    with pytest.raises(ValueError, match="invalid reverification config"):
+        cli_eval.reverify_rollouts()
+
+    runner.start.assert_not_called()
+    runner.shutdown.assert_not_called()
