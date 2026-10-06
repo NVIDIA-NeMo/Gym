@@ -1,0 +1,23 @@
+<original_task_instructions>
+{task_markdown}
+</original_task_instructions>
+
+<rubric_item>
+<description>
+{check_description}
+</description>
+
+<pass_criteria>
+{score_1_criteria}
+</pass_criteria>
+
+<fail_criteria>
+{score_0_criteria}
+</fail_criteria>
+</rubric_item>
+
+<submitted_artifact>
+Submitted artifact content follows in this same user message.
+
+<<<SUBMISSION CONTENT MESSAGES>>>
+</submitted_artifact>

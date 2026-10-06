@@ -1,0 +1,158 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+from omegaconf import OmegaConf
+from openai import OpenAI
+
+from nemo_gym.server_utils import ServerClient
+from resources_servers.aa_briefcase_lite.app import (
+    AABriefcaseLiteResourcesServer,
+    AABriefcaseLiteResourcesServerConfig,
+    _BinaryJudgeHttpClient,
+)
+from resources_servers.gdpval.comparison import send_judge_request
+from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
+
+
+@pytest.mark.parametrize(
+    ("judge_name", "expected_model", "expected_parameters", "model_overrides"),
+    [
+        ("gpt-5.5", "openai/openai/gpt-5.5", {"reasoning_effort": "high"}, {}),
+        ("gemini-3.1-pro", "gcp/google/gemini-3.1-pro-preview", {"reasoning_effort": "high"}, {}),
+        (
+            "claude-opus-4.8",
+            "aws/anthropic/bedrock-claude-opus-4-8",
+            {"thinking": {"type": "adaptive"}, "output_config": {"effort": "medium"}, "max_tokens": 49152},
+            {},
+        ),
+        (
+            "gemini-3.1-pro",
+            "gemini-model",
+            {"reasoning_effort": "high"},
+            {"JUDGE_GEMINI_MODEL": "gemini-model"},
+        ),
+    ],
+)
+@pytest.mark.parametrize(("judge_mode", "default_max_tokens"), [("binary", 4096), ("pairwise", 65535)])
+async def test_benchmark_panel_routes_to_matching_upstream_model(
+    monkeypatch,
+    tmp_path: Path,
+    judge_name: str,
+    expected_model: str,
+    expected_parameters: dict,
+    model_overrides: dict,
+    judge_mode: str,
+    default_max_tokens: int,
+) -> None:
+    """Exercise the benchmark YAML, panel resolver, SDK, and real model HTTP route.
+
+    Capture the outbound provider request, after the adapter's fixed-model
+    override. No provider credentials or network calls are needed.
+    """
+    for name in ("JUDGE_GPT_MODEL", "JUDGE_GEMINI_MODEL", "JUDGE_CLAUDE_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in model_overrides.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("AA_BRIEFCASE_LITE_DATASET_DIR", str(tmp_path))
+    monkeypatch.setenv("JUDGE_BASE_URL", "http://upstream.invalid/v1")
+    monkeypatch.setenv("JUDGE_API_KEY", "dummy")
+    benchmark = Path(__file__).resolve().parents[3] / "benchmarks/aa_briefcase_lite/config.yaml"
+    config = OmegaConf.load(benchmark)
+    model_configs = {}
+    for name, section in config.items():
+        if "responses_api_models" not in section:
+            continue
+        model_config = section.responses_api_models.openai_model
+        model_config.update(host="127.0.0.1", port=19000 + len(model_configs), name=name)
+        model_configs[name] = SimpleModelServerConfig(**OmegaConf.to_container(model_config, resolve=True))
+    monkeypatch.setattr("nemo_gym.server_utils.get_global_config_dict", lambda: config)
+    resource_config = AABriefcaseLiteResourcesServerConfig(
+        **OmegaConf.to_container(
+            config.aa_briefcase_lite_resources_server.resources_servers.aa_briefcase_lite, resolve=True
+        ),
+        host="127.0.0.1",
+        port=18000,
+    )
+    # Resolving the panel does not need dataset loading or Office installation.
+    monkeypatch.setattr(AABriefcaseLiteResourcesServer, "model_post_init", lambda self, context: None)
+    resource = AABriefcaseLiteResourcesServer(
+        config=resource_config, server_client=MagicMock(spec=ServerClient, global_config_dict={})
+    )
+    judges = resource._resolve_judges()
+    judge = next(member for member in judges if member.name == judge_name)
+    assert judge.model == expected_model
+    model_config = next(
+        model for model in model_configs.values() if judge.base_url == f"http://{model.host}:{model.port}/v1"
+    )
+    server = SimpleModelServer(config=model_config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+    server._client = MagicMock()
+    server._client.create_chat_completion = AsyncMock(
+        return_value={
+            "id": "chatcmpl-panel-routing",
+            "object": "chat.completion",
+            "created": 0,
+            "model": expected_model,
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": '{"passed": true, "reasoning": "test verdict"}'},
+                }
+            ],
+        }
+    )
+    with TestClient(server.setup_webserver()) as transport:
+        messages = [{"role": "user", "content": "check"}]
+        if judge_mode == "pairwise":
+            monkeypatch.setattr(
+                "resources_servers.aa_briefcase_lite.app.OpenAI",
+                lambda **kwargs: OpenAI(**{**kwargs, "http_client": transport}),
+            )
+            pairwise_judge = resource._pairwise_judges([judge])[0]
+            assert pairwise_judge.model == expected_model
+            assert str(pairwise_judge.client.base_url).rstrip("/") == judge.base_url.rstrip("/")
+            assert (
+                send_judge_request(
+                    pairwise_judge.client,
+                    pairwise_judge.model,
+                    messages,
+                    create_overrides=pairwise_judge.create_overrides,
+                )
+                == '{"passed": true, "reasoning": "test verdict"}'
+            )
+        else:
+            resource._aa_binary_system = "Judge the submitted artifact."
+            resource._aa_binary_user = "{task_markdown} {check_description} {score_1_criteria} {score_0_criteria}<<<SUBMISSION CONTENT MESSAGES>>>"
+            monkeypatch.setattr(
+                "resources_servers.aa_briefcase_lite.app._BinaryJudgeHttpClient",
+                lambda **kwargs: _BinaryJudgeHttpClient(
+                    transport=httpx.ASGITransport(app=server.setup_webserver()), **kwargs
+                ),
+            )
+            parsed, _ = await resource._binary_call(
+                judge,
+                "Produce the requested artifact.",
+                {
+                    "check_id": "test-routing",
+                    "check_description": "Check it.",
+                    "score_1_criteria": "Correct.",
+                    "score_0_criteria": "Incorrect.",
+                },
+                [{"type": "text", "text": "Submitted artifact"}],
+            )
+            assert parsed == {"passed": True, "reasoning": "test verdict"}
+    server._client.create_chat_completion.assert_awaited_once()
+    forwarded = server._client.create_chat_completion.await_args.kwargs
+    assert forwarded["model"] == expected_model
+    assert {key: forwarded[key] for key in expected_parameters} == expected_parameters
+    if judge_mode == "binary" and judge_name == "gpt-5.5":
+        assert forwarded["max_tokens"] == 16384
+    else:
+        assert forwarded["max_tokens"] == expected_parameters.get("max_tokens", default_max_tokens)
+    assert "temperature" not in forwarded
