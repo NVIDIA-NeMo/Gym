@@ -50,7 +50,7 @@ def agent(monkeypatch):
     )
 
     monkeypatch.setattr(
-        HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/ng-rollout/native-a1/v1"
+        HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/ng-rollout/episode-a1/v1"
     )
     return result
 
@@ -62,7 +62,7 @@ def state():
     return HermesAgentSessionState(
         request=AgentSeedSessionRequest(
             agent_session_id="session",
-            episode_id=EpisodeId(rollout_id="native", attempt=1),
+            episode_id=EpisodeId(rollout_id="episode", attempt=1),
             task_id=TaskId(taskset="test", task_id="task"),
             sandbox_access={
                 "connection": {
@@ -657,7 +657,7 @@ async def test_runner_exit_without_cleanup_receipt_blocks_close(agent, state, re
 
 
 @pytest.mark.parametrize("overrides", [{}, {"temperature": 0.0}])
-async def test_native_prompt_and_limits_reach_runner(agent, state, overrides, tmp_path):
+async def test_session_prompt_and_limits_reach_runner(agent, state, overrides, tmp_path):
     state.session_dir = str(tmp_path)
     agent.server_client.global_config_dict = {
         "model": {"responses_api_models": {"vllm_model": {"chat_template_kwargs": {"enable_thinking": False}}}}
@@ -759,7 +759,7 @@ async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, out
     assert state.runner_cleanup is RunnerCleanup.CONFIRMED
     agent.server_client.post.assert_not_called()
     payload = agent._upload_json.await_args.args[2]
-    assert payload["model_base_url"] == "http://model:8000/ng-rollout/native-a1/v1"
+    assert payload["model_base_url"] == "http://model:8000/ng-rollout/episode-a1/v1"
 
 
 @pytest.mark.parametrize(

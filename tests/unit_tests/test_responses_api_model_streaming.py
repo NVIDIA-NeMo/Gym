@@ -27,7 +27,7 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-from fastapi import Body, Request
+from fastapi import Body, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
 
@@ -337,6 +337,19 @@ class TestSanitizeStreamingBody:
         # the cleaned body validates against the strict params model
         NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
 
+    def test_keeps_replayed_assistant_message_without_annotations(self) -> None:
+        # A client replaying an output message it received may omit the annotations list (the
+        # Codex CLI does); the item must survive as the assistant turn it is, not be dropped.
+        item = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Let me inspect the workload first."}],
+        }
+        cleaned, _ = sanitize_streaming_responses_body({"input": [item], "stream": True})
+        assert cleaned["input"] == [item]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
     def test_flattens_namespace_tools(self) -> None:
         flat, ns_map = flatten_namespace_tools([NAMESPACE_TOOL])
         assert len(flat) == 1
@@ -366,6 +379,64 @@ class TestSanitizeStreamingBody:
             {"input": [], "stream": True, "tools": [{"type": "totally_unknown_tool_kind", "config": 1}]}
         )
         assert cleaned["tools"] == []
+
+    HOSTED_TOOL_BODY = {
+        "input": [],
+        "stream": True,
+        "tools": [
+            {"type": "web_search"},
+            {"type": "function", "name": "exec_command", "parameters": {"type": "object"}, "strict": False},
+        ],
+    }
+
+    def test_keeps_hosted_tools_by_default(self) -> None:
+        # A hosted tool spec is a valid Responses tool, so it reaches a provider that serves it.
+        cleaned, _ = sanitize_streaming_responses_body(self.HOSTED_TOOL_BODY)
+
+        assert [tool["type"] for tool in cleaned["tools"]] == ["web_search", "function"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_drops_hosted_tools_when_asked(self) -> None:
+        # Only the provider executes a hosted tool. With the switch on it is dropped, so a backend
+        # that serves none of them offers the model only the tools the client executes.
+        cleaned, _ = sanitize_streaming_responses_body(self.HOSTED_TOOL_BODY, drop_hosted_tools=True)
+
+        assert [tool["type"] for tool in cleaned["tools"]] == ["function"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_drops_hosted_tools_keeps_custom_tools(self) -> None:
+        """The two tool switches are independent: a client-executed custom tool is not hosted."""
+        body = {
+            "input": [],
+            "stream": True,
+            "tools": [
+                {"type": "web_search"},
+                {"type": "custom", "name": "apply_patch", "description": "Apply a patch."},
+            ],
+        }
+
+        cleaned, _ = sanitize_streaming_responses_body(body, drop_hosted_tools=True)
+
+        assert [tool["type"] for tool in cleaned["tools"]] == ["custom"]
+
+    def test_drops_custom_tools_only_when_asked(self) -> None:
+        # A free-form custom tool converts to a Chat Completions custom tool, which a backend
+        # that expresses function tools only refuses; with the switch on it is dropped and the
+        # functions stay, and by default it is kept for backends that support it.
+        body = {
+            "input": [],
+            "stream": True,
+            "tools": [
+                {"type": "custom", "name": "apply_patch", "description": "Apply a patch."},
+                {"type": "function", "name": "exec_command", "parameters": {"type": "object"}, "strict": False},
+            ],
+        }
+        cleaned, _ = sanitize_streaming_responses_body(body, drop_custom_tools=True)
+        assert [tool["type"] for tool in cleaned["tools"]] == ["function"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+        kept, _ = sanitize_streaming_responses_body(body)
+        assert [tool["type"] for tool in kept["tools"]] == ["custom", "function"]
 
     def test_rewrites_namespaced_calls_in_input_history(self) -> None:
         cleaned, _ = sanitize_streaming_responses_body(
@@ -539,6 +610,20 @@ class TestSynthesizeSSE:
         assert completed["usage"]["input_tokens"] == 7
         assert len(completed["output"]) == 1
 
+    def test_unknown_usage_details_are_integers_on_the_wire(self) -> None:
+        # Gym keeps an unreported cache/reasoning breakdown as None to tell unknown from zero, but
+        # the Responses wire schema types these counts as integers; a strict client (the Codex CLI)
+        # fails to parse a null in response.completed and re-sends the request.
+        response = _build_response([_message_item("hello")]).model_dump(mode="json")
+        response["usage"]["input_tokens_details"] = {"cached_tokens": None}
+        response["usage"]["output_tokens_details"] = None
+        events = self._events("".join(synthesize_responses_sse(response)))
+        for event in (events[0], events[-1]):
+            usage = event["response"]["usage"]
+            assert usage["input_tokens_details"]["cached_tokens"] == 0
+            assert usage["output_tokens_details"]["reasoning_tokens"] == 0
+            assert usage["input_tokens"] == 7
+
     def test_namespaced_call_names_restored(self) -> None:
         response = _build_response([_function_call_item("mcp__weather__get_weather")]).model_dump(mode="json")
         ns_map = {"mcp__weather__get_weather": ("mcp__weather", "get_weather")}
@@ -619,6 +704,11 @@ class _FailingModel(_EchoModel):
         raise RuntimeError("backend exploded")
 
 
+class _HTTPErrorModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        raise HTTPException(status_code=400, detail={"error": {"code": "context_length_exceeded"}})
+
+
 def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
     server = model_cls(
         config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name=""),
@@ -689,6 +779,14 @@ class TestResponsesDispatchRoute:
         payload = json.loads(failed[0][len("data: ") :])
         assert payload["response"]["status"] == "failed"
         assert "backend exploded" in payload["response"]["error"]["message"]
+
+    def test_streaming_http_exception_keeps_its_status(self) -> None:
+        # An HTTPException is a status the server chose to return; it is raised before the
+        # stream is committed, so it is not converted into a response.failed event.
+        client, _ = _client(_HTTPErrorModel)
+        resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+        assert resp.status_code == 400
+        assert resp.json() == {"detail": {"error": {"code": "context_length_exceeded"}}}
 
     def test_non_streaming_backend_error_still_raises(self) -> None:
         # Without the streaming contract, a backend failure is a normal exception (HTTP 500), not a

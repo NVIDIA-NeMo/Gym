@@ -268,7 +268,7 @@ async def test_real_harbor_decisions_survive_saved_projection(
         assert turn["resolved"] is None
         assert turn["timestamp"] > 0
     assert {
-        "model_call_failed",
+        "rollout_ended_on_failed_model_call",
         "model_call_zero_completion_tokens",
         "model_call_missing_token_counts",
         "model_call_runaway_generation",
