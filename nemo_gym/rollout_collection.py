@@ -58,11 +58,11 @@ from nemo_gym.config_types import (
     UploadRolloutsConfigMixin,
 )
 from nemo_gym.deliverables import is_deliverable
+from nemo_gym.episode_types import is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
-    AGENT_SERVER_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -76,6 +76,8 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
     dataset_agent_pins,
+    environment_server_agent_names,
+    environment_server_attributed_agent,
     get_global_config_dict,
     label_runs,
     pairing_override_enabled,
@@ -220,7 +222,7 @@ _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 
 
 def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, list[str]]:
-    """Map each agent name to the environment servers whose ``agent_server`` names it."""
+    """Map each agent name to the environment servers that front it."""
     servers_by_agent: dict[str, list[str]] = {}
     for name, instance in global_config_dict.items():
         if not isinstance(instance, DictConfig):
@@ -229,10 +231,10 @@ def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, l
         if not isinstance(servers, DictConfig):
             continue
         for server in servers.values():
-            reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
-            agent_name = reference.get("name") if isinstance(reference, DictConfig) else None
-            if agent_name is not None:
-                servers_by_agent.setdefault(str(agent_name), []).append(str(name))
+            if not isinstance(server, DictConfig):
+                continue
+            for agent_name in environment_server_agent_names(server):
+                servers_by_agent.setdefault(agent_name, []).append(str(name))
     return servers_by_agent
 
 
@@ -241,7 +243,7 @@ def _environment_server_for_agent(agent_name: str, servers_by_agent: Mapping[str
 
     A row routed by its agent cannot choose between several environment servers.
     Several servers may still front one agent when every row names its server directly.
-    Native tasksets name their environment server through ``environment_server_routes``.
+    Materialized tasksets name their environment server through ``environment_server_routes``.
     """
     servers = servers_by_agent.get(agent_name, [])
     if len(servers) == 1:
@@ -259,9 +261,10 @@ def _environment_server_for_agent(agent_name: str, servers_by_agent: Mapping[str
 
 
 def _materialized_taskset(row: Mapping[str, Any]) -> str | None:
-    task_id = row.get("task_id")
-    if not isinstance(task_id, Mapping) or "task_input" not in row:
+    if not is_materialized_task_row(row):
         return None
+    task_id = row.get("task_id")
+    assert isinstance(task_id, Mapping)
     taskset = task_id.get("taskset")
     return taskset if isinstance(taskset, str) and taskset else None
 
@@ -270,10 +273,10 @@ def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> s
     """Pick the environment server a row is dispatched to, or None for today's agent path.
 
     A materialized task (``task_id.taskset`` plus ``task_input``) always routes by its taskset:
-    it is the native episode request and no agent-server ``/run`` accepts it. A flat row follows
+    it is already an episode request and no agent-server ``/run`` accepts it. A flat row follows
     ``environment_routing_mode``: ``agent`` keeps today's routing (its agent's environment server
     is resolved at dispatch), ``legacy`` sends every flat row to ``environment_server_name``, and
-    ``taskset`` refuses flat rows so a native-only run cannot silently pick up legacy input.
+    ``taskset`` refuses flat rows so a run of materialized rows cannot silently pick up legacy input.
 
     One batch may therefore hold both kinds of rows in ``agent`` and ``legacy`` mode. The chosen
     server is stamped on the row as ``_ng_environment_server`` and travels with it through the
@@ -295,7 +298,7 @@ def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> s
     )
 
 
-def _native_episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
+def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
     if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
         raise ValueError(f"Invalid episode attempt: {attempt!r}")
@@ -644,6 +647,8 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             metadata.setdefault("response_status", response["status"])
         projected = TrajectoryModelCall(
             model_call_id=model_call_id,
+            client_session_id=raw_call.get("client_session_id"),
+            client_assistant_message_id=raw_call.get("client_assistant_message_id"),
             started_at=raw_call.get("started_at"),
             completed_at=raw_call.get("completed_at"),
             duration_ms=raw_call.get("latency_total_ms"),
@@ -1084,9 +1089,9 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         description=(
             "How flat (non-materialized) rows are routed. `agent`: today's routing, each row through its "
             "agent's environment server. `legacy`: every flat row to `environment_server_name`. `taskset`: "
-            "flat rows are rejected, so the run is native-only. Materialized rows (`task_id.taskset` plus "
+            "flat rows are rejected, so the run takes only materialized rows. Materialized rows (`task_id.taskset` plus "
             "`task_input`) always route by `environment_server_routes`, in every mode, so one batch may mix "
-            "native and compatibility-routed tasksets."
+            "materialized and compatibility-routed tasksets."
         ),
     )
     environment_server_name: str | None = Field(
@@ -1198,6 +1203,17 @@ class DispatchLatencyTracker:
         if seconds > 0:
             bisect.insort(self._durations, seconds)
 
+    def record_failure(self, seconds: float) -> None:
+        """Record a failed attempt only when it ran at least as long as the median so far.
+
+        A task that timed out or died late shows how long tasks can run, so it can raise the
+        drain margin. One that failed at once says nothing about duration and would drag the
+        p75 toward zero, so it is ignored, as is any failure before a real completion exists.
+        """
+        median = self.quantile(0.5)
+        if median is not None and seconds >= median:
+            self.record(seconds)
+
     def record_drained(self) -> None:
         self._drained += 1
 
@@ -1232,12 +1248,12 @@ class DispatchLatencyTracker:
         else:
             total = sum(self._durations)
             lines = [
-                f"Per-task latency over {len(self._durations)} completed rollout(s): "
+                f"Per-task latency over {len(self._durations)} finished attempt(s): "
                 f"median {self.quantile(0.5) / 60:.1f} min, "
                 f"p90 {self.quantile(0.9) / 60:.1f} min, "
                 f"p99 {self.quantile(0.99) / 60:.1f} min, "
                 f"max {max(self._durations) / 60:.1f} min",
-                f"Task-time delivered: {total / 3600:.1f} task-hours",
+                f"Task-time observed: {total / 3600:.1f} task-hours",
             ]
         if self._drained:
             lines.append(
@@ -1560,9 +1576,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     @model_validator(mode="after")
     def _validate_dispatch_concurrency(self) -> "RolloutCollectionConfig":
-        if self.dispatch_budget_s is not None and self.num_samples_in_parallel is None:
+        if (
+            self.dispatch_budget_s is not None
+            and self.num_samples_in_parallel is None
+            and self.max_resident_rollout_tasks is None
+        ):
             raise ValueError(
-                "dispatch_budget_s requires a finite positive num_samples_in_parallel; "
+                "dispatch_budget_s requires num_samples_in_parallel or max_resident_rollout_tasks; "
                 "unbounded dispatch can POST the entire queue before the budget is re-checked"
             )
         return self
@@ -1797,7 +1817,7 @@ def _rollout_order_key(row: Dict[str, Any]) -> tuple:
 
 
 def _routing_identity(row: Mapping[str, Any]) -> Optional[str]:
-    """The agent a rollout ran on, or for a native taskset row, which names none, its environment server.
+    """The agent a rollout ran on, or for a materialized taskset row, which names none, its environment server.
 
     A materialized row, its result and its sidecar row all name the same one.
     """
@@ -1879,7 +1899,7 @@ def _missing_rollout_rows_counted_as_zero(
     into a no-op.
 
     The zero carries the rollout's identity: its agent, and its environment server stamp when the
-    row has one, which a native taskset row needs because it names no agent. `_fill_task_fields`
+    row has one, which a materialized taskset row needs because it names no agent. `_fill_task_fields`
     adds the task's dataset fields. A row that names neither cannot reach any server's metrics, so
     it is warned about rather than counted. The score enters the metric input and nothing else, the
     same way a counted failure row does.
@@ -3190,12 +3210,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             server_results.setdefault(server_name, []).append(result)
             if server_name not in server_agents:
                 if agent_name is None:
-                    # A native row names no agent; the environment server's own binding does.
+                    # A materialized row names no agent; the environment server's own binding does.
                     agent_name = self._agent_name_for_row({NG_ENVIRONMENT_SERVER_KEY: server_name}, global_config_dict)
                 server_agents[server_name] = agent_name
 
         # One entry per environment server, labelled by the agent it binds so metric names and
-        # `agent_ref` keep today's shape. Servers that front the same agent (a native server and its
+        # `agent_ref` keep today's shape. Servers that front the same agent (a session-based server and its
         # legacy_agent twin) are each labelled by their own name, whatever order their rows arrive in.
         labels = label_runs(server_agents)
         first_error: Optional[Exception] = None
@@ -3431,9 +3451,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if not isinstance(environment_server_name, str):
             return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
         environment_group = global_config_dict[environment_server_name]["environment_servers"]
-        environment_config = next(iter(environment_group.values()))
-        agent_ref = environment_config.get("agent_server")
-        return agent_ref.get("name") if isinstance(agent_ref, DictConfig) else None
+        return environment_server_attributed_agent(next(iter(environment_group.values())))
 
     @classmethod
     def _stamp_environment_server_agent_refs(
@@ -3488,17 +3506,17 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 continue
             environment_group = global_config_dict[environment_server_name]["environment_servers"]
             environment_config = next(iter(environment_group.values()))
-            agent_ref = environment_config.get("agent_server")
             resources_ref = environment_config.get("resources_server")
-            configured_agent = agent_ref.get("name") if isinstance(agent_ref, DictConfig) else None
+            configured_agent = environment_server_attributed_agent(environment_config)
+            server_agents = environment_server_agent_names(environment_config)
             configured_resources = resources_ref.get("name") if isinstance(resources_ref, DictConfig) else None
 
             row_agent = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
             task_source = row.get(TASK_SOURCE_KEY_NAME)
-            if row_agent is not None and configured_agent is not None and row_agent != configured_agent:
+            if row_agent is not None and server_agents and row_agent not in server_agents:
                 raise ValueError(
-                    f"Row agent_ref {row_agent!r} does not match environment server "
-                    f"{environment_server_name!r} agent server {configured_agent!r}"
+                    f"Row agent_ref {row_agent!r} is not an agent of environment server "
+                    f"{environment_server_name!r}: {', '.join(repr(agent) for agent in server_agents)}"
                 )
             if task_source is not None and configured_resources is not None and task_source != configured_resources:
                 raise ValueError(
@@ -3646,15 +3664,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started = time.monotonic()
                 started_at = time.time()
                 res = None
+                succeeded = False
                 try:
-                    request_body = _native_episode_request_body(row) if _materialized_taskset(row) else row
+                    request_body = _episode_request_body(row) if _materialized_taskset(row) else row
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000
-                    tracker.record(time.monotonic() - started)
+                    succeeded = True
                     return _CompletedRollout(
                         row=row,
                         result=result,
@@ -3683,6 +3702,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server=server_name,
                         environment_server_type=server_type,
                     )
+                finally:
+                    # Failed and timed-out tasks inform the adaptive margin too, but only by
+                    # raising it: see ``DispatchLatencyTracker.record_failure``.
+                    elapsed = time.monotonic() - started
+                    if succeeded:
+                        tracker.record(elapsed)
+                    else:
+                        tracker.record_failure(elapsed)
 
         awaitables = map(_post_subroutine, examples)
         if max_resident_tasks is not None:
