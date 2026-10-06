@@ -1,179 +1,152 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""OpenCode execution in borrowed or agent-owned sandboxes."""
+"""OpenCode artifacts and request state over the shared sandbox lifecycle."""
 
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 from shlex import quote
 
-from pydantic import JsonValue
+from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.sandbox import AsyncSandbox, process_supervisor
-from nemo_gym.sandbox.process_supervisor import CleanupReceipt
-from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.sandbox.runner import (
-    RunnerRuntimeInfo,
-    confirm_runner_cleanup,
-    read_text,
-    supervisor_command,
-    upload_text,
-)
+from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.base_responses_api_agent import AgentSessionState
+from nemo_gym.config_types import ModelServerRef
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
+from nemo_gym.sandbox.utils import read_text, upload_text
+from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
+
+
+LOG = logging.getLogger(__name__)
+
+
+class HarnessProcessInfo(BaseModel):
+    """Optional OpenCode shim identity, independent of supervisor cleanup."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    hostname: str
+    pid: int
+    python: str | None = None
+
+
+def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
+    """Read OpenCode diagnostics without failing an otherwise valid episode."""
+    try:
+        return HarnessProcessInfo.model_validate(payload)
+    except ValidationError:
+        LOG.warning("OpenCode runtime metadata is missing or malformed")
+        return None
 
 
 @dataclass
-class OpenCodeSandboxSession:
-    """Worker-local session with retryable, fail-closed runner teardown."""
+class OpenCodeSandboxSession(AgentSessionState):
+    """OpenCode request/output state; SandboxSession owns execution and teardown."""
 
-    seed: AgentSeedSessionRequest
-    sandbox: AsyncSandbox
-    directory: str
+    session: SandboxSession[str]
     runtime: str
-    workdir: str = field(kw_only=True)
-    owns_sandbox: bool = field(default=False, kw_only=True)
-    sandbox_stopped: bool = False
+    model_ref: ModelServerRef | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
-    exec_task: asyncio.Task[SandboxExecResult] | None = None
-    cleanup: CleanupReceipt | None = None
-    runtime_info: RunnerRuntimeInfo | None = None
+    runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
-    activated: bool = False
-    closing: bool = False
-    launch_started: bool = False
-    closed: bool = False
-    close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
-        """Upload adapter-owned data beneath this session's directory."""
-        await upload_text(self.sandbox, path=f"{self.directory}/{name}", text=json.dumps(payload))
+        """Stage adapter input using the shared text-transfer utility."""
+        await upload_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}", text=json.dumps(payload))
 
     async def read_text(self, name: str) -> str:
-        """Read adapter-owned output independently of cleanup confirmation."""
-        return await read_text(self.sandbox, path=f"{self.directory}/{name}")
-
-    async def stop_runner(self, timeout: float) -> None:
-        """Fence a delayed launch or require the shared supervisor's cleanup receipt."""
-        if self.sandbox_stopped or not self.launch_started or self.cleanup is not None:
-            return
-        self.cleanup = await confirm_runner_cleanup(
-            self.sandbox, directory=self.directory, workdir=self.workdir, timeout=timeout, harness="OpenCode"
-        )
+        """Read adapter output using file transfer."""
+        return await read_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}")
 
     async def close(self, timeout: float) -> None:
-        """Stop owned sandboxes; only stop harness work and disconnect borrowed ones."""
-        async with self.close_lock:
-            if self.closed:
-                return
-            self.closing = True
-            # Cancelling provider exec can kill the supervisor. Obtain its
-            # descendant-cleanup receipt before cancelling the response task.
-            if self.owns_sandbox:
-                # The provider is the cleanup authority for an agent-owned sandbox.
-                # Keep the handle retryable if stop fails or times out.
-                if not self.sandbox_stopped:
-                    await asyncio.wait_for(self.sandbox.stop(), timeout=timeout)
-                    self.sandbox_stopped = True
-            else:
-                await self.stop_runner(timeout)
-            if self.task is not None:
-                if not self.task.done() and not self.task.cancelling():
-                    self.task.cancel()
-                try:
-                    await asyncio.wait_for(asyncio.shield(self.task), timeout=timeout)
-                except asyncio.CancelledError:
-                    if not self.task.cancelled():
-                        raise
-                except Exception:
-                    if not self.task.done():
-                        raise
-            if self.exec_task is not None:
-                # A confirmed receipt makes it safe to cancel a stuck provider
-                # response; transport completion is not another cleanup gate.
-                if not self.exec_task.done():
-                    self.exec_task.cancel()
-                try:
-                    await asyncio.wait_for(asyncio.shield(self.exec_task), timeout=timeout)
-                except asyncio.CancelledError:
-                    if not self.exec_task.cancelled():
-                        raise
-                except Exception:
-                    if not self.exec_task.done():
-                        raise
-                    # Transport failure is not cleanup failure once the receipt is confirmed.
-            if self.owns_sandbox:
-                self.closed = True
-                return
-            retired = f"{self.directory}.closed"
-            result = await self.sandbox.exec(
-                f"if [ -d {quote(self.directory)} ]; then "
-                f"mv {quote(self.directory)} {quote(retired)} || exit 1; fi; rm -rf -- {quote(retired)}",
-                timeout_s=timeout,
-            )
-            if result.return_code != 0 or getattr(result, "error_type", None):
-                raise RuntimeError(f"Could not remove OpenCode session files: {result.stderr}")
-            await self.sandbox.disconnect()
-            self.closed = True
+        """Capture and release before cancelling the HTTP activation."""
+        await self.session.close(timeout=timeout)
+        if self.task is not None and not self.task.done() and not self.task.cancelling():
+            self.task.cancel()
+        if self.task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(self.task), timeout=timeout)
+            except asyncio.CancelledError:
+                if not self.task.cancelled():
+                    raise
+            except Exception:
+                if not self.task.done():
+                    raise
+                # The agent base replays the activation error independently of close.
 
     async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> str:
-        """Run the supervisor through provider-neutral exec, without a PTY."""
-        await self.upload_json("input.json", payload)
-        cleanup_timeout = close_timeout / 3
-        command = supervisor_command(
-            directory=self.directory,
-            command=["python3", "-I", f"{self.directory}/sandbox_runner.py", f"{self.directory}/input.json"],
+        """Run through the common lifecycle; the adapter validates terminal events."""
+        artifacts = await self.session.execute(
+            stage_activation=lambda: self.stage_activation(payload),
+            collect=lambda: self.collect_artifacts(timeout=close_timeout),
             timeout=timeout,
-            cleanup_timeout=cleanup_timeout,
+            close_timeout=close_timeout,
         )
-        self.launch_started = True
-        try:
-            # The runner enforces its own deadline and reaps descendants.
-            # Leave extra time for cleanup and transport before provider timeout.
-            self.exec_task = asyncio.create_task(
-                self.sandbox.exec(
-                    command,
-                    cwd=self.workdir,
-                    timeout_s=process_supervisor.exec_timeout(timeout=timeout, cleanup_timeout=cleanup_timeout),
-                )
+        if self.session.closing:
+            raise asyncio.CancelledError
+        return artifacts
+
+    async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
+        """Stage the invocation and return the OpenCode worker command."""
+        if payload.get("instructions"):
+            await upload_text(
+                self.session.sandbox, path=f"{self.session.session_dir}/instructions.md", text=payload["instructions"]
             )
-            # HTTP cancellation must not propagate into provider exec before
-            # the supervisor has stopped and reaped the harness descendants.
-            launched = await asyncio.shield(self.exec_task)
-            if getattr(launched, "error_type", None) == "timeout":
-                raise TimeoutError("OpenCode sandbox supervisor exceeded its execution deadline")
-            if launched.return_code != 0 or getattr(launched, "error_type", None):
-                raise RuntimeError(f"OpenCode sandbox supervisor failed: {launched.stderr}")
-        except BaseException:
-            try:
-                await self.stop_runner(close_timeout)
-                # Preserve interrupted transcripts before the caller's close
-                # retires session files; never snapshot without cleanup evidence.
-                if self.cleanup is not None and self.cleanup["return_code"] is not None:
-                    await self.snapshot(close_timeout)
-            except Exception:
-                logging.getLogger(__name__).exception("OpenCode cleanup or interrupted transcript capture failed")
-            raise
-        else:
-            await self.stop_runner(close_timeout)
-        # A fenced launch can be safely closed without ever running a worker.
-        if self.cleanup is None or self.cleanup["return_code"] is None:
-            raise RuntimeError("OpenCode sandbox runner has no worker exit code")
-        self.runtime_info = RunnerRuntimeInfo.model_validate_json(await self.read_text("runtime.json"))
-        await self.snapshot(close_timeout)
-        return await self.read_text("export.json")
+        await self.upload_json("input.json", payload)
+        return SandboxCommand(
+            python="python3",
+            argv=[
+                "python3",
+                "-I",
+                f"{self.session.session_dir}/sandbox_runner.py",
+                f"{self.session.session_dir}/input.json",
+            ],
+        )
+
+    async def collect_artifacts(self, *, timeout: float) -> str:
+        """Snapshot only after cleanup; keep observations before sandbox release."""
+        await self.snapshot(timeout)
+        try:
+            with tempfile.TemporaryDirectory(prefix="opencode-observations-") as directory:
+                path = Path(directory) / "observations.db"
+                await self.session.sandbox.download(f"{self.session.session_dir}/observations.db", path)
+                self.observations = parse_opencode_observations(
+                    path,
+                    self.request.episode_id.capture_key,
+                    require_terminal_finish=True,
+                    model_ref=self.model_ref,
+                )
+        except Exception:
+            self.observations = AgentObservationBundle(
+                source="opencode",
+                gaps=[
+                    ObservationGap(code="agent_artifact_unavailable"),
+                    ObservationGap(code="observation_capture_failed"),
+                ],
+            )
+        try:
+            runtime = json.loads(await self.read_text("runtime.json"))
+        except Exception:
+            runtime = None
+        self.runtime_info = parse_runtime_info(runtime)
+        try:
+            return await self.read_text("export.json")
+        except Exception as error:
+            logs = await self.session.read_output_log()
+            raise RuntimeError(f"OpenCode sandbox runner returned no valid result: {logs}") from error
 
     async def snapshot(self, timeout: float) -> None:
-        """Capture output only after confirmed cleanup, without changing its receipt."""
-        if self.cleanup is None or not self.cleanup["cleanup_confirmed"]:
+        """Copy SQLite output after all harness database writers have stopped."""
+        if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
             raise RuntimeError("OpenCode transcript capture requires confirmed cleanup")
-        # Snapshot only after the supervisor has reaped all database writers.
-        captured = await self.sandbox.exec(
-            f"python3 -I {quote(self.directory + '/sandbox_runner.py')} --snapshot {quote(self.directory)}",
-            cwd=self.workdir,
+        captured = await self.session.sandbox.exec(
+            f"python3 -I {quote(self.session.session_dir + '/sandbox_runner.py')} --snapshot {quote(self.session.session_dir)}",
+            cwd=self.session.workdir,
             timeout_s=timeout,
         )
-        if captured.return_code != 0 or getattr(captured, "error_type", None):
+        if captured.return_code != 0 or captured.error_type:
             raise RuntimeError(f"OpenCode transcript capture failed: {captured.stderr}")

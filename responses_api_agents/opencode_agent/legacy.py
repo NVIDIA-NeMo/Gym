@@ -79,6 +79,8 @@ from responses_api_agents.opencode_agent.observability import scope_opencode_tra
 
 
 _NATIVE_SESSION_KEY = "nemo_gym_opencode_native_session"
+_ASSISTANT_MESSAGE_PLUGIN = Path(__file__).parents[1] / "opencode_sandboxed_agent" / "assistant_message_header.js"
+_REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
 
 
 class LegacyOpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -273,8 +275,6 @@ class LegacyOpenCodeAgent(SimpleResponsesAPIAgent):
             plugins.append("remaining-context.js")
         if self.config.tool_servers:
             plugins.append("required-mcp.js")
-        if self._model_call_capture_enabled():
-            plugins.append("assistant_message_header.js")
         return plugins
 
     def _agent_sandbox_observation(
@@ -442,6 +442,12 @@ class LegacyOpenCodeAgent(SimpleResponsesAPIAgent):
             value = getattr(body, name, None)
             if value is not None:
                 build_agent[name] = value
+        if self._model_call_capture_enabled():
+            await sandbox.upload(_ASSISTANT_MESSAGE_PLUGIN, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
+            effective_config["plugin"] = [
+                *effective_config.get("plugin", []),
+                f"file://{_REMOTE_ASSISTANT_MESSAGE_PLUGIN}",
+            ]
         opencode_config_content = json.dumps(effective_config)
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
@@ -616,7 +622,9 @@ class LegacyOpenCodeAgent(SimpleResponsesAPIAgent):
             opencode_export_found = True
             # Assume only one input message. May change with a system/developer message later on.
             output = self._opencode_export_to_output_items(opencode_export)[1:]
-            usage = NeMoGymResponseUsage.sum_from_list([*self._opencode_export_to_usages(opencode_export), *child_usages])
+            usage = NeMoGymResponseUsage.sum_from_list(
+                [*self._opencode_export_to_usages(opencode_export), *child_usages]
+            )
 
         result_stdout = (result.stdout if result else "") or ""
         result_stderr = (result.stderr if result else "") or ""

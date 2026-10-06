@@ -256,7 +256,7 @@ class TestLegacyOpenCodeAgent:
                 ],
             ]
         }
-        usages = OpenCodeSandboxedAgent._opencode_export_to_usages(None, export)
+        usages = LegacyOpenCodeAgent._opencode_export_to_usages(None, export)
         assert len(usages) == 2
         assert usages[0].output_tokens == 3509 + reasoning
         assert usages[1].output_tokens == reasoning
@@ -422,7 +422,8 @@ class TestLegacyOpenCodeAgent:
         # Execution uploads plugins even when a resource supplied this sandbox.
         if remaining_context:
             sandbox_mock.upload.assert_any_await(
-                Path(app_module.__file__).parents[1] / "opencode_sandboxed_agent" / "remaining-context.js", "/tmp/nemo-gym-remaining-context.js"
+                Path(app_module.__file__).parents[1] / "opencode_sandboxed_agent" / "remaining-context.js",
+                "/tmp/nemo-gym-remaining-context.js",
             )
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
         assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["command"]
@@ -1167,7 +1168,11 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
 @mark.skipif(shutil.which("node") is None, reason="Node.js is needed to exercise the OpenCode plugin hooks")
 def test_assistant_message_plugin_hooks() -> None:
     subprocess.run(
-        [shutil.which("node"), "--test", str(Path(__file__).with_name("assistant_message_header.test.mjs"))],
+        [
+            shutil.which("node"),
+            "--test",
+            str(Path(__file__).parents[2] / "opencode_sandboxed_agent/tests/assistant_message_header.test.mjs"),
+        ],
         check=True,
         timeout=30,
     )

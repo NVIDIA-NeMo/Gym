@@ -77,12 +77,12 @@ async def test_native_markers_never_enter_other_modes(mode: str, marker: str | N
 async def test_native_seed_dispatch_is_independent_of_legacy_mode(mode: str) -> None:
     agent = make_agent(mode)
     with patch.object(
-        agent, "_initialize_agent_session_state", AsyncMock(side_effect=RuntimeError("native setup reached"))
+        agent, "_seed_agent_session_state", AsyncMock(side_effect=RuntimeError("native setup reached"))
     ) as initialize:
         with pytest.raises(RuntimeError, match="native setup reached"):
             await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
     initialize.assert_awaited_once()
-    assert not agent._native_sessions
+    assert not agent._session_records
 
 
 async def test_explicit_legacy_dispatch_retains_client_request_and_configuration() -> None:

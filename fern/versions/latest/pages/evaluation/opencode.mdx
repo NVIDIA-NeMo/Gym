@@ -160,13 +160,20 @@ Session close requires a positive cleanup receipt, removal of adapter files, and
 disconnect before verification proceeds. Unknown launch outcomes and unconfirmed
 cleanup fail closed and retain state for retries. Successful close receipts remain
 available for `session_close_retry_window_seconds` (300 seconds by default).
-The supervisor snapshots the session database only after confirming cleanup; a
+The shared `SandboxSession` snapshots the session database only after confirming cleanup; a
 failed cleanup must not export a database that surviving tools may still write.
 Caller-assigned session IDs are idempotent for identical seed inputs. Close accepts an
 explicit ID without a cookie when the seed response is lost, and closing an unknown ID
-blocks a delayed seed. Session files use independent random paths. Abandoned sessions
-expire after `session_lifetime_seconds` (21600 by default); failed cleanup retains the
-closing state and logs the failure so activation stays blocked. State is process-local,
+blocks a delayed seed during the retry window. Identical activation retries join or
+replay one invocation; changed requests are rejected. A disconnected HTTP waiter
+does not cancel the invocation. Session files use independent random paths.
+The agent no longer has an active-session expiry timer: the episode owner closes
+normal sessions, and the sandbox provider governs crash recovery (`ttl_s` for
+agent-owned sandboxes). Failed cleanup retains the closing state for retry.
+Captured output and observations remain available after release. Optional runtime
+diagnostics do not gate cleanup, but positive cleanup proof is still required.
+Runtime or model failures propagate before verification; explicit execution/output
+limits retain gradable partial output. State is process-local,
 so native mode requires one worker and there is no cross-worker crash recovery. This
 process cleanup prevents verification races and is not a security boundary against hostile code.
 

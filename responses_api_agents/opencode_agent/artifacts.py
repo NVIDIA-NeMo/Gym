@@ -461,6 +461,9 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
     }
 
 
+parse_opencode_observations = _parse_opencode_session
+
+
 def parse_opencode_export(opencode_export: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
     """Convert persisted OpenCode export messages into Gym conversation items."""
     messages = []

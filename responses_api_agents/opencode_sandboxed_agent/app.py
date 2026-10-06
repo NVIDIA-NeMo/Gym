@@ -4,6 +4,7 @@
 """Compatibility entrypoint for existing sandboxed OpenCode configurations."""
 
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations  # noqa: F401
 from responses_api_agents.opencode_agent.legacy import (
     LegacyOpenCodeAgent as OpenCodeSandboxedAgent,
 )

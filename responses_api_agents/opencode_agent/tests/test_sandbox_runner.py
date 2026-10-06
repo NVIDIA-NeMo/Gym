@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from nemo_gym.sandbox import process_supervisor
+from nemo_gym.agent_utils import process_supervisor
 from responses_api_agents.opencode_agent import sandbox_runner
 
 
@@ -42,7 +42,7 @@ def launch(tmp_path, code, *, timeout=3, python=sys.executable, env=None, superv
             "--receipt",
             str(tmp_path / "cleanup.json"),
             "--stop-file",
-            str(tmp_path / "runner.stop"),
+            str(tmp_path / "stop.request"),
             "--",
             *command,
         ]
@@ -124,7 +124,7 @@ def test_spawn_error_does_not_prevent_cleanup(tmp_path):
 
 @linux_only
 def test_stop_marker_fences_launch_without_inventing_worker_identity(tmp_path):
-    (tmp_path / "runner.stop").touch()
+    (tmp_path / "stop.request").touch()
     summary = result(tmp_path, launch(tmp_path, "open('unexpected', 'w').close()"))
     assert summary["cleanup_confirmed"] is True
     assert summary["return_code"] is None

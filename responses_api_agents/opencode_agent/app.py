@@ -21,32 +21,29 @@ import os
 import re
 import shlex
 import shutil
-import tempfile
 from asyncio import Semaphore
-from collections import OrderedDict
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from shlex import quote
-from time import monotonic, time
+from time import time
 from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
-    AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
-    AgentSeedSessionResponse,
+    AgentSessionSetupError,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -68,7 +65,7 @@ from nemo_gym.rollout_observability import (
     SandboxObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider, process_supervisor
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import (
@@ -79,7 +76,6 @@ from nemo_gym.server_utils import (
 from responses_api_agents.opencode_agent.artifacts import (
     _parse_opencode_session,
     parse_opencode_export,
-    parse_opencode_observations,
     parse_opencode_session,
 )
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
@@ -152,9 +148,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_install_script_path: str | None = None
     remote_opencode_binary_path: str | None = None
     remote_opencode_musl_binary_path: str | None = None
-    session_lifetime_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
-    session_close_retry_window_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
 
     # Temporary legacy_sandbox compatibility; unused by native sandbox sessions.
     opencode_max_context_window: int = 262144
@@ -187,14 +181,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ray_enabled = False
 
     config: OpenCodeAgentConfig
-    _native_sessions: dict[str, OpenCodeSandboxSession] = PrivateAttr(default_factory=dict)
-    _closed_native_sessions: OrderedDict[str, tuple[EpisodeId, AgentCloseSessionResponse, float]] = PrivateAttr(
-        default_factory=OrderedDict
-    )
-    _native_session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
-    _native_session_lock_users: dict[str, int] = PrivateAttr(default_factory=dict)
-    _native_session_expiry_tasks: dict[str, asyncio.Task[None]] = PrivateAttr(default_factory=dict)
-    _native_session_tombstones: OrderedDict[str, tuple[EpisodeId, float]] = PrivateAttr(default_factory=OrderedDict)
     _local_runtime_ready: bool = PrivateAttr(default=False)
     _legacy_agent: SimpleResponsesAPIAgent | None = PrivateAttr(default=None)
     sem: Semaphore = None
@@ -482,26 +468,25 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        session_id = self._native_session_marker(request)
-        if session_id is not None or self.config.execution_mode == "sandbox":
-            if session_id is None:
-                raise HTTPException(409, "Native OpenCode requires a seeded agent session")
-            state = self._native_sessions.get(session_id)
-            if state is None or request.path_params.get("rollout_id") != state.seed.episode_id.capture_key:
-                raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
-            if state.activated or state.closing:
-                raise HTTPException(409, "Native OpenCode sessions allow one activation")
-            prompt, system = self._native_input(body)
-            state.activated = True
-            state.task = asyncio.create_task(self._native_response(state, body, prompt=prompt, system=system))
-            try:
-                return await asyncio.shield(state.task)
-            except asyncio.CancelledError:
-                if not state.task.done() and not state.task.cancelling():
-                    state.task.cancel()
-                raise
+        session_id = self._agent_session_id_from_request(request)
+        if self._native_session_marker(request) is not None:
+            raise HTTPException(409, "Obsolete OpenCode session cookie; seed a new agent session")
         if session_id is not None:
-            raise HTTPException(409, "Native OpenCode session markers cannot enter local or legacy execution")
+            state = self._require_agent_session(session_id)
+            assert isinstance(state, OpenCodeSandboxSession)
+            if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
+                raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
+            prompt, system = self._native_input(body)
+            if state.task is None:
+                state.activation_request = body.model_copy(deep=True)
+                state.task = asyncio.create_task(
+                    self._native_response(state, state.activation_request, prompt=prompt, system=system)
+                )
+            elif body != state.activation_request:
+                raise HTTPException(409, "OpenCode sandbox sessions support one activation; retry the same request")
+            return (await asyncio.shield(state.task)).model_copy(deep=True)
+        if self.config.execution_mode == "sandbox":
+            raise HTTPException(409, "Native OpenCode requires a seeded agent session")
         if self.config.execution_mode == "legacy_sandbox":
             return await self._legacy().responses(request, body)
         path_params = getattr(request, "path_params", None)
@@ -518,7 +503,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
 
     async def run(self, request: Request, body: OpenCodeAgentRunRequest) -> OpenCodeAgentVerifyResponse:
-        if self._native_session_marker(request) is not None or self.config.execution_mode == "sandbox":
+        if (
+            self._agent_session_id_from_request(request) is not None
+            or self._native_session_marker(request) is not None
+            or self.config.execution_mode == "sandbox"
+        ):
             raise HTTPException(409, "Native OpenCode sessions must use EnvironmentServer /run")
         if self.config.execution_mode == "legacy_sandbox":
             return await self._legacy().run(request, body)
@@ -596,68 +585,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(409, "Invalid native OpenCode session marker")
         return marker
 
-    @asynccontextmanager
-    async def _native_session_lock(self, session_id: str) -> AsyncIterator[None]:
-        lock = self._native_session_locks.setdefault(session_id, asyncio.Lock())
-        self._native_session_lock_users[session_id] = self._native_session_lock_users.get(session_id, 0) + 1
-        try:
-            async with lock:
-                yield
-        finally:
-            self._native_session_lock_users[session_id] -= 1
-            if not self._native_session_lock_users[session_id]:
-                del self._native_session_lock_users[session_id]
-                if session_id not in self._native_sessions and session_id not in self._native_session_tombstones:
-                    self._native_session_locks.pop(session_id, None)
-
-    async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
-        """Install OpenCode once under the EnvironmentServer's caller-assigned identity."""
-        self._expire_native_receipts()
-        session_id = body.agent_session_id
-        marker = self._native_session_marker(request)
-        if marker is not None and marker != session_id and marker in self._native_sessions:
-            raise HTTPException(409, "OpenCode request is already bound to another session")
-        async with self._native_session_lock(session_id):
-            if session_id in self._native_session_tombstones:
-                raise HTTPException(409, "OpenCode session is already closed")
-            state = self._native_sessions.get(session_id)
-            if state is not None:
-                if state.seed != body:
-                    raise HTTPException(409, "OpenCode session ID is bound to different seed inputs")
-                if state.closing:
-                    raise HTTPException(409, "OpenCode session is closing")
-            else:
-                if marker == session_id:
-                    raise HTTPException(409, "OpenCode session cookie has expired")
-                state = await self._initialize_agent_session_state(session_id, body)
-                self._native_sessions[session_id] = state
-                self._native_session_expiry_tasks[session_id] = asyncio.create_task(
-                    self._expire_native_session(session_id, body.episode_id)
-                )
-            request.session[_NATIVE_SESSION_KEY] = session_id
-            return AgentSeedSessionResponse(agent_session_id=session_id)
-
-    async def _expire_native_session(self, session_id: str, episode_id: EpisodeId) -> None:
-        try:
-            await asyncio.sleep(self.config.session_lifetime_seconds)
-            async with self._native_session_lock(session_id):
-                await self._close_native_session(session_id, episode_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # Keep failed cleanup state and its closing marker so activation cannot resume.
-            LOG.exception("Could not clean up expired OpenCode session %s", session_id)
-        finally:
-            if self._native_session_expiry_tasks.get(session_id) is asyncio.current_task():
-                self._native_session_expiry_tasks.pop(session_id, None)
-
-    async def _initialize_agent_session_state(
-        self, session_id: str, body: AgentSeedSessionRequest
-    ) -> OpenCodeSandboxSession:
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
+        """Prepare only the harness runtime; Resources owns borrowed task setup."""
         if self.config.model_server is None:
             raise HTTPException(422, "Native OpenCode requires model_server")
-        if self.config.num_workers not in (None, 1):
-            raise HTTPException(422, "Native OpenCode sessions require num_workers=1")
         owns_sandbox = body.sandbox_access is None
         if owns_sandbox:
             if not self.config.sandbox_provider:
@@ -716,7 +647,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # Caller-assigned IDs are wire identifiers, never filesystem paths.
         directory = f"/tmp/nemo-gym-opencode-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-opencode-runtime-{self.config.opencode_version}"
-        state = OpenCodeSandboxSession(body, sandbox, directory, runtime, workdir=workdir, owns_sandbox=owns_sandbox)
+        state = OpenCodeSandboxSession(
+            request=body,
+            session=SandboxSession(
+                sandbox=sandbox, session_dir=directory, workdir=workdir, harness="OpenCode", owns_sandbox=owns_sandbox
+            ),
+            runtime=runtime,
+            model_ref=self.config.model_server,
+        )
+        prepared_directory = False
         try:
             if owns_sandbox:
                 await sandbox.start(spec)
@@ -740,6 +679,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
             result = await sandbox.exec(command, timeout_s=30)
             self._check_native_setup(command, result)
+            prepared_directory = True
             installer = "install_opencode_runtime.sh"
             await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
             command = "bash " + " ".join(
@@ -756,17 +696,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.setup_timeout)
             self._check_native_setup(command, result)
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
-            await sandbox.upload(Path(process_supervisor.__file__), f"{directory}/process_supervisor.py")
-        except BaseException:
+        except BaseException as error:
             try:
-                await state.close(self.config.session_close_timeout_seconds)
+                if prepared_directory or owns_sandbox:
+                    await state.close(self.config.session_close_timeout_seconds)
+                else:
+                    await sandbox.disconnect()
             except BaseException:
-                # A lost cleanup response must not turn the next close into empty success.
-                self._native_sessions[session_id] = state
-                self._native_session_expiry_tasks[session_id] = asyncio.create_task(
-                    self._expire_native_session(session_id, body.episode_id)
-                )
-                LOG.exception("Could not clean failed OpenCode setup %s; retaining session for close", session_id)
+                LOG.exception("OpenCode seed cleanup failed; retaining session %s", body.agent_session_id)
+                raise AgentSessionSetupError(state, error=error) from error
             raise
         return state
 
@@ -778,70 +716,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 f"error={result.error_type}; stderr={result.stderr}; stdout={result.stdout}"
             )
 
-    def _expire_native_receipts(self) -> None:
-        now = monotonic()
-        while self._closed_native_sessions and next(iter(self._closed_native_sessions.values()))[2] <= now:
-            self._closed_native_sessions.popitem(last=False)
-        while self._native_session_tombstones and next(iter(self._native_session_tombstones.values()))[1] <= now:
-            session_id, _ = self._native_session_tombstones.popitem(last=False)
-            if session_id not in self._native_sessions and not self._native_session_lock_users.get(session_id):
-                self._native_session_locks.pop(session_id, None)
-
-    async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
-        """Close by caller identity even when a lost seed response omitted the cookie."""
-        self._expire_native_receipts()
-        session_id = body.agent_session_id
-        marker = self._native_session_marker(request)
-        if marker is not None and marker != session_id:
-            raise HTTPException(409, "OpenCode close cookie does not match the requested session")
-        async with self._native_session_lock(session_id):
-            if (
-                marker is not None
-                and session_id not in self._native_sessions
-                and session_id not in self._closed_native_sessions
-            ):
-                raise HTTPException(409, "OpenCode close receipt expired")
-            result = await self._close_native_session(session_id, body.episode_id)
-            # Keep a tombstone cookie so this client cannot enter local or legacy execution.
-            request.session[_NATIVE_SESSION_KEY] = session_id
-            return result
-
-    async def _close_native_session(self, session_id: str, episode_id: EpisodeId) -> AgentCloseSessionResponse:
-        receipt = self._closed_native_sessions.get(session_id)
-        if receipt is not None:
-            if episode_id != receipt[0]:
-                raise HTTPException(409, "OpenCode close does not match the seeded episode")
-            return receipt[1]
-        tombstone = self._native_session_tombstones.get(session_id)
-        if tombstone is not None:
-            raise HTTPException(409, "OpenCode close receipt expired")
-        state = self._native_sessions.get(session_id)
-        observations = None
-        if state is not None:
-            if state.seed.episode_id != episode_id:
-                raise HTTPException(409, "OpenCode close does not match the seeded episode")
-            await state.close(self.config.session_close_timeout_seconds)
-            observations = state.observations or AgentObservationBundle(
-                source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
-            )
-        result = AgentCloseSessionResponse(agent_session_id=session_id, agent_observations=observations)
-        self._native_sessions.pop(session_id, None)
-        expiry_task = self._native_session_expiry_tasks.pop(session_id, None)
-        if expiry_task is not None and expiry_task is not asyncio.current_task():
-            expiry_task.cancel()
-        now = monotonic()
-        self._closed_native_sessions[session_id] = (
-            episode_id,
-            result,
-            now + self.config.session_close_retry_window_seconds,
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        """Release only after capture and positive cleanup; retain failed closes for retry."""
+        assert isinstance(state, OpenCodeSandboxSession)
+        await state.close(self.config.session_close_timeout_seconds)
+        observations = state.observations or AgentObservationBundle(
+            source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
         )
-        # A close that arrives before seed must block the delayed seed through its lifetime.
-        retention = max(self.config.session_lifetime_seconds, self.config.session_close_retry_window_seconds)
-        self._native_session_tombstones[session_id] = (episode_id, now + retention)
-        loop = asyncio.get_running_loop()
-        loop.call_later(self.config.session_close_retry_window_seconds, self._expire_native_receipts)
-        loop.call_later(retention, self._expire_native_receipts)
-        return result
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id, agent_observations=observations
+        )
 
     def _native_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         unsupported = (
@@ -981,7 +865,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     async def _native_response(
         self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, *, prompt: str, system: str
     ) -> NeMoGymResponse:
-        base_url = self.resolve_model_base_url(self.config.model_server.name, state.seed.episode_id.capture_key)
+        base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         config = {
             "model": "nemo_gym/dummy_model",
             "small_model": "nemo_gym/dummy_model",
@@ -1011,23 +895,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         }
         # System instructions are separate from the user's task and applied to every OpenCode model turn.
         if system:
-            # OpenCode reads instruction files as text; JSON quoting must not become prompt content.
-            with tempfile.TemporaryDirectory(prefix="opencode-instructions-") as directory:
-                path = Path(directory) / "instructions.md"
-                path.write_text(system)
-                await state.sandbox.upload(path, f"{state.directory}/instructions.md")
-            config["instructions"] = [f"{state.directory}/instructions.md"]
+            config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
         payload = {
-            "directory": state.directory,
-            "cwd": state.workdir,
+            "instructions": system,
+            "directory": state.session.session_dir,
+            "cwd": state.session.workdir,
             "command": [f"{state.runtime}/opencode", "run", "--format", "json", "--thinking", "--title", "NeMo Gym"],
             "prompt": prompt,
             "env": {
-                "HOME": f"{state.directory}/home",
-                "XDG_DATA_HOME": f"{state.directory}/data",
-                "XDG_CONFIG_HOME": f"{state.directory}/config",
-                "XDG_CACHE_HOME": f"{state.directory}/cache",
-                "XDG_STATE_HOME": f"{state.directory}/state",
+                "HOME": f"{state.session.session_dir}/home",
+                "XDG_DATA_HOME": f"{state.session.session_dir}/data",
+                "XDG_CONFIG_HOME": f"{state.session.session_dir}/config",
+                "XDG_CACHE_HOME": f"{state.session.session_dir}/cache",
+                "XDG_STATE_HOME": f"{state.session.session_dir}/state",
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
                 "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
@@ -1038,37 +918,22 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         export = {}
         cancelled = False
         try:
-            export = json.loads(
-                await state.execute(
-                    payload,
-                    timeout=self.config.timeout,
-                    close_timeout=self.config.session_close_timeout_seconds,
+            async with self.sem:
+                export = json.loads(
+                    await state.execute(
+                        payload,
+                        timeout=self.config.timeout,
+                        close_timeout=self.config.session_close_timeout_seconds,
+                    )
                 )
-            )
         except asyncio.CancelledError:
             cancelled = True
             raise
-        except Exception as exc:
-            error = str(exc)
-            try:
-                export = json.loads(await state.read_text("export.json"))
-            except Exception:
-                pass
         finally:
-            try:
-                with tempfile.TemporaryDirectory(prefix="opencode-observations-") as directory:
-                    path = Path(directory) / "observations.db"
-                    await state.sandbox.download(f"{state.directory}/observations.db", path)
-                    state.observations = parse_opencode_observations(
-                        path, state.seed.episode_id.capture_key, require_terminal_finish=True
-                    )
-            except Exception:
+            if state.observations is None:
                 state.observations = AgentObservationBundle(
                     source="opencode",
-                    gaps=[
-                        ObservationGap(code="agent_artifact_unavailable"),
-                        ObservationGap(code="observation_capture_failed"),
-                    ],
+                    gaps=[ObservationGap(code="observation_capture_failed")],
                 )
             if cancelled:
                 for record in state.observations.records:
@@ -1094,11 +959,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     )
             except Exception as exc:
                 error = error or f"OpenCode output parse failed: {exc}"
-        result = state.cleanup
+        result = state.session.cleanup
         runtime = state.runtime_info
+        if runtime is None:
+            state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
+        if result is not None and result["return_code"] is None:
+            state.observations.gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
         if result is not None:
             error = error or result["error"]
-            if result["return_code"] != 0 and not result["timed_out"]:
+            if result["return_code"] not in (0, None) and not result["timed_out"]:
                 error = error or f"OpenCode exited with code {result['return_code']}"
         assistants = [
             message["info"] for message in export.get("messages", []) if message["info"].get("role") == "assistant"
@@ -1128,13 +997,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     role="agent",
                     provider=(
                         self.config.sandbox_provider
-                        if state.owns_sandbox
-                        else state.seed.sandbox_access.connection.provider_config_ref
+                        if state.session.owns_sandbox
+                        else state.request.sandbox_access.connection.provider_config_ref
                     ),
                     sandbox_id=(
                         None
-                        if state.owns_sandbox
-                        else str(state.seed.sandbox_access.connection.descriptor.get("sandbox_id", "unknown"))
+                        if state.session.owns_sandbox
+                        else str(state.request.sandbox_access.connection.descriptor.get("sandbox_id", "unknown"))
                     ),
                     outcome="timeout" if result["timed_out"] else "failed" if error else "completed",
                     exit_code=result["return_code"],
@@ -1146,6 +1015,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 detail="Usage comes from OpenCode persisted assistant messages; compare against captured Gym model calls.",
             )
         )
+        if error:
+            raise HTTPException(502, error)
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -1154,15 +1025,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             output=output,
             usage=usage,
             status=status,
-            error={"code": "server_error", "message": error} if error else None,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
             metadata={
                 "harness_execution": "sandbox",
                 "opencode_version": self.config.opencode_version,
-                "harness_hostname": runtime.hostname if runtime else "unknown",
-                "harness_pid": str(runtime.pid) if runtime else "unknown",
+                **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
             },
         )
 

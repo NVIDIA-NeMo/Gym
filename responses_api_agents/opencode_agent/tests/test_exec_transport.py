@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.sandbox import process_supervisor
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from responses_api_agents.opencode_agent import sandbox_runner
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
@@ -48,7 +48,7 @@ class ExecOnlySandbox:
             if self.worker_child is not None:
                 with pytest.raises(ProcessLookupError):
                     os.kill(int(self.worker_child.read_text()), 0)
-        launch = command.startswith("trap '' TERM;")
+        launch = "--receipt" in command and "process_supervisor.py" in command
         if launch:
             self.deadline = timeout_s
             self.delayed_command = command
@@ -79,10 +79,14 @@ def make_session(tmp_path):
     request.sandbox_access.workdir = str(workdir)
     provider = ExecOnlySandbox()
     state = OpenCodeSandboxSession(
-        request, provider, str(directory), str(tmp_path / "runtime"), workdir=request.sandbox_access.workdir
+        request=request,
+        session=SandboxSession(
+            sandbox=provider, session_dir=str(directory), workdir=request.sandbox_access.workdir, harness="OpenCode"
+        ),
+        runtime=str(tmp_path / "runtime"),
     )
     shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
-    shutil.copyfile(process_supervisor.__file__, directory / "process_supervisor.py")
+    assert not (directory / "process_supervisor.py").exists()
     database = directory / "data/opencode/opencode.db"
     database.parent.mkdir(parents=True)
     with sqlite3.connect(database) as connection:
@@ -97,9 +101,9 @@ def make_session(tmp_path):
 
 def payload(state, code, timeout=0.5):
     return {
-        "directory": state.directory,
+        "directory": state.session.session_dir,
         "prompt": "task",
-        "cwd": state.seed.sandbox_access.workdir,
+        "cwd": state.request.sandbox_access.workdir,
         "command": [sys.executable, "-c", code],
         "env": {},
         "timeout": timeout,
@@ -134,9 +138,9 @@ async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
             await asyncio.gather(task, return_exceptions=True)
         else:
             await task
-        assert state.cleanup["cleanup_confirmed"] is True
+        assert state.session.cleanup["cleanup_confirmed"] is True
         if ending == "timeout":
-            assert state.cleanup["timed_out"] is True
+            assert state.session.cleanup["timed_out"] is True
         with pytest.raises(ProcessLookupError):
             os.kill(int((workdir / "child.pid").read_text()), 0)
         assert provider.cancelled_launch is False
@@ -145,9 +149,9 @@ async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
         await state.close(3)
         await state.close(3)
         assert provider.disconnected
-        assert not Path(state.directory).exists()
+        assert not Path(state.session.session_dir).exists()
     finally:
-        if not state.closed:
+        if not state.session.closed:
             await state.close(3)
 
 
@@ -156,27 +160,27 @@ async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
     provider.lost_launch = True
     with pytest.raises(TimeoutError, match="lost launch response"):
         await state.execute(payload(state, "open('started','w').close()"), timeout=0.5, close_timeout=3)
-    assert state.cleanup["cleanup_confirmed"] is True
-    assert state.cleanup["return_code"] is None
-    assert state.cleanup["error"] is None
+    assert state.session.cleanup["cleanup_confirmed"] is True
+    assert state.session.cleanup["return_code"] is None
+    assert state.session.cleanup["error"] is None
     assert state.runtime_info is None
     await state.close(3)
     provider.lost_launch = False
     await provider.exec(provider.delayed_command, cwd=str(workdir))
     assert not (workdir / "started").exists()
-    assert not Path(state.directory).exists()
+    assert not Path(state.session.session_dir).exists()
 
 
 async def test_failed_receipt_keeps_files_and_can_retry(tmp_path):
     state, provider, _ = make_session(tmp_path)
-    state.launch_started = True
+    state.session.launch_started = True
     receipt = {
         "return_code": 1,
         "timed_out": False,
         "cleanup_confirmed": False,
         "error": "descendants remain",
     }
-    path = Path(state.directory) / "cleanup.json"
+    path = Path(state.session.session_dir) / "cleanup.json"
     path.write_text(json.dumps(receipt))
     with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
         await state.close(3)
@@ -190,17 +194,17 @@ async def test_failed_receipt_keeps_files_and_can_retry(tmp_path):
 
 async def test_confirmed_cleanup_cancels_stuck_transport(tmp_path):
     state, provider, _ = make_session(tmp_path)
-    state.launch_started = True
+    state.session.launch_started = True
     receipt = {
         "return_code": 0,
         "timed_out": False,
         "cleanup_confirmed": True,
         "error": None,
     }
-    (Path(state.directory) / "cleanup.json").write_text(json.dumps(receipt))
-    state.exec_task = asyncio.create_task(asyncio.Event().wait())
+    (Path(state.session.session_dir) / "cleanup.json").write_text(json.dumps(receipt))
+    state.session._exec_task = asyncio.create_task(asyncio.Event().wait())
     await asyncio.sleep(0)
     await state.close(0.5)
-    assert state.exec_task.cancelled()
-    assert state.closed and provider.disconnected
-    assert not Path(state.directory).exists()
+    assert state.session._exec_task.cancelled()
+    assert state.session.closed and provider.disconnected
+    assert not Path(state.session.session_dir).exists()
