@@ -161,8 +161,8 @@ class HarnessExaSearchConfig(BaseResponsesAPIAgentConfig):
     parallel_api_key: SecretStr | None = None
     brave_api_key: SecretStr | None = None
     search_max_results: int = 20
-    search_max_chars_per_result: int = 30000
-    search_max_chars_total: int = 65000
+    search_max_chars_per_result: int = 2000
+    search_max_chars_total: int = 8000
 
 
 class HarnessExaSearchRunRequest(BaseRunRequest):

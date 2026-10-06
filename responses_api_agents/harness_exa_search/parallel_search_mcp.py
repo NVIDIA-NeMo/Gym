@@ -10,8 +10,8 @@ import aiohttp
 from mcp.server.fastmcp import FastMCP
 
 MAX_RESULTS = int(os.environ.get("SEARCH_MAX_RESULTS", "20"))
-MAX_CHARS_PER_RESULT = int(os.environ.get("SEARCH_MAX_CHARS_PER_RESULT", "30000"))
-MAX_CHARS_TOTAL = int(os.environ.get("SEARCH_MAX_CHARS_TOTAL", "65000"))
+MAX_CHARS_PER_RESULT = int(os.environ.get("SEARCH_MAX_CHARS_PER_RESULT", "2000"))
+MAX_CHARS_TOTAL = int(os.environ.get("SEARCH_MAX_CHARS_TOTAL", "8000"))
 
 mcp = FastMCP("parallel")
 
