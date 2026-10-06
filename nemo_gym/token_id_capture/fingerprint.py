@@ -256,7 +256,24 @@ def _canonical_json(value: Any) -> str:
     """Serialize JSON-compatible prompt content without losing structure."""
     try:
         return orjson.dumps(value, option=orjson.OPT_SORT_KEYS).decode("utf-8")
-    except (TypeError, orjson.JSONEncodeError) as error:
+    except (TypeError, orjson.JSONEncodeError):
+        pass
+    # Valid JSON can contain integers beyond orjson's 64-bit range. Keep
+    # the fast path unchanged, but do not let the fallback coerce object
+    # keys (e.g. 1 and "1") into the same fingerprint.
+    try:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        pending = [value]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, dict):
+                if any(not isinstance(key, str) for key in item):
+                    raise ValueError("JSON object keys must be strings")
+                pending.extend(item.values())
+            elif isinstance(item, (list, tuple)):
+                pending.extend(item)
+        return encoded
+    except (TypeError, ValueError) as error:
         raise ValueError(f"unsupported prompt content: {type(value).__name__}") from error
 
 

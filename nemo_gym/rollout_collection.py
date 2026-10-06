@@ -3588,6 +3588,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
+        retry_requests: bool = True,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -3667,7 +3668,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 succeeded = False
                 try:
                     request_body = _episode_request_body(row) if _materialized_taskset(row) else row
-                    res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
+                    res = await server_client.post(
+                        server_name=server_name,
+                        url_path="/run",
+                        json=request_body,
+                        **({"_retry": False} if not retry_requests else {}),
+                    )
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
@@ -3744,6 +3750,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
+        retry_requests: bool = True,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -3773,6 +3780,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         by the dispatch budget gets ``_ng_failure_class="cancelled"`` with the ``_ng_dispatch_drained``
         and ``_ng_no_persist`` markers, and a failed `/run` under ``route_failures_to_sidecar`` gets a
         failure row with ``_ng_failure_*`` fields.
+
+        ``retry_requests=False`` disables automatic HTTP replay of a mutating `/run`.
+        It does not convert failures to successful result rows.
         """
 
         async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
@@ -3791,6 +3801,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 dispatch_budget_s=dispatch_budget_s,
                 drain_margin_s=drain_margin_s,
                 latency_tracker=latency_tracker,
+                **({"retry_requests": False} if not retry_requests else {}),
             ),
         )
 

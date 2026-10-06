@@ -450,6 +450,7 @@ async def request(
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
     _max_num_tries: Optional[int] = None,
+    _retry: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -457,6 +458,8 @@ async def request(
     This is the only place Gym talks to another server, so it is also the only place
     trace context has to be injected: every agent -> model and agent -> resources hop goes
     through here. `CLAUDE.md` bans httpx precisely to keep it that way.
+
+    Set ``_retry=False`` when replaying an ambiguous request could repeat a state change.
 
     ``_server_name`` is the bounded logical destination label for pool metrics: a configured
     ``ServerClient`` server name, ``remote_agent_service`` for the remote agent's external
@@ -486,6 +489,7 @@ async def request(
             _max_num_tries=_max_num_tries,
             _max_connection_retries=_max_connection_retries,
             _server_name=_server_name,
+            _retry=_retry,
             **kwargs,
         )
     return await _request_with_retries(
@@ -495,6 +499,7 @@ async def request(
         _max_num_tries=_max_num_tries,
         _max_connection_retries=_max_connection_retries,
         _server_name=_server_name,
+        _retry=_retry,
         **kwargs,
     )
 
@@ -506,6 +511,7 @@ async def _traced_request(
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
     _max_num_tries: Optional[int] = None,
+    _retry: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -547,6 +553,7 @@ async def _traced_request(
             _max_num_tries=_max_num_tries,
             _max_connection_retries=_max_connection_retries,
             _server_name=_server_name,
+            _retry=_retry,
             **kwargs,
         )
 
@@ -598,12 +605,16 @@ async def _request_with_retries(
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
     _max_num_tries: Optional[int] = None,
+    _retry: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
     # Initialization stays inside the client span and sets the metrics flag before it is read.
     token = set_server_name(_server_name or "external") if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY else None
     try:
+        if not _retry:
+            return await client.request(method=method, url=url, **kwargs)
+
         num_tries = 1
         explicit_tries = 0
         retries = 0
