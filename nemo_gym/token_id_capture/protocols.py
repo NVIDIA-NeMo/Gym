@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Protocol, TypedDict, runtime_checkable
 
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
@@ -91,6 +92,12 @@ class TokenCaptureRetiredError(TokenCaptureFrozenError):
     not mark the rollout incomplete. Typical sources are an abandoned attempt that keeps running
     and a duplicate execution of a finished rollout.
     """
+
+
+class ParentSelection(Enum):
+    """Distinguish an omitted candidate hint from no accepted predecessor."""
+
+    INFER = auto()
 
 
 @dataclass(frozen=True)

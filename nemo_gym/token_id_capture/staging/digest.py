@@ -35,7 +35,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-STAGING_SCHEMA_VERSION = 2
+STAGING_SCHEMA_VERSION = 3
 STAGING_DIGEST_VERSION = 2
 EXTRAS_DIGEST_VERSION = 1
 
