@@ -66,7 +66,11 @@ Removing the custom wrapper has these limits:
   durations. Gym emits `tool_timing_unavailable` gaps rather than estimating them.
 - Submission exits before a final tool observation is saved. The decision and
   native submission text remain available; that tool's execution observation is
-  incomplete.
+  incomplete, with no output or error evidence. This known mini-SWE gap fails
+  TE-5 (`tool.terminal` and `tool.outcome`) and the `gym-p0/v1` conformance gate,
+  even when the task succeeds. mini-SWE needs to persist a terminal tool result
+  correlated with the submit call before exiting; Gym's projection must then
+  retain that evidence. The observability test asserts this gap until it is fixed.
 - Native trajectories are saved after each step. A forced kill during a model
   request or command can lose the active step, or leave a partially written
   trajectory. Gym model-server capture remains independent of that file.

@@ -21,7 +21,7 @@ import pytest
 from fastapi import Body, FastAPI, Response
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
@@ -75,11 +75,16 @@ class _DispatchPayload(BaseModel):
     token_ids: list[int]
 
 
+class _AliasedDispatchPayload(BaseModel):
+    schema_: dict = Field(alias="schema")
+
+
 @pytest.mark.parametrize(
     ("content", "expected"),
     [
         ({"text": "café", "token_ids": [1, 2, 3]}, {"text": "café", "token_ids": [1, 2, 3]}),
         (_DispatchPayload(text="café", token_ids=[1, 2, 3]), {"text": "café", "token_ids": [1, 2, 3]}),
+        (_AliasedDispatchPayload(schema={"type": "object"}), {"schema": {"type": "object"}}),
     ],
 )
 def test_orjson_dispatch_response_serializes_json(content, expected):
@@ -120,6 +125,34 @@ def test_orjson_dispatch_response_preserves_existing_response():
     existing_response = Response(content=b"already encoded", media_type="application/octet-stream", status_code=202)
 
     assert _orjson_dispatch_response(existing_response) is existing_response
+
+
+def test_orjson_dispatch_response_preserves_json_schema_alias() -> None:
+    """Structured judge replies must retain API field names across the HTTP boundary."""
+    schema = {
+        "type": "object",
+        "properties": {"correct": {"type": "boolean"}},
+        "required": ["correct"],
+        "additionalProperties": False,
+    }
+    original = NeMoGymResponse(
+        id="structured_judge",
+        created_at=0,
+        model="fixture",
+        object="response",
+        status="completed",
+        output=[],
+        parallel_tool_calls=False,
+        tool_choice="none",
+        tools=[],
+        text={"format": {"type": "json_schema", "name": "judge", "schema": schema, "strict": True}},
+    )
+
+    payload = orjson.loads(_orjson_dispatch_response(original).body)
+
+    assert payload["text"]["format"]["schema"] == schema
+    assert "schema_" not in payload["text"]["format"]
+    assert NeMoGymResponse.model_validate(payload) == original
 
 
 def _capture_config(tmp_path, *, enabled: bool = True) -> ModelCallCaptureConfig:
@@ -943,6 +976,7 @@ def test_base_agent_resolve_model_base_url(monkeypatch):
 
     monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _config, _name: {"host": "h", "port": 1})
     agent = SimpleNamespace(
+        resolved_model_base_url=None,
         server_client=SimpleNamespace(
             global_config_dict={},
             _build_server_base_url=lambda _config: "http://h:1",

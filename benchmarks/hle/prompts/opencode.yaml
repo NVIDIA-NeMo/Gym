@@ -1,0 +1,9 @@
+# Preserve the standard HLE answer-format instructions in a single user message.
+# Shared by the OpenCode/Pi presets; native harness system prompts stay intact.
+user: |-
+  {question}
+
+  Your response should be in the following format:
+  Explanation: {{your explanation for your final answer}}
+  Answer: {{your succinct, final answer}}
+  Confidence: {{your confidence score between 0% and 100% for your answer}}

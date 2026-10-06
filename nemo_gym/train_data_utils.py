@@ -41,10 +41,15 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
+    ATTEMPT_INDEX_KEY_NAME,
     HF_TOKEN_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     GlobalConfigDictParser,
     get_global_config_dict,
+    resolve_dataset_agent,
 )
 from nemo_gym.hf_utils import (
     download_hf_dataset_as_jsonl,
@@ -56,6 +61,7 @@ from nemo_gym.task_data import (
     find_server_dir,
     load_task_data_schema,
 )
+from nemo_gym.task_materialization import materialize_task
 
 
 class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
@@ -289,7 +295,7 @@ def postprocess_other_metrics(metrics: DatasetMetrics, other_metrics: Dict[str, 
             setattr(metrics, k, StringMetrics(unique_count=len(v), total_count=sum(v.values())))
 
 
-def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
+def compute_sample_metrics(sample_dict_str: str, *, require_responses: bool = True) -> Tuple[DatasetMetrics, bool]:
     try:
         sample_dict = json.loads(sample_dict_str)
     except json.JSONDecodeError:
@@ -298,6 +304,10 @@ def compute_sample_metrics(sample_dict_str: str) -> Tuple[DatasetMetrics, bool]:
     try:
         sample = BaseRunRequest.model_validate(sample_dict)
     except ValidationError:
+        if not require_responses and isinstance(sample_dict, dict):
+            # The selected Environment Server owns task-input validation. Response-specific
+            # metrics are unavailable for these rows, but they are still dataset examples.
+            return DatasetMetrics(number_of_examples=1), False
         return DatasetMetrics(), True
 
     responses_create_params = sample.responses_create_params
@@ -446,6 +456,16 @@ class TrainDataProcessor(BaseModel):
             if not in_scope_datasets:
                 continue
 
+            # Validate taskset routing before conversion removes the declaring instance and agent pin.
+            for dataset in in_scope_datasets:
+                if dataset.taskset is not None:
+                    resolve_dataset_agent(
+                        global_config_dict,
+                        agent_config.name,
+                        pin=dataset.agent if isinstance(dataset, BenchmarkDatasetConfig) else None,
+                        taskset=dataset.taskset,
+                    )
+
             inner_config = agent_config.get_inner_run_server_config()
             inner_config.datasets = in_scope_datasets
             agent_configs_with_in_scope_datasets.append(agent_config)
@@ -557,9 +577,9 @@ class TrainDataProcessor(BaseModel):
     ########################################
 
     def _validate_samples_and_aggregate_metrics_single_sample(
-        self, state: DatasetValidatorState, sample_idx: int, sample_dict_str: str
+        self, state: DatasetValidatorState, sample_idx: int, sample_dict_str: str, *, require_responses: bool = True
     ) -> None:
-        metrics, is_offending = compute_sample_metrics(sample_dict_str)
+        metrics, is_offending = compute_sample_metrics(sample_dict_str, require_responses=require_responses)
         if is_offending:
             state.offending_example_idxs.append(sample_idx)
             return
@@ -592,7 +612,7 @@ class TrainDataProcessor(BaseModel):
 
         map_fn = self._validate_samples_and_aggregate_metrics_single_sample
         for sample_idx, sample_dict_str in enumerate(self._iter_dataset_lines(dataset_config)):
-            map_fn(state, sample_idx, sample_dict_str)
+            map_fn(state, sample_idx, sample_dict_str, require_responses=dataset_config.taskset is None)
 
         postprocess_other_metrics(state.metrics, state.other_metrics)
 
@@ -702,9 +722,11 @@ class TrainDataProcessor(BaseModel):
                 aggregate_metrics = state.metrics.aggregate()
 
                 aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
-                # The agent: pin is routing config, not dataset identity; excluding it keeps
-                # pre-pin metrics sidecars valid (no conflict churn from the decoupling).
-                aggregate_metrics_dict = d.model_dump(mode="json", exclude={"agent"}) | aggregate_metrics_dict
+                # Agent and taskset select routing, not source data. Exclude both so taskset
+                # and flat declarations of the same file can share its metrics sidecar.
+                aggregate_metrics_dict = (
+                    d.model_dump(mode="json", exclude={"agent", "taskset"}) | aggregate_metrics_dict
+                )
 
                 data_fpath = Path(d.jsonl_fpath)
                 metrics_fpath = data_fpath.with_name(f"{data_fpath.stem}_metrics.json")
@@ -823,6 +845,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
     ) -> List[Path]:
         paths_to_collate = []
         used_prepare_paths: set[Path] = set()
+        source_task_index = -1
         for c in server_instance_configs:
             for d in c.datasets:
                 if d.type != type:
@@ -873,10 +896,27 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         if row.pop(AGENT_REF_KEY, None) is not None:
                             legacy_agent_ref_rows += 1
                         row[TASK_SOURCE_KEY_NAME] = c.name
-                        # num_repeats duplicates each line consecutively; validate only the first
-                        # copy so reports count each source row once, with its jsonl line index.
+                        if row_index % d.num_repeats == 0:
+                            source_task_index += 1
+                        # Validate flat rows before conversion, which would hide misplaced fields.
+                        # Count each source row once, using its original JSONL line index.
                         if validator is not None and row_index % d.num_repeats == 0:
                             validator.validate_row(row_index // d.num_repeats, row)
+                        if d.taskset is not None:
+                            # Keep collector identity outside task_data so shards and retries
+                            # retain their capture keys after materialization.
+                            identity = {
+                                key: row[key]
+                                for key in (
+                                    TASK_INDEX_KEY_NAME,
+                                    ROLLOUT_INDEX_KEY_NAME,
+                                    ROLLOUT_ID_KEY_NAME,
+                                    ATTEMPT_INDEX_KEY_NAME,
+                                )
+                                if key in row
+                            }
+                            row = materialize_task(row, taskset=d.taskset, task_index=source_task_index)
+                            row.update(identity)
                         target.write(f"{json.dumps(row)}\n")
 
                 if validator is not None and (not validator.report.clean or validator.report.unknown_keys):
@@ -917,9 +957,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 None,
             )
             if d is not None:
-                # The agent: pin is routing config, not dataset identity; excluding it keeps
-                # pre-pin metrics sidecars valid (no conflict churn from the decoupling).
-                aggregate_metrics_dict = d.model_dump(mode="json", exclude={"agent"}) | aggregate_metrics_dict
+                # Routing choices do not change source metrics.
+                aggregate_metrics_dict = (
+                    d.model_dump(mode="json", exclude={"agent", "taskset"}) | aggregate_metrics_dict
+                )
 
             parent = Path(config.output_dirpath)
             parent.mkdir(exist_ok=True, parents=True)
