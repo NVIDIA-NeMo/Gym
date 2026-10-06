@@ -109,7 +109,9 @@ class BenchmarkConfig(BaseModel):
         dataset = datasets[0]
 
         try:
-            agent_name = resolve_dataset_agent(global_config_dict, declaring_instance_names[0], pin=dataset.agent)
+            agent_name = resolve_dataset_agent(
+                global_config_dict, declaring_instance_names[0], pin=dataset.agent, taskset=dataset.taskset
+            )
         except ConfigError as e:
             raise ConfigError(f"Benchmark config {path}: dataset {dataset.name!r}: {e}") from e
 
