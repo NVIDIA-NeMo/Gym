@@ -47,7 +47,7 @@ frontend:
     pool-max-idle-per-host: 0
     pool-idle-timeout-secs: 2
     health-check-interval-secs: 5
-    log-level: info
+    log-level: error
     dp-aware: false
     prefill-policy: cache_aware
     decode-policy: cache_aware
