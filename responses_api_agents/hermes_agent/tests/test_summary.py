@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from run_agent import AIAgent
+from tools.delegate_tool import _build_child_agent
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
@@ -80,3 +81,87 @@ def test_pinned_hermes_summary_passes_gym_schema_and_retains_call_ownership(
         observations = observer.finish(result)
         ids = [call.response_id for call in observations.records[0].model_calls]
     assert ids == [f"summary-{i + 1}" for i in range(len(requests))]
+
+
+@pytest.mark.parametrize("observer_kind", ["host", "sandbox", "none"])
+@pytest.mark.parametrize("install_before_observer", [False, True])
+def test_delegated_child_limit_summary_uses_gym_and_belongs_to_child(
+    observer_kind, install_before_observer, monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    with patch("run_agent.get_tool_definitions", return_value=[]), patch("run_agent.OpenAI"):
+        parent = AIAgent(
+            base_url="http://gym:8000/v1",
+            api_key="test-key",  # pragma: allowlist secret
+            model="test-model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        if install_before_observer:
+            install_summary_compat(parent, preserve_reasoning_history=False)
+        observer = None
+        if observer_kind == "host":
+            observer = HermesAgentObserver(
+                model_ref=ModelServerRef(type="responses_api_models", name="policy_model")
+            ).instrument(parent)
+        elif observer_kind == "sandbox":
+            observer = SandboxHermesObserver().instrument(parent)
+        if not install_before_observer:
+            install_summary_compat(parent, preserve_reasoning_history=False)
+        child = _build_child_agent(
+            task_index=0,
+            goal="Inspect a file",
+            context=None,
+            toolsets=None,
+            model=None,
+            max_iterations=1,
+            parent_agent=parent,
+        )
+
+    child._cached_system_prompt = "Inspect the file."
+    requests = []
+
+    def complete(**kwargs):
+        requests.append(NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(kwargs))
+        return SimpleNamespace(
+            id="child-summary", choices=[SimpleNamespace(message=SimpleNamespace(content="Partial findings."))]
+        )
+
+    client = MagicMock()
+    client.chat.completions.create.side_effect = complete
+    monkeypatch.setattr(child, "_create_request_openai_client", lambda **kwargs: client)
+    monkeypatch.setattr(child, "_close_request_openai_client", lambda *args, **kwargs: None)
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "call_id": "call_1",
+                    "response_item_id": "fc_1",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "file inspected"},
+    ]
+
+    assert child._handle_max_iterations(messages, 1) == "Partial findings."
+    assert child._gym_iteration_limit_reached is True
+    assert not getattr(parent, "_gym_iteration_limit_reached", False)
+    assert len(requests) == 1
+    assert messages[0]["tool_calls"][0]["response_item_id"] == "fc_1"
+
+    if observer_kind == "sandbox":
+        invocations = observer.finish({"messages": [], "completed": True}, None)["invocations"]
+        assert invocations[0]["model_response_ids"] == []
+        assert invocations[1]["model_response_ids"] == ["child-summary"]
+    elif observer_kind == "host":
+        invocations = [
+            r for r in observer.finish({"messages": [], "completed": True}).records if hasattr(r, "model_calls")
+        ]
+        assert invocations[0].model_calls == []
+        assert [call.response_id for call in invocations[1].model_calls] == ["child-summary"]

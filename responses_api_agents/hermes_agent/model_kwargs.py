@@ -8,6 +8,16 @@ from types import SimpleNamespace
 from typing import Any
 
 
+class _SummaryCompatChildren(list):
+    """Install Gym's summary adapter before a delegated child starts running."""
+
+    _gym_child_hook_supported = True
+
+    def append(self, child: Any) -> None:
+        self._gym_prepare_child(child)
+        super().append(child)
+
+
 def _model_api_kwargs(kwargs: dict[str, Any], *, preserve_reasoning_history: bool) -> dict[str, Any]:
     kwargs = kwargs.copy()
     extra_body = dict(kwargs.get("extra_body") or {})
@@ -34,6 +44,8 @@ def _model_api_kwargs(kwargs: dict[str, Any], *, preserve_reasoning_history: boo
 
 def install_summary_compat(agent: Any, *, preserve_reasoning_history: bool) -> None:
     """Route pinned Hermes's iteration-limit summary through Gym's observed model path."""
+    if getattr(agent, "_gym_summary_compat_installed", False):
+        return
     original_ensure_client = getattr(agent, "_ensure_primary_openai_client", None)
     original_handle_max_iterations = getattr(agent, "_handle_max_iterations", None)
     if not callable(original_ensure_client) or not callable(original_handle_max_iterations):
@@ -69,3 +81,13 @@ def install_summary_compat(agent: Any, *, preserve_reasoning_history: bool) -> N
 
     agent._ensure_primary_openai_client = ensure_client
     agent._handle_max_iterations = handle_max_iterations
+    agent._gym_summary_compat_installed = True
+
+    children = getattr(agent, "_active_children", None)
+    if isinstance(children, list):
+        if not getattr(children, "_gym_child_hook_supported", False):
+            children = _SummaryCompatChildren(children)
+            agent._active_children = children
+        children._gym_prepare_child = lambda child: install_summary_compat(
+            child, preserve_reasoning_history=preserve_reasoning_history
+        )

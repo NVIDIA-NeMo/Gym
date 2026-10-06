@@ -13,12 +13,17 @@ from typing import Any
 
 
 class _ObservedChildren(list):
+    _gym_child_hook_supported = True
+
     def __init__(self, values: Iterable[Any], observer: "SandboxHermesObserver", parent_id: str):
         super().__init__(values)
         self.observer = observer
         self.parent_id = parent_id
+        self._gym_prepare_child = getattr(values, "_gym_prepare_child", None)
 
     def append(self, child: Any) -> None:
+        if self._gym_prepare_child is not None:
+            self._gym_prepare_child(child)
         super().append(child)
         self.observer._child_added(child, self.parent_id)
 
