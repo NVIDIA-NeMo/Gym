@@ -22,6 +22,7 @@ import under our loader, that the prompt and parse functions are upstream's, and
 evaluator does.
 """
 
+import importlib.util
 import json
 import os
 import re
@@ -85,6 +86,20 @@ SOURCE_FILE = (
 )
 
 
+def _shadow_installed_anthropic_with_broken_sdk(monkeypatch, tmp_path: Path) -> None:
+    """An installed-but-broken anthropic: ``find_spec`` sees it, importing it raises.
+
+    Clears the cached upstream and provider modules so ``load_upstream`` re-imports the
+    whole chain and reaches the broken SDK, and resets the loader cache.
+    """
+    (tmp_path / "anthropic.py").write_text("import verisoftbench_test_missing_dependency  # broken on purpose\n")
+    monkeypatch.setattr(upstream, "_LOADED", None)
+    for name in list(sys.modules):
+        if name.split(".")[0] in upstream.UPSTREAM_TOP_LEVEL_MODULES + ("google", "anthropic"):
+            monkeypatch.delitem(sys.modules, name)
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+
 class TestLoader:
     def test_modules_come_from_the_checkout(self, harness) -> None:
         for module in (
@@ -105,6 +120,58 @@ class TestLoader:
         monkeypatch.setitem(sys.modules, "core", type(sys)("core"))
         with pytest.raises(UpstreamError, match="already taken"):
             upstream.load_upstream(UPSTREAM_DIR)
+        # A lookalike sibling sharing the checkout's path as a string prefix is still
+        # taken: provenance is exact path containment, not ``startswith``.
+        lookalike = type(sys)("core")
+        lookalike.__file__ = f"{UPSTREAM_DIR.resolve()}-evil/core/__init__.py"
+        monkeypatch.setitem(sys.modules, "core", lookalike)
+        with pytest.raises(UpstreamError, match="already taken"):
+            upstream.load_upstream(UPSTREAM_DIR)
+
+    def test_failed_upstream_import_restores_sys_path_and_sys_modules(self, harness, monkeypatch, tmp_path) -> None:
+        # A load that fails mid-import must leave the interpreter exactly as it found
+        # it: no checkout left on sys.path, no stub or half-imported package published.
+        _shadow_installed_anthropic_with_broken_sdk(monkeypatch, tmp_path)
+        monkeypatch.setattr(sys, "path", [p for p in sys.path if Path(p) != UPSTREAM_DIR.resolve()])
+        path_before = list(sys.path)
+        modules_before = dict(sys.modules)
+        with pytest.raises(ModuleNotFoundError, match="verisoftbench_test_missing_dependency"):
+            upstream.load_upstream(UPSTREAM_DIR)
+        assert sys.path == path_before
+        assert set(sys.modules) == set(modules_before)
+        assert all(sys.modules[name] is module for name, module in modules_before.items())
+
+    def test_installed_but_broken_sdk_is_not_replaced_by_a_stub(self, harness, monkeypatch, tmp_path) -> None:
+        # ``find_spec`` proves anthropic is installed, so its own import failure must
+        # surface to the caller; a stub standing in for a real SDK would silently
+        # weaken every later host import of it.
+        _shadow_installed_anthropic_with_broken_sdk(monkeypatch, tmp_path)
+        with pytest.raises(ModuleNotFoundError, match="verisoftbench_test_missing_dependency"):
+            upstream.load_upstream(UPSTREAM_DIR)
+        assert "anthropic" not in sys.modules
+
+    def test_stubs_for_absent_sdks_carry_module_metadata(self, monkeypatch) -> None:
+        # Spec-based discovery of a published stub must return its spec, not crash the
+        # way a bare ModuleType with ``__spec__ = None`` makes ``find_spec`` do.
+        real_find_spec = importlib.util.find_spec
+        monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+        before = {name: sys.modules.get(name) for name in upstream._PROVIDER_STUBS}
+        for name in upstream._PROVIDER_STUBS:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        try:
+            upstream._stub_missing_provider_sdks()
+            for name in upstream._PROVIDER_STUBS:
+                stub = sys.modules[name]
+                assert stub.__spec__ is not None and stub.__spec__.name == name
+                assert real_find_spec(name) is stub.__spec__
+            assert sys.modules["anthropic"].Anthropic is object
+            assert sys.modules["google"].genai is sys.modules["google.genai"]
+        finally:
+            for name, module in before.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
 
     def test_checkout_modified_after_the_cached_load_is_refused(self, harness, monkeypatch, tmp_path) -> None:
         # ``load_upstream`` returns its cached modules on every later call; the tracked

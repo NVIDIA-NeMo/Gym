@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import importlib.machinery
+import importlib.util
 import json
 import logging
 import re
@@ -206,20 +208,28 @@ def require_repo_index(modules: "UpstreamModules") -> str:
 
 
 def _stub_missing_provider_sdks() -> None:
-    for name in _PROVIDER_STUBS:
+    """Stub only the provider SDKs that are genuinely absent from the environment.
+
+    ``importlib.util.find_spec`` proves absence without executing the SDK: an installed
+    SDK whose own import raises must surface that failure to the caller's rollback, not
+    be silently replaced by a stub. Stubs are built from a real ``ModuleSpec`` (as an
+    empty package) so spec-based discovery of them does not crash, and parent stubs link
+    their stubbed children so attribute access mirrors a real package.
+    """
+    stubbed: set[str] = set()
+    for name in _PROVIDER_STUBS:  # parents precede their children in this tuple
         if name in sys.modules:
             continue
-        try:
-            importlib.import_module(name)
-        except ImportError:
-            module = types.ModuleType(name)
-            # Attributes the upstream ``from x import y`` statements resolve.
-            module.genai = types.ModuleType("google.genai")
-            module.types = types.ModuleType("google.genai.types")
-            module.oauth2 = types.ModuleType("google.oauth2")
-            module.service_account = types.ModuleType("google.oauth2.service_account")
-            module.Anthropic = object
-            sys.modules[name] = module
+        if importlib.util.find_spec(name) is not None:
+            continue
+        spec = importlib.machinery.ModuleSpec(name, None, is_package=True)
+        module = importlib.util.module_from_spec(spec)
+        module.Anthropic = object  # resolves upstream's ``from anthropic import Anthropic``
+        sys.modules[name] = module
+        parent, _, child = name.rpartition(".")
+        if parent in stubbed:
+            setattr(sys.modules[parent], child, module)
+        stubbed.add(name)
 
 
 @dataclass
@@ -232,6 +242,18 @@ class UpstreamModules:
 
 
 _LOADED: Optional[UpstreamModules] = None
+
+
+def _module_file_inside(module: Any, upstream_dir: Path) -> bool:
+    """Exact path containment of ``module.__file__`` in the checkout, never a string prefix.
+
+    A prefix test accepts a lookalike sibling such as ``<checkout>-evil/utils.py``;
+    ``Path.is_relative_to`` only accepts real descendants of ``upstream_dir``.
+    """
+    module_file = getattr(module, "__file__", None)
+    if not module_file:
+        return False
+    return Path(module_file).resolve().is_relative_to(upstream_dir)
 
 
 def load_upstream(upstream_dir: Path) -> UpstreamModules:
@@ -248,15 +270,35 @@ def load_upstream(upstream_dir: Path) -> UpstreamModules:
     require_pinned_checkout(upstream_dir)
     for name in UPSTREAM_TOP_LEVEL_MODULES:
         present = sys.modules.get(name)
-        if present is not None and not str(getattr(present, "__file__", "") or "").startswith(str(upstream_dir)):
+        if present is not None and not _module_file_inside(present, upstream_dir):
             raise UpstreamError(f"module name {name!r} is already taken by {present!r}; cannot import upstream")
-    if str(upstream_dir) not in sys.path:
-        sys.path.insert(0, str(upstream_dir))
-    _stub_missing_provider_sdks()
-    utils = importlib.import_module("utils.utils")
-    lean_interface = importlib.import_module("core.lean_interface")
-    evaluator = importlib.import_module("core.evaluator")
-    prompt_builder = importlib.import_module("prompts.prompt_builder")
+    # The import is transactional: any failure below — an upstream module, or an
+    # installed provider SDK whose own import raises — restores ``sys.path`` and
+    # ``sys.modules`` exactly, so no stub or half-imported package outlives a failed load.
+    path_before = list(sys.path)
+    modules_before = dict(sys.modules)
+    try:
+        if str(upstream_dir) not in sys.path:
+            sys.path.insert(0, str(upstream_dir))
+        _stub_missing_provider_sdks()
+        utils = importlib.import_module("utils.utils")
+        lean_interface = importlib.import_module("core.lean_interface")
+        evaluator = importlib.import_module("core.evaluator")
+        prompt_builder = importlib.import_module("prompts.prompt_builder")
+        for module in (utils, lean_interface, evaluator, prompt_builder):
+            if not _module_file_inside(module, upstream_dir):
+                raise UpstreamError(
+                    f"{module.__name__} was imported from {getattr(module, '__file__', None)}, "
+                    f"outside the pinned checkout {upstream_dir}"
+                )
+    except BaseException:
+        sys.path[:] = path_before
+        for name in [name for name in sys.modules if name not in modules_before]:
+            del sys.modules[name]
+        for name, module in modules_before.items():
+            if sys.modules.get(name) is not module:
+                sys.modules[name] = module
+        raise
     _LOADED = UpstreamModules(utils, lean_interface, evaluator, prompt_builder, upstream_dir)
     return _LOADED
 
