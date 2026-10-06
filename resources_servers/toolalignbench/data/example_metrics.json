@@ -1,0 +1,63 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/toolalignbench/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 902.6,
+        "Min": 689.0,
+        "Max": 1085.0,
+        "Standard deviation": 144.55
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "domain": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "scenario_type": {
+        "unique_count": 2,
+        "total_count": 5
+    },
+    "prompt_condition": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "tool_names": {
+        "unique_count": 20,
+        "total_count": 33
+    },
+    "remaining_documents": {
+        "unique_count": 15,
+        "total_count": 15
+    }
+}
