@@ -30,8 +30,6 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.agent_utils.supervisor_client import HarnessProcessInfo
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -44,6 +42,7 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.harness.sandbox_session import SandboxSession
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -76,7 +75,7 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
-from responses_api_agents.hermes_agent.sandbox import HermesSandboxSession
+from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, HermesSandboxSession
 
 
 def _trajectory_to_output_items(messages, n_input):
@@ -419,13 +418,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
             session=SandboxSession(
                 sandbox=sandbox,
                 workdir=workdir,
-                directory=session_dir,
+                session_dir=session_dir,
                 owns_sandbox=owns_sandbox,
                 harness="Hermes",
             ),
         )
         try:
-            await state.prepare(install_timeout=self.config.sandbox_install_timeout_seconds)
+            await state.install_runtime(install_timeout=self.config.sandbox_install_timeout_seconds)
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)

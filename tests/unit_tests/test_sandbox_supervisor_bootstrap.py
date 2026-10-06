@@ -10,8 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agent_utils import process_supervisor
-from nemo_gym.agent_utils.supervisor_client import (
+from nemo_gym.harness import process_supervisor
+from nemo_gym.harness.supervisor_client import (
+    CLEANUP_RECEIPT_FILE,
+    LAUNCH_CLAIM_FILE,
+    SUPERVISOR_FILE,
+    SUPERVISOR_PID_FILE,
     remove_session_directory,
     stop_and_confirm_cleanup,
     supervised_launch_command,
@@ -33,10 +37,10 @@ class LocalSandbox:
 
 @pytest.mark.parametrize("failure", ["missing_python", "broken_python", "missing_supervisor", "broken_supervisor"])
 async def test_bootstrap_failure_preserves_diagnostics_and_allows_close(tmp_path: Path, failure: str) -> None:
-    directory = tmp_path / "session"
-    directory.mkdir()
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
     python = sys.executable
-    supervisor = directory / "process_supervisor.py"
+    supervisor = session_dir / SUPERVISOR_FILE
     shutil.copyfile(process_supervisor.__file__, supervisor)
     expected_error = ""
     if failure == "missing_python":
@@ -56,8 +60,8 @@ async def test_bootstrap_failure_preserves_diagnostics_and_allows_close(tmp_path
         expected_error = "SyntaxError"
     sandbox = LocalSandbox()
     command = supervised_launch_command(
-        directory=str(directory),
-        command=["touch", str(directory / "worker-started")],
+        session_dir=str(session_dir),
+        command=["touch", str(session_dir / "worker-started")],
         timeout=1,
         cleanup_timeout=1,
         python=python,
@@ -67,29 +71,29 @@ async def test_bootstrap_failure_preserves_diagnostics_and_allows_close(tmp_path
     if failure == "broken_python":
         assert result.return_code == 17
     assert expected_error in result.stderr
-    assert not (directory / "launch.claim").is_symlink()
-    assert not (directory / "runner.pid").exists()
-    assert not (directory / "worker-started").exists()
-    assert not (directory / "cleanup.json").exists()
+    assert not (session_dir / LAUNCH_CLAIM_FILE).is_symlink()
+    assert not (session_dir / SUPERVISOR_PID_FILE).exists()
+    assert not (session_dir / "worker-started").exists()
+    assert not (session_dir / CLEANUP_RECEIPT_FILE).exists()
 
     receipt = await stop_and_confirm_cleanup(
-        sandbox, directory=str(directory), workdir=None, timeout=1, harness="bootstrap-test"
+        sandbox, session_dir=str(session_dir), workdir=None, timeout=1, harness="bootstrap-test"
     )
     assert receipt["cleanup_confirmed"] is True
     assert receipt["return_code"] is None
-    assert (directory / "launch.claim").readlink() == Path("stop")
+    assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")
 
 
 @pytest.mark.parametrize("removed", [False, True])
 async def test_fenced_delayed_launch_does_not_require_the_runtime(tmp_path: Path, removed: bool) -> None:
-    directory = tmp_path / "session"
-    directory.mkdir()
-    (directory / "launch.claim").symlink_to("stop")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    (session_dir / LAUNCH_CLAIM_FILE).symlink_to("stop")
     if removed:
-        shutil.rmtree(directory)
+        shutil.rmtree(session_dir)
     result = await LocalSandbox().exec(
         supervised_launch_command(
-            directory=str(directory),
+            session_dir=str(session_dir),
             command=["touch", str(tmp_path / "worker-started")],
             timeout=1,
             cleanup_timeout=1,
@@ -103,12 +107,12 @@ async def test_fenced_delayed_launch_does_not_require_the_runtime(tmp_path: Path
 
 @pytest.mark.parametrize("remove_directory", [False, True])
 async def test_close_during_preflight_fences_later_launch(tmp_path: Path, remove_directory: bool) -> None:
-    directory = tmp_path / "session"
-    directory.mkdir()
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
     preflight_started = tmp_path / "preflight-started"
     continue_preflight = tmp_path / "continue-preflight"
     worker_started = tmp_path / "worker-started"
-    supervisor = tmp_path / "supervisor.py"
+    supervisor = session_dir / SUPERVISOR_FILE
     supervisor.write_text(
         "import pathlib, sys, time\n"
         "if '--help' in sys.argv:\n"
@@ -122,12 +126,11 @@ async def test_close_during_preflight_fences_later_launch(tmp_path: Path, remove
     launch = asyncio.create_task(
         sandbox.exec(
             supervised_launch_command(
-                directory=str(directory),
+                session_dir=str(session_dir),
                 command=["worker"],
                 timeout=1,
                 cleanup_timeout=1,
                 python=sys.executable,
-                supervisor_path=str(supervisor),
             )
         )
     )
@@ -136,13 +139,13 @@ async def test_close_during_preflight_fences_later_launch(tmp_path: Path, remove
             while not preflight_started.exists():
                 await asyncio.sleep(0.01)
         receipt = await stop_and_confirm_cleanup(
-            sandbox, directory=str(directory), workdir=None, timeout=1, harness="bootstrap-test"
+            sandbox, session_dir=str(session_dir), workdir=None, timeout=1, harness="bootstrap-test"
         )
         assert receipt["cleanup_confirmed"] is True
         assert receipt["return_code"] is None
         if remove_directory:
             await remove_session_directory(
-                sandbox, directory=str(directory), workdir=None, timeout=1, harness="bootstrap-test"
+                sandbox, session_dir=str(session_dir), workdir=None, timeout=1, harness="bootstrap-test"
             )
     finally:
         continue_preflight.touch()
@@ -152,26 +155,25 @@ async def test_close_during_preflight_fences_later_launch(tmp_path: Path, remove
 
 
 async def test_bootstrap_quotes_private_paths_and_uses_the_same_interpreter(tmp_path: Path) -> None:
-    directory = tmp_path / "session's files"
-    directory.mkdir()
+    session_dir = tmp_path / "session's $(touch unintended) files"
+    session_dir.mkdir()
     runtime = tmp_path / "runtime's $(touch unintended) files"
     runtime.mkdir()
     python = runtime / "python interpreter"
     python.symlink_to(sys.executable)
-    supervisor = runtime / "supervisor's code.py"
-    arguments = directory / "arguments.json"
+    supervisor = session_dir / SUPERVISOR_FILE
+    arguments = session_dir / "arguments.json"
     supervisor.write_text(
         "import json, pathlib, sys\n"
         "if '--help' not in sys.argv:\n"
         f"    pathlib.Path({str(arguments)!r}).write_text(json.dumps([sys.executable, *sys.argv[1:]]))\n"
     )
     command = supervised_launch_command(
-        directory=str(directory),
+        session_dir=str(session_dir),
         command=["worker", "$(touch unintended)", "argument's value"],
         timeout=1,
         cleanup_timeout=1,
         python=str(python),
-        supervisor_path=str(supervisor),
     )
     result = await LocalSandbox().exec(command, cwd=str(tmp_path))
     assert result.return_code == 0, result.stderr
@@ -179,4 +181,4 @@ async def test_bootstrap_quotes_private_paths_and_uses_the_same_interpreter(tmp_
     assert captured[0] == str(python)
     assert captured[-3:] == ["worker", "$(touch unintended)", "argument's value"]
     assert not (tmp_path / "unintended").exists()
-    assert (directory / "launch.claim").readlink() == Path("launch")
+    assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("launch")

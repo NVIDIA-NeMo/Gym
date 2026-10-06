@@ -22,7 +22,6 @@ import pytest
 import yaml
 from fastapi import HTTPException
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
@@ -30,6 +29,7 @@ from nemo_gym.base_responses_api_agent import (
     _AgentSessionRecord,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.harness.sandbox_session import SandboxSession
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -165,14 +165,13 @@ class TestSanity:
         )
         assert state.session.sandbox is sandbox
         assert state.session.workdir == "/app"
-        assert state.session.directory.startswith("/tmp/nemo-gym-hermes-sessions/")
-        assert len(state.session.directory.rsplit("/", 1)[-1]) == 32
+        assert state.session.session_dir.startswith("/tmp/nemo-gym-hermes-sessions/")
+        assert len(state.session.session_dir.rsplit("/", 1)[-1]) == 32
         assert sandbox.exec.await_count == 2
         assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
             "sandbox_runner.py",
             "sandbox_observer.py",
             "model_kwargs.py",
-            "process_supervisor.py",
         }
 
     async def test_seed_installs_hermes_when_it_does_not_import(self, monkeypatch) -> None:
@@ -390,7 +389,7 @@ class TestSanity:
         hermes._session_records["session"] = _AgentSessionRecord(
             state=HermesSandboxSession(
                 request=seed,
-                session=SandboxSession(sandbox=sandbox, workdir=None, directory="/session", harness="Hermes"),
+                session=SandboxSession(sandbox=sandbox, workdir=None, session_dir="/session", harness="Hermes"),
             ),
             episode_id=seed.episode_id,
         )
@@ -424,7 +423,7 @@ class TestSanity:
                 self.uploaded: dict = {}
 
             async def upload(self, local_path, remote_path) -> None:
-                self.uploaded[remote_path] = json.loads(Path(local_path).read_text())
+                self.uploaded[remote_path] = Path(local_path).read_text()
 
             # Mirrors AsyncSandbox.exec so an unsupported argument fails here too.
             async def exec(
@@ -442,7 +441,8 @@ class TestSanity:
 
         response = await hermes.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="fix bug"))
 
-        runner_input = sandbox.uploaded["/session/input.json"]
+        runner_input = json.loads(sandbox.uploaded["/session/input.json"])
+        assert "/session/process_supervisor.py" in sandbox.uploaded
         assert runner_input["model_base_url"] == f"http://model-server:1/ng-rollout/{seed.episode_id.capture_key}/v1"
         assert runner_input["user_message"] == "fix bug"
         assert response.metadata["harness_execution"] == "sandbox"
@@ -453,7 +453,7 @@ class TestSanity:
                 self.uploaded: dict = {}
 
             async def upload(self, local_path, remote_path) -> None:
-                self.uploaded[remote_path] = json.loads(Path(local_path).read_text())
+                self.uploaded[remote_path] = Path(local_path).read_text()
 
             async def exec(
                 self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
@@ -488,7 +488,7 @@ class TestSanity:
             request, NeMoGymResponseCreateParamsNonStreaming(input="what is the weather")
         )
 
-        runner_input = sandbox.uploaded["/session/input.json"]
+        runner_input = json.loads(sandbox.uploaded["/session/input.json"])
         assert runner_input["mcp_servers"] == ["weather", "search"]
         assert runner_input["required_mcp_servers"] == ["weather"]
         assert runner_input["enabled_toolsets"] == ["terminal", "weather", "search"]
@@ -517,7 +517,7 @@ class TestSanity:
                 self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
             ) -> SandboxExecResult:
                 self.commands.append(command)
-                if "runner.pid" in command and "exec " in command:
+                if "supervisor.pid" in command and "exec " in command:
                     return SandboxExecResult(stdout=None, stderr="timed out", return_code=124, error_type="timeout")
                 return SandboxExecResult(stdout="", stderr="", return_code=0)
 
@@ -527,7 +527,7 @@ class TestSanity:
         with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
             await hermes.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="fix bug"))
 
-        stop = [command for command in sandbox.commands if "runner.stop" in command and "kill -TERM" in command]
+        stop = [command for command in sandbox.commands if "stop.request" in command and "kill -TERM" in command]
         assert len(stop) == 1
 
     async def test_close_during_activation_stops_the_runner(self, monkeypatch) -> None:
@@ -550,7 +550,7 @@ class TestSanity:
                 self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
             ) -> SandboxExecResult:
                 self.commands.append(command)
-                if "runner.pid" in command and "exec " in command:
+                if "supervisor.pid" in command and "exec " in command:
                     self.runner_started.set()
                     await asyncio.Event().wait()
                 return SandboxExecResult(stdout="", stderr="", return_code=0)
@@ -569,7 +569,7 @@ class TestSanity:
             timeout=5,
         )
 
-        stop = [command for command in sandbox.commands if "runner.stop" in command and "kill -TERM" in command]
+        stop = [command for command in sandbox.commands if "stop.request" in command and "kill -TERM" in command]
         assert len(stop) == 1
         assert hermes._session_records["session"].state is None
         with pytest.raises(asyncio.CancelledError):

@@ -4,6 +4,19 @@
 
 Session ownership and cancellation live in sandbox_session.py; output parsing stays with the adapter.
 Unlike process_supervisor.py, this module is not uploaded to the task sandbox.
+
+Session control files (all paths are relative to session_dir):
+
+===================== ==================== ===========================================
+Filename              Writer               When
+===================== ==================== ===========================================
+process_supervisor.py Session              Uploaded before launch
+launch.claim          Launch or stop shell Atomically claims launch or fences it
+supervisor.pid        Launch shell         After claiming launch, before exec
+stop.request          Stop shell           Before signalling the supervisor
+cleanup.json          Supervisor or stop   After cleanup, or when stop fences launch
+output.log            Launch shell         Captures supervisor and harness diagnostics
+===================== ==================== ===========================================
 """
 
 import json
@@ -11,40 +24,28 @@ import logging
 from shlex import join, quote
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
+from nemo_gym.harness.process_supervisor import CLEANUP_PHASE_COUNT, CleanupReceipt, exec_timeout
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.utils import read_text
 
+
+SUPERVISOR_FILE = "process_supervisor.py"
+LAUNCH_CLAIM_FILE = "launch.claim"
+SUPERVISOR_PID_FILE = "supervisor.pid"
+STOP_REQUEST_FILE = "stop.request"
+CLEANUP_RECEIPT_FILE = "cleanup.json"
+OUTPUT_LOG_FILE = "output.log"
 
 _CLEANUP_RECEIPT = TypeAdapter(CleanupReceipt)
 LOG = logging.getLogger(__name__)
 
 
-class HarnessProcessInfo(BaseModel):
-    """Identity of the supervised worker, which may be a shim that spawns the harness CLI.
-
-    This is independent of supervisor cleanup and harness output. The PID is
-    diagnostic metadata, not the supervisor PID used to request cleanup.
-    """
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-    hostname: str
-    pid: int
-    python: str | None = None
-
-
 def parse_cleanup_receipt(payload: object) -> CleanupReceipt:
-    """Require positive cleanup evidence, tolerating malformed optional diagnostics.
-
-    Older stop-before-launch receipts contain only acknowledgement and error.
-    Normalize that form without inventing a successful worker exit code.
-    """
+    """Require positive cleanup evidence, tolerating malformed optional diagnostics."""
     if not isinstance(payload, dict) or payload.get("cleanup_confirmed") is not True:
         raise ValueError("Sandbox cleanup was not confirmed")
-    if payload.keys() == {"cleanup_confirmed", "error"}:
-        payload = {**payload, "return_code": None, "timed_out": False}
     try:
         return _CLEANUP_RECEIPT.validate_python(payload, strict=True, extra="forbid")
     except ValidationError:
@@ -57,64 +58,67 @@ def parse_cleanup_receipt(payload: object) -> CleanupReceipt:
     }
 
 
-def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
-    """Read optional worker diagnostics without failing an otherwise valid episode."""
-    try:
-        return HarnessProcessInfo.model_validate(payload)
-    except ValidationError:
-        LOG.warning("Harness runtime metadata is missing or malformed")
-        return None
+def supervision_timeouts(*, timeout: float, close_timeout: float) -> tuple[float, float]:
+    """Return the per-cleanup-phase and provider execution deadlines.
+
+    Divide the close budget across TERM grace, harness process reaping, and
+    descendant draining. The provider deadline reserves all three phases after
+    the harness timeout, plus 30 seconds for startup, polling, and receipt I/O.
+    """
+    cleanup_timeout = close_timeout / CLEANUP_PHASE_COUNT
+    return cleanup_timeout, exec_timeout(timeout=timeout, cleanup_timeout=cleanup_timeout)
 
 
 def supervised_launch_command(
     *,
-    directory: str,
+    session_dir: str,
     command: list[str],
     timeout: float,
     cleanup_timeout: float,
     python: str,
-    supervisor_path: str | None = None,
 ) -> str:
     """Fence delayed launches and run a harness command under the shared supervisor.
 
     The adapter must install or select the interpreter explicitly. Check that it
     can load the supervisor before claiming a launch: a failed bootstrap cannot
-    write a cleanup receipt. Supervisor and worker diagnostics share runner.log.
+    write a cleanup receipt. Supervisor and harness diagnostics share output.log.
     """
-    supervisor = quote(supervisor_path or directory + "/process_supervisor.py")
+    supervisor = quote(f"{session_dir}/{SUPERVISOR_FILE}")
+    claim_path = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
     return (
-        f"[ -d {quote(directory)} ] && [ ! -L {quote(directory + '/launch.claim')} ] || exit 0; "
+        f"[ -d {quote(session_dir)} ] && [ ! -L {claim_path} ] || exit 0; "
         f"{quote(python)} -I {supervisor} --help >/dev/null || exit $?; "
-        f"trap '' TERM; ln -s launch {quote(directory + '/launch.claim')} 2>/dev/null || exit 0; "
-        f"echo $$ > {quote(directory + '/runner.pid')} && "
+        f"trap '' TERM; ln -s launch {claim_path} 2>/dev/null || exit 0; "
+        f"echo $$ > {quote(f'{session_dir}/{SUPERVISOR_PID_FILE}')} && "
         f"exec {quote(python)} -I {supervisor} "
         f"--timeout {timeout} --cleanup-timeout {cleanup_timeout} "
-        f"--stop-file {quote(directory + '/runner.stop')} "
-        f"--receipt {quote(directory + '/cleanup.json')} -- {join(command)} "
-        f">{quote(directory + '/runner.log')} 2>&1"
+        f"--stop-file {quote(f'{session_dir}/{STOP_REQUEST_FILE}')} "
+        f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} -- {join(command)} "
+        f">{quote(f'{session_dir}/{OUTPUT_LOG_FILE}')} 2>&1"
     )
 
 
 async def stop_and_confirm_cleanup(
-    sandbox: AsyncSandbox, *, directory: str, workdir: str | None, timeout: float, harness: str
+    sandbox: AsyncSandbox, *, session_dir: str, workdir: str | None, timeout: float, harness: str
 ) -> CleanupReceipt:
     """Fence a pending launch or require explicit supervisor acknowledgement before teardown.
 
-    A stop that wins the launch claim writes a minimal receipt: no worker ran, so
-    runtime metadata and a return code are intentionally absent. Worker metadata
-    and harness output are validated separately by the adapter.
+    A stop that wins the launch claim writes the same receipt shape as the
+    supervisor, with no return code because no harness process ran.
     """
-    receipt_path = f"{directory}/cleanup.json"
+    receipt_path = f"{session_dir}/{CLEANUP_RECEIPT_FILE}"
     try:
         receipt = json.loads(await read_text(sandbox, path=receipt_path))
     except Exception:
         receipt = {}
     if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
-        pid_path = quote(f"{directory}/runner.pid")
-        stop_path = quote(f"{directory}/runner.stop")
-        claim_path = quote(f"{directory}/launch.claim")
+        pid_path = quote(f"{session_dir}/{SUPERVISOR_PID_FILE}")
+        stop_path = quote(f"{session_dir}/{STOP_REQUEST_FILE}")
+        claim_path = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
         temporary = quote(f"{receipt_path}.{uuid4().hex}.tmp")
-        stopped = quote(json.dumps({"cleanup_confirmed": True, "error": None}))
+        stopped = quote(
+            json.dumps({"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": False})
+        )
         script = (
             f"[ -f {quote(receipt_path)} ] && exit 0; "
             f"touch {stop_path} || exit 1; "
@@ -137,7 +141,7 @@ async def stop_and_confirm_cleanup(
 
 
 async def remove_session_directory(
-    sandbox: AsyncSandbox, *, directory: str, workdir: str | None, timeout: float, harness: str
+    sandbox: AsyncSandbox, *, session_dir: str, workdir: str | None, timeout: float, harness: str
 ) -> None:
     """Remove adapter-owned files after cleanup, keeping delayed launches fenced.
 
@@ -145,10 +149,10 @@ async def remove_session_directory(
     delayed launch could win the claim while recursive deletion is in progress.
     A failed removal leaves the retired path available for a close retry.
     """
-    retired = f"{directory}.closed"
+    retired = f"{session_dir}.closed"
     result = await sandbox.exec(
-        f"if [ -d {quote(directory)} ]; then "
-        f"mv {quote(directory)} {quote(retired)} || exit 1; fi; rm -rf -- {quote(retired)}",
+        f"if [ -d {quote(session_dir)} ]; then "
+        f"mv {quote(session_dir)} {quote(retired)} || exit 1; fi; rm -rf -- {quote(retired)}",
         cwd=workdir,
         timeout_s=timeout,
     )

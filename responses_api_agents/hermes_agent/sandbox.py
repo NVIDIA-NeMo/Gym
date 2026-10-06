@@ -5,20 +5,22 @@
 import asyncio
 import importlib.metadata
 import json
+import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
 
-from pydantic import JsonValue
+from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils import process_supervisor
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
-from nemo_gym.agent_utils.supervisor_client import HarnessProcessInfo, parse_runtime_info
 from nemo_gym.base_responses_api_agent import AgentSessionState
+from nemo_gym.harness.sandbox_session import SandboxCommand, SandboxSession
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox.utils import read_text, upload_text
+
+
+LOG = logging.getLogger(__name__)
 
 
 def _sandbox_hermes_install() -> tuple[str, str]:
@@ -44,9 +46,26 @@ _SANDBOX_RUNTIME_DIR = f"/tmp/nemo-gym-hermes-runtime-{_HERMES_RUNTIME_KEY}"
 _SANDBOX_UV = f"{_SANDBOX_RUNTIME_DIR}/uv"
 _SANDBOX_PYTHON = f"{_SANDBOX_RUNTIME_DIR}/venv/bin/python"
 _SANDBOX_RUNNER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_runner.py"
-_SANDBOX_SUPERVISOR = f"{_SANDBOX_RUNTIME_DIR}/process_supervisor.py"
 _SANDBOX_OBSERVER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_observer.py"
 _SANDBOX_MODEL_KWARGS = f"{_SANDBOX_RUNTIME_DIR}/model_kwargs.py"
+
+
+class HarnessProcessInfo(BaseModel):
+    """Optional identity of the Hermes harness process, separate from cleanup evidence."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    hostname: str
+    pid: int
+    python: str | None = None
+
+
+def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
+    """Read Hermes diagnostics without failing an otherwise valid episode."""
+    try:
+        return HarnessProcessInfo.model_validate(payload)
+    except ValidationError:
+        LOG.warning("Hermes runtime metadata is missing or malformed")
+        return None
 
 
 @dataclass
@@ -59,10 +78,10 @@ class HermesSandboxSession(AgentSessionState):
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
 
-    async def prepare(self, *, install_timeout: float) -> None:
-        """Reuse or install the pinned runtime and stage the Hermes worker files."""
+    async def install_runtime(self, *, install_timeout: float) -> None:
+        """Reuse or install the pinned runtime and stage the Hermes harness files."""
         prepared = await self.session.sandbox.exec(
-            f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(self.session.directory)}",
+            f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(self.session.session_dir)}",
             cwd=self.session.workdir,
             timeout_s=30,
         )
@@ -73,7 +92,6 @@ class HermesSandboxSession(AgentSessionState):
         await self.session.sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), _SANDBOX_RUNNER)
         await self.session.sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
         await self.session.sandbox.upload(Path(__file__).with_name("model_kwargs.py"), _SANDBOX_MODEL_KWARGS)
-        await self.session.sandbox.upload(Path(process_supervisor.__file__), _SANDBOX_SUPERVISOR)
 
     async def _runtime_installed(self) -> bool:
         """Whether the pinned Hermes and its MCP client import from its runtime path.
@@ -107,11 +125,11 @@ class HermesSandboxSession(AgentSessionState):
 
     async def upload_json(self, name: str, payload: dict[str, JsonValue]) -> None:
         """Write a Hermes input under the session directory using file transfer."""
-        await upload_text(self.session.sandbox, path=f"{self.session.directory}/{name}", text=json.dumps(payload))
+        await upload_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}", text=json.dumps(payload))
 
     async def read_json(self, name: str) -> dict[str, JsonValue]:
         """Read a Hermes output object without mixing it with the cleanup contract."""
-        path = f"{self.session.directory}/{name}"
+        path = f"{self.session.session_dir}/{name}"
         payload = json.loads(await read_text(self.session.sandbox, path=path))
         if not isinstance(payload, dict):
             raise TypeError(f"Hermes sandbox payload at {path} is not an object")
@@ -138,7 +156,7 @@ class HermesSandboxSession(AgentSessionState):
     ) -> dict[str, JsonValue]:
         """Use the common lifecycle, then check the Hermes-specific result."""
         output = await self.session.execute(
-            prepare=lambda: self.prepare_execution(payload),
+            stage_activation=lambda: self.stage_activation(payload),
             collect=self.collect_artifacts,
             timeout=timeout,
             close_timeout=close_timeout,
@@ -147,18 +165,17 @@ class HermesSandboxSession(AgentSessionState):
             raise RuntimeError(f"Hermes sandbox runner failed: {output['error']}\n{output.get('traceback', '')}")
         return output
 
-    async def prepare_execution(self, payload: dict[str, JsonValue]) -> SandboxCommand:
-        """Stage this activation's input and describe its worker command."""
-        await self.upload_json("input.json", payload)
+    async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
+        """Stage this activation's input and describe its harness process."""
+        await self.upload_json("input.json", {**payload, "stop_request_path": self.session.stop_request_path})
         return SandboxCommand(
             argv=[
                 _SANDBOX_PYTHON,
                 _SANDBOX_RUNNER,
-                f"{self.session.directory}/input.json",
-                f"{self.session.directory}/output.json",
+                f"{self.session.session_dir}/input.json",
+                f"{self.session.session_dir}/output.json",
             ],
             python=_SANDBOX_PYTHON,
-            supervisor_path=_SANDBOX_SUPERVISOR,
         )
 
     async def collect_artifacts(self) -> dict[str, JsonValue]:
@@ -166,11 +183,7 @@ class HermesSandboxSession(AgentSessionState):
         try:
             output = await self.read_json("output.json")
         except Exception as error:
-            logs = await self.session.sandbox.exec(
-                f"cat {quote(self.session.directory + '/runner.log')} 2>/dev/null || true",
-                cwd=self.session.workdir,
-                timeout_s=30,
-            )
-            raise RuntimeError(f"Hermes sandbox runner exited without output: {logs.stdout or ''}") from error
+            logs = await self.session.read_output_log()
+            raise RuntimeError(f"Hermes sandbox runner exited without output: {logs}") from error
         self.runtime_info = parse_runtime_info(output.get("runtime"))
         return output
