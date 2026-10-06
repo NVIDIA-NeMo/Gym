@@ -49,7 +49,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -225,8 +225,9 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         step_usage = []
         rollout_id = maybe_rollout_id_from_run_body(body)
         collect_trajectory = self._model_call_capture_enabled() and rollout_id is not None
-        task_index = (body.model_extra or {}).get(TASK_INDEX_KEY_NAME)
-        task_id = str(task_index if task_index is not None else body.problem_id)
+        # The rollout collector prefers the source problem_id as its canonical
+        # task identity when one is present in the input row.
+        task_id = body.problem_id
         invocations: list[AgentInvocation] = []
         turns: list[TrajectoryTurn] = []
         trajectory_gaps: list[ObservationGap] = []

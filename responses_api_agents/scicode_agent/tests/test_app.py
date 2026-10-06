@@ -239,7 +239,8 @@ class TestApp:
             result = await agent.run(_FakeRequest(), body)
 
         trajectory = result["ng_trajectory"]
-        assert (trajectory["task_id"], trajectory["rollout_id"]) == ("4", "4-2")
+        assert (trajectory["task_id"], trajectory["rollout_id"]) == ("1", "4-2")
+        assert all(turn["task_id"] == "1" for turn in trajectory["turns"])
         assert [invocation["invocation_id"] for invocation in trajectory["invocations"]] == [
             "substep-1",
             "substep-2",
@@ -286,6 +287,10 @@ class TestApp:
             },
         }
         _attach_trajectory_record(record, record)
+        assert record["ng_trajectory"]["task_id"] == "1"
+        assert not any(
+            gap["code"] == "producer_trajectory_identity_mismatch" for gap in record["ng_trajectory"]["gaps"]
+        )
         path = tmp_path / "rollouts.jsonl"
         path.write_text(json.dumps(record) + "\n")
         checked = run_health_checks(path, output_dir=tmp_path, workers=1)
