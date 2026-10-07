@@ -142,6 +142,7 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
                         "probe_type": probe,
                         "probe_family": f"family-{probe}",
                         "probe_variant": "usersim-resolved",
+                        "toolset_name": float("nan"),
                         "persona": {"source": "usersim"},
                         "theme": {"source": "usersim"},
                         "trajectory_id": f"usersim-{probe}",
@@ -172,6 +173,8 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
     assert {row["resolved_row"]["probe_type"] for row in rows} == set(REGISTERED_PROBES)
     assert all(row["resolved_row"]["persona"] == {"source": "usersim"} for row in rows)
     assert all(row["resolved_row"]["theme"] == {"source": "usersim"} for row in rows)
+    assert all(row["resolved_row"]["toolset_name"] is None for row in rows)
+    assert "NaN" not in tasks_path.read_text()
     assert all(
         row["resolved_row"]["usersim_provenance"]["code_sha"] == prepare_module.USERSIM_REVISION for row in rows
     )

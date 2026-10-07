@@ -5,6 +5,7 @@
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -112,6 +113,16 @@ def _validate_persona_asset(locale: str) -> None:
     )
 
 
+def _json_safe(value: object) -> object:
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def _write_tasks(tasks: list[dict[str, object]]) -> None:
     temporary_tasks: Path | None = None
     try:
@@ -124,7 +135,7 @@ def _write_tasks(tasks: list[dict[str, object]]) -> None:
             delete=False,
         ) as output:
             temporary_tasks = Path(output.name)
-            output.write("".join(f"{json.dumps(row, separators=(',', ':'))}\n" for row in tasks))
+            output.write("".join(f"{json.dumps(row, separators=(',', ':'), allow_nan=False)}\n" for row in tasks))
         os.replace(temporary_tasks, TASKS_FPATH)
     finally:
         if temporary_tasks is not None:
@@ -195,7 +206,7 @@ def prepare(
         if task_id in task_ids:
             raise ValueError(f"Duplicate UserSim trajectory_id: {task_id}")
         task_ids.add(task_id)
-        tasks.append({"task_id": task_id, "resolved_row": row})
+        tasks.append({"task_id": task_id, "resolved_row": _json_safe(row)})
     _write_tasks(tasks)
     print(f"Prepared {len(tasks)} NeMo UserSim tasks at {TASKS_FPATH}")
     return TASKS_FPATH.absolute()
