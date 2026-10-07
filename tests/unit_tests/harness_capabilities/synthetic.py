@@ -134,3 +134,31 @@ def evidence_record() -> dict:
             "tool_calls": deepcopy(tools),
         },
     }
+
+
+def evidence_and_witness() -> tuple[dict, dict]:
+    """Return independent saved evidence and matching controlled observations."""
+    record = evidence_record()
+    witness = {
+        "seeded": 1,
+        "finished": True,
+        "violations": [],
+        "verifications": [{"reward": 0.0, "answer_seen": True}],
+        "tool_calls": [
+            {
+                "id": f"tool-{number}",
+                "name": "read_value",
+                "arguments": {"key": "example"},
+                "exit_code": 0,
+                "outputs": ["value"],
+                "executed": True,
+                "result_seen": True,
+            }
+            for number in (1, 2)
+        ],
+        "attempts": [
+            {"request": c["request"], "response": c["response"], "status_code": c["response_metadata"]["status_code"]}
+            for c in record["ng_trajectory"]["model_calls"]
+        ],
+    }
+    return deepcopy(record), witness
