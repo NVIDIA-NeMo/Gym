@@ -8855,6 +8855,7 @@ class TestEnvironmentServerRouting:
                 "terminal": False,
                 "stage": "agent",
                 "partial_response": {"id": "partial"},
+                "protocol_evidence": {"cleanup_confirmed": True, "diagnostic": ["native failure"]},
             },
         }
         assert nemo_gym.rollout_collection._is_episode_response(reply)
@@ -8866,6 +8867,7 @@ class TestEnvironmentServerRouting:
         assert record["_ng_failure_message"] == "agent unavailable"
         assert record["_ng_failure_stage"] == "agent"
         assert record["_ng_failure_partial_response"] == {"id": "partial"}
+        assert record["_ng_failure"] == reply["failure"]
         assert record[nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] == "a"
         assert "reward" not in record
 
@@ -9137,6 +9139,12 @@ class TestEnvironmentServerRouting:
         output_jsonl_fpath = tmp_path / "output.jsonl"
         dispatched: list[tuple[str, dict]] = []
         failed_once: set[str] = set()
+        failure_payload = {
+            "failure_reason": "agent unavailable",
+            "terminal": False,
+            "agent_close": {"cleanup_confirmed": True, "agent_observations": {"records": ["partial diagnostics"]}},
+            "dependency_error": {"status_code": 502, "body": "native failure"},
+        }
 
         async def post(server_name: str, url_path: str, json, **kwargs):
             if url_path == "/run":
@@ -9147,8 +9155,7 @@ class TestEnvironmentServerRouting:
                     failed_once.add(task)
                     return FakeResponse(
                         200,
-                        identity
-                        | {"result": None, "failure": {"failure_reason": "agent unavailable", "terminal": False}},
+                        identity | {"result": None, "failure": failure_payload},
                     )
                 return FakeResponse(
                     200,
@@ -9186,6 +9193,7 @@ class TestEnvironmentServerRouting:
         assert len(failures) == 1
         assert failures[0][NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
         assert failures[0][NG_TERMINAL_KEY] is False
+        assert failures[0]["_ng_failure"] == failure_payload
         assert failures[0][NG_ENVIRONMENT_SERVER_KEY] == "environment"
         assert failures[0][nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] == "a"
         metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(

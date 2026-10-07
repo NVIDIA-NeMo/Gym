@@ -3,6 +3,8 @@
 
 """Resources-orchestrated native agent continuation without benchmark policy."""
 
+import json
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -14,7 +16,6 @@ from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
-    HandledEpisodeError,
 )
 from nemo_gym.base_resources_server import (
     ResourcesCloseSessionRequest,
@@ -31,15 +32,18 @@ from nemo_gym.config_types import AgentServerRef, AggregateMetrics, AggregateMet
 from nemo_gym.interactive_agent_types import (
     AgentActivationRequest,
     AgentActivationResponse,
+    InteractiveAgentCloseReceipt,
     InteractiveAgentFailure,
     InteractiveAgentRequest,
     InteractiveAgentResponse,
     InteractiveAgentResult,
+    InteractiveDependencyError,
     InteractiveResourcesSeedResponse,
     InteractiveVerificationInput,
     ResourcesStepRequest,
     ResourcesStepResponse,
 )
+from nemo_gym.secret_utils import looks_like_secret_key
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 
 
@@ -74,6 +78,7 @@ class InteractiveAgentEnvironmentServer(BaseEnvironmentServer[InteractiveAgentRe
         resources_cookies: dict[str, str] = {}
         agent_cookies: dict[str, str] = {}
         agent_close: AgentCloseSessionResponse | None = None
+        failure_response: InteractiveAgentResponse | None = None
         activations: list[AgentActivationResponse] = []
         steps: list[ResourcesStepResponse] = []
         stage = "seed"
@@ -105,9 +110,16 @@ class InteractiveAgentEnvironmentServer(BaseEnvironmentServer[InteractiveAgentRe
             receipt = AgentCloseSessionResponse.model_validate(await get_response_json(response))
             if receipt.agent_session_id != agent_session_id:
                 raise ValueError("Agent close returned a different session ID")
+            agent_close = receipt
+            if failure_response is not None:
+                # BaseEnvironmentServer unwinds cleanup after run() returns. Keep the
+                # returned failure alive so it includes evidence collected during close.
+                assert failure_response.failure is not None
+                failure_response.failure.agent_close = InteractiveAgentCloseReceipt.model_validate(
+                    receipt.model_dump(exclude={"resources_cookies"})
+                )
             if not receipt.cleanup_confirmed:
                 raise ValueError("Agent close did not confirm cleanup")
-            agent_close = receipt
             if receipt.resources_cookies is not None:
                 resources_cookies.update(receipt.resources_cookies)
             agent_cookies.update(_cookies(response))
@@ -223,17 +235,24 @@ class InteractiveAgentEnvironmentServer(BaseEnvironmentServer[InteractiveAgentRe
             await raise_for_status(response)
             verification = InteractiveAgentResult.model_validate(await get_response_json(response))
         except Exception as error:
-            raise HandledEpisodeError(
+            failure_response = self.failure_response(
+                request,
                 InteractiveAgentFailure(
                     stage=stage,
-                    failure_reason=str(error)[:2000],
+                    failure_reason=(
+                        f"Dependency returned HTTP {error.status}"
+                        if isinstance(error, ClientResponseError)
+                        else _redact_error_text(str(error))[:2000]
+                    ),
                     terminal=not _is_retryable_dependency_error(error),
                     partial_response=activations[-1].response if activations else None,
                     activations=activations,
                     steps=steps,
-                    agent_close=agent_close,
-                )
-            ) from error
+                    agent_close=(agent_close.model_copy(update={"resources_cookies": None}) if agent_close else None),
+                    dependency_error=_dependency_error(error),
+                ),
+            )
+            return failure_response
         cleanup.register_cleanup("post-verification resources session", resources_cleanup.close)
         return InteractiveAgentResponse(
             episode_id=request.episode_id,
@@ -251,6 +270,48 @@ class InteractiveAgentEnvironmentServer(BaseEnvironmentServer[InteractiveAgentRe
 
 def _cookies(response: Any) -> dict[str, str]:
     return {str(name): str(morsel.value) for name, morsel in response.cookies.items()}
+
+
+def _redact_error_text(text: str) -> str:
+    """Redact credential assignments, authorization values and URL credentials in diagnostics."""
+    text = re.sub(r"(?i)\b(?:Bearer|Basic)\s+[^\s\"'<>]+", "[redacted authorization]", text)
+    text = re.sub(
+        r"(?i)\b([\w-]*(?:api[_-]?key|password|passwd|secret|token|credential|cookie|authorization)[\w-]*"
+        r"[\"']?\s*[:=]\s*)(?:\"[^\"]*(?:\"|$)|'[^']*(?:'|$)|[^\s,;}]+)",
+        r"\1[redacted]",
+        text,
+    )
+    # Error messages may embed request URLs even though transport metadata is never retained.
+    text = re.sub(r"(https?://)[^/\s]+@", r"\1[redacted]@", text)
+    return re.sub(r"(https?://[^\s\"'<>?]+)\?[^\s\"'<>]*", r"\1?[redacted]", text)
+
+
+def _dependency_error(error: Exception) -> InteractiveDependencyError | None:
+    if not isinstance(error, ClientResponseError):
+        return None
+    content = getattr(error, "response_content", None)
+    if not isinstance(content, (bytes, str)):
+        return InteractiveDependencyError(status_code=error.status)
+    # Avoid processing an unbounded error response; clipping precedes parsing and redaction.
+    limit = 8192
+    prefix = content[: limit * 4]
+    text = prefix.decode("utf-8", errors="replace") if isinstance(prefix, bytes) else prefix
+    truncated = len(content) > len(prefix)
+
+    def redact(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: "[redacted]" if looks_like_secret_key(key) else redact(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        return _redact_error_text(value) if isinstance(value, str) else value
+
+    try:
+        text = json.dumps(redact(json.loads(text)), ensure_ascii=False)
+    except (ValueError, RecursionError):
+        text = _redact_error_text(text)
+    return InteractiveDependencyError(
+        status_code=error.status, body=text[:limit], body_truncated=truncated or len(text) > limit
+    )
 
 
 def _is_retryable_dependency_error(error: Exception) -> bool:

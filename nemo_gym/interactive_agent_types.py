@@ -159,12 +159,22 @@ class InteractiveAgentResult(SingleAgentTurnResult):
     ng_agent_close: InteractiveAgentCloseReceipt | None = None
 
 
+class InteractiveDependencyError(BaseModel):
+    """Bounded dependency diagnostics, excluding transport headers and request metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+    status_code: int
+    body: str | None = Field(default=None, max_length=8192)
+    body_truncated: bool = False
+
+
 class InteractiveAgentFailure(SingleAgentTurnFailure):
     """Retain completed work and lifecycle evidence when an episode cannot be measured."""
 
     activations: list[AgentActivationResponse] = Field(default_factory=list)
     steps: list[ResourcesStepResponse] = Field(default_factory=list)
     agent_close: InteractiveAgentCloseReceipt | None = None
+    dependency_error: InteractiveDependencyError | None = None
 
 
 class InteractiveAgentResponse(BaseEpisodeResponse[InteractiveAgentResult]):

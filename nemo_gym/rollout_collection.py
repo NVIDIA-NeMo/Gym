@@ -359,6 +359,9 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
             NG_TERMINAL_KEY: bool(failure.get("terminal", False)),
             "_ng_failure_message": failure.get("failure_reason"),
+            # Keep protocol-specific diagnostics opaque, including evidence produced
+            # during deferred cleanup. Summary fields remain stable for old readers.
+            "_ng_failure": dict(failure),
         }
         if failure.get("stage") is not None:
             record["_ng_failure_stage"] = failure["stage"]
