@@ -70,6 +70,17 @@ def install_artifact_runner(sandbox, tmp_path):
                         len(payloads) * 10,
                     ),
                 )
+            for step_type in ("step-start", "step-finish"):
+                con.execute(
+                    "insert into part values(?,?,?,?,?)",
+                    (
+                        step_type + assistant_id,
+                        assistant_id,
+                        "native-session",
+                        json.dumps({"type": step_type}),
+                        len(payloads) * 10,
+                    ),
+                )
             ids = [row[0] for row in con.execute("select id from message")]
         sandbox.files[f"{directory}/export.json"] = json.dumps(
             {
@@ -167,6 +178,17 @@ def test_interactive_http_resumes_same_store_replays_and_closes_cumulative(setup
             0
         ]
         assert len(root["conversation"]) == 4
+        trajectory = receipt["trajectory"]
+        assert (trajectory["task_id"], trajectory["rollout_id"]) == ("task", request.episode_id.capture_key)
+        turns = trajectory["turns"]
+        assert [(turn["source_message_id"], turn["turn_no"], turn["step_count"]) for turn in turns] == [
+            ("a0", 1, 1),
+            ("a1", 2, 2),
+        ]
+        assert {turn["invocation_id"] for turn in turns} == {"native-session"}
+        assert all(turn["source_model_ref"] == agent.config.model_server.model_dump() for turn in turns)
+        # Session affinity is insufficient to assert per-assistant HTTP call ownership.
+        assert all(turn["model_calls"] == [] and turn["question"] is None for turn in turns)
         assert sandbox.disconnect.await_count == 1
         assert sandbox.stop.await_count == 0
         assert client.post("/v1/agent_sessions/activate", json={**body, "activation_id": 2}).status_code == 409
@@ -240,6 +262,7 @@ def test_native_terminal_reason_distinguishes_failure_from_model_budget(setup, t
         )
         assert close.status_code == 200, close.text
         assert close.json()["cleanup_confirmed"] is True
+        assert [turn["source_message_id"] for turn in close.json()["trajectory"]["turns"]] == ["a0"]
         records = close.json()["agent_observations"]["records"]
         root = next(record for record in records if record["kind"] == "agent_invocation")
         assert root["status"] == ("incomplete" if finish == "length" else "failed")

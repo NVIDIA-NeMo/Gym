@@ -750,6 +750,20 @@ class ServerClient(BaseModel):
             raise ValueError(f"Harnesses using model server {model_server_name!r} declare different assistant headers")
         return next(iter(headers), None)
 
+    def client_session_headers(self, model_server_name: str) -> tuple[bytes, ...]:
+        """Read declared session identities without importing harness runtime dependencies."""
+        headers = {b"x-session-id"}
+        for instance in self.global_config_dict.values():
+            if not isinstance(instance, (dict, DictConfig)):
+                continue
+            for harness, config in instance.get("responses_api_agents", {}).items():
+                model = config.get("model_server") or {}
+                if model.get("name") != model_server_name or model.get("type") != "responses_api_models":
+                    continue
+                package = import_module(f"responses_api_agents.{harness}")
+                headers.update(header.lower() for header in getattr(package, "_session_id_headers", ()))
+        return tuple(sorted(headers))
+
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
         global_config_dict = get_global_config_dict()

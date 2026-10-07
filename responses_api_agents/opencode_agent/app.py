@@ -1108,6 +1108,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=observations,
+            trajectory=state.trajectory,
             cleanup_confirmed=True,
         )
 

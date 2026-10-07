@@ -266,6 +266,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             capture_config,
             model_server_name=self.config.name,
             assistant_message_header=self.server_client.assistant_message_header(self.config.name),
+            client_session_headers=self.server_client.client_session_headers(self.config.name),
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
             non_generating_requests=self.non_generating_model_routes
@@ -1461,11 +1462,13 @@ class _CaptureMiddleware:
         external_staging: bool = False,
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
+        client_session_headers: tuple[bytes, ...] = (_CLIENT_SESSION_HEADER,),
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
     ) -> None:
         self._app = app
         self._store = store
         self._model_server_name = model_server_name
+        self._client_session_headers = frozenset(header.lower() for header in client_session_headers)
         self._assistant_message_header: bytes | None = (
             assistant_message_header.lower() if assistant_message_header else None
         )
@@ -1582,7 +1585,14 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
-        client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
+        request_headers = scope.get("headers") or []
+        # All present aliases must name the same session; absence/conflicts remain unattributed.
+        session_values = {value for name, value in request_headers if name.lower() in self._client_session_headers}
+        client_session_id = (
+            next(iter(session_values)).decode("latin-1")
+            if len(session_values) == 1 and b"" not in session_values
+            else None
+        )
         client_assistant_message_id = (
             _unique_request_header(scope.get("headers") or [], self._assistant_message_header)
             if self._assistant_message_header is not None
@@ -1808,6 +1818,7 @@ def install_model_call_capture(
     *,
     model_server_name: str | None = None,
     assistant_message_header: bytes | None = None,
+    client_session_headers: tuple[bytes, ...] = (_CLIENT_SESSION_HEADER,),
     global_config_dict: Any = None,
     num_workers: int | None = None,
     non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -1893,6 +1904,7 @@ def install_model_call_capture(
         _CaptureMiddleware,
         store=make_capture_store(config),
         assistant_message_header=assistant_message_header,
+        client_session_headers=client_session_headers,
         model_server_name=model_server_name,
         token_store=token_store,
         configured_sink=configured_sink,

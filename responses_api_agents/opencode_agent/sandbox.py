@@ -18,7 +18,7 @@ from nemo_gym.agent_utils.supervisor_client import remove_session_directory
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, TrajectoryRecord
 from nemo_gym.sandbox.utils import read_text, upload_text
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 
@@ -57,6 +57,7 @@ class OpenCodeSandboxSession(AgentSessionState):
     ripgrep_info: dict[str, str] | None = None
     opencode_config: dict[str, JsonValue] = field(default_factory=dict)
     observations: AgentObservationBundle | None = None
+    trajectory: TrajectoryRecord | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     session_directory: str | None = None
     native_session_id: str | None = None
@@ -185,12 +186,17 @@ class OpenCodeSandboxSession(AgentSessionState):
             with tempfile.TemporaryDirectory(prefix="opencode-observations-") as directory:
                 path = Path(directory) / "observations.db"
                 await self.session.sandbox.download(f"{self.session.session_dir}/observations.db", path)
+                trajectory = TrajectoryRecord(
+                    task_id=self.request.task_id.task_id, rollout_id=self.request.episode_id.capture_key
+                )
                 self.observations = parse_opencode_observations(
                     path,
                     self.request.episode_id.capture_key,
+                    trajectory,
                     require_terminal_finish=True,
                     model_ref=self.model_ref,
                 )
+                self.trajectory = trajectory
                 self.activation_observations = parse_opencode_observations(
                     path,
                     self.request.episode_id.capture_key,
@@ -199,6 +205,8 @@ class OpenCodeSandboxSession(AgentSessionState):
                     message_ids=set(export.get("activation_message_ids", [])) if self.session_directory else None,
                 )
         except Exception:
+            if self.trajectory is not None:
+                self.trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
             missing = AgentObservationBundle(
                 source="opencode",
                 gaps=[
