@@ -128,9 +128,10 @@ def build_sidecar(output_path: Path) -> None:
     result = subprocess.run(
         [go, "build", "-buildvcs=false", "-trimpath", "-o", str(output_path), "."],
         cwd=SIDECAR_SOURCE_DIR,
-        env={**os.environ, "CGO_ENABLED": "0"},
+        env={**os.environ, "CGO_ENABLED": "0", "GOTOOLCHAIN": "local"},
         capture_output=True,
         text=True,
+        errors="replace",
         timeout=_BUILD_TIMEOUT_SEC,
     )
     if result.returncode != 0:
@@ -157,7 +158,7 @@ def resolve_log_dir(config: H2PingSidecarConfig, global_config_dict: Any) -> str
     configured = config.log_dir or global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME)
     if configured:
         return str(Path(configured).expanduser().resolve())
-    return os.path.join(tempfile.gettempdir(), "nemo_gym_h2ping")
+    return os.path.join(tempfile.gettempdir(), f"nemo_gym_h2ping-{os.getuid()}")
 
 
 # ---------------------------------------------------------------------------------------------
