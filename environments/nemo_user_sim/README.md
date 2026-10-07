@@ -11,7 +11,7 @@ environment and asks its canonical sampler to materialize one fully resolved
 input for every registered probe:
 
 ```bash
-python environments/nemo_user_sim/prepare.py
+gym eval prepare --environment nemo_user_sim
 ```
 
 The resulting `environments/nemo_user_sim/data/nemo_user_sim.jsonl` contains 14 rows. Each
