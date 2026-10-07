@@ -23,21 +23,6 @@ from typing import Any, Dict, Optional
 from responses_api_agents.stirrup_agent.task_strategy import TaskStrategy
 
 
-def _render_template(template_path: str, **kwargs) -> str:
-    from jinja2 import Environment
-
-    path = Path(template_path)
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"Template not found at '{template_path}'. "
-            f"Directory exists: {path.parent.is_dir()}, "
-            f"Directory contents: {list(path.parent.iterdir()) if path.parent.is_dir() else 'N/A'}"
-        )
-    template_source = path.read_text()
-    template = Environment().from_string(template_source)
-    return template.render(**kwargs)
-
-
 def _parse_json_str(value: Any, default: Any = None):
     """Parse a value that may be a JSON-encoded string."""
     if default is None:
@@ -142,16 +127,6 @@ class GDPValTask(TaskStrategy):
             "rubric_json": _parse_json_str(metadata.get("rubric_json", "{}"), {}),
             "rubric_pretty": metadata.get("rubric_pretty", ""),
         }
-
-    def build_system_prompt(self, task_info: Dict[str, Any], config: Any) -> str:
-        if config.system_prompt_template:
-            return _render_template(config.system_prompt_template, task=task_info)
-        return ""
-
-    def build_user_prompt(self, task_info: Dict[str, Any], config: Any) -> str:
-        if config.user_prompt_template:
-            return _render_template(config.user_prompt_template, task=task_info)
-        return task_info["prompt"]
 
     def get_exec_provider(self, task_info: Dict[str, Any], config: Any) -> Any:
         container_path = getattr(config, "gdpval_container_path", None)

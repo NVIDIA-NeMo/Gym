@@ -12,22 +12,29 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 
-_CONTAINERS = Path(__file__).resolve().parents[3] / "resources_servers" / "gdpval" / "containers"
-_PROMPTS = Path(__file__).resolve().parents[1] / "prompts"
+_REPO = Path(__file__).resolve().parents[3]
+_CONTAINERS = Path(__file__).resolve().parents[1] / "containers"
+_PROMPTS = _REPO / "benchmarks" / "gdpval" / "prompts"
 _PY_MANIFEST = _CONTAINERS / "gdpval_aa_v2_python_requirements.txt"
 
 
-@pytest.fixture(params=["gdpval_user_prompt.txt", "user_prompt.j2"])
-def prompt(request) -> str:
-    """Both GDPval user prompt templates as this tree defines them.
+def _user_prompt(name: str) -> str:
+    return yaml.safe_load((_PROMPTS / name).read_text(encoding="utf-8"))["user"]
 
-    Read from disk rather than via ``_build_gdpval_user_prompt`` so the test
-    checks *this* checkout: an editable install can resolve the package to a
-    different worktree and silently validate the wrong file.
-    """
-    return (_PROMPTS / request.param).read_text(encoding="utf-8")
+
+@pytest.fixture(params=["default-stirrup.yaml", "harness-neutral.yaml"])
+def prompt(request) -> str:
+    """Both GDPval user prompts as this tree defines them."""
+    return _user_prompt(request.param)
+
+
+@pytest.fixture
+def stirrup_prompt() -> str:
+    """The prompt that states Stirrup's exec contract."""
+    return _user_prompt("default-stirrup.yaml")
 
 
 def _pins(path: Path) -> dict[str, str]:
@@ -127,25 +134,19 @@ def test_prompt_only_advertises_python_packages_that_are_pinned(prompt):
     assert "opencv" in prompt.lower() and "opencv-python" in installed
 
 
-def test_prompt_states_the_real_command_timeout(prompt):
+def test_prompt_states_the_real_command_timeout(stirrup_prompt):
     base = pytest.importorskip("stirrup.tools.code_backends.base")
     SHELL_TIMEOUT = base.SHELL_TIMEOUT
 
     minutes = SHELL_TIMEOUT // 60
-    assert f"{minutes} minutes" in prompt, (
+    assert f"{minutes} minutes" in stirrup_prompt, (
         f"prompt must state the real per-command limit ({minutes} min), not the upstream AA value"
     )
 
 
-def test_prompt_tells_the_model_state_does_not_carry_over(prompt):
-    """Wording check, paired with the behavioural test
-    ``test_exec_backend_really_discards_shell_state_between_calls`` in
-    ``test_gdpval_sandbox_alignment.py``.
-
-    On its own this proves nothing -- it is the behavioural test that anchors
-    it. Together they fail in opposite directions if prompt and backend drift.
-    """
-    runtime = " ".join(prompt.split("## Reference Files")[0].lower().split())
+def test_prompt_tells_the_model_state_does_not_carry_over(stirrup_prompt):
+    """Wording check for the exec contract Stirrup's sandbox provides."""
+    runtime = " ".join(stirrup_prompt.split("## Reference Files")[0].lower().split())
     assert (
         "every command runs independently: no working directory, environment variable, "
         "or other shell state carries over from one call to the next." in runtime
@@ -164,7 +165,7 @@ def test_prompt_advertises_the_working_dir_the_provider_actually_uses(prompt):
     an example rooted at /home/user sends the model to a directory that does
     not exist here.
     """
-    task_src = (Path(__file__).resolve().parents[1] / "tasks" / "gdpval.py").read_text(encoding="utf-8")
+    task_src = (_REPO / "responses_api_agents" / "stirrup_agent" / "tasks" / "gdpval.py").read_text(encoding="utf-8")
     m = re.search(r'^\s*working_dir\s*=\s*"([^"]+)"', task_src, re.MULTILINE)
     assert m, "could not find the working_dir the GDPval provider is constructed with"
     working_dir = m.group(1)

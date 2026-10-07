@@ -14,18 +14,20 @@
 """Generic Stirrup-based agent wrapper with pluggable task strategies.
 
 The ``StirrupAgentWrapper`` owns all Stirrup mechanics (agent creation,
-Ray execution, history conversion).  Task-specific behaviour (prompt
-construction, scoring, response building) is delegated to a
+Ray execution, history conversion).  Task-specific behaviour (scoring,
+response building) is delegated to a
 ``TaskStrategy`` instance selected via the ``task`` config field.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -416,41 +418,96 @@ def get_task_strategy(name: str) -> TaskStrategy:
 # ---------------------------------------------------------------------------
 
 
-_GDPVAL_PROMPT_TEMPLATE: Optional[str] = None
+_BASE64_DATA_URL_PREFIX = re.compile(r"^data:[^;,]*;base64,")
+_MEDIA_URL_EXAMPLES = {
+    "input_image": '{"image_url": "data:image/png;base64,..."}',
+    "input_video": '{"video_url": {"url": "data:video/mp4;base64,..."}}',
+}
 
 
-def _build_gdpval_user_prompt(task_prompt: str, input_files_dir: Optional[str] = None) -> str:
-    """Build the full GDPVal user prompt from our template.
+def _abbreviate(value: Any, keep: int = 40) -> str:
+    text = json.dumps(value, default=str)
+    return text if len(text) <= 2 * keep + 5 else f"{text[:keep]} ... {text[-keep:]}"
 
-    Replaces the former ``gdpval_mode`` fork feature by constructing the prompt
-    externally before passing to Stirrup.
 
-    Paths are listed relative to *input_files_dir* itself, because Stirrup copies
-    that directory's *contents* into the sandbox working dir. Listing them
-    relative to its parent advertised a ``gdpval_ref_files_<random>/`` prefix
-    that does not exist in the sandbox.
+def _media_bytes(source: Any, part_type: str) -> bytes:
+    url = source.get("url") if isinstance(source, dict) else source
+    match = _BASE64_DATA_URL_PREFIX.match(url) if isinstance(url, str) else None
+    if match is None:
+        raise ValueError(
+            f"Stirrup expects {part_type} as a base64 data URL, e.g. {_MEDIA_URL_EXAMPLES[part_type]}, "
+            f"but {_abbreviate(source)} was given"
+        )
+    return base64.b64decode(url[match.end() :])
+
+
+def _stirrup_content(content: Any) -> Any:
+    """Convert Responses message content into Stirrup ``Content``."""
+    from stirrup.core.models import ImageContentBlock, VideoContentBlock
+
+    if isinstance(content, str):
+        return content
+    blocks: list[Any] = []
+    for part in content or []:
+        match part.get("type"):
+            case "input_text":
+                blocks.append(part["text"])
+            case "input_image":
+                blocks.append(ImageContentBlock(data=_media_bytes(part.get("image_url"), "input_image")))
+            case "input_video":
+                source = part.get("video_url", part.get("video"))
+                blocks.append(VideoContentBlock(data=_media_bytes(source, "input_video")))
+            case _:
+                raise ValueError(
+                    "Stirrup expects input_text, input_image or input_video content parts, "
+                    f"but {_abbreviate(part)} was given"
+                )
+    return blocks
+
+
+def _text_content(content: Any, role: str) -> str:
+    blocks = _stirrup_content(content)
+    if isinstance(blocks, str):
+        return blocks
+    if not all(isinstance(block, str) for block in blocks):
+        raise ValueError(f"Stirrup expects text-only {role} messages, but {_abbreviate(content)} was given")
+    return "".join(blocks)
+
+
+def _messages_from_input(body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[Optional[str], list[Any]]:
+    """Convert Responses API input into Stirrup's system prompt and initial messages.
+
+    ``instructions`` and the leading system/developer messages form the system prompt, which Stirrup appends
+    to its own base system prompt.
     """
-    global _GDPVAL_PROMPT_TEMPLATE
-    if _GDPVAL_PROMPT_TEMPLATE is None:
-        template_path = Path(__file__).parent / "prompts" / "gdpval_user_prompt.txt"
-        _GDPVAL_PROMPT_TEMPLATE = template_path.read_text(encoding="utf-8")
+    from stirrup.core.models import UserMessage
 
-    if input_files_dir:
-        import os
-
-        ref_dir = input_files_dir.rstrip("/")
-        files_section = ""
-        for root, _dirs, fnames in os.walk(ref_dir):
-            for fname in sorted(fnames):
-                fpath = os.path.join(root, fname)
-                rel = os.path.relpath(fpath, ref_dir)
-                files_section += f"- {rel}\n"
-        if not files_section:
-            files_section = "None"
-    else:
-        files_section = "None"
-
-    return _GDPVAL_PROMPT_TEMPLATE.format(task=task_prompt, reference_files=files_section)
+    items = [{"type": "message", "role": "user", "content": body.input}] if isinstance(body.input, str) else body.input
+    system_parts = [body.instructions] if body.instructions else []
+    messages: list[Any] = []
+    for index, item in enumerate(items):
+        item = item if isinstance(item, dict) else item.model_dump()
+        item_type, role = item.get("type", "message"), item.get("role")
+        if item_type != "message":
+            raise ValueError(f"Stirrup expects message items, but input[{index}] is {_abbreviate(item)}")
+        if role in ("system", "developer"):
+            if messages:
+                raise ValueError(
+                    f"Stirrup expects {role} messages before the first user message, "
+                    f"but input[{index}] is {_abbreviate(item)}"
+                )
+            system_parts.append(_text_content(item.get("content"), role))
+        elif role == "user":
+            messages.append(UserMessage(content=_stirrup_content(item.get("content"))))
+        elif role == "assistant":
+            raise NotImplementedError("Multi-turn input with assistant messages is not supported by Stirrup yet")
+        else:
+            raise ValueError(
+                f"Stirrup expects system, developer or user messages, but input[{index}] is {_abbreviate(item)}"
+            )
+    if not messages:
+        raise ValueError("Stirrup requires a user message in responses_create_params.input")
+    return "\n\n".join(system_parts) or None, messages
 
 
 # Pin the Ray worker to this server's venv (same pattern as
@@ -469,8 +526,8 @@ def run_stirrup_agent_remote(params: dict[str, Any]) -> Any:
 
 
 async def _run_stirrup_agent(
-    task_prompt: str,
-    system_prompt: str,
+    task_messages: list[Any],
+    system_prompt: Optional[str],
     model_base_url: str,
     model_name: str,
     api_key: str = "dummy",
@@ -665,10 +722,7 @@ async def _run_stirrup_agent(
         _aexit_failed = False
         try:
             async with agent.session(output_dir=output_dir, input_files=input_files) as session:
-                if is_gdpval:
-                    # Build GDPVal prompt with input-dir-relative file paths (matches fork behavior)
-                    task_prompt = _build_gdpval_user_prompt(task_prompt, input_files_dir)
-                finish_params, history, metadata = await session.run(task_prompt)
+                finish_params, history, metadata = await session.run(task_messages)
         except TypeError as _session_err:
             # Stirrup's session __aexit__ may crash in _log_finish when the exit
             # reason is not a string (e.g. a tuple).  If session.run() completed
@@ -909,11 +963,6 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
     agent_max_turns: int = Field(default=250, description="Maximum turns for the Stirrup agent")
     concurrency: int = Field(default=32, description="Maximum concurrent runs")
     temperature: float = Field(default=0.6, description="Sampling temperature for the agent model")
-
-    system_prompt_template: Optional[str] = Field(
-        default=None, description="Path to the system prompt Jinja2 template"
-    )
-    user_prompt_template: Optional[str] = Field(default=None, description="Path to the user prompt Jinja2 template")
 
     container_formatter: Optional[Any] = Field(
         default=None,
@@ -1200,15 +1249,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         # run() derives rollout_id from the row's task/rollout indices and passes it here.
         model_base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
 
-        if self.config.task == "gdpval":
-            system_prompt = None
-            # Raw task prompt — _run_stirrup_agent wraps it in GDPVal template when is_gdpval=True
-            user_prompt = (
-                f"Sector: {task_info['sector']}\nOccupation: {task_info['occupation']}\n\n{task_info['prompt']}"
-            )
-        else:
-            system_prompt = self.task_strategy.build_system_prompt(task_info, self.config)
-            user_prompt = self.task_strategy.build_user_prompt(task_info, self.config)
+        system_prompt, task_messages = _messages_from_input(body)
 
         model_name = getattr(body, "model", None) or "default"
         temperature = getattr(body, "temperature", None) or self.config.temperature
@@ -1228,7 +1269,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         # Reference files are downloaded on the Ray worker (see _run_stirrup_agent)
         # because head-node /tmp is not visible to SPREAD-scheduled workers on other nodes.
         params = {
-            "task_prompt": user_prompt,
+            "task_messages": task_messages,
             "system_prompt": system_prompt,
             "model_base_url": model_base_url,
             "model_name": model_name,

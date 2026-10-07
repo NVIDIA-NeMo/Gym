@@ -19,10 +19,6 @@ stirrup_agent:
       concurrency: 32
       temperature: 1.0
 
-      # Prompt templates (set via --export in sbatch or CLI override)
-      system_prompt_template: ???
-      user_prompt_template: ???
-
       # Apptainer container for isolated code execution (optional).
       # Set to path of GDPVal .sif to enable containerized execution.
       # When null, uses local sandbox (default for dev/testing).

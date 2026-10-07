@@ -71,6 +71,11 @@ class TaskData(BaseModel):
         ),
         json_schema_extra={"consumed_by": ["prompt"]},
     )
+    reference_files_str: Optional[str] = Field(
+        default=None,
+        description="Reference file paths as '- <path>' lines, or 'None', rendered into the task prompt.",
+        json_schema_extra={"consumed_by": ["prompt"]},
+    )
     reference_files: Optional[List[str]] = Field(
         default=None,
         description=(

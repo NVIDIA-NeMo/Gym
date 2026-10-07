@@ -15,10 +15,9 @@
 """Prepare the GDPVal benchmark JSONL.
 
 Downloads the ``openai/gdpval`` HuggingFace dataset and converts it into the
-NeMo-Gym benchmark JSONL format: each row has ``responses_create_params`` (an
-empty input — the Stirrup agent builds the actual prompt from the top-level
-``prompt`` / ``sector`` / ``occupation`` fields) plus task metadata at the
-top level so the GDPVal resources server can pick them up via /verify.
+NeMo-Gym benchmark JSONL format: task fields at the top level, which the
+benchmark's ``prompt_config`` renders into the user prompt and the GDPVal
+resources server reads at /verify.
 """
 
 from __future__ import annotations
@@ -36,6 +35,11 @@ HF_DATASET = "openai/gdpval"
 HF_SPLIT = "train"
 
 
+def reference_files_str(reference_files: list[str]) -> str:
+    """List reference file paths, relative to the agent's working directory, for the prompt."""
+    return "".join(f"- {path}\n" for path in sorted(p.lstrip("/") for p in reference_files)) or "None"
+
+
 def prepare() -> Path:
     from datasets import load_dataset
 
@@ -48,14 +52,12 @@ def prepare() -> Path:
     with OUTPUT_FPATH.open("w") as f:
         for row in ds:
             record = {
-                # Empty input: the Stirrup agent constructs the user prompt
-                # from the top-level ``prompt`` field at runtime.
-                "responses_create_params": {"input": []},
                 "task_id": row["task_id"],
                 "sector": row.get("sector", ""),
                 "occupation": row.get("occupation", ""),
                 "prompt": row["prompt"],
                 "reference_files": row.get("reference_files", []),
+                "reference_files_str": reference_files_str(row.get("reference_files", [])),
                 "reference_file_urls": row.get("reference_file_urls", []),
                 "rubric_json": row.get("rubric_json", {}),
                 "rubric_pretty": row.get("rubric_pretty", ""),
