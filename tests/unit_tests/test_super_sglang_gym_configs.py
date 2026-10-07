@@ -52,7 +52,7 @@ def test_gym_benchmark_sections_match() -> None:
 
 
 @pytest.mark.parametrize("missing_role", [None, "prefill", "decode"])
-@pytest.mark.parametrize("recipe", ["2P2D.yaml", "2P2D_hicachemooncake.yaml", "2P2D_hicache.yaml"])
+@pytest.mark.parametrize("recipe", ["2P2D.yaml", "2P2D_mooncake.yaml"])
 def test_srt_worker_metrics_config(tmp_path: Path, missing_role: str | None, recipe: str) -> None:
     config = yaml.safe_load((CONFIG_DIR / recipe).read_text())
     command = config["benchmark"]["command"]
@@ -102,21 +102,23 @@ def test_srt_worker_metrics_config(tmp_path: Path, missing_role: str | None, rec
 
 def test_hicache_mooncake_prefill_config(tmp_path: Path) -> None:
     base = yaml.safe_load((CONFIG_DIR / "2P2D.yaml").read_text())
-    config = yaml.safe_load((CONFIG_DIR / "2P2D_hicachemooncake.yaml").read_text())
+    config = yaml.safe_load((CONFIG_DIR / "2P2D_mooncake.yaml").read_text())
     assert config["roles"]["decode"] == base["roles"]["decode"]
     assert config["frontend"] == base["frontend"]
     prefill = config["roles"]["prefill"]
     assert prefill["args"]["enable-hierarchical-cache"]
+    assert prefill["args"]["hicache-size"] == 16
     assert prefill["args"]["hicache-storage-backend"] == "mooncake"
     assert prefill["args"]["disaggregation-transfer-backend"] == "nixl"
     master, store = config["services"]
     assert master["placement"]["node"] == "head"
-    assert store["placement"]["node"] == "prefill"
+    assert store["placement"]["node"] == "workers"
     assert master["readiness"]["http"] == {"port": 9003, "path": "/health"}
     assert "--rpc_port=50051" in master["args"]
     assert "--metrics_port=9003" in master["args"]
     assert config["sbatch_directives"]["mem"] == "0"
-    assert store["env"]["MOONCAKE_GLOBAL_SEGMENT_SIZE"] == "150gb"
+    assert int(store["env"]["MOONCAKE_GLOBAL_SEGMENT_SIZE"]) == prefill["gpus"] * 128 * 10**9
+    assert all(role["gpus"] == prefill["gpus"] for role in config["roles"].values())
     for env in (store["env"], prefill["env"]):
         assert env["MC_TE_FILTERS"] == store["env"]["MOONCAKE_DEVICE"]
         assert env["WITH_NVIDIA_PEERMEM"] == "0"

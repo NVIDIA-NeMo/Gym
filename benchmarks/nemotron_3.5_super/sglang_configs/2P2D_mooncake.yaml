@@ -1,13 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Nemotron 3.5 Super GA MTP-boosted BF16 — 2P2D with local CPU HiCache.
+# Nemotron 3.5 Super GA MTP-boosted BF16 — 2P2D with shared Mooncake storage.
 # GPU/CPU HiCache is prefill-only; NIXL still transfers live KV to decode.
-# Each prefill engine has its own local cache; no shared L3 storage is configured.
+# Each prefill TP rank has 16 GB local HiCache; every worker node contributes 512 GB
+# of CPU RAM to shared Mooncake storage (128 GB per GPU at TP4).
 # Startup patches the SGLang 0.5.20 HiCache layer span for Nemotron's sparse IDs.
 # This addresses the scheduler IndexError; GPU cache-restoration validation is pending.
-# Host-memory starting budget per prefill node: TP4 * 64 GB HiCache,
-# plus runtime overhead. Size against available host RAM.
+# Host-memory budget per prefill node: 64 GB HiCache + 512 GB Mooncake,
+# and per decode node: 512 GB Mooncake, plus runtime overhead on every node.
+# Decode HiCache requires radix caching, which is incompatible with EAGLE/MTP.
+# GB here means decimal GB, not GiB.
+# Zero HiCache is unsupported for this Mamba storage path; hicache-size: 0
+# selects ratio-based sizing rather than disabling the local host pool.
 # Analytical candidate; full-scale startup, accuracy and throughput are unmeasured.
 # P/D counts mean whole four-GPU nodes. Larger D roles are one shared engine.
 # Source checkpoint: nim-mtp-boosted-09212026 (83 registry-hash-verified files).
@@ -29,7 +34,7 @@
 # Serving capacity does not enlarge the external CPU/sandbox resource budget.
 
 schema: 2
-name: nemotron35-ga-gb200-2p2d-hicache
+name: nemotron35-ga-gb200-2p2d-mooncake
 model:
   path: "$MODEL"
   container: sglang-nemotron35-v0520-validated
@@ -38,7 +43,7 @@ resources:
   gpu_type: gb200
   gpus_per_node: 4
 sbatch_directives:
-  # Allocate node host memory for the local HiCache pools and runtime.
+  # Allocate node host memory for HiCache, Mooncake storage, and runtime.
   mem: '0'
 engine: sglang
 # SRT resolves setup_script relative to /configs; reuse the /opt/Gym mount.
@@ -84,7 +89,7 @@ benchmark:
   env:
     GYM_CONFIG: benchmarks/swebench/verified/opencode.yaml
     POLICY_MODEL_NAME: &served_model_name nemotron-3.5-super-ga-mtp-boosted
-    EXPERIMENT_NAME: sglang-2p2d-hicache-gym
+    EXPERIMENT_NAME: sglang-2p2d-mooncake-gym
     EXPORT_TO_CSV: '0'
     EXPORT_CSV_TO_MODEL_DIR: '0'
   command: |
@@ -152,12 +157,89 @@ benchmark:
       ++port_range_high=64000 \
       ++model_endpoint_readiness_timeout_seconds=1200
 
+# Generic services keep Mooncake L3 independent of the NIXL P/D transport.
+# SRT's typed mooncake-master currently requires Mooncake P/D transport.
+services:
+  - name: hicache-master
+    type: generic
+    placement:
+      node: head
+    start: before_workers
+    critical: true
+    command: [mooncake_master]
+    args:
+      - --rpc_port=50051
+      - --rpc_thread_num=4
+      - --metrics_port=9003
+      - --eviction_high_watermark_ratio=0.95
+      - --eviction_ratio=0.1
+      - --minloglevel=1
+      - --enable_metric_reporting=false
+      - --default_kv_lease_ttl=180000
+      - --logtostderr
+    readiness:
+      http:
+        port: 9003
+        path: /health
+      timeout_seconds: 120
+  - name: hicache-store
+    type: generic
+    placement:
+      node: workers
+    start: before_workers
+    critical: true
+    command: [python, -m, mooncake.mooncake_store_service]
+    args: [--port, '8800']
+    env:
+      MOONCAKE_MASTER: "{head_ip}:50051"
+      MOONCAKE_TE_META_DATA_SERVER: P2PHANDSHAKE
+      MOONCAKE_LOCAL_HOSTNAME: "{node_ip}"
+      MOONCAKE_PROTOCOL: rdma
+      MOONCAKE_DEVICE: mlx5_0,mlx5_1,mlx5_3,mlx5_4
+      # One store per four-GPU worker node: 4 * 128 GB = 512 GB (decimal bytes).
+      # Two prefill and two decode nodes contribute 2,048 GB shared capacity.
+      MOONCAKE_GLOBAL_SEGMENT_SIZE: '512000000000'
+      # Storage-only process; SGLang uses zero-copy rather than vLLM's 4 GB buffer.
+      MOONCAKE_LOCAL_BUFFER_SIZE: '0'
+      MC_TE_FILTERS: mlx5_0,mlx5_1,mlx5_3,mlx5_4
+      WITH_NVIDIA_PEERMEM: '0'
+      HICACHE_CONFIG_PATH: "/logs/hicache-mooncake-{node}.json"
+    preamble: |
+      set -euo pipefail
+      (
+      python - <<'PY_MOONCAKE'
+      import json
+      import os
+      from pathlib import Path
+
+      # Each worker needs its own routable address; the shared master is on head.
+      # The standalone store owns the L3 segment, so workers contribute zero.
+      config = {
+          "local_hostname": os.environ["MOONCAKE_LOCAL_HOSTNAME"],
+          "master_server_address": os.environ["MOONCAKE_MASTER"],
+          "metadata_server": os.environ["MOONCAKE_TE_META_DATA_SERVER"],
+          "protocol": os.environ["MOONCAKE_PROTOCOL"],
+          "device_name": os.environ["MOONCAKE_DEVICE"],
+          "global_segment_size": 0,
+          "enable_ssd_offload": False,
+      }
+      Path(os.environ["HICACHE_CONFIG_PATH"]).write_text(json.dumps(config))
+      PY_MOONCAKE
+      )
+    readiness:
+      port: 8800
+      timeout_seconds: 120
+
 roles:
   prefill:
     nodes: 2
     workers: 2
     gpus: 4
     env:
+      # Match the standalone store config generated on this prefill node.
+      SGLANG_HICACHE_MOONCAKE_CONFIG_PATH: "/logs/hicache-mooncake-{node}.json"
+      MC_TE_FILTERS: mlx5_0,mlx5_1,mlx5_3,mlx5_4
+      WITH_NVIDIA_PEERMEM: '0'
       CUDA_VISIBLE_DEVICES: 0,1,2,3
       UCX_NET_DEVICES: mlx5_0,mlx5_1,mlx5_3,mlx5_4
       SGLANG_DISAGGREGATION_NIXL_BACKEND: UCX
@@ -192,10 +274,13 @@ roles:
       dtype: bfloat16
       enable-hierarchical-cache: true
       # GB per TP rank; the hybrid host budget covers attention KV and Mamba states.
-      hicache-size: 128
+      # Small L2 capacity can limit long-prefix fetches even when L3 has space.
+      hicache-size: 16
       hicache-mem-layout: page_first
       hicache-io-backend: kernel
       hicache-write-policy: write_through
+      hicache-storage-backend: mooncake
+      hicache-storage-prefetch-policy: best_effort
       enable-cache-report: true
       enable-metrics: true
       ep-size: 4
