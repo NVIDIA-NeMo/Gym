@@ -5,6 +5,9 @@ import asyncio
 import inspect
 import io
 import json
+import posixpath
+import re
+import shlex
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,16 +18,19 @@ from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
 from nemo_gym.tasks.harbor.dockerfile import OverlayRun
 from nemo_gym.tasks.harbor.models import HarborEnvironment
+from nemo_gym.tasks.harbor.task import IMAGE_CONFIGS_FILE
 from resources_servers.harbor.app import (
+    OVERLAY_FAILED_KIND,
     HarborResourcesServer,
     HarborResourcesServerConfig,
     _verifier_image,
     overlay_shell_command,
+    overlay_workdir_command,
     parse_reward_file,
     select_reward,
 )
@@ -46,7 +52,21 @@ storage_mb = 10240
 """
 
 
-def write_task(root: Path, *, dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app") -> Path:
+# The PATH the test base images record, as Docker's default for an image whose Dockerfile set none.
+IMAGE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def write_image_config(parent: Path, image: str, **config) -> None:
+    """Record ``image``'s OCI configuration next to the task folders, as preparing the dataset does."""
+    path = parent / IMAGE_CONFIGS_FILE
+    recorded = json.loads(path.read_text()) if path.is_file() else {}
+    recorded[image] = {"os": "linux", "architecture": "amd64", "image": image, "config": config}
+    path.write_text(json.dumps(recorded))
+
+
+def write_task(
+    root: Path, *, dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app", image_config: dict | None = None
+) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "task.toml").write_text(TASK_TOML)
     (root / "instruction.md").write_text("Create hello.txt\n")
@@ -54,6 +74,8 @@ def write_task(root: Path, *, dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app
     (root / "environment" / "Dockerfile").write_text(dockerfile)
     (root / "tests").mkdir(exist_ok=True)
     (root / "tests" / "test.sh").write_text("#!/bin/bash\necho 1 > /logs/verifier/reward.txt\n")
+    # The loader resolves the Dockerfile against its base image's configuration, recorded at prepare.
+    write_image_config(root.parent, dockerfile.split()[1], **(image_config or {"Env": [f"PATH={IMAGE_PATH}"]}))
     return root
 
 
@@ -68,21 +90,95 @@ def archive_of(files: dict[str, str]) -> bytes:
     return buffer.getvalue()
 
 
+OK = SandboxExecResult(stdout="", stderr="", return_code=0)
+
+
+def _fails(message: str) -> SandboxExecResult:
+    return SandboxExecResult(stdout="", stderr=message, return_code=1)
+
+
 @dataclass
 class FakeSandbox:
-    """Records sandbox calls; ``verifier_files`` is what ``/logs/verifier`` holds after test.sh."""
+    """Records sandbox calls and behaves like the container they would reach.
+
+    ``verifier_files`` is what ``/logs/verifier`` holds after test.sh. The container side: a
+    command runs as the exec's ``user``, else as the image's default user; ``spec_env`` is the
+    environment the sandbox was created with, and the ``unset``/``export``/``cd`` prefix the server
+    puts before a Dockerfile ``RUN`` line is applied to it, so each exec's record carries under
+    ``seen`` the command, environment, user and directory the container would run. Directories
+    exist only once something made them (``dirs`` maps each to its owner; a non-root user can
+    only create under its own directories, and ``cd`` into a missing one fails), and ``passwd``
+    is the image's uid-to-name table.
+    """
 
     verifier_files: dict[str, str] = field(default_factory=lambda: {"reward.txt": "1\n"})
-    test_result: SandboxExecResult = SandboxExecResult(stdout="", stderr="", return_code=0)
+    test_result: SandboxExecResult = OK
     execs: list[dict] = field(default_factory=list)
     uploads: list[tuple[Path, str]] = field(default_factory=list)
     stopped: bool = False
+    spec_env: dict[str, str] = field(default_factory=dict)
+    image_user: str = "root"
+    dirs: dict[str, str] = field(default_factory=lambda: {"/": "root", "/tmp": "root", "/home": "root"})
+    passwd: dict[str, str] = field(default_factory=lambda: {"0": "root", "1000": "agent"})
+
+    def run(self, fragment: str) -> dict:
+        """The record of the one exec whose command, prefix aside, holds ``fragment``."""
+        (record,) = [c for c in self.execs if c.get("seen") and fragment in c["seen"]["command"]]
+        return record
+
+    def _mkdir(self, path: str, user: str) -> SandboxExecResult:
+        if path in self.dirs:
+            return OK
+        parent = posixpath.dirname(path)
+        while parent not in self.dirs:
+            parent = posixpath.dirname(parent)
+        if user != "root" and self.dirs[parent] != user:
+            return _fails(f"mkdir: cannot create directory '{path}': Permission denied")
+        while path not in self.dirs:
+            self.dirs[path] = user
+            path = posixpath.dirname(path)
+        return OK
 
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
-        self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user})
+        record = {"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user, "seen": None}
+        self.execs.append(record)
         if "test.sh" in command:
             return self.test_result
-        return SandboxExecResult(stdout="", stderr="", return_code=0)
+        who = str(user) if user is not None else self.image_user
+        if match := re.fullmatch(r"getent passwd (\S+) \| cut -d: -f1", command):
+            name = self.passwd.get(shlex.split(match.group(1))[0], "")
+            return SandboxExecResult(stdout=f"{name}\n" if name else "", stderr="", return_code=0)
+        if match := re.fullmatch(r"test -d (\S+) \|\| \(mkdir -p \1 && chown (\S+) \1\)", command):
+            path, owner = shlex.split(match.group(1))[0], shlex.split(match.group(2))[0]
+            if path in self.dirs:
+                return OK
+            result = self._mkdir(path, who)
+            if result.return_code == 0:
+                self.dirs[path] = owner
+            return result
+        if match := re.fullmatch(r"mkdir -p (\S+)(?: && chown (\S+) \1)?", command):
+            path = shlex.split(match.group(1))[0]
+            result = self._mkdir(path, who)
+            if result.return_code == 0 and match.group(2):
+                self.dirs[path] = shlex.split(match.group(2))[0]
+            return result
+        # Anything else runs as a shell line: the server's `unset`/`export`/`cd` prefix shapes what the
+        # command itself sees.
+        statements = command.split("; ")
+        seen_env, seen_cwd = dict(self.spec_env), cwd
+        while statements and statements[0].startswith(("unset ", "export ")):
+            words = shlex.split(statements.pop(0))
+            if words[0] == "unset":
+                seen_env.pop(words[1], None)
+            else:
+                key, _, value = words[1].partition("=")
+                seen_env[key] = value
+        if statements and statements[0].startswith("cd ") and statements[0].endswith(" || exit 1"):
+            seen_cwd = shlex.split(statements.pop(0))[1]
+            if seen_cwd not in self.dirs:
+                return _fails(f"cd: {seen_cwd}: No such file or directory")
+        record["seen"] = {"command": "; ".join(statements), "env": seen_env, "user": who, "cwd": seen_cwd}
+        return OK
 
     async def upload(self, local_path, remote_path):
         self.uploads.append((Path(local_path), remote_path))
@@ -103,9 +199,10 @@ def make_server(
     sandbox: FakeSandbox | None = None,
     *,
     dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app",
+    image_config: dict | None = None,
 ):
     folder = tmp_path / "datasets" / "ds"
-    task = load_task(write_task(folder / "hello", dockerfile=dockerfile))
+    task = load_task(write_task(folder / "hello", dockerfile=dockerfile, image_config=image_config))
     config = HarborResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -422,12 +519,17 @@ class OverlaySandbox(FakeSandbox):
     failure: SandboxExecResult = SandboxExecResult(
         stdout="line 1\nline 2\n", stderr="E: no package\n", return_code=100
     )
+    spec: SandboxSpec | None = None
 
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
         result = await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
-        if self.failing and self.failing in command:
+        seen = self.execs[-1]["seen"]
+        if self.failing and seen and self.failing in seen["command"]:
             return self.failure
         return result
+
+
+SEPARATE_IN_TASK_IMAGE_TOML = TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
 
 
 class TestOverlay:
@@ -437,17 +539,48 @@ class TestOverlay:
         (task.path / "task.toml").write_text(toml)
         task = load_task(task.path)
         server.config.tasksets["ds"].tasks["hello"] = task.digest
+        monkeypatch.setattr(
+            "resources_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+
+        async def create(task, workdir):
+            # The sandbox starts with the spec's environment, as the provider's container would.
+            sandbox.spec = server._sandbox_spec(task, workdir)
+            sandbox.spec_env = dict(sandbox.spec.env)
+            created.append((task.task_id, workdir))
+            return sandbox
+
+        monkeypatch.setattr(server, "_create_sandbox", create)
         return server, task, sandbox, created
 
-    def test_shell_command_applies_env_and_workdir_before_the_run(self):
-        step = OverlayRun(command="make all", workdir="/app src", env={"PATH": "/opt/bin:$PATH", "Q": 'say "hi" `x`'})
-        assert overlay_shell_command(step) == (
-            'export PATH="/opt/bin:$PATH"; export Q="say \\"hi\\" \\`x\\`"; '
-            "mkdir -p '/app src' && cd '/app src' || exit 1; make all"
+    def test_shell_command_exports_literal_values_and_only_enters_the_workdir(self):
+        step = OverlayRun(
+            command="make all", workdir="/app src", env={"PATH": "/opt/bin:/usr/bin", "Q": 'say "hi" `x` $NOT'}
         )
-        assert overlay_shell_command(OverlayRun(command="true")) == "true"
+        # Values are already resolved: they are quoted so nothing expands again, `$NOT` included.
+        assert overlay_shell_command(step) == (
+            "export PATH=/opt/bin:/usr/bin; export Q='say \"hi\" `x` $NOT'; cd '/app src' || exit 1; make all"
+        )
+        # Keys the sandbox was created with that this step does not have yet are unset first.
+        assert overlay_shell_command(step, {"PATH": "/x", "LATE": "1", "ZED": "2"}) == (
+            "unset LATE; unset ZED; export PATH=/opt/bin:/usr/bin; export Q='say \"hi\" `x` $NOT'; "
+            "cd '/app src' || exit 1; make all"
+        )
+        assert overlay_shell_command(OverlayRun(command="true")) == "cd / || exit 1; true"
 
-    def test_run_lines_execute_in_order_as_root_before_setup_and_healthcheck(self, tmp_path, monkeypatch):
+    def test_workdir_command_creates_as_root_and_hands_the_directory_to_the_user(self):
+        assert overlay_workdir_command("/app", None) == "mkdir -p /app"
+        assert overlay_workdir_command("/app", "root") == overlay_workdir_command("/app", "0:0") == "mkdir -p /app"
+        assert overlay_workdir_command("/home/agent/w", "agent") == (
+            "test -d /home/agent/w || (mkdir -p /home/agent/w && chown agent /home/agent/w)"
+        )
+        assert overlay_workdir_command("/a b", "agent:staff") == (
+            "test -d '/a b' || (mkdir -p '/a b' && chown agent:staff '/a b')"
+        )
+
+    def test_run_lines_see_the_environment_directory_and_user_of_their_point_in_the_dockerfile(
+        self, tmp_path, monkeypatch
+    ):
         server, task, sandbox, created = self.overlay_server(tmp_path, monkeypatch, toml=HEALTHCHECK_TOML)
         assert len(task.overlay) == 3 and task.user == "agent"
 
@@ -455,26 +588,45 @@ class TestOverlay:
 
         assert response.status_code == 200, response.text
         assert created == [("hello", "/app")]
-        commands = [c["command"] for c in sandbox.execs]
-        first, second, third = sandbox.execs[:3]
-        # Dockerfile order, each with the state in effect at that point.
-        assert first["command"] == "apt-get update && apt-get install -y curl"
-        assert second["command"] == (
-            'export PATH="/opt/tools/bin:$PATH"; export MSG="hi there"; '
-            "mkdir -p /app && cd /app || exit 1; mkdir -p /opt/tools/bin && echo ok > ready.txt"
-        )
-        assert third["command"] == (
-            'export PATH="/opt/tools/bin:$PATH"; export MSG="hi there"; '
-            'mkdir -p /app && cd /app || exit 1; echo "as agent" > /tmp/who'
-        )
-        # Lines before `USER agent` run as root (explicitly, since the image user is non-root); after it, as agent.
+        # The sandbox is created with the Dockerfile's final environment, resolved: no live `$` reaches the provider.
+        assert sandbox.spec.env == {"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "MSG": "hi there"}
+        assert not any("$" in value for value in sandbox.spec.env.values())
+        first = sandbox.run("apt-get update")
+        second = sandbox.run("echo ok > ready.txt")
+        third = sandbox.run("as agent")
+        # The line before `ENV PATH=...` sees the image's PATH and no MSG; the lines after see the extended PATH.
+        extended = {"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "MSG": "hi there"}
+        assert first["seen"] == {
+            "command": "apt-get update && apt-get install -y curl",
+            "env": {"PATH": IMAGE_PATH},
+            "user": "root",
+            "cwd": "/",
+        }
+        assert second["seen"] == {
+            "command": "mkdir -p /opt/tools/bin && echo ok > ready.txt",
+            "env": extended,
+            "user": "root",
+            "cwd": "/app",
+        }
+        assert third["seen"] == {
+            "command": 'echo "as agent" > /tmp/who',
+            "env": extended,
+            "user": "agent",
+            "cwd": "/app",
+        }
+        # Lines before `USER agent` run as root (explicitly, since the task's user is non-root); after it, as agent.
         assert [c["user"] for c in (first, second, third)] == ["root", "root", "agent"]
         assert all(c["cwd"] == "/" and c["env"] is None for c in (first, second, third))
+        commands = [c["command"] for c in sandbox.execs]
+        # /app is made as root when the first RUN after `WORKDIR /app` comes up, once, then only entered.
+        assert commands[:4] == [first["command"], "mkdir -p /app", second["command"], third["command"]]
+        assert first["command"] == f"unset MSG; export PATH={IMAGE_PATH}; cd / || exit 1; {first['seen']['command']}"
+        assert sandbox.execs[1]["user"] == "root" and commands.count("mkdir -p /app") == 1
         # The overlay shares the task's build budget: the first line sees all of it, later ones what is left.
         assert first["timeout_s"] == pytest.approx(task.config.environment.build_timeout_sec, abs=1)
         assert second["timeout_s"] <= first["timeout_s"] and third["timeout_s"] <= second["timeout_s"]
-        # Only then does Gym prepare the workdir, poll the healthcheck and hand the sandbox over.
-        assert commands[3].startswith("mkdir -p /app && chown agent /app")
+        # Only then does Gym prepare the agent's workdir, poll the healthcheck and hand the sandbox over.
+        assert commands[4] == "mkdir -p /app && chown agent /app" and sandbox.dirs["/app"] == "agent"
         assert commands.index("test -f /app/ready.txt") > commands.index(third["command"])
 
     def test_root_image_without_user_keeps_the_plain_exec_path(self, tmp_path, monkeypatch):
@@ -482,16 +634,72 @@ class TestOverlay:
             tmp_path, monkeypatch, dockerfile="FROM img\nWORKDIR /app\nRUN true\nRUN false\n"
         )
         assert TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task)).status_code == 200
-        runs = sandbox.execs[:2]
+        prepare, *runs = sandbox.execs[:3]
+        assert prepare["command"] == "mkdir -p /app"
+        # The image's own PATH is exported again, harmlessly: a step exports its whole resolved environment.
         assert [c["command"] for c in runs] == [
-            "mkdir -p /app && cd /app || exit 1; true",
-            "mkdir -p /app && cd /app || exit 1; false",
+            f"export PATH={IMAGE_PATH}; cd /app || exit 1; true",
+            f"export PATH={IMAGE_PATH}; cd /app || exit 1; false",
         ]
+        assert [c["seen"]["cwd"] for c in runs] == ["/app", "/app"]
         # No USER anywhere: root is the image's default user, so no override is needed (every provider supports this).
-        assert [c["user"] for c in runs] == [None, None]
+        assert [c["user"] for c in (prepare, *runs)] == [None, None, None]
 
-    def test_failing_run_is_a_terminal_task_error_and_cleans_up(self, tmp_path, monkeypatch):
-        sandbox = OverlaySandbox(failing="apt-get install")
+    def test_workdir_after_user_is_made_as_root_and_owned_by_the_user(self, tmp_path, monkeypatch):
+        # The fake enforces what a container would: a non-root user cannot create under a root-owned directory.
+        assert OverlaySandbox()._mkdir("/home/agent/work", "agent").return_code == 1
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile="FROM img\nUSER agent\nWORKDIR /home/agent/work\nRUN touch made\n"
+        )
+        assert task.user == "agent" and task.workdir == "/home/agent/work"
+
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+
+        assert response.status_code == 200, response.text
+        prepare, run = sandbox.execs[:2]
+        assert prepare["command"] == (
+            "test -d /home/agent/work || (mkdir -p /home/agent/work && chown agent /home/agent/work)"
+        )
+        assert prepare["user"] == "root"
+        assert sandbox.dirs["/home/agent/work"] == "agent" and sandbox.dirs["/home/agent"] == "root"
+        assert run["seen"] == {
+            "command": "touch made",
+            "env": {"PATH": IMAGE_PATH},
+            "user": "agent",
+            "cwd": "/home/agent/work",
+        }
+
+    def test_numeric_user_is_resolved_to_its_name_in_the_image(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile="FROM img\nUSER 1000\nWORKDIR /home/agent/work\nRUN id\nRUN id -g\n"
+        )
+        assert task.user == "1000"
+
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+
+        assert response.status_code == 200, response.text
+        lookup, prepare, first, second = sandbox.execs[:4]
+        assert lookup["command"] == "getent passwd 1000 | cut -d: -f1" and lookup["user"] == "root"
+        # The name serves the directory's owner and both lines; the lookup happens once.
+        assert prepare["command"].endswith("chown agent /home/agent/work)") and prepare["user"] == "root"
+        assert [c["seen"]["user"] for c in (first, second)] == ["agent", "agent"]
+        assert sum("getent" in c["command"] for c in sandbox.execs) == 1
+
+    def test_unknown_numeric_user_is_a_clear_task_error(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile="FROM img\nUSER 4242\nRUN id\n"
+        )
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+        assert response.status_code == 422, response.text
+        assert "RUN line 1/1 'id': USER 4242 names no user in img" in response.json()["detail"]
+        assert [c["command"] for c in sandbox.execs] == ["getent passwd 4242 | cut -d: -f1"] and sandbox.stopped
+
+    def test_failing_run_is_a_terminal_task_error_with_the_end_of_its_output(self, tmp_path, monkeypatch):
+        stdout = "\n".join(f"line {number}" for number in range(1, 401)) + "\n"
+        sandbox = OverlaySandbox(
+            failing="apt-get install",
+            failure=SandboxExecResult(stdout=stdout, stderr="E: no package\n", return_code=100),
+        )
         server, task, sandbox, _ = self.overlay_server(tmp_path, monkeypatch, sandbox=sandbox)
         client = TestClient(server.setup_webserver())
 
@@ -501,8 +709,28 @@ class TestOverlay:
         detail = response.json()["detail"]
         assert "Dockerfile overlay failed for 'hello'" in detail
         assert "RUN line 1/3 'apt-get update && apt-get install -y curl' exited 100" in detail
-        assert "line 2" in detail and "E: no package" in detail
+        # The tail keeps the end of a long log, where the error is, and drops the start.
+        assert "line 400\nE: no package" in detail and "line 1\nline 2\n" not in detail
         # Nothing after the failing line ran, the sandbox is gone and no session was kept.
+        assert len(sandbox.execs) == 1 and sandbox.stopped
+        assert client.post("/verify", json=verify_body()).status_code == 404
+
+    def test_provider_failure_during_a_run_is_retriable(self, tmp_path, monkeypatch):
+        sandbox = OverlaySandbox(
+            failing="apt-get install",
+            failure=SandboxExecResult(stdout=None, stderr="connection reset", return_code=-1, error_type="sandbox"),
+        )
+        server, task, sandbox, _ = self.overlay_server(tmp_path, monkeypatch, sandbox=sandbox)
+        client = TestClient(server.setup_webserver())
+
+        response = client.post("/seed_session", json=seed_body(task))
+
+        assert response.status_code == 503, response.text
+        detail = response.json()["detail"]
+        assert "Could not set up sandbox for 'hello'" in detail
+        assert (
+            "RUN line 1/3 'apt-get update && apt-get install -y curl' could not run in the sandbox: sandbox" in detail
+        )
         assert len(sandbox.execs) == 1 and sandbox.stopped
         assert client.post("/verify", json=verify_body()).status_code == 404
 
@@ -531,61 +759,119 @@ class TestOverlay:
         assert "RUN line 2/3" in detail and "build_timeout_sec=0.01 is used up" in detail
         assert len(sandbox.execs) == 1 and sandbox.stopped
 
-    def test_separate_verifier_in_the_task_image_gets_the_overlay(self, tmp_path, monkeypatch):
-        toml = TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+    def test_sandbox_ttls_include_the_build_budget_when_there_is_an_overlay(self, tmp_path, monkeypatch):
+        server, task, _, _ = self.overlay_server(tmp_path, monkeypatch, toml=SEPARATE_IN_TASK_IMAGE_TOML)
+        config, slack = task.config, server.config.sandbox_ttl_slack_s
+        build = config.environment.build_timeout_sec
+        assert build == 600 and task.overlay
+        agent_spec = server._sandbox_spec(task, "/app")
+        assert agent_spec.ttl_s == config.agent.timeout_sec + config.verifier.timeout_sec + slack + build
+
+        specs = []
+
+        class RecordingSandbox:
+            def __init__(self, provider_config):
+                pass
+
+            async def start(self, spec):
+                specs.append(spec)
+
+        monkeypatch.setattr("resources_servers.harbor.app.AsyncSandbox", RecordingSandbox)
+        asyncio.run(server._create_verifier_sandbox(task))
+        (verifier_spec,) = specs
+        assert verifier_spec.ttl_s == config.verifier.timeout_sec + slack + build
+        # The verifier runs in the task's own image: it gets the same resolved Dockerfile environment as the agent.
+        assert verifier_spec.image == task.image == "debian:bookworm-slim"
+        assert verifier_spec.env == agent_spec.env == {"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "MSG": "hi there"}
+
+        # A pull-mode task has no overlay, so no build budget is added anywhere.
+        server, task, _, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile="FROM img\nWORKDIR /app\n", toml=SEPARATE_IN_TASK_IMAGE_TOML
+        )
+        assert not task.overlay
+        assert (
+            server._sandbox_spec(task, "/app").ttl_s == config.agent.timeout_sec + config.verifier.timeout_sec + slack
+        )
+        specs.clear()
+        asyncio.run(server._create_verifier_sandbox(task))
+        assert specs[0].ttl_s == config.verifier.timeout_sec + slack
+
+    def separate_verifier(self, tmp_path, monkeypatch, *, toml=SEPARATE_IN_TASK_IMAGE_TOML, verifier=None):
         server, task, agent, _ = self.overlay_server(tmp_path, monkeypatch, toml=toml)
-        assert not task.config.is_shared_verifier and _verifier_image(task) == "debian:bookworm-slim"
-        verifier = OverlaySandbox()
+        verifier = verifier or OverlaySandbox()
 
         async def create_verifier(task):
+            verifier.spec_env = dict(
+                server._sandbox_spec(task, None, environment=task.config.verifier.environment).env
+            )
             return verifier
 
         monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
         client = TestClient(server.setup_webserver())
         assert client.post("/seed_session", json=seed_body(task)).status_code == 200
+        return server, task, agent, verifier, client
+
+    def test_separate_verifier_in_the_task_image_gets_the_overlay(self, tmp_path, monkeypatch):
+        server, task, agent, verifier, client = self.separate_verifier(tmp_path, monkeypatch)
+        assert not task.config.is_shared_verifier and _verifier_image(task) == "debian:bookworm-slim"
 
         payload = client.post("/verify", json=verify_body()).json()
 
         assert payload["reward"] == 1.0 and payload["verifier_mode"] == "separate", payload
+        assert payload["mask_sample"] is False and payload["failure_kind"] is None
         verifier_commands = [c["command"] for c in verifier.execs]
-        assert verifier_commands[0] == "apt-get update && apt-get install -y curl"
-        assert verifier_commands.index("apt-get update && apt-get install -y curl") < next(
+        # The same three lines, in the same state, before anything else touches the verifier's sandbox.
+        assert verifier.execs[0]["seen"]["command"] == "apt-get update && apt-get install -y curl"
+        assert verifier.run("apt-get update")["seen"]["env"] == {"PATH": IMAGE_PATH}
+        assert verifier.run("as agent")["seen"] == {
+            "command": 'echo "as agent" > /tmp/who',
+            "env": {"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "MSG": "hi there"},
+            "user": "agent",
+            "cwd": "/app",
+        }
+        assert verifier_commands.index(verifier.run("as agent")["command"]) < next(
             i for i, c in enumerate(verifier_commands) if "test.sh" in c
         )
         assert agent.stopped and verifier.stopped
 
-    def test_separate_verifier_overlay_failure_is_a_task_error(self, tmp_path, monkeypatch):
-        toml = TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
-        server, task, agent, _ = self.overlay_server(tmp_path, monkeypatch, toml=toml)
+    def test_separate_verifier_overlay_failure_masks_the_sample(self, tmp_path, monkeypatch):
         verifier = OverlaySandbox(failing="apt-get install")
+        server, task, agent, verifier, client = self.separate_verifier(tmp_path, monkeypatch, verifier=verifier)
 
-        async def create_verifier(task):
-            return verifier
-
-        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
-        client = TestClient(server.setup_webserver())
-        assert client.post("/seed_session", json=seed_body(task)).status_code == 200
         response = client.post("/verify", json=verify_body())
-        assert response.status_code == 422 and "(verifier)" in response.json()["detail"]
-        assert "RUN line 1/3" in response.json()["detail"]
-        assert verifier.stopped
+
+        # The rollout is complete; a verifier sandbox that cannot take the overlay must not discard it as a 422.
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["reward"] == 0.0 and payload["mask_sample"] is True
+        assert payload["failure_kind"] == OVERLAY_FAILED_KIND == "harbor:overlay_failed"
+        assert "Dockerfile overlay failed in the verifier sandbox" in payload["failure_reason"]
+        assert "RUN line 1/3 'apt-get update && apt-get install -y curl' exited 100" in payload["failure_reason"]
+        assert "E: no package" in payload["failure_reason"]
+        assert not any("test.sh" in c["command"] for c in verifier.execs)
+        assert agent.stopped and verifier.stopped
+
+    def test_separate_verifier_provider_failure_during_the_overlay_masks_the_sample(self, tmp_path, monkeypatch):
+        verifier = OverlaySandbox(
+            failing="apt-get install",
+            failure=SandboxExecResult(stdout=None, stderr="gone", return_code=-1, error_type="sandbox"),
+        )
+        _, _, _, verifier, client = self.separate_verifier(tmp_path, monkeypatch, verifier=verifier)
+        payload = client.post("/verify", json=verify_body()).json()
+        assert payload["mask_sample"] is True and payload["failure_kind"] == "provider_unavailable"
+        assert "could not run in the sandbox: sandbox" in payload["failure_reason"] and verifier.stopped
 
     def test_prebuilt_verifier_image_gets_no_overlay(self, tmp_path, monkeypatch):
         toml = TASK_TOML.replace(
             "[verifier]\n",
             '[verifier]\nenvironment_mode = "separate"\n\n[verifier.environment]\ndocker_image = "org/verifier:1"\n',
         )
-        server, task, _, _ = self.overlay_server(tmp_path, monkeypatch, toml=toml)
-        verifier = OverlaySandbox()
-
-        async def create_verifier(task):
-            return verifier
-
-        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
-        client = TestClient(server.setup_webserver())
-        assert client.post("/seed_session", json=seed_body(task)).status_code == 200
+        _, task, _, verifier, client = self.separate_verifier(tmp_path, monkeypatch, toml=toml)
+        assert _verifier_image(task) == "org/verifier:1"
         assert client.post("/verify", json=verify_body()).json()["reward"] == 1.0
         assert not any("apt-get" in c["command"] for c in verifier.execs)
+        # Nor the agent image's Dockerfile environment.
+        assert verifier.spec_env == {}
 
 
 class TestVerify:

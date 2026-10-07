@@ -26,7 +26,7 @@ import yaml
 from nemo_gym import component_search_roots
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.tasks.harbor.hub import datasets_dir, fetch_ref, is_hub_ref
-from nemo_gym.tasks.harbor.image_configs import record_compose_images
+from nemo_gym.tasks.harbor.image_configs import record_base_images, record_compose_images
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
 from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, discover_tasks
 
@@ -121,6 +121,11 @@ def prepare_target(
     else:
         folder = Path(target).expanduser().resolve()
     taskset = folder.name
+    # Dockerfile ENV, WORKDIR and USER resolve from the base image's configuration, so it is recorded
+    # before the tasks load; a base image the registry cannot resolve stops the preparation here.
+    images = record_base_images(folder)
+    if images is not None:
+        print(f"Base image configurations recorded in {images}")
     errors: dict[str, HarborTaskError] = {}
     loaded = discover_tasks(folder, skipped=errors)
     for task_id, error in errors.items():

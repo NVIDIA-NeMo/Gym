@@ -3,6 +3,7 @@
 
 import json
 import logging
+import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -22,11 +23,18 @@ from nemo_gym.tasks.harbor.cli import (
     runs_in_sandbox,
 )
 from nemo_gym.tasks.harbor.dockerfile import (
+    DEFAULT_PATH,
+    BaseImageConfig,
     DockerfileNeedsBuild,
+    ImageConfigRequired,
+    OverlayImage,
     OverlayRun,
     base_image_only,
+    has_heredoc,
     overlay_image,
     parse_dockerfile,
+    resolve_dockerfile,
+    split_words,
 )
 from nemo_gym.tasks.harbor.hub import (
     HubError,
@@ -41,7 +49,7 @@ from nemo_gym.tasks.harbor.hub import (
 )
 from nemo_gym.tasks.harbor.materialize import materialize_task, run_config, write_rows
 from nemo_gym.tasks.harbor.package_store import PackageStoreError
-from nemo_gym.tasks.harbor.task import HarborTaskError
+from nemo_gym.tasks.harbor.task import IMAGE_CONFIGS_FILE, HarborTaskError
 
 
 HELLO_TOML = """
@@ -76,6 +84,22 @@ def write_task(root: Path, *, dockerfile: str = "FROM ubuntu:24.04\n\nWORKDIR /a
     (root / "solution").mkdir(exist_ok=True)
     (root / "solution" / "solve.sh").write_text("#!/bin/bash\necho hi > hello.txt\n")
     return root
+
+
+IMAGE_PATH = "/usr/local/bin:/usr/bin:/bin"
+
+
+def write_image_config(parent: Path, image: str, **config) -> None:
+    """Record ``image``'s OCI configuration next to the task folders, as prepare does."""
+    path = parent / IMAGE_CONFIGS_FILE
+    recorded = json.loads(path.read_text()) if path.is_file() else {}
+    recorded[image] = {"os": "linux", "architecture": "amd64", "image": image, "config": config}
+    path.write_text(json.dumps(recorded))
+
+
+def dockerfile(text: str, **config) -> OverlayImage:
+    """Parse and resolve ``text`` against a base image whose configuration is ``config`` (``Env`` etc.)."""
+    return resolve_dockerfile(parse_dockerfile(text), BaseImageConfig.from_record({"config": config}))
 
 
 class TestTaskConfig:
@@ -183,6 +207,83 @@ class TestDockerfileDetection:
         base = base_image_only("FROM ubuntu:24.04 \\\n   # inside\n\n AS base\n\nWORKDIR \\\n /app\n")
         assert base is not None and base.image == "ubuntu:24.04" and base.workdir == "/app"
 
+    def test_a_continuation_joins_the_next_line_verbatim(self):
+        # Docker removes only the backslash and the newline: no separator is inserted, blanks are kept.
+        parsed = parse_dockerfile("FROM img\nRUN echo ab\\\ncd \\   \n    && echo e\\\n\tf\n")
+        assert parsed.instructions == (("RUN", "echo abcd     && echo e\tf"),)
+
+    def test_env_values_resolve_as_docker_does(self):
+        image = dockerfile(
+            "FROM img\n"
+            "ENV PATH=/opt/a/bin:$PATH\n"
+            'ENV PATH="/opt/b/bin:${PATH}" LIT=\'$PATH\' ESC="\\$HOME/x" UNQ=\\$NOPE\n'
+            'ENV MIX="a\\"b" EMPTY= TAIL=${MISSING:-dflt} OPT=${PATH:+set}\n'
+            "ENV LEGACY two words $LIT\n",
+            Env=[f"PATH={IMAGE_PATH}", "HOME=/root"],
+        )
+        assert image.env == {
+            "PATH": f"/opt/b/bin:/opt/a/bin:{IMAGE_PATH}",
+            "LIT": "$PATH",
+            "ESC": "$HOME/x",
+            "UNQ": "$NOPE",
+            "MIX": 'a"b',
+            "EMPTY": "",
+            "TAIL": "dflt",
+            "OPT": "set",
+            "LEGACY": "two words $PATH",
+        }
+        # Only the single-quoted and escaped values keep a `$`, and theirs is a literal character, not a reference.
+        assert [key for key, value in image.env.items() if "$" in value] == ["LIT", "ESC", "UNQ", "LEGACY"]
+
+    def test_image_without_path_gets_dockers_default(self):
+        assert dockerfile("FROM scratch\nENV PATH=/x:$PATH\n").env == {"PATH": f"/x:{DEFAULT_PATH}"}
+
+    def test_workdir_and_user_expand_variables_and_start_from_the_image(self):
+        image = dockerfile(
+            "FROM img\nENV APP=/srv/app USR=svc\nWORKDIR $APP\nWORKDIR src/\nUSER ${USR}:$USR\n",
+            WorkingDir="/home/svc",
+            User="svc",
+        )
+        assert image.workdir == "/srv/app/src" and image.user == "svc:svc"
+        assert dockerfile("FROM img\nWORKDIR rel\n", WorkingDir="/home/svc").workdir == "/home/svc/rel"
+        assert dockerfile("FROM img\n", WorkingDir="/home/svc", User="svc") == dockerfile(
+            "FROM img\n", WorkingDir="/home/svc", User="svc"
+        )
+        bare = dockerfile("FROM img\n")
+        assert bare.workdir == "/" and bare.user is None
+
+    def test_without_the_image_configuration_only_self_contained_files_resolve(self):
+        # Nothing refers to the base image: the result does not depend on it.
+        base = base_image_only("FROM img\nENV A=1 B=$A\nWORKDIR /app\nUSER me\n")
+        assert base is not None and base.env == {"A": "1", "B": "1"} and base.workdir == "/app"
+        for text, fragment in [
+            ("FROM img\nENV PATH=/x:$PATH\n", "`$PATH` refers to the base image"),
+            ("FROM img\nWORKDIR src\n", "WORKDIR src is relative to the base image"),
+            ("FROM img\nRUN true\n", "RUN lines run with the base image"),
+        ]:
+            with pytest.raises(ImageConfigRequired, match=re.escape(fragment)):
+                resolve_dockerfile(parse_dockerfile(text))
+
+    def test_split_words_keeps_quotes_and_escapes(self):
+        assert split_words("A=1  B=\"two words\" C='x y' D=a\\ b") == ["A=1", 'B="two words"', "C='x y'", "D=a\\ b"]
+
+    @pytest.mark.parametrize(
+        ("command", "heredoc"),
+        [
+            ("cat <<EOF", True),
+            ("python3 <<-'PY'", True),
+            ('cat <<"EOF" > /x', True),
+            ("echo $((1<<2))", False),
+            ("cat <<< hello", False),
+            ("echo '<<EOF'", False),
+            ('echo "a <<EOF b"', False),
+            ("bash -lc 'cat <<EOF'", False),
+            ("echo it's <<EOF", True),
+        ],
+    )
+    def test_heredoc_detection(self, command, heredoc):
+        assert has_heredoc(command) is heredoc
+
     @pytest.mark.parametrize(
         "text",
         [
@@ -229,52 +330,62 @@ ENTRYPOINT []
 """
 
 
+SWEBENCH_IMAGE_ENV = [f"PATH=/opt/miniconda3/bin:{IMAGE_PATH}", "LANG=C.UTF-8"]
+
+
 class TestOverlayDockerfile:
     def test_swebench_verified_shape(self):
-        overlay = overlay_image(SWEBENCH_VERIFIED_DOCKERFILE)
+        base = BaseImageConfig.from_record({"config": {"Env": SWEBENCH_IMAGE_ENV, "WorkingDir": "/testbed"}})
+        overlay = overlay_image(SWEBENCH_VERIFIED_DOCKERFILE, base)
         assert overlay is not None
         assert overlay.image == "swebench/sweb.eval.x86_64.django_1776_django-11099:latest"
-        assert overlay.workdir is None and overlay.env == {} and overlay.user is None
+        # The Dockerfile sets nothing itself: the image's working directory and user stand.
+        assert overlay.workdir == "/testbed" and overlay.env == {} and overlay.user is None
         assert [run.command for run in overlay.runs] == [
             "cd /testbed && git status && git checkout -- . && git clean -fd",
             "/opt/miniconda3/bin/conda run -n testbed pip install pytest",
             "echo 'source /opt/miniconda3/bin/activate testbed' >> /root/.bashrc",
         ]
-        assert all(run.workdir is None and run.env == {} and run.user is None for run in overlay.runs)
+        # Every RUN sees the whole image environment, resolved, and runs in the image's directory as root.
+        image_env = {"PATH": f"/opt/miniconda3/bin:{IMAGE_PATH}", "LANG": "C.UTF-8"}
+        assert all(run.workdir == "/testbed" and run.env == image_env and run.user is None for run in overlay.runs)
         # The same file is not pull mode.
         assert base_image_only(SWEBENCH_VERIFIED_DOCKERFILE) is None
 
     def test_tb21_debian_shape_applies_state_in_order(self):
-        overlay = overlay_image(TB21_DEBIAN_DOCKERFILE)
-        assert overlay is not None and overlay.image == "debian:bookworm-slim"
+        overlay = dockerfile(TB21_DEBIAN_DOCKERFILE, Env=[f"PATH={IMAGE_PATH}"])
+        assert overlay.image == "debian:bookworm-slim"
         first, second = overlay.runs
         # The apt line runs before WORKDIR and ENV exist; continuations are joined.
         assert " ".join(first.command.split()) == (
             "apt-get update && apt-get install -y --no-install-recommends curl tmux && rm -rf /var/lib/apt/lists/*"
         )
-        assert first.workdir is None and first.env == {}
-        # The later RUN sees both, and the final image settings are recorded too.
+        assert first.workdir == "/" and first.env == {"PATH": IMAGE_PATH}
+        # The later RUN sees both, with `$PATH` already expanded, and the final image settings are recorded too.
         assert second == OverlayRun(
             command="mkdir -p /opt/tools/bin && echo ready > /app/ready.txt",
             workdir="/app",
-            env={"PATH": "/opt/tools/bin:$PATH", "DEBIAN_FRONTEND": "noninteractive"},
+            env={"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "DEBIAN_FRONTEND": "noninteractive"},
         )
         assert overlay.workdir == "/app" and overlay.env == second.env
 
     def test_user_and_relative_workdir_apply_to_later_runs_only(self):
-        overlay = parse_dockerfile(
-            "FROM img\nRUN id\nUSER agent\nWORKDIR /home/agent\nWORKDIR src\nRUN make\nENV LATE=1\n"
+        overlay = dockerfile(
+            "FROM img\nRUN id\nUSER agent\nWORKDIR /home/agent\nWORKDIR src\nRUN make\nENV LATE=1\n",
+            Env=[f"PATH={IMAGE_PATH}"],
+            WorkingDir="/srv",
+            User="svc",
         )
         assert [(r.command, r.user, r.workdir) for r in overlay.runs] == [
-            ("id", None, None),
+            ("id", "svc", "/srv"),
             ("make", "agent", "/home/agent/src"),
         ]
         assert overlay.user == "agent" and overlay.workdir == "/home/agent/src" and overlay.env == {"LATE": "1"}
         # ENV after the last RUN reaches the image, not the RUN.
-        assert overlay.runs[1].env == {}
+        assert overlay.runs[1].env == {"PATH": IMAGE_PATH}
 
     def test_exec_form_run_becomes_a_shell_command(self):
-        overlay = parse_dockerfile('FROM img\nRUN ["bash", "-lc", "echo hi there"]\n')
+        overlay = dockerfile('FROM img\nRUN ["bash", "-lc", "echo hi there"]\n')
         assert overlay.runs[0].command == "bash -lc 'echo hi there'"
 
     @pytest.mark.parametrize(
@@ -305,12 +416,18 @@ class TestOverlayDockerfile:
         assert str(excinfo.value).startswith(named), str(excinfo.value)
         assert overlay_image(text) is None and base_image_only(text) is None
 
-    def test_here_string_is_not_a_heredoc(self):
-        overlay = parse_dockerfile("FROM img\nRUN cat <<< hello\n")
-        assert overlay.runs[0].command == "cat <<< hello"
+    def test_here_strings_shifts_and_quoted_arrows_are_not_heredocs(self):
+        text = "FROM img\nRUN cat <<< hello\nRUN echo $((1<<2))\nRUN echo '<<EOF' \"<<EOF\"\n"
+        assert [command for _, command in parse_dockerfile(text).instructions] == [
+            "cat <<< hello",
+            "echo $((1<<2))",
+            "echo '<<EOF' \"<<EOF\"",
+        ]
+        with pytest.raises(DockerfileNeedsBuild, match="heredoc"):
+            parse_dockerfile("FROM img\nRUN echo $((1<<2)) && cat <<EOF\n4\nEOF\n")
 
     def test_emptied_entrypoint_is_ignored(self):
-        overlay = parse_dockerfile("FROM img\nRUN true\nENTRYPOINT []\n")
+        overlay = dockerfile("FROM img\nRUN true\nENTRYPOINT []\n")
         assert len(overlay.runs) == 1
 
 
@@ -363,13 +480,36 @@ class TestLoadTask:
 
     def test_overlay_dockerfile_records_the_run_lines(self, tmp_path):
         toml = HELLO_TOML + '\n[environment.env]\nDEBIAN_FRONTEND = "teletype"\n'
-        task = load_task(write_task(tmp_path / "t", dockerfile=TB21_DEBIAN_DOCKERFILE, toml=toml))
+        folder = write_task(tmp_path / "t", dockerfile=TB21_DEBIAN_DOCKERFILE, toml=toml)
+        write_image_config(tmp_path, "debian:bookworm-slim", Env=[f"PATH={IMAGE_PATH}"])
+        task = load_task(folder)
         assert task.image == "debian:bookworm-slim" and task.workdir == "/app" and task.user is None
-        # task.toml wins for the sandbox env, but the RUN lines keep the Dockerfile's own ENV.
-        assert task.env == {"PATH": "/opt/tools/bin:$PATH", "DEBIAN_FRONTEND": "teletype"}
+        # task.toml wins for the sandbox env; the Dockerfile's `$PATH` is the image's, resolved, not a live `$`.
+        assert task.env == {"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "DEBIAN_FRONTEND": "teletype"}
         assert [run.command[:10] for run in task.overlay] == ["apt-get up", "mkdir -p /"]
         assert task.overlay[1].env["DEBIAN_FRONTEND"] == "noninteractive"
         assert task.needs_sandbox
+
+    def test_overlay_dockerfile_without_the_recorded_base_image_is_rejected(self, tmp_path):
+        folder = write_task(tmp_path / "t", dockerfile=TB21_DEBIAN_DOCKERFILE)
+        with pytest.raises(HarborTaskError) as excinfo:
+            load_task(folder)
+        message = str(excinfo.value)
+        assert "RUN lines run with the base image" in message
+        assert "'debian:bookworm-slim' is not recorded" in message and IMAGE_CONFIGS_FILE in message
+        assert "Prepare the dataset again" in message
+        # A pull-mode Dockerfile that refers to the image environment needs it too; one that does not, does not.
+        (folder / "environment" / "Dockerfile").write_text("FROM img\nENV PATH=/x:$PATH\n")
+        with pytest.raises(HarborTaskError, match=r"`\$PATH` refers to the base image"):
+            load_task(folder)
+        (folder / "environment" / "Dockerfile").write_text("FROM img\nENV A=1\nWORKDIR /app\n")
+        assert load_task(folder).env == {"A": "1"}
+
+    def test_recorded_base_image_fills_in_workdir_and_user(self, tmp_path):
+        folder = write_task(tmp_path / "t", dockerfile="FROM img\nENV PATH=/x:$PATH\n")
+        write_image_config(tmp_path, "img", Env=["PATH=/bin"], WorkingDir="/srv", User="svc")
+        task = load_task(folder)
+        assert (task.workdir, task.user, task.env) == ("/srv", "svc", {"PATH": "/x:/bin"})
 
     def test_pull_mode_task_has_no_overlay(self, tmp_path):
         assert load_task(write_task(tmp_path / "t")).overlay == ()
@@ -1028,6 +1168,43 @@ class TestInstruction:
         assert read_instruction(path) == "\nStarts after a blank line.\n"
 
 
+class FakeRegistryClient:
+    """Stands in for ``RegistryClient`` at prepare: records every image, except the ones told to fail."""
+
+    missing: set[str] = set()
+    resolved: list[str] = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def image_config(self, reference: str) -> dict:
+        from nemo_gym.tasks.harbor.image_configs import ImageConfigError
+
+        FakeRegistryClient.resolved.append(reference)
+        if reference in FakeRegistryClient.missing:
+            raise ImageConfigError(
+                f"library/{reference.partition(':')[0]}: registry returned HTTP 404 for manifests/x"
+            )
+        return {
+            "architecture": "amd64",
+            "config": {"Env": [f"PATH={IMAGE_PATH}"], "WorkingDir": "/"},
+            "config_digest": "sha256:c",
+            "image": reference,
+            "os": "linux",
+        }
+
+
+@pytest.fixture
+def fake_registry(monkeypatch):
+    from nemo_gym.tasks.harbor import image_configs as image_configs_module
+
+    monkeypatch.setattr(image_configs_module, "RegistryClient", FakeRegistryClient)
+    monkeypatch.setattr(FakeRegistryClient, "missing", set())
+    monkeypatch.setattr(FakeRegistryClient, "resolved", [])
+    return FakeRegistryClient
+
+
+@pytest.mark.usefixtures("fake_registry")
 class TestCli:
     def test_prepare_local_folder(self, tmp_path):
         folder = tmp_path / "ds"
@@ -1037,6 +1214,38 @@ class TestCli:
         assert prepared.rows_path == tmp_path / "out" / "ds" / "tasks.jsonl"
         assert [t.task_id for t in prepared.tasks] == ["a"]
         assert prepared.skipped == {}
+
+    def test_prepare_records_base_images_before_loading_and_resolves_the_dockerfiles(self, tmp_path, capsys):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        write_task(folder / "b", dockerfile=TB21_DEBIAN_DOCKERFILE)
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        # Images are resolved in task order, once each, before any task loads.
+        assert FakeRegistryClient.resolved == ["ubuntu:24.04", "debian:bookworm-slim"]
+        recorded = json.loads((folder / IMAGE_CONFIGS_FILE).read_text())
+        assert set(recorded) == {"debian:bookworm-slim", "ubuntu:24.04"}
+        assert recorded["debian:bookworm-slim"]["config"]["Env"] == [f"PATH={IMAGE_PATH}"]
+        overlay = next(task for task in prepared.tasks if task.task_id == "b")
+        assert overlay.env == {"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "DEBIAN_FRONTEND": "noninteractive"}
+        assert overlay.overlay[0].env == {"PATH": IMAGE_PATH} and overlay.overlay[0].workdir == "/"
+        assert f"Base image configurations recorded in {folder / IMAGE_CONFIGS_FILE}" in capsys.readouterr().out
+        # A second prepare finds everything recorded and asks the registry for nothing.
+        prepare_target(str(folder), output_root=tmp_path / "out")
+        assert FakeRegistryClient.resolved == ["ubuntu:24.04", "debian:bookworm-slim"]
+
+    def test_prepare_fails_clearly_when_a_base_image_cannot_be_fetched(self, tmp_path):
+        from nemo_gym.tasks.harbor.image_configs import ImageConfigError
+
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        write_task(folder / "b", dockerfile=TB21_DEBIAN_DOCKERFILE)
+        FakeRegistryClient.missing.add("debian:bookworm-slim")
+        with pytest.raises(ImageConfigError) as excinfo:
+            prepare_target(str(folder), output_root=tmp_path / "out")
+        message = str(excinfo.value)
+        assert "base image 'debian:bookworm-slim'" in message and "task(s) b" in message
+        assert "registry returned HTTP 404" in message
+        assert not (tmp_path / "out").exists()
 
     def test_prepare_skips_tasks_that_do_not_load(self, tmp_path, caplog):
         folder = tmp_path / "ds"
@@ -1325,6 +1534,7 @@ class TestDatasetConfig:
             load_task(folder / "hello")
 
 
+@pytest.mark.usefixtures("fake_registry")
 class TestDatasetInit:
     """The scaffold is read back by the loader, so `gym dataset init` cannot drift from what runs."""
 
