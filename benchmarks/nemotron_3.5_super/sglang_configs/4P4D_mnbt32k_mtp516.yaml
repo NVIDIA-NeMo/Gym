@@ -43,7 +43,7 @@ frontend:
   args:
     request-timeout-secs: 1200
     worker-startup-timeout-secs: 1200
-    max-concurrent-requests: 512
+    max-concurrent-requests: 2048
     pool-max-idle-per-host: 0
     pool-idle-timeout-secs: 2
     health-check-interval-secs: 5
