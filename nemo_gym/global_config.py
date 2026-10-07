@@ -43,6 +43,7 @@ from nemo_gym.config_types import (
     AgentCompositionError,
     AgentWithoutEnvironmentServerError,
     AlmostServerError,
+    AmbiguousAgentRenameError,
     ConfigError,
     ConfigInterpolationError,
     ConfigMissingValuesError,
@@ -634,11 +635,10 @@ Duplicate config paths:
                         and server_instance_config.get_server_ref().type == ENVIRONMENT_SERVER_TYPE_KEY_NAME
                     ):
                         hint += (
-                            "\nIf the agent was renamed with `_inherit_from`, this environment server must reference "
-                            "the agent's new name."
-                            "\nTo fix this automatically, run "
-                            "`python scripts/add_legacy_agent_environment_servers.py <your config paths>` from a NeMo Gym checkout."
-                            f"\nOr point this server's {field_name}.name at the agent's new name."
+                            "\nGym follows top-level `_inherit_from` agent renames when there is one destination "
+                            "and it still defines exactly one agent."
+                            f"\nFor other inheritance patterns, point this server's {field_name}.name "
+                            "at an existing agent."
                         )
                     raise ServerRefNotFoundError(
                         f"""In server instance '{server_instance_config.name}', field '{field_name}' references {maybe_server_ref.type}/'{maybe_server_ref.name}', which is not defined in the merged config.
@@ -1231,8 +1231,48 @@ For example, on the command line:
                 for source, targets in destinations.items()
                 if source not in dict_config and len(targets) == 1 and targets[0] in final_agents
             }
+            ambiguous = {
+                source: targets
+                for source, targets in destinations.items()
+                if source not in dict_config and len(targets) > 1
+            }
+            if ambiguous:
+                self._raise_on_ambiguous_environment_agent_renames(dict_config, ambiguous)
             if renames:
                 self._retarget_environment_servers(dict_config, renames)
+
+    @staticmethod
+    def _raise_on_ambiguous_environment_agent_renames(
+        dict_config: DictConfig, ambiguous: Dict[str, List[str]]
+    ) -> None:
+        # Several benchmarks may inherit the same agent. Only a reference still naming
+        # the removed source requires the user to choose a destination.
+        for name, instance in dict_config.items_ex(resolve=False):
+            if not isinstance(instance, DictConfig):
+                continue
+            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            if not isinstance(servers, DictConfig):
+                continue
+            for server_type, server in servers.items_ex(resolve=False):
+                if not isinstance(server, DictConfig):
+                    continue
+                for field, reference in server.items_ex(resolve=False):
+                    if not isinstance(reference, DictConfig):
+                        continue
+                    if OmegaConf.is_missing(reference, "type") or OmegaConf.is_missing(reference, "name"):
+                        continue
+                    if reference.get("type") != AGENT_SERVER_TYPE_KEY_NAME and not (
+                        field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None
+                    ):
+                        continue
+                    source = reference.get("name")
+                    if source in ambiguous:
+                        targets = ", ".join(repr(target) for target in ambiguous[source])
+                        path = f"{name}.{ENVIRONMENT_SERVER_TYPE_KEY_NAME}.{server_type}.{field}.name"
+                        raise AmbiguousAgentRenameError(
+                            f"Agent '{source}' was inherited into several names: {targets}. "
+                            f"'{path}' still references '{source}'. Set this field to the intended agent's new name."
+                        )
 
     def _recursively_swap_keys_helper(
         self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig

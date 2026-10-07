@@ -202,7 +202,7 @@ The script appends a block to each config that needs one and leaves the existing
 It skips agents that an environment server already names.
 It also skips agents that only override fields of an agent defined elsewhere.
 Run without paths, it updates this repository's configs.
-It exits with 1 under `--check` when something needs adding, and with 2 when a file cannot be read or a rename needs a manual update.
+It exits with 1 under `--check` when something needs adding, and with 2 when a file cannot be read.
 
 You can also add the block by hand.
 The warning prints the exact block for each agent; add it at the same level as the agents:
@@ -217,10 +217,10 @@ my_environment_server:
         name: my_simple_agent
 ```
 
-If you rename an agent with `_inherit_from`, every environment server that references the agent must reference the new name, because `_inherit_from` retires the source.
-The script points each of those references at the new name and keeps the server's name, so `environment_server_routes` still resolve.
-If the source agent only has the server the script generates, the renamed agent's server inherits that server instead.
-If the rename is in the same file as a server that references the source, the script reports the field to update by hand.
+For a top-level `_inherit_from` rename with one destination that still defines exactly one agent, Gym automatically points environment server references at the new name.
+The server keeps its name, so `environment_server_routes` still resolve. The migration script leaves these renames alone.
+If several agents inherit the same source and an environment server still references the old name, Gym reports `AmbiguousAgentRenameError` with the destinations and the field to update.
+Set that field to the intended agent's new name. Multiple destinations remain valid when the servers already reference the intended agents.
 Do not add a second server in front of an agent, because that makes agent-routed rows ambiguous.
 
 #### Require Declared Environment Servers
