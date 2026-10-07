@@ -511,6 +511,37 @@ class TestPrepareBenchmark:
             prepare_benchmark()
             mock_module.prepare.assert_called_once_with()
 
+    def test_calls_prepare_for_validation_dataset(self, tmp_path: Path) -> None:
+        prepare_script = tmp_path / "prepare.py"
+        prepare_script.write_text("")
+        output_path = tmp_path / "validation.jsonl"
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(f"""dummy_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: dummy_validation
+        type: validation
+        jsonl_fpath: {output_path}
+        prepare_script: {prepare_script}
+        license: Apache 2.0
+""")
+        mock_module = MagicMock()
+        mock_module.prepare.return_value = output_path
+
+        with (
+            patch(
+                "nemo_gym.cli.eval.get_global_config_dict",
+                return_value=_mock_global_config(
+                    {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
+                ),
+            ),
+            patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
+        ):
+            prepare_benchmark()
+
+        mock_module.prepare.assert_called_once_with()
+
     def test_forwards_prepare_script_args(self, tmp_path: Path) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)
 

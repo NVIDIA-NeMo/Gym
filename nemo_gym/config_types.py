@@ -462,6 +462,8 @@ class DatasetConfig(BaseModel):
     name: str
     type: DatasetType
     jsonl_fpath: str
+    prepare_script: Optional[Path] = Field(default=None, exclude_if=lambda value: value is None)
+    prepare_dependencies: List[str] = Field(default_factory=list, exclude_if=lambda value: not value)
     taskset: Optional[str] = Field(
         default=None,
         min_length=1,

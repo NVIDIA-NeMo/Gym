@@ -79,11 +79,11 @@ def _request(session_id: str = "session-0") -> SimpleNamespace:
     return SimpleNamespace(session={SESSION_ID_KEY: session_id})
 
 
-def _seed_body(row: dict) -> ResourcesSeedSessionRequest:
+def _seed_body(row: dict, *, taskset: str = "nemo_user_sim:example") -> ResourcesSeedSessionRequest:
     return ResourcesSeedSessionRequest(
         resources_session_id="resources-session-0",
         episode_id=EpisodeId(rollout_id="0-0", attempt=0),
-        task_id=TaskId(taskset="nemo_user_sim:example", task_id="0"),
+        task_id=TaskId(taskset=taskset, task_id="0"),
         task_data={"resolved_row": row},
     )
 
@@ -216,6 +216,27 @@ def test_resolved_row_rejects_invalid_provenance(provenance: object, message: st
     row["usersim_provenance"] = provenance
     with pytest.raises(ValueError, match=message):
         _validate_resolved_row(row, expected_revision=REVISION)
+
+
+@pytest.mark.asyncio
+async def test_seed_requires_pinned_personas_version_for_validation_tasks() -> None:
+    server = _server()
+    server.session_id_to_seed = {}
+    row = _resolved_row(provenance_as_text=False)
+
+    with pytest.raises(HTTPException, match="Nemotron-Personas version") as error:
+        await server.seed_session(
+            _request("wrong-personas-version"),
+            _seed_body(row, taskset="nemo_user_sim:validation"),
+        )
+    assert error.value.status_code == 422
+
+    row["usersim_provenance"]["nemotron_personas_version"] = server.config.nemotron_personas_version
+    response = await server.seed_session(
+        _request("pinned-personas-version"),
+        _seed_body(row, taskset="nemo_user_sim:validation"),
+    )
+    assert response.resources_session_id == "resources-session-0"
 
 
 @pytest.mark.asyncio

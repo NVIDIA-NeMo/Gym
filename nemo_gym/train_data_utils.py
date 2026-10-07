@@ -669,13 +669,16 @@ class TrainDataProcessor(BaseModel):
             datasets,
         ) in local_datasets_not_found.items():  # pragma: no cover
             for d in datasets:
-                if not isinstance(d, DatasetConfig):
-                    # Benchmark datasets have no registry identifiers; their file comes from
-                    # their prepare_script (`gym eval prepare`), not a download.
+                prepare_script = getattr(d, "prepare_script", None)
+                if prepare_script is not None:
+                    # Locally prepared datasets have no registry identifiers; their file comes
+                    # from their prepare_script (`gym eval prepare`), not a download.
                     raise ValueError(
-                        f"Benchmark dataset {d.name!r} ({d.jsonl_fpath}) is missing on disk. Run "
-                        f"`gym eval prepare` (its prepare_script is {d.prepare_script}) before collating."
+                        f"Dataset {d.name!r} ({d.jsonl_fpath}) is missing on disk. Run "
+                        f"`gym eval prepare` (its prepare_script is {prepare_script}) before collating."
                     )
+                if not isinstance(d, DatasetConfig):
+                    raise ValueError(f"Benchmark dataset {d.name!r} has no prepare_script")
                 if d.gitlab_identifier and d.huggingface_identifier:
                     backend = config.data_source
                 elif not d.gitlab_identifier:
@@ -891,8 +894,13 @@ class TrainDataProcessor(BaseModel):
                 aggregate_metrics_dict = aggregate_metrics.model_dump_for_output()
                 # Agent and taskset select routing, not source data. Exclude both so taskset
                 # and flat declarations of the same file can share its metrics sidecar.
+                excluded_dataset_fields = {"agent", "taskset"}
+                if isinstance(d, DatasetConfig):
+                    # Preparation controls how a local source file is produced; they are not
+                    # properties of the rows and defaults must not churn existing sidecars.
+                    excluded_dataset_fields.update({"prepare_script", "prepare_dependencies"})
                 aggregate_metrics_dict = (
-                    d.model_dump(mode="json", exclude={"agent", "taskset"}) | aggregate_metrics_dict
+                    d.model_dump(mode="json", exclude=excluded_dataset_fields) | aggregate_metrics_dict
                 )
 
                 data_fpath = Path(d.jsonl_fpath)

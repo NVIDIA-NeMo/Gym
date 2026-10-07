@@ -17,6 +17,7 @@ DATA_DIR = ENVIRONMENT_DIR / "data"
 TASKS_FPATH = DATA_DIR / "nemo_user_sim.jsonl"
 PREPARE_REQUIREMENTS_FPATH = ENVIRONMENT_DIR / "requirements.txt"
 USERSIM_REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
+NEMOTRON_PERSONAS_VERSION = "0.0.2"
 _MATERIALIZE_SCRIPT = """
 import json
 import sys
@@ -54,14 +55,14 @@ def _task_id(row: dict[str, object]) -> str:
     return task_id
 
 
-def _models_config(*, policy_model_name: str, support_model_name: str) -> str:
+def _models_config() -> str:
     model_names = {
-        "user_model": policy_model_name,
-        "assistant_model": policy_model_name,
-        "api_response_model": support_model_name,
-        "judge_model": support_model_name,
-        "summary_model": support_model_name,
-        "evaluator_model": support_model_name,
+        "user_model": "policy_model",
+        "assistant_model": "policy_model",
+        "api_response_model": "support_model",
+        "judge_model": "support_model",
+        "summary_model": "support_model",
+        "evaluator_model": "support_model",
     }
     specs = ",\n".join(
         f'  {{ alias = {json.dumps(alias)}, model = {json.dumps(model)}, provider = "openai" }}'
@@ -70,11 +71,40 @@ def _models_config(*, policy_model_name: str, support_model_name: str) -> str:
     return f"models = [\n{specs},\n]\n"
 
 
+def _validate_provenance(row: dict[str, object]) -> None:
+    provenance = row.get("usersim_provenance")
+    if isinstance(provenance, str):
+        provenance = json.loads(provenance)
+    if not isinstance(provenance, dict):
+        raise ValueError("Each UserSim row must contain usersim_provenance")
+    if provenance.get("code_sha") != USERSIM_REVISION:
+        raise ValueError("Generated UserSim row does not record the pinned UserSim revision")
+    if provenance.get("nemotron_personas_version") != NEMOTRON_PERSONAS_VERSION:
+        raise ValueError("Generated UserSim row does not record the pinned Nemotron-Personas version")
+
+
+def _write_tasks(tasks: list[dict[str, object]]) -> None:
+    temporary_tasks: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=f".{TASKS_FPATH.name}.",
+            suffix=".tmp",
+            dir=TASKS_FPATH.parent,
+            delete=False,
+        ) as output:
+            temporary_tasks = Path(output.name)
+            output.write("".join(f"{json.dumps(row, separators=(',', ':'))}\n" for row in tasks))
+        os.replace(temporary_tasks, TASKS_FPATH)
+    finally:
+        if temporary_tasks is not None:
+            temporary_tasks.unlink(missing_ok=True)
+
+
 def prepare(
     locale: str = "en_US",
     random_seed: int = 1042,
-    policy_model_name: str = "policy_model",
-    support_model_name: str = "support_model",
     uv_executable: str = "uv",
     timeout_seconds: float = 3_600,
 ) -> Path:
@@ -86,9 +116,7 @@ def prepare(
     with tempfile.TemporaryDirectory(prefix="usersim-materialize-") as working_dir:
         resolved_path = Path(working_dir) / "resolved.jsonl"
         models_path = Path(working_dir) / "models.toml"
-        models_path.write_text(
-            _models_config(policy_model_name=policy_model_name, support_model_name=support_model_name)
-        )
+        models_path.write_text(_models_config())
         command = [
             executable,
             "run",
@@ -113,7 +141,11 @@ def prepare(
                 capture_output=True,
                 text=True,
                 errors="replace",
-                env={**os.environ, "USERSIM_CODE_SHA": USERSIM_REVISION},
+                env={
+                    **os.environ,
+                    "USERSIM_CODE_SHA": USERSIM_REVISION,
+                    "USERSIM_NEMOTRON_PERSONAS_VERSION": NEMOTRON_PERSONAS_VERSION,
+                },
                 timeout=timeout_seconds,
                 cwd=working_dir,
             )
@@ -125,6 +157,7 @@ def prepare(
     tasks = []
     task_ids: set[str] = set()
     for row in resolved_rows:
+        _validate_provenance(row)
         usersim_config = row.get("usersim_config")
         if isinstance(usersim_config, dict):
             usersim_config.pop("assets_dir", None)
@@ -133,9 +166,7 @@ def prepare(
             raise ValueError(f"Duplicate UserSim trajectory_id: {task_id}")
         task_ids.add(task_id)
         tasks.append({"task_id": task_id, "resolved_row": row})
-    temporary_tasks = TASKS_FPATH.with_suffix(".jsonl.tmp")
-    temporary_tasks.write_text("".join(f"{json.dumps(row, separators=(',', ':'))}\n" for row in tasks))
-    os.replace(temporary_tasks, TASKS_FPATH)
+    _write_tasks(tasks)
     print(f"Prepared {len(tasks)} NeMo UserSim tasks at {TASKS_FPATH}")
     return TASKS_FPATH.absolute()
 

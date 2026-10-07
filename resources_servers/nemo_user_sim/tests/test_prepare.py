@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -11,9 +12,11 @@ from omegaconf import OmegaConf
 from environments.nemo_user_sim import prepare as prepare_module
 from nemo_gym.config_types import DatasetConfig
 from nemo_gym.task_materialization import materialize_task
+from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig
 from resources_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 REGISTERED_PROBES = (
     "financial_services",
     "general_educational",
@@ -33,7 +36,7 @@ REGISTERED_PROBES = (
 
 
 def test_environment_config_declares_generated_validation_split() -> None:
-    config = OmegaConf.load("environments/nemo_user_sim/config.yaml")
+    config = OmegaConf.load(prepare_module.ENVIRONMENT_DIR / "config.yaml")
     datasets = config.nemo_user_sim_resources.resources_servers.nemo_user_sim.datasets
     [example] = [dataset for dataset in datasets if dataset.type == "example"]
     assert example.name == "example"
@@ -42,7 +45,33 @@ def test_environment_config_declares_generated_validation_split() -> None:
     validation = DatasetConfig.model_validate(raw_validation)
     assert validation.name == "nemo_user_sim"
     assert validation.jsonl_fpath == "environments/nemo_user_sim/data/nemo_user_sim.jsonl"
+    assert validation.prepare_script == Path("environments/nemo_user_sim/prepare.py")
     assert validation.taskset == "nemo_user_sim:validation"
+
+
+def test_usersim_revision_pins_are_aligned() -> None:
+    requirement_paths = (
+        prepare_module.PREPARE_REQUIREMENTS_FPATH,
+        REPOSITORY_ROOT / "environment_servers/nemo_user_sim/requirements.txt",
+        REPOSITORY_ROOT / "resources_servers/nemo_user_sim/requirements.txt",
+    )
+    requirement_revisions = []
+    for path in requirement_paths:
+        match = re.search(r"UserSim\.git@([0-9a-f]{40})", path.read_text())
+        assert match is not None, f"Missing UserSim revision in {path}"
+        requirement_revisions.append(match.group(1))
+
+    resources_config = OmegaConf.load(REPOSITORY_ROOT / "resources_servers/nemo_user_sim/configs/nemo_user_sim.yaml")
+    configured_revision = resources_config.nemo_user_sim_resources.resources_servers.nemo_user_sim.usersim_revision
+    server_default = UserSimResourcesServerConfig.model_fields["usersim_revision"].default
+    assert set(requirement_revisions + [prepare_module.USERSIM_REVISION, configured_revision, server_default]) == {
+        prepare_module.USERSIM_REVISION
+    }
+    configured_personas_version = (
+        resources_config.nemo_user_sim_resources.resources_servers.nemo_user_sim.nemotron_personas_version
+    )
+    personas_version_default = UserSimResourcesServerConfig.model_fields["nemotron_personas_version"].default
+    assert configured_personas_version == personas_version_default == prepare_module.NEMOTRON_PERSONAS_VERSION
 
 
 def test_probe_seed_and_task_id_are_stable() -> None:
@@ -51,6 +80,22 @@ def test_probe_seed_and_task_id_are_stable() -> None:
     assert prepare_module._task_id({"trajectory_id": "usersim-financial_services"}) == "usersim-financial_services"
     with pytest.raises(ValueError, match="non-empty string trajectory_id"):
         prepare_module._task_id({"trajectory_id": ""})
+
+
+def test_write_tasks_removes_temporary_file_after_replace_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks_path = tmp_path / "nemo_user_sim.jsonl"
+    monkeypatch.setattr(prepare_module, "TASKS_FPATH", tasks_path)
+
+    def fail_replace(source: Path, destination: Path) -> None:
+        raise OSError(f"Cannot replace {destination} with {source}")
+
+    monkeypatch.setattr(prepare_module.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="Cannot replace"):
+        prepare_module._write_tasks([{"task_id": "example", "resolved_row": {}}])
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_prepare_materializes_every_registered_probe_with_usersim(
@@ -76,7 +121,10 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
                         "persona": {"source": "usersim"},
                         "theme": {"source": "usersim"},
                         "trajectory_id": f"usersim-{probe}",
-                        "usersim_provenance": {"code_sha": prepare_module.USERSIM_REVISION},
+                        "usersim_provenance": {
+                            "code_sha": prepare_module.USERSIM_REVISION,
+                            "nemotron_personas_version": prepare_module.NEMOTRON_PERSONAS_VERSION,
+                        },
                         "usersim_config": {
                             "assets_dir": f"/tmp/usersim-assets-{index}",
                             "random_seed": 1042 + index,
@@ -129,4 +177,5 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
     assert 'alias = "assistant_model", model = "policy_model"' in model_configs[0]
     assert 'alias = "judge_model", model = "support_model"' in model_configs[0]
     assert kwargs["env"]["USERSIM_CODE_SHA"] == prepare_module.USERSIM_REVISION
+    assert kwargs["env"]["USERSIM_NEMOTRON_PERSONAS_VERSION"] == prepare_module.NEMOTRON_PERSONAS_VERSION
     assert Path(str(kwargs["cwd"])).name.startswith("usersim-materialize-")

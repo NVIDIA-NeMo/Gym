@@ -49,6 +49,7 @@ from nemo_gym.config_types import (
     BenchmarkDatasetConfig,
     ConfigError,
     ConfigPathNotFoundError,
+    DatasetConfig,
     ServerInstanceConfig,
 )
 from nemo_gym.discovery import read_config_metadata
@@ -218,9 +219,11 @@ def _multiprocess_benchmark_prepare_fn(args):
 
     module = importlib.import_module(prepare_module_path)
     output_fpath = module.prepare(**prepare_script_args)
-    if output_fpath.absolute() != benchmark_config.dataset.jsonl_fpath.absolute():
+    expected_output_fpath = Path(benchmark_config.dataset.jsonl_fpath).absolute()
+    if output_fpath.absolute() != expected_output_fpath:
         raise ConfigError(
-            f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
+            f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. "
+            f"Instead got {output_fpath=} jsonl_fpath={expected_output_fpath}"
         )
     print(f"Benchmark data prepared at: {output_fpath}")
 
@@ -278,12 +281,14 @@ def prepare_benchmark() -> None:
         inspected_server_instances.append(server_instance_name)
         inner_server_config = get_first_server_config_dict(global_config_dict, server_instance_name)
 
-        datasets: List[BenchmarkDatasetConfig] = []
+        datasets: List[BenchmarkDatasetConfig | DatasetConfig] = []
         for dataset in inner_server_config.get("datasets") or []:
-            if dataset["type"] != "benchmark":
+            if dataset["type"] == "benchmark":
+                datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
+            elif dataset.get("prepare_script"):
+                datasets.append(DatasetConfig.model_validate(dataset))
+            else:
                 continue
-
-            datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
 
         if len(datasets) < 1:
             continue
@@ -299,7 +304,10 @@ def prepare_benchmark() -> None:
 
         try:
             agent_name = resolve_dataset_agent(
-                global_config_dict, str(server_instance_name), pin=dataset.agent, taskset=dataset.taskset
+                global_config_dict,
+                str(server_instance_name),
+                pin=getattr(dataset, "agent", None),
+                taskset=dataset.taskset,
             )
         except ConfigError as e:
             raise ConfigError(f"Benchmark dataset {dataset.name!r}: {e}") from e
@@ -333,7 +341,10 @@ def prepare_benchmark() -> None:
     validated: List[Tuple[BenchmarkConfig, str]] = []
     already_prepared: List[BenchmarkConfig] = []
     for benchmark_config in benchmarks_dict.values():
-        prepare_script_path = benchmark_config.dataset.prepare_script
+        prepare_script = benchmark_config.dataset.prepare_script
+        if prepare_script is None:
+            raise ConfigError(f"Dataset {benchmark_config.name!r} has no prepare_script")
+        prepare_script_path = Path(prepare_script)
         if not prepare_script_path.exists():
             prepare_script_missing.append(benchmark_config)
             continue
@@ -345,7 +356,7 @@ def prepare_benchmark() -> None:
             prepare_function_missing.append(benchmark_config)
             continue
 
-        is_already_prepared = benchmark_config.dataset.jsonl_fpath.exists()
+        is_already_prepared = Path(benchmark_config.dataset.jsonl_fpath).exists()
         if prepare_benchmark_config.use_cached_prepared_benchmarks and is_already_prepared:
             is_current = getattr(module, "is_prepared_data_current", None)
             if callable(is_current) and not is_current(benchmark_config.dataset.jsonl_fpath):
