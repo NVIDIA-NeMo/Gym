@@ -322,3 +322,115 @@ func TestSidecarRotationLetsInFlightRequestsFinish(t *testing.T) {
 		t.Fatal("in-flight request did not finish after rotation")
 	}
 }
+
+// When the port is already taken the sidecar must exit without writing the
+// ready file, or the launcher would route traffic to whatever holds the port.
+func TestSidecarWritesNoReadyFileWhenThePortIsTaken(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "h2-ping-sidecar-test")
+	if out, err := exec.Command("go", "build", "-buildvcs=false", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	ready := filepath.Join(t.TempDir(), "ready")
+	cmd := exec.Command(bin, "-listen", taken.Addr().String(), "-upstream", "https://127.0.0.1:1", "-ready-file", ready)
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("started on a port that was already in use:\n%s", out)
+	}
+	if _, err := os.Stat(ready); !os.IsNotExist(err) {
+		t.Fatalf("ready file present after a failed bind: %v", err)
+	}
+}
+
+// idleRelay forwards TCP connections to target and closes a connection once no
+// byte has crossed it in either direction for idle, as Global Accelerator does
+// after 340s. TLS passes through it untouched.
+func idleRelay(t *testing.T, target string, idle time.Duration) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			client, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			upstream, err := net.Dial("tcp", target)
+			if err != nil {
+				_ = client.Close()
+				continue
+			}
+			activity := make(chan struct{}, 1)
+			pipe := func(dst, src net.Conn) {
+				buf := make([]byte, 32<<10)
+				for {
+					n, err := src.Read(buf)
+					if n > 0 {
+						select {
+						case activity <- struct{}{}:
+						default:
+						}
+						if _, err := dst.Write(buf[:n]); err != nil {
+							return
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}
+			go pipe(upstream, client)
+			go pipe(client, upstream)
+			go func() {
+				defer client.Close()
+				defer upstream.Close()
+				for {
+					select {
+					case <-activity:
+					case <-time.After(idle):
+						return
+					}
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// A response that takes longer than the upstream's idle timeout to start only
+// arrives because the sidecar's PINGs keep the connection busy meanwhile.
+func TestSidecarPingsKeepAnIdleConnectionAlive(t *testing.T) {
+	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(600 * time.Millisecond)
+		_, _ = io.WriteString(w, "done")
+	}))
+	origin.EnableHTTP2 = true
+	origin.StartTLS()
+	defer origin.Close()
+	relay := idleRelay(t, origin.Listener.Addr().String(), 200*time.Millisecond)
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	send := func(pingInterval string) (int, string) {
+		addr := startSidecar(t, "https://"+relay, "-ping-interval", pingInterval)
+		resp, err := client.Post("http://"+addr+"/slow", "text/plain", strings.NewReader("prompt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+	// The control proves the relay enforces the idle limit: without PINGs it drops the request.
+	if code, _ := send("0s"); code != http.StatusBadGateway {
+		t.Fatalf("without PINGs: status %d, want 502 from the dropped connection", code)
+	}
+	if code, body := send("50ms"); code != http.StatusOK || body != "done" {
+		t.Fatalf("with a 50ms ping interval: status %d body %q, want 200 %q", code, body, "done")
+	}
+}
