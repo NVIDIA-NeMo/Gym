@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from responses_api_agents.stirrup_agent import task_distribution as td
-from responses_api_agents.stirrup_agent.task_distribution import (
+from resources_servers.gdpval import task_distribution as td
+from resources_servers.gdpval.task_distribution import (
     MISSING_VALUE,
     build_distribution,
     build_distribution_from_dataset,

@@ -199,13 +199,13 @@ class TestMediaExtensionSetsAgree:
         assert media_keys == expected
 
     def test_rubric_emitter_covers_every_media_ext(self) -> None:
-        from responses_api_agents.stirrup_agent.file_reader import MIME_TYPES
+        from resources_servers.gdpval.file_reader import MIME_TYPES
 
         missing = (AUDIO_EXTS | VIDEO_EXTS) - set(MIME_TYPES)
         assert not missing, f"file_reader.MIME_TYPES is missing: {sorted(missing)}"
 
     def test_rubric_emitter_reuses_canonical_sets(self) -> None:
-        from responses_api_agents.stirrup_agent import file_reader
+        from resources_servers.gdpval import file_reader
 
         assert file_reader.AUDIO_EXTS is AUDIO_EXTS
         assert file_reader.VIDEO_EXTS is VIDEO_EXTS

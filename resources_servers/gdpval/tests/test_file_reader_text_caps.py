@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from responses_api_agents.stirrup_agent.file_reader import (
+from resources_servers.gdpval.file_reader import (
     MAX_TEXT_BLOCK_CHARS,
     MAX_TOTAL_CHARS,
     MAX_TOTAL_TEXT_BLOCK_CHARS,
@@ -72,7 +72,7 @@ def test_hard_budget_counts_headers_and_truncation_markers(tmp_path: Path):
 
 
 def test_hard_budget_counts_pdf_extractor_text(monkeypatch, tmp_path: Path):
-    import responses_api_agents.stirrup_agent.file_reader as file_reader
+    import resources_servers.gdpval.file_reader as file_reader
 
     pdf = tmp_path / "report.pdf"
     pdf.write_bytes(b"fake pdf")
@@ -169,7 +169,7 @@ def test_a_single_file_may_use_the_per_file_cap(tmp_path: Path):
 
 
 def test_text_paths_do_not_use_unbounded_path_read_text(monkeypatch, tmp_path: Path):
-    import responses_api_agents.stirrup_agent.file_reader as file_reader
+    import resources_servers.gdpval.file_reader as file_reader
 
     (tmp_path / "large.txt").write_text("prefix evidence\n" + "X" * 1_000_000)
 
@@ -183,7 +183,7 @@ def test_text_paths_do_not_use_unbounded_path_read_text(monkeypatch, tmp_path: P
 
 
 def test_rubric_attachment_budget_rejects_before_read(monkeypatch, tmp_path: Path):
-    import responses_api_agents.stirrup_agent.file_reader as file_reader
+    import resources_servers.gdpval.file_reader as file_reader
 
     (tmp_path / "Plan.docx").write_bytes(b"source")
     sidecar = tmp_path / "Plan.docx.pdf"
@@ -205,7 +205,7 @@ def test_rubric_attachment_budget_rejects_before_read(monkeypatch, tmp_path: Pat
 
 
 def test_rubric_attachment_budget_is_aggregate(monkeypatch, tmp_path: Path):
-    import responses_api_agents.stirrup_agent.file_reader as file_reader
+    import resources_servers.gdpval.file_reader as file_reader
 
     (tmp_path / "a.png").write_bytes(b"AAAA")
     (tmp_path / "b.png").write_bytes(b"BBBB")
@@ -220,7 +220,7 @@ def test_rubric_attachment_budget_is_aggregate(monkeypatch, tmp_path: Path):
 
 
 def test_pdf_source_size_does_not_consume_rendered_page_budget(monkeypatch, tmp_path: Path):
-    import responses_api_agents.stirrup_agent.file_reader as file_reader
+    import resources_servers.gdpval.file_reader as file_reader
 
     pdf = tmp_path / "compressed.pdf"
     pdf.write_bytes(b"source-is-larger-than-output-budget")

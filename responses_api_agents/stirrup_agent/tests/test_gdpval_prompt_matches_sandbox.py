@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 
-_CONTAINERS = Path(__file__).resolve().parents[1] / "containers"
+_CONTAINERS = Path(__file__).resolve().parents[3] / "resources_servers" / "gdpval" / "containers"
 _PROMPTS = Path(__file__).resolve().parents[1] / "prompts"
 _PY_MANIFEST = _CONTAINERS / "gdpval_aa_v2_python_requirements.txt"
 

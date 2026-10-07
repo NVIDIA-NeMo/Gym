@@ -36,16 +36,16 @@ Usage::
     # Full defaults: the prepared GDPVal dataset (220 tasks)
     # (benchmarks/gdpval/data/gdpval_benchmark.jsonl) grouped by ``occupation``.
     # Without --output the distribution is printed to stdout.
-    python -m responses_api_agents.stirrup_agent.task_distribution \
+    python -m resources_servers.gdpval.task_distribution \
         --output occupation_distribution.json
 
     # --dataset defaults to the prepared GDPVal dataset when omitted.
-    python -m responses_api_agents.stirrup_agent.task_distribution \
+    python -m resources_servers.gdpval.task_distribution \
         --column sector \
         --output sector_distribution.json
 
     # Composite key over multiple columns, explicit dataset:
-    python -m responses_api_agents.stirrup_agent.task_distribution \
+    python -m resources_servers.gdpval.task_distribution \
         --dataset data/gdpval.jsonl --column sector --column occupation \
         --output sector_occupation_distribution.json
 """
@@ -69,13 +69,13 @@ DEFAULT_KEY_SEPARATOR = " | "
 # Column grouped on when ``--column`` is not specified.
 DEFAULT_COLUMN = "occupation"
 
-# Repo root: this file is responses_api_agents/stirrup_agent/task_distribution.py.
+# Repo root: this file is resources_servers/gdpval/task_distribution.py.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Candidate GDPVal dataset locations, in priority order. The first that exists
 # is used when ``--dataset`` is not given. The prepared benchmark JSONL (written
-# by ``gym eval prepare --benchmark gdpval``) is preferred; the agent-local
-# ``data/gdpval.jsonl`` (written by setup_scripts/gdpval.sh) is a fallback.
+# by ``gym eval prepare --benchmark gdpval``) is preferred; ``data/gdpval.jsonl``
+# next to this module is a fallback.
 # The synthetic ``example.jsonl`` is intentionally *not* a default so the
 # command never silently computes a distribution over a single fake task.
 DEFAULT_DATASET_CANDIDATES = (
@@ -90,7 +90,7 @@ def resolve_default_dataset(
     """Return the first existing default GDPVal dataset, or ``None``.
 
     Used when the caller does not pass an explicit ``--dataset``; prefers the
-    prepared benchmark JSONL and falls back to agent-local datasets.
+    prepared benchmark JSONL and falls back to ``data/gdpval.jsonl`` next to this module.
     """
     if candidates is None:
         candidates = DEFAULT_DATASET_CANDIDATES
@@ -323,7 +323,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Path to the input JSONL dataset (one task per line). If omitted, "
             "defaults to the prepared GDPVal dataset "
             "(benchmarks/gdpval/data/gdpval_benchmark.jsonl), falling back to "
-            "the agent-local data/gdpval.jsonl or data/example.jsonl."
+            "resources_servers/gdpval/data/gdpval.jsonl."
         ),
     )
     parser.add_argument(

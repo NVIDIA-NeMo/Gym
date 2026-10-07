@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-import responses_api_agents.stirrup_agent.file_reader as file_reader
-from responses_api_agents.stirrup_agent.file_reader import (
+import resources_servers.gdpval.file_reader as file_reader
+from resources_servers.gdpval.file_reader import (
     IGNORE_FILES,
     convert_deliverables_to_content_blocks,
     is_deliverable,

@@ -1,6 +1,5 @@
 -e nemo-gym[dev] @ ../../
-# Deliverable-processing deps (scoring.py + preconvert.py). Stirrup agent's
-# requirements.txt no longer carries these — reward work moved here.
+# Deliverable-processing deps (scoring.py + preconvert.py + file_reader.py).
 jinja2>=3.1
 python-docx>=1.1
 python-pptx>=1.0
