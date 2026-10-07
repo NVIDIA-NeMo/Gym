@@ -82,6 +82,29 @@ def test_probe_seed_and_task_id_are_stable() -> None:
         prepare_module._task_id({"trajectory_id": ""})
 
 
+def test_validate_persona_asset_requires_pinned_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(prepare_module, "PERSONA_DATASETS_DIR", tmp_path)
+    with pytest.raises(
+        RuntimeError,
+        match=re.escape(prepare_module.NEMOTRON_PERSONAS_DOWNLOAD_COMMAND),
+    ):
+        prepare_module._validate_persona_asset("en_US")
+
+    asset_path = tmp_path / "en_US.parquet"
+    asset_path.write_bytes(b"wrong asset")
+    with pytest.raises(RuntimeError, match="expected"):
+        prepare_module._validate_persona_asset("en_US")
+
+    expected_asset = b"pinned asset"
+    asset_path.write_bytes(expected_asset)
+    monkeypatch.setattr(
+        prepare_module,
+        "NEMOTRON_PERSONAS_SHA256",
+        prepare_module.hashlib.sha256(expected_asset).hexdigest(),
+    )
+    prepare_module._validate_persona_asset("en_US")
+
+
 def test_write_tasks_removes_temporary_file_after_replace_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -103,6 +126,7 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
 ) -> None:
     tasks_path = tmp_path / "nemo_user_sim.jsonl"
     monkeypatch.setattr(prepare_module, "TASKS_FPATH", tasks_path)
+    monkeypatch.setattr(prepare_module, "_validate_persona_asset", lambda locale: None)
     monkeypatch.setattr(prepare_module.shutil, "which", lambda executable: f"/bin/{executable}")
     calls: list[tuple[list[str], dict[str, object]]] = []
     model_configs: list[str] = []
@@ -151,6 +175,11 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
     assert all(
         row["resolved_row"]["usersim_provenance"]["code_sha"] == prepare_module.USERSIM_REVISION for row in rows
     )
+    assert all(
+        row["resolved_row"]["usersim_provenance"]["nemotron_personas_version"]
+        == prepare_module.NEMOTRON_PERSONAS_VERSION
+        for row in rows
+    )
     assert all("assets_dir" not in row["resolved_row"]["usersim_config"] for row in rows)
     for index, row in enumerate(rows):
         task = materialize_task(row, taskset="nemo_user_sim:validation", task_index=index)
@@ -174,8 +203,8 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
         "-c",
     ]
     assert command[10] == str(prepare_module.ENVIRONMENT_DIR.parents[1])
-    assert 'alias = "assistant_model", model = "policy_model"' in model_configs[0]
-    assert 'alias = "judge_model", model = "support_model"' in model_configs[0]
+    assert 'alias = "assistant_model", model = "assistant_model"' in model_configs[0]
+    assert 'alias = "judge_model", model = "judge_model"' in model_configs[0]
     assert kwargs["env"]["USERSIM_CODE_SHA"] == prepare_module.USERSIM_REVISION
     assert kwargs["env"]["USERSIM_NEMOTRON_PERSONAS_VERSION"] == prepare_module.NEMOTRON_PERSONAS_VERSION
     assert Path(str(kwargs["cwd"])).name.startswith("usersim-materialize-")

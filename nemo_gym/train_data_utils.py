@@ -659,15 +659,18 @@ class TrainDataProcessor(BaseModel):
         if not local_datasets_not_found:
             return
 
+        global_config = get_global_config_dict()
+        config_paths = global_config.get("config_paths") or []
+        config_path = config_paths[-1] if config_paths else "<config path>"
+        prepare_command = f"gym eval prepare --config {config_path}"
+
         hf_backend_ok, hf_error_msg = validate_backend_credentials("huggingface")
         gitlab_backend_ok, gitlab_error_msg = validate_backend_credentials("gitlab")
-
-        global_config = get_global_config_dict()
 
         for (
             server_name,
             datasets,
-        ) in local_datasets_not_found.items():  # pragma: no cover
+        ) in local_datasets_not_found.items():
             for d in datasets:
                 prepare_script = getattr(d, "prepare_script", None)
                 if prepare_script is not None:
@@ -675,7 +678,7 @@ class TrainDataProcessor(BaseModel):
                     # from their prepare_script (`gym eval prepare`), not a download.
                     raise ValueError(
                         f"Dataset {d.name!r} ({d.jsonl_fpath}) is missing on disk. Run "
-                        f"`gym eval prepare` (its prepare_script is {prepare_script}) before collating."
+                        f"`{prepare_command}` (its prepare_script is {prepare_script}) before collating."
                     )
                 if not isinstance(d, DatasetConfig):
                     raise ValueError(f"Benchmark dataset {d.name!r} has no prepare_script")

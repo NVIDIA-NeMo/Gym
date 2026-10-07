@@ -542,6 +542,53 @@ class TestPrepareBenchmark:
 
         mock_module.prepare.assert_called_once_with()
 
+    def test_prepares_benchmark_and_validation_dataset_from_same_server(self, tmp_path: Path) -> None:
+        benchmark_script = tmp_path / "prepare_benchmark.py"
+        validation_script = tmp_path / "prepare_validation.py"
+        benchmark_script.write_text("")
+        validation_script.write_text("")
+        benchmark_output = tmp_path / "benchmark.jsonl"
+        validation_output = tmp_path / "validation.jsonl"
+        config = {
+            "dummy_agent": {
+                "responses_api_agents": {
+                    "simple_agent": {
+                        "datasets": [
+                            {
+                                "name": "dummy_benchmark",
+                                "type": "benchmark",
+                                "jsonl_fpath": str(benchmark_output),
+                                "prepare_script": str(benchmark_script),
+                            },
+                            {
+                                "name": "dummy_validation",
+                                "type": "validation",
+                                "jsonl_fpath": str(validation_output),
+                                "prepare_script": str(validation_script),
+                                "license": "Apache 2.0",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+        benchmark_module = MagicMock()
+        benchmark_module.prepare.return_value = benchmark_output
+        validation_module = MagicMock()
+        validation_module.prepare.return_value = validation_output
+
+        def import_prepare(module_path: str) -> MagicMock:
+            return validation_module if module_path.endswith("prepare_validation") else benchmark_module
+
+        with (
+            patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
+            patch("nemo_gym.cli.eval.importlib.import_module", side_effect=import_prepare),
+        ):
+            prepare_benchmark()
+
+        benchmark_module.prepare.assert_called_once_with()
+        validation_module.prepare.assert_called_once_with()
+
     def test_forwards_prepare_script_args(self, tmp_path: Path) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)
 
@@ -586,7 +633,7 @@ class TestPrepareBenchmark:
                 prepare_benchmark()
         assert exc_info.value.code == 1
         out = " ".join(capsys.readouterr().out.split())
-        assert "The following benchmarks are missing a valid prepare script" in out
+        assert "The following datasets are missing a valid prepare script" in out
 
     def test_missing_prepare_function(self, tmp_path: Path, capsys) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)
@@ -617,7 +664,7 @@ class TestPrepareBenchmark:
                 prepare_benchmark()
         assert exc_info.value.code == 1
         out = " ".join(capsys.readouterr().out.split())
-        assert "No benchmark config found" in out
+        assert "No preparable dataset config found" in out
 
     def test_no_benchmark_dataset_reports_inspected_instances(self, tmp_path: Path, capsys) -> None:
         # A server instance is present but declares no `benchmark` dataset; the error should name it

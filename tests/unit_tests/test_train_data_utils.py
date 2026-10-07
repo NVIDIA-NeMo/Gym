@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import re
 import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, mock_open
@@ -404,6 +405,49 @@ class TestLoadDatasets:
                         server_type_config_dict=DictConfig(server_type_config_dict),
                         responses_api_agents=server_type_config_dict["responses_api_agents"],
                     ),
+                ],
+            )
+
+    def test_missing_prepared_dataset_reports_configured_prepare_command(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "environment.yaml"
+        monkeypatch.setattr(
+            nemo_gym.train_data_utils,
+            "get_global_config_dict",
+            lambda: DictConfig({"config_paths": [str(config_path)]}),
+        )
+        server_type_config_dict = {
+            "responses_api_agents": {
+                "simple_agent": {
+                    "host": "127.0.0.1",
+                    "port": 12345,
+                    "entrypoint": "app.py",
+                    "datasets": [
+                        {
+                            "name": "prepared_validation",
+                            "type": "validation",
+                            "jsonl_fpath": str(tmp_path / "missing.jsonl"),
+                            "prepare_script": str(tmp_path / "prepare.py"),
+                            "license": "Apache 2.0",
+                        }
+                    ],
+                }
+            }
+        }
+
+        with raises(
+            ValueError,
+            match=rf"gym eval prepare --config {re.escape(str(config_path))}",
+        ):
+            TrainDataProcessor().load_datasets(
+                config=TrainDataProcessorConfig(output_dirpath="", mode="train_preparation", should_download=True),
+                server_instance_configs=[
+                    ResponsesAPIAgentServerInstanceConfig(
+                        name="prepared_validation_agent",
+                        server_type_config_dict=DictConfig(server_type_config_dict),
+                        responses_api_agents=server_type_config_dict["responses_api_agents"],
+                    )
                 ],
             )
 

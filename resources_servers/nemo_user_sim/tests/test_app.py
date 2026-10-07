@@ -34,10 +34,11 @@ from resources_servers.nemo_user_sim.episode_contracts import (
 
 
 REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
+PERSONAS_VERSION = "0.0.2"
 
 
 def _resolved_row(probe_type: str = "tool_calling", *, provenance_as_text: bool = True) -> dict:
-    provenance = {"code_sha": REVISION, "bank_version": {}}
+    provenance = {"code_sha": REVISION, "nemotron_personas_version": "synthetic", "bank_version": {}}
     return {
         "persona": {"first_name": "Avery"},
         "probe_type": probe_type,
@@ -158,7 +159,7 @@ def _install_evaluator_scripts(
 @pytest.mark.parametrize("as_text", [True, False])
 def test_resolved_row_accepts_json_and_legacy_mapping_provenance(as_text: bool) -> None:
     row = _resolved_row(provenance_as_text=as_text)
-    _validate_resolved_row(row, expected_revision=REVISION)
+    _validate_resolved_row(row, expected_revision=REVISION, expected_personas_version=PERSONAS_VERSION)
     assert _decode_provenance(row["usersim_provenance"])["bank_version"] == {}
 
 
@@ -215,7 +216,7 @@ def test_resolved_row_rejects_invalid_provenance(provenance: object, message: st
     row = _resolved_row()
     row["usersim_provenance"] = provenance
     with pytest.raises(ValueError, match=message):
-        _validate_resolved_row(row, expected_revision=REVISION)
+        _validate_resolved_row(row, expected_revision=REVISION, expected_personas_version=PERSONAS_VERSION)
 
 
 @pytest.mark.asyncio
@@ -223,6 +224,7 @@ async def test_seed_requires_pinned_personas_version_for_validation_tasks() -> N
     server = _server()
     server.session_id_to_seed = {}
     row = _resolved_row(provenance_as_text=False)
+    row["usersim_provenance"]["nemotron_personas_version"] = None
 
     with pytest.raises(HTTPException, match="Nemotron-Personas version") as error:
         await server.seed_session(
@@ -235,6 +237,17 @@ async def test_seed_requires_pinned_personas_version_for_validation_tasks() -> N
     response = await server.seed_session(
         _request("pinned-personas-version"),
         _seed_body(row, taskset="nemo_user_sim:validation"),
+    )
+    assert response.resources_session_id == "resources-session-0"
+
+
+@pytest.mark.asyncio
+async def test_seed_accepts_synthetic_provenance_independent_of_taskset_name() -> None:
+    server = _server()
+    server.session_id_to_seed = {}
+    response = await server.seed_session(
+        _request("synthetic-validation"),
+        _seed_body(_resolved_row(), taskset="nemo_user_sim:validation"),
     )
     assert response.resources_session_id == "resources-session-0"
 

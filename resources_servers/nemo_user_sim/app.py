@@ -59,7 +59,6 @@ PROBE_SCORERS = {
     "tool_calling": "tool_use",
 }
 ASSISTANT_QUALITY_AXES = ("helpfulness", "accuracy", "coherence")
-EXAMPLE_TASKSET = "nemo_user_sim:example"
 logger = logging.getLogger(__name__)
 
 
@@ -195,9 +194,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
             _validate_resolved_row(
                 task.resolved_row,
                 expected_revision=self.config.usersim_revision,
-                expected_personas_version=(
-                    None if body.task_id.taskset == EXAMPLE_TASKSET else self.config.nemotron_personas_version
-                ),
+                expected_personas_version=self.config.nemotron_personas_version,
             )
         except (ValidationError, ValueError) as error:
             detail = error.errors() if isinstance(error, ValidationError) else str(error)
@@ -465,7 +462,7 @@ def _validate_resolved_row(
     row: Mapping[str, Any],
     *,
     expected_revision: str,
-    expected_personas_version: str | None = None,
+    expected_personas_version: str,
 ) -> None:
     required = ("persona", "probe_type", "conversation_language", "trajectory_id", "usersim_config")
     missing = [name for name in required if not row.get(name)]
@@ -479,10 +476,10 @@ def _validate_resolved_row(
             f"Resolved UserSim row revision {provenance.get('code_sha')!r} does not match {expected_revision!r}"
         )
     personas_version = provenance.get("nemotron_personas_version")
-    if expected_personas_version is not None and personas_version != expected_personas_version:
+    if personas_version != "synthetic" and personas_version != expected_personas_version:
         raise ValueError(
             f"Resolved UserSim row Nemotron-Personas version {personas_version!r} "
-            f"does not match {expected_personas_version!r}"
+            f"is neither 'synthetic' nor the configured version {expected_personas_version!r}"
         )
 
 

@@ -26,6 +26,7 @@ from pydantic import (
     Field,
     TypeAdapter,
     ValidationError,
+    model_serializer,
     model_validator,
 )
 from pydantic_core import PydanticUndefined
@@ -462,8 +463,8 @@ class DatasetConfig(BaseModel):
     name: str
     type: DatasetType
     jsonl_fpath: str
-    prepare_script: Optional[Path] = Field(default=None, exclude_if=lambda value: value is None)
-    prepare_dependencies: List[str] = Field(default_factory=list, exclude_if=lambda value: not value)
+    prepare_script: Optional[Path] = None
+    prepare_dependencies: List[str] = Field(default_factory=list)
     taskset: Optional[str] = Field(
         default=None,
         min_length=1,
@@ -490,6 +491,15 @@ class DatasetConfig(BaseModel):
             Literal["GNU General Public License v3.0"],
         ]
     ] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_preparation_fields(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if self.prepare_script is None:
+            data.pop("prepare_script", None)
+        if not self.prepare_dependencies:
+            data.pop("prepare_dependencies", None)
+        return data
 
     @model_validator(mode="after")
     def check_train_validation_sets(self) -> "DatasetConfig":

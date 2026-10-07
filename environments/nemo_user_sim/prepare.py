@@ -18,6 +18,11 @@ TASKS_FPATH = DATA_DIR / "nemo_user_sim.jsonl"
 PREPARE_REQUIREMENTS_FPATH = ENVIRONMENT_DIR / "requirements.txt"
 USERSIM_REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
 NEMOTRON_PERSONAS_VERSION = "0.0.2"
+NEMOTRON_PERSONAS_SHA256 = "0341192b00a376cf5643d98cb244e596529030fb3011694ca6ab381f149d3ae8"
+PERSONA_DATASETS_DIR = Path.home() / ".data-designer" / "managed-assets" / "datasets"
+NEMOTRON_PERSONAS_DOWNLOAD_COMMAND = (
+    'ngc registry resource download-version "nvidia/nemotron-personas/nemotron-personas-dataset-en_us:0.0.2"'
+)
 _MATERIALIZE_SCRIPT = """
 import json
 import sys
@@ -56,17 +61,20 @@ def _task_id(row: dict[str, object]) -> str:
 
 
 def _models_config() -> str:
-    model_names = {
-        "user_model": "policy_model",
-        "assistant_model": "policy_model",
-        "api_response_model": "support_model",
-        "judge_model": "support_model",
-        "summary_model": "support_model",
-        "evaluator_model": "support_model",
-    }
+    # Materialization has no runtime endpoint configuration. Keep UserSim's
+    # canonical aliases unresolved so model-specific probes select their
+    # provider-neutral form instead of inventing an identity for the policy.
+    model_names = (
+        "user_model",
+        "assistant_model",
+        "api_response_model",
+        "judge_model",
+        "summary_model",
+        "evaluator_model",
+    )
     specs = ",\n".join(
-        f'  {{ alias = {json.dumps(alias)}, model = {json.dumps(model)}, provider = "openai" }}'
-        for alias, model in model_names.items()
+        f'  {{ alias = {json.dumps(alias)}, model = {json.dumps(alias)}, provider = "openai" }}'
+        for alias in model_names
     )
     return f"models = [\n{specs},\n]\n"
 
@@ -81,6 +89,27 @@ def _validate_provenance(row: dict[str, object]) -> None:
         raise ValueError("Generated UserSim row does not record the pinned UserSim revision")
     if provenance.get("nemotron_personas_version") != NEMOTRON_PERSONAS_VERSION:
         raise ValueError("Generated UserSim row does not record the pinned Nemotron-Personas version")
+
+
+def _validate_persona_asset(locale: str) -> None:
+    if locale != "en_US":
+        raise ValueError("NeMo UserSim validation preparation currently supports only locale='en_US'")
+    asset_path = PERSONA_DATASETS_DIR / f"{locale}.parquet"
+    if asset_path.is_file():
+        digest = hashlib.sha256()
+        with asset_path.open("rb") as asset:
+            for chunk in iter(lambda: asset.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() == NEMOTRON_PERSONAS_SHA256:
+            return
+        problem = f"has SHA-256 {digest.hexdigest()}, expected {NEMOTRON_PERSONAS_SHA256}"
+    else:
+        problem = "is missing"
+    raise RuntimeError(
+        f"Pinned Nemotron-Personas {NEMOTRON_PERSONAS_VERSION} asset {asset_path} {problem}. "
+        f"Download the pinned resource with `{NEMOTRON_PERSONAS_DOWNLOAD_COMMAND}`, then place its "
+        f"`en_US.parquet` at {asset_path}."
+    )
 
 
 def _write_tasks(tasks: list[dict[str, object]]) -> None:
@@ -112,6 +141,7 @@ def prepare(
     executable = shutil.which(uv_executable)
     if executable is None:
         raise RuntimeError(f"{uv_executable!r} is not on PATH; it is required to prepare UserSim inputs.")
+    _validate_persona_asset(locale)
     TASKS_FPATH.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="usersim-materialize-") as working_dir:
         resolved_path = Path(working_dir) / "resolved.jsonl"

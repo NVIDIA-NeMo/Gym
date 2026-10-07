@@ -38,8 +38,16 @@ def test_examples_are_safe_task_rows_that_materialize_as_episode_requests() -> N
         )
         assert request.task.task_id.task_id == task_id
         expected_revision = UserSimResourcesServerConfig.model_fields["usersim_revision"].default
+        expected_personas_version = UserSimResourcesServerConfig.model_fields["nemotron_personas_version"].default
         assert isinstance(expected_revision, str)
-        _validate_resolved_row(request.task.task_input.resolved_row, expected_revision=expected_revision)
+        assert isinstance(expected_personas_version, str)
+        _validate_resolved_row(
+            request.task.task_input.resolved_row,
+            expected_revision=expected_revision,
+            expected_personas_version=expected_personas_version,
+        )
+        provenance = json.loads(resolved_row["usersim_provenance"])
+        assert provenance["nemotron_personas_version"] == "synthetic"
 
 
 def test_rollouts_match_examples_and_do_not_duplicate_episode_evidence() -> None:
@@ -61,3 +69,5 @@ def test_rollouts_match_examples_and_do_not_duplicate_episode_evidence() -> None
         verification = rollout["verification"]
         assert verification["usersim_result"] is None
         assert not {"invocations", "resolved_row", "usersim_result"} & verification["verifier_data"].keys()
+        provenance = json.loads(rollout["usersim_result"]["usersim_provenance"])
+        assert provenance["nemotron_personas_version"] == "synthetic"
