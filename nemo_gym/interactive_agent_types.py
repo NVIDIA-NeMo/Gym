@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 from nemo_gym.base_resources_server import ResourcesSeedSessionResponse
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
 
 
@@ -91,6 +91,7 @@ class InteractiveAgentCloseReceipt(BaseModel):
     agent_session_id: str
     agent_observations: AgentObservationBundle | None = None
     resources_cookies: dict[str, str] | None = None
+    trajectory: TrajectoryRecord | None = None
     activations: list[AgentActivationResponse] = Field(default_factory=list)
     cleanup_confirmed: bool = False
 
@@ -157,6 +158,16 @@ class InteractiveAgentResult(SingleAgentTurnResult):
     ng_activations: list[AgentActivationResponse] = Field(default_factory=list)
     ng_steps: list[ResourcesStepResponse] = Field(default_factory=list)
     ng_agent_close: InteractiveAgentCloseReceipt | None = None
+    ng_trajectory: TrajectoryRecord | None = None
+
+
+class InteractiveDependencyError(BaseModel):
+    """Bounded dependency diagnostics, excluding transport headers and request metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+    status_code: int
+    body: str | None = Field(default=None, max_length=8192)
+    body_truncated: bool = False
 
 
 class InteractiveAgentFailure(SingleAgentTurnFailure):
@@ -165,6 +176,7 @@ class InteractiveAgentFailure(SingleAgentTurnFailure):
     activations: list[AgentActivationResponse] = Field(default_factory=list)
     steps: list[ResourcesStepResponse] = Field(default_factory=list)
     agent_close: InteractiveAgentCloseReceipt | None = None
+    dependency_error: InteractiveDependencyError | None = None
 
 
 class InteractiveAgentResponse(BaseEpisodeResponse[InteractiveAgentResult]):
