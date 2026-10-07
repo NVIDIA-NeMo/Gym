@@ -30,7 +30,6 @@ from nemo_gym.h2_ping_sidecar.launcher import (
     NodeSidecars,
     SidecarError,
     build_sidecar,
-    default_binary_path,
     resolve_binary,
     rewrite_base_urls,
     sidecar_command,
@@ -211,7 +210,7 @@ class TestResolveBinary:
         with patch.object(launcher.shutil, "which", return_value=str(go)):
             path = resolve_binary(_cfg(), gcd)
             assert path.is_file() and os.access(path, os.X_OK)
-            assert path.parent.parent == (tmp_path / "cache" / "h2-ping-sidecar").resolve()
+            assert path.parent.parent.parent == (tmp_path / "cache" / "h2-ping-sidecar").resolve()
             mtime = path.stat().st_mtime_ns
             assert resolve_binary(_cfg(), gcd) == path
         assert path.stat().st_mtime_ns == mtime  # not rebuilt
@@ -251,7 +250,7 @@ class TestResolveBinary:
 
 
 class TestBinaryCacheKey:
-    """A cached binary is only reused for the same sources and the same Go release."""
+    """A cached binary is only reused for the same sources, and for the same Go release when Go is present."""
 
     def _sources(self, tmp_path):
         src = tmp_path / "src"
@@ -262,23 +261,23 @@ class TestBinaryCacheKey:
         (src / "main_test.go").write_text("package main\n")
         return src
 
-    def test_digest_changes_with_sources_and_go_version_but_not_tests(self, tmp_path):
+    def test_digest_changes_with_sources_but_not_tests(self, tmp_path):
         src = self._sources(tmp_path)
         with patch.object(launcher, "SIDECAR_SOURCE_DIR", src):
-            base = launcher._source_digest("go1.25.0")
-            assert launcher._source_digest("go1.25.0") == base
-            assert launcher._source_digest("go1.25.1") != base  # a Go upgrade rebuilds
+            base = launcher._source_digest()
+            assert launcher._source_digest() == base
+            assert len(base) == 12 and set(base) <= set("0123456789abcdef")
 
             (src / "main_test.go").write_text("package main // changed\n")
-            assert launcher._source_digest("go1.25.0") == base  # tests are not part of the binary
+            assert launcher._source_digest() == base  # tests are not part of the binary
 
             (src / "main.go").write_text("package main // changed\n")
-            changed = launcher._source_digest("go1.25.0")
+            changed = launcher._source_digest()
             assert changed != base
             (src / "go.mod").write_text("module x\n\ngo 1.26\n")
-            assert launcher._source_digest("go1.25.0") != changed
+            assert launcher._source_digest() != changed
 
-    def test_binary_built_by_older_sources_is_not_reused(self, tmp_path):
+    def test_binary_built_from_older_sources_is_not_reused(self, tmp_path):
         src = self._sources(tmp_path)
         go = _fake_go(tmp_path, GOOD_BUILD)
         gcd = OmegaConf.create({"cache_dir": str(tmp_path / "cache")})
@@ -292,23 +291,54 @@ class TestBinaryCacheKey:
         assert new != old
         assert old.is_file() and new.is_file()
 
-    def test_path_includes_the_digest(self, tmp_path):
+    def test_a_go_upgrade_rebuilds(self, tmp_path):
         src = self._sources(tmp_path)
-        go = _fake_go(tmp_path, GOOD_BUILD, version="go1.25.0")
         gcd = OmegaConf.create({"cache_dir": str(tmp_path / "cache")})
-        with (
-            patch.object(launcher, "SIDECAR_SOURCE_DIR", src),
-            patch.object(launcher.shutil, "which", return_value=str(go)),
-        ):
-            path = default_binary_path(gcd)
-            assert path.parent.name == launcher._source_digest("go1.25.0")
-            assert len(path.parent.name) == 12 and set(path.parent.name) <= set("0123456789abcdef")
-            # Without Go the version part is empty, so the path differs from the one a Go-built binary has.
+        paths = []
+        for version in ("go1.25.0", "go1.25.1"):
+            go = _fake_go(tmp_path, GOOD_BUILD, version=version)
+            with (
+                patch.object(launcher, "SIDECAR_SOURCE_DIR", src),
+                patch.object(launcher.shutil, "which", return_value=str(go)),
+            ):
+                paths.append(resolve_binary(_cfg(), gcd))
+        assert paths[0] != paths[1]
+        assert paths[0].parent.parent == paths[1].parent.parent  # same sources, different Go
+        assert [p.parent.name for p in paths] == ["go1.25.0", "go1.25.1"]
+        assert all(p.is_file() for p in paths)
+
+    def test_without_go_the_newest_binary_for_these_sources_is_used(self, tmp_path):
+        """A node with no Go can run a binary that was built (by anyone) from the current sources."""
+        src = self._sources(tmp_path)
+        gcd = OmegaConf.create({"cache_dir": str(tmp_path / "cache")})
+        built = []
+        for index, version in enumerate(("go1.25.0", "go1.25.1")):
+            go = _fake_go(tmp_path, GOOD_BUILD, version=version)
+            with (
+                patch.object(launcher, "SIDECAR_SOURCE_DIR", src),
+                patch.object(launcher.shutil, "which", return_value=str(go)),
+            ):
+                path = resolve_binary(_cfg(), gcd)
+            os.utime(path, (1_000_000 + index, 1_000_000 + index))
+            built.append(path)
+
         with (
             patch.object(launcher, "SIDECAR_SOURCE_DIR", src),
             patch.object(launcher.shutil, "which", return_value=None),
         ):
-            assert default_binary_path(gcd) != path
+            assert resolve_binary(_cfg(), gcd) == built[-1]
+
+            # Sources that nobody built have no binary to fall back on.
+            (src / "main.go").write_text("package main // not built by anyone\n")
+            with pytest.raises(SidecarError, match="`go` is not on PATH"):
+                resolve_binary(_cfg(), gcd)
+
+    def test_missing_binary_message_names_the_searched_path(self, tmp_path):
+        gcd = OmegaConf.create({"cache_dir": str(tmp_path / "cache")})
+        with patch.object(launcher.shutil, "which", return_value=None):
+            with pytest.raises(SidecarError) as excinfo:
+                resolve_binary(_cfg(), gcd)
+        assert str(tmp_path / "cache" / "h2-ping-sidecar") in str(excinfo.value)
 
 
 class TestCommandAndEnv:

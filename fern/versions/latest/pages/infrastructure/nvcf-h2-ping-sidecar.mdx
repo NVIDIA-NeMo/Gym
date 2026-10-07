@@ -102,7 +102,7 @@ All keys are optional except `enabled` and `instances`.
 |-----|---------|-------------|
 | `enabled` | `false` | Master switch. When false Gym starts nothing and leaves every URL untouched. |
 | `instances` | (required) | List of `{name, upstream, listen}`. `listen` defaults to `127.0.0.1:1250`; give each instance its own port. |
-| `binary` | `<cache_dir>/h2-ping-sidecar/<hash>/h2-ping-sidecar` | Path to the compiled sidecar. When it is missing Gym builds it here. The default path contains a hash of the Go sources and the Go version, so a binary built from older sources or an older Go is never reused. |
+| `binary` | `<cache_dir>/h2-ping-sidecar/<sources hash>/<go version>/h2-ping-sidecar` | Path to the compiled sidecar. When it is missing Gym builds it here. The path contains a hash of the Go sources and, when Go is on PATH, the exact Go version, so a binary built from older sources or an older Go is never reused. Without Go on PATH, Gym uses the newest binary already built from the current sources, so a node with no Go can run a cache built elsewhere. |
 | `build_if_missing` | `true` | Run `go build` when `binary` does not exist. Needs Go on PATH (1.25 or newer; see `nemo_gym/tools/sidecar/go.mod`). Set `false` to require a prebuilt binary. |
 | `ping_interval` | `60s` | Idle time before a PING. Must be below 340s. |
 | `ping_timeout` | `15s` | Close the upstream connection if a PING is not acknowledged in time. See [Limits](#limits). |

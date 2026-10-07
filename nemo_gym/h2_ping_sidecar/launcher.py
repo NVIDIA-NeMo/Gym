@@ -21,6 +21,7 @@ as the model servers that call it, including when ``RunHelper`` itself runs insi
 
 import hashlib
 import os
+import re
 import shutil
 import signal
 import socket
@@ -107,14 +108,12 @@ def _local_go_version() -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def _source_digest(go_version: str) -> str:
-    """Short hash of the Go sources and the Go version they are built with.
+def _source_digest() -> str:
+    """Short hash of the Go sources the binary is built from.
 
-    A binary built from older sources, or by a Go release that has since been replaced (the proxy
-    is mostly Go's own ``net/http`` and ``crypto/tls``, whose fixes ship as Go releases), must
-    never be reused, so both go into the cache path.
+    A binary built from older sources must never be reused, so the hash is part of the cache path.
     """
-    digest = hashlib.sha256(go_version.encode() + b"\0")
+    digest = hashlib.sha256()
     sources = sorted(path for path in SIDECAR_SOURCE_DIR.glob("*.go") if not path.name.endswith("_test.go"))
     for path in sources + [SIDECAR_SOURCE_DIR / "go.mod"]:
         digest.update(path.name.encode() + b"\0" + path.read_bytes())
@@ -122,13 +121,20 @@ def _source_digest(go_version: str) -> str:
 
 
 def default_binary_path(global_config_dict: Any) -> Path:
+    """Where the sidecar built from the current sources lives: ``<cache>/<sources hash>/<go version>/``.
+
+    The proxy is mostly Go's own ``net/http`` and ``crypto/tls``, whose fixes ship as Go releases, so
+    a binary built by a Go that has since been replaced is not reused: with Go on PATH the exact
+    version is part of the path. Without Go nothing can be built, so any binary already built from
+    these sources is used (the newest one), which lets a node without Go run a prebuilt cache.
+    """
     cache_dir = global_config_dict.get(CACHE_DIR_KEY_NAME) or "cache"
-    return (
-        Path(cache_dir).expanduser().resolve()
-        / SIDECAR_BINARY_NAME
-        / _source_digest(_local_go_version())
-        / SIDECAR_BINARY_NAME
-    )
+    sources = Path(cache_dir).expanduser().resolve() / SIDECAR_BINARY_NAME / _source_digest()
+    go_version = re.sub(r"[^A-Za-z0-9._-]", "_", _local_go_version())
+    if go_version:
+        return sources / go_version / SIDECAR_BINARY_NAME
+    built = sorted(sources.glob(f"*/{SIDECAR_BINARY_NAME}"), key=lambda path: path.stat().st_mtime)
+    return built[-1] if built else sources / "no-go" / SIDECAR_BINARY_NAME
 
 
 def build_sidecar(output_path: Path) -> None:
@@ -140,8 +146,8 @@ def build_sidecar(output_path: Path) -> None:
     go = shutil.which("go")
     if go is None:
         raise SidecarError(
-            "The h2-ping-sidecar binary is missing and `go` is not on PATH, so it cannot be built. Install Go "
-            f"(see go.mod in {SIDECAR_SOURCE_DIR} for the minimum version) or set "
+            f"The h2-ping-sidecar binary {output_path} is missing and `go` is not on PATH, so it cannot be built. "
+            f"Install Go (see go.mod in {SIDECAR_SOURCE_DIR} for the minimum version) or set "
             f"`{H2_PING_SIDECAR_KEY_NAME}.binary` to a prebuilt h2-ping-sidecar."
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
