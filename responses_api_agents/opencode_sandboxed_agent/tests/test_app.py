@@ -536,12 +536,13 @@ class TestOpenCodeSandboxedAgent:
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
 
     @mark.parametrize(
-        "database_name,snapshot_failure",
+        "database_name,lookup_failure",
         [
             ("opencode.db", None),
             ("opencode-gym-correlation.db", None),
             ("custom database.sqlite", None),
             ("opencode.db", "exit"),
+            ("opencode.db", "empty"),
             ("opencode.db", "execution"),
         ],
     )
@@ -552,7 +553,7 @@ class TestOpenCodeSandboxedAgent:
         opencode_export_test_data: Dict[str, Any],
         monkeypatch: MonkeyPatch,
         database_name: str,
-        snapshot_failure: str | None,
+        lookup_failure: str | None,
         collect_observations: bool,
     ) -> None:
         class Response:
@@ -637,7 +638,7 @@ class TestOpenCodeSandboxedAgent:
                                 "input": tokens,
                                 "output": tokens,
                                 "reasoning": tokens,
-                                "cache": {"read": tokens * 2, "write": tokens * 3},
+                                "cache": {"read": 0, "write": 0},
                             },
                         }
                     ),
@@ -669,14 +670,22 @@ class TestOpenCodeSandboxedAgent:
                 SimpleNamespace(stdout='[{"id": "root"}]', stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
                 SimpleNamespace(
-                    stdout="",
-                    stderr="snapshot failed" if snapshot_failure else "",
-                    return_code=1 if snapshot_failure == "exit" else 0,
-                    error_type="execution_failed" if snapshot_failure == "execution" else None,
+                    stdout="" if lookup_failure == "empty" else f"{db_path}\n",
+                    stderr="path lookup failed" if lookup_failure else "",
+                    return_code=1 if lookup_failure == "exit" else 0,
+                    error_type="execution_failed" if lookup_failure == "execution" else None,
                 ),
+                SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
             ]
         )
         snapshot_path = tmp_path / "snapshot.db"
+
+        def local_quote(value: str) -> str:
+            if value.endswith("/opencode/nemo-gym-observations.db") or value.startswith("/tmp/nemo-gym-observations-"):
+                value = str(snapshot_path)
+            return shlex.quote(value)
+
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.quote", local_quote)
 
         async def download(remote_path: str, local_path: Path) -> None:
             if remote_path == "/tmp/opencode_export.json":
@@ -685,14 +694,7 @@ class TestOpenCodeSandboxedAgent:
                 assert remote_path.endswith("/opencode/nemo-gym-observations.db") or remote_path.startswith(
                     "/tmp/nemo-gym-observations-"
                 )
-                command = shlex.split(sandbox.exec.await_args_list[-1].kwargs["command"])
-                assert command[:5] == ["export", "PATH=$HOME/.opencode/bin:$PATH", "&&", "opencode", "db"]
-                # Exercise the real SQLite query against committed rows still in the WAL.
-                # Only map the sandbox destination into this test's temporary directory.
-                query = command[5]
-                assert query == "VACUUM INTO '" + remote_path.replace("'", "''") + "'"
-                with sqlite3.connect(db_path) as snapshot_source:
-                    snapshot_source.execute(query.replace(remote_path, str(snapshot_path)))
+                subprocess.run(shlex.split(sandbox.exec.await_args_list[-1].kwargs["command"]), check=True)
                 local_path.write_bytes(snapshot_path.read_bytes())
 
         sandbox.download = AsyncMock(side_effect=download)
@@ -741,13 +743,10 @@ class TestOpenCodeSandboxedAgent:
 
         parent_usage = NeMoGymResponseUsage.sum_from_list(server._opencode_export_to_usages(opencode_export_test_data))
         usage = result.response.usage
-        assert usage.input_tokens == parent_usage.input_tokens + (0 if snapshot_failure else 180)
-        assert usage.input_tokens_details.cached_tokens == parent_usage.input_tokens_details.cached_tokens + (
-            0 if snapshot_failure else 60
-        )
-        assert usage.output_tokens == parent_usage.output_tokens + (0 if snapshot_failure else 60)
+        assert usage.input_tokens == parent_usage.input_tokens + (0 if lookup_failure else 30)
+        assert usage.output_tokens == parent_usage.output_tokens + (0 if lookup_failure else 60)
         assert usage.output_tokens_details.reasoning_tokens == parent_usage.output_tokens_details.reasoning_tokens + (
-            0 if snapshot_failure else 30
+            0 if lookup_failure else 30
         )
         if not collect_observations:
             assert result.ng_agent_observations is None
@@ -755,12 +754,11 @@ class TestOpenCodeSandboxedAgent:
             assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
             return
         assert result.ng_agent_observations is not None
-        snapshot = sandbox.exec.await_args_list[3].kwargs
-        assert "opencode db" in snapshot["command"]
-        assert snapshot["env"] == sandbox.exec.await_args_list[1].kwargs["env"]
-        assert snapshot["timeout_s"] == server.config.sandbox_timeout
-        if snapshot_failure:
-            # Snapshot failures must preserve the export but leave ownership unobserved.
+        lookup = sandbox.exec.await_args_list[3].kwargs
+        assert lookup["command"].endswith("opencode db path")
+        assert lookup["env"] == sandbox.exec.await_args_list[1].kwargs["env"]
+        if lookup_failure:
+            # Even a usable default-named database must not hide a failed lookup.
             assert not TrajectoryRecord.model_validate(result.ng_trajectory).turns
             assert "observation_capture_failed" in {gap.code for gap in result.ng_agent_observations.gaps}
             assert result.opencode_export_found
