@@ -770,6 +770,7 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--input`, `-i` | Input tasks JSONL file. |
 | `--output`, `-o` | Output rollouts JSONL file. |
 | `--limit` | Maximum number of tasks to run. |
+| `--task-ids ID[,ID...]` | Only run these tasks, selected by the id stored in each row (`task_id`, `problem_id` or `instance_id`). Each selected task runs `--num-repeats` times, even if the input repeats its row. Not combinable with `--limit`. |
 | `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
 | `--interleave-repeats` | Start repeats round by round (every task's first rollout, then every task's second) rather than each task's back to back. Use it when a task is heavy on the machine running it, for example when its sandbox loads large data, to spread its repeats over the run. This is best effort: repeats still overlap when the concurrency is high or rollouts are long. GDPVal's multistage orchestrator rebuilds its stage rows per task and does not keep this order. Maps to legacy `+interleave_repeats=true`. |
 | `--prompt-config` | Prompt template YAML to apply. |

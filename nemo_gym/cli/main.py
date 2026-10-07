@@ -1042,6 +1042,9 @@ COMMANDS = {
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
+            _comma_list_flag(
+                "task-ids", "task_ids", "Only run these task ids (comma-separated).", metavar="ID[,ID...]"
+            ),
             _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),
             _bool_flag(
                 "interleave-repeats",

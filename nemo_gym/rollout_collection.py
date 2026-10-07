@@ -113,6 +113,7 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
 from nemo_gym.task_materialization import TASK_ID_FIELDS
+from nemo_gym.task_selection import select_tasks
 from nemo_gym.token_id_capture import (
     TokenCaptureStore,
     TokenIdCaptureConfig,
@@ -1501,6 +1502,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     limit: Optional[int] = Field(
         default=None, description="Maximum number of examples to load and take from the input dataset."
     )
+    task_ids: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Run only these tasks, selected by the id stored in each row (task_id, problem_id or instance_id). "
+            "Each selected task runs num_repeats times, even if the input repeats its row."
+        ),
+    )
     num_repeats: Union[int, Dict[str, int]] = Field(
         default=1,
         description=(
@@ -1561,6 +1569,12 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
                 "Set only one of them."
             )
         self.agent_map = {**(self.agent_map or {}), "_default": self.agent_name}
+        return self
+
+    @model_validator(mode="after")
+    def _validate_task_selection(self) -> "RolloutCollectionConfig":
+        if self.task_ids is not None and self.limit:
+            raise ValueError("limit cannot be combined with task_ids")
         return self
 
     @model_validator(mode="after")
@@ -2096,6 +2110,11 @@ class RolloutCollectionHelper(BaseModel):
                 (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
                 for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
             ]
+
+        if config.task_ids is not None:
+            keep = select_tasks([row for _, _, row in raw_rows], config.task_ids)
+            raw_rows = [raw_rows[index] for index in keep]
+            print(f"Selected {len(raw_rows)} task(s)")
 
         # Validate and apply prompt config before per-row processing
         if prompt_cfg is not None:
