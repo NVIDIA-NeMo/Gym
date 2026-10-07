@@ -773,6 +773,10 @@ class ServerClient(BaseModel):
     _server_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _checkpoint_enabled: Optional[bool] = PrivateAttr(default=None)
 
+    def model_post_init(self, context: Any) -> None:
+        # Validate the ``checkpoint:`` block once, when the client is built at startup, rather than on every request.
+        self.checkpoint_enabled()
+
     def checkpoint_enabled(self) -> bool:
         """Return whether the global ``checkpoint:`` block enables partial-rollout checkpointing."""
         if self._checkpoint_enabled is None:

@@ -147,7 +147,7 @@ async def test_discover_refuses_a_deployment_without_a_policy_model() -> None:
         await coordination.discover(client, auth_token=TOKEN)
 
 
-async def test_prepare_runs_in_gym_order_and_resume_releases_in_reverse() -> None:
+async def test_prepare_runs_in_gym_order_and_resume_reopens_in_reverse() -> None:
     client, _, events = deployment(*FULL)
     participants = await coordination.discover(client, auth_token=TOKEN)
 
@@ -232,15 +232,40 @@ async def test_restore_is_all_or_nothing(tmp_path: Path) -> None:
 
     with pytest.raises(CoordinationError, match="restore failed on 1"):
         await coordination.restore(restarted, "r1", str(tmp_path), [EpisodeId(rollout_id="r")], deadline_ts=deadline())
-    # Nothing continues from a partial restore: the replacement attempt is gone and fenced everywhere.
+    # Nothing continues from a partial restore: the replacement attempt is gone everywhere.
     assert {name: recorder.live for name, recorder in recorders.items()} == {
         "env": set(),
         "policy": set(),
         "agent": set(),
         "res": set(),
     }
-    # The retire stopped and freed the attempt, so nothing about it remains to refuse later requests.
-    assert all(len(recorder.retiring) == 0 for recorder in recorders.values())
+    # The replacement attempt stays refused everywhere until the controller forgets the rollout.
+    assert all(len(recorder.retired) == 1 for recorder in recorders.values())
+
+
+async def test_a_failed_restore_still_resumes_everyone_and_raises_the_restore_error(tmp_path: Path) -> None:
+    source, _, _ = deployment(*FULL)
+    participants = await coordination.discover(source, auth_token=TOKEN)
+    await coordination.prepare(participants, "c1", deadline_ts=deadline())
+    await coordination.commit(participants, "c1", str(tmp_path), [EpisodeId(rollout_id="r")], deadline_ts=deadline())
+
+    fresh, recorders, events = deployment(*FULL)
+    recorders["agent"].fail_restore = True
+
+    async def unreachable(episode_id: EpisodeId) -> None:
+        raise RuntimeError("cannot reach the sandbox")
+
+    recorders["res"].retire = unreachable
+    restarted = await coordination.discover(fresh, auth_token=TOKEN)
+
+    with pytest.raises(CoordinationError, match="restore failed on 1"):
+        await coordination.restore(restarted, "r1", str(tmp_path), [EpisodeId(rollout_id="r")], deadline_ts=deadline())
+    assert {event for event in events if event.startswith("open ")} == {
+        "open env",
+        "open policy",
+        "open agent",
+        "open res",
+    }
 
 
 async def test_renew_extends_every_participants_lease() -> None:
@@ -274,3 +299,50 @@ async def test_retire_stops_callers_before_the_servers_they_call() -> None:
     retires = [event for event in events if event.startswith("retire ")]
     assert retires[:2] == ["retire env", "retire agent"]
     assert sorted(retires[2:]) == ["retire policy", "retire res"]
+
+
+async def test_forget_runs_callers_before_the_servers_they_call() -> None:
+    client, recorders, events = deployment(*FULL)
+    participants = await coordination.discover(client, auth_token=TOKEN)
+    await coordination.retire(participants, "retire", [EpisodeId(rollout_id="r")], deadline_ts=deadline())
+    for name, recorder in recorders.items():
+        forget = recorder.retired.forget
+
+        def recording(rollout_ids, name=name, forget=forget) -> None:
+            events.append(f"forget {name}")
+            forget(rollout_ids)
+
+        recorder.retired.forget = recording
+
+    await coordination.forget(participants, "forget", ["r"], deadline_ts=deadline())
+
+    forgets = [event for event in events if event.startswith("forget ")]
+    assert forgets[:2] == ["forget env", "forget agent"]
+    assert sorted(forgets[2:]) == ["forget policy", "forget res"]
+    assert all(len(recorder.retired) == 0 for recorder in recorders.values())
+
+
+async def test_discover_reports_a_server_that_is_down_instead_of_retrying_forever(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import aiohttp
+
+    import nemo_gym.server_utils as server_utils
+
+    calls: list[Optional[int]] = []
+
+    async def refused(**kwargs: Any) -> Any:
+        calls.append(kwargs.get("_max_num_tries"))
+        raise aiohttp.ClientOSError(111, "connection refused")
+
+    monkeypatch.setattr(server_utils, "request", refused)
+    client = ServerClient(
+        head_server_config=BaseServerConfig(host="head", port=1),
+        global_config_dict=OmegaConf.create(
+            {"env": {"environment_servers": {"env": {"host": "127.0.0.1", "port": 9}}}}
+        ),
+    )
+
+    with pytest.raises(CoordinationError, match="env"):
+        await coordination.discover(client, auth_token=TOKEN)
+    assert calls == [coordination._DISCOVER_TRIES]

@@ -85,3 +85,21 @@ async def test_calls_stay_unprefixed_when_checkpointing_and_observability_are_of
         "http://model:1/v1/chat/completions",
         "http://resources:2/step",
     ]
+
+
+def test_a_bad_checkpoint_block_fails_when_the_client_is_built_not_on_every_request() -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.server_utils import BaseServerConfig, ServerClient
+
+    with pytest.raises(ValueError, match="control_auth_token is required"):
+        ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=1),
+            global_config_dict=OmegaConf.create({"checkpoint": {"enabled": True}}),
+        )
+
+
+def test_the_checkpoint_block_is_a_reserved_top_level_key() -> None:
+    from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+
+    assert "checkpoint" in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS

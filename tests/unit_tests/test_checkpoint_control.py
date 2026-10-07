@@ -16,10 +16,11 @@ from nemo_gym._checkpoint.control import (
     CheckpointRecord,
     CheckpointRequest,
     PrepareReport,
-    RetiringAttempts,
+    RetiredAttempts,
     StaleAttemptError,
     install_participant,
 )
+from nemo_gym._checkpoint.steps import EpisodeSteps
 from nemo_gym.episode_types import EpisodeId
 
 
@@ -59,9 +60,12 @@ class FakeParticipant(CheckpointParticipant):
         self.executions.pop(episode_id.capture_key, None)
 
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[BaseModel]:
+        scope = None if episode_ids is None else {episode_id.capture_key for episode_id in episode_ids}
         return [
             Record(episode_id=EpisodeId.from_capture_key(key), value=execution["value"])
             for key, execution in self.executions.items()
+            # Restored state outside the commit's scope is not exported: the commit retires it.
+            if scope is None or not execution.get("restored") or key in scope
         ]
 
     def restore_records(self, records: list[BaseModel]) -> None:
@@ -128,8 +132,9 @@ async def test_a_straggler_is_retired_after_resume_not_while_a_checkpoint_is_ope
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "invalid_phase"
     assert retired.status_code == 200
     assert ready["phase"] == "prepared"
-    # Stopped and freed: nothing about the attempt remains.
-    assert len(participant.retiring) == 0
+    # Stopped and freed; only the rollout's refusal remains, until the controller forgets it.
+    assert participant.executions.keys() == {"s-a1"}
+    assert len(participant.retired) == 1
 
 
 async def test_resume_interrupts_a_waiting_prepare_and_retires_the_checkpoint() -> None:
@@ -200,7 +205,7 @@ async def test_commit_restore_round_trip_and_immutable_manifest(tmp_path: Path) 
     assert restored.executions == {"r-a3": {"parked": True, "value": 7}}
     assert restored.accepting is True
     # A restore runs in a fresh process, so no replaced attempt is running and nothing needs refusing.
-    assert len(restored.retiring) == 0
+    assert len(restored.retired) == 0
 
 
 async def test_restore_rejects_corrupt_records_without_installing(tmp_path: Path) -> None:
@@ -254,20 +259,81 @@ async def test_commit_requires_prepared_and_routes_require_bearer(tmp_path: Path
     assert unauthorized.status_code == 401
 
 
-def test_the_attempt_fence_refuses_attempts_only_while_they_are_being_stopped() -> None:
-    fence = RetiringAttempts()
-    with fence.stopping([EpisodeId(rollout_id="r", attempt=1)]):
-        with fence.stopping([EpisodeId(rollout_id="r", attempt=0)]):
-            for attempt in (0, 1):
-                with pytest.raises(StaleAttemptError):
-                    fence.check(EpisodeId(rollout_id="r", attempt=attempt))
+def test_a_retired_attempt_stays_refused_until_its_rollout_is_forgotten() -> None:
+    retired = RetiredAttempts()
+    retired.mark([EpisodeId(rollout_id="r", attempt=1)])
+    # A later retire of an earlier attempt never lowers the mark.
+    retired.mark([EpisodeId(rollout_id="r", attempt=0)])
+    for attempt in (0, 1):
         with pytest.raises(StaleAttemptError):
-            fence.check(EpisodeId(rollout_id="r", attempt=0))
-        fence.check(EpisodeId(rollout_id="r", attempt=2))
-        fence.check(EpisodeId(rollout_id="other", attempt=0))
+            retired.check(EpisodeId(rollout_id="r", attempt=attempt))
+    retired.check(EpisodeId(rollout_id="r", attempt=2))
+    retired.check(EpisodeId(rollout_id="other", attempt=0))
+    assert len(retired) == 1
 
-    fence.check(EpisodeId(rollout_id="r", attempt=0))
-    assert len(fence) == 0
+    joined = RetiredAttempts()
+    joined.update(retired.marks())
+    with pytest.raises(StaleAttemptError):
+        joined.check(EpisodeId(rollout_id="r", attempt=1))
+
+    retired.forget(["r", "never-retired"])
+    retired.check(EpisodeId(rollout_id="r", attempt=0))
+    assert len(retired) == 0
+
+
+async def test_a_request_arriving_after_retire_finished_is_refused_until_forget() -> None:
+    participant = FakeParticipant()
+    participant.executions["r"] = {"parked": False, "value": 1}
+    async with make_client(participant) as client:
+        retired = await client.post("/ng-control/v1/checkpoint/retire", json=body(episode_ids=[{"rollout_id": "r"}]))
+        # The caller sent this request before its own retire; it reaches this server only now.
+        with pytest.raises(StaleAttemptError):
+            participant.retired.check(EpisodeId(rollout_id="r"))
+        forgotten = await client.post("/ng-control/v1/checkpoint/forget", json=body(rollout_ids=["r"]))
+        status = (await client.get("/ng-control/v1/checkpoint/status")).json()
+
+    assert retired.status_code == 200 and forgotten.json() == {"forgotten": ["r"]}
+    participant.retired.check(EpisodeId(rollout_id="r"))
+    assert status["retired_rollouts"] == 0
+
+
+async def test_forget_is_refused_while_a_checkpoint_is_open() -> None:
+    participant = FakeParticipant()
+    async with make_client(participant) as client:
+        await client.post("/ng-control/v1/checkpoint/retire", json=body("retire", episode_ids=[{"rollout_id": "r"}]))
+        await client.post("/ng-control/v1/checkpoint/prepare", json=body())
+        refused = await client.post("/ng-control/v1/checkpoint/forget", json=body(rollout_ids=["r"]))
+
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "invalid_phase"
+    assert len(participant.retired) == 1
+
+
+async def test_a_failed_retire_keeps_its_attempts_refused_and_a_retry_stops_them() -> None:
+    participant = FakeParticipant()
+    participant.executions["r"] = {"parked": False, "value": 1}
+    participant.executions["s"] = {"parked": False, "value": 2}
+    original_retire = participant.retire
+    fail = {"s"}
+
+    async def flaky_retire(episode_id: EpisodeId) -> None:
+        if episode_id.capture_key in fail:
+            raise RuntimeError("could not stop")
+        await original_retire(episode_id)
+
+    participant.retire = flaky_retire
+    batch = {"episode_ids": [{"rollout_id": "r"}, {"rollout_id": "s"}]}
+    async with make_client(participant) as client:
+        with pytest.raises(RuntimeError):
+            await client.post("/ng-control/v1/checkpoint/retire", json=body(**batch))
+        for key in ("r", "s"):
+            with pytest.raises(StaleAttemptError):
+                participant.retired.check(EpisodeId(rollout_id=key))
+        fail.clear()
+        retried = await client.post("/ng-control/v1/checkpoint/retire", json=body(**batch))
+
+    assert retried.status_code == 200 and participant.executions == {}
+    with pytest.raises(StaleAttemptError):
+        participant.retired.check(EpisodeId(rollout_id="s"))
 
 
 async def test_retire_replies_only_after_the_participant_stopped_the_attempt() -> None:
@@ -290,7 +356,7 @@ async def test_retire_replies_only_after_the_participant_stopped_the_attempt() -
         )
         await stopping.wait()
         try:
-            participant.retiring.check(EpisodeId(rollout_id="r"))
+            participant.retired.check(EpisodeId(rollout_id="r"))
         except StaleAttemptError:
             refused_while_stopping.append(True)
         replied_early = retire.done()
@@ -299,7 +365,7 @@ async def test_retire_replies_only_after_the_participant_stopped_the_attempt() -
 
     assert refused_while_stopping == [True] and not replied_early
     assert retired.status_code == 200 and participant.executions == {}
-    assert len(participant.retiring) == 0
+    assert len(participant.retired) == 1
 
 
 async def test_commit_refuses_a_participant_that_is_no_longer_ready(tmp_path: Path) -> None:
@@ -384,7 +450,7 @@ async def test_restored_state_can_be_retired_after_resume(tmp_path: Path) -> Non
 
     assert retired.status_code == 200
     assert restored.executions == {}
-    assert len(restored.retiring) == 0
+    assert len(restored.retired) == 1
 
 
 async def test_commit_io_past_the_deadline_fails_and_a_retry_is_idempotent(
@@ -436,8 +502,6 @@ def test_seed_reply_reports_the_verify_mode_and_defaults_to_wait() -> None:
 
 
 async def test_an_episode_woken_by_resume_stays_parked_if_a_new_checkpoint_closes_first() -> None:
-    from nemo_gym._checkpoint.steps import EpisodeSteps
-
     async def notify() -> None:
         return None
 
@@ -456,7 +520,7 @@ async def test_an_episode_woken_by_resume_stays_parked_if_a_new_checkpoint_close
     steps.open()
     steps.close()
     await asyncio.sleep(0.05)
-    parked_through_second_checkpoint = not progressed.is_set() and steps.blockers() == []
+    parked_through_second_checkpoint = not progressed.is_set() and steps.blocker_count() == 0
     steps.open()
     await asyncio.wait_for(task, 1)
 
@@ -542,5 +606,201 @@ async def test_a_commit_retires_restored_episodes_its_scope_leaves_out(tmp_path:
         )
         await client.post("/ng-control/v1/checkpoint/resume", json=body())
 
-    # The controller no longer continues "dropped", so its restored state is released.
+    # The controller no longer continues "dropped", so its restored state is retired.
     assert set(participant.executions) == {"kept-a1", "live"}
+
+
+async def test_a_commit_that_fails_while_retiring_out_of_scope_state_can_be_retried(tmp_path: Path) -> None:
+    participant = FakeParticipant()
+    participant.executions["kept-a1"] = {"parked": True, "value": 1, "restored": True}
+    participant.executions["x-a1"] = {"parked": True, "value": 2, "restored": True}
+    participant.executions["y-a1"] = {"parked": True, "value": 3, "restored": True}
+    original_retire = participant.retire
+    fail_on = {"y-a1"}
+
+    async def flaky_retire(episode_id: EpisodeId) -> None:
+        if episode_id.capture_key in fail_on:
+            raise RuntimeError("could not free")
+        await original_retire(episode_id)
+
+    participant.retire = flaky_retire
+    commit = body(checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "kept", "attempt": 1}])
+    async with make_client(participant) as client:
+        await client.post("/ng-control/v1/checkpoint/prepare", json=body())
+        with pytest.raises(RuntimeError):
+            await client.post("/ng-control/v1/checkpoint/commit", json=commit)
+        fail_on.clear()
+        retried = await client.post("/ng-control/v1/checkpoint/commit", json=commit)
+
+    # The retry exported the same in-scope records, so the existing manifest matched.
+    assert retried.status_code == 200 and retried.json()["episode_ids"] == ["kept-a1"]
+    assert set(participant.executions) == {"kept-a1"}
+
+
+async def test_restore_validates_only_the_records_in_scope(tmp_path: Path) -> None:
+    source = FakeParticipant()
+    source.executions["keep"] = {"parked": True, "value": 1}
+    source.executions["other"] = {"parked": True, "value": -1}
+    async with make_client(source) as client:
+        await client.post("/ng-control/v1/checkpoint/prepare", json=body())
+        await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path)))
+    validated: list[str] = []
+    original = Record.model_validate
+
+    def counting(value, *args, **kwargs):
+        validated.append(EpisodeId.model_validate(value["episode_id"]).capture_key)
+        return original(value, *args, **kwargs)
+
+    restored = FakeParticipant()
+    Record.model_validate = counting
+    try:
+        async with make_client(restored) as client:
+            result = await client.post(
+                "/ng-control/v1/checkpoint/restore",
+                json=body("r1", checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "keep"}]),
+            )
+    finally:
+        Record.model_validate = original
+
+    assert result.status_code == 200 and validated == ["keep"]
+
+
+async def _no_notify() -> None:
+    return None
+
+
+async def test_retire_waits_for_the_episode_and_a_cut_short_retire_leaves_it_tracked() -> None:
+    steps = EpisodeSteps(_no_notify)
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def episode() -> None:
+        steps.begin("r")
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Cleanup that outlives the cancellation, like closing sessions.
+            await release.wait()
+            raise
+        finally:
+            await steps.end("r")
+
+    task = asyncio.create_task(episode())
+    await started.wait()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(steps.retire("r"), 0.05)
+    # The task is still running: it stays tracked, a duplicate start is refused, and it still blocks a checkpoint.
+    with pytest.raises(ValueError, match="already running"):
+        steps.begin("r")
+    assert steps.keys() == ["r"] and steps.blocker_count() == 1
+
+    retry = asyncio.create_task(steps.retire("r"))
+    await asyncio.sleep(0.01)
+    assert not retry.done()
+    release.set()
+    await asyncio.wait_for(retry, 1)
+
+    assert task.done() and steps.keys() == [] and steps.blocker_count() == 0
+
+
+async def test_a_replay_step_that_ends_during_a_checkpoint_does_not_block_it_again() -> None:
+    steps = EpisodeSteps(_no_notify)
+    finish_step = asyncio.Event()
+    stepped = asyncio.Event()
+    record_boundary = asyncio.Event()
+
+    async def episode() -> None:
+        steps.begin("r")
+        await steps.boundary("r", {"next": "verify"})
+        async with steps.step("r", "replay"):
+            await finish_step.wait()
+        stepped.set()
+        await record_boundary.wait()
+        await steps.boundary("r", {"next": "close"})
+        await steps.end("r")
+
+    task = asyncio.create_task(episode())
+    await asyncio.sleep(0)
+    steps.close()
+    assert steps.blocker_count() == 0
+    finish_step.set()
+    await stepped.wait()
+    # Between the end of the step and its next boundary, the episode still counts at the boundary before the step.
+    assert steps.blocker_count() == 0 and steps.exported() == {"r": {"next": "verify"}}
+    record_boundary.set()
+    await asyncio.sleep(0)
+    assert steps.blocker_count() == 0 and steps.exported() == {"r": {"next": "close"}}
+    steps.open()
+    await asyncio.wait_for(task, 1)
+
+
+async def test_every_live_episode_is_exported_with_or_without_a_boundary() -> None:
+    steps = EpisodeSteps(_no_notify)
+    in_first_step = asyncio.Event()
+    hold = asyncio.Event()
+
+    async def fresh() -> None:
+        steps.begin("fresh")
+        async with steps.step("fresh", "replay"):
+            in_first_step.set()
+            await hold.wait()
+
+    async def restored() -> None:
+        steps.begin("restored-a1", continuation={"next": "verify"})
+        async with steps.step("restored-a1", "replay"):
+            await hold.wait()
+
+    tasks = [asyncio.create_task(fresh()), asyncio.create_task(restored())]
+    await in_first_step.wait()
+    await asyncio.sleep(0)
+    steps.close()
+
+    # The fresh episode starts over from its input; the restored one continues from its restored boundary.
+    assert steps.exported() == {"fresh": None, "restored-a1": {"next": "verify"}}
+    assert steps.blocker_count() == 0
+    hold.set()
+    steps.open()
+    await asyncio.gather(*tasks)
+
+
+async def test_blockers_are_counted_in_full_and_listed_up_to_a_limit() -> None:
+    steps = EpisodeSteps(_no_notify)
+    for key in ("c", "a", "b"):
+        steps.begin(key)
+
+    assert steps.blocker_count() == 3
+    assert steps.blockers(2) == ["a", "b"]
+
+
+def test_records_stream_to_disk_and_a_retried_commit_leaves_no_temporary_file(tmp_path: Path) -> None:
+    from nemo_gym._checkpoint.errors import CheckpointStateError
+    from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
+
+    def records(value: int):
+        for attempt in range(3):
+            yield {"episode_id": {"rollout_id": "r", "attempt": attempt}, "value": value}
+
+    first = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
+    again = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
+    with pytest.raises(CheckpointStateError, match="different commit"):
+        write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(2))
+
+    manifest, restored = read_participant_state(tmp_path, kind="fake", instance="f")
+    directory = participant_dir(tmp_path, kind="fake", instance="f")
+    assert first == again == manifest and manifest["record_count"] == 3
+    assert [record["episode_id"]["attempt"] for record in restored] == [0, 1, 2]
+    assert sorted(path.name for path in directory.iterdir()) == ["manifest.json", "records.jsonl"]
+
+
+def test_a_corrupt_records_file_is_a_checkpoint_state_error(tmp_path: Path) -> None:
+    from nemo_gym._checkpoint.errors import CheckpointStateError
+    from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
+
+    write_participant_state(
+        tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=[{"episode_id": {"rollout_id": "r"}}]
+    )
+    (participant_dir(tmp_path, kind="fake", instance="f") / "records.jsonl").write_bytes(b"{not json\n")
+
+    with pytest.raises(CheckpointStateError):
+        read_participant_state(tmp_path, kind="fake", instance="f")

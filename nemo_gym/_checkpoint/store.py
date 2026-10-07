@@ -9,9 +9,10 @@ Layout under the controller-owned directory::
 
 Each participant writes one records file regardless of how many rollouts it holds, so shared
 filesystem metadata operations do not grow with the live set. The records file is written under a
-temporary name, flushed, and renamed; the manifest carrying its digest is written the same way and
-last. A directory with a manifest never changes: committing the same checkpoint again returns the
-existing manifest, and committing a different checkpoint into it fails.
+temporary name one record at a time, hashed as it goes, flushed, and renamed, so a commit never holds
+the whole file in memory; the manifest carrying its digest is written the same way and last. A
+directory with a manifest never changes: committing the same checkpoint again returns the existing
+manifest, and committing a different checkpoint into it fails.
 """
 
 import hashlib
@@ -19,6 +20,7 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -42,30 +44,44 @@ def write_participant_state(
     kind: str,
     instance: str,
     checkpoint_id: str,
-    records: list[dict[str, Any]],
+    records: Iterable[dict[str, Any]],
 ) -> dict[str, Any]:
     directory = participant_dir(checkpoint_dir, kind=kind, instance=instance)
     manifest_path = directory / "manifest.json"
-    # Keep each record's key order: a restored episode must see its state exactly as exported, and state such as a
-    # tool environment is often rendered back to the model by serializing a stored dict.
-    payload = b"".join(json.dumps(record).encode() + b"\n" for record in records)
-    manifest = {
-        "schema_version": STATE_SCHEMA_VERSION,
-        "kind": kind,
-        "instance": instance,
-        "checkpoint_id": checkpoint_id,
-        "records_file": "records.jsonl",
-        "records_sha256": hashlib.sha256(payload).hexdigest(),
-        "record_count": len(records),
-    }
-    if manifest_path.exists():
-        existing = json.loads(manifest_path.read_text())
-        if existing != manifest:
-            raise CheckpointStateError(f"{manifest_path} already holds a different commit")
-        return existing
-
     directory.mkdir(parents=True, exist_ok=True)
-    _atomic_write(directory / "records.jsonl", payload)
+    digest = hashlib.sha256()
+    count = 0
+    descriptor, temporary = tempfile.mkstemp(dir=directory, prefix=".records.jsonl.")
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            for record in records:
+                # Keep each record's key order: a restored episode must see its state exactly as exported, and
+                # state such as a tool environment is often rendered back to the model by serializing a stored dict.
+                line = json.dumps(record).encode() + b"\n"
+                digest.update(line)
+                handle.write(line)
+                count += 1
+            handle.flush()
+            os.fsync(handle.fileno())
+        manifest = {
+            "schema_version": STATE_SCHEMA_VERSION,
+            "kind": kind,
+            "instance": instance,
+            "checkpoint_id": checkpoint_id,
+            "records_file": "records.jsonl",
+            "records_sha256": digest.hexdigest(),
+            "record_count": count,
+        }
+        if manifest_path.exists():
+            existing = json.loads(manifest_path.read_text())
+            if existing != manifest:
+                raise CheckpointStateError(f"{manifest_path} already holds a different commit")
+            Path(temporary).unlink()
+            return existing
+        os.replace(temporary, directory / "records.jsonl")
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
     _atomic_write(manifest_path, json.dumps(manifest, sort_keys=True, indent=1).encode())
     _fsync_dir(directory)
     return manifest
@@ -81,10 +97,18 @@ def read_participant_state(checkpoint_dir: Path, *, kind: str, instance: str) ->
         raise CheckpointStateError(f"{manifest_path} has unsupported schema {manifest.get('schema_version')!r}")
     if (manifest.get("kind"), manifest.get("instance")) != (kind, instance):
         raise CheckpointStateError(f"{manifest_path} belongs to {manifest.get('kind')}/{manifest.get('instance')}")
-    payload = (directory / manifest["records_file"]).read_bytes()
-    if hashlib.sha256(payload).hexdigest() != manifest["records_sha256"]:
-        raise CheckpointStateError(f"{directory / manifest['records_file']} does not match its manifest digest")
-    records = [json.loads(line) for line in payload.splitlines()]
+    records_path = directory / manifest["records_file"]
+    digest = hashlib.sha256()
+    records = []
+    with records_path.open("rb") as handle:
+        for line in handle:
+            digest.update(line)
+            try:
+                records.append(json.loads(line))
+            except ValueError as error:
+                raise CheckpointStateError(f"{records_path} holds a record that is not JSON: {error}") from error
+    if digest.hexdigest() != manifest["records_sha256"]:
+        raise CheckpointStateError(f"{records_path} does not match its manifest digest")
     if len(records) != manifest["record_count"]:
         raise CheckpointStateError(f"{manifest_path} expects {manifest['record_count']} records, found {len(records)}")
     return manifest, records

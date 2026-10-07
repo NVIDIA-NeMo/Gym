@@ -12,10 +12,12 @@ The participant order is a Gym invariant:
   resources servers. Environment servers park their episodes first. The policy model then closes
   admission and cuts in-flight generations, so agents waiting on it reach a boundary. Resources servers
   go last because agents and environments call them until they park.
-- ``resume`` runs the stages in reverse, so no server is released before the servers it calls.
+- ``resume`` runs the stages in reverse, so no server reopens before the servers it calls.
 - ``commit`` and ``restore`` fan out to every participant at once.
 - ``retire`` runs callers before callees: environment servers, then agents, then policy model and
-  resources servers together. Each stops the attempts' work before it replies.
+  resources servers together. Each refuses the attempts, then stops their work before it replies.
+- ``forget`` runs in the same order. A retired attempt stays refused everywhere until then: a request its
+  caller sent just before the caller's retire can reach a server after that server's retire finished.
 
 What the controller still owns:
 
@@ -26,9 +28,12 @@ What the controller still owns:
   for every outstanding ``/run`` whose episode is not in the committed ``episode_ids``.
 - Publishing. ``commit`` writes each participant's state; the controller publishes the checkpoint only
   after every commit succeeded, and then calls ``resume``.
+- Forgetting. Once a rollout it retired is finished for good, so nothing of any of its attempts can still run,
+  the controller calls ``forget`` for it. Until then every participant keeps one entry for the rollout.
 
-Restore is all-or-nothing: if any participant fails, every participant is resumed, which discards the
-restored state, and the controller restarts those rollouts from their inputs.
+Restore is all-or-nothing: if any participant fails, the replacement attempts are retired everywhere, which
+frees the restored state, every participant is resumed, and the controller restarts those rollouts from their
+inputs.
 """
 
 import asyncio
@@ -52,6 +57,8 @@ PREPARE_ORDER: tuple[ParticipantKind, ...] = ("environment", "model", "agent", "
 # Retire stops callers before the servers they call: environment servers call agents and resources servers,
 # agents call the policy model and resources servers.
 RETIRE_ORDER: tuple[tuple[ParticipantKind, ...], ...] = (("environment",), ("agent",), ("model", "resources"))
+# A server that is down must not stall discovery: connection errors are retried this many times in all.
+_DISCOVER_TRIES = 3
 _SERVER_TYPES = ("environment_servers", "responses_api_models", "responses_api_agents", "resources_servers")
 
 
@@ -121,6 +128,7 @@ async def discover(client: ServerClient, *, auth_token: str) -> Participants:
                 method="GET",
                 headers=_auth(auth_token),
                 _control=True,
+                _max_num_tries=_DISCOVER_TRIES,
             )
             if response.status == 404:
                 return
@@ -172,10 +180,29 @@ async def retire(
     }
     if body["episode_ids"]:
         # Callers before callees: once a server stops the attempts, nothing upstream can still call it for them.
-        for kinds in RETIRE_ORDER:
-            members = [member for member in participants.members if member.kind in kinds]
-            if members:
-                await _fan_out(participants, members, "retire", body, deadline_ts)
+        await _in_retire_order(participants, "retire", body, deadline_ts)
+
+
+async def forget(
+    participants: Participants, checkpoint_id: str, rollout_ids: Iterable[str], *, deadline_ts: float
+) -> None:
+    """Stop refusing the retired attempts of these rollouts everywhere.
+
+    Call it once a rollout is finished for good: nothing of any of its attempts can still run, and the controller
+    will not dispatch it again. Refused while a checkpoint is open: resume first.
+    """
+    body = {"checkpoint_id": checkpoint_id, "deadline_ts": deadline_ts, "rollout_ids": sorted(set(rollout_ids))}
+    if body["rollout_ids"]:
+        await _in_retire_order(participants, "forget", body, deadline_ts)
+
+
+async def _in_retire_order(
+    participants: Participants, operation: str, body: dict[str, Any], deadline_ts: float
+) -> None:
+    for kinds in RETIRE_ORDER:
+        members = [member for member in participants.members if member.kind in kinds]
+        if members:
+            await _fan_out(participants, members, operation, body, deadline_ts)
 
 
 async def commit(
@@ -225,24 +252,34 @@ async def restore(
     try:
         return await _fan_out(participants, participants.members, "restore", body, deadline_ts)
     except CoordinationError:
-        LOGGER.warning("checkpoint %s restore failed; discarding the restored state everywhere", checkpoint_id)
+        LOGGER.warning("checkpoint %s restore failed; retiring the restored state everywhere", checkpoint_id)
         cleanup_deadline = max(deadline_ts, time.time() + 30)
-        # Retiring the replacement attempts frees their restored state, so nothing can continue from a
-        # partial restore.
-        await retire(participants, checkpoint_id, [next_attempt(e) for e in episode_ids], deadline_ts=cleanup_deadline)
-        await resume(participants, checkpoint_id, deadline_ts=cleanup_deadline)
+        try:
+            # Retiring the replacement attempts frees their restored state, so nothing can continue from a
+            # partial restore.
+            await retire(
+                participants, checkpoint_id, [next_attempt(e) for e in episode_ids], deadline_ts=cleanup_deadline
+            )
+        except CoordinationError:
+            # The restore error is the one the controller must see; resume still runs.
+            LOGGER.exception("checkpoint %s: retiring the restored state failed", checkpoint_id)
+        finally:
+            try:
+                await resume(participants, checkpoint_id, deadline_ts=cleanup_deadline)
+            except CoordinationError:
+                LOGGER.exception("checkpoint %s: resuming after a failed restore failed", checkpoint_id)
         raise
 
 
 async def resume(participants: Participants, checkpoint_id: str, *, deadline_ts: float) -> None:
-    """Release every participant in reverse order. This also aborts a checkpoint that was not published."""
+    """Reopen every participant in reverse order. This also aborts a checkpoint that was not published."""
     body = {"checkpoint_id": checkpoint_id, "deadline_ts": deadline_ts}
     failures: dict[str, str] = {}
     for kind in reversed(PREPARE_ORDER):
         try:
             await _fan_out(participants, participants.of_kind(kind), "resume", body, deadline_ts)
         except CoordinationError as error:
-            # Keep releasing the other stages; a participant that cannot be reached resumes on its own
+            # Keep reopening the other stages; a participant that cannot be reached resumes on its own
             # when its lease expires.
             failures.update(error.failures)
     if failures:

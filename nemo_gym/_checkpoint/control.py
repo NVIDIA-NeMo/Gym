@@ -13,13 +13,14 @@ phase machine::
 The control plane here owns everything that is the same for every participant:
 
 - checkpoint-ID fencing, phases, and idempotent replay of completed operations;
-- retire: stopping an attempt's work and freeing its state before replying. While a retire stops an
-  attempt, its requests get 409 ``stale_attempt``; afterwards nothing of the attempt remains;
+- retire: refusing an attempt's requests, stopping its work and freeing its state before replying. The
+  refusal outlives the retire, because a request a caller sent before its own retire can arrive after
+  this server's retire finished; it lasts until the controller calls ``forget`` for the rollout;
 - the readiness wait, deadlines, and manifest-last storage;
 - a lease: if the controller that started a checkpoint stops calling, the participant resumes on its
   own when the lease expires, which is the same as an abort.
 
-``resume`` also aborts: it reopens admission and releases parked work whether or not the checkpoint
+``resume`` also aborts: it reopens admission and lets parked work continue whether or not the checkpoint
 was published. Resuming remembers the checkpoint ID, so a delayed call from a stale controller cannot
 reopen or overwrite anything.
 
@@ -35,8 +36,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import Awaitable, Callable, Iterable
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Optional
@@ -48,6 +48,7 @@ from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, PlainValidator, 
 
 from nemo_gym._checkpoint.errors import (
     CheckpointConflictError,
+    CheckpointStateError,
     ControlError,
     DeadlineExceededError,
     InvalidPhaseError,
@@ -107,6 +108,13 @@ class RestoreRequest(CheckpointRequest):
 
 class RetireRequest(CheckpointRequest):
     episode_ids: list[EpisodeId] = Field(min_length=1)
+
+
+class ForgetRequest(CheckpointRequest):
+    rollout_ids: list[str] = Field(
+        min_length=1,
+        description="Rollouts that are finished for good: nothing of any of their attempts can still run.",
+    )
 
 
 def _check_json(value: Any) -> Any:
@@ -173,47 +181,50 @@ class PrepareReport(BaseModel):
         return data
 
 
-class RetiringAttempts:
-    """Refuse requests from attempts while a retire stops them.
+class RetiredAttempts:
+    """Refuse requests from retired attempts until the controller forgets their rollout.
 
-    A retire stops an attempt's running work and frees its state before it returns, so afterwards nothing Gym
-    runs can send another request for that attempt, and the fence forgets it. It holds only retires in progress.
+    Retire stops callers before callees, but a request a caller sent just before its own retire travels on a
+    different connection than the callee's retire, and can arrive after the callee's retire finished. So a retire
+    raises its rollout's mark before it stops anything, never lowers it, and keeps it whether or not the retire
+    succeeds. The mark goes away only when the controller calls ``forget`` for the rollout, once nothing of any of
+    its attempts can still run: one entry per rollout retired and not yet forgotten.
     """
 
     def __init__(self) -> None:
-        self._stopping: dict[str, list[int]] = {}
+        self._marks: dict[str, int] = {}
 
     def check(self, episode_id: EpisodeId) -> None:
-        for attempt in self._stopping.get(episode_id.rollout_id, ()):
-            if episode_id.attempt <= attempt:
-                raise StaleAttemptError(
-                    f"rollout {episode_id.rollout_id!r} attempt {episode_id.attempt} is being retired"
-                )
+        mark = self._marks.get(episode_id.rollout_id)
+        if mark is not None and episode_id.attempt <= mark:
+            raise StaleAttemptError(f"rollout {episode_id.rollout_id!r} attempt {episode_id.attempt} was retired")
 
-    @contextmanager
-    def stopping(self, episode_ids: Iterable[EpisodeId]) -> Iterator[None]:
-        """Refuse ``episode_ids`` and their earlier attempts for the length of the block."""
-        marked = list(episode_ids)
-        for episode_id in marked:
-            self._stopping.setdefault(episode_id.rollout_id, []).append(episode_id.attempt)
-        try:
-            yield
-        finally:
-            for episode_id in marked:
-                attempts = self._stopping[episode_id.rollout_id]
-                attempts.remove(episode_id.attempt)
-                if not attempts:
-                    del self._stopping[episode_id.rollout_id]
+    def mark(self, episode_ids: Iterable[EpisodeId]) -> None:
+        """Refuse ``episode_ids`` and their earlier attempts from now on."""
+        for episode_id in episode_ids:
+            self._marks[episode_id.rollout_id] = max(self._marks.get(episode_id.rollout_id, -1), episode_id.attempt)
+
+    def forget(self, rollout_ids: Iterable[str]) -> None:
+        for rollout_id in rollout_ids:
+            self._marks.pop(rollout_id, None)
+
+    def marks(self) -> dict[str, int]:
+        """Each retired rollout's highest retired attempt, for a worker that joins after the retires."""
+        return dict(self._marks)
+
+    def update(self, marks: dict[str, int]) -> None:
+        for rollout_id, attempt in marks.items():
+            self.mark([EpisodeId(rollout_id=rollout_id, attempt=attempt)])
 
     def __len__(self) -> int:
-        return len(self._stopping)
+        return len(self._marks)
 
 
 class CheckpointParticipant(ABC):
     """State owner inside one server process.
 
     A participant implements admission, readiness, export, and restore for the state it owns, and
-    checks ``retiring`` on its data plane. The ``ParticipantControlPlane`` does checkpoint-ID fencing, phases,
+    checks ``retired`` on its data plane. The ``ParticipantControlPlane`` does checkpoint-ID fencing, phases,
     deadlines, and storage.
     """
 
@@ -221,7 +232,7 @@ class CheckpointParticipant(ABC):
     record_model: ClassVar[type[CheckpointRecord]]
 
     def __init__(self) -> None:
-        self.retiring = RetiringAttempts()
+        self.retired = RetiredAttempts()
         self._changed = asyncio.Condition()
 
     async def notify(self) -> None:
@@ -242,7 +253,7 @@ class CheckpointParticipant(ABC):
 
     @abstractmethod
     async def open_admission(self) -> None:
-        """Admit work again and release everything parked or held."""
+        """Admit work again: parked work continues and held responses are delivered."""
 
     @abstractmethod
     def readiness(self) -> PrepareReport:
@@ -251,11 +262,18 @@ class CheckpointParticipant(ABC):
     @abstractmethod
     async def retire(self, episode_id: EpisodeId) -> None:
         """Stop the running work of ``episode_id`` and earlier attempts, wait until it has stopped, then free
-        their state, live or restored. Return only once nothing of them remains."""
+        their state, live or restored. Return only once nothing of them remains.
+
+        If this raises or is cancelled, whatever is still running must stay tracked, so a retry stops it again.
+        """
 
     @abstractmethod
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
-        """Return the frozen records of a prepared participant, within the commit's episode scope."""
+        """Return the frozen records of a prepared participant, within the commit's episode scope.
+
+        Restored state the scope leaves out must not be exported: the commit retires it after the write, and a
+        retried commit must write the same records.
+        """
 
     @abstractmethod
     def restore_records(self, records: list[CheckpointRecord]) -> None:
@@ -264,11 +282,19 @@ class CheckpointParticipant(ABC):
         Implementations must not change live state unless every record is valid.
         """
 
+    async def mark_retired(self, episode_ids: list[EpisodeId]) -> None:
+        """Refuse these attempts from now on, before a retire stops them. Override to tell other processes as well."""
+        self.retired.mark(episode_ids)
+
+    async def forget(self, rollout_ids: list[str]) -> None:
+        """Stop refusing these rollouts' retired attempts. Override to tell other processes as well."""
+        self.retired.forget(rollout_ids)
+
     async def restored_pending(self) -> list[EpisodeId]:
         """Restored episodes whose replacement has not started here yet, as the attempts that continue them.
 
         A commit retires the ones its scope leaves out: the controller no longer continues them, and nothing
-        else would release their restored state.
+        else would free their restored state.
         """
         return []
 
@@ -315,8 +341,8 @@ class ParticipantControlPlane:
             "phase": self.phase.value,
             "checkpoint_id": self.checkpoint_id,
             "lease_expires_at": self._lease_expires_at,
-            # Attempts a retire is stopping right now; nothing about an attempt outlives its retire.
-            "retiring": len(self.participant.retiring),
+            # Rollouts retired and not yet forgotten: each refuses its retired attempts until ``forget``.
+            "retired_rollouts": len(self.participant.retired),
             "report": self.participant.readiness().model_dump(),
             **self.participant.status_extra(),
         }
@@ -410,30 +436,47 @@ class ParticipantControlPlane:
             await self.participant.wait_changed(min(remaining, 1.0))
 
     async def retire(self, request: RetireRequest) -> dict[str, Any]:
-        """Stop these attempts' running work and free their state, then reply.
+        """Refuse these attempts, stop their running work and free their state, then reply.
 
         Allowed when idle, and after a restore, where nothing is running yet. While a checkpoint is open it is
         refused: stopping an episode waits for its final cleanup, whose calls wait for resume. A controller with
-        a straggler resumes first. The attempts are refused while they stop; afterwards nothing remains of them.
+        a straggler resumes first. The attempts stay refused, even if this retire fails, until ``forget``.
         """
         async with self._lock:
-            if self.phase not in (CheckpointPhase.IDLE, CheckpointPhase.RESTORED):
-                raise InvalidPhaseError(f"cannot retire in phase {self.phase.value}; resume first")
-            if self.checkpoint_id is not None and self.checkpoint_id != request.checkpoint_id:
-                raise CheckpointConflictError(f"checkpoint {self.checkpoint_id!r} is active")
-            if self.phase != CheckpointPhase.IDLE:
-                self._renew(request)
-            with self.participant.retiring.stopping(request.episode_ids):
-                await _within(request, self._stop(request.episode_ids))
+            self._admit_outside_checkpoint(request)
+            await _within(request, self.participant.mark_retired(request.episode_ids))
+            await _within(request, self._stop(request.episode_ids))
         await self.participant.notify()
         return {"retired": [episode_id.capture_key for episode_id in request.episode_ids]}
+
+    async def forget(self, request: ForgetRequest) -> dict[str, Any]:
+        """Stop refusing these rollouts' retired attempts: the controller is done with them for good.
+
+        Callers before callees, like retire, and only once nothing of any attempt of these rollouts can still run.
+        """
+        async with self._lock:
+            self._admit_outside_checkpoint(request)
+            await _within(request, self.participant.forget(request.rollout_ids))
+        return {"forgotten": sorted(request.rollout_ids)}
+
+    def _admit_outside_checkpoint(self, request: CheckpointRequest) -> None:
+        if self.phase not in (CheckpointPhase.IDLE, CheckpointPhase.RESTORED):
+            raise InvalidPhaseError(f"not valid in phase {self.phase.value}; resume first")
+        if self.checkpoint_id is not None and self.checkpoint_id != request.checkpoint_id:
+            raise CheckpointConflictError(f"checkpoint {self.checkpoint_id!r} is active")
+        if self.phase != CheckpointPhase.IDLE:
+            self._renew(request)
 
     async def _stop(self, episode_ids: list[EpisodeId]) -> None:
         for episode_id in episode_ids:
             await self.participant.retire(episode_id)
 
     async def _retire_unscoped(self, episode_ids: Optional[list[EpisodeId]]) -> None:
-        """Retire restored episodes the commit's scope leaves out: the scope is everything the controller continues."""
+        """Retire restored episodes the commit's scope leaves out: the scope is everything the controller continues.
+
+        Their attempts are not marked retired: a replacement that never started here cannot send a late request,
+        and the controller may still start the rollout over as that attempt.
+        """
         if episode_ids is None:
             return
         scope = set(episode_ids)
@@ -460,11 +503,13 @@ class ParticipantControlPlane:
                 kind=self.participant.kind,
                 instance=self.instance_name,
                 checkpoint_id=request.checkpoint_id,
-                records=[record.to_json_record() for record in records],
+                records=(record.to_json_record() for record in records),
             )
             # A write that outlives the deadline fails this call; a retry returns the same manifest.
             manifest = await _within(request, write)
-            await self._retire_unscoped(request.episode_ids)
+            # Restored state outside the scope was not exported, so a retry after a failure here writes the same
+            # records and returns the same manifest.
+            await _within(request, self._retire_unscoped(request.episode_ids))
             self.phase = CheckpointPhase.COMMITTED
             result = {
                 "phase": self.phase.value,
@@ -488,9 +533,13 @@ class ParticipantControlPlane:
                 instance=self.instance_name,
             )
             manifest, raw_records = await _within(request, read)
-            scope = set(request.episode_ids)
-            records = [self.participant.record_model.model_validate(record) for record in raw_records]
-            records = [record for record in records if record.episode_id in scope]
+            # Validate only the records in scope: the scope can be much smaller than the checkpoint.
+            scope = {episode_id.capture_key for episode_id in request.episode_ids}
+            records = [
+                self.participant.record_model.model_validate(record)
+                for record in raw_records
+                if _record_key(record) in scope
+            ]
             await self.participant.close_admission(request)
             try:
                 await _within(request, self.participant.install(records))
@@ -540,6 +589,14 @@ class ParticipantControlPlane:
         await self.participant.notify()
 
 
+def _record_key(record: Any) -> Optional[str]:
+    """The capture key of a stored record, without validating the rest of it."""
+    try:
+        return EpisodeId.model_validate(record["episode_id"]).capture_key
+    except (KeyError, TypeError, ValueError) as error:
+        raise CheckpointStateError(f"checkpoint record has no valid episode_id: {error}") from error
+
+
 async def _within(request: CheckpointRequest, operation: Any) -> Any:
     try:
         async with asyncio.timeout(request.remaining()):
@@ -558,6 +615,7 @@ _OPERATION_REQUESTS: dict[str, type[CheckpointRequest]] = {
     "prepare": CheckpointRequest,
     "renew": CheckpointRequest,
     "retire": RetireRequest,
+    "forget": ForgetRequest,
     "commit": CommitRequest,
     "restore": RestoreRequest,
     "resume": CheckpointRequest,
