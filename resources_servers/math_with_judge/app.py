@@ -389,22 +389,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
             return False, judge_evaluation
 
         output_text = last_content.text
-        equal_choice_position = output_text.find(self.JUDGE_EQUAL_LABEL)
-        not_equal_choice_position = output_text.find(self.JUDGE_NOT_EQUAL_LABEL)
-
-        # The first label that appears in the text is used for the evaluation.
-        if equal_choice_position < 0:
-            if not_equal_choice_position < 0:
-                return False, judge_evaluation
-            else:
-                return False, judge_evaluation
-        else:
-            if not_equal_choice_position < 0:
-                return True, judge_evaluation
-            elif equal_choice_position < not_equal_choice_position:
-                return True, judge_evaluation
-            else:
-                return False, judge_evaluation
+        equal_choice_position = output_text.rfind(self.JUDGE_EQUAL_LABEL)
+        not_equal_choice_position = output_text.rfind(self.JUDGE_NOT_EQUAL_LABEL)
+        return equal_choice_position > not_equal_choice_position, judge_evaluation
 
     # ──────────────────────────────────────────────────────────
     # Aggregate metrics overrides
