@@ -158,7 +158,7 @@ def resolve_log_dir(config: H2PingSidecarConfig, global_config_dict: Any) -> str
     configured = config.log_dir or global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME)
     if configured:
         return str(Path(configured).expanduser().resolve())
-    return os.path.join(tempfile.gettempdir(), "nemo_gym_h2ping")
+    return os.path.join(tempfile.gettempdir(), f"nemo_gym_h2ping-{os.getuid()}")
 
 
 # ---------------------------------------------------------------------------------------------
