@@ -117,6 +117,15 @@ class TestProbeClassification:
             )
             assert nemo_gym.cli.env._ENDPOINT_ANSWERING == _probe_endpoint("http://x:8000/v1")
 
+    def test_gateway_statuses_are_still_starting(self, monkeypatch: MonkeyPatch) -> None:
+        """A load balancer in front of vLLM replicas that are still loading answers 503 (or a proxy
+        502/504). Something is listening, but nothing can serve a request yet."""
+        for status_code in (502, 503, 504):
+            monkeypatch.setattr(
+                nemo_gym.cli.env.requests, "get", MagicMock(return_value=MagicMock(status_code=status_code))
+            )
+            assert nemo_gym.cli.env._ENDPOINT_STARTING == _probe_endpoint("http://lb:8000/v1")
+
     def test_untrusted_certificate_is_reachable(self, monkeypatch: MonkeyPatch) -> None:
         """A completed TLS handshake proves something is listening. SSLError subclasses
         ConnectionError, so deciding on the parent class would reject it."""
@@ -153,6 +162,33 @@ class TestCheckStopsStartupCleanly:
 
         assert [] == unreachable
         sleep_mock.assert_not_called()
+
+    def test_waits_through_a_load_balancer_with_no_ready_backend(self, monkeypatch: MonkeyPatch) -> None:
+        """The startup wait holds until the load balancer stops answering 503, instead of letting
+        the first rollouts reach it while its backends are still loading."""
+        clock = _FakeClock()
+        statuses = iter([503, 503, 200])
+        get_mock = MagicMock(side_effect=lambda *args, **kwargs: MagicMock(status_code=next(statuses)))
+        monkeypatch.setattr(nemo_gym.cli.env.requests, "get", get_mock)
+
+        unreachable = _wait_for_model_endpoints(
+            [("base_url", "http://lb:8000/v1")], timeout_seconds=600, monotonic=clock, sleep_fn=clock.sleep
+        )
+
+        assert [] == unreachable
+        assert 3 == get_mock.call_count
+        assert 2 * _ENDPOINT_POLL_INTERVAL_SEC == clock()
+
+    def test_a_gateway_status_that_never_clears_is_reported(self, monkeypatch: MonkeyPatch) -> None:
+        clock = _FakeClock()
+        monkeypatch.setattr(nemo_gym.cli.env.requests, "get", MagicMock(return_value=MagicMock(status_code=503)))
+
+        unreachable = _wait_for_model_endpoints(
+            [("base_url", "http://lb:8000/v1")], timeout_seconds=30, monotonic=clock, sleep_fn=clock.sleep
+        )
+
+        assert [("base_url", "http://lb:8000/v1")] == unreachable
+        assert clock() >= 30
 
     def test_failure_is_a_config_error_not_a_system_exit(self, monkeypatch: MonkeyPatch) -> None:
         """NeMo-RL imports RunHelper, so a library method must not exit the process."""
