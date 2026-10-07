@@ -178,7 +178,7 @@ def _has_real_deliverable(deliverables_dir: Optional[str]) -> bool:
     # Keep the definition of a deliverable aligned with the judge's reader so
     # run-state files such as finish_params.json and history.json never turn a
     # judge failure into a policy-reuse request.
-    from responses_api_agents.stirrup_agent.file_reader import is_deliverable
+    from nemo_gym.deliverables import is_deliverable
 
     try:
         return any(is_deliverable(path) for path in root.iterdir())
@@ -334,6 +334,7 @@ def _classify_verify_failure(exc: BaseException) -> str:
             parts.append(str(response_content))
         current = current.__cause__ or current.__context__
     error_text = "\n".join(parts)
+    # FIXME: removed once stirrup runs behind an environment server
     from resources_servers.gdpval.scoring import is_permanent_judge_error
 
     permanent = is_permanent_judge_error(exc) or is_permanent_judge_error(error_text)
@@ -584,7 +585,7 @@ async def _run_stirrup_agent(
         # image by many GB. Refuse rather than run tasks in a crippled env.
         raise RuntimeError(
             "GDPval requires the Apptainer sandbox but no exec provider was configured; "
-            "set `gdpval_container_path` to a .sif built from containers/gdpval.def. The "
+            "set `gdpval_container_path` to a .sif built from resources_servers/gdpval/containers/gdpval.def. The "
             "local backend is rejected because the sandbox dependencies are not installed "
             "in the evaluation container."
         )
@@ -733,7 +734,8 @@ async def _run_stirrup_agent(
 
         # Stirrup's session __aexit__ saves files from finish_params.paths to output_dir.
         # Read their text content so the judge can score actual deliverables.
-        from responses_api_agents.stirrup_agent.file_reader import (
+        # FIXME: removed once stirrup runs behind an environment server
+        from resources_servers.gdpval.file_reader import (
             convert_deliverables_to_content_blocks,
             read_deliverable_files,
         )

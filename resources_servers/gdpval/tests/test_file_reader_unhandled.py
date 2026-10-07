@@ -5,7 +5,7 @@
 import zipfile
 from pathlib import Path
 
-from responses_api_agents.stirrup_agent.file_reader import (
+from resources_servers.gdpval.file_reader import (
     HANDLED_EXTS,
     LEGACY_OFFICE_EXTS,
     OFFICE_EXTS,

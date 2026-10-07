@@ -112,7 +112,7 @@ _A = TypeVar("_A", bound=_HasAV)
 # here: an extension that routes as video but that the emitter cannot build a
 # block for is silently dropped, and the judge scores a task whose media it never
 # saw. The emitters are ``comparison.FILE_TYPE_MAP`` and
-# ``stirrup_agent.file_reader.MIME_TYPES``; tests/test_judge_panel.py asserts both
+# ``file_reader.MIME_TYPES``; tests/test_judge_panel.py asserts both
 # stay in sync with these sets.
 AUDIO_EXTS = frozenset(
     {

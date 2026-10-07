@@ -13,8 +13,8 @@ degradation, and it already exists.
 import subprocess
 from pathlib import Path
 
-import responses_api_agents.stirrup_agent.file_reader as file_reader
-from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
+import resources_servers.gdpval.file_reader as file_reader
+from resources_servers.gdpval.file_reader import convert_deliverables_to_content_blocks
 
 
 def _docx(path: Path, body: str) -> None:

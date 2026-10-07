@@ -394,13 +394,13 @@ Some GDPVal tasks ask the model to install packages or run untrusted code. By de
 agent uses a local sandbox; setting `gdpval_container_path` to an Apptainer `.sif` routes
 all `code_exec` calls through a persistent container.
 
-Build the supplied container definition. Build **from the `containers/`
+Build the supplied container definition. Build **from the `resources_servers/gdpval/containers/`
 directory**: the definition stages the vendored GDPval-AA v2 manifests via
 `%files`, and apptainer resolves those paths relative to the directory the
 build runs in, so a build started from the repository root cannot find them.
 
 ```bash
-cd responses_api_agents/stirrup_agent/containers
+cd resources_servers/gdpval/containers
 apptainer build gdpval.sif gdpval.def
 ```
 
