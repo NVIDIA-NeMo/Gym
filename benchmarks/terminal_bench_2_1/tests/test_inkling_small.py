@@ -40,6 +40,7 @@ def pinned_tasks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
             "responses_create_params": {
                 "input": [
                     {"role": "user", "content": f"Solve {name}.\nKeep the café heading.\n\n"},
+                    {"role": "user", "content": preparation.TERMINAL_INTERACTION_GUIDANCE},
                 ]
             },
             "task_name": f"terminal-bench/{name}",
@@ -106,18 +107,19 @@ def test_changed_task_checkout_is_rejected_without_rewriting_inputs(pinned_tasks
     assert output.read_bytes() == original
 
 
-@pytest.mark.parametrize("change", ["order", "checksum", "missing_task"])
-def test_input_drift_is_rejected(pinned_tasks: list[dict], change: str) -> None:
+@pytest.mark.parametrize("change", ["order", "guidance", "missing_task"])
+def test_input_drift_is_rejected(pinned_tasks: list[dict], monkeypatch: pytest.MonkeyPatch, change: str) -> None:
     output = preparation.prepare()
     original = output.read_bytes()
-    manifest = json.loads(preparation.TASK_MANIFEST_PATH.read_text())
-    if change == "order":
-        manifest["task_order"].reverse()
-    elif change == "checksum":
-        manifest["normalized_rows_sha256"] = "0" * 64
+    if change == "guidance":
+        monkeypatch.setattr(preparation, "TERMINAL_INTERACTION_GUIDANCE", "Different guidance")
     else:
-        manifest["task_order"].pop()
-    preparation.TASK_MANIFEST_PATH.write_text(json.dumps(manifest))
+        manifest = json.loads(preparation.TASK_MANIFEST_PATH.read_text())
+        if change == "order":
+            manifest["task_order"].reverse()
+        else:
+            manifest["task_order"].pop()
+        preparation.TASK_MANIFEST_PATH.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="differ from the pinned|89 unique tasks"):
         preparation.prepare()
     assert output.read_bytes() == original
