@@ -1,0 +1,105 @@
+---
+title: "Standalone turn budget proxy"
+description: "Bind a policy endpoint to a per-session POST budget and retain a terminal receipt."
+---
+
+# Standalone turn budget proxy
+
+`TurnConstraintSession` gives adapter authors a streaming OpenAI-compatible endpoint
+with a per-rollout request budget. Bind the policy client to `session.base_url`
+inside the context and persist `session.metadata` after it exits. This library
+primitive requires explicit adapter wiring before a harness configuration can use it.
+
+```python
+from nemo_gym.adapters.turn_counter_proxy import (
+    TurnConstraintConfig,
+    TurnConstraintSession,
+    is_turn_budget_exhausted,
+)
+
+constraint = TurnConstraintConfig.model_validate({
+    "enforcement": "proxy",
+    "limit": 20,
+    "scope": "session",
+    "reminder": {"trigger": "per_turn", "position": "system_message"},
+})
+session = TurnConstraintSession(
+    constraint=constraint,  # None preserves the upstream URL with no listener
+    upstream_base_url=captured_policy_url,
+    api_key=model_api_key,
+    harness_version=installed_harness_version,
+)
+try:
+    async with session:
+        try:
+            await run_policy(base_url=session.base_url)
+        except Exception as error:
+            if not is_turn_budget_exhausted(error):
+                raise
+            # Keep accepted history, files and tool effects for verification.
+finally:
+    if session.metadata is not None:
+        persist_constraint(session.metadata.model_dump())
+# The adapter now verifies the partial or complete result using its normal scorer.
+```
+
+The example's policy, persistence and verification functions are supplied by the
+adapter. Keep the session object outside the context so failed startup, cancellation
+and other exceptions also leave a receipt. Each session object can be entered once.
+Gym initializes its shared aiohttp client; the proxy uses that transport without
+internal retries. The context closes its listener and active upstream responses,
+while leaving the shared client open for other rollouts.
+
+## Budget and stop semantics
+
+The unit is `policy_model_post_attempt`. Every POST reaching the listener consumes
+an attempt, including retries, failed requests, compaction and child calls using
+that endpoint. Admission is atomic within the listener's event loop. At most
+`limit` requests are forwarded; request `limit + 1` and subsequent requests return
+HTTP 400 with `error.code = "session_budget_exhausted"`. Finishing naturally on the
+last allowed request is not exhaustion. GET `/health` does not consume budget.
+
+Upstream 429 and 5xx responses pass through unchanged. Connection failures become
+502 with `error.code = "upstream_failure"`. Harness retries must pass through the
+proxy to be charged. A typed budget error is an intentional policy stop: preserve
+partial output, do not replay policy, and run normal verification. The proxy does
+not set rewards. Adapters must preserve infrastructure and verifier failures
+separately, including when a budget rejection also occurred.
+
+The receipt retains `requested` settings and `realized` settings, including:
+
+- `observed_count`: all POST attempts reaching the listener, for compatibility.
+- `forwarded_count`: attempts sent to the upstream transport, including failures.
+- `rejected_count`: attempts rejected because the budget was exhausted.
+- `exhausted`: whether any attempt was rejected, independent of other failures.
+- `stop_reason`: `completed`, `session_budget_exhausted`, `startup_failure`,
+  `cancelled`, or `error`. An unrelated exception takes precedence over exhaustion.
+- `runtime_version`: the proxy contract/runtime revision; `harness_version` is
+  provided by the adapter from its installed harness.
+
+A request that fails while its body is being read consumes budget but is neither
+forwarded nor budget-rejected. Downstream captures cannot measure rejected requests;
+use the proxy receipt for budget accounting. The adapter persists that receipt to
+its normal result or failure record and retains it across resume operations.
+
+## Reminders and routing
+
+Supported reminder triggers are `per_turn`, `threshold` and `auto`; positions are
+`system_message` and `user_message`. `auto` resolves to per-turn reminders when the
+80% warning point leaves fewer than two requests. Otherwise, threshold reminders
+start at 80% and become urgent at 95%. The last request receives zero remaining
+requests in its reminder. `realized.reminder` records the effective cadence.
+
+System reminders extend the first system message or insert one at the beginning,
+which preserves chat-template ordering. User reminders extend the last user message.
+Both Chat Completions and Responses input formats are supported. Streaming response
+bytes are forwarded as they arrive; large multimodal histories are supported up to
+128 MiB. Connection establishment has a 30-second limit; the rollout owns the overall
+generation deadline.
+
+Resolve the captured upstream URL before entering the context. For upstream paths
+ending in `/v1`, the advertised URL exposes `/v1` and retains any capture prefix
+only on upstream requests. Bind graders outside this policy endpoint. Validate
+competing native limits/reminders and alternate policy routes in each adapter.
+For remote execution, set `host` and `advertise_host` explicitly and check the
+advertised address from where the model client runs.
