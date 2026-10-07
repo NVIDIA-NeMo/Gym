@@ -9,6 +9,7 @@ from aiohttp import web
 
 from nemo_gym.token_id_capture.completion import completion_items, output_item_fingerprint
 from responses_api_agents.agentic_vbench_agent.capture_proxy import (
+    classify_agent,
     CaptureProxy,
     capture_output,
     load_records,
@@ -206,3 +207,32 @@ def test_capture_output_requires_records_and_ids(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="missing its id"):
         capture_output([record])
     assert redact_images("not a list") == "not a list"
+
+
+def test_classify_agent_recognizes_untagged_compaction_requests() -> None:
+    # Stock OpenCode 1.14.39 sends no x-opencode-agent header: a task turn carries
+    # the tool set, the compaction request carries none and one of two fixed prompts.
+    tools = [{"type": "function", "function": {"name": "bash", "parameters": {}}}]
+    task = {"messages": [{"role": "system", "content": "You are opencode"}, {"role": "user", "content": "Do it"}], "tools": tools}
+    fresh = {
+        "messages": [
+            {"role": "system", "content": "You are an anchored context summarization assistant"},
+            {"role": "user", "content": "Create a new anchored summary from the conversation history above.\nOutput..."},
+        ]
+    }
+    update = {
+        "messages": [
+            {"role": "user", "content": "Do it"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": [{"type": "text", "text": "Update the anchored summary below using the conversation history above. Keep"}]},
+        ],
+        "tools": [],
+    }
+    assert classify_agent(None, task) is None
+    assert classify_agent(None, fresh) == "compaction"
+    assert classify_agent(None, update) == "compaction"
+    # A tool-less plain user turn (e.g. the post-compaction continue prompt with tools stripped) is not a summary.
+    assert classify_agent(None, {"messages": [{"role": "user", "content": "Continue if you have next steps"}]}) is None
+    # The header still wins when OpenCode sends one.
+    assert classify_agent("title", fresh) == "title"
+    assert classify_agent("build", task) == "build"

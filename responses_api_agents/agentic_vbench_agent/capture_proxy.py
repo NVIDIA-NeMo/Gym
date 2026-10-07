@@ -15,10 +15,13 @@ capture needs two things that endpoint cannot give it directly:
   completions are converted with the same Chat conversion Gym's capture
   ledger applies, which makes the fingerprints identical by construction.
 
-OpenCode tags each call with ``x-opencode-agent``; compaction summaries arrive
-as ``compaction`` and are reported separately. The proxy never alters the
-upstream decision: Gym's rollout prefix on the upstream URL attributes the
-calls, and the vLLM worker stages the exact tokens.
+Calls are attributed to OpenCode agents so compaction summaries can be
+reported (and optionally excluded) separately: an ``x-opencode-agent`` header
+when OpenCode sends one, otherwise the request shape. Stock OpenCode 1.14.39
+sends no such header; its compaction request is the only one without tools,
+and its user turn is one of two fixed prompts (``session/compaction.ts``). The
+proxy never alters the upstream decision: Gym's rollout prefix on the upstream
+URL attributes the calls, and the vLLM worker stages the exact tokens.
 """
 
 import asyncio
@@ -44,6 +47,11 @@ COMPACTION_AGENT = "compaction"
 # generation is disabled in the OpenCode config for training, but a stray call
 # must still not be presented as accepted history.
 IGNORED_AGENTS = frozenset({"title", "summary"})
+# OpenCode 1.14.39 session/compaction.ts: the user turn of a compaction request.
+COMPACTION_PROMPT_PREFIXES = (
+    "Create a new anchored summary from the conversation history above.",
+    "Update the anchored summary below using the conversation history above.",
+)
 _IMAGE_DATA_URL = re.compile(r"^data:(image/[^;]+);base64,(.*)$", re.DOTALL)
 _FORWARDED_HEADER_PREFIXES = ("x-opencode-",)
 
@@ -159,7 +167,7 @@ class CaptureProxy:
         include_usage = False
         if streamed:
             body, include_usage = sanitize_streaming_chat_body(body)
-        agent = request.headers.get(AGENT_HEADER)
+        agent = classify_agent(request.headers.get(AGENT_HEADER), body)
         started = time.time()
         # OpenCode is sequential within a session; the lock also keeps a stray
         # overlapping side call from racing the ledger's sequential admission.
@@ -195,6 +203,35 @@ class CaptureProxy:
                 body=events.encode(), content_type="text/event-stream", headers={"Cache-Control": "no-cache"}
             )
         return web.Response(body=payload, content_type="application/json")
+
+
+def _message_text(message: Any) -> str:
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    return ""
+
+
+def classify_agent(header_agent: str | None, body: dict) -> str | None:
+    """Name the OpenCode agent behind a chat request.
+
+    The header wins when present. Otherwise a request without tools whose last
+    user turn is OpenCode's compaction prompt is the ``compaction`` agent; task
+    turns always carry the tool set.
+    """
+    if header_agent:
+        return header_agent
+    if body.get("tools"):
+        return None
+    for message in reversed(body.get("messages") or []):
+        if isinstance(message, dict) and message.get("role") == "user":
+            text = _message_text(message).lstrip()
+            if text.startswith(COMPACTION_PROMPT_PREFIXES):
+                return COMPACTION_AGENT
+            return None
+    return None
 
 
 def load_records(record_dir: Path) -> list[dict]:
