@@ -29,6 +29,8 @@ resources:
   gpu_type: gb200
   gpus_per_node: 4
 engine: sglang
+# SRT runs this inside every worker container before starting SGLang.
+setup_script: install-fastokens.sh
 dynamo:
   install: false
 identity:
@@ -56,6 +58,7 @@ frontend:
 # SRT already mounts its job log directory at /logs and the checkpoint at /model.
 container_mounts:
   "$GYM_REPO": /opt/Gym
+  "$GYM_REPO/benchmarks/nemotron_3.5_super/sglang_configs/install-fastokens.sh": /configs/install-fastokens.sh
 
 # SRT collects telemetry; Gym also exports worker metrics during rollout collection.
 observability:
