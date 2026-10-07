@@ -34,6 +34,11 @@ The harness settings remain independent of benchmark prompts and stopping policy
   `null`: a catalog output limit does not imply that native requests use that entire limit.
 - `reasoning_effort` selects an explicit variant. Configure `reasoning: true` and the matching
   entry in `native_model_options.variants`; unsupported profiles fail during setup.
+- Session seeds may carry `runtime_policy` with format `harbor.agent-kwargs.v1` and
+  `settings.disallowed_tools` as the original comma-separated string. The adapter preserves
+  that format's upstream translation into nested `permission.tools`; this is compatibility
+  metadata, not a claim that every native version enforces those nested entries. Unknown
+  formats/settings fail before setup. The composition's sandbox egress policy remains independent.
 - For offline runtime setup, supply `local_opencode_binary_path` and its required
   `local_opencode_binary_sha256`. The adapter uploads and verifies the binary before
   checking its exact version inside the task sandbox. Alternatively provide a keyless

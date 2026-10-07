@@ -36,6 +36,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from nemo_gym.agent_runtime_policy import AgentRuntimePolicy
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -744,8 +745,40 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             stop_reason=stop_reason,
         )
 
+    def _validate_agent_runtime_policy(self, policy: AgentRuntimePolicy) -> None:
+        if policy.format != "harbor.agent-kwargs.v1":
+            raise HTTPException(422, f"Unsupported OpenCode runtime policy format: {policy.format}")
+        unsupported = policy.settings.keys() - {"disallowed_tools"}
+        if unsupported:
+            raise HTTPException(422, f"Unsupported OpenCode runtime policy settings: {sorted(unsupported)}")
+        disallowed = policy.settings.get("disallowed_tools")
+        if disallowed is not None and not isinstance(disallowed, str):
+            raise HTTPException(422, "OpenCode disallowed_tools must be a comma-separated string or null")
+
+    def _native_task_config(self, policy: AgentRuntimePolicy | None) -> dict[str, Any]:
+        config = copy.deepcopy(self.config.opencode_config)
+        if policy is None:
+            return config
+        self._validate_agent_runtime_policy(policy)
+        disallowed = [name.strip().lower() for name in (policy.settings.get("disallowed_tools") or "").split(",")]
+        disallowed = [name for name in disallowed if name]
+        if not disallowed:
+            return config
+        # Preserve this format's upstream nested translation, including its native semantics.
+        permission = config.setdefault("permission", {})
+        if not isinstance(permission, dict):
+            permission = {}
+        tools = permission.setdefault("tools", {})
+        if not isinstance(tools, dict):
+            tools = {}
+        tools.update({name: "deny" for name in disallowed})
+        permission["tools"] = tools
+        config["permission"] = permission
+        return config
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
         """Prepare only the harness runtime; Resources owns borrowed task setup."""
+        task_config = self._native_task_config(body.runtime_policy)
         if self.config.model_server is None:
             raise HTTPException(422, "Native OpenCode requires model_server")
         owns_sandbox = body.sandbox_access is None
@@ -905,6 +938,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             ),
             runtime=runtime,
             model_ref=self.config.model_server,
+            opencode_config=task_config,
         )
         prepared_directory = False
         try:
@@ -1248,7 +1282,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     "models": {self.config.native_model_id: model_options},
                 }
             },
-            **self.config.opencode_config,
+            **state.opencode_config,
         }
         if self.config.native_auxiliary_model == "primary":
             config["small_model"] = config["model"]

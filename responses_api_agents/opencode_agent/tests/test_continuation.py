@@ -335,6 +335,61 @@ def test_native_catalog_and_output_cap_are_independent(setup, tmp_path, cap, exp
         )
 
 
+def test_runtime_policy_is_translated_per_session_without_changing_global_config(setup, tmp_path):
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    agent.config.opencode_config = {"permission": {"external_directory": {"/workspace/**": "allow"}}}
+    request = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
+    body = request.model_dump(mode="json")
+    body["runtime_policy"] = {
+        "format": "harbor.agent-kwargs.v1",
+        "settings": {"disallowed_tools": " WebFetch, WebSearch , ,"},
+    }
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=body).status_code == 200
+        response = client.post(
+            "/v1/agent_sessions/activate",
+            json={
+                "agent_session_id": request.agent_session_id,
+                "episode_id": request.episode_id.model_dump(),
+                "activation_id": 0,
+                "responses_create_params": {"input": "Complete the task"},
+            },
+        )
+        assert response.status_code == 200, response.text
+        config = json.loads(payloads[0]["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["permission"] == {
+            "external_directory": {"/workspace/**": "allow"},
+            "tools": {"webfetch": "deny", "websearch": "deny"},
+        }
+        closed = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": request.agent_session_id, "episode_id": request.episode_id.model_dump()},
+        )
+        assert closed.status_code == 200
+        assert agent.config.opencode_config == {"permission": {"external_directory": {"/workspace/**": "allow"}}}
+        # A following task with no policy inherits the composition, not its predecessor's settings.
+        assert agent._native_task_config(None) == agent.config.opencode_config
+        assert body["runtime_policy"]["settings"]["disallowed_tools"] == " WebFetch, WebSearch , ,"
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"format": "unknown.v1", "settings": {}},
+        {"format": "harbor.agent-kwargs.v1", "settings": {"unknown": True}},
+        {"format": "harbor.agent-kwargs.v1", "settings": {"disallowed_tools": ["webfetch"]}},
+    ],
+)
+def test_unsupported_runtime_policy_is_rejected_before_sandbox_setup(setup, policy):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json={**seed().model_dump(mode="json"), "runtime_policy": policy})
+        assert response.status_code == 422, response.text
+        sandbox.exec.assert_not_awaited()
+        assert not agent._session_records
+
+
 def test_event_projection_preserves_failures_tool_details_and_reasoning():
     raw = "\n".join(
         json.dumps(event)
