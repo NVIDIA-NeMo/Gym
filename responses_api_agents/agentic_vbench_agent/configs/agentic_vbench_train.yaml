@@ -44,3 +44,14 @@ agentic_vbench_agent:
         num_repeats: 1
         # Benchmark tasks are debugging data for training, not a clean measurement.
         license: TBD
+
+# Rollout collection dispatches to environment servers, so the agent needs one in front
+# of it (same shape as benchmarks/agentic_vbench/config.yaml). Episode timeouts come from
+# the trainer (nemo_gym rollout_timeout_s); a relay does not enforce its own.
+agentic_vbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: agentic_vbench_agent

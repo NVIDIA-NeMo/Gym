@@ -399,8 +399,12 @@ def test_training_config_resolves_from_environment(monkeypatch: pytest.MonkeyPat
     for key in ("AGENTIC_VBENCH_ROOT", "AGENTIC_VBENCH_CREDENTIALS_FILE", "AGENTIC_VBENCH_RUNTIME_ROOT"):
         monkeypatch.delenv(key, raising=False)
     recipe = OmegaConf.load(Path(__file__).parents[1] / "configs/agentic_vbench_train.yaml")
-    server = OmegaConf.to_container(recipe, resolve=True)["agentic_vbench_agent"]
+    resolved = OmegaConf.to_container(recipe, resolve=True)
+    server = resolved["agentic_vbench_agent"]
     ResponsesAPIAgentServerTypeConfig.model_validate(server)
+    # Rollout collection dispatches to environment servers, so the agent needs one in front of it.
+    environment_server = resolved["agentic_vbench_environment_server"]["environment_servers"]["legacy_agent"]
+    assert environment_server["agent_server"] == {"type": "responses_api_agents", "name": "agentic_vbench_agent"}
     config = app.AgenticVBenchConfig.model_validate(
         {
             **server["responses_api_agents"]["agentic_vbench_agent"],
