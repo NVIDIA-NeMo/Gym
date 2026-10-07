@@ -28,7 +28,12 @@ model:
 resources:
   gpu_type: gb200
   gpus_per_node: 4
+sbatch_directives:
+  # Allocate node host memory for the local HiCache pools and runtime.
+  mem: '0'
 engine: sglang
+# SRT resolves setup_script relative to /configs; reuse the /opt/Gym mount.
+setup_script: ../opt/Gym/benchmarks/nemotron_3.5_super/sglang_configs/patch-hicache-mamba.sh
 dynamo:
   install: false
 identity:
@@ -172,10 +177,16 @@ roles:
       disaggregation-mode: prefill
       skip-server-warmup: true
       attention-backend: trtllm_mha
-      chunked-prefill-size: 8192
+      chunked-prefill-size: 131072
       context-length: 262144
       disaggregation-transfer-backend: nixl
       dtype: bfloat16
+      enable-hierarchical-cache: true
+      # GB per TP rank; the hybrid host budget covers attention KV and Mamba states.
+      hicache-size: 128
+      hicache-mem-layout: page_first
+      hicache-io-backend: kernel
+      hicache-write-policy: write_through
       enable-cache-report: true
       enable-metrics: true
       ep-size: 4
@@ -185,8 +196,8 @@ roles:
       mamba-full-memory-ratio: 4
       mamba-radix-cache-strategy: extra_buffer
       mamba-ssm-dtype: float32
-      max-prefill-tokens: 16384
-      max-running-requests: 256
+      max-prefill-tokens: 131072
+      max-running-requests: 1024
       mem-fraction-static: 0.9
       moe-a2a-backend: none
       page-size: 64
@@ -195,8 +206,8 @@ roles:
       speculative-algorithm: EAGLE
       speculative-draft-model-path: /model
       speculative-eagle-topk: 1
-      speculative-num-draft-tokens: 4
-      speculative-num-steps: 3
+      speculative-num-draft-tokens: 2
+      speculative-num-steps: 1
       tokenizer-worker-num: 4
       tool-call-parser: qwen3_coder
       tp-size: 4
@@ -237,8 +248,8 @@ roles:
       skip-server-warmup: true
       attention-backend: trtllm_mha
       context-length: 262144
-      cuda-graph-max-bs-decode: 128
-      disaggregation-decode-extra-slots: 0
+      cuda-graph-max-bs-decode: 256
+      disaggregation-decode-extra-slots: 64
       disaggregation-transfer-backend: nixl
       dtype: bfloat16
       enable-cache-report: true
@@ -249,8 +260,8 @@ roles:
       mamba-backend: flashinfer
       mamba-radix-cache-strategy: extra_buffer
       mamba-ssm-dtype: float32
-      max-running-requests: 128
-      max-total-tokens: 16777216
+      max-running-requests: 256
+      max-total-tokens: 67108864
       mem-fraction-static: 0.8
       moe-a2a-backend: none
       page-size: 64
@@ -259,8 +270,8 @@ roles:
       speculative-algorithm: EAGLE
       speculative-draft-model-path: /model
       speculative-eagle-topk: 1
-      speculative-num-draft-tokens: 4
-      speculative-num-steps: 3
+      speculative-num-draft-tokens: 6
+      speculative-num-steps: 5
       tokenizer-worker-num: 4
       tool-call-parser: qwen3_coder
       tp-size: 4
