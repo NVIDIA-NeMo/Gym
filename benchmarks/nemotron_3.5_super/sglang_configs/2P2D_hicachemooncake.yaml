@@ -5,7 +5,7 @@
 # HiCache/L3 is prefill-only; NIXL still transfers live KV to decode.
 # https://kvcache-ai.github.io/Mooncake/deployment/integrations/sglang/hicache-integration-v1.html#prefill-decode-disaggregation
 # Requires mooncake_master and mooncake.mooncake_store_service in model.container.
-# Host-memory starting budget per prefill node: TP4 * 64 GB HiCache + 64 GiB
+# Host-memory starting budget per prefill node: TP4 * 64 GB HiCache + 150 GiB
 # Mooncake Store, plus runtime overhead. Size against available host RAM.
 # The store is ephemeral and is stopped with the Slurm job.
 # Analytical candidate; full-scale startup, accuracy and throughput are unmeasured.
@@ -37,6 +37,9 @@ model:
 resources:
   gpu_type: gb200
   gpus_per_node: 4
+sbatch_directives:
+  # Match the vLLM Mooncake launcher's host-memory allocation.
+  mem: '0'
 engine: sglang
 dynamo:
   install: false
@@ -156,10 +159,19 @@ services:
     critical: true
     command: [mooncake_master]
     args:
-      - --port=50051
+      - --rpc_port=50051
+      - --rpc_thread_num=4
+      - --metrics_port=9003
       - --eviction_high_watermark_ratio=0.95
+      - --eviction_ratio=0.1
+      - --minloglevel=1
+      - --enable_metric_reporting=false
+      - --default_kv_lease_ttl=180000
+      - --logtostderr
     readiness:
-      port: 50051
+      http:
+        port: 9003
+        path: /health
       timeout_seconds: 120
   - name: hicache-store
     type: generic
@@ -174,9 +186,13 @@ services:
       MOONCAKE_TE_META_DATA_SERVER: P2PHANDSHAKE
       MOONCAKE_LOCAL_HOSTNAME: "{node_ip}"
       MOONCAKE_PROTOCOL: rdma
-      MOONCAKE_DEVICE: ''
-      MOONCAKE_GLOBAL_SEGMENT_SIZE: 64gb
+      MOONCAKE_DEVICE: mlx5_0,mlx5_1,mlx5_3,mlx5_4
+      # One 150 GiB standalone store per prefill node (300 GiB total).
+      MOONCAKE_GLOBAL_SEGMENT_SIZE: 150gb
+      # Storage-only process; SGLang uses zero-copy rather than vLLM's 4 GB buffer.
       MOONCAKE_LOCAL_BUFFER_SIZE: '0'
+      MC_TE_FILTERS: mlx5_0,mlx5_1,mlx5_3,mlx5_4
+      WITH_NVIDIA_PEERMEM: '0'
       HICACHE_CONFIG_PATH: "/logs/hicache-mooncake-{node}.json"
     preamble: |
       set -euo pipefail
@@ -195,6 +211,7 @@ services:
           "protocol": os.environ["MOONCAKE_PROTOCOL"],
           "device_name": os.environ["MOONCAKE_DEVICE"],
           "global_segment_size": 0,
+          "enable_ssd_offload": False,
       }
       Path(os.environ["HICACHE_CONFIG_PATH"]).write_text(json.dumps(config))
       PY_MOONCAKE
@@ -211,6 +228,9 @@ roles:
     env:
       # SRT expands {node} to match the store service's per-node config file.
       SGLANG_HICACHE_MOONCAKE_CONFIG_PATH: "/logs/hicache-mooncake-{node}.json"
+      # Match the vLLM launcher's OCI-HSG NIC filter and GB200 setting.
+      MC_TE_FILTERS: mlx5_0,mlx5_1,mlx5_3,mlx5_4
+      WITH_NVIDIA_PEERMEM: '0'
       CUDA_VISIBLE_DEVICES: 0,1,2,3
       UCX_NET_DEVICES: mlx5_0,mlx5_1,mlx5_3,mlx5_4
       SGLANG_DISAGGREGATION_NIXL_BACKEND: UCX

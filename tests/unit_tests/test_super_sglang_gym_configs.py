@@ -102,8 +102,14 @@ def test_hicache_mooncake_prefill_config(tmp_path: Path) -> None:
     master, store = config["services"]
     assert master["placement"]["node"] == "head"
     assert store["placement"]["node"] == "prefill"
-    assert master["readiness"]["port"] == 50051
-    assert "--port=50051" in master["args"]
+    assert master["readiness"]["http"] == {"port": 9003, "path": "/health"}
+    assert "--rpc_port=50051" in master["args"]
+    assert "--metrics_port=9003" in master["args"]
+    assert config["sbatch_directives"]["mem"] == "0"
+    assert store["env"]["MOONCAKE_GLOBAL_SEGMENT_SIZE"] == "150gb"
+    for env in (store["env"], prefill["env"]):
+        assert env["MC_TE_FILTERS"] == store["env"]["MOONCAKE_DEVICE"]
+        assert env["WITH_NVIDIA_PEERMEM"] == "0"
     for service in (master, store):
         assert service["start"] == "before_workers"
         assert service["critical"]
@@ -131,6 +137,7 @@ def test_hicache_mooncake_prefill_config(tmp_path: Path) -> None:
             "master_server_address": "10.0.0.1:50051",
             "metadata_server": "P2PHANDSHAKE",
             "protocol": "rdma",
-            "device_name": "",
+            "device_name": "mlx5_0,mlx5_1,mlx5_3,mlx5_4",
             "global_segment_size": 0,
+            "enable_ssd_offload": False,
         }
