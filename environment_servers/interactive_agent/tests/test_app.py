@@ -59,6 +59,7 @@ class ScriptedComposition:
         self.failure_path = None
         self.cleanup_confirmed = True
         self.capabilities = {"mode": "native_conversation", "observations": ["ordered_events", "timing"]}
+        self.runtime_policy = None
         self.closed = False
         self.invalid_activation_id = False
         self.invalid_step_id = False
@@ -77,10 +78,12 @@ class ScriptedComposition:
                 {
                     "resources_session_id": body["resources_session_id"],
                     "responses_create_params": {"input": "first instruction"},
+                    "runtime_policy": self.runtime_policy,
                 },
                 "resources-cookie",
             )
         if path == "/v1/agent_sessions":
+            assert body["runtime_policy"] == self.runtime_policy
             assert body["continuation"] == {
                 "mode": "native_conversation",
                 "observations": ["ordered_events", "timing"],
@@ -197,6 +200,19 @@ async def test_two_turn_composition_preserves_identity_cookies_verdict_and_order
     assert len(result.result.ng_activations) == len(result.result.ng_agent_close.activations) == 2
     assert result.result.ng_steps[-1].stop_reason == "resources_done"
     assert InteractiveAgentResponse.model_validate_json(result.model_dump_json()).model_dump() == result.model_dump()
+
+
+async def test_runtime_policy_reaches_adapter_without_environment_interpretation():
+    env, script = environment()
+    script.runtime_policy = {
+        "format": "independent-fixture.v3",
+        "settings": {"nested": {"names": ["MixedCase", "native.name"], "enabled": False}, "limit": 7},
+    }
+    result = await env.run_request(request())
+    assert result.failure is None and result.result.reward == 1
+    agent_seed = next(body for _, path, body, _ in script.calls if path == "/v1/agent_sessions")
+    assert agent_seed["runtime_policy"] == script.runtime_policy
+    assert [path for _, path, _, _ in script.calls][-1] == "/close_session"
 
 
 @pytest.mark.parametrize(
