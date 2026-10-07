@@ -13,7 +13,12 @@ from openai.types.chat import ChatCompletion
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
-from responses_api_agents.osworld_agent.app import OSWorldRunRequest, _build_messages_model_fn, _build_response
+from responses_api_agents.osworld_agent.app import (
+    OSWorldRunRequest,
+    _build_messages_model_fn,
+    _build_model_fn,
+    _build_response,
+)
 
 
 MODEL_REF = ModelServerRef(type="responses_api_models", name="policy_model")
@@ -267,3 +272,42 @@ def test_model_wrapper_preserves_real_identity_timing_usage_and_request(monkeypa
     assert messages == original_messages
     assert create.call_args.kwargs["messages"] == original_messages
     assert set(create.call_args.kwargs) == {"model", "messages", "max_tokens", "temperature", "timeout"}
+
+
+@pytest.mark.parametrize("max_tokens", [None, 8192])
+def test_messages_model_fn_sends_max_tokens_only_when_set(max_tokens):
+    completion = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="action"))])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=None)))
+    with (
+        patch("responses_api_agents.osworld_agent.app._build_policy_openai_client", return_value=client),
+        patch.object(client.chat.completions, "create", return_value=completion) as create,
+    ):
+        caller = _build_messages_model_fn(base_url="http://policy/v1", model_name="super", api_key="unused")
+        caller([{"role": "user", "content": "Click"}], {"temperature": 0.6, "max_tokens": max_tokens})
+    if max_tokens is None:
+        assert "max_tokens" not in create.call_args.kwargs
+    else:
+        assert create.call_args.kwargs["max_tokens"] == max_tokens
+
+
+@pytest.mark.parametrize("max_tokens", [None, 8192])
+def test_model_fn_sends_max_tokens_only_when_set(max_tokens):
+    completion = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="action"))])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=None)))
+    with (
+        patch("responses_api_agents.osworld_agent.app._build_policy_openai_client", return_value=client),
+        patch.object(client.chat.completions, "create", return_value=completion) as create,
+    ):
+        caller = _build_model_fn(
+            base_url="http://policy/v1",
+            model_name="super",
+            api_key="unused",
+            max_tokens=max_tokens,
+            temperature=0.6,
+            top_p=None,
+        )
+        assert caller("system", "Click", [{"screenshot_b64": ""}]) == "action"
+    if max_tokens is None:
+        assert "max_tokens" not in create.call_args.kwargs
+    else:
+        assert create.call_args.kwargs["max_tokens"] == max_tokens

@@ -356,7 +356,7 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     cache_dir: str = "cache"
     setup_cache_dir: Optional[str] = None
     asset_input_jsonl: Optional[str] = None
-    max_tokens: int = 1500
+    max_tokens: Optional[int] = 1500
     temperature: float = 1.0
     top_p: Optional[float] = 0.9  # set to null in yaml when running a reasoning model that rejects top_p
     model_timeout: float = Field(default=900.0, gt=0)
@@ -576,7 +576,7 @@ def _build_model_fn(
     base_url: str,
     model_name: str,
     api_key: str,
-    max_tokens: int,
+    max_tokens: Optional[int],
     temperature: float,
     top_p: Optional[float],
     model_timeout_s: float = 900.0,
@@ -639,10 +639,11 @@ def _build_model_fn(
         create_kwargs: Dict[str, Any] = {
             "model": model_name,
             "messages": messages,
-            "max_tokens": max_tokens,
             "temperature": temperature,
             "timeout": float(model_timeout_s),
         }
+        if max_tokens is not None:
+            create_kwargs["max_tokens"] = max_tokens
         # Some reasoning models (e.g. openai/openai/gpt-5.5 via inference-api)
         # reject top_p outright with HTTP 400. Skip the kwarg when None so
         # the request goes through cleanly; set top_p=null in osworld_agent.yaml
@@ -691,10 +692,11 @@ def _build_messages_model_fn(
         create_kwargs: Dict[str, Any] = {
             "model": payload.get("model") or model_name,
             "messages": messages,
-            "max_tokens": payload.get("max_tokens"),
             "temperature": payload.get("temperature"),
             "timeout": float(model_timeout_s),
         }
+        if payload.get("max_tokens") is not None:
+            create_kwargs["max_tokens"] = payload["max_tokens"]
         if payload.get("top_p") is not None:
             create_kwargs["top_p"] = payload["top_p"]
         if rollout_purpose is not None:

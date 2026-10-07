@@ -1718,7 +1718,7 @@ def run_osworld_task(
     policy_base_url: str = "",
     policy_api_key: str = "",
     policy_model_name: str = "",
-    policy_max_tokens: int = 1500,
+    policy_max_tokens: Optional[int] = 1500,
     policy_temperature: float = 1.0,
     policy_top_p: Optional[float] = 0.9,
     evaluator_disable_gpu: bool = True,

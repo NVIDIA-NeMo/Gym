@@ -157,6 +157,15 @@ def _yaml_string(value: str | Path) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
+def _max_output_tokens(value: str) -> int | None:
+    if value.strip().lower() == "none":
+        return None
+    tokens = int(value)
+    if tokens < 1:
+        raise argparse.ArgumentTypeError("--max-output-tokens must be >= 1 or 'none'")
+    return tokens
+
+
 def select_config_paths(
     *,
     profile: str,
@@ -315,7 +324,7 @@ def write_env(
     setup_cache_dir: Path = DEFAULT_SETUP_CACHE,
     asset_input_jsonl: Path | None = None,
     num_samples_in_parallel: int = 1,
-    max_output_tokens: int = 1500,
+    max_output_tokens: int | None = 1500,
     temperature: float = 1.0,
     top_p: float | None = None,
     agent_name: str = "osworld_simple_agent",
@@ -387,7 +396,7 @@ def write_env(
             f"num_samples_in_parallel: {num_samples_in_parallel}",
             "upload_rollouts: false",
             "responses_create_params:",
-            f"  max_output_tokens: {max_output_tokens}",
+            f"  max_output_tokens: {'null' if max_output_tokens is None else max_output_tokens}",
             f"  temperature: {temperature}",
             *([] if top_p is None else [f"  top_p: {top_p}"]),
             f"policy_base_url: {_yaml_string(policy_base_url)}",
@@ -401,6 +410,7 @@ def write_env(
             f"      asset_input_jsonl: {_yaml_string((asset_input_jsonl or input_jsonl).resolve())}",
             f"      sandbox_provider: {sandbox_provider_name or 'null'}",
             *([] if emitted_vm_path is None else [f"      vm_path: {_yaml_string(emitted_vm_path)}"]),
+            *([] if max_output_tokens is not None else ["      max_tokens: null"]),
             *(
                 []
                 if execution_backend != "gym_opensandbox"
@@ -541,7 +551,12 @@ def main() -> None:
         default=1,
         help="Concurrent eval requests and OSWorld DesktopEnv instances written to env.yaml",
     )
-    parser.add_argument("--max-output-tokens", type=int, default=1500, help="Per-step model output limit")
+    parser.add_argument(
+        "--max-output-tokens",
+        type=_max_output_tokens,
+        default=1500,
+        help="Per-step model output limit; 'none' sends no limit so the server uses its remaining context",
+    )
     parser.add_argument("--max-steps", type=int, default=None, help="Optional rollout step cap override")
     parser.add_argument("--temperature", type=float, default=1.0, help="Model sampling temperature")
     parser.add_argument("--top-p", type=float, default=None, help="Optional nucleus-sampling top-p")

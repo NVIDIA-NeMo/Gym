@@ -629,7 +629,7 @@ class NemotronV3NanoOmniAgent:
         history_policy: Mapping[str, Any] | HistoryPolicySpec | None = None,
         model_protocol_id: str | None = None,
         platform: str = "ubuntu",
-        max_tokens: int = 16384,
+        max_tokens: int | None = 16384,
         top_p: float | None = 0.95,
         temperature: float = 1.0,
         action_space: str = "pyautogui",
@@ -961,12 +961,13 @@ class NemotronV3NanoOmniAgent:
             payload: Dict[str, Any] = {
                 "model": self.model,
                 "messages": request_messages,
-                "max_tokens": self.max_tokens,
                 "temperature": self.temperature if attempt == 0 else retry_temperature,
                 "_nemo_gym_return_message": True,
                 "_nemo_gym_require_stop": True,
                 "_osworld_log_context": call_log_context,
             }
+            if self.max_tokens is not None:
+                payload["max_tokens"] = self.max_tokens
             if self.top_p is not None:
                 payload["top_p"] = self.top_p
             model_call_record: Dict[str, Any] = {

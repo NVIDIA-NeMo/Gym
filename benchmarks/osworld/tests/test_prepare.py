@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -18,6 +19,7 @@ from benchmarks.osworld.prepare import (
     OPENSANDBOX_CONFIG,
     OPENSANDBOX_VM_SENTINEL,
     POINTER_AGENT_CONFIG,
+    _max_output_tokens,
     main,
     prepare,
     select_config_paths,
@@ -142,6 +144,7 @@ def test_write_env_is_private_and_preserves_existing_file(tmp_path: Path) -> Non
     assert "concurrency: 5" in contents
     assert "sandbox_provider: null" in contents
     assert "max_output_tokens: 4096" in contents
+    assert "max_tokens: null" not in contents
     assert "temperature: 0.6" in contents
     assert "top_p: 0.95" in contents
     assert 'host: "127.0.0.1"' in contents
@@ -162,6 +165,35 @@ def test_write_env_is_private_and_preserves_existing_file(tmp_path: Path) -> Non
         is False
     )
     assert env_path.read_text(encoding="utf-8") == "user-owned: true\n"
+
+
+def test_write_env_without_output_cap_nulls_request_and_agent_limits(tmp_path: Path) -> None:
+    env_path = tmp_path / "env.yaml"
+    write_env(
+        env_path,
+        config_path=tmp_path / "config.yaml",
+        input_jsonl=DEFAULT_INPUT,
+        output_jsonl=tmp_path / "rollouts.jsonl",
+        policy_base_url="http://model.test/v1",
+        policy_api_key="test-key",  # pragma: allowlist secret
+        policy_model_name="test-model",
+        max_output_tokens=None,
+    )
+
+    env = yaml.safe_load(env_path.read_text(encoding="utf-8"))
+    assert env["responses_create_params"]["max_output_tokens"] is None
+    assert env["osworld_simple_agent"]["responses_api_agents"]["osworld_agent"]["max_tokens"] is None
+
+
+@pytest.mark.parametrize(("value", "expected"), [("none", None), ("None", None), ("4096", 4096)])
+def test_max_output_tokens_flag_accepts_none(value: str, expected: int | None) -> None:
+    assert _max_output_tokens(value) == expected
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_max_output_tokens_flag_rejects_non_positive(value: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError):
+        _max_output_tokens(value)
 
 
 def test_prepare_composes_profile_and_backend_for_gym_env() -> None:

@@ -267,6 +267,20 @@ def test_parse_nemotron_response_repairs_structural_code_newlines() -> None:
     compile(commands[0], "<test-action>", "exec")
 
 
+def test_nemotron_agent_omits_max_tokens_when_none() -> None:
+    agent = NemotronV3NanoOmniAgent(model="policy-under-test", max_steps=3, max_tokens=None, temperature=0.6)
+    payloads: List[Dict[str, Any]] = []
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        payloads.append(payload)
+        return {"content": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(0.5, 0.5)\n```"}
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+
+    assert agent.predict("Complete the task.", {"screenshot": b"fake-png"})[1] == ["pyautogui.click(960, 540)"]
+    assert "max_tokens" not in payloads[0]
+
+
 def test_nemotron_agent_routes_messages_and_compacts_old_images() -> None:
     agent = NemotronV3NanoOmniAgent(
         model="policy-under-test",

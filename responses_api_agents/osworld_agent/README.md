@@ -342,6 +342,11 @@ Runner and model behavior:
 - `agent_kwargs` supplies runner-specific constructor options.
 - `max_tokens`, `temperature`, and `top_p` provide server defaults; request
   values can override sampling parameters.
+- `max_tokens: null` sends no per-step output limit, so a vLLM policy server
+  generates up to its remaining context (`max_model_len` minus the prompt).
+  The request's `max_output_tokens` must also be null or unset, because a
+  request value takes precedence. `benchmarks/osworld/prepare.py
+  --max-output-tokens none` writes both.
 
 Evaluation and operations:
 
