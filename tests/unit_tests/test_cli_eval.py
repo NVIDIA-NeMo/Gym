@@ -160,11 +160,11 @@ class TestPrepareDependencies:
 
         assert calls == []
 
-    def test_a_failed_install_is_reported_against_the_benchmark(self, monkeypatch) -> None:
+    def test_a_failed_install_is_reported_against_the_dataset(self, monkeypatch) -> None:
         def boom(cmd, **kw):
             raise cli_eval.subprocess.CalledProcessError(1, cmd)
 
         monkeypatch.setattr(cli_eval.subprocess, "run", boom)
 
-        with pytest.raises(ConfigError, match="prepare_dependencies for benchmark 'b'"):
+        with pytest.raises(ConfigError, match="prepare_dependencies for dataset 'b'"):
             cli_eval._install_prepare_dependencies(self._benchmark(["nope"]))
