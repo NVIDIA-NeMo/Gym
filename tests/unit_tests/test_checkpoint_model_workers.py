@@ -288,3 +288,27 @@ async def test_restore_refuses_workers_that_have_served_calls(tmp_path: Path) ->
             )
 
     assert fresh.export_rows("r-a1") == []
+
+
+async def test_worker_messages_carry_what_the_checkpoint_writer_carries() -> None:
+    import math
+
+    from nemo_gym._checkpoint.model_workers import _read_frame, _write_frame
+
+    class Sink:
+        data = b""
+
+        def write(self, data: bytes) -> None:
+            self.data += data
+
+        async def drain(self) -> None:
+            pass
+
+    sink, reader = Sink(), asyncio.StreamReader()
+    # A -inf logprob and an integer beyond 64 bits, which orjson would turn into null or refuse.
+    await _write_frame(sink, {"logprobs": [-math.inf, -0.5], "nan": math.nan, "hash": 2**70})
+    reader.feed_data(sink.data)
+
+    message = await _read_frame(reader)
+
+    assert message["logprobs"] == [-math.inf, -0.5] and math.isnan(message["nan"]) and message["hash"] == 2**70

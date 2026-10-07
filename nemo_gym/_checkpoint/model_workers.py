@@ -21,6 +21,7 @@ resumes. A worker that starts, or restarts, while a checkpoint is open closes im
 """
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -30,8 +31,6 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, Optional
-
-import orjson
 
 from nemo_gym._checkpoint.control import (
     CheckpointParticipant,
@@ -95,7 +94,9 @@ def coordinator_socket_path() -> str:
 
 
 async def _write_frame(writer: asyncio.StreamWriter, message: dict[str, Any]) -> None:
-    data = orjson.dumps(message)
+    # The same encoder as the checkpoint writer: orjson would refuse integers beyond 64 bits and silently turn NaN and
+    # infinities, such as a -inf logprob, into null.
+    data = json.dumps(message, separators=(",", ":")).encode()
     if len(data) > _MAX_FRAME_BYTES:
         raise ValueError(f"checkpoint message of {len(data)} bytes exceeds the frame limit")
     writer.write(len(data).to_bytes(4, "big") + data)
@@ -106,7 +107,7 @@ async def _read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
     size = int.from_bytes(await reader.readexactly(4), "big")
     if size > _MAX_FRAME_BYTES:
         raise ValueError(f"checkpoint message of {size} bytes exceeds the frame limit")
-    return orjson.loads(await reader.readexactly(size))
+    return json.loads(await reader.readexactly(size))
 
 
 # Handles one incoming message kind and body; returns the reply body.
@@ -191,7 +192,18 @@ class _Channel:
                 "error": {"status": 500, "code": "checkpoint_error", "detail": str(error)},
             }
         try:
-            await self._send(reply)
+            try:
+                await self._send(reply)
+            except (TypeError, ValueError) as error:
+                # A reply that cannot be framed must still answer the caller, or it would wait until its deadline.
+                LOGGER.exception("checkpoint reply to %r cannot be sent", message.get("kind"))
+                await self._send(
+                    {
+                        "reply_to": message["id"],
+                        "ok": False,
+                        "error": {"status": 422, "code": "invalid_checkpoint_state", "detail": str(error)},
+                    }
+                )
         except (ConnectionError, RuntimeError):
             pass
 
