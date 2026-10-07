@@ -977,7 +977,15 @@ def test_interaction_deadline_rechecked_after_supervisor_upload(setup, tmp_path,
 
 @pytest.mark.parametrize(
     "mode",
-    ["session_budget", "activation_cap", "no_checkpoint", "not_timed_out", "process_error", "different_session"],
+    [
+        "session_budget",
+        "activation_cap",
+        "no_checkpoint",
+        "not_timed_out",
+        "process_error",
+        "different_session",
+        "native_error",
+    ],
 )
 def test_timeout_before_new_assistant_preserves_only_valid_prior_checkpoint(setup, tmp_path, monkeypatch, mode):
     from responses_api_agents.opencode_agent import app
@@ -1006,7 +1014,13 @@ def test_timeout_before_new_assistant_preserves_only_valid_prior_checkpoint(setu
         if mode == "different_session":
             export["session_id"] = "unexpected-native-session"
         sandbox.files[path] = json.dumps(export)
-        sandbox.files[f"{sandbox.directory}/stdout.jsonl"] = ""
+        sandbox.files[f"{sandbox.directory}/stdout.jsonl"] = (
+            json.dumps(
+                {"type": "error", "error": {"name": "APIError", "data": {"message": "Provider rejected request"}}}
+            )
+            if mode == "native_error"
+            else ""
+        )
         sandbox.files[f"{sandbox.directory}/cleanup.json"] = json.dumps(
             {
                 "return_code": 241 if mode != "not_timed_out" else 0,
@@ -1069,6 +1083,9 @@ def test_timeout_before_new_assistant_preserves_only_valid_prior_checkpoint(setu
                 assert payloads[-1]["previous_message_ids"] == ["u0", "a0", "u1"]
         else:
             assert interrupted.status_code == (500 if mode == "different_session" else 502), interrupted.text
+            if mode == "native_error":
+                assert interrupted.json()["detail"]["native_event_tail"][0]["type"] == "error"
+                assert "APIError" in interrupted.json()["detail"]["native_event_tail"][0]["preview"]
         closed = client.post(
             "/v1/agent_sessions/close",
             json={"agent_session_id": request.agent_session_id, "episode_id": request.episode_id.model_dump()},

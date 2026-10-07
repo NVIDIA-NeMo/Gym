@@ -1432,6 +1432,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             and result
             and result["timed_out"]
             and result["cleanup_confirmed"]
+            and not any(event.kind == "error" for event in parse_activation_events(state.activation_log))
         )
         if not assistants and not resumed_checkpoint_timeout:
             error = error or "OpenCode produced no assistant result"
