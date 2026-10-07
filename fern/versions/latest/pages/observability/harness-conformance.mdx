@@ -14,58 +14,88 @@ python scripts/inspect_harness_conformance.py \
     --output results/my-harness/evidence
 ```
 
-The `gym-p0/v1` profile checks the currently supported P0 trajectory evidence
-(TE-1–TE-9). Every applicable TE-1–TE-7 must pass, plus **TE-8 or TE-9** on
-every rollout. It replaces the earlier experimental C0–C11 profiles.
+The `gym-p0/v1` profile checks trajectory evidence across TE-1–TE-9. Each check
+declares `tier`: `P0`, `P1` or `P2`. Every applicable P0 check must pass on every rollout.
+All current checks are P0, including ownership and call-to-step attribution.
+TE labels group results for reporting; they do not determine priority or schedule checks.
+This guide and the check definitions maintain the implemented requirements.
 
 | Evidence | Persisted contract |
 | --- | --- |
-| TE-1: model call status | Exact call/model identity, HTTP or transport outcome, response status and termination metadata preserved from the response. Optional call clocks are checked when present. |
-| TE-2: token counts | Supplied prompt, completion, reasoning, total and cached counts preserved on successful and failed attempts. Provider omission remains unknown. Availability is reported separately. |
-| TE-3: steps | Task, repeat, rollout and step identity; timestamp; model-visible prompt; answer/tool or reasoning fields; resolution or explicit unknown. No step is inferred from an HTTP call. |
+| TE-1: model call status | Nonblank call/model identity, protocol, required call clocks and explicit response or error outcome. |
+| TE-2: token counts | Nonnegative integer prompt, completion, reasoning, total and cached counts when populated. Missing/null metrics remain unavailable and are counted separately. |
+| TE-3: steps | Container task/rollout identity, invocation reference, step number, timestamp and explicit boolean/null resolution. Content belongs to TE-4/TE-7. |
 | TE-4: history | Ordered saved model inputs and outputs, including tool results and changed context. Missing media, opaque content and unavailable prior-response history fail. |
-| TE-5: tool record | Execution id/name/status, originating request with dispatched arguments, and output/error. Tool clocks are outside P0. A tool request alone does not prove execution. |
-| TE-6: verifier outcome | The current Gym verification surface: finite rollout reward, including for masked results, and correctly scoped terminal resolution when present. `mask_sample=true` excludes the reward from scores. Masked or explicitly incomplete verification requires nonblank `failure_kind` and `failure_reason`. Extended verifier scope/version and judge provenance are not certified by this profile. |
+| TE-5: tool record | Execution id/name/status, originating request with dispatched arguments, and saved output. Tool clocks are outside P0. A tool request alone does not prove execution. |
+| TE-6: verifier outcome | Numeric rollout reward and required boolean `evaluation_completed` and `mask_sample`. Saved sandbox IDs, outcomes and failure categories are also checked. `mask_sample=true` excludes the reward from scores. Masked or explicitly incomplete verification requires nonblank `failure_kind` and `failure_reason`. Extended verifier scope/version and judge provenance are not certified by this profile. |
 | TE-7: payloads | Saved request and response/error bodies. Empty returned bodies and explicit no-response transport failures remain distinct. |
-| TE-8: run join | Exactly one explicit invocation owner per captured attempt, including attempts without response ids; consistent parent relationships and exact references. |
+| TE-8: run join | Exactly one explicit invocation owner per captured attempt, including attempts without response ids; exact references. |
 | TE-9: step join | Every retained policy attempt belongs to exactly one identified step. Retries remain attempts on that step. Explicit compaction-helper refs are excluded from policy steps. |
 
-TE-2 distinguishes preservation from availability: an absent provider metric is
-not an available zero or a five-count availability pass. Derived totals follow
-Gym's documented prompt-plus-completion convention. Anthropic prompt totals
-include cache reads and cache creation. Missing usage remains visible to health.
+Checks do not repeat Gym's unit tests for ID uniqueness, timestamp ordering or
+usage normalization.
 
 The profile covers retained artifacts. It does not certify live failure/retry
 scenario coverage, closed-run completeness, health, accuracy, or deployment
 readiness. Independent completeness required by some health consumers is separate
-from TE-9's retained reference check. Infra taxonomy (TE-10) and P1 efficiency
-requirements are outside this profile.
+from TE-9's retained reference check. Only the saved sandbox rows of TE-10 are included. P1 efficiency requirements
+remain outside this profile.
 
 ## Applicability and delivery
 
 By default the pair has policy steps, tools, and a verifier. Use `--no-tools`,
 `--no-verifier`, or `--no-steps` only when that feature does not apply to the
-pair. Missing evidence never automatically becomes N/A. Contradictory retained
-evidence rejects an exclusion. A step-free pair still needs TE-8.
+pair. These flags select checks; they are not inferred from the artifacts.
+With `--no-steps`, step checks are excluded; invocation ownership checks still apply.
 
 `--bundle` accepts a JSONL file, or a directory with exactly one `rollouts.jsonl`
 or `evaluator_rollouts.jsonl`, at its root or under `artifacts/`.
 
-The delivery surface is the rollout JSONL, including `ng_trajectory` payloads.
-An optional `--capture-dir /absolute/path/to/model-calls` cross-checks exact
-identity sets, payloads, metadata and incomplete markers. It cannot repair a
-missing JSONL payload for a passing delivery verdict.
+Each evidence check uses one designated location: `$.ng_trajectory` for model
+calls, steps, invocations and tool executions; rollout fields for grades;
+`$.ng_agent_observations.records` for sandbox outcomes and compaction helper
+references. Tool arguments currently live in the canonical invocation conversation.
+Missing canonical evidence is not repaired from duplicate capture/observation
+attachments, and those copies are not compared for consistency.
+
+`--capture-dir` retains capture sidecars in input provenance only. It cannot
+supply or invalidate evidence at the designated locations. `--require-sandbox`
+requires a saved sandbox record; sandbox records are checked whenever present.
 
 Each inspection atomically publishes an immutable directory containing:
 
 - `evidence_summary.json`: gate, per-TE counts, token availability, applicability,
-  source/checker/schema hashes and qualification limits.
-- `evidence_results.jsonl`: per-rollout findings and field locations.
+  source/checker hashes and qualification limits.
+- `evidence_results.jsonl`: individual checks with ID, kind, priority tier, status, JSONPath,
+  reason and blocking prerequisite; TE labels and failure findings for reporting.
 - `evidence_report.md`: evidence table.
 
 Exit codes are **0** for a met gate, **1** for unmet evidence, and **2** for an
 input/checker error. An empty input is an error. Reports omit payload contents.
 Identical inputs and checker versions reuse the same report directory.
+
+## Read individual results
+
+- **Schema:** saved fields have the required structure, types and values.
+- **Semantic:** references resolve to unambiguous saved targets.
+- **Behavioral:** harness behavior and saved evidence match the controlled test's
+  model, tool and verifier observations.
+
+The standalone inspector runs schema and semantic checks; the conformance runner
+also runs behavioral checks.
+
+Each check reports `pass` (✓), `fail` (✗: requirement not demonstrated), or
+`not_applicable` (—: excluded by the check's applicability condition).
+Missing required input and blocked prerequisites fail the check; the result retains
+the reason and `blocked_by` IDs. Blocked checks do not evaluate their input.
+An unrelated malformed step does not invalidate model-call checks.
+A behavioral failure does not erase artifact passes.
+
+The runner writes `conformance_report.md` with one table per harness: check IDs as
+rows and scenarios as columns. Process return codes and timeouts stay in
+`scenario_result.json` as execution status, outside the evidence checks. A failure
+sidecar without a normal rollout fails applicable artifact checks. Missing check
+results also display ✗; execution details retain any runner/checker error.
 
 ## Compare harnesses
 

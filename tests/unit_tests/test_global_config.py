@@ -30,6 +30,7 @@ from nemo_gym.config_types import (
     AgentCompositionError,
     AgentWithoutEnvironmentServerError,
     AlmostServerError,
+    AmbiguousAgentRenameError,
     ConfigError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
@@ -55,6 +56,7 @@ from nemo_gym.global_config import (
     find_open_port,
     get_first_server_config_dict,
     get_global_config_dict,
+    resolve_dataset_agent,
 )
 from nemo_gym.rollout_collection import _environment_servers_by_agent
 from nemo_gym.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
@@ -2213,6 +2215,122 @@ class TestConfigLoadErrors:
         assert config["mcqa_environment_server"] == {"note": "an unrelated top-level entry"}
         assert _environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_simple_agent_environment_server"]}
 
+    def _agent_with_environment_server_config(self, **extra) -> DictConfig:
+        return OmegaConf.merge(
+            GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            self._agent_without_environment_server_config(
+                mcqa_environment_server={
+                    "environment_servers": {
+                        "legacy_agent": {
+                            "entrypoint": "app.py",
+                            "agent_server": {"type": "responses_api_agents", "name": "mcqa_simple_agent"},
+                        }
+                    }
+                },
+                **extra,
+            ),
+        )
+
+    @mark.parametrize("inherit", [{"_inherit_from": "mcqa_simple_agent"}, "${inherit_from:mcqa_simple_agent}"])
+    def test_agent_rename_preserves_environment_server_and_routes(self, inherit) -> None:
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=self._agent_with_environment_server_config(
+                    renamed_agent=inherit,
+                    error_on_agent_without_environment_server=True,
+                    environment_server_routes={"mcqa_tasks": "mcqa_environment_server"},
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "mcqa_simple_agent" not in resolved
+        assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["mcqa_environment_server"]}
+        assert resolved.environment_server_routes == {"mcqa_tasks": "mcqa_environment_server"}
+        assert resolved.renamed_agent.responses_api_agents.simple_agent.resources_server.name == "mcqa"
+
+    def test_copying_agent_keeps_original_environment_server(self) -> None:
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=self._agent_with_environment_server_config(
+                    copied_agent={"_copy": "mcqa_simple_agent"},
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "mcqa_simple_agent" in resolved
+        assert _environment_servers_by_agent(resolved) == {
+            "mcqa_simple_agent": ["mcqa_environment_server"],
+            "copied_agent": ["copied_environment_server"],
+        }
+
+    def test_agent_rename_ignores_non_agent_destination(self) -> None:
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=self._agent_with_environment_server_config(
+                    renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+                    holder={"_inherit_from": "mcqa_simple_agent", "_delete_key": "responses_api_agents"},
+                    error_on_agent_without_environment_server=True,
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "mcqa_simple_agent" not in resolved
+        assert "responses_api_agents" not in resolved.holder
+        assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["mcqa_environment_server"]}
+
+    def test_agent_rename_preserves_explicit_environment_server_override(self) -> None:
+        config = self._agent_with_environment_server_config(renamed_agent={"_inherit_from": "mcqa_simple_agent"})
+        config["other_agent"] = OmegaConf.create(config.mcqa_simple_agent)
+        config.mcqa_environment_server.environment_servers.legacy_agent.agent_server.name = "other_agent"
+
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=config,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert _environment_servers_by_agent(resolved) == {
+            "other_agent": ["mcqa_environment_server"],
+            "renamed_agent": ["renamed_environment_server"],
+        }
+
+    @mark.parametrize(
+        "target",
+        [
+            {"nested": {"_inherit_from": "mcqa_simple_agent"}},
+            {
+                "_inherit_from": "mcqa_simple_agent",
+                "_delete_key": "responses_api_agents",
+                "resources_servers": {"mcqa": {"entrypoint": "app.py", "domain": "other"}},
+            },
+        ],
+        ids=["nested-agent", "non-agent"],
+    )
+    def test_inheritance_into_non_agent_destination_does_not_retarget_environment_server(self, target) -> None:
+        with raises(ServerRefNotFoundError, match="references responses_api_agents/'mcqa_simple_agent'") as error:
+            GlobalConfigDictParser().parse(
+                GlobalConfigDictParserConfig(
+                    initial_global_config_dict=self._agent_with_environment_server_config(target=target),
+                    skip_load_from_cli=True,
+                    skip_load_from_dotenv=True,
+                    offline=True,
+                )
+            )
+        assert "point this server's agent_server.name at an existing agent" in str(error.value)
+        assert "add_legacy_agent_environment_servers" not in str(error.value)
+
     def test_parse_runs_a_config_without_environment_servers(self) -> None:
         # End to end through parse(), the generated relay resolves its agent reference.
         # It is assigned an address like any declared server.
@@ -2233,30 +2351,29 @@ class TestConfigLoadErrors:
         assert "host" in relay and "port" in relay
 
     # `user_agent` is one of several agents a multi-agent environment server can reference.
-    @mark.parametrize("field", ["agent_server", "user_agent"])
-    def test_dangling_environment_server_agent_reference_suggests_migration(self, field: str) -> None:
-        # Renaming an agent with `_inherit_from` moves it, stranding the environment server that referenced it.
+    @mark.parametrize("field, typed", [("agent_server", True), ("user_agent", True), ("agent_server", False)])
+    def test_ambiguous_agent_rename_names_destinations_and_reference(self, field: str, typed: bool) -> None:
+        reference = {"name": "mcqa_simple_agent"}
+        if typed:
+            reference["type"] = "responses_api_agents"
         config = OmegaConf.merge(
             GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
             self._agent_without_environment_server_config(
                 renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+                # Two destinations make the move ambiguous; the wrapper needs an explicit target.
+                other_renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+                holder={"_inherit_from": "mcqa_simple_agent", "_delete_key": "responses_api_agents"},
                 mcqa_environment_server={
                     "environment_servers": {
                         "legacy_agent": {
                             "entrypoint": "app.py",
-                            field: {"type": "responses_api_agents", "name": "mcqa_simple_agent"},
+                            field: reference,
                         }
                     }
                 },
             ),
         )
-        with raises(
-            ServerRefNotFoundError,
-            match=(
-                "(?s)renamed with `_inherit_from`, this environment server must reference the agent's new name"
-                f".*add_legacy_agent_environment_servers.*point this server's {field}.name at the agent's new name"
-            ),
-        ):
+        with raises(AmbiguousAgentRenameError) as error:
             GlobalConfigDictParser().parse(
                 GlobalConfigDictParserConfig(
                     initial_global_config_dict=config,
@@ -2265,6 +2382,92 @@ class TestConfigLoadErrors:
                     offline=True,
                 )
             )
+        message = str(error.value)
+        assert "mcqa_simple_agent" in message
+        assert "'renamed_agent', 'other_renamed_agent'" in message
+        assert "holder" not in message
+        assert f"mcqa_environment_server.environment_servers.legacy_agent.{field}.name" in message
+        assert "Give each new agent its own environment server that inherits 'mcqa_environment_server'" in message
+        assert "ensure the other agents also have environment servers" in message
+        assert "add_legacy_agent_environment_servers" not in message
+
+    def test_multiple_agent_renames_preserve_explicit_wrapper_targets(self) -> None:
+        config = self._agent_with_environment_server_config(
+            renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+            other_renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+            error_on_agent_without_environment_server=True,
+        )
+        config.mcqa_environment_server.environment_servers.legacy_agent.agent_server.name = "renamed_agent"
+        config["other_environment_server"] = OmegaConf.create(config.mcqa_environment_server)
+        config.other_environment_server.environment_servers.legacy_agent.agent_server.name = "other_renamed_agent"
+
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=config,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "mcqa_simple_agent" not in resolved
+        assert _environment_servers_by_agent(resolved) == {
+            "renamed_agent": ["mcqa_environment_server"],
+            "other_renamed_agent": ["other_environment_server"],
+        }
+
+    def test_multiple_agent_renames_with_inherited_wrappers_load_in_strict_mode(self) -> None:
+        config = self._agent_with_environment_server_config(error_on_agent_without_environment_server=True)
+        for variant in ("variant_a", "variant_b"):
+            config[variant] = {"_inherit_from": "mcqa_simple_agent"}
+            config[f"{variant}_environment_server"] = {
+                "_inherit_from": "mcqa_environment_server",
+                "environment_servers": {"legacy_agent": {"agent_server": {"name": variant}}},
+            }
+
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=config,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "mcqa_simple_agent" not in resolved
+        assert "mcqa_environment_server" not in resolved
+        assert _environment_servers_by_agent(resolved) == {
+            "variant_a": ["variant_a_environment_server"],
+            "variant_b": ["variant_b_environment_server"],
+        }
+
+    @mark.parametrize(
+        "missing_path",
+        [
+            "required_setting",
+            "mcqa_environment_server.environment_servers.legacy_agent.required_setting",
+            "mcqa_environment_server.environment_servers.legacy_agent.agent_server.name",
+        ],
+    )
+    def test_multiple_agent_renames_preserve_missing_value_diagnostic(self, missing_path: str) -> None:
+        config = self._agent_with_environment_server_config(
+            renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+            other_renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+        )
+        config.mcqa_environment_server.environment_servers.legacy_agent.agent_server.name = "renamed_agent"
+        OmegaConf.update(config, missing_path, "???", force_add=True)
+
+        with raises(ConfigMissingValuesError) as error:
+            GlobalConfigDictParser().parse(
+                GlobalConfigDictParserConfig(
+                    initial_global_config_dict=config,
+                    skip_load_from_cli=True,
+                    skip_load_from_dotenv=True,
+                    offline=True,
+                )
+            )
+
+        assert missing_path in str(error.value)
 
     @mark.parametrize("resources_server", ["reasoning_gym", "tavily_search"])
     def test_langchain_deepagents_configs_have_environment_servers(self, resources_server: str) -> None:
@@ -2329,6 +2532,32 @@ class TestConfigLoadErrors:
         server = config["multi_agent_environment"]["environment_servers"]["multi_agent"]
         assert server["participant_a"]["name"] == "participant_a"
         assert server["participant_b"]["name"] == "participant_b_swapped"
+
+    def test_agent_rename_preserves_multi_agent_environment_and_taskset(self) -> None:
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.merge(
+                    GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                    self._multi_agent_environment_config(),
+                    {
+                        "renamed_b": {"_inherit_from": "participant_b"},
+                        "error_on_agent_without_environment_server": True,
+                        "environment_server_routes": {"dialogue": "multi_agent_environment"},
+                    },
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "participant_b" not in resolved
+        assert _environment_servers_by_agent(resolved) == {
+            "participant_a": ["multi_agent_environment"],
+            "renamed_b": ["multi_agent_environment"],
+        }
+        assert resolved.environment_server_routes == {"dialogue": "multi_agent_environment"}
+        assert resolve_dataset_agent(resolved, "renamed_b", taskset="dialogue") == "renamed_b"
 
     @staticmethod
     def _multi_agent_environment_config() -> DictConfig:
