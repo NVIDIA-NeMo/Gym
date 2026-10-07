@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Set to "true" to skip the check, e.g. when the submitting machine cannot reach the repo.
 NEMO_GYM_SUBMIT_NO_REF_CHECK_ENV_VAR_NAME = "NEMO_GYM_SUBMIT_NO_REF_CHECK"
 _GIT_TIMEOUT_SECONDS = 10
-_HEX = re.compile(r"[0-9a-f]{7,40}")
+_HEX = re.compile(r"[0-9a-f]{4,40}")
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")
 _GIT_ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true"}
 

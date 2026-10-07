@@ -83,3 +83,16 @@ def test_env_var_other_than_true_does_not_skip(repo, monkeypatch):
     monkeypatch.setenv("NEMO_GYM_SUBMIT_NO_REF_CHECK", "0")
     with pytest.raises(ValueError, match="not found"):
         validate_gym_install_ref(_config(repo.url, "nope"))
+
+
+def test_abbreviated_hash_down_to_four_chars_matches_a_tip(repo):
+    validate_gym_install_ref(_config(repo.url, repo.head[:4]))
+
+
+def test_unresolvable_abbreviated_hash_only_warns(repo):
+    validate_gym_install_ref(_config(repo.url, repo.first[:4]))
+
+
+def test_three_char_hex_is_a_name_and_must_exist(repo):
+    with pytest.raises(ValueError, match="not found"):
+        validate_gym_install_ref(_config(repo.url, "abc"))
