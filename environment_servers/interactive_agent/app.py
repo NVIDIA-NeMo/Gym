@@ -5,6 +5,7 @@
 
 import json
 import re
+from time import time
 from typing import Any
 from uuid import uuid4
 
@@ -32,6 +33,7 @@ from nemo_gym.config_types import AgentServerRef, AggregateMetrics, AggregateMet
 from nemo_gym.interactive_agent_types import (
     AgentActivationRequest,
     AgentActivationResponse,
+    InteractionBudget,
     InteractiveAgentCloseReceipt,
     InteractiveAgentFailure,
     InteractiveAgentRequest,
@@ -56,6 +58,7 @@ class InteractiveAgentEnvironmentServerConfig(BaseEnvironmentServerConfig):
     max_activations: int = Field(
         default=1000, ge=1, description="Safety fence; benchmark stopping belongs to Resources."
     )
+    interaction_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 
 class InteractiveAgentEnvironmentServer(BaseEnvironmentServer[InteractiveAgentRequest, InteractiveAgentResponse]):
@@ -140,6 +143,13 @@ class InteractiveAgentEnvironmentServer(BaseEnvironmentServer[InteractiveAgentRe
             seed = InteractiveResourcesSeedResponse.model_validate(await get_response_json(response))
             if seed.resources_session_id != resources_session_id or not resources_cookies:
                 raise ValueError("Resources seed must return the requested session ID and a session cookie")
+            continuation = seed.continuation
+            if self.config.interaction_timeout_seconds is not None:
+                if not seed.supports_interaction_budget:
+                    raise ValueError("Resources does not support the configured interaction budget")
+                continuation = continuation.model_copy(update={"requires_interaction_budget": True})
+            elif continuation.requires_interaction_budget:
+                raise ValueError("Resources requires an interaction budget but no timeout is configured")
             # Registration precedes setup: a lost seed reply must not leak a remote candidate session.
             agent_cleanup = cleanup.register_cleanup("agent session", close_agent)
             stage = "agent"
@@ -151,7 +161,7 @@ class InteractiveAgentEnvironmentServer(BaseEnvironmentServer[InteractiveAgentRe
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
                     sandbox_access=seed.sandbox_access,
-                    continuation=seed.continuation,
+                    continuation=continuation,
                     runtime_policy=seed.runtime_policy,
                 ).model_dump(mode="json"),
             )
@@ -165,6 +175,15 @@ class InteractiveAgentEnvironmentServer(BaseEnvironmentServer[InteractiveAgentRe
                 raise ValueError("Agent seed did not confirm native continuation support")
             if set(seed.continuation.observations) - set(capabilities.observations):
                 raise ValueError("Agent seed did not confirm all required observation capabilities")
+            if continuation.requires_interaction_budget and not capabilities.supports_interaction_budget:
+                raise ValueError("Agent seed did not confirm interaction budget support")
+            interaction_budget = None
+            if self.config.interaction_timeout_seconds is not None:
+                started_at = time()
+                interaction_budget = InteractionBudget(
+                    started_at_unix_seconds=started_at,
+                    deadline_unix_seconds=started_at + self.config.interaction_timeout_seconds,
+                )
             next_input = seed.responses_create_params
             while True:
                 stage = "agent"
@@ -179,6 +198,7 @@ class InteractiveAgentEnvironmentServer(BaseEnvironmentServer[InteractiveAgentRe
                         episode_id=request.episode_id,
                         activation_id=activation_id,
                         responses_create_params=next_input,
+                        interaction_budget=interaction_budget,
                     ).model_dump(mode="json"),
                     cookies=agent_cookies,
                 )
@@ -196,6 +216,7 @@ class InteractiveAgentEnvironmentServer(BaseEnvironmentServer[InteractiveAgentRe
                         resources_session_id=resources_session_id,
                         episode_id=request.episode_id,
                         activation=activation,
+                        interaction_budget=interaction_budget,
                     ).model_dump(mode="json"),
                     cookies=resources_cookies,
                 )

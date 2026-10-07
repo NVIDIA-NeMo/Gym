@@ -20,6 +20,7 @@ class AgentContinuationRequirements(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["native_conversation"] = "native_conversation"
     observations: list[str] = Field(default_factory=lambda: ["ordered_events", "timing"])
+    requires_interaction_budget: bool = False
 
 
 class AgentContinuationCapabilities(AgentContinuationRequirements):
@@ -27,6 +28,26 @@ class AgentContinuationCapabilities(AgentContinuationRequirements):
 
     runtime_prerequisites: dict[str, JsonValue] = Field(default_factory=dict)
     budget_semantics: dict[str, JsonValue] = Field(default_factory=dict)
+    supports_interaction_budget: bool = False
+
+
+class InteractionBudget(BaseModel):
+    """Immutable execution window shared across services with synchronized UTC clocks.
+
+    Starts after setup and covers candidate activations plus Resources steps.
+    Deadline owners cancel and await their work before returning a terminal checkpoint;
+    an HTTP waiter timing out does not establish that the owned operation stopped.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    started_at_unix_seconds: float = Field(gt=0, allow_inf_nan=False)
+    deadline_unix_seconds: float = Field(gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_deadline(self) -> "InteractionBudget":
+        if self.deadline_unix_seconds <= self.started_at_unix_seconds:
+            raise ValueError("interaction deadline must follow its start")
+        return self
 
 
 class AgentActivationEvent(BaseModel):
@@ -71,6 +92,7 @@ class AgentActivationRequest(BaseModel):
     episode_id: EpisodeId
     activation_id: int = Field(ge=0)
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    interaction_budget: InteractionBudget | None = None
 
 
 class AgentActivationResponse(BaseModel):
@@ -101,6 +123,7 @@ class InteractiveResourcesSeedResponse(ResourcesSeedSessionResponse):
 
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     continuation: AgentContinuationRequirements = Field(default_factory=AgentContinuationRequirements)
+    supports_interaction_budget: bool = False
 
 
 class ResourcesStepRequest(BaseModel):
@@ -110,6 +133,7 @@ class ResourcesStepRequest(BaseModel):
     resources_session_id: str = Field(min_length=1)
     episode_id: EpisodeId
     activation: AgentActivationResponse
+    interaction_budget: InteractionBudget | None = None
 
 
 class ResourcesStepResponse(BaseModel):
