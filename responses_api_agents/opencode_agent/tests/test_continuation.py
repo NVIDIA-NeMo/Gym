@@ -973,3 +973,108 @@ def test_interaction_deadline_rechecked_after_supervisor_upload(setup, tmp_path,
         )
         assert closed.status_code == 200
         assert closed.json()["cleanup_confirmed"] is True
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["session_budget", "activation_cap", "no_checkpoint", "not_timed_out", "process_error", "different_session"],
+)
+def test_timeout_before_new_assistant_preserves_only_valid_prior_checkpoint(setup, tmp_path, monkeypatch, mode):
+    from responses_api_agents.opencode_agent import app
+
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    launch = sandbox.launch.side_effect
+    clock = [100.0]
+    monkeypatch.setattr(app, "time", lambda: clock[0])
+    interrupted_index = 0 if mode == "no_checkpoint" else 1
+
+    async def stop_before_assistant(**kwargs):
+        result = await launch(**kwargs)
+        index = len(payloads) - 1
+        if index != interrupted_index:
+            return result
+        with sqlite3.connect(tmp_path / "session.db") as con:
+            con.execute("delete from part where message_id=?", (f"a{index}",))
+            con.execute("delete from message where id=?", (f"a{index}",))
+        path = f"{sandbox.directory}/export.json"
+        export = json.loads(sandbox.files[path])
+        export["messages"] = []
+        export["usage_messages"] = []
+        export["message_ids"].remove(f"a{index}")
+        export["activation_message_ids"].remove(f"a{index}")
+        if mode == "different_session":
+            export["session_id"] = "unexpected-native-session"
+        sandbox.files[path] = json.dumps(export)
+        sandbox.files[f"{sandbox.directory}/stdout.jsonl"] = ""
+        sandbox.files[f"{sandbox.directory}/cleanup.json"] = json.dumps(
+            {
+                "return_code": 241 if mode != "not_timed_out" else 0,
+                "timed_out": mode != "not_timed_out",
+                "cleanup_confirmed": True,
+                "error": "Supervisor rejected launch" if mode == "process_error" else None,
+            }
+        )
+        if mode == "session_budget":
+            clock[0] = 121.0
+        return result
+
+    sandbox.launch.side_effect = stop_before_assistant
+    request = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/v1/agent_sessions", json=request.model_dump(mode="json")).status_code == 200
+        body = {
+            "agent_session_id": request.agent_session_id,
+            "episode_id": request.episode_id.model_dump(),
+            "activation_id": 0,
+            "responses_create_params": {"input": "Implement the first change"},
+            "interaction_budget": {"started_at_unix_seconds": 90, "deadline_unix_seconds": 120},
+        }
+        if interrupted_index:
+            first = client.post("/v1/agent_sessions/activate", json=body)
+            assert first.status_code == 200, first.text
+            assert first.json()["response"]["status"] == "completed"
+        interrupted_body = {
+            **body,
+            "activation_id": interrupted_index,
+            "responses_create_params": {"input": "Continue the change"},
+        }
+        interrupted = client.post("/v1/agent_sessions/activate", json=interrupted_body)
+        valid_timeout = mode in ("session_budget", "activation_cap")
+        if valid_timeout:
+            assert interrupted.status_code == 200, interrupted.text
+            receipt = interrupted.json()
+            assert receipt["response"]["status"] == "incomplete"
+            assert receipt["response"]["output"] == []
+            assert receipt["response"]["metadata"]["opencode_session_id"] == "native-session"
+            assert receipt["stop_reason"] == (
+                "session_budget_exhausted" if mode == "session_budget" else "activation_timeout"
+            )
+            assert receipt["observation"]["events"] == []
+            assert receipt["observation"]["harness_steps"] == 0
+            assert client.post("/v1/agent_sessions/activate", json=interrupted_body).json() == receipt
+            assert len(payloads) == 2
+            if mode == "activation_cap":
+                resumed = client.post(
+                    "/v1/agent_sessions/activate",
+                    json={
+                        **body,
+                        "activation_id": 2,
+                        "responses_create_params": {"input": "Please continue from the preserved checkpoint"},
+                    },
+                )
+                assert resumed.status_code == 200, resumed.text
+                assert resumed.json()["response"]["status"] == "completed"
+                assert payloads[-1]["native_session_id"] == "native-session"
+                assert payloads[-1]["previous_message_ids"] == ["u0", "a0", "u1"]
+        else:
+            assert interrupted.status_code == (500 if mode == "different_session" else 502), interrupted.text
+        closed = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": request.agent_session_id, "episode_id": request.episode_id.model_dump()},
+        )
+        assert closed.status_code == 200, closed.text
+        assert closed.json()["cleanup_confirmed"] is True
+        if valid_timeout:
+            assert len(closed.json()["trajectory"]["turns"]) == (2 if mode == "activation_cap" else 1)
+            assert closed.json()["trajectory"]["turns"][0]["source_message_id"] == "a0"

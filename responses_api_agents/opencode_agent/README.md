@@ -64,6 +64,12 @@ tools are confirmed stopped. Per-activation native event ordering, raw logs,
 visible text, reasoning, tool evidence, and native step counts are preserved.
 The raw-log fallback excludes dedicated reasoning events, which remain in typed evidence.
 Provider-call counts remain a separate captured-model measurement.
+A supervised timeout can precede a new assistant message on a resumed activation.
+After confirmed cleanup and a validated export of the same existing session, it returns an
+empty partial delta while retaining the earlier checkpoint. A per-activation timeout can
+resume; an exhausted interaction window stops new work. Missing initial checkpoints,
+unexplained empty results, and failed artifact collection remain errors.
+
 Only native `length` termination is a model budget limit. An explicit tool-permission rejection
 with a valid checkpoint and confirmed cleanup returns an incomplete `permission_denied` activation,
 allowing the caller to supply feedback and resume the same session. The failed tool remains visible

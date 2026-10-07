@@ -1282,6 +1282,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         timeout: float | None = None,
         interaction_deadline: float | None = None,
     ) -> NeMoGymResponse:
+        previous_native_session_id = state.native_session_id if state.message_ids else None
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         model_options = copy.deepcopy(self.config.native_model_options)
         if self.config.native_model_catalog == "configured":
@@ -1425,8 +1426,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         for info in assistants:
             if info.get("error"):
                 error = error or json.dumps(info["error"])
-        if not assistants:
+        resumed_checkpoint_timeout = bool(
+            previous_native_session_id
+            and state.native_session_id == previous_native_session_id
+            and result
+            and result["timed_out"]
+            and result["cleanup_confirmed"]
+        )
+        if not assistants and not resumed_checkpoint_timeout:
             error = error or "OpenCode produced no assistant result"
+        # A short remaining budget can stop a resumed CLI before it adds an assistant message.
+        # Its successfully exported, same-session checkpoint still survives confirmed cleanup.
         incomplete = result is not None and result["timed_out"]
         permission_denied = False
         if assistants and not incomplete:
