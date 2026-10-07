@@ -96,6 +96,14 @@ jobs:
     with:
       base-ref: ${{ needs.pre-flight.outputs.base_ref }}
 
+  # Advisory only: deliberately excluded from Nemo_CICD_Test and failure notifications.
+  harness_conformance:
+    name: Harness conformance
+    needs: [pre-flight]
+    uses: ./.github/workflows/harness-conformance.yml
+    with:
+      base-ref: ${{ needs.pre-flight.outputs.base_ref }}
+
   container_build:
     name: Build Gym container
     needs: [pre-flight, classify_changes, unit_tests]

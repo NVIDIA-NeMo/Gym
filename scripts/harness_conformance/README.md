@@ -1,5 +1,24 @@
 # Live harness conformance probes
 
+## Pull-request feedback
+
+Gym CI runs an advisory harness matrix on approved PR mirrors and merge-queue
+revisions. Changes to a registered adapter select that harness; shared code,
+dependency files, CI configuration, and other server code conservatively select
+all registered harnesses. Changes limited to `fern/`, `docs/`, or root Markdown
+files are skipped. Scheduled and manual CI runs exercise all harnesses.
+
+Each job installs the adapter's pinned runtime, validates the runner, checker,
+and adapter tests, then runs every scenario. Conformance failures produce warning
+annotations and a table in the Actions summary. Setup, test, execution, and checker
+errors are reported as unavailable measurements. Download the `harness-conformance-*`
+artifact for test/setup logs and probe evidence. These jobs do not participate in
+the required `Nemo_CICD_Test` gate and do not regenerate documentation.
+
+Use the diagnostic command below to reproduce a warning at the reported commit.
+When registering another harness in `registry.HARNESSES`, provide its pinned runtime
+installation in `ci.install_runtime` as well as its episode configuration.
+
 ## Regenerate the documentation table
 
 From a checkout matching a full Gym commit SHA, rebuild the TE table in
@@ -139,7 +158,7 @@ Run regression checks with:
 python -m pytest scripts/harness_conformance/tests tests/unit_tests/harness_capabilities -q
 ```
 
-To add another local harness, add its adapter class to `episode.HARNESSES`, supply
+To add another local harness, add its adapter class to `registry.HARNESSES`, supply
 its launch settings in `episode._config`, and make its advertised shell-tool
 schema consumable by `provider.Probe._tool`. Keep expectations and witnesses out
 of the task input and preserve the normal Gym collection path.
