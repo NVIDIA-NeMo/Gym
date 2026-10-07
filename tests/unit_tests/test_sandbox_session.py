@@ -30,14 +30,67 @@ def session(receipt_reader):
     return SandboxSession(sandbox=sandbox, session_dir="/session", workdir="/app", harness="test")
 
 
-async def execute(session, *, collect=None, stage_activation=None, timeout=1):
+async def execute(session, *, collect=None, stage_activation=None, timeout=1, timeout_resolver=None):
     return await session.execute(
         stage_activation=stage_activation
         or AsyncMock(return_value=SandboxCommand(argv=["worker"], python="/runtime/python")),
         collect=collect or AsyncMock(return_value="transcript"),
         timeout=10,
         close_timeout=timeout,
+        timeout_resolver=timeout_resolver,
     )
+
+
+@pytest.mark.parametrize("remaining,expected", [(3, 3), (30, 10)])
+async def test_timeout_is_resolved_after_staging_and_never_extended(session, monkeypatch, remaining, expected):
+    events = []
+
+    async def stage():
+        events.append("input")
+        return SandboxCommand(argv=["worker"], python="/runtime/python")
+
+    async def upload(*args):
+        events.append("supervisor")
+
+    def remaining_timeout():
+        assert events == ["input", "supervisor"]
+        assert not session.launch_started
+        events.append("resolve")
+        return remaining
+
+    def launch(**kwargs):
+        assert events == ["input", "supervisor", "resolve"]
+        assert kwargs["timeout"] == expected
+        return "launch"
+
+    session.sandbox.upload.side_effect = upload
+    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.supervised_launch_command", launch)
+    assert await execute(session, stage_activation=stage, timeout_resolver=remaining_timeout) == "transcript"
+    session.sandbox.exec.assert_awaited_once()
+    assert session.cleanup == RECEIPT
+    await session.close(timeout=1)
+
+
+async def test_expired_timeout_resolver_prevents_launch_and_allows_release(session, receipt_reader):
+    class BudgetExpired(Exception):
+        pass
+
+    def remaining_timeout():
+        session.sandbox.upload.assert_awaited_once()
+        raise BudgetExpired("execution window elapsed during staging")
+
+    collector = AsyncMock()
+    with pytest.raises(BudgetExpired, match="elapsed during staging"):
+        await execute(session, collect=collector, timeout_resolver=remaining_timeout)
+    assert not session.launch_started
+    assert session._stage_task.done()
+    session.sandbox.exec.assert_not_awaited()
+    collector.assert_not_awaited()
+    receipt_reader.assert_not_awaited()
+    await session.close(timeout=1)
+    assert session.closed
+    session.sandbox.disconnect.assert_awaited_once()
+    assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
 
 
 @pytest.mark.parametrize("owned", [False, True])

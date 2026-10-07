@@ -46,6 +46,7 @@ from nemo_gym.interactive_agent_types import (
     AgentActivationResponse,
     AgentContinuationCapabilities,
     AgentContinuationRequirements,
+    InteractionBudget,
     InteractiveAgentCloseReceipt,
 )
 from nemo_gym.openai_utils import (
@@ -179,6 +180,8 @@ class _AgentSessionRecord:
     expires_at: float = float("inf")
     activations: OrderedOperationLedger[AgentActivationResponse] = field(default_factory=OrderedOperationLedger)
     close_task: asyncio.Task[AgentCloseSessionResponse] | None = None
+    interaction_budget: InteractionBudget | None = None
+    interaction_budget_bound: bool = False
 
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
@@ -294,6 +297,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             missing = set(body.continuation.observations) - set(capabilities.observations)
             if missing:
                 raise HTTPException(422, f"Agent lacks required continuation observations: {sorted(missing)}")
+            if body.continuation.requires_interaction_budget and not capabilities.supports_interaction_budget:
+                raise HTTPException(422, "Agent does not support the required interaction budget")
         current = self._agent_session_id_from_request(request)
         if current is not None and current != body.agent_session_id:
             raise HTTPException(409, "agent_session_id does not match the session cookie")
@@ -378,10 +383,24 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 raise HTTPException(409, "episode_id does not match the seeded agent session")
             if state.request.continuation is None:
                 raise HTTPException(422, "Session was not seeded for native continuation")
+            if state.request.continuation.requires_interaction_budget and body.interaction_budget is None:
+                raise HTTPException(422, "Activation requires the seeded interaction budget")
+            capabilities = self._agent_continuation_capabilities()
+            if body.interaction_budget is not None and (
+                capabilities is None or not capabilities.supports_interaction_budget
+            ):
+                raise HTTPException(422, "Agent does not support interaction budgets")
+            if record.interaction_budget_bound and record.interaction_budget != body.interaction_budget:
+                raise HTTPException(409, "Agent interaction budget is already bound to another execution window")
             # Capture input before the shared task starts; no caller may mutate its binding.
             activation = body.model_copy(deep=True)
 
         async def execute() -> AgentActivationResponse:
+            # Bind only after the ledger accepts an ordered activation. Rejected IDs
+            # must not change the session's deadline, and retries keep the same window.
+            if not record.interaction_budget_bound:
+                record.interaction_budget = activation.interaction_budget
+                record.interaction_budget_bound = True
             result = await self._activate_agent_session_state(state, activation, request)
             if result.activation_id != activation.activation_id:
                 raise ValueError("Agent returned a different activation_id")

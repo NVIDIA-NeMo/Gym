@@ -3,6 +3,7 @@
 
 import asyncio
 from http.cookies import SimpleCookie
+from time import time
 from unittest.mock import MagicMock
 
 import orjson
@@ -120,20 +121,31 @@ class ScriptedComposition:
         self.activation_failure = None
         self.close_observations = None
         self.close_trajectory = None
+        self.supports_interaction_budget = False
+        self.budgets = []
+        self.setup_delay = 0
+        self.setup_finished_at = None
+        self.budget_mode = None
+        self.simulator_settled = False
+        self.accepted_late_message = False
         self.entered = asyncio.Event()
 
     async def post(self, *, server_name, url_path, json, cookies=None):
         body = json.model_dump(mode="json") if isinstance(json, BaseModel) else json
         path = url_path.removeprefix("/ng-rollout/rollout-a2")
         self.calls.append((server_name, path, body, cookies))
+        if path in {"/v1/agent_sessions/activate", "/step"}:
+            self.budgets.append(body["interaction_budget"])
         if path == self.failure_path:
             raise TimeoutError(f"lost reply: {path}")
         if path == "/seed_session":
+            await asyncio.sleep(self.setup_delay)
             return Reply(
                 {
                     "resources_session_id": body["resources_session_id"],
                     "responses_create_params": {"input": "first instruction"},
                     "runtime_policy": self.runtime_policy,
+                    "supports_interaction_budget": self.supports_interaction_budget,
                 },
                 "resources-cookie",
             )
@@ -142,7 +154,10 @@ class ScriptedComposition:
             assert body["continuation"] == {
                 "mode": "native_conversation",
                 "observations": ["ordered_events", "timing"],
+                "requires_interaction_budget": self.supports_interaction_budget,
             }
+            await asyncio.sleep(self.setup_delay)
+            self.setup_finished_at = time()
             return Reply(
                 {"agent_session_id": body["agent_session_id"], "capabilities": self.capabilities}, "agent-cookie"
             )
@@ -162,6 +177,36 @@ class ScriptedComposition:
         if path == "/step":
             assert cookies == {"session": "resources-cookie"}
             index = body["activation"]["activation_id"]
+            if self.budget_mode:
+                deadline = body["interaction_budget"]["deadline_unix_seconds"]
+                if self.budget_mode == "outage":
+                    assert time() < deadline
+                    raise TimeoutError("simulator transport timeout while interaction budget remains")
+
+                async def simulator():
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        await asyncio.sleep(0.01)  # The owner must await cancellation settlement.
+                        self.simulator_settled = True
+                        if self.budget_mode == "late":
+                            return "late decision after cancellation"
+                        raise
+
+                timer = asyncio.timeout(max(0, deadline - time()))
+                try:
+                    async with timer:
+                        await simulator()
+                except TimeoutError:
+                    if not timer.expired():
+                        raise
+                if timer.expired() or time() >= deadline:
+                    assert self.simulator_settled
+                    return Reply(
+                        {"activation_id": index, "continue_episode": False, "stop_reason": "session_budget_exhausted"},
+                        "resources-cookie",
+                    )
+                self.accepted_late_message = True
             return Reply(
                 {
                     "activation_id": index + int(self.invalid_step_id),
@@ -188,7 +233,9 @@ class ScriptedComposition:
             assert self.closed
             verify = ResourcesVerifyRequest[InteractiveVerificationInput].model_validate(body)
             assert verify.verification_input.agent_close.cleanup_confirmed
-            assert len(verify.verification_input.activations) == 2
+            assert len(verify.verification_input.activations) == len(self.activations)
+            if self.budget_mode:
+                assert self.simulator_settled and not self.accepted_late_message
             return Reply(
                 {
                     "reward": 1,
@@ -286,6 +333,50 @@ async def test_native_trajectory_is_optional_and_forwarded_without_projection(pr
     assert result.result.ng_trajectory == trajectory
     collected = _episode_record(result.model_dump(mode="json"))
     assert collected["ng_trajectory"] == script.close_trajectory
+
+
+@pytest.mark.parametrize("mode", ["expiry", "late"])
+async def test_interaction_budget_excludes_setup_and_awaits_resource_settlement_before_grading(mode):
+    env, script = environment()
+    env.config.interaction_timeout_seconds = 0.02
+    script.setup_delay = 0.03
+    script.supports_interaction_budget = True
+    script.capabilities["supports_interaction_budget"] = True
+    script.budget_mode = mode
+    result = await env.run_request(request())
+    assert result.failure is None and result.result.reward == 1
+    assert result.result.ng_steps[-1].stop_reason == "session_budget_exhausted"
+    assert len(result.result.ng_activations) == 1
+    assert script.budgets[0] == script.budgets[1]
+    assert script.budgets[0]["started_at_unix_seconds"] >= script.setup_finished_at
+    assert script.budgets[0]["deadline_unix_seconds"] - script.budgets[0]["started_at_unix_seconds"] == pytest.approx(
+        0.02
+    )
+    assert script.simulator_settled and not script.accepted_late_message
+    assert [path for _, path, _, _ in script.calls][-3:] == ["/v1/agent_sessions/close", "/verify", "/close_session"]
+
+
+async def test_simulator_outage_is_not_reclassified_as_interaction_budget_expiry():
+    env, script = environment()
+    env.config.interaction_timeout_seconds = 30
+    script.supports_interaction_budget = True
+    script.capabilities["supports_interaction_budget"] = True
+    script.budget_mode = "outage"
+    result = await env.run_request(request())
+    assert result.result is None and result.failure.stage == "step"
+    assert "simulator transport timeout" in result.failure.failure_reason
+    assert result.failure.agent_close.cleanup_confirmed
+    assert "/verify" not in [path for _, path, _, _ in script.calls]
+
+
+@pytest.mark.parametrize("participant", ["resources", "agent"])
+async def test_interaction_budget_rejects_unsupported_participant_before_activation(participant):
+    env, script = environment()
+    env.config.interaction_timeout_seconds = 30
+    script.supports_interaction_budget = participant != "resources"
+    result = await env.run_request(request())
+    assert result.failure and "interaction budget" in result.failure.failure_reason
+    assert "/v1/agent_sessions/activate" not in [path for _, path, _, _ in script.calls]
 
 
 @pytest.mark.parametrize(
