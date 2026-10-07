@@ -21,7 +21,7 @@ VLLM_COMMON_ARGS=(
     --data-parallel-backend mp
     --enable-auto-tool-choice
     --tool-call-parser glm47
-    --reasoning-parser glm45
+    --reasoning-parser glm47
     --enable-chunked-prefill
     --enable-prefix-caching
     --kv-cache-dtype fp8
@@ -29,12 +29,10 @@ VLLM_COMMON_ARGS=(
     --block-size 128
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
-    --skip-mm-profiling
     --data-parallel-size 1
     --data-parallel-size-local 1
     --tensor-parallel-size 4
     --api-server-count 1
-    --compilation-config '{"cudagraph_mm_encoder": true}'
 )
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'

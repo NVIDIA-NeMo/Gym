@@ -30,6 +30,8 @@ from nemo_gym.health.checks import (
     CHECK_REGISTRY,
     _bind_policy_call_views,
     _canonical_trajectory,
+    _ended_on_failed_call,
+    _is_context_overflow_rejection,
     _is_failed,
     _is_successful,
     _normalized_trajectory_calls,
@@ -159,6 +161,9 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         if CheckInput.AGENT_TURNS in spec.reads and not turns_observed:
             unobserved.append(spec.id)
             continue
+        if CheckInput.OBSERVED_MODEL_CALLS in spec.reads and not (model_calls_observed and calls):
+            unobserved.append(spec.id)
+            continue
         binding_input = next(iter(spec.reads & CALL_BINDING_INPUTS), None)
         bindings = owned_bindings if binding_input == CheckInput.OWNED_MODEL_CALLS else turn_bindings
         if binding_input is not None:
@@ -183,7 +188,9 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             unobserved.append(spec.id)
             continue
         if spec.id == "model_call_runaway_generation" and any(
-            call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS and call.get("response") is None
+            not _is_context_overflow_rejection(call)
+            and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
+            and call.get("response") is None
             for call in bindings.matched_calls
         ):
             unobserved.append(spec.id)
@@ -228,7 +235,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         successful_model_calls=sum(_is_successful(call) for call in turn_bindings.matched_calls),
         model_call_errors=len(failed),
         errors_by_status=dict(errors_by_status),
-        ended_on_error=bool(calls and _is_failed(calls[-1])),
+        ended_on_error=_ended_on_failed_call(calls),
         duplicated_calls=duplicated,
         transcript_prompt_tokens=transcript_prompt,
         transcript_completion_tokens=transcript_completion,
