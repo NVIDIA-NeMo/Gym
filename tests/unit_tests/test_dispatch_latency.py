@@ -115,7 +115,7 @@ class TestTimingSummary:
         for seconds in (1200, 10800, 3000, 9500):
             t.record(seconds)
         table = t.timing_summary()
-        assert "all rollouts started by" in table and "40.0 min" in table
+        assert "all rollouts started by" in table and "40.0 min" in table and "WARNING" in table
         assert "started within 30 min" in table and "75.0%" in table and "WARNING" in table
         assert "ended by wall-clock limit" in table and "25.0% (1)" in table
         assert "longer than 150 min" in table and "50.0%" in table
@@ -142,3 +142,23 @@ class TestTimingSummary:
         t = DispatchLatencyTracker(total=1, start_report_within_s=60)
         t.record_outcome({"_ng_failure_class": "timeout_exceeded"})
         assert "100.0% (1)" in t.timing_summary()
+
+
+class TestPartialStart:
+    def test_partial_start_reports_count_and_waits_for_the_window(self):
+        t = DispatchLatencyTracker(total=100, start_report_within_s=1800)
+        for offset in (10, 20, 30):
+            t.record_start(t._t0 + offset)
+        table = t.timing_summary()
+        assert "rollouts started so far" in table and "3/100" in table
+        assert "(window open)" in table
+        assert "WARNING" not in table
+
+    def test_partial_start_warns_once_the_window_has_passed(self):
+        t = DispatchLatencyTracker(total=100, start_report_within_s=1800)
+        t._t0 -= 3600  # an hour into the run
+        for offset in (10, 20, 30):
+            t.record_start(t._t0 + offset)
+        table = t.timing_summary()
+        assert "3/100" in table and "(window open)" not in table
+        assert table.count("WARNING") == 2

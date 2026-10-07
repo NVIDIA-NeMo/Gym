@@ -1270,11 +1270,13 @@ class DispatchLatencyTracker:
             return ""
         n_results = len(self._durations)
         rows: List[Tuple[str, str, str, bool]] = []
-        if self._start_offsets:
-            started_by = max(self._start_offsets) / 60
-            if self._start_report_within_s is not None:
-                window_min = self._start_report_within_s / 60
-                fraction = self._started_within() or 0.0
+        if self._start_offsets and self._start_report_within_s is not None:
+            window_min = self._start_report_within_s / 60
+            elapsed = time.monotonic() - self._t0
+            started = len(self._start_offsets)
+            all_started = self._total is None or started >= self._total
+            if all_started:
+                started_by = max(self._start_offsets) / 60
                 rows.append(
                     (
                         "all rollouts started by",
@@ -1283,14 +1285,26 @@ class DispatchLatencyTracker:
                         started_by <= window_min,
                     )
                 )
+            else:
+                # Not every rollout has started yet: report how many have, and judge it only once the window is over.
                 rows.append(
                     (
-                        f"started within {window_min:.0f} min",
-                        f"{fraction:.1%}",
-                        f">= {self._start_report_min_fraction:.0%}",
-                        fraction >= self._start_report_min_fraction,
+                        "rollouts started so far",
+                        f"{started}/{self._total}",
+                        f"all by {window_min:.0f} min",
+                        elapsed <= self._start_report_within_s,
                     )
                 )
+            fraction = self._started_within() or 0.0
+            window_open = elapsed <= self._start_report_within_s and not all_started
+            rows.append(
+                (
+                    f"started within {window_min:.0f} min" + (" (window open)" if window_open else ""),
+                    f"{fraction:.1%}",
+                    f">= {self._start_report_min_fraction:.0%}",
+                    window_open or fraction >= self._start_report_min_fraction,
+                )
+            )
         if self._outcomes:
             timed_out = self._timed_out / self._outcomes
             rows.append(
