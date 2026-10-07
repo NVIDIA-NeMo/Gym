@@ -19,6 +19,7 @@ from nemo_gym import harness_capabilities
 from nemo_gym.harness_capabilities.behavior import inspect_behavior
 from nemo_gym.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
 from nemo_gym.harness_capabilities.cli import digest_file, inspect_bundle, json_rows
+from nemo_gym.harness_capabilities.health import inspect_health
 from nemo_gym.harness_capabilities.results import gate_passes, render_matrices
 
 from .episode import HARNESSES
@@ -98,7 +99,7 @@ def run_process(command: list[str], *, directory: Path, timeout: float) -> dict:
 
 
 def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dict:
-    """Keep artifact results, behavioral results and execution status independent."""
+    """Inspect artifacts, behavior and health independently of process exit status."""
     witness_path = directory / "witness.json"
     witness = json.loads(witness_path.read_text()) if witness_path.exists() else None
     bundle = directory / "rollouts.jsonl"
@@ -114,6 +115,13 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         tool_steps=scenario.tool_steps,
         expected_reward=scenario.expected_reward,
         fingerprint=_fingerprint,
+    )
+    health_inputs = [path for path in (bundle, directory / "rollouts_failures.jsonl") if path.is_file()]
+    checks += inspect_health(
+        health_inputs,
+        output=directory / "health",
+        expectations=scenario.health_expectations,
+        steps=scenario.steps,
     )
     summary, report = None, None
     if record is not None:
@@ -141,9 +149,16 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         "model_attempts": len((witness or {}).get("attempts", [])),
         "evidence": evidence,
         "artifact_report": report,
+        "health_report": "health/quality_summary.json" if health_inputs else None,
         "hashes": {
             path.name: digest_file(path)
-            for path in (bundle, witness_path, directory / "runtime.json", directory / "launch.json")
+            for path in (
+                bundle,
+                directory / "rollouts_failures.jsonl",
+                witness_path,
+                directory / "runtime.json",
+                directory / "launch.json",
+            )
             if path.exists()
         },
     }
@@ -165,6 +180,10 @@ def run_suite(
         runner_sources={p.name: digest_file(p) for p in sorted(Path(__file__).parent.glob("*.py"))},
         checker_sources={
             p.name: digest_file(p) for p in sorted(Path(harness_capabilities.__file__).parent.glob("*.py"))
+        },
+        health_sources={
+            str(p.relative_to(ROOT)): digest_file(p)
+            for p in [ROOT / "nemo_gym/rollout_health.py", *sorted((ROOT / "nemo_gym/health").glob("*.py"))]
         },
     )
     (output / "suite.json").write_text(_json(manifest))
