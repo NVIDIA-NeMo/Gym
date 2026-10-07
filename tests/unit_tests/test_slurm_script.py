@@ -2976,10 +2976,50 @@ def test_a_pd_config_renders_the_same_with_and_without_gpu_packing(tmp_path, mon
     assert "CUDA_VISIBLE_DEVICES" not in packed
 
 
-def test_auto_refuses_a_pool_a_pd_tier_uses(tmp_path):
+def test_auto_sizes_a_pd_tier_pool(tmp_path):
+    # decode: TP=4, instances=6, gpus_per_node=4 → ceil(24/4) = 6 nodes
     pools = {**_PD_POOLS, "decode": {**_PD_POOLS["decode"], "nodes": "auto"}}
-    with pytest.raises(ValueError, match="vllm_pd service 'policy' uses it"):
-        _pd_config(tmp_path, pools=pools)
+    config = _pd_config(tmp_path, pools=pools)
+    assert config.compute["hsg"].node_pools["decode"].nodes == 6
+    # prefill unchanged
+    assert config.compute["hsg"].node_pools["prefill"].nodes == 4
+
+
+def test_auto_sizes_both_pd_pools(tmp_path):
+    # prefill: TP=4, instances=4 → ceil(16/4) = 4; decode: TP=4, instances=6 → ceil(24/4) = 6
+    pools = {k: {**v, "nodes": "auto"} for k, v in _PD_POOLS.items()}
+    config = _pd_config(tmp_path, pools=pools)
+    assert config.compute["hsg"].node_pools["prefill"].nodes == 4
+    assert config.compute["hsg"].node_pools["decode"].nodes == 6
+
+
+def test_auto_pd_rounds_up_to_full_nodes(tmp_path):
+    # TP=3, instances=3 → 9 GPUs, gpus_per_node=4 → ceil(9/4) = 3 nodes
+    services = _pd_services()
+    services["policy"]["prefill"]["tensor_parallel_size"] = 3
+    services["policy"]["prefill"]["number_of_instances"] = 3
+    pools = {"prefill": {**_PD_POOLS["prefill"], "nodes": "auto"}, "decode": _PD_POOLS["decode"]}
+    config = _pd_config(tmp_path, services=services, pools=pools)
+    assert config.compute["hsg"].node_pools["prefill"].nodes == 3
+
+
+def test_auto_pd_server_per_node_sizes_to_one_node_per_instance(tmp_path):
+    # server_per_node forces instances=1; auto-size gives the pool exactly 1 node.
+    services = _pd_services(server_per_node=True)
+    for tier in ("prefill", "decode"):
+        services["policy"][tier]["number_of_instances"] = 1
+    pools = {"prefill": {**_PD_POOLS["prefill"], "nodes": "auto"}, "decode": _PD_POOLS["decode"]}
+    config = _pd_config(tmp_path, services=services, pools=pools)
+    assert config.compute["hsg"].node_pools["prefill"].nodes == 1
+
+
+def test_auto_pd_two_tiers_on_same_pool_is_refused(tmp_path):
+    services = _pd_services()
+    services["policy"]["prefill"]["node_pool"] = "shared"
+    services["policy"]["decode"]["node_pool"] = "shared"
+    pools = {"shared": {"partition": "batch", "nodes": "auto", "ntasks_per_node": 1, "gpus_per_node": 8}}
+    with pytest.raises(ValueError, match="share node_pool"):
+        _pd_config(tmp_path, services=services, pools=pools)
 
 
 def test_a_pd_router_beside_a_lone_vllm_takes_no_gpus(tmp_path):
