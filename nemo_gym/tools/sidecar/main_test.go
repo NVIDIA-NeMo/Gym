@@ -210,7 +210,7 @@ func TestSidecarRetriesRequestsRefusedAfterGoaway(t *testing.T) {
 		client := &http.Client{Timeout: 10 * time.Second}
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		for i := 0; i < 40; i++ {
+		for i := 0; i < 200; i++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -234,9 +234,9 @@ func TestSidecarRetriesRequestsRefusedAfterGoaway(t *testing.T) {
 		return failures
 	}
 
-	t.Logf("failures without buffering (-retry-body-limit 0): %d", run("-retry-body-limit", "0"))
+	t.Logf("failures without buffering (-retry-body-limit 0, of 200): %d", run("-retry-body-limit", "0"))
 	if failures := run(); failures != 0 {
-		t.Fatalf("%d of 40 requests failed even with body buffering", failures)
+		t.Fatalf("%d of 200 requests failed even with body buffering", failures)
 	}
 }
 
@@ -337,8 +337,12 @@ func TestSidecarWritesNoReadyFileWhenThePortIsTaken(t *testing.T) {
 	defer taken.Close()
 	ready := filepath.Join(t.TempDir(), "ready")
 	cmd := exec.Command(bin, "-listen", taken.Addr().String(), "-upstream", "https://127.0.0.1:1", "-ready-file", ready)
-	if out, err := cmd.CombinedOutput(); err == nil {
+	out, err := cmd.CombinedOutput()
+	if err == nil {
 		t.Fatalf("started on a port that was already in use:\n%s", out)
+	}
+	if !strings.Contains(string(out), "cannot bind") {
+		t.Fatalf("a failed bind must say so (the launcher keys its hint on it):\n%s", out)
 	}
 	if _, err := os.Stat(ready); !os.IsNotExist(err) {
 		t.Fatalf("ready file present after a failed bind: %v", err)

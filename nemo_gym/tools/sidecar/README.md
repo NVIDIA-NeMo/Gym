@@ -23,6 +23,8 @@ go build -buildvcs=false -trimpath -o h2-ping-sidecar .
 
 Resource limits come from the Go runtime environment: `GOMEMLIMIT` (for example `1GiB`) and `GOMAXPROCS`.
 
-Build and test need Go 1.27 or newer: `go vet ./... && go test ./...`. The test builds the binary and runs it against a local fake HTTP/2 origin only.
+Build and test need Go 1.25 or newer: `go vet ./... && go test ./...`. The tests build the binary and run it against local fake HTTP/2 origins and relays only. They are not run in CI.
+
+Gym builds this program on first use and caches it under a path that contains a hash of the sources and of the Go version (`go env GOVERSION`), so editing the sources, or upgrading Go (whose `net/http` and `crypto/tls` this proxy mostly is, so security fixes ship as Go releases), triggers a rebuild. The minimum Go version in `go.mod` is owned by whoever changes this directory: raise it only when the code needs it, and note that `pyproject.toml`'s dependency policy covers Python packages only. 1.25 is the practical floor because the Go runtime follows a container's CPU quota automatically from that release.
 
 Connection lifetime: the load balancer closes a client connection with a GOAWAY once it is about an hour old. By default the sidecar retires its upstream connection after 45-50 minutes (`-max-conn-age`); requests in flight finish on the old connection and new ones use a fresh one. A request still running when the limit is reached can meet the GOAWAY: bodies within `-retry-body-limit` are re-sent on a fresh connection, larger ones are not retried.
