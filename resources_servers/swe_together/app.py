@@ -305,6 +305,10 @@ class SWETResourcesServer(SimpleResourcesServer):
         turn = activation.activation_id
         if state.started_at is None:
             state.interaction_budget = body.interaction_budget
+            if state.interaction_budget:
+                (state.directory / "interaction-budget.json").write_text(
+                    state.interaction_budget.model_dump_json(indent=2)
+                )
             elapsed = (
                 max(0.0, time() - body.interaction_budget.started_at_unix_seconds)
                 if body.interaction_budget
@@ -384,11 +388,13 @@ class SWETResourcesServer(SimpleResourcesServer):
                 json.dumps(state.simulator_model.calls, indent=2)
             )
             raise
+        accepted_at = time()
         if timer.expired() or self._remaining_interaction_seconds(state) <= 0:
             return self._expired_simulator_turn(state, body, simulator)
         state.simulator = simulator
         evidence = {
             "turn": turn + 1,
+            "accepted_at_unix_seconds": accepted_at,
             "action": decision.action,
             "content": decision.content,
             "raw_response": decision.raw_response,
@@ -443,6 +449,7 @@ class SWETResourcesServer(SimpleResourcesServer):
         state.stopped = True
         evidence = {
             "turn": body.activation.activation_id + 1,
+            "discarded_at_unix_seconds": time(),
             "stop_reason": "session_budget_exhausted",
             "discarded": True,
             "simulator_messages": simulator.last_messages_sent,

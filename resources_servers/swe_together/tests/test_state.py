@@ -298,7 +298,11 @@ async def test_budget_expiry_cancels_simulator_once_and_replays_terminal_step(tm
         return await state.steps.execute(index=0, request=request, operation=lambda: server._step(state, request))
 
     first, duplicate = await asyncio.gather(invoke(), invoke())
+    budget_path = tmp_path / "interaction-budget.json"
+    budget_mtime = budget_path.stat().st_mtime_ns
     assert first == duplicate == await invoke()
+    assert budget_path.stat().st_mtime_ns == budget_mtime
+    assert json.loads(budget_path.read_text()) == request.interaction_budget.model_dump(mode="json")
     assert first.stop_reason == "session_budget_exhausted" and not first.continue_episode
     assert canceled.is_set() and llm.call.await_count == 1
     assert state.stopped and state.messages == [] and state.noops == 0
@@ -306,6 +310,8 @@ async def test_budget_expiry_cancels_simulator_once_and_replays_terminal_step(tm
     assert state.snapshots.capture.await_count == 1
     evidence = json.loads((tmp_path / "turn-0-simulator.json").read_text())
     assert evidence["discarded"] and evidence["simulator_messages"]
+    assert evidence["discarded_at_unix_seconds"] >= request.interaction_budget.started_at_unix_seconds
+    assert "accepted_at_unix_seconds" not in evidence
 
 
 @pytest.mark.asyncio
@@ -393,6 +399,11 @@ async def test_resources_rejects_interaction_budget_change(tmp_path):
     http_request = SimpleNamespace(session={SESSION_ID_KEY: "s"})
     request = budget_request(state, seconds=60)
     assert (await server.step(http_request, request)).continue_episode
+    budget_path = tmp_path / "interaction-budget.json"
+    budget_text = budget_path.read_text()
+    budget_mtime = budget_path.stat().st_mtime_ns
+    evidence = json.loads((tmp_path / "turn-0-simulator.json").read_text())
+    assert evidence["accepted_at_unix_seconds"] < request.interaction_budget.deadline_unix_seconds
     changed = budget_request(state, seconds=120, index=1)
     with pytest.raises(HTTPException, match="Interaction budget changed"):
         await server.step(http_request, changed)
@@ -400,3 +411,4 @@ async def test_resources_rejects_interaction_budget_change(tmp_path):
     request.activation = activation(1)
     assert (await server.step(http_request, request)).continue_episode
     assert llm.call.await_count == 2 and len(state.messages) == 2
+    assert budget_path.read_text() == budget_text and budget_path.stat().st_mtime_ns == budget_mtime
