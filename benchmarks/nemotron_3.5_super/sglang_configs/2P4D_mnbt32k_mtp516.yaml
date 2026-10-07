@@ -171,7 +171,7 @@ roles:
       disaggregation-mode: prefill
       skip-server-warmup: true
       attention-backend: trtllm_mha
-      chunked-prefill-size: 8192
+      chunked-prefill-size: 32768
       context-length: 262144
       disaggregation-transfer-backend: nixl
       dtype: bfloat16
@@ -184,7 +184,7 @@ roles:
       mamba-full-memory-ratio: 4
       mamba-radix-cache-strategy: extra_buffer
       mamba-ssm-dtype: float32
-      max-prefill-tokens: 16384
+      max-prefill-tokens: 32768
       max-running-requests: 256
       mem-fraction-static: 0.9
       moe-a2a-backend: none
@@ -194,8 +194,8 @@ roles:
       speculative-algorithm: EAGLE
       speculative-draft-model-path: /model
       speculative-eagle-topk: 1
-      speculative-num-draft-tokens: 4
-      speculative-num-steps: 3
+      speculative-num-draft-tokens: 6
+      speculative-num-steps: 5
       tokenizer-worker-num: 4
       tool-call-parser: qwen3_coder
       tp-size: 4
@@ -259,8 +259,8 @@ roles:
       speculative-algorithm: EAGLE
       speculative-draft-model-path: /model
       speculative-eagle-topk: 1
-      speculative-num-draft-tokens: 4
-      speculative-num-steps: 3
+      speculative-num-draft-tokens: 6
+      speculative-num-steps: 5
       tokenizer-worker-num: 4
       tool-call-parser: qwen3_coder
       tp-size: 4
