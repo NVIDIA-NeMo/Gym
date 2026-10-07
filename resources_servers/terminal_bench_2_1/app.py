@@ -124,17 +124,6 @@ EOF""",
     ],
 }
 
-# The QEMU images retain their dated Debian sources as comments. Their live
-# security indexes can reference packages returning 404, preventing tests from
-# starting. Restore the image's snapshot only when bootstrapping the verifier.
-QEMU_VERIFIER_APT_UPDATE = """snapshot_sources=$(sed -n 's|^# deb http://snapshot.debian.org/|deb [check-valid-until=no] http://snapshot.debian.org/|p' /etc/apt/sources.list)
-if [ -n "$snapshot_sources" ]; then
-    printf '%s\\n' "$snapshot_sources" > /etc/apt/sources.list
-    rm -rf /var/lib/apt/lists/*
-fi
-apt-get update"""
-
-
 TEST_SH_PATCHES = {
     # Agent installs without recommends can leave curl present but its CA bundle
     # absent. Install the verifier's HTTPS dependency explicitly at grading time.
@@ -143,12 +132,6 @@ TEST_SH_PATCHES = {
     ],
     "terminal-bench/extract-moves-from-video": [
         ("apt-get install -y curl", "apt-get install -y curl ca-certificates"),
-    ],
-    "terminal-bench/qemu-startup": [
-        ("apt-get update", QEMU_VERIFIER_APT_UPDATE),
-    ],
-    "terminal-bench/qemu-alpine-ssh": [
-        ("apt-get update", QEMU_VERIFIER_APT_UPDATE),
     ],
     "terminal-bench/pytorch-model-recovery": [
         ("-w torch==2.7.1", "-w torch==2.7.1 --index https://download.pytorch.org/whl/cpu"),
