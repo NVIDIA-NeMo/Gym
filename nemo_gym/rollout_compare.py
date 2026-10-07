@@ -66,8 +66,8 @@ class CompareInputError(Exception):
 class RolloutCompareConfig(BaseNeMoGymCLIConfig):
     """
     Compare two rollout JSONL files task by task: count identical, flipped, masked and missing tasks and print the
-    losing side's verifier output for every flip. A report, not a gate: the exit code is 0 unless an input cannot
-    be read.
+    losing side's verifier output for every flip. A report, not a gate: the exit code is 0 for a report and 1 when
+    an input cannot be read or the `--json` summary cannot be written.
 
     Examples:
 
@@ -94,6 +94,10 @@ class RolloutCompareConfig(BaseNeMoGymCLIConfig):
     )
     tail: int = Field(default=15, ge=0, description="Lines of the losing side's verifier output to print per flip.")
     json_output: Optional[str] = Field(default=None, description="Also write a machine-readable summary here.")
+    json_stdout: bool = Field(
+        default=False,
+        description="Print the JSON summary on stdout instead of the report (the root `gym --json` toggle).",
+    )
     logs_root: Optional[str] = Field(
         default=None,
         description="Extra directory against which a relative `verifier_logs_dir` is resolved (tried after the "
@@ -109,6 +113,7 @@ class TaskSide:
     reward: Optional[float]
     masked: Optional[str]  # why this side is masked, or None
     agent_error: Optional[str]  # an agent-level error marker (legacy `error`, `*_error_type` metadata), or None
+    reward_rows: int = 0  # rows that contributed to `reward` (fewer than `rows` when some are masked)
 
     @property
     def repeated(self) -> bool:
@@ -118,7 +123,11 @@ class TaskSide:
         if self.reward is None:
             return "none"
         text = str(round(self.reward, 4))
-        return f"{text} (mean of {len(self.rows)} rows)" if self.repeated else text
+        if not self.repeated:
+            return text
+        if self.reward_rows != len(self.rows):
+            return f"{text} (mean of {self.reward_rows} of {len(self.rows)} rows)"
+        return f"{text} (mean of {len(self.rows)} rows)"
 
 
 @dataclass
@@ -147,6 +156,7 @@ class CompareResult:
     new_masked_rows: int = 0
     old_prefix_stripped: Optional[str] = None
     new_prefix_stripped: Optional[str] = None
+    keyed_by_taskset: bool = False  # tasks are labelled `taskset/task_id` because a side spans several tasksets
     notes: list[str] = field(default_factory=list)
 
     def by_category(self, category: Category) -> list[TaskComparison]:
@@ -179,11 +189,12 @@ class CompareResult:
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     try:
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         raise CompareInputError(f"cannot read {path}: {exc.strerror or exc}") from exc
     rows: list[dict[str, Any]] = []
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    # "\n" only: str.splitlines would also break a line at U+2028, U+2029 or U+0085 inside a string field.
+    for lineno, line in enumerate(text.split("\n"), start=1):
         if not line.strip():
             continue
         try:
@@ -192,8 +203,20 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             raise CompareInputError(f"{path}:{lineno}: invalid JSON ({exc})") from exc
         if not isinstance(row, dict):
             raise CompareInputError(f"{path}:{lineno}: expected a JSON object per line")
+        try:
+            _reward_of(row)
+        except CompareInputError as exc:
+            raise CompareInputError(f"{path}:{lineno}: {exc} (task {_row_task_label(row)})") from exc
         rows.append(row)
     return rows
+
+
+def _row_task_label(row: dict[str, Any]) -> str:
+    """Best-effort task name for an error about one row, before the join key is known."""
+    for candidate in TASK_KEY_CANDIDATES:
+        if _lookup(row, candidate) is not None:
+            return task_id_of(row, candidate, with_taskset=True)
+    return "unknown"
 
 
 def _failure_as_masked_row(failure: dict[str, Any]) -> dict[str, Any]:
@@ -241,20 +264,38 @@ def detect_task_key(rows: list[dict[str, Any]]) -> str:
     )
 
 
-def task_id_of(row: dict[str, Any], key: str) -> str:
+def _task_identity(row: dict[str, Any], key: str) -> tuple[Optional[str], str]:
+    """(taskset, task id) named by `key`; the taskset is only known for a dict `_ng_task_id`."""
     value = _lookup(row, key)
     if value is None:
         raise CompareInputError(f"row has no {key!r} field (keys: {sorted(row)[:12]})")
-    if isinstance(value, dict):
-        # The Harbor path's `_ng_task_id` is {"taskset": ..., "task_id": ...}.
-        value = value.get("task_id", value.get("id", json.dumps(value, sort_keys=True)))
-    return str(value)
+    if not isinstance(value, dict):
+        return None, str(value)
+    # The Harbor path's `_ng_task_id` is {"taskset": ..., "task_id": ...}.
+    task_id = value.get("task_id", value.get("id"))
+    if task_id is None:
+        return None, json.dumps(value, sort_keys=True)
+    taskset = value.get("taskset")
+    return (None if taskset is None else str(taskset)), str(task_id)
 
 
-def group_by_task(rows: list[dict[str, Any]], key: str) -> dict[str, list[dict[str, Any]]]:
+def task_id_of(row: dict[str, Any], key: str, *, with_taskset: bool = False) -> str:
+    """The label a row is joined and listed under: the plain task id, or `taskset/task_id` with `with_taskset`
+    (used when a side spans several tasksets, where the same task id may recur)."""
+    taskset, task_id = _task_identity(row, key)
+    return f"{taskset}/{task_id}" if with_taskset and taskset else task_id
+
+
+def tasksets_of(rows: list[dict[str, Any]], key: str) -> set[str]:
+    return {taskset for taskset, _ in (_task_identity(row, key) for row in rows) if taskset}
+
+
+def group_by_task(
+    rows: list[dict[str, Any]], key: str, *, with_taskset: bool = False
+) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        grouped.setdefault(task_id_of(row, key), []).append(row)
+        grouped.setdefault(task_id_of(row, key, with_taskset=with_taskset), []).append(row)
     return grouped
 
 
@@ -276,13 +317,17 @@ def _strip_prefix(grouped: dict[str, list[dict[str, Any]]], prefix: str) -> dict
 
 
 def mask_reason(row: dict[str, Any]) -> Optional[str]:
+    """Why a row does not count: `mask_sample`, a `failure_kind`, no reward, or a NaN/infinite reward."""
     if row.get("mask_sample"):
         kind = row.get("failure_kind")
         return f"mask_sample (failure_kind={kind})" if kind else "mask_sample"
     if row.get("failure_kind"):
         return f"failure_kind={row['failure_kind']}"
-    if row.get("reward") is None:
+    reward = row.get("reward")
+    if reward is None:
         return "no reward"
+    if isinstance(reward, float) and not math.isfinite(reward):
+        return f"non-finite reward ({reward!r})"
     return None
 
 
@@ -302,15 +347,24 @@ def agent_error(row: dict[str, Any]) -> Optional[str]:
 
 
 def _reward_of(row: dict[str, Any]) -> Optional[float]:
+    """The row's reward as a float (None when absent; NaN/inf pass through for `mask_reason` to catch). Booleans
+    and strings are rejected rather than coerced: a `"1.0"` string means the producer is broken."""
     reward = row.get("reward")
-    if isinstance(reward, bool) or not isinstance(reward, (int, float)):
+    if reward is None:
         return None
+    if isinstance(reward, bool) or not isinstance(reward, (int, float)):
+        raise CompareInputError(f"reward {reward!r} is not a number")
     return float(reward)
+
+
+def _finite_reward_of(row: dict[str, Any]) -> Optional[float]:
+    reward = _reward_of(row)
+    return reward if reward is not None and math.isfinite(reward) else None
 
 
 def summarize_side(rows: list[dict[str, Any]]) -> TaskSide:
     reasons = [reason for reason in (mask_reason(row) for row in rows) if reason]
-    rewards = [reward for reward in (_reward_of(row) for row in rows) if reward is not None]
+    rewards = [reward for reward in (_finite_reward_of(row) for row in rows) if reward is not None]
     errors = [err for err in (agent_error(row) for row in rows) if err]
     masked = None
     if reasons:
@@ -320,6 +374,7 @@ def summarize_side(rows: list[dict[str, Any]]) -> TaskSide:
         reward=statistics.fmean(rewards) if rewards else None,
         masked=masked,
         agent_error=errors[0] if errors else None,
+        reward_rows=len(rewards),
     )
 
 
@@ -331,13 +386,19 @@ def summarize_side(rows: list[dict[str, Any]]) -> TaskSide:
 def compare_rollouts(
     old_rows: list[dict[str, Any]], new_rows: list[dict[str, Any]], key: Optional[str] = None
 ) -> CompareResult:
+    if not old_rows and not new_rows:
+        raise CompareInputError("no rows in either input")
     if key:
         old_key = new_key = key
     else:
         # An empty side (everything missing) borrows the other side's detected key.
-        old_key = detect_task_key(old_rows) if old_rows or not new_rows else detect_task_key(new_rows)
+        old_key = detect_task_key(old_rows) if old_rows else detect_task_key(new_rows)
         new_key = detect_task_key(new_rows) if new_rows else old_key
-    old, new = group_by_task(old_rows, old_key), group_by_task(new_rows, new_key)
+    # A side spanning several tasksets may repeat a task id, so the taskset becomes part of the key and heading.
+    old_tasksets, new_tasksets = tasksets_of(old_rows, old_key), tasksets_of(new_rows, new_key)
+    with_taskset = len(old_tasksets) > 1 or len(new_tasksets) > 1
+    old = group_by_task(old_rows, old_key, with_taskset=with_taskset)
+    new = group_by_task(new_rows, new_key, with_taskset=with_taskset)
 
     old_prefix = new_prefix = None
     if old and new and not (set(old) & set(new)):
@@ -372,6 +433,12 @@ def compare_rollouts(
         tasks.append(TaskComparison(task, category, old_side, new_side, winner))
 
     notes = []
+    if with_taskset:
+        notes.append(
+            "a side spans several tasksets ("
+            + ", ".join(sorted(old_tasksets | new_tasksets))
+            + "); tasks are keyed and listed as taskset/task_id"
+        )
     if repeated:
         notes.append(
             f"{len(repeated)} task(s) have several rows on a side; they are compared on the mean reward: "
@@ -387,6 +454,7 @@ def compare_rollouts(
         new_masked_rows=sum(1 for row in new_rows if mask_reason(row)),
         old_prefix_stripped=old_prefix,
         new_prefix_stripped=new_prefix,
+        keyed_by_taskset=with_taskset,
         notes=notes,
     )
 
@@ -414,7 +482,10 @@ def verifier_output(row: dict[str, Any], roots: list[Path]) -> tuple[Optional[st
     if logs_dir:
         path = _resolve_logs_path(str(logs_dir), roots)
         if path is not None:
-            return path.read_text(errors="replace"), str(path)
+            try:
+                return path.read_text(errors="replace"), str(path)
+            except OSError as exc:
+                return None, f"unavailable: cannot read {path}: {exc.strerror or exc}"
     for name in EMBEDDED_VERIFIER_FIELDS:
         text = row.get(name)
         if isinstance(text, str) and text.strip():
@@ -431,7 +502,7 @@ def tail_lines(text: str, count: int) -> list[str]:
 
 def _losing_row(side: TaskSide) -> dict[str, Any]:
     """The worst row on the losing side (meaningful when a side has repeats)."""
-    return min(side.rows, key=lambda row: _reward_of(row) if _reward_of(row) is not None else math.inf)
+    return min(side.rows, key=lambda row: _finite_reward_of(row) if _finite_reward_of(row) is not None else math.inf)
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -525,6 +596,7 @@ def summary_dict(result: CompareResult) -> dict[str, Any]:
             "new_key": result.new_key,
             "old_prefix_stripped": result.old_prefix_stripped,
             "new_prefix_stripped": result.new_prefix_stripped,
+            "keyed_by_taskset": result.keyed_by_taskset,
         },
         "notes": result.notes,
         "tasks": [
@@ -546,7 +618,8 @@ def summary_dict(result: CompareResult) -> dict[str, Any]:
 
 
 def run_compare(config: RolloutCompareConfig, out=None) -> int:
-    """Load both sides, print the report (and write the JSON summary), return the process exit code."""
+    """Load both sides, print the report (or the JSON summary with `json_stdout`) and write the JSON file when
+    asked. Exit code: 0 for a report, 1 for unreadable input or unwritable output."""
     out = out or sys.stdout
     try:
         old_rows = load_rollouts(config.old_rollouts)
@@ -559,8 +632,19 @@ def run_compare(config: RolloutCompareConfig, out=None) -> int:
     roots = [Path.cwd(), Path(config.new_rollouts).parent.resolve(), Path(config.old_rollouts).parent.resolve()]
     if config.logs_root:
         roots.append(Path(config.logs_root))
-    out.write(render_report(result, roots, tail=config.tail))
+    summary = json.dumps(summary_dict(result), indent=2) + "\n"
     if config.json_output:
-        Path(config.json_output).write_text(json.dumps(summary_dict(result), indent=2) + "\n")
-        out.write(f"\nwrote {config.json_output}\n")
+        # Written before the report so a bad path fails with the one error line and nothing half-printed.
+        try:
+            Path(config.json_output).write_text(summary)
+        except OSError as exc:
+            print(f"error: cannot write {config.json_output}: {exc.strerror or exc}", file=sys.stderr)
+            return 1
+    if config.json_stdout:
+        out.write(summary)
+    else:
+        out.write(render_report(result, roots, tail=config.tail))
+    if config.json_output:
+        # Keeps stdout machine-readable under `--json`: the note goes to stderr there.
+        print(f"\nwrote {config.json_output}", file=sys.stderr if config.json_stdout else out)
     return 0

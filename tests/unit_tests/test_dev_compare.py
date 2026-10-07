@@ -16,13 +16,14 @@
 
 import io
 import json
+import re
 import sys
 from pathlib import Path
 
 import pytest
 from pytest import CaptureFixture, MonkeyPatch
 
-import nemo_gym.cli.main as cli_main
+import nemo_gym.cli.dev as cli_dev
 import nemo_gym.global_config as gc
 from nemo_gym.cli.main import main
 from nemo_gym.rollout_compare import (
@@ -67,9 +68,26 @@ def new_row(task: str, reward, logs_dir: str | None = None, **extra) -> dict:
     return row
 
 
+def failure_record(task: str, message: str = "502, message='Bad Gateway'") -> dict:
+    """A `<name>_failures.jsonl` record as the Harbor path writes it for a masked infrastructure failure."""
+    return {
+        "_ng_task_id": {"taskset": "terminal-bench-2-1", "task_id": task},
+        "_ng_failure_class": "environment_server_failed",
+        "_ng_failure_message": message,
+    }
+
+
 def write_jsonl(path: Path, rows: list[dict]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
     return path
+
+
+def with_reward_literal(row: dict, literal: str) -> str:
+    """The row as a JSONL line whose `reward` is the raw JSON token `literal` (e.g. `NaN`, `"1.0"`, `true`)."""
+    line = json.dumps(row)
+    assert line.count('"reward": 0.0') == 1
+    return line.replace('"reward": 0.0', f'"reward": {literal}')
 
 
 def write_verifier_log(root: Path, name: str, lines: list[str]) -> str:
@@ -167,6 +185,62 @@ class TestClassification:
         new["response"]["metadata"]["terminus2_error_type"] = "TimeoutError"
         assert compare_rollouts([old_row("t", 1.0)], [new]).tasks[0].category == "identical"
 
+    def test_agent_error_on_the_winning_side_is_also_set_apart(self) -> None:
+        # The error is on the side that scored higher: still a rerun candidate, not a counted new-win.
+        new = new_row("t", 1.0)
+        new["response"]["metadata"]["terminus2_error_type"] = "TimeoutError"
+        result = compare_rollouts([old_row("t", 0.0)], [new])
+        task = result.tasks[0]
+        assert task.category == "flipped_agent_error" and task.winner == "new" and task.loser == "old"
+        counts = result.counts()
+        assert counts["flipped"] == 0 and counts["flipped_new_win"] == 0 and counts["flipped_agent_error"] == 1
+
+    @pytest.mark.parametrize("literal, shown", [("NaN", "nan"), ("Infinity", "inf"), ("-Infinity", "-inf")])
+    def test_non_finite_reward_is_masked_not_a_new_win(self, tmp_path: Path, literal: str, shown: str) -> None:
+        # json.loads accepts the NaN/Infinity tokens, so a broken producer can emit them; `nan > 0.0` is False
+        # and `inf > 0.0` is True, so without the rule they would land in the flip counts.
+        path = tmp_path / "new.jsonl"
+        path.write_text(with_reward_literal(new_row("t", 0.0), literal) + "\n")
+        result = compare_rollouts([old_row("t", 0.0)], load_rollouts(path))
+        task = result.tasks[0]
+        assert task.category == "masked"
+        assert task.new.masked == f"non-finite reward ({shown})" and task.new.reward is None
+        counts = result.counts()
+        assert counts["flipped"] == 0 and counts["flipped_new_win"] == 0 and counts["masked_new"] == 1
+        assert f"- t: old=0.0 new=none; new non-finite reward ({shown})" in render_report(result, roots=[])
+        assert json.loads(json.dumps(summary_dict(result)))["tasks"][0]["new"]["reward"] is None
+
+    def test_non_numeric_reward_is_an_input_error_not_an_assert(self) -> None:
+        with pytest.raises(CompareInputError, match="reward '1.0' is not a number"):
+            compare_rollouts([old_row("t", "1.0")], [new_row("t", 1.0)])
+        with pytest.raises(CompareInputError, match="reward True is not a number"):
+            compare_rollouts([old_row("t", 1.0)], [new_row("t", True)])
+
+    def test_repeated_rows_with_one_masked_are_masked_not_flipped(self) -> None:
+        # Two clean 1.0 rows and one masked row against old 0.0: unmasked this would be a new-win flip.
+        new_rows = [
+            new_row("t", 1.0),
+            new_row("t", 1.0),
+            new_row("t", None, mask_sample=True, failure_kind="environment_server_failed"),
+        ]
+        result = compare_rollouts([old_row("t", 0.0)], new_rows)
+        task = result.tasks[0]
+        assert task.category == "masked"
+        assert task.new.masked == "1/3 rows masked: mask_sample (failure_kind=environment_server_failed)"
+        assert task.new.reward == 1.0 and task.new.reward_text() == "1.0 (mean of 2 of 3 rows)"
+        counts = result.counts()
+        assert counts["masked"] == 1 and counts["flipped"] == 0 and counts["flipped_agent_error"] == 0
+        report = render_report(result, roots=[])
+        assert "## Flips (0)" in report
+        assert (
+            "## Masked (1)\n- t: old=0.0 new=1.0 (mean of 2 of 3 rows); "
+            "new 1/3 rows masked: mask_sample (failure_kind=environment_server_failed)"
+        ) in report
+
+    def test_both_sides_empty_is_no_rows(self) -> None:
+        with pytest.raises(CompareInputError, match="^no rows in either input$"):
+            compare_rollouts([], [])
+
 
 class TestTaskKey:
     def test_detects_verifier_metadata_task_id(self) -> None:
@@ -198,6 +272,33 @@ class TestTaskKey:
         assert result.old_prefix_stripped is None and result.new_prefix_stripped == "tb/"
         assert result.counts()["identical"] == 1
 
+    def test_same_task_id_in_two_tasksets_is_keyed_by_taskset(self) -> None:
+        def row(taskset: str, reward: float) -> dict:
+            return new_row("x", reward, _ng_task_id={"taskset": taskset, "task_id": "x"})
+
+        result = compare_rollouts([row("tb-a", 1.0), row("tb-b", 0.0)], [row("tb-a", 1.0), row("tb-b", 1.0)])
+        assert result.keyed_by_taskset
+        assert [t.task for t in result.tasks] == ["tb-a/x", "tb-b/x"]
+        counts = result.counts()
+        assert counts["identical"] == 1 and counts["flipped_new_win"] == 1 and counts["missing"] == 0
+        assert result.notes == [
+            "a side spans several tasksets (tb-a, tb-b); tasks are keyed and listed as taskset/task_id"
+        ]
+        assert "### tb-b/x: old=0.0 new=1.0 -> new wins" in render_report(result, roots=[])
+        assert summary_dict(result)["join"]["keyed_by_taskset"] is True
+
+    def test_several_tasksets_on_one_side_only_still_keys_by_taskset(self) -> None:
+        def row(taskset: str, reward: float) -> dict:
+            return new_row("x", reward, _ng_task_id={"taskset": taskset, "task_id": "x"})
+
+        result = compare_rollouts([row("tb-a", 1.0), row("tb-b", 0.0)], [row("tb-a", 1.0)])
+        assert [(t.task, t.category) for t in result.tasks] == [("tb-a/x", "identical"), ("tb-b/x", "missing")]
+
+    def test_single_taskset_keeps_the_plain_task_id(self) -> None:
+        result = compare_rollouts([old_row("x", 1.0)], [new_row("x", 1.0)])
+        assert not result.keyed_by_taskset and result.tasks[0].task == "x"
+        assert summary_dict(result)["join"]["keyed_by_taskset"] is False
+
     def test_both_sides_prefixed_differently_are_not_joined(self) -> None:
         # Stripping both would silently match unrelated namespaces; the tasks stay missing instead.
         result = compare_rollouts([old_row("t", 1.0)], [new_row("t", 1.0, _ng_task_id="other-bench/t")])
@@ -213,7 +314,7 @@ class TestLoading:
             tmp_path / "new_failures.jsonl",
             [
                 {
-                    "_ng_task_id": {"taskset": "tb", "task_id": "broken"},
+                    "_ng_task_id": {"taskset": "terminal-bench-2-1", "task_id": "broken"},
                     "_ng_failure_class": "environment_server_failed",
                     "_ng_failure_message": "502, message='Bad Gateway'",
                 }
@@ -261,6 +362,28 @@ class TestLoading:
     def test_missing_file_is_an_input_error(self, tmp_path: Path) -> None:
         with pytest.raises(CompareInputError, match="cannot read"):
             load_rollouts(tmp_path / "nope.jsonl")
+
+    def test_line_separator_inside_a_string_field_does_not_split_the_row(self, tmp_path: Path) -> None:
+        # str.splitlines also breaks at U+2028, U+2029 and U+0085, which a verifier log may well contain; the file
+        # has one JSON object per "\n"-terminated line and must load as one row.
+        text = "before\u2028after\u2029end\u0085tail"
+        path = tmp_path / "rows.jsonl"
+        path.write_text(json.dumps(new_row("t", 1.0, test_output=text), ensure_ascii=False) + "\n", encoding="utf-8")
+        rows = load_rollouts(path)
+        assert len(rows) == 1 and rows[0]["test_output"] == text
+
+    @pytest.mark.parametrize("literal, shown", [('"1.0"', "'1.0'"), ("true", "True"), ("false", "False")])
+    def test_non_numeric_reward_names_file_line_and_task(self, tmp_path: Path, literal: str, shown: str) -> None:
+        # A numeric string is not coerced: the producer is broken and the report must not guess.
+        path = tmp_path / "new.jsonl"
+        path.write_text(
+            json.dumps(new_row("fine", 1.0)) + "\n" + with_reward_literal(new_row("broken", 0.0), literal) + "\n"
+        )
+        with pytest.raises(
+            CompareInputError,
+            match=rf"new\.jsonl:2: reward {re.escape(shown)} is not a number \(task terminal-bench-2-1/broken\)$",
+        ):
+            load_rollouts(path)
 
 
 class TestReport:
@@ -340,6 +463,27 @@ class TestReport:
         )
         assert "## Missing (1)\n- old-only: only on old side (reward 1.0)" in report
 
+    def test_unreadable_verifier_log_is_reported_and_the_report_continues(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        logs_dir = write_verifier_log(tmp_path, "locked", ["must not leak"])
+        log_path = tmp_path / logs_dir / "test-stdout.txt"
+        real_read_text = Path.read_text
+
+        def locked_read_text(self: Path, *args, **kwargs) -> str:
+            if self == log_path:
+                raise PermissionError(13, "Permission denied")
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", locked_read_text)
+        result = compare_rollouts(
+            [old_row("a", 1.0), old_row("b", 1.0)], [new_row("a", 0.0, logs_dir=logs_dir), new_row("b", 0.0)]
+        )
+        report = render_report(result, roots=[tmp_path], tail=5)
+        assert f"    new verifier output unavailable: cannot read {log_path}: Permission denied" in report
+        assert "### b: old=1.0 new=0.0 -> old wins" in report  # the report goes on to the next flip
+        assert "must not leak" not in report
+
     def test_repeats_choose_the_worst_losing_row_for_the_tail(self, tmp_path: Path) -> None:
         good = write_verifier_log(tmp_path, "good", ["all passed"])
         bad = write_verifier_log(tmp_path, "bad", ["1 failed"])
@@ -381,6 +525,7 @@ class TestReport:
             "new_key": "_ng_task_id",
             "old_prefix_stripped": "terminal-bench/",
             "new_prefix_stripped": None,
+            "keyed_by_taskset": False,
         }
         flip = next(t for t in summary["tasks"] if t["task"] == "b")
         assert flip == {
@@ -429,15 +574,157 @@ class TestRunCompare:
         assert run_compare(config, out=io.StringIO()) == 1
         assert "no task id field found" in capsys.readouterr().err
 
+    def test_reference_fixture_shape(self, tmp_path: Path) -> None:
+        # The parity-v3 gate in miniature: every category the real report produced, asserted as one counts dict.
+        err_on_loser = new_row("err-loser", 0.0)  # new loses and reports the agent error
+        err_on_loser["response"]["metadata"]["terminus2_error_type"] = "TimeoutError"
+        err_on_winner = new_row("err-winner", 1.0)  # new wins but reports the agent error
+        err_on_winner["response"]["metadata"]["terminus2_error_type"] = "TimeoutError"
+        old = write_jsonl(
+            tmp_path / "old.jsonl",
+            [
+                old_row("same-1", 1.0),
+                old_row("same-0", 0.0),
+                old_row("old-wins", 1.0),
+                old_row("new-wins", 0.0),
+                old_row("err-loser", 1.0),
+                old_row("err-winner", 0.0),
+                old_row("infra", 0.0),
+                # An old-side agent error with reward 0.0 against a sidecar-masked new side: masked, not a flip.
+                old_row("infra-old-error", 0.0, error="Traceback (most recent call last):\n  ...\nTimeoutError"),
+            ],
+        )
+        new = write_jsonl(
+            tmp_path / "new.jsonl",
+            [
+                new_row("same-1", 1.0),
+                new_row("same-0", 0.0),
+                new_row("old-wins", 0.0),
+                new_row("new-wins", 1.0),
+                err_on_loser,
+                err_on_winner,
+            ],
+        )
+        write_jsonl(tmp_path / "new_failures.jsonl", [failure_record("infra"), failure_record("infra-old-error")])
+        json_path = tmp_path / "summary.json"
+        out = io.StringIO()
+        config = RolloutCompareConfig(old_rollouts=str(old), new_rollouts=str(new), json_output=str(json_path))
+        assert run_compare(config, out=out) == 0
+        summary = json.loads(json_path.read_text())
+        assert summary["counts"] == {
+            "tasks": 8,
+            "identical": 2,
+            "flipped": 2,
+            "flipped_old_win": 1,
+            "flipped_new_win": 1,
+            "flipped_agent_error": 2,
+            "masked": 2,
+            "masked_old": 0,
+            "masked_new": 2,
+            "missing": 0,
+            "missing_old_only": 0,
+            "missing_new_only": 0,
+        }
+        by_task = {t["task"]: t for t in summary["tasks"]}
+        assert by_task["err-loser"]["winner"] == "old" and by_task["err-winner"]["winner"] == "new"
+        assert by_task["infra-old-error"]["category"] == "masked"
+        assert by_task["infra-old-error"]["old"]["agent_error"] == "error: TimeoutError"
+        text = out.getvalue()
+        assert "## Flips (2)" in text and "## Flips with agent errors (2)" in text and "## Masked (2)" in text
+        assert "infra-old-error" not in text.split("## Masked")[0]  # listed under masked only
+
+    def test_relative_logs_dir_resolves_against_each_files_own_directory(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        old_dir, new_dir = tmp_path / "old-run", tmp_path / "new-run"
+        old_log = write_verifier_log(old_dir, "logs/o", ["old side failed"])
+        new_log = write_verifier_log(new_dir, "logs/n", ["new side failed"])
+        # The embedded output is blanked so only the file under the row's own directory can supply the tail.
+        old = write_jsonl(
+            old_dir / "old.jsonl",
+            [old_row("a", 1.0), old_row("b", 0.0, test_output="", verifier_logs_dir=old_log)],
+        )
+        new = write_jsonl(new_dir / "new.jsonl", [new_row("a", 0.0, logs_dir=new_log), new_row("b", 1.0)])
+        (tmp_path / "elsewhere").mkdir()
+        monkeypatch.chdir(tmp_path / "elsewhere")
+        out = io.StringIO()
+        assert run_compare(RolloutCompareConfig(old_rollouts=str(old), new_rollouts=str(new)), out=out) == 0
+        text = out.getvalue()
+        assert "    | new side failed" in text and "    | old side failed" in text
+        assert "unavailable" not in text
+
+    def test_two_empty_inputs_say_no_rows(self, tmp_path: Path, capsys: CaptureFixture) -> None:
+        old, new = tmp_path / "old.jsonl", tmp_path / "new.jsonl"
+        old.write_text("")
+        new.write_text("\n\n")
+        assert run_compare(RolloutCompareConfig(old_rollouts=str(old), new_rollouts=str(new)), out=io.StringIO()) == 1
+        err = capsys.readouterr().err
+        assert err == "error: no rows in either input\n"
+
+    def test_non_numeric_reward_exits_nonzero_naming_the_row(self, tmp_path: Path, capsys: CaptureFixture) -> None:
+        old = write_jsonl(tmp_path / "old.jsonl", [old_row("a", 1.0)])
+        new = tmp_path / "new.jsonl"
+        new.write_text(with_reward_literal(new_row("a", 0.0), '"1.0"') + "\n")
+        assert run_compare(RolloutCompareConfig(old_rollouts=str(old), new_rollouts=str(new)), out=io.StringIO()) == 1
+        assert capsys.readouterr().err == (
+            f"error: {new}:1: reward '1.0' is not a number (task terminal-bench-2-1/a)\n"
+        )
+
+    def test_unwritable_json_path_is_an_error(self, tmp_path: Path, capsys: CaptureFixture) -> None:
+        old = write_jsonl(tmp_path / "old.jsonl", [old_row("a", 1.0)])
+        new = write_jsonl(tmp_path / "new.jsonl", [new_row("a", 1.0)])
+        json_path = tmp_path / "missing-dir" / "summary.json"
+        config = RolloutCompareConfig(old_rollouts=str(old), new_rollouts=str(new), json_output=str(json_path))
+        out = io.StringIO()
+        assert run_compare(config, out=out) == 1
+        assert capsys.readouterr().err == f"error: cannot write {json_path}: No such file or directory\n"
+        assert out.getvalue() == ""  # nothing half-printed
+        assert not json_path.parent.exists()  # the directory is not created silently
+
+    def test_json_stdout_prints_the_summary_instead_of_the_report(
+        self, tmp_path: Path, capsys: CaptureFixture
+    ) -> None:
+        old = write_jsonl(tmp_path / "old.jsonl", [old_row("a", 1.0), old_row("b", 0.0)])
+        new = write_jsonl(tmp_path / "new.jsonl", [new_row("a", 1.0), new_row("b", 1.0)])
+        json_path = tmp_path / "summary.json"
+        config = RolloutCompareConfig(
+            old_rollouts=str(old), new_rollouts=str(new), json_stdout=True, json_output=str(json_path)
+        )
+        out = io.StringIO()
+        assert run_compare(config, out=out) == 0
+        summary = json.loads(out.getvalue())  # stdout is exactly the JSON object
+        assert summary["counts"]["flipped_new_win"] == 1
+        assert json.loads(json_path.read_text()) == summary
+        assert f"wrote {json_path}" in capsys.readouterr().err
+
 
 class TestCliWiring:
-    def test_positionals_and_flags_become_overrides(self, monkeypatch: MonkeyPatch) -> None:
+    @staticmethod
+    def _capture(monkeypatch: MonkeyPatch) -> dict:
+        """Replace `dev_compare` with a recorder of the keyword values it receives and the argv left for Hydra."""
         captured: dict = {}
 
-        def fake_dispatch(target: str, overrides: list[str]) -> None:
-            captured["target"], captured["overrides"] = target, overrides
+        def fake_dev_compare(**values) -> None:
+            captured.update(values)
+            captured["hydra_argv"] = sys.argv[1:]
 
-        monkeypatch.setattr(cli_main, "dispatch", fake_dispatch)
+        monkeypatch.setattr(cli_dev, "dev_compare", fake_dev_compare)
+        return captured
+
+    @pytest.mark.parametrize(
+        "old_path",
+        [
+            "old dir/old.jsonl",  # a space
+            "résumé/ancien.jsonl",  # non-ASCII, which json.dumps would turn into \u00e9 escapes
+            r"runs\old\old.jsonl",  # backslashes, which Hydra's quoted grammar would keep doubled
+            'say "hi".jsonl',  # a quote
+        ],
+    )
+    def test_paths_and_quoted_options_reach_the_command_verbatim(
+        self, monkeypatch: MonkeyPatch, old_path: str
+    ) -> None:
+        # Like `gym eval run`'s TARGET, the paths bypass Hydra's override grammar; only --tail travels as an override.
+        captured = self._capture(monkeypatch)
         monkeypatch.setattr(
             sys,
             "argv",
@@ -445,7 +732,7 @@ class TestCliWiring:
                 "gym",
                 "dev",
                 "compare",
-                "old dir/old.jsonl",
+                old_path,
                 "new.jsonl",
                 "--key",
                 "verifier_metadata.task_id",
@@ -458,22 +745,36 @@ class TestCliWiring:
             ],
         )
         main()
-        assert captured["target"] == "nemo_gym.cli.dev:dev_compare"
-        assert captured["overrides"] == [
-            '+old_rollouts="old dir/old.jsonl"',
-            '+new_rollouts="new.jsonl"',
-            '+key="verifier_metadata.task_id"',
-            "+tail=3",
-            '+logs_root="resources_servers/harbor"',
-            '+json_output="out.json"',
-        ]
+        assert captured == {
+            "json_stdout": False,
+            "old_rollouts": old_path,
+            "new_rollouts": "new.jsonl",
+            "key": "verifier_metadata.task_id",
+            "logs_root": "resources_servers/harbor",
+            "json_output": "out.json",
+            "hydra_argv": ["+tail=3"],
+        }
 
-    def test_optional_flags_default_to_nothing(self, monkeypatch: MonkeyPatch) -> None:
-        captured: dict = {}
-        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: captured.update(overrides=overrides))
+    def test_optional_flags_default_to_none(self, monkeypatch: MonkeyPatch) -> None:
+        captured = self._capture(monkeypatch)
         monkeypatch.setattr(sys, "argv", ["gym", "dev", "compare", "a.jsonl", "b.jsonl"])
         main()
-        assert captured["overrides"] == ['+old_rollouts="a.jsonl"', '+new_rollouts="b.jsonl"']
+        assert captured == {
+            "json_stdout": False,
+            "old_rollouts": "a.jsonl",
+            "new_rollouts": "b.jsonl",
+            "key": None,
+            "logs_root": None,
+            "json_output": None,
+            "hydra_argv": [],
+        }
+
+    def test_root_json_toggle_is_passed_on(self, monkeypatch: MonkeyPatch) -> None:
+        # `gym --json dev compare` used to be accepted and silently dropped.
+        captured = self._capture(monkeypatch)
+        monkeypatch.setattr(sys, "argv", ["gym", "--json", "dev", "compare", "a.jsonl", "b.jsonl", "--json", "o.json"])
+        main()
+        assert captured["json_stdout"] is True and captured["json_output"] == "o.json"
 
     def test_missing_positional_is_a_usage_error(self, monkeypatch: MonkeyPatch, capsys: CaptureFixture) -> None:
         monkeypatch.setattr(sys, "argv", ["gym", "dev", "compare", "only-one.jsonl"])
@@ -482,14 +783,13 @@ class TestCliWiring:
         assert exc_info.value.code == 2
         assert "NEW_ROLLOUTS" in capsys.readouterr().err
 
-    def test_end_to_end_through_dispatch(
-        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys: CaptureFixture
-    ) -> None:
-        # The real dispatch: argv is rewritten to Hydra overrides, the global config is built from them, and
-        # `dev_compare` validates `RolloutCompareConfig` off it.
-        old = write_jsonl(tmp_path / "old.jsonl", [old_row("a", 1.0), old_row("b", 1.0), old_row("c", 0.0)])
-        new = write_jsonl(tmp_path / "new.jsonl", [new_row("a", 1.0), new_row("b", 0.0), new_row("c", 0.0)])
-        json_path = tmp_path / "summary.json"
+    def test_end_to_end_through_hydra(self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys: CaptureFixture) -> None:
+        # The real path: argparse values seed the config, Hydra parses the remaining overrides, `dev_compare`
+        # validates `RolloutCompareConfig`. The run lives in a directory with a space and non-ASCII characters.
+        run_dir = tmp_path / "résumé dir"
+        old = write_jsonl(run_dir / "old.jsonl", [old_row("a", 1.0), old_row("b", 1.0), old_row("c", 0.0)])
+        new = write_jsonl(run_dir / "new.jsonl", [new_row("a", 1.0), new_row("b", 0.0), new_row("c", 0.0)])
+        json_path = run_dir / "summary.json"
         monkeypatch.setattr(gc, "_GLOBAL_CONFIG_DICT", None)
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
@@ -503,4 +803,21 @@ class TestCliWiring:
         assert "identical                    2" in out
         assert "flipped                      1   old-win 1, new-win 0" in out
         assert "### b: old=1.0 new=0.0 -> old wins" in out
+        assert out.endswith(f"wrote {json_path}\n")
         assert json.loads(json_path.read_text())["counts"]["identical"] == 2
+
+    @pytest.mark.parametrize("argv_prefix, argv_suffix", [(["--json"], []), ([], ["+json=true"])])
+    def test_root_json_toggle_prints_the_summary_on_stdout(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys: CaptureFixture, argv_prefix: list, argv_suffix: list
+    ) -> None:
+        old = write_jsonl(tmp_path / "old.jsonl", [old_row("a", 1.0), old_row("b", 1.0)])
+        new = write_jsonl(tmp_path / "new.jsonl", [new_row("a", 1.0), new_row("b", 0.0)])
+        monkeypatch.setattr(gc, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["gym", *argv_prefix, "dev", "compare", str(old), str(new), *argv_suffix])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 0
+        summary = json.loads(capsys.readouterr().out)  # the whole of stdout is the JSON summary; no report
+        assert summary["counts"]["flipped_old_win"] == 1
+        assert summary["join"]["old_key"] == "task_name"
