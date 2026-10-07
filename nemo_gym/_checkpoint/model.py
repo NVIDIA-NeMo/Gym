@@ -41,7 +41,7 @@ from nemo_gym._checkpoint.control import (
     ControlError,
     JsonPayload,
     PrepareReport,
-    RetiringAttempts,
+    RetiredAttempts,
     next_attempt,
 )
 from nemo_gym._checkpoint.errors import AdmissionClosedError
@@ -273,13 +273,13 @@ class PolicyGate:
         *,
         server_name: str,
         cut_requester: Optional[CutRequester],
-        retiring: RetiringAttempts,
+        retired: RetiredAttempts,
         restored_cuts: RestoredCuts,
         on_change: Callable[[], Awaitable[None]],
     ) -> None:
         self.server_name = server_name
         self.cut_requester = cut_requester
-        self.retiring = retiring
+        self.retired = retired
         self.restored_cuts = restored_cuts
         self.on_change = on_change
         self.accepting = True
@@ -291,7 +291,7 @@ class PolicyGate:
 
     def admit(self, capture_key: Optional[str]) -> None:
         if capture_key is not None:
-            self.retiring.check(EpisodeId.from_capture_key(capture_key))
+            self.retired.check(EpisodeId.from_capture_key(capture_key))
         if not self.accepting:
             raise AdmissionClosedError("policy model admission is closed for a checkpoint")
 
@@ -306,8 +306,8 @@ class PolicyGate:
         await self.restored_cuts.settle(ticket)
         await self.on_change()
 
-    async def release_response(self, ticket: _Ticket) -> None:
-        """Hold a response until resume unless it may be delivered now."""
+    async def deliver_response(self, ticket: _Ticket) -> None:
+        """Let a response start, holding it until resume while a checkpoint is open."""
         while not self.accepting:
             await self.on_change()
             await self._reopened.wait()
@@ -583,7 +583,7 @@ class PolicyModelParticipant(CheckpointParticipant):
         self.gate = PolicyGate(
             server_name=server_name,
             cut_requester=cut_requester,
-            retiring=self.retiring,
+            retired=self.retired,
             restored_cuts=self._local_cuts,
             on_change=self.notify,
         )
@@ -697,7 +697,7 @@ class PolicyAdmissionMiddleware:
 
         async def gated_send(message: dict[str, Any]) -> None:
             if message["type"] == "http.response.start":
-                await self.gate.release_response(ticket)
+                await self.gate.deliver_response(ticket)
             await send(message)
 
         token = _CURRENT_TICKET.set(ticket)

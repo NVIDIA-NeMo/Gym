@@ -19,11 +19,12 @@ from fastapi import FastAPI
 from nemo_gym._checkpoint.control import (
     CheckpointRequest,
     CommitRequest,
+    ForgetRequest,
     RestoreRequest,
     RetireRequest,
     install_control_routes,
 )
-from nemo_gym._checkpoint.errors import ControlError, InvalidPhaseError
+from nemo_gym._checkpoint.errors import ControlError, InvalidPhaseError, StaleAttemptError
 from nemo_gym._checkpoint.model import GenerationCutRecord, PolicyGate, _Ticket
 from nemo_gym._checkpoint.model_workers import PolicyCoordinator, PolicyWorkerLink
 from nemo_gym.episode_types import EpisodeId
@@ -132,7 +133,7 @@ async def test_commit_leaves_out_undelivered_calls_on_every_worker(tmp_path: Pat
     assert [row["model_call_id"] for row in record.rows] == ["c1"]
 
 
-async def test_a_restored_cut_is_claimed_by_exactly_one_worker_and_released_if_unused() -> None:
+async def test_a_restored_cut_is_claimed_by_exactly_one_worker_and_returned_if_unclaimed() -> None:
     async with deployment() as (coordinator, (first, second)):
         coordinator.participant.restored_cuts["r-a1"] = restored_cut()
         await coordinator.controller.prepare(CheckpointRequest(**control()))
@@ -184,17 +185,24 @@ async def test_a_worker_that_joins_during_a_checkpoint_closes_at_once() -> None:
     assert prepared["phase"] == "prepared"
 
 
-async def test_a_retire_leaves_no_fence_on_any_worker_or_on_one_that_joins_later() -> None:
+async def test_a_retired_attempt_is_refused_on_every_worker_and_one_that_joins_later_until_forget() -> None:
     async with deployment() as (coordinator, (first, second)):
         await coordinator.controller.retire(RetireRequest(**control(episode_ids=[{"rollout_id": "r"}])))
         late = worker_link(coordinator.socket_path)
         await late.connect()
-        retiring = [len(link.retiring) for link in (first, second, late)] + [len(coordinator.participant.retiring)]
+        refused = []
+        for gate in (first.gate, second.gate, late.gate):
+            with pytest.raises(StaleAttemptError):
+                gate.admit("r")
+            refused.append(True)
+        await coordinator.controller.forget(ForgetRequest(**control(rollout_ids=["r"])))
         for gate in (first.gate, second.gate, late.gate):
             gate.admit("r")
+        remaining = [len(link.retired) for link in (first, second, late)] + [len(coordinator.participant.retired)]
         await late.disconnect()
 
-    assert retiring == [0, 0, 0, 0]
+    assert refused == [True, True, True]
+    assert remaining == [0, 0, 0, 0]
 
 
 async def test_worker_control_routes_forward_to_the_coordinator() -> None:

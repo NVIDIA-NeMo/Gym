@@ -17,7 +17,7 @@ messages in both directions on one connection per worker.
 
 Failures close the checkpoint rather than weaken it. A worker that has not reported for the current
 checkpoint, or that disconnected while it was open, blocks prepare and commit until the controller
-retires or resumes. A worker that starts, or restarts, while a checkpoint is open closes immediately.
+resumes. A worker that starts, or restarts, while a checkpoint is open closes immediately.
 """
 
 import asyncio
@@ -39,7 +39,7 @@ from nemo_gym._checkpoint.control import (
     CheckpointRequest,
     ParticipantControlPlane,
     PrepareReport,
-    RetiringAttempts,
+    RetiredAttempts,
     dispatch_control,
 )
 from nemo_gym._checkpoint.errors import ControlError
@@ -241,6 +241,8 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
             "generation": self.generation,
             "request": self.request.model_dump(mode="json") if self.request is not None else None,
             "restored_keys": sorted(self.restored_cuts),
+            # A worker that starts after a retire must refuse its late requests too.
+            "retired": self.retired.marks(),
         }
 
     async def leave(self, worker_index: int) -> None:
@@ -259,7 +261,7 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
 
     def return_cut(self, capture_key: str, record: GenerationCutRecord) -> None:
         try:
-            self.retiring.check(EpisodeId.from_capture_key(capture_key))
+            self.retired.check(EpisodeId.from_capture_key(capture_key))
         except ControlError:
             return  # The attempt was retired while the call held the cut.
         self.restored_cuts.setdefault(capture_key, record)
@@ -333,6 +335,16 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
         )
         # After every worker cancelled the attempts' calls, so no late row recreates a ledger.
         await retire_ledgers(self.ledger, [episode_id])
+
+    async def mark_retired(self, episode_ids: list[EpisodeId]) -> None:
+        self.retired.mark(episode_ids)
+        await self._broadcast(
+            "mark", {"episode_ids": [e.model_dump(mode="json") for e in episode_ids]}, timeout=_MESSAGE_TIMEOUT_SECONDS
+        )
+
+    async def forget(self, rollout_ids: list[str]) -> None:
+        self.retired.forget(rollout_ids)
+        await self._broadcast("forget", {"rollout_ids": rollout_ids}, timeout=_MESSAGE_TIMEOUT_SECONDS)
 
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         raise NotImplementedError("the coordinated policy participant exports asynchronously; use export()")
@@ -518,12 +530,12 @@ class PolicyWorkerLink:
         self.socket_path = socket_path
         self.on_coordinator_lost = on_coordinator_lost or _terminate_this_worker
         self._disconnecting = False
-        self.retiring = RetiringAttempts()
+        self.retired = RetiredAttempts()
         self.restored_cuts = CoordinatedRestoredCuts(self)
         self.gate = PolicyGate(
             server_name=server_name,
             cut_requester=cut_requester,
-            retiring=self.retiring,
+            retired=self.retired,
             restored_cuts=self.restored_cuts,
             on_change=self._changed,
         )
@@ -549,6 +561,7 @@ class PolicyWorkerLink:
         self._reader_task.add_done_callback(self._connection_ended)
         state = await self.call("register", {"pid": os.getpid()})
         self.restored_cuts.keys = set(state["restored_keys"])
+        self.retired.update(state["retired"])
         if not state["accepting"]:
             # A checkpoint is open: close at once and report, like every other worker did.
             self.generation = state["generation"]
@@ -597,11 +610,15 @@ class PolicyWorkerLink:
             return {}
         if kind == "snapshot":
             return self.gate.snapshot().model_dump(mode="json")
+        if kind == "mark":
+            # This worker refuses the attempts from now on, until the controller forgets the rollout.
+            self.retired.mark([EpisodeId.model_validate(e) for e in body["episode_ids"]])
+            return {}
         if kind == "retire":
-            episode_id = EpisodeId.model_validate(body["episode_id"])
-            # This worker refuses the attempts until its calls for them have stopped.
-            with self.retiring.stopping([episode_id]):
-                await self.gate.retire(episode_id)
+            await self.gate.retire(EpisodeId.model_validate(body["episode_id"]))
+            return {}
+        if kind == "forget":
+            self.retired.forget(body["rollout_ids"])
             return {}
         raise ControlError(f"unknown checkpoint message {kind!r}")
 

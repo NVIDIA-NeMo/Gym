@@ -141,7 +141,8 @@ async def test_retire_stops_a_running_generation_before_it_replies() -> None:
     assert retired.status_code == 200
     assert inflight_at_reply == 0
     assert running.cancelled() or running.exception() is not None
-    assert len(participant.retiring) == 0
+    # The attempt stays refused until the controller forgets the rollout.
+    assert len(participant.retired) == 1
 
 
 async def _ledger_participant(root: Path) -> tuple[FileLineageStore, PolicyModelParticipant, ParticipantControlPlane]:
@@ -175,7 +176,7 @@ async def test_restored_ledger_lets_the_next_attempt_resolve_its_parent(tmp_path
     assert resolution.status == ParentResolutionStatus.RESOLVED
     assert (resolution.match.model_call_id, resolution.match.staging_chain) == ("c1", ("r/c1",))
     assert [record.model_call_id for record in manifest.records] == ["c1"]
-    assert len(restored.retiring) == 0
+    assert len(restored.retired) == 0
     # The carried-over call stays staged under the attempt that made it.
     assert [record.capture_key for record in manifest.records] == ["r"]
 
