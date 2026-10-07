@@ -48,6 +48,17 @@ NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/main/a
 
 ## 📣 News
 
+* **[10/06/2026]** [Release v0.7.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.7.0):
+  Highlights:
+  - Define reusable agent-environment interactions with Environment Servers that manage sessions, verification, cleanup, and failures
+  - Reuse compatible agent harnesses across tasks and environments through common sandbox and verification infrastructure
+  - Finish large evaluations reliably with job-time-aware scheduling, predictable memory use, and automatic Slurm resume after timeout or preemption
+  - Preserve token-level training trajectories with durable worker-side capture for vLLM and Megatron
+  - Run multi-service OpenSandbox workloads from Compose files and pause or resume sandboxes without losing task state
+
+<details>
+<summary>Previous News</summary>
+
 * **[09/03/2026]** [Release v0.6.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.6.0):
   Highlights:
   - Use supported external agent harnesses during RL training while preserving exact token IDs across multi-step runs
@@ -55,9 +66,6 @@ NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/main/a
   - Validate and debug rollouts with automatic health checks, traces, and token, tool-call, turn, and latency diagnostics
   - Evaluate multiple agents and datasets in one run with task-level harness routing
   - Scale vLLM evaluation jobs across GPUs or Slurm nodes for higher rollout concurrency
-
-<details>
-<summary>Previous News</summary>
 
 * **[08/06/2026]** [Release v0.5.0](https://github.com/NVIDIA-NeMo/Gym/releases#release-v0.5.0):
   Highlights:
