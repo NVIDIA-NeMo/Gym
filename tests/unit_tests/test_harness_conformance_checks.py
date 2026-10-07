@@ -10,13 +10,30 @@ from pathlib import Path
 import pytest
 from scripts.harness_conformance import checks
 from scripts.harness_conformance.ci import report
+from scripts.harness_conformance.feedback import failure_details
 
 
 def write_probe_result(root, harness, exit_code):
     output = root / harness / "probes"
     output.mkdir(parents=True)
     (output / "conformance_summary.json").write_text(
-        json.dumps({"runner_status": "completed", "full_suite": True, "harnesses": {harness: {}}})
+        json.dumps(
+            {
+                "runner_status": "completed",
+                "full_suite": True,
+                "harnesses": {
+                    harness: {
+                        "scenarios": [
+                            {
+                                "scenario": "tool_success",
+                                "verdict": "fulfilled" if exit_code == 0 else "not_fulfilled",
+                                "issues": [] if exit_code == 0 else ["tool status differs from the witness"],
+                            }
+                        ]
+                    }
+                },
+            }
+        )
     )
     report(harness, output=output, exit_code=exit_code)
 
@@ -69,7 +86,8 @@ def test_missing_invalid_or_stale_evidence_never_passes(tmp_path, evidence):
 
 
 @pytest.mark.parametrize("download_failure", [False, True])
-def test_publisher_downloads_current_attempt_and_posts_check(tmp_path, monkeypatch, download_failure):
+@pytest.mark.parametrize("listing_failure", [False, True])
+def test_publisher_downloads_current_attempt_and_posts_check(tmp_path, monkeypatch, download_failure, listing_failure):
     env = {
         "GITHUB_REPOSITORY": "example/Gym",
         "GITHUB_RUN_ID": "123",
@@ -95,10 +113,97 @@ def test_publisher_downloads_current_attempt_and_posts_check(tmp_path, monkeypat
             posted.append(json.loads(kwargs["input"]))
 
     monkeypatch.setattr(checks.subprocess, "run", run)
+
+    def artifact_listing(*args, **kwargs):
+        if listing_failure:
+            raise subprocess.CalledProcessError(1, args[0])
+        return "harness-conformance-pi-123-2\t456\n"
+
+    monkeypatch.setattr(checks.subprocess, "check_output", artifact_listing)
     checks.main()
     assert len(posted) == 1
     assert posted[0]["head_sha"] == "tested-sha"
     assert posted[0]["conclusion"] == ("failure" if download_failure else "success")
     assert posted[0]["details_url"] == "https://github.com/example/Gym/actions/runs/123/attempts/2"
     assert posted[0]["external_id"] == "harness-conformance-p0-123-2"
+    if not listing_failure:
+        assert "https://github.com/example/Gym/actions/runs/123/artifacts/456" in posted[0]["output"]["summary"]
     assert "Harness conformance P0" in (tmp_path / "summary.md").read_text()
+
+
+def test_actionable_summary_counts_scenarios_and_includes_rerun(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITHUB_SHA", "tested-sha")
+    write_probe_result(tmp_path, "codex", 1)
+    summary = checks.p0_check(["codex"], artifacts=tmp_path, sha="tested-sha")["output"]["summary"]
+    assert "| codex | failed | 1 / 1 | tool_success: tool status differs from the witness |" in summary
+    assert 'python scripts/run_harness_conformance.py --harness codex --output "$(mktemp -d)/probes"' in summary
+    assert "probes/conformance_report.md" in summary
+
+
+def test_failure_count_respects_scenario_verdict_and_explains_execution_error(tmp_path):
+    # TE-8 / TE-9 are alternatives: failing TE-9 alone must not inflate the count.
+    scenarios = [
+        {
+            "scenario": "tool_success",
+            "verdict": "fulfilled",
+            "evidence": {"TE-8": {"verdict": "fulfilled"}, "TE-9": {"verdict": "not_fulfilled"}},
+        },
+        {
+            "scenario": "retry_429",
+            "verdict": "not_fulfilled",
+            "evidence": {"TE-8": {"verdict": "not_fulfilled"}, "TE-9": {"verdict": "not_fulfilled"}},
+        },
+        {
+            "scenario": "model_error",
+            "verdict": "not_fulfilled",
+            "execution": {"returncode": 1},
+            "issues": ["episode process failed; see episode.log", "expected exactly one collected rollout"],
+        },
+    ]
+    (tmp_path / "conformance_summary.json").write_text(json.dumps({"harnesses": {"hermes": {"scenarios": scenarios}}}))
+    count, first = failure_details("hermes", tmp_path)
+    assert count == "2 / 3"
+    assert first.startswith("retry_429: TE-8 / TE-9:")
+    assert "execution also failed in model_error: episode process failed; see episode.log" in first
+
+
+@pytest.mark.parametrize("contents", [None, "{}", "null", '{"harnesses": {"pi": {"scenarios": []}}}'])
+def test_missing_diagnostics_are_unknown_not_zero(tmp_path, contents):
+    if contents is not None:
+        (tmp_path / "conformance_summary.json").write_text(contents)
+    count, first = failure_details("pi", tmp_path)
+    assert count == "Unknown"
+    assert "setup/test logs" in first
+
+
+def test_first_failure_includes_checker_assertion_and_reason(tmp_path):
+    scenarios = [
+        {
+            "scenario": "tool_success",
+            "verdict": "not_fulfilled",
+            "artifact_report": "evidence/hash/evidence_summary.json",
+            "evidence": {"TE-3": {"verdict": "not_fulfilled"}},
+        }
+    ]
+    (tmp_path / "conformance_summary.json").write_text(
+        json.dumps({"harnesses": {"opencode": {"scenarios": scenarios}}})
+    )
+    results = tmp_path / "opencode/tool_success/evidence/hash/evidence_results.jsonl"
+    results.parent.mkdir(parents=True)
+    results.write_text(
+        json.dumps(
+            {
+                "findings": [
+                    {
+                        "evidence": "TE-3",
+                        "assertion": "turn.question",
+                        "reason": "non-null model-visible prompt is required",
+                    }
+                ]
+            }
+        )
+        + "\n"
+    )
+    count, first = failure_details("opencode", tmp_path)
+    assert count == "1 / 1"
+    assert first == "tool_success: TE-3 / turn.question: non-null model-visible prompt is required"

@@ -16,7 +16,10 @@ Warnings and a detailed table remain available in the Actions summary.
 After the probes finish, a separate reporting job publishes **Harness conformance P0**
 in the PR checks list. It succeeds only if every selected harness passes the current
 P0 suite, or no harnesses are affected. Conformance failures and unavailable
-measurements both produce a failed check, with a per-harness breakdown. Only the
+measurements both produce a failed check, with the first failure and number of
+failed scenario checks per harness, local rerun commands, and direct artifact links.
+Counts include execution errors and count each scenario once, rather than counting
+cascading evidence failures separately. Only the
 reporting job receives `checks: write`; probe jobs keep read-only permissions.
 Download the `harness-conformance-*` artifacts for test/setup logs and probe evidence.
 The reporter only uses artifacts from the current run attempt; rerun all jobs to

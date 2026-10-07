@@ -110,6 +110,7 @@ jobs:
           python3 -m scripts.harness_conformance.ci report --harness "$HARNESS" \
             --output "$PROBE_OUTPUT" --exit-code "$PROBE_EXIT_CODE"
       - name: Upload conformance evidence
+        id: evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -117,6 +118,12 @@ jobs:
           path: ${{ env.RESULTS }}
           if-no-files-found: warn
           retention-days: 14
+      - name: Link downloadable report
+        if: always() && steps.evidence.outputs.artifact-url != ''
+        env:
+          ARTIFACT_URL: ${{ steps.evidence.outputs.artifact-url }}
+        run: |
+          echo "[Download conformance report and logs]($ARTIFACT_URL) — open probes/conformance_report.md in the artifact." >> "$GITHUB_STEP_SUMMARY"
 
   report:
     name: Publish P0 check

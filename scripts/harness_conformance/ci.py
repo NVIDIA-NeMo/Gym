@@ -10,6 +10,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from .feedback import failure_details, reproduction
 from .registry import HARNESSES
 
 
@@ -82,11 +83,11 @@ def report(harness: str, *, output: Path, exit_code: int) -> str:
     if exit_code not in (0, 1) or not complete:
         status = "unavailable"
         message = f"{harness}: conformance could not be evaluated (setup, tests, execution, or checker error)."
-        print(f"::warning title=Harness conformance unavailable::{message}")
+        warning_title = "Harness conformance unavailable"
     elif exit_code == 1:
         status = "failed"
         message = f"{harness}: P0 conformance requirements are not fulfilled."
-        print(f"::warning title=Harness conformance::{message}")
+        warning_title = "Harness conformance"
     else:
         status = "passed"
         message = f"{harness}: all selected conformance requirements are fulfilled."
@@ -95,15 +96,16 @@ def report(harness: str, *, output: Path, exit_code: int) -> str:
         json.dumps({"harness": harness, "sha": os.environ.get("GITHUB_SHA", "local"), "status": status}) + "\n"
     )
     markdown = f"## Harness conformance: {harness}\n\n{message}\n\n"
+    count, first = failure_details(harness, output)
+    markdown += f"**Failed scenario checks:** {count}\n\n**First failure:** {first}\n\n"
+    if status != "passed":
+        detail = f"{message} Failed scenario checks: {count}. First failure: {first}"
+        print(f"::warning title={warning_title}::{detail}".replace("%", "%25"))
     markdown += f"Source: `{os.environ.get('GITHUB_SHA', 'local')}`\n\n"
     report_path = output / "conformance_report.md"
     if report_path.exists():
         markdown += report_path.read_text() + "\n"
-    markdown += (
-        "Download the harness artifact for runtime versions, scenario details, rollouts, captures, and logs.\n\n"
-        "Reproduce from this revision with the pinned runtime installed:\n\n"
-        f"```bash\npython scripts/run_harness_conformance.py --harness {harness} --output /tmp/new-conformance-run\n```\n"
-    )
+    markdown += reproduction([harness])
     return markdown
 
 
