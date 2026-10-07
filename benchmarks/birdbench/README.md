@@ -7,13 +7,45 @@ Execution-based text-to-SQL on BIRD dev, bound to the `bird_sql` resource server
 - **Metrics**: overall + per-difficulty (simple / moderate / challenging)
   via `compute_subset_metrics(field="difficulty")`
 
-## Preparation
+## Installation
 
-Dataset prep needs `bm25s` and `nltk` for per-question BM25 retrieval (see below);
-neither is a `pyproject.toml` dependency, so install them separately:
+None of the packages below are `pyproject.toml` dependencies, so install them
+separately into the environment you run `gym` from.
+
+**SQLite (default dialect)** -- BM25 retrieval for `sql_context`:
 
 ```bash
 uv pip install bm25s nltk
+```
+
+**Spark SQL dialect (in development)** -- needs a JDK plus Python packages
+(`pyspark` for execution, `sqlglot` to transpile the gold SQL):
+
+```bash
+# macOS (Homebrew). openjdk@17 is keg-only, so point JAVA_HOME at it
+# instead of relying on a system-wide symlink:
+brew install openjdk@17
+export JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"
+
+# Linux: install any JDK 17 (e.g. `apt install openjdk-17-jdk`) and set JAVA_HOME.
+
+uv pip install "pyspark>=3.5,<4" sqlglot pandas pyarrow setuptools
+java -version   # sanity check; should report 17
+```
+
+`setuptools` is needed because PySpark 3.5 imports `distutils`, which Python
+3.12+ no longer ships. If Spark fails with `PYTHON_VERSION_MISMATCH`, its
+workers picked up a different Python than the driver; set
+`PYSPARK_PYTHON` to the interpreter you run `gym` with.
+
+Spark runs in local mode inside the server process, so no cluster or daemon is
+needed.
+
+## Preparation
+
+Dataset prep needs `bm25s` and `nltk` (see Installation above):
+
+```bash
 gym eval prepare --benchmark birdbench
 ```
 
