@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import functools
 import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -56,6 +58,7 @@ class MimoRLOSSConfig(BaseResourcesServerConfig):
     general_judge_api_key: str | None = None
     general_judge_model: str | None = None
     general_judge_api: str | None = None
+    max_workers: int = 1024
 
 
 class MimoRLOSSRequest(BaseSeedSessionRequest):
@@ -104,6 +107,8 @@ class MimoRLOSSResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         self._envs: dict[str, tuple[DatasetEnvironment, float]] = {}
         self._evictions: set[asyncio.Task] = set()
+        # asyncio.to_thread's default pool (~32 threads) serialized setup and grading across thousands of rollouts.
+        self._pool = ThreadPoolExecutor(max_workers=self.config.max_workers)
         for key, value in (
             ("WEBDEV_EVAL_JUDGE_BASE_URL", self.config.webdev_judge_base_url),
             ("WEBDEV_EVAL_JUDGE_API_KEY", self.config.webdev_judge_api_key),
@@ -151,8 +156,11 @@ class MimoRLOSSResourcesServer(SimpleResourcesServer):
             env.cleanup()
             raise
 
+    async def _thread(self, fn, *args):
+        return await asyncio.get_running_loop().run_in_executor(self._pool, functools.partial(fn, *args))
+
     def _cleanup_later(self, env: DatasetEnvironment) -> None:
-        task = asyncio.create_task(asyncio.to_thread(env.cleanup))
+        task = asyncio.create_task(self._thread(env.cleanup))
         self._evictions.add(task)
         task.add_done_callback(self._evictions.discard)
 
@@ -165,7 +173,7 @@ class MimoRLOSSResourcesServer(SimpleResourcesServer):
                 self._cleanup_later(stale)
 
     async def seed_session(self, request: Request, body: MimoRLOSSRequest) -> MimoRLOSSSeedResponse:
-        env, descriptor = await asyncio.to_thread(self._setup, body.instance)
+        env, descriptor = await self._thread(self._setup, body.instance)
         self._evict_stale()
         previous = self._envs.get(str(request.session[SESSION_ID_KEY]))
         if previous is not None:
@@ -181,9 +189,9 @@ class MimoRLOSSResourcesServer(SimpleResourcesServer):
         env = entry[0]
         try:
             env.attach_rollout(task=body.instance.get("problem_statement", ""), result=_final_text(body.response))
-            reward, test_output, extra = await asyncio.to_thread(env.calculate_reward)
+            reward, test_output, extra = await self._thread(env.calculate_reward)
         finally:
-            await asyncio.to_thread(env.cleanup)
+            await self._thread(env.cleanup)
         failure = _failure(extra)
         return MimoRLOSSVerifyResponse(
             **body.model_dump(),
