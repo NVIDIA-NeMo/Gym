@@ -120,6 +120,12 @@ class NonExecutingSimpleAgent(SimpleResponsesAPIAgent):
             body.model_dump() | {"response": await get_response_json(response)}
         )
 
+        if self.config.skip_verification:
+            return NonExecutingSimpleAgentVerifyResponse.model_validate(
+                verify_request.model_dump()
+                | {"reward": float(self.config.skip_verification_reward), "verification_skipped": True}
+            )
+
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
@@ -131,6 +137,9 @@ class NonExecutingSimpleAgent(SimpleResponsesAPIAgent):
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
+        if self.config.skip_verification:
+            return await super().aggregate_metrics(body)
+
         response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/aggregate_metrics",

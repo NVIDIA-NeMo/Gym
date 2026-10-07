@@ -52,7 +52,9 @@ TOP_LEVEL_TOOLS = [
 ]
 
 
-def make_agent(max_agent_steps: int = 50, *, observability: bool = False) -> ConversationalToolUseAgent:
+def make_agent(
+    max_agent_steps: int = 50, *, observability: bool = False, **config_overrides
+) -> ConversationalToolUseAgent:
     config = ConversationalToolUseAgentConfig(
         host="0.0.0.0",
         port=0,
@@ -62,6 +64,7 @@ def make_agent(max_agent_steps: int = 50, *, observability: bool = False) -> Con
         resources_server=ResourcesServerRef(type="resources_servers", name="simulation_resource_server"),
         model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
         max_agent_steps=max_agent_steps,
+        **config_overrides,
     )
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = {"observability_enabled": observability}
@@ -1136,6 +1139,34 @@ async def test_run_preserves_verified_semantic_zero_as_scored_result() -> None:
     assert result_payload["result"]["judge_label"] == "fail"
     assert result_payload["result"]["profile"] == "general"
     assert result.instance_config == {"mask_sample": False}
+
+
+async def test_run_skip_verification_uses_configured_reward_without_verify() -> None:
+    agent = make_agent(skip_verification=True, skip_verification_reward=0.25)
+
+    async def route_post(**kwargs):
+        if kwargs["url_path"] == "/seed_session":
+            return JsonResponseStub({}, cookies={"session_id": "session-1"})
+        if kwargs["url_path"] == "/v1/responses":
+            return JsonResponseStub(response_payload([assistant_message("msg_1", "Done.")]))
+        raise AssertionError(f"Unexpected request under skip_verification: {kwargs['url_path']}")
+
+    agent.server_client.post = AsyncMock(side_effect=route_post)
+
+    result = await agent.run(RequestStub(), materialized_run_request())
+    result_payload = result.model_dump(mode="json")
+
+    assert result.reward == 0.25
+    assert result_payload["verification_skipped"] is True
+    # No typed judge result exists, yet the rollout is scored (not masked) and the validator accepts it.
+    assert result.result is None
+    assert NG_FAILURE_CLASS_KEY not in result_payload
+    assert result.instance_config == {"mask_sample": False}
+    # seed_session + rollout only: neither /verify nor /discard_session is called.
+    assert [c.kwargs["url_path"] for c in agent.server_client.post.await_args_list] == [
+        "/seed_session",
+        "/v1/responses",
+    ]
 
 
 async def test_run_does_not_convert_non_retryable_4xx_to_transient_failure() -> None:

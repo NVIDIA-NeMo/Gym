@@ -939,3 +939,37 @@ class TestRun:
         result = await agent.run(req, body)
         assert result.reward == 0.0
         assert result.response.id == "error"
+
+    @pytest.mark.asyncio
+    async def test_run_skip_verification_uses_configured_reward(self) -> None:
+        """skip_verification short-circuits /verify and returns the configured reward."""
+        agent, _ = _make_agent_and_client(_make_config(skip_verification=True, skip_verification_reward=0.25))
+
+        seed_mock = _dotjson_mock({})
+        seed_mock.cookies = {"session": "seeded"}
+        model_mock = _dotjson_mock(_text_response("Revenue was $100B."))
+
+        async def route_post(**kwargs):
+            if kwargs["url_path"] == "/seed_session":
+                return seed_mock
+            if kwargs["url_path"] == "/v1/responses":
+                return model_mock
+            raise AssertionError(f"unexpected call under skip_verification: {kwargs['url_path']}")
+
+        agent.server_client.post = AsyncMock(side_effect=route_post)
+
+        body = FinanceAgentRunRequest.model_validate(
+            {"responses_create_params": {"input": [{"role": "user", "content": "What was revenue?"}]}}
+        )
+        req = MagicMock()
+        req.cookies = {}
+        result = await agent.run(req, body)
+
+        payload = result.model_dump(mode="json")
+        assert payload["reward"] == 0.25
+        assert payload["verification_skipped"] is True
+        assert payload["response"]["id"] == "resp_1"
+        assert [c.kwargs["url_path"] for c in agent.server_client.post.call_args_list] == [
+            "/seed_session",
+            "/v1/responses",
+        ]

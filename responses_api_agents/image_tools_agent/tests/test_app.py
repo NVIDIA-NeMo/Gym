@@ -231,3 +231,85 @@ async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
     assert output[1]["role"] == "user"
     assert output[2]["role"] == "assistant"
     assert server_client_post.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_image_tools_agent_skip_verification_uses_configured_base_reward(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "source.png"
+    Image.new("RGB", (256, 192), color=(120, 80, 40)).save(image_path)
+
+    config = ImageToolsAgentConfig(
+        host="localhost",
+        port=10001,
+        entrypoint="app.py",
+        name="image_tools_simple_agent",
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        resource_servers_by_agent={
+            "string_match_simple_agent": ResourcesServerRef(
+                type="resources_servers",
+                name="string_match",
+            )
+        },
+        crop_dir=str(tmp_path / "crops"),
+        skip_verification=True,
+        skip_verification_reward=0.25,
+    )
+
+    server_client_post = AsyncMock()
+
+    async def _post_side_effect(*, server_name: str, url_path: str, **kwargs: Any):
+        if url_path == "/seed_session":
+            return _FakeClientResponse({})
+        if server_name == "policy_model" and url_path == "/v1/responses":
+            return _FakeClientResponse(
+                _assistant_response(
+                    response_id="final",
+                    text="The answer is car.",
+                    prompt_token_ids=[1, 2, 3],
+                    generation_token_ids=[30, 31],
+                )
+            )
+        raise AssertionError(f"Unexpected call under skip_verification: {server_name} {url_path}")
+
+    server_client_post.side_effect = _post_side_effect
+    server_client = MagicMock(spec=ServerClient)
+    server_client.post = server_client_post
+
+    agent = ImageToolsAgent(config=config, server_client=server_client)
+    body = ImageToolsAgentRunRequest.model_validate(
+        {
+            "image_tools_base_agent_ref": {
+                "type": "responses_api_agents",
+                "name": "string_match_simple_agent",
+            },
+            "responses_create_params": {
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "What object is shown?"},
+                            {
+                                "type": "input_image",
+                                "image_url": str(image_path),
+                                "detail": "auto",
+                            },
+                        ],
+                    },
+                ],
+            },
+        }
+    )
+    result = await agent.run(SimpleNamespace(cookies={}), body)
+    payload = result.model_dump(mode="json")
+
+    # The fixed reward stands in for the verifier's base reward; the aux reward is still layered on top.
+    assert payload["verification_skipped"] is True
+    assert payload["base_reward"] == 0.25
+    assert payload["image_tools_aux_reward"] == 0.0
+    assert payload["reward"] == 0.25
+    assert payload["image_tools_call_count"] == 0
+    assert payload["response"]["output"][0]["content"][0]["text"] == "The answer is car."
+    # seed_session + one model call; /verify is never reached.
+    assert server_client_post.await_count == 2
