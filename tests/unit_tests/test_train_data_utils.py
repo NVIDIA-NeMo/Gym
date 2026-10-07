@@ -412,11 +412,7 @@ class TestLoadDatasets:
         self, tmp_path: Path, monkeypatch: MonkeyPatch
     ) -> None:
         config_path = tmp_path / "environment.yaml"
-        monkeypatch.setattr(
-            nemo_gym.train_data_utils,
-            "get_global_config_dict",
-            lambda: DictConfig({"config_paths": [str(config_path)]}),
-        )
+        nested_config_path = tmp_path / "resources.yaml"
         server_type_config_dict = {
             "responses_api_agents": {
                 "simple_agent": {
@@ -435,6 +431,23 @@ class TestLoadDatasets:
                 }
             }
         }
+        config_path.write_text(
+            f"""environment:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: prepared_validation
+          type: validation
+          jsonl_fpath: {tmp_path / "missing.jsonl"}
+          prepare_script: {tmp_path / "prepare.py"}
+"""
+        )
+        nested_config_path.write_text("resources: {}\n")
+        monkeypatch.setattr(
+            nemo_gym.train_data_utils,
+            "get_global_config_dict",
+            lambda: DictConfig({"config_paths": [str(config_path), str(nested_config_path)]}),
+        )
 
         with raises(
             ValueError,

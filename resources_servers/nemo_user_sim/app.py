@@ -71,6 +71,8 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
     )
     nemotron_personas_version: str = "0.0.2"
     probe_scorer_model: ModelServerRef
+    judge_max_output_tokens: int = Field(16_384, gt=0)
+    judge_max_output_tokens_non_ascii: int = Field(32_768, gt=0)
     model_call_timeout_seconds: float = Field(300.0, gt=0)
     evaluation_timeout_seconds: float = Field(1200.0, gt=0)
     session_ttl_seconds: float = Field(1980.0, gt=0)
@@ -398,6 +400,8 @@ class UserSimResourcesServer(SimpleResourcesServer):
             judges=[{"alias": "judge_model"}],
             scorers=[scorer_name] if scorer_name else [],
             skip_if_existing=False,
+            max_judge_tokens=self.config.judge_max_output_tokens,
+            max_judge_tokens_non_ascii=self.config.judge_max_output_tokens_non_ascii,
         )
         model = _ResourcesModelFacade(self, self.config.probe_scorer_model)
         evaluator = _create_evaluator(config, {"judge_model": model})

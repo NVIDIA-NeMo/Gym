@@ -322,6 +322,32 @@ async def test_verify_uses_real_evaluator_with_scripted_judge_and_scorer(
 
 
 @pytest.mark.asyncio
+async def test_verify_budgets_for_reasoning_judge_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _server()
+    server.session_id_to_seed = {}
+    row = _resolved_row("general_open_ended")
+    request = _request("reasoning-judge")
+    await server.seed_session(request, _seed_body(row))
+
+    class BudgetAwareFacade(_ScriptedModelFacade):
+        async def acompletion(self, messages: list[Any], **kwargs: Any) -> SimpleNamespace:
+            self.calls.append({"messages": messages, **kwargs})
+            content = _judge_payload() if kwargs["max_tokens"] >= 16_384 else '{"helpfulness":'
+            return SimpleNamespace(
+                message=SimpleNamespace(content=content, reasoning_content=None, tool_calls=None),
+                usage=None,
+            )
+
+    facade = BudgetAwareFacade(_judge_payload())
+    _install_evaluator_scripts(monkeypatch, facade)
+
+    verification = await _verify(server, request, row)
+
+    assert verification.mask_sample is False
+    assert facade.calls[0]["max_tokens"] == 16_384
+
+
+@pytest.mark.asyncio
 async def test_verify_masks_swallowed_judge_failure_from_real_evaluator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from nemo_gym.task_materialization import materialize_task
-from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig, _validate_resolved_row
+from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig, _row_digest, _validate_resolved_row
 from resources_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
 
 
@@ -69,5 +69,6 @@ def test_rollouts_match_examples_and_do_not_duplicate_episode_evidence() -> None
         verification = rollout["verification"]
         assert verification["usersim_result"] is None
         assert not {"invocations", "resolved_row", "usersim_result"} & verification["verifier_data"].keys()
+        assert verification["verifier_data"]["resolved_row_sha256"] == _row_digest(example["resolved_row"])
         provenance = json.loads(rollout["usersim_result"]["usersim_provenance"])
         assert provenance["nemotron_personas_version"] == "synthetic"

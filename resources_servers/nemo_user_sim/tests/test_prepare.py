@@ -83,14 +83,17 @@ def test_probe_seed_and_task_id_are_stable() -> None:
 
 
 def test_validate_persona_asset_requires_pinned_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(prepare_module, "PERSONA_DATASETS_DIR", tmp_path)
+    managed_assets_path = tmp_path / "managed-assets"
+    datasets_path = managed_assets_path / "datasets"
+    datasets_path.mkdir(parents=True)
+    monkeypatch.setenv("DATA_DESIGNER_MANAGED_ASSETS_PATH", str(managed_assets_path))
     with pytest.raises(
         RuntimeError,
         match=re.escape(prepare_module.NEMOTRON_PERSONAS_DOWNLOAD_COMMAND),
     ):
         prepare_module._validate_persona_asset("en_US")
 
-    asset_path = tmp_path / "en_US.parquet"
+    asset_path = datasets_path / "en_US.parquet"
     asset_path.write_bytes(b"wrong asset")
     with pytest.raises(RuntimeError, match="expected"):
         prepare_module._validate_persona_asset("en_US")
@@ -102,7 +105,15 @@ def test_validate_persona_asset_requires_pinned_file(tmp_path: Path, monkeypatch
         "NEMOTRON_PERSONAS_SHA256",
         prepare_module.hashlib.sha256(expected_asset).hexdigest(),
     )
-    prepare_module._validate_persona_asset("en_US")
+    assert prepare_module._validate_persona_asset("en_US") == managed_assets_path
+
+
+def test_managed_assets_path_matches_data_designer_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATA_DESIGNER_HOME", str(tmp_path / "home"))
+    assert prepare_module._managed_assets_path() == tmp_path / "home" / "managed-assets"
+
+    monkeypatch.setenv("DATA_DESIGNER_MANAGED_ASSETS_PATH", str(tmp_path / "explicit"))
+    assert prepare_module._managed_assets_path() == tmp_path / "explicit"
 
 
 def test_write_tasks_removes_temporary_file_after_replace_failure(
@@ -125,8 +136,9 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tasks_path = tmp_path / "nemo_user_sim.jsonl"
+    managed_assets_path = tmp_path / "verified-managed-assets"
     monkeypatch.setattr(prepare_module, "TASKS_FPATH", tasks_path)
-    monkeypatch.setattr(prepare_module, "_validate_persona_asset", lambda locale: None)
+    monkeypatch.setattr(prepare_module, "_validate_persona_asset", lambda locale: managed_assets_path)
     monkeypatch.setattr(prepare_module.shutil, "which", lambda executable: f"/bin/{executable}")
     calls: list[tuple[list[str], dict[str, object]]] = []
     model_configs: list[str] = []
@@ -210,4 +222,5 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
     assert 'alias = "judge_model", model = "judge_model"' in model_configs[0]
     assert kwargs["env"]["USERSIM_CODE_SHA"] == prepare_module.USERSIM_REVISION
     assert kwargs["env"]["USERSIM_NEMOTRON_PERSONAS_VERSION"] == prepare_module.NEMOTRON_PERSONAS_VERSION
+    assert kwargs["env"]["DATA_DESIGNER_MANAGED_ASSETS_PATH"] == str(managed_assets_path)
     assert Path(str(kwargs["cwd"])).name.startswith("usersim-materialize-")

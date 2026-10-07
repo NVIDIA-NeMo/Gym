@@ -24,7 +24,7 @@ from shutil import copyfileobj
 from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
 
 from devtools import pprint
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from tqdm.auto import tqdm
 
@@ -492,6 +492,25 @@ class DatasetValidatorState(BaseModel):
     other_metrics: Dict[str, Any] = Field(default_factory=dict)
 
 
+def _declares_prepared_dataset(value: object, dataset: DatasetConfig) -> bool:
+    if isinstance(value, Mapping):
+        if str(value.get("jsonl_fpath", "")) == str(dataset.jsonl_fpath) and value.get("prepare_script") is not None:
+            return True
+        return any(_declares_prepared_dataset(item, dataset) for item in value.values())
+    if isinstance(value, list):
+        return any(_declares_prepared_dataset(item, dataset) for item in value)
+    return False
+
+
+def _prepare_command(global_config: DictConfig, dataset: DatasetConfig) -> str:
+    for raw_config_path in global_config.get("config_paths") or []:
+        config_path = _resolve_under_cwd_or_install(raw_config_path)
+        config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=False)
+        if _declares_prepared_dataset(config, dataset):
+            return f"gym eval prepare --config {raw_config_path}"
+    return "gym eval prepare --config <config path>"
+
+
 class TrainDataProcessor(BaseModel):
     def run(self, global_config_dict: DictConfig):  # pragma: no cover
         """
@@ -660,9 +679,6 @@ class TrainDataProcessor(BaseModel):
             return
 
         global_config = get_global_config_dict()
-        config_paths = global_config.get("config_paths") or []
-        config_path = config_paths[-1] if config_paths else "<config path>"
-        prepare_command = f"gym eval prepare --config {config_path}"
 
         hf_backend_ok, hf_error_msg = validate_backend_credentials("huggingface")
         gitlab_backend_ok, gitlab_error_msg = validate_backend_credentials("gitlab")
@@ -678,7 +694,8 @@ class TrainDataProcessor(BaseModel):
                     # from their prepare_script (`gym eval prepare`), not a download.
                     raise ValueError(
                         f"Dataset {d.name!r} ({d.jsonl_fpath}) is missing on disk. Run "
-                        f"`{prepare_command}` (its prepare_script is {prepare_script}) before collating."
+                        f"`{_prepare_command(global_config, d)}` "
+                        f"(its prepare_script is {prepare_script}) before collating."
                     )
                 if not isinstance(d, DatasetConfig):
                     raise ValueError(f"Benchmark dataset {d.name!r} has no prepare_script")

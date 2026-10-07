@@ -19,8 +19,9 @@ TASKS_FPATH = DATA_DIR / "nemo_user_sim.jsonl"
 PREPARE_REQUIREMENTS_FPATH = ENVIRONMENT_DIR / "requirements.txt"
 USERSIM_REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
 NEMOTRON_PERSONAS_VERSION = "0.0.2"
-NEMOTRON_PERSONAS_SHA256 = "0341192b00a376cf5643d98cb244e596529030fb3011694ca6ab381f149d3ae8"
-PERSONA_DATASETS_DIR = Path.home() / ".data-designer" / "managed-assets" / "datasets"
+NEMOTRON_PERSONAS_SHA256 = (  # pragma: allowlist secret
+    "0341192b00a376cf5643d98cb244e596529030fb3011694ca6ab381f149d3ae8"
+)
 NEMOTRON_PERSONAS_DOWNLOAD_COMMAND = (
     'ngc registry resource download-version "nvidia/nemotron-personas/nemotron-personas-dataset-en_us:0.0.2"'
 )
@@ -92,17 +93,26 @@ def _validate_provenance(row: dict[str, object]) -> None:
         raise ValueError("Generated UserSim row does not record the pinned Nemotron-Personas version")
 
 
-def _validate_persona_asset(locale: str) -> None:
+def _managed_assets_path() -> Path:
+    if configured_path := os.environ.get("DATA_DESIGNER_MANAGED_ASSETS_PATH"):
+        return Path(configured_path).expanduser()
+    if data_designer_home := os.environ.get("DATA_DESIGNER_HOME"):
+        return Path(data_designer_home).expanduser() / "managed-assets"
+    return Path.home() / ".data-designer" / "managed-assets"
+
+
+def _validate_persona_asset(locale: str) -> Path:
     if locale != "en_US":
         raise ValueError("NeMo UserSim validation preparation currently supports only locale='en_US'")
-    asset_path = PERSONA_DATASETS_DIR / f"{locale}.parquet"
+    managed_assets_path = _managed_assets_path()
+    asset_path = managed_assets_path / "datasets" / f"{locale}.parquet"
     if asset_path.is_file():
         digest = hashlib.sha256()
         with asset_path.open("rb") as asset:
             for chunk in iter(lambda: asset.read(1024 * 1024), b""):
                 digest.update(chunk)
         if digest.hexdigest() == NEMOTRON_PERSONAS_SHA256:
-            return
+            return managed_assets_path
         problem = f"has SHA-256 {digest.hexdigest()}, expected {NEMOTRON_PERSONAS_SHA256}"
     else:
         problem = "is missing"
@@ -152,7 +162,7 @@ def prepare(
     executable = shutil.which(uv_executable)
     if executable is None:
         raise RuntimeError(f"{uv_executable!r} is not on PATH; it is required to prepare UserSim inputs.")
-    _validate_persona_asset(locale)
+    managed_assets_path = _validate_persona_asset(locale)
     TASKS_FPATH.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="usersim-materialize-") as working_dir:
         resolved_path = Path(working_dir) / "resolved.jsonl"
@@ -184,6 +194,7 @@ def prepare(
                 errors="replace",
                 env={
                     **os.environ,
+                    "DATA_DESIGNER_MANAGED_ASSETS_PATH": str(managed_assets_path),
                     "USERSIM_CODE_SHA": USERSIM_REVISION,
                     "USERSIM_NEMOTRON_PERSONAS_VERSION": NEMOTRON_PERSONAS_VERSION,
                 },
