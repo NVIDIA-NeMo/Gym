@@ -4,7 +4,7 @@
 """Standalone Linux process supervisor to upload beside a sandboxed harness.
 
 Uses only the standard library; Gym need not be installed in the task sandbox.
-The receipt confirms descendant cleanup independently of the worker's result.
+The receipt confirms descendant cleanup independently of the harness result.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from typing import TypedDict
 
 
 DEFAULT_CLEANUP_TIMEOUT = 10.0
+CLEANUP_PHASE_COUNT = 3
 
 
 class CleanupReceipt(TypedDict):
@@ -35,8 +36,12 @@ class CleanupReceipt(TypedDict):
 
 
 def exec_timeout(*, timeout: float, cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT) -> float:
-    """Leave room for TERM grace, worker reaping, descendant draining, and receipt I/O."""
-    return timeout + 3 * cleanup_timeout + 30
+    """Reserve TERM grace, harness process reaping, and descendant draining.
+
+    The extra 30 seconds cover startup, polling, and receipt I/O beyond those
+    bounded cleanup phases. Keep their count shared with the controller budget.
+    """
+    return timeout + CLEANUP_PHASE_COUNT * cleanup_timeout + 30
 
 
 def _drain_children(timeout: float) -> None:
@@ -66,7 +71,7 @@ def _supervise(
     cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT,
     stop_path: Path | None = None,
 ) -> CleanupReceipt:
-    """Enforce a worker deadline, then acknowledge cleanup after all descendants exit."""
+    """Enforce a harness deadline, then acknowledge cleanup after all descendants exit."""
     process = None
     subreaping = False
     stopping = False
@@ -82,7 +87,7 @@ def _supervise(
         # TERM can be ignored during interpreter startup. A durable stop marker fences
         # that window; later signals are handled without interrupting Popen.
         if stopping or (stop_path is not None and stop_path.exists()):
-            return receipt  # The finally block confirms that no worker was launched.
+            return receipt  # The finally block confirms that no harness process was launched.
         if sys.platform != "linux":
             raise RuntimeError("Sandbox process supervision requires Linux")
         # Leave the provider group when possible. An exec launcher may already make us
@@ -99,7 +104,7 @@ def _supervise(
             time.sleep(0.05)
         if process.poll() is None:
             receipt["timed_out"] = not stopping
-            # Let the worker checkpoint before the bounded hard cleanup.
+            # Let the harness checkpoint before the bounded hard cleanup.
             process.send_signal(signal.SIGTERM)
             try:
                 process.wait(timeout=cleanup_timeout)
@@ -143,7 +148,7 @@ def main() -> int:
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
-        parser.error("a worker command is required after --")
+        parser.error("a harness command is required after --")
     receipt = _supervise(command, timeout=args.timeout, cleanup_timeout=args.cleanup_timeout, stop_path=args.stop_file)
     temporary = args.receipt.with_suffix(".tmp")
     temporary.write_text(json.dumps(receipt))

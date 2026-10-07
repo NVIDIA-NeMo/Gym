@@ -170,6 +170,11 @@ def _resolve_dataset_owner_agent(resolved: DictConfig, owner_instance_name: str)
         }
     except ConfigError as e:
         raise EnvironmentValidationError(f"Datasets on {owner_instance_name!r}: {e}") from e
+    if None in agents:
+        raise EnvironmentValidationError(
+            f"Datasets on {owner_instance_name!r} route by taskset to an Environment Server that fronts several "
+            "agents. An environment manifest describes one agent, so it cannot describe this composition."
+        )
     if len(agents) != 1:
         raise EnvironmentValidationError(
             f"Datasets on {owner_instance_name!r} route to different agents ({sorted(agents)}); "

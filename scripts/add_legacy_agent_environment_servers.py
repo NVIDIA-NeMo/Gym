@@ -6,8 +6,12 @@
 Rollout collection dispatches to environment servers.
 Every agent that still owns its episode through `run()` therefore needs one in front of it.
 Unbound agent templates get none: they are swap sources, and composition replaces them before anything runs.
-An agent that an environment server already names gets none either.
+An agent that an environment server already references gets none either.
 A second server in front of it would make agent-routed rows ambiguous.
+
+An environment server can reference several agents, such as a user and an assistant.
+It references an agent through any field whose value has `type: responses_api_agents`,
+and through `agent_server`, whose type may be left out.
 
 A server is named after the environment stem rather than the agent, so swapping the agent leaves
 the name alone.
@@ -18,9 +22,16 @@ the name alone.
     # Your own configs (files or directories)
     python scripts/add_legacy_agent_environment_servers.py my_configs/ my_run.yaml [--check]
 
-This repository's configs are always indexed.
-A config that renames one of their agents with `_inherit_from` therefore gets a server that inherits that agent's server.
-Inheriting moves the source server, so the renamed agent ends up with exactly one server.
+This repository's configs are always indexed, so a config may rename one of their agents with `_inherit_from`.
+Renaming retires the source agent, so every reference to it must follow the new name:
+
+- Where a declared server references the source, the script points that reference at the new name.
+  The server keeps its name, so `environment_server_routes` and the server's other agents are unaffected.
+- Where the source has only the server this script generates, the renamed agent gets a server that inherits it.
+  Inheriting retires the generated server, so the renamed agent ends up with exactly one server.
+
+A rename defined in the same file as a server that references its source cannot be migrated by appending.
+The script reports it, with the field to update by hand.
 """
 
 from __future__ import annotations
@@ -28,6 +39,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
 
@@ -35,6 +47,8 @@ import yaml
 REPO = Path(__file__).resolve().parents[1]
 ROOTS = ("benchmarks", "environments", "resources_servers", "responses_api_agents", "responses_api_models")
 SUFFIX = "_environment_server"
+AGENT_SERVER = "agent_server"
+AGENT_SERVER_TYPE = "responses_api_agents"
 
 DECLARED = """
 {server}:
@@ -61,6 +75,14 @@ class UnreadableConfigError(ValueError):
     """A config file cannot be read or parsed."""
 
 
+class Reference(NamedTuple):
+    """One field of an environment server that references an agent."""
+
+    server: str
+    server_type: str
+    field: str
+
+
 def agent_type_of(instance: dict) -> str | None:
     agents = instance.get("responses_api_agents")
     if not isinstance(agents, dict) or len(agents) != 1:
@@ -76,9 +98,10 @@ def is_rename(instance: dict) -> bool:
 def needs_environment_server(instance: dict) -> bool:
     """True for an agent instance a run dispatches to, so it needs a server in front of it.
 
-    Two kinds are skipped. An unbound template leaves `resources_server.name` unset for
-    composition to fill. A shared overlay names several benchmarks' agents to override one field
-    on each; without an entrypoint or an `_inherit_from` supplying one, that name is not a server
+    Unbound templates leave `resources_server.name` unset for composition to fill, or
+    use Hermes' native session interface with no Resources binding. A shared overlay names
+    several benchmarks' agents to override one field on each; without an entrypoint or an
+    `_inherit_from` supplying one, that name is not a server
     a run can start, and declaring a server for it strands the reference in every run that merges
     the overlay without the agent.
     """
@@ -88,7 +111,12 @@ def needs_environment_server(instance: dict) -> bool:
     agent = instance.get("responses_api_agents", {}).get(agent_type) if agent_type else None
     if not isinstance(agent, dict):
         return False
-    if (agent.get("resources_server") or {}).get("name") == "???":
+    resources_server = agent.get("resources_server", {})
+    if (resources_server or {}).get("name") == "???":
+        return False
+    # Explicitly unbound Hermes uses native sessions; its compatibility /run requires Resources.
+    # A legacy relay here would conflict with the Environment Server supplied by composition.
+    if agent_type == "hermes_agent" and resources_server is None:
         return False
     return bool(agent.get("entrypoint") or instance.get("_inherit_from"))
 
@@ -138,16 +166,31 @@ def load(path: Path) -> dict | None:
     return document if isinstance(document, dict) else None
 
 
-def fronted_agents(document: dict) -> set[str]:
-    """Agents that some environment server in the document already names."""
-    names = set()
-    for instance in document.values():
+def agent_references(server: dict) -> list[tuple[str, str]]:
+    """Return each ``(field, agent)`` that one environment server's config references.
+
+    Matches `environment_server_agent_refs` in `nemo_gym/global_config.py`.
+    """
+    return [
+        (field, value["name"])
+        for field, value in server.items()
+        if isinstance(value, dict)
+        and value.get("name")
+        and (value.get("type") == AGENT_SERVER_TYPE or (field == AGENT_SERVER and value.get("type") is None))
+    ]
+
+
+def declared_servers(document: dict) -> dict[str, list[Reference]]:
+    """Map each agent that an environment server in the document references to those references."""
+    references: dict[str, list[Reference]] = {}
+    for name, instance in document.items():
         servers = instance.get("environment_servers") if isinstance(instance, dict) else None
-        for server in servers.values() if isinstance(servers, dict) else ():
-            reference = server.get("agent_server") if isinstance(server, dict) else None
-            if isinstance(reference, dict) and reference.get("name"):
-                names.add(reference["name"])
-    return names
+        for server_type, server in servers.items() if isinstance(servers, dict) else ():
+            for field, agent in agent_references(server) if isinstance(server, dict) else ():
+                found = references.setdefault(agent, [])
+                if (reference := Reference(name, server_type, field)) not in found:
+                    found.append(reference)
+    return references
 
 
 def agent_types_in(document: dict, known_types: dict[str, str]) -> dict[str, str]:
@@ -179,12 +222,13 @@ def server_names_for(document: dict, known_types: dict[str, str] | None = None) 
     return {name: stem if taken.count(stem) == 1 else f"{name}{SUFFIX}" for name, stem in stems.items()}
 
 
-def index(documents: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
-    """Index agent types and server names across documents.
+def index(documents: list[dict]) -> tuple[dict[str, str], dict[str, list[Reference]], dict[str, str]]:
+    """Index agent types and environment servers across documents.
 
-    Returns ``(agent_types, servers)``.
+    Returns ``(agent_types, references, generated)``.
     ``agent_types`` maps each agent instance to its type.
-    ``servers`` maps each agent instance to the server name declared beside it, or the one this script would declare.
+    ``references`` maps each agent to every environment server field that references it.
+    ``generated`` maps each agent that no server references to the server this script would declare.
     Renaming configs look up the agent they rename here.
     """
     agent_types: dict[str, str] = {}
@@ -193,29 +237,59 @@ def index(documents: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
     # A rename may precede the document defining its source.
     for document in documents:
         agent_types.update(agent_types_in(document, agent_types))
-    servers: dict[str, str] = {}
+    references: dict[str, list[Reference]] = {}
     for document in documents:
-        servers.update(server_names_for(document, agent_types))
-    return agent_types, servers
+        for agent, found in declared_servers(document).items():
+            known = references.setdefault(agent, [])
+            known.extend(reference for reference in found if reference not in known)
+    generated: dict[str, str] = {}
+    for document in documents:
+        generated.update(server_names_for(document, agent_types))
+    return agent_types, references, {agent: server for agent, server in generated.items() if agent not in references}
 
 
-def stanzas_for(document: dict, bound_agents: dict[str, str], known_types: dict[str, str] | None = None) -> list[str]:
+def stanzas_for(
+    document: dict,
+    references: dict[str, list[Reference]],
+    generated: dict[str, str],
+    known_types: dict[str, str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Return the blocks to append to the document, and the renames it cannot migrate by appending."""
     blocks: list[str] = []
+    unmigrated: list[str] = []
     declared: set[str] = set()
-    fronted = fronted_agents(document)
+    retargeted: dict[str, dict[str, dict[str, dict[str, str]]]] = {}
+    fronted = declared_servers(document)
     servers = server_names_for(document, known_types)
     for name, instance in document.items():
+        if not isinstance(instance, dict) or name in fronted:
+            continue
+        source = instance.get("_inherit_from")
+        if isinstance(source, str) and source in references:
+            for reference in references[source]:
+                # Appending a key the document already has would duplicate it.
+                if reference.server in document:
+                    unmigrated.append(
+                        f"point `{reference.server}.environment_servers.{reference.server_type}.{reference.field}"
+                        f".name` at `{name}`"
+                    )
+                    continue
+                fields = retargeted.setdefault(reference.server, {}).setdefault(reference.server_type, {})
+                fields[reference.field] = {"type": AGENT_SERVER_TYPE, "name": name}
+            continue
         server = servers.get(name)
-        if server is None or name in fronted or server in document or server in declared:
+        if server is None or server in document or server in declared:
             continue
         declared.add(server)
-        source = instance.get("_inherit_from")
-        inherited = bound_agents.get(source) if isinstance(source, str) else None
+        inherited = generated.get(source) if isinstance(source, str) else None
         if inherited and inherited != server:
             blocks.append(INHERITED.format(server=server, source=inherited, agent=name))
         else:
             blocks.append(DECLARED.format(server=server, agent=name))
-    return blocks
+    # One block per server, so renaming several of its agents does not repeat its key.
+    for server, by_type in retargeted.items():
+        blocks.append("\n" + yaml.safe_dump({server: {"environment_servers": by_type}}, sort_keys=False))
+    return blocks, unmigrated
 
 
 def append_blocks(text: str, blocks: list[str]) -> str:
@@ -261,11 +335,13 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if document is not None:
             repo_documents.append(document)
-    agent_types, bound_agents = index(repo_documents + list(documents.values()))
+    agent_types, references, generated = index(repo_documents + list(documents.values()))
 
     changed, added = 0, 0
+    unmigrated: list[str] = []
     for path, document in documents.items():
-        blocks = stanzas_for(document, bound_agents, agent_types)
+        blocks, by_hand = stanzas_for(document, references, generated, agent_types)
+        unmigrated.extend(f"{display(path)}: {message}" for message in by_hand)
         if not blocks:
             continue
         if not args.check:
@@ -276,8 +352,13 @@ def main(argv: list[str] | None = None) -> int:
 
     for message in unreadable:
         print(f"could not update {message}", file=sys.stderr)
-    print(f"\nfiles touched: {changed}, blocks added: {added}, unreadable files: {len(unreadable)}")
-    if unreadable:
+    for message in unmigrated:
+        print(f"update by hand: {message}", file=sys.stderr)
+    print(
+        f"\nfiles touched: {changed}, blocks added: {added}, unreadable files: {len(unreadable)}, "
+        f"updates by hand: {len(unmigrated)}"
+    )
+    if unreadable or unmigrated:
         return 2
     return 1 if (args.check and changed) else 0
 

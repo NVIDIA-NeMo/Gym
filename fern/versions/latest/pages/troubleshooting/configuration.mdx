@@ -202,7 +202,7 @@ The script appends a block to each config that needs one and leaves the existing
 It skips agents that an environment server already names.
 It also skips agents that only override fields of an agent defined elsewhere.
 Run without paths, it updates this repository's configs.
-It exits with 1 under `--check` when something needs adding, and with 2 when a file cannot be read.
+It exits with 1 under `--check` when something needs adding, and with 2 when a file cannot be read or a rename needs a manual update.
 
 You can also add the block by hand.
 The warning prints the exact block for each agent; add it at the same level as the agents:
@@ -217,8 +217,10 @@ my_environment_server:
         name: my_simple_agent
 ```
 
-If you rename an agent with `_inherit_from`, the agent's environment server must be renamed with it, because `_inherit_from` moves the source.
-The script writes a server that inherits the source agent's server.
+If you rename an agent with `_inherit_from`, every environment server that references the agent must reference the new name, because `_inherit_from` retires the source.
+The script points each of those references at the new name and keeps the server's name, so `environment_server_routes` still resolve.
+If the source agent only has the server the script generates, the renamed agent's server inherits that server instead.
+If the rename is in the same file as a server that references the source, the script reports the field to update by hand.
 Do not add a second server in front of an agent, because that makes agent-routed rows ambiguous.
 
 #### Require Declared Environment Servers
@@ -242,6 +244,40 @@ gym env start \
 ## Connection Errors
 
 Errors where the config is valid but an endpoint it names cannot be reached.
+
+### Head Server Unreachable
+
+```
+Error: Could not connect to the head server at http://127.0.0.1:11000. Is the head server running?
+Start it with: `gym env start`. If it is already running on a different host or port, pass
+`++head_server.host=<host>` / `++head_server.port=<port>` so this command can find it.
+```
+
+**When**: `gym eval run --no-serve` collects against servers that are already running, and found nothing
+listening at the head server address in its config. Either no `gym env start` is running, or it was started
+with a different head server address than this command is using. That address is `head_server.host` /
+`head_server.port` (default `127.0.0.1:11000`). When `head_server.host` is not set, the host is the machine's
+IP address if [`use_absolute_ip`](/reference/configuration#multi-node-configuration) is `true`, and otherwise
+`default_host` (default `127.0.0.1`), so a `gym env start` run with either setting can listen on a different
+address than a command run without it.
+
+**Fix**: Check which head server address `gym env start` used (from its config and overrides), then run
+`gym env status` with matching overrides before concluding that nothing is running. `gym env status` only
+queries the head server address in its own config, so servers running on another host or port also show
+`No NeMo Gym servers found running.`
+
+```bash
+gym env status "++head_server.port=<port>"
+```
+
+If status lists your servers, pass the same overrides to the collecting command:
+
+```bash
+gym eval run --no-serve "++head_server.port=<port>" ...
+```
+
+If status finds no servers at the matching address either, start them with `gym env start` (in another
+terminal or the background) and retry.
 
 ### Gym Server Startup Timeout
 

@@ -17,19 +17,21 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE, SUPERVISOR_FILE, parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest, _AgentSessionRecord
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.hermes_agent import app as hermes_app
+from responses_api_agents.hermes_agent import sandbox as hermes_sandbox
 from responses_api_agents.hermes_agent.app import (
     HermesAgent,
     HermesAgentConfig,
     HermesAgentRunRequest,
-    HermesAgentSessionState,
-    RunnerCleanup,
 )
+from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, HermesSandboxSession, parse_runtime_info
 
 
 @pytest.fixture
@@ -50,7 +52,7 @@ def agent(monkeypatch):
     )
 
     monkeypatch.setattr(
-        HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/ng-rollout/native-a1/v1"
+        HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/ng-rollout/episode-a1/v1"
     )
     return result
 
@@ -59,10 +61,10 @@ def agent(monkeypatch):
 def state():
     sandbox = AsyncMock()
     sandbox.exec.return_value = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
-    return HermesAgentSessionState(
+    return HermesSandboxSession(
         request=AgentSeedSessionRequest(
             agent_session_id="session",
-            episode_id=EpisodeId(rollout_id="native", attempt=1),
+            episode_id=EpisodeId(rollout_id="episode", attempt=1),
             task_id=TaskId(taskset="test", task_id="task"),
             sandbox_access={
                 "connection": {
@@ -73,10 +75,21 @@ def state():
                 "workdir": "/app",
             },
         ),
-        sandbox=sandbox,
-        workdir="/app",
-        session_dir="/tmp/nemo-gym-hermes-sessions/session",
+        session=SandboxSession(
+            sandbox=sandbox, workdir="/app", session_dir="/tmp/nemo-gym-hermes-sessions/session", harness="Hermes"
+        ),
     )
+
+
+def mock_json_download(sandbox, **kwargs):
+    """Supply files through the real text utility's sandbox download boundary."""
+    download = AsyncMock(**kwargs)
+
+    async def write_download(path, destination):
+        Path(destination).write_text(json.dumps(await download(sandbox, path)), encoding="utf-8")
+
+    sandbox.download = AsyncMock(side_effect=write_download)
+    return download
 
 
 def request(state):
@@ -97,7 +110,33 @@ def episode(agent):
     )
 
 
-def test_http_close_retry_and_stale_activation_never_fall_back(agent, state):
+async def test_unbound_compatibility_run_fails_before_calling_resources(agent):
+    agent.config.resources_server = None
+    agent.server_client.post = AsyncMock()
+    with pytest.raises(HTTPException, match="/run requires resources_server") as error:
+        await agent.run(
+            SimpleNamespace(session={}, cookies={}),
+            HermesAgentRunRequest(responses_create_params={"input": "task"}),
+        )
+    assert error.value.status_code == 422
+    agent.server_client.post.assert_not_awaited()
+
+
+async def test_unbound_direct_responses_remains_available(agent):
+    agent.config.resources_server = None
+    result = episode(agent)
+    agent._create_response = AsyncMock(return_value=result.response)
+    response = await agent.responses(
+        SimpleNamespace(session={}, path_params={}), NeMoGymResponseCreateParamsNonStreaming(input="task")
+    )
+    assert response == result.response
+    agent._create_response.assert_awaited_once()
+
+
+@pytest.mark.parametrize("bind_resources", [True, False])
+def test_http_close_retry_and_stale_activation_never_fall_back(agent, state, bind_resources):
+    if not bind_resources:
+        agent.config.resources_server = None
     agent._initialize_agent_session_state = AsyncMock(return_value=state)
     agent._run_sandbox_episode = AsyncMock(return_value=episode(agent))
     agent._create_response = AsyncMock(side_effect=AssertionError("host fallback"))
@@ -106,7 +145,7 @@ def test_http_close_retry_and_stale_activation_never_fall_back(agent, state):
         seed = client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json"))
         assert seed.status_code == 200
         assert state.task is None
-        assert state.runner_cleanup is RunnerCleanup.IDLE
+        assert not state.session.launch_started and state.session.cleanup is None
         assert client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json")).status_code == 200
         path = f"/ng-rollout/{state.request.episode_id.capture_key}/v1/responses"
         activation = client.post(path, json={"input": "task"})
@@ -131,11 +170,11 @@ def test_http_close_retry_and_stale_activation_never_fall_back(agent, state):
         wrong = dict(close, episode_id={"rollout_id": "other"})
         assert client.post("/v1/agent_sessions/close", json=wrong).status_code == 409
     assert agent._run_sandbox_episode.await_count == 1
-    state.sandbox.disconnect.assert_awaited_once()
-    state.sandbox.stop.assert_not_awaited()
+    state.session.sandbox.disconnect.assert_awaited_once()
+    state.session.sandbox.stop.assert_not_awaited()
 
 
-async def test_invalid_activation_keeps_session_ready(agent: HermesAgent, state: HermesAgentSessionState) -> None:
+async def test_invalid_activation_keeps_session_ready(agent: HermesAgent, state: HermesSandboxSession) -> None:
     agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     agent._run_sandbox_episode = AsyncMock(return_value=episode(agent))
     with pytest.raises(HTTPException) as error:
@@ -183,7 +222,7 @@ async def test_close_cancels_activation_and_its_replay(agent, state):
     with pytest.raises(asyncio.CancelledError):
         await replay
     agent._run_sandbox_episode.assert_awaited_once()
-    state.sandbox.disconnect.assert_awaited_once()
+    state.session.sandbox.disconnect.assert_awaited_once()
 
 
 async def test_activation_replay_survives_disconnected_waiter(agent, state):
@@ -232,12 +271,16 @@ async def test_activation_replay_survives_disconnected_waiter(agent, state):
 
 def test_provider_failure_is_http_500_and_replays_without_rerunning(agent, state):
     agent._initialize_agent_session_state = AsyncMock(return_value=state)
-    agent._upload_json = AsyncMock()
-    agent._download_json = AsyncMock(
+    state.upload_json = AsyncMock()
+    mock_json_download(
+        state.session.sandbox,
         side_effect=[
-            {"cleanup_confirmed": True},
-            {"result": {"failed": True, "error": "HTTP 429 Too Many Requests", "messages": []}, "runtime": {}},
-        ]
+            {"cleanup_confirmed": True, "error": None},
+            {
+                "result": {"failed": True, "error": "HTTP 429 Too Many Requests", "messages": []},
+                "runtime": {"hostname": "sandbox", "pid": 123},
+            },
+        ],
     )
     with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         assert client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json")).status_code == 200
@@ -245,91 +288,101 @@ def test_provider_failure_is_http_500_and_replays_without_rerunning(agent, state
         for _ in range(2):
             response = client.post(path, json={"input": "task"})
             assert response.status_code == 500
-        agent._upload_json.assert_awaited_once()
-        assert state.runner_cleanup is RunnerCleanup.CONFIRMED
+        state.upload_json.assert_awaited_once()
+        assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
         close = client.post(
             "/v1/agent_sessions/close",
             json={"agent_session_id": "session", "episode_id": state.request.episode_id.model_dump()},
         )
         assert close.status_code == 200
-    state.sandbox.disconnect.assert_awaited_once()
+    state.session.sandbox.disconnect.assert_awaited_once()
 
 
 @pytest.mark.parametrize("runner_started", [False, True], ids=["not-launched", "cleanup-confirmed"])
 async def test_close_failure_keeps_session_for_retry(
-    agent: HermesAgent, state: HermesAgentSessionState, runner_started: bool
+    agent: HermesAgent, state: HermesSandboxSession, runner_started: bool
 ) -> None:
     agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     if runner_started:
-        state.runner_cleanup = RunnerCleanup.UNCONFIRMED
-        agent._download_json = AsyncMock(return_value={"cleanup_confirmed": True})
-    state.sandbox.exec.side_effect = [SimpleNamespace(return_code=1), SimpleNamespace(return_code=0)]
+        state.session.launch_started = True
+        download_json = mock_json_download(
+            state.session.sandbox, return_value={"cleanup_confirmed": True, "error": None}
+        )
+    state.session.sandbox.exec.side_effect = [
+        SimpleNamespace(return_code=1, error_type=None),
+        SimpleNamespace(return_code=0, error_type=None),
+    ]
     close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
     with pytest.raises(RuntimeError, match="session files"):
         await agent.close_agent_session(request(state), close)
     assert agent._session_records["session"].state is state
     assert agent._session_records["session"].closing
-    assert state.runner_cleanup is (RunnerCleanup.CONFIRMED if runner_started else RunnerCleanup.IDLE)
-    state.sandbox.disconnect.assert_not_awaited()
+    assert (state.session.cleanup is not None) == runner_started
+    state.session.sandbox.disconnect.assert_not_awaited()
     with pytest.raises(HTTPException):
         await agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task"))
     await agent.close_agent_session(request(state), close)
-    state.sandbox.disconnect.assert_awaited_once()
+    state.session.sandbox.disconnect.assert_awaited_once()
     if runner_started:
-        agent._download_json.assert_awaited_once()
+        download_json.assert_awaited_once()
 
 
 @pytest.mark.parametrize("receipt", [None, {"cleanup_confirmed": False, "error": "cleanup failed"}])
-@pytest.mark.parametrize("runner_cleanup", list(RunnerCleanup))
-async def test_owned_close_stops_without_receipt_or_filesystem_cleanup(agent, state, receipt, runner_cleanup):
-    state.owns_sandbox = True
-    state.runner_cleanup = runner_cleanup
+@pytest.mark.parametrize("launch_started,cleanup", [(False, None), (True, None), (True, {"cleanup_confirmed": True})])
+async def test_owned_close_falls_back_to_stop_without_receipt(agent, state, receipt, launch_started, cleanup):
+    state.session.owns_sandbox = True
+    state.session.launch_started = launch_started
+    state.session.cleanup = cleanup
     state.observations = AgentObservationBundle(source="hermes")
     agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
-    agent._download_json = AsyncMock(return_value=receipt)
+    download_json = mock_json_download(state.session.sandbox, return_value=receipt)
     if receipt is None:
-        agent._download_json.side_effect = FileNotFoundError("missing cleanup receipt")
-    state.sandbox.exec.side_effect = AssertionError("Owned close must not depend on sandbox exec")
+        download_json.side_effect = FileNotFoundError("missing cleanup receipt")
+    state.session.sandbox.exec.side_effect = AssertionError("Owned close must not depend on sandbox exec")
     close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
 
     response = await agent.close_agent_session(request(state), close)
     assert response.agent_observations == state.observations
-    assert state.runner_cleanup is RunnerCleanup.CONFIRMED
+    assert state.session.sandbox_stopped
     assert agent._session_records["session"].state is None
     assert await agent.close_agent_session(request(state), close) == response
-    state.sandbox.stop.assert_awaited_once()
-    state.sandbox.disconnect.assert_not_awaited()
-    state.sandbox.exec.assert_not_awaited()
-    agent._download_json.assert_not_awaited()
+    state.session.sandbox.stop.assert_awaited_once()
+    state.session.sandbox.disconnect.assert_not_awaited()
+    if launch_started and cleanup is None:
+        state.session.sandbox.exec.assert_awaited_once()
+        assert download_json.await_count >= 1
+    else:
+        state.session.sandbox.exec.assert_not_awaited()
+        download_json.assert_not_awaited()
 
 
 @pytest.mark.parametrize("failure", [RuntimeError, TimeoutError, asyncio.CancelledError])
 async def test_owned_stop_failure_keeps_close_retryable(agent, state, failure):
-    state.owns_sandbox = True
-    state.runner_cleanup = RunnerCleanup.UNCONFIRMED
+    state.session.owns_sandbox = True
+    state.session.launch_started = True
     agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
-    state.sandbox.stop.side_effect = [failure("stop failed"), None]
-    agent._download_json = AsyncMock(side_effect=FileNotFoundError("missing cleanup receipt"))
+    state.session.sandbox.stop.side_effect = [failure("stop failed"), None]
+    download_json = mock_json_download(state.session.sandbox, side_effect=FileNotFoundError("missing cleanup receipt"))
     close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
 
-    with pytest.raises(failure, match="stop failed"):
+    with pytest.raises(failure):
         await agent.close_agent_session(request(state), close)
     assert agent._session_records["session"].state is state
     assert agent._session_records["session"].closing
-    assert state.runner_cleanup is RunnerCleanup.UNCONFIRMED
+    assert state.session.launch_started and state.session.cleanup is None and not state.session.sandbox_stopped
     assert "session" not in agent._closed_session_records
     response = await agent.close_agent_session(request(state), close)
     assert await agent.close_agent_session(request(state), close) == response
-    assert state.sandbox.stop.await_count == 2
-    assert state.runner_cleanup is RunnerCleanup.CONFIRMED
-    state.sandbox.disconnect.assert_not_awaited()
-    state.sandbox.exec.assert_not_awaited()
-    agent._download_json.assert_not_awaited()
+    assert state.session.sandbox.stop.await_count == 2
+    assert state.session.sandbox_stopped
+    state.session.sandbox.disconnect.assert_not_awaited()
+    assert state.session.sandbox.exec.await_count == 2
+    assert download_json.await_count == 4
 
 
 async def test_owned_stop_precedes_waiting_for_cancelled_activation(agent, state):
-    state.owns_sandbox = True
-    state.runner_cleanup = RunnerCleanup.UNCONFIRMED
+    state.session.owns_sandbox = True
+    state.session.launch_started = True
     agent.config.session_close_timeout_seconds = 0.1
     started, stopped = asyncio.Event(), asyncio.Event()
 
@@ -342,17 +395,17 @@ async def test_owned_stop_precedes_waiting_for_cancelled_activation(agent, state
             await stopped.wait()
             raise
 
-    state.sandbox.stop.side_effect = stopped.set
-    agent._download_json = AsyncMock(side_effect=FileNotFoundError("missing cleanup receipt"))
+    state.session.sandbox.stop.side_effect = stopped.set
+    download_json = mock_json_download(state.session.sandbox, side_effect=FileNotFoundError("missing cleanup receipt"))
     state.task = asyncio.create_task(activation())
     await started.wait()
     try:
         await agent._close_agent_session_state(state)
         assert state.task.cancelled()
-        assert state.runner_cleanup is RunnerCleanup.CONFIRMED
-        state.sandbox.stop.assert_awaited_once()
-        state.sandbox.exec.assert_not_awaited()
-        agent._download_json.assert_not_awaited()
+        assert state.session.sandbox_stopped
+        state.session.sandbox.stop.assert_awaited_once()
+        state.session.sandbox.exec.assert_awaited_once()
+        assert download_json.await_count == 2
     finally:
         stopped.set()
         if not state.task.done():
@@ -363,20 +416,20 @@ async def test_owned_stop_precedes_waiting_for_cancelled_activation(agent, state
 @pytest.mark.parametrize("failure", [TimeoutError, asyncio.CancelledError])
 async def test_unavailable_remote_fence_still_blocks_close(agent, state, failure):
     # Losing contact with the sandbox is not proof that its pending launch is fenced.
-    state.sandbox.exec.side_effect = [failure("launch status unavailable"), SimpleNamespace(return_code=0)]
-    agent._download_json = AsyncMock(side_effect=FileNotFoundError("missing cleanup receipt"))
-    agent._upload_json = AsyncMock()
+    state.session.sandbox.exec.side_effect = [failure("launch status unavailable"), SimpleNamespace(return_code=0)]
+    mock_json_download(state.session.sandbox, side_effect=FileNotFoundError("missing cleanup receipt"))
+    state.upload_json = AsyncMock()
     with pytest.raises(failure):
         await agent._run_sandbox_episode(
             body=NeMoGymResponseCreateParamsNonStreaming(input="task"),
             agent_session_id="session",
             state=state,
         )
-    assert state.runner_cleanup is RunnerCleanup.UNCONFIRMED
-    state.sandbox.exec.side_effect = None
+    assert state.session.launch_started and state.session.cleanup is None and not state.session.sandbox_stopped
+    state.session.sandbox.exec.side_effect = None
     with pytest.raises(RuntimeError, match="launch outcome is unknown"):
         await agent._close_agent_session_state(state)
-    state.sandbox.disconnect.assert_not_awaited()
+    state.session.sandbox.disconnect.assert_not_awaited()
 
 
 @pytest.fixture
@@ -384,14 +437,15 @@ def local_runner(agent, state, monkeypatch, tmp_path):
     """Execute the actual launch/close shell commands and exchange files, without a remote provider."""
     directory = tmp_path / "session"
     directory.mkdir()
-    state.session_dir = str(directory)
-    state.workdir = str(tmp_path)
+    state.session.session_dir = str(directory)
+    state.session.workdir = str(tmp_path)
     agent.config.session_close_timeout_seconds = 2
-    monkeypatch.setattr(hermes_app, "_SANDBOX_PYTHON", sys.executable)
-    monkeypatch.setattr(hermes_app, "_SANDBOX_RUNNER", str(Path(hermes_app.__file__).with_name("sandbox_runner.py")))
-    monkeypatch.setattr(hermes_app, "_SANDBOX_SUPERVISOR", hermes_app.process_supervisor.__file__)
-    state.sandbox.upload.side_effect = shutil.copyfile
-    state.sandbox.download.side_effect = shutil.copyfile
+    monkeypatch.setattr(hermes_sandbox, "_SANDBOX_PYTHON", sys.executable)
+    monkeypatch.setattr(
+        hermes_sandbox, "_SANDBOX_RUNNER", str(Path(hermes_sandbox.__file__).with_name("sandbox_runner.py"))
+    )
+    state.session.sandbox.upload.side_effect = shutil.copyfile
+    state.session.sandbox.download.side_effect = shutil.copyfile
 
     async def execute(command, **kwargs):
         process = await asyncio.create_subprocess_exec(
@@ -416,7 +470,7 @@ def local_runner(agent, state, monkeypatch, tmp_path):
                 os.killpg(process.pid, signal.SIGKILL)
                 await process.wait()
 
-    state.sandbox.exec.side_effect = execute
+    state.session.sandbox.exec.side_effect = execute
     return execute
 
 
@@ -435,7 +489,7 @@ async def test_close_fences_a_launch_that_never_reached_the_shell(agent, state, 
             raise OSError("provider failed before spawning the shell")
         return await local_runner(command, **kwargs)
 
-    state.sandbox.exec.side_effect = queued_exec
+    state.session.sandbox.exec.side_effect = queued_exec
     state.task = asyncio.create_task(
         agent._run_sandbox_episode(
             body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
@@ -446,37 +500,87 @@ async def test_close_fences_a_launch_that_never_reached_the_shell(agent, state, 
         state.task.cancel()
     with pytest.raises(asyncio.CancelledError if failure == "cancel" else OSError):
         await state.task
-    assert state.runner_cleanup is RunnerCleanup.CONFIRMED
-    directory = Path(state.session_dir)
+    assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
+    directory = Path(state.session.session_dir)
     assert (directory / "launch.claim").readlink() == Path("stop")
     assert json.loads((directory / "cleanup.json").read_text())["cleanup_confirmed"] is True
 
     # A delayed delivery cannot launch, before or after close removes the session directory.
     assert (await local_runner(commands[0])).return_code == 0
-    assert not (directory / "runner.pid").exists()
+    assert not (directory / "supervisor.pid").exists()
     agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
     first = await agent.close_agent_session(request(state), close)
     assert await agent.close_agent_session(request(state), close) == first
-    state.sandbox.disconnect.assert_awaited_once()
+    state.session.sandbox.disconnect.assert_awaited_once()
     assert not directory.exists()
     assert (await local_runner(commands[0])).return_code == 0
     assert not directory.exists()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="The process supervisor requires Linux")
+@pytest.mark.parametrize("owned", [False, True])
+async def test_close_preserves_interrupted_observations_before_release(
+    agent, state, local_runner, monkeypatch, tmp_path, owned
+):
+    ready = tmp_path / "worker-ready"
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "import json,os,pathlib,signal,sys,time\n"
+        "def interrupted(*args):\n"
+        "    output = {'result': {'completed': False, 'interrupted': True, 'stop_reason': 'cancelled', "
+        "'messages': [{'role': 'assistant', 'content': 'partial answer'}]}, "
+        "'observations': {'invocations': [{'invocation_id': 'root', 'status': 'incomplete', "
+        "'model_response_ids': ['partial-completion']}]}, "
+        "'runtime': {'hostname': 'sandbox', 'pid': os.getpid()}}\n"
+        "    pathlib.Path(sys.argv[2]).write_text(json.dumps(output))\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, interrupted)\n"
+        f"pathlib.Path({str(ready)!r}).touch()\n"
+        "while True: time.sleep(0.01)\n"
+    )
+    monkeypatch.setattr(hermes_sandbox, "_SANDBOX_RUNNER", str(worker))
+    state.session.owns_sandbox = owned
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+    running = asyncio.create_task(
+        agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    )
+    try:
+        async with asyncio.timeout(5):
+            while not ready.exists():
+                await asyncio.sleep(0.01)
+        close = AgentCloseSessionRequest(agent_session_id="session", episode_id=state.request.episode_id)
+        result = await agent.close_agent_session(request(state), close)
+        assert result.agent_observations.gaps == []
+        invocation = result.agent_observations.records[0]
+        assert invocation.status == "incomplete"
+        assert invocation.model_calls[0].response_id == "partial-completion"
+        assert state.session.artifacts["result"]["messages"][0]["content"] == "partial answer"
+        assert state.session.cleanup["cleanup_confirmed"] is True
+        assert await agent.close_agent_session(request(state), close) == result
+        if owned:
+            state.session.sandbox.stop.assert_awaited_once()
+        else:
+            assert not Path(state.session.session_dir).exists()
+            state.session.sandbox.disconnect.assert_awaited_once()
+    finally:
+        await state.close(2)
+        await asyncio.gather(running, return_exceptions=True)
+
+
 async def test_close_can_recover_a_stop_claim_with_no_receipt(agent, state, local_runner):
-    directory = Path(state.session_dir)
+    directory = Path(state.session.session_dir)
     # The first close won the claim but was interrupted before publishing its receipt.
     (directory / "launch.claim").symlink_to("stop")
-    state.runner_cleanup = RunnerCleanup.UNCONFIRMED
-    await agent._terminate_sandbox_runner(state)
-    assert state.runner_cleanup is RunnerCleanup.CONFIRMED
+    state.session.launch_started = True
+    await state.session.stop_harness(timeout=agent.config.session_close_timeout_seconds)
+    assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
     assert json.loads((directory / "cleanup.json").read_text())["cleanup_confirmed"] is True
 
 
 @pytest.mark.parametrize("confirmed", [True, False])
 async def test_receipt_download_failure_never_signals_a_reused_pid(agent, state, local_runner, tmp_path, confirmed):
-    directory = Path(state.session_dir)
+    directory = Path(state.session.session_dir)
     signaled = tmp_path / "unrelated-process-signaled"
     child = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -489,10 +593,10 @@ async def test_receipt_download_failure_never_signals_a_reused_pid(agent, state,
     )
     try:
         assert await child.stdout.readline() == b"ready\n"
-        (directory / "runner.pid").write_text(str(child.pid))
+        (directory / "supervisor.pid").write_text(str(child.pid))
         (directory / "launch.claim").symlink_to("launch")
-        (directory / "cleanup.json").write_text(json.dumps({"cleanup_confirmed": confirmed}))
-        download = agent._download_json
+        (directory / "cleanup.json").write_text(json.dumps({"cleanup_confirmed": confirmed, "error": None}))
+        original_download = state.session.sandbox.download
         attempts = 0
 
         async def transient_download(*args):
@@ -500,15 +604,15 @@ async def test_receipt_download_failure_never_signals_a_reused_pid(agent, state,
             attempts += 1
             if attempts == 1:
                 raise OSError("transient download failure")
-            return await download(*args)
+            return await original_download(*args)
 
-        agent._download_json = AsyncMock(side_effect=transient_download)
-        state.runner_cleanup = RunnerCleanup.UNCONFIRMED
+        state.session.sandbox.download = AsyncMock(side_effect=transient_download)
+        state.session.launch_started = True
         if confirmed:
-            await agent._terminate_sandbox_runner(state)
+            await state.session.stop_harness(timeout=agent.config.session_close_timeout_seconds)
         else:
             with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
-                await agent._terminate_sandbox_runner(state)
+                await state.session.stop_harness(timeout=agent.config.session_close_timeout_seconds)
         await asyncio.sleep(0.05)
         assert not signaled.exists()
         assert child.returncode is None
@@ -536,18 +640,18 @@ async def test_borrowed_close_confirms_cleanup_before_cancelling_provider_exec(a
         finally:
             assert confirmed.is_set(), "Provider exec was cancelled before remote cleanup"
 
-    async def terminate(_state):
+    async def terminate(*, timeout):
         assert not state.task.cancelling()
-        state.runner_cleanup = RunnerCleanup.CONFIRMED
+        state.session.cleanup = {"cleanup_confirmed": True, "error": None, "return_code": None, "timed_out": False}
         confirmed.set()
 
-    agent._terminate_sandbox_runner = AsyncMock(side_effect=terminate)
+    state.session.stop_harness = AsyncMock(side_effect=terminate)
     state.task = asyncio.create_task(execute())
     await entered.wait()
     try:
         await agent._close_agent_session_state(state)
         assert state.task.cancelled()
-        state.sandbox.disconnect.assert_awaited_once()
+        state.session.sandbox.disconnect.assert_awaited_once()
     finally:
         confirmed.set()
         state.task.cancel()
@@ -557,9 +661,9 @@ async def test_borrowed_close_confirms_cleanup_before_cancelling_provider_exec(a
 async def test_close_retires_the_launch_path_before_removing_its_fence(
     agent, state, local_runner, monkeypatch, tmp_path
 ):
-    directory = Path(state.session_dir)
-    retired = Path(f"{state.session_dir}.closed")
-    state.runner_cleanup = RunnerCleanup.UNCONFIRMED
+    directory = Path(state.session.session_dir)
+    retired = Path(f"{state.session.session_dir}.closed")
+    state.session.launch_started = True
     commands = tmp_path / "bin"
     commands.mkdir()
     remove = commands / "rm"
@@ -571,48 +675,51 @@ async def test_close_retires_the_launch_path_before_removing_its_fence(
             await agent._close_agent_session_state(state)
     assert not directory.exists()
     assert (retired / "launch.claim").readlink() == Path("stop")
-    state.sandbox.disconnect.assert_not_awaited()
+    state.session.sandbox.disconnect.assert_not_awaited()
     # Retry completes removal using the stable retired path, without reopening the launch path.
     await agent._close_agent_session_state(state)
     assert not retired.exists()
-    state.sandbox.disconnect.assert_awaited_once()
+    state.session.sandbox.disconnect.assert_awaited_once()
 
 
 async def test_launch_claim_without_pid_is_not_proof_of_cleanup(agent, state, local_runner):
-    directory = Path(state.session_dir)
+    directory = Path(state.session.session_dir)
     (directory / "launch.claim").symlink_to("launch")
-    state.runner_cleanup = RunnerCleanup.UNCONFIRMED
+    state.session.launch_started = True
     with pytest.raises(RuntimeError, match="launch outcome is unknown"):
         await agent._close_agent_session_state(state)
-    assert state.runner_cleanup is RunnerCleanup.UNCONFIRMED
+    assert state.session.launch_started and state.session.cleanup is None and not state.session.sandbox_stopped
     assert not (directory / "cleanup.json").exists()
-    state.sandbox.disconnect.assert_not_awaited()
+    state.session.sandbox.disconnect.assert_not_awaited()
 
 
 @pytest.mark.parametrize("stop_timing", ["before-shell", "before-handler"])
 async def test_stop_during_interpreter_startup_closes_without_starting_a_worker(
     agent, state, local_runner, monkeypatch, tmp_path, stop_timing
 ):
-    directory = Path(state.session_dir)
+    directory = Path(state.session.session_dir)
     ready = tmp_path / "before-handler"
     worker_started = tmp_path / "worker-started"
     wrapper = tmp_path / "delayed_supervisor.py"
     wrapper.write_text(
         "import pathlib,runpy,sys,time\n"
+        f"if '--help' in sys.argv: runpy.run_path({process_supervisor.__file__!r}, run_name='__main__')\n"
         f"pathlib.Path({str(ready)!r}).touch()\n"
-        f"while not pathlib.Path({str(directory / 'runner.stop')!r}).exists(): time.sleep(0.01)\n"
+        f"while not pathlib.Path({str(directory / STOP_REQUEST_FILE)!r}).exists(): time.sleep(0.01)\n"
         # Keep the interpreter in the pre-handler window while close sends TERM.
         "time.sleep(0.15)\n"
-        f"runner=runpy.run_path({hermes_app._SANDBOX_SUPERVISOR!r})\n"
+        f"runner=runpy.run_path({process_supervisor.__file__!r})\n"
         "def unexpected_worker(*args, **kwargs):\n"
         f"    pathlib.Path({str(worker_started)!r}).touch()\n"
         "    raise AssertionError('Worker must not start after the stop marker')\n"
         "runner['subprocess'].Popen=unexpected_worker\n"
         "raise SystemExit(runner['main']())\n"
     )
-    monkeypatch.setattr(hermes_app, "_SANDBOX_SUPERVISOR", str(wrapper))
+    state.session.sandbox.upload.side_effect = lambda source, destination: shutil.copyfile(
+        wrapper if Path(source).name == SUPERVISOR_FILE else source, destination
+    )
     if stop_timing == "before-shell":
-        (directory / "runner.stop").touch()
+        (directory / STOP_REQUEST_FILE).touch()
     state.task = asyncio.create_task(
         agent._run_sandbox_episode(
             body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
@@ -623,10 +730,10 @@ async def test_stop_during_interpreter_startup_closes_without_starting_a_worker(
             async with asyncio.timeout(3):
                 while not ready.exists():
                     await asyncio.sleep(0.01)
-            await agent._terminate_sandbox_runner(state)
+            await state.session.stop_harness(timeout=agent.config.session_close_timeout_seconds)
         with pytest.raises(RuntimeError, match="exited without output"):
             await state.task
-        assert state.runner_cleanup is RunnerCleanup.CONFIRMED
+        assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
         assert not worker_started.exists()
         assert json.loads((directory / "cleanup.json").read_text()) == {
             "cleanup_confirmed": True,
@@ -635,55 +742,173 @@ async def test_stop_during_interpreter_startup_closes_without_starting_a_worker(
             "timed_out": False,
         }
         await agent._close_agent_session_state(state)
-        state.sandbox.disconnect.assert_awaited_once()
+        state.session.sandbox.disconnect.assert_awaited_once()
     finally:
         if not state.task.done():
             state.task.cancel()
         await asyncio.gather(state.task, return_exceptions=True)
 
 
+def test_cleanup_and_runtime_are_independent():
+    cleanup = {"return_code": 0, "timed_out": False, "cleanup_confirmed": True, "error": None}
+    assert parse_cleanup_receipt(cleanup) == cleanup
+    runtime = HarnessProcessInfo.model_validate({"hostname": "sandbox", "pid": 123})
+    assert runtime.hostname == "sandbox" and runtime.pid == 123
+    assert runtime.python is None
+    with pytest.raises(ValueError, match="cleanup was not confirmed"):
+        parse_cleanup_receipt(runtime.model_dump())
+    with pytest.raises(ValidationError):
+        HarnessProcessInfo.model_validate(cleanup)
+
+
+@pytest.mark.parametrize("invalid", [{"pid": "123"}, {"hostname": 123}, {"python": 123}, {"return_code": 0}])
+def test_runtime_info_keeps_strict_validation(invalid):
+    with pytest.raises(ValidationError):
+        HarnessProcessInfo.model_validate({"hostname": "sandbox", "pid": 123, **invalid})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        {},
+        {"hostname": "sandbox", "pid": "123"},
+        {"hostname": "sandbox", "pid": 123, "python": {"secret": "do not log"}},
+    ],
+)
+def test_malformed_runtime_info_is_optional_and_logs_without_payload(payload, caplog):
+    assert parse_runtime_info(payload) is None
+    assert "runtime metadata" in caplog.text
+    assert "do not log" not in caplog.text
+
+
+def test_hermes_runtime_uses_the_same_schema():
+    payload = {"hostname": "sandbox", "pid": 123, "python": "/opt/hermes/bin/python"}
+    assert HarnessProcessInfo.model_validate(payload).model_dump() == payload
+    assert parse_runtime_info(payload).model_dump() == payload
+    for field in ("hostname", "pid"):
+        with pytest.raises(ValidationError):
+            HarnessProcessInfo.model_validate({key: value for key, value in payload.items() if key != field})
+
+
+@pytest.mark.parametrize("runtime", [None, {}, {"hostname": "sandbox", "pid": "123"}])
+async def test_invalid_runtime_preserves_response_and_cleanup(agent, state, runtime):
+    state.upload_json = AsyncMock()
+    mock_json_download(
+        state.session.sandbox,
+        side_effect=[
+            {"cleanup_confirmed": True, "error": None},
+            {
+                "result": {
+                    "completed": True,
+                    "messages": [{"role": "user", "content": "task"}, {"role": "assistant", "content": "done"}],
+                },
+                "observations": {"invocations": [{"invocation_id": "root", "model_response_ids": ["completion"]}]},
+                "runtime": runtime,
+            },
+        ],
+    )
+    result = await agent._run_sandbox_episode(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+    )
+    assert result.response.status == "completed"
+    assert result.response.output[-1].content[0].text == "done"
+    assert result.response.metadata["harness_execution"] == "sandbox"
+    assert not {"harness_hostname", "harness_pid", "harness_python"}.intersection(result.response.metadata)
+    assert result.observations.records[0].model_calls[0].response_id == "completion"
+    assert [gap.code for gap in result.observations.gaps] == ["runtime_info_unavailable"]
+    assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
+    close = await agent._close_agent_session_state(state)
+    assert close.agent_observations == result.observations
+    state.session.sandbox.disconnect.assert_awaited_once()
+    state.session.sandbox.stop.assert_not_awaited()
+
+
+async def test_close_preserves_runtime_gap_after_runner_error(agent, state):
+    state.upload_json = AsyncMock()
+    mock_json_download(
+        state.session.sandbox,
+        side_effect=[
+            {"cleanup_confirmed": True, "error": None},
+            {
+                "error": "runner failed",
+                "observations": {"invocations": [{"invocation_id": "root", "model_response_ids": ["completion"]}]},
+                "runtime": {"hostname": "sandbox", "pid": "invalid"},
+            },
+        ],
+    )
+    with pytest.raises(RuntimeError, match="Hermes sandbox runner failed: runner failed"):
+        await agent._run_sandbox_episode(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+        )
+    close = await agent._close_agent_session_state(state)
+    assert close.agent_observations.records[0].model_calls[0].response_id == "completion"
+    assert [gap.code for gap in close.agent_observations.gaps] == ["runtime_info_unavailable"]
+    state.session.sandbox.disconnect.assert_awaited_once()
+
+
+async def test_invalid_cleanup_diagnostics_do_not_block_close(agent, state):
+    state.session.launch_started = True
+    mock_json_download(
+        state.session.sandbox,
+        return_value={"cleanup_confirmed": True, "error": None, "timed_out": False, "return_code": "0"},
+    )
+    await agent._close_agent_session_state(state)
+    assert state.session.cleanup == {
+        "cleanup_confirmed": True,
+        "error": None,
+        "timed_out": False,
+        "return_code": None,
+    }
+    state.session.sandbox.disconnect.assert_awaited_once()
+
+
 @pytest.mark.parametrize("receipt", [{}, {"cleanup_confirmed": False}, {"cleanup_confirmed": "true"}])
 async def test_runner_exit_without_cleanup_receipt_blocks_close(agent, state, receipt):
-    state.runner_cleanup = RunnerCleanup.UNCONFIRMED
-    agent._download_json = AsyncMock(return_value=receipt)
+    state.session.launch_started = True
+    download_json = mock_json_download(state.session.sandbox, return_value=receipt)
     with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
         await agent._close_agent_session_state(state)
-    assert state.runner_cleanup is RunnerCleanup.UNCONFIRMED
-    state.sandbox.disconnect.assert_not_awaited()
-    agent._download_json.return_value = {"cleanup_confirmed": True}
+    assert state.session.launch_started and state.session.cleanup is None and not state.session.sandbox_stopped
+    state.session.sandbox.disconnect.assert_not_awaited()
+    download_json.return_value = {"cleanup_confirmed": True, "error": None}
     await agent._close_agent_session_state(state)
-    assert state.runner_cleanup is RunnerCleanup.CONFIRMED
-    state.sandbox.disconnect.assert_awaited_once()
+    assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
+    state.session.sandbox.disconnect.assert_awaited_once()
 
 
 @pytest.mark.parametrize("overrides", [{}, {"temperature": 0.0}])
-async def test_native_prompt_and_limits_reach_runner(agent, state, overrides, tmp_path):
-    state.session_dir = str(tmp_path)
+async def test_session_prompt_and_limits_reach_runner(agent, state, overrides, tmp_path, monkeypatch):
+    state.session.session_dir = str(tmp_path)
+    monkeypatch.setattr(hermes_sandbox, "_SANDBOX_PYTHON", sys.executable)
+    state.session.sandbox.upload.side_effect = shutil.copyfile
     agent.server_client.global_config_dict = {
         "model": {"responses_api_models": {"vllm_model": {"chat_template_kwargs": {"enable_thinking": False}}}}
     }
     agent.config.system_prompt = "Configured instruction"
-    agent._upload_json = AsyncMock()
-    agent._download_json = AsyncMock(
+    state.upload_json = AsyncMock()
+    mock_json_download(
+        state.session.sandbox,
         side_effect=[
-            {"cleanup_confirmed": True},
+            {"cleanup_confirmed": True, "error": None},
             {
                 "result": {"completed": True, "messages": [{"role": "assistant", "content": "done"}]},
-                "runtime": {"pid": 123},
+                "runtime": {"hostname": "sandbox", "pid": 123},
             },
-        ]
+        ],
     )
     body = NeMoGymResponseCreateParamsNonStreaming(
         input="Fix the bug", instructions="Request instruction", **overrides
     )
     await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
-    launch_command = state.sandbox.exec.await_args_list[0].args[0]
+    launch_command = state.session.sandbox.exec.await_args_list[0].args[0]
     launch_args = shlex.split(launch_command)
     assert any(arg.endswith("/process_supervisor.py") for arg in launch_args)
     assert float(launch_args[launch_args.index("--timeout") + 1]) == agent.config.sandbox_runner_timeout_seconds
     cleanup_timeout = float(launch_args[launch_args.index("--cleanup-timeout") + 1])
     assert cleanup_timeout == agent.config.session_close_timeout_seconds / 3
-    assert state.sandbox.exec.await_args_list[0].kwargs["timeout_s"] > (
+    assert state.session.sandbox.exec.await_args_list[0].kwargs["timeout_s"] > (
         agent.config.sandbox_runner_timeout_seconds + 3 * cleanup_timeout
     )
     # Execute the real launch prefix: cleanup must receive the shell's PID, not a literal "$".
@@ -691,8 +916,9 @@ async def test_native_prompt_and_limits_reach_runner(agent, state, overrides, tm
     assert separator
     process = await asyncio.create_subprocess_exec("sh", "-c", launch_prefix)
     assert await process.wait() == 0
-    assert int((tmp_path / "runner.pid").read_text()) == process.pid
-    payload = agent._upload_json.await_args.args[2]
+    assert int((tmp_path / "supervisor.pid").read_text()) == process.pid
+    payload = state.upload_json.await_args.args[1]
+    assert payload["stop_request_path"] == state.session.stop_request_path
     assert payload["user_message"] == "Fix the bug"
     assert payload["history"] == []
     assert payload["system_message"] == "Configured instruction\n\nRequest instruction"
@@ -704,19 +930,20 @@ async def test_native_prompt_and_limits_reach_runner(agent, state, overrides, tm
 @pytest.mark.parametrize("output_available", [True, False])
 @pytest.mark.parametrize("hermes_error", [None, "Model generated invalid tool call"])
 async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, output_available, hermes_error):
-    agent._upload_json = AsyncMock()
+    state.upload_json = AsyncMock()
+    state.session.read_output_log = AsyncMock(return_value="runner stderr")
     events = []
 
     async def execute(command, **kwargs):
         events.append("exec")
         return SimpleNamespace(stdout="runner stderr", stderr="", return_code=0, error_type=None)
 
-    state.sandbox.exec.side_effect = execute
+    state.session.sandbox.exec.side_effect = execute
 
     async def download(sandbox, path):
         if path.endswith("/cleanup.json"):
             events.append("cleanup")
-            return {"cleanup_confirmed": True}
+            return {"cleanup_confirmed": True, "error": None}
         assert path.endswith("/output.json")
         events.append("output")
         if not output_available:
@@ -739,10 +966,10 @@ async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, out
                     }
                 ]
             },
-            "runtime": {"pid": 123},
+            "runtime": {"hostname": "sandbox", "pid": 123},
         }
 
-    agent._download_json = AsyncMock(side_effect=download)
+    mock_json_download(state.session.sandbox, side_effect=download)
     activation = agent._run_sandbox_episode(
         body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
     )
@@ -756,10 +983,10 @@ async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, out
         with pytest.raises(RuntimeError, match="runner exited without output: runner stderr"):
             await activation
     assert events[:3] == ["exec", "cleanup", "output"]
-    assert state.runner_cleanup is RunnerCleanup.CONFIRMED
+    assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
     agent.server_client.post.assert_not_called()
-    payload = agent._upload_json.await_args.args[2]
-    assert payload["model_base_url"] == "http://model:8000/ng-rollout/native-a1/v1"
+    payload = state.upload_json.await_args.args[1]
+    assert payload["model_base_url"] == "http://model:8000/ng-rollout/episode-a1/v1"
 
 
 @pytest.mark.parametrize(
@@ -840,10 +1067,16 @@ async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypat
     user_message, system_message, history = runner.run_conversation.call_args.args
 
     agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
-    agent._upload_json = AsyncMock()
-    agent._download_json = AsyncMock(side_effect=[{"cleanup_confirmed": True}, {"result": result, "runtime": {}}])
+    state.upload_json = AsyncMock()
+    mock_json_download(
+        state.session.sandbox,
+        side_effect=[
+            {"cleanup_confirmed": True, "error": None},
+            {"result": result, "runtime": {"hostname": "sandbox", "pid": 123}},
+        ],
+    )
     await agent.responses(request(state), body)
-    payload = agent._upload_json.await_args.args[2]
+    payload = state.upload_json.await_args.args[1]
     assert payload["user_message"] == user_message == "Follow-up"
     assert (
         payload["history"]
@@ -912,7 +1145,7 @@ async def test_seed_binds_full_payload_and_is_serialized(agent, state):
     result = await agent.close_agent_session(SimpleNamespace(session={}), close)
     assert await agent.close_agent_session(SimpleNamespace(session={}), close) == result
     assert all(record.state is None for record in agent._session_records.values())
-    state.sandbox.disconnect.assert_awaited_once()
+    state.session.sandbox.disconnect.assert_awaited_once()
 
 
 @pytest.mark.parametrize("marker", [None, "", 0, [], {}])
@@ -943,7 +1176,7 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
         body.sandbox_access = None
         agent.config.sandbox_provider = "runtime"
         agent.config.sandbox_config = {"workdir": "/fallback"}
-    sandbox = state.sandbox
+    sandbox = state.session.sandbox
     factory = MagicMock(return_value=sandbox)
     factory.connect = AsyncMock(return_value=sandbox)
     monkeypatch.setattr(module, "AsyncSandbox", factory)
@@ -951,7 +1184,7 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
     monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
     monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
     monkeypatch.setattr(module.shutil, "which", lambda name: "/test/uv")
-    ok = SimpleNamespace(return_code=0, stdout="", stderr="")
+    ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
     failed = SimpleNamespace(return_code=1, stdout="", stderr="installer failed")
     # Prepare paths, detect a missing runtime, fail installation, then remove session files.
     sandbox.exec.side_effect = [ok, failed, failed, ok]
