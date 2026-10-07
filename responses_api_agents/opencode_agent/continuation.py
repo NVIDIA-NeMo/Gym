@@ -3,6 +3,7 @@
 """Project the native event stream without applying benchmark visibility policy."""
 
 import json
+import re
 
 from nemo_gym.interactive_agent_types import AgentActivationEvent
 
@@ -60,3 +61,49 @@ def visible_activation_log(stdout: str) -> str:
             continue
         lines.append(line)
     return "\n".join(lines)
+
+
+def native_failure_detail(*, message, classification, session_id, finish_reason, cleanup, stdout):
+    """Keep bounded native evidence in an HTTP error without transport metadata."""
+    sensitive = re.compile(r"authorization|api[_-]?key|(?:request|response)?headers", re.IGNORECASE)
+
+    def safe(value, depth=0):
+        if depth > 6:
+            return "[truncated]"
+        if isinstance(value, dict):
+            return {key: safe(item, depth + 1) for key, item in list(value.items())[:16] if not sensitive.search(key)}
+        if isinstance(value, list):
+            return [safe(item, depth + 1) for item in value[:8]]
+        if isinstance(value, str):
+            return "\n".join(
+                "[redacted transport metadata]" if sensitive.search(line) else line for line in value.splitlines()
+            )[:1024]
+        return value
+
+    try:
+        parsed_message = json.loads(message)
+    except (ValueError, TypeError):
+        parsed_message = message
+    message = safe(parsed_message)
+    if not isinstance(message, str):
+        message = json.dumps(message)[:1024]
+    events = []
+    for line in visible_activation_log(stdout).splitlines()[-3:]:
+        try:
+            native = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(native, dict):
+            events.append(
+                {"type": str(native.get("type", "unknown"))[:64], "preview": json.dumps(safe(native))[:1536]}
+            )
+    return {
+        "harness": "opencode",
+        "classification": classification,
+        "message": message,
+        "native_session_id": session_id[:256] if session_id else None,
+        "finish_reason": str(finish_reason)[:128] if finish_reason is not None else None,
+        "return_code": cleanup.get("return_code") if cleanup else None,
+        "timed_out": cleanup.get("timed_out") if cleanup else None,
+        "native_event_tail": events,
+    }

@@ -64,6 +64,9 @@ Provider-call counts remain a separate captured-model measurement.
 Only native `length` termination is a model budget limit. A process that exits after an
 unfinished tool turn or content-filter result fails the activation, preserving its evidence
 for diagnosis and cleanup; a zero process exit code alone does not make it a healthy turn.
+Failed activations return a bounded structured HTTP 502 detail with the native session,
+finish reason, process outcome, and visible event previews. Transport metadata and dedicated
+reasoning events are omitted; close still retains cumulative failed invocation/tool evidence.
 
 Native sessions use ordinary sandbox `exec`, not a PTY. The supervisor enforces the
 runner deadline and confirms descendant cleanup before verification; uncertain

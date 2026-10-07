@@ -734,7 +734,7 @@ def test_partial_output_survives_model_failure_and_timeout(setup, kind, tmp_path
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         if kind == "error":
             assert result.status_code == 502
-            assert "model rejected request" in result.json()["detail"]
+            assert "model rejected request" in result.json()["detail"]["message"]
         else:
             assert result.json()["status"] == "incomplete"
             assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
@@ -774,7 +774,7 @@ def test_completed_model_turn_is_not_always_terminal(setup, tmp_path, finish, ex
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         if expected == "failed":
             assert result.status_code == 502
-            assert "terminal assistant result" in result.json()["detail"]
+            assert "terminal assistant result" in result.json()["detail"]["message"]
         else:
             assert result.status_code == 200
             assert result.json()["status"] == expected

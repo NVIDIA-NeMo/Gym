@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.interactive_agent_types import AgentContinuationRequirements
-from responses_api_agents.opencode_agent.continuation import parse_activation_events
+from responses_api_agents.opencode_agent.continuation import native_failure_detail, parse_activation_events
 from responses_api_agents.opencode_agent.sandbox_runner import snapshot
 from responses_api_agents.opencode_agent.tests.test_native_sessions import seed  # noqa: F401
 from responses_api_agents.opencode_agent.tests.test_native_sessions import setup as setup
@@ -223,9 +223,15 @@ def test_native_terminal_reason_distinguishes_failure_from_model_budget(setup, t
             assert response.json()["stop_reason"] == "model_budget_exhausted"
         else:
             assert response.status_code == 502, response.text
-            assert "terminal assistant result" in response.json()["detail"]
+            detail = response.json()["detail"]
+            assert "terminal assistant result" in detail["message"]
+            assert detail["classification"] == "native_nonterminal_exit"
+            assert detail["native_session_id"] == "native-session"
+            assert detail["finish_reason"] == finish
+            assert detail["return_code"] == 0
+            assert detail["native_event_tail"][-1]["type"] == "step_finish"
             if finish == "tool-calls":
-                assert denial in response.json()["detail"]
+                assert denial in detail["message"]
             assert client.post("/v1/agent_sessions/activate", json=body).status_code == 502
             assert sandbox.launch.await_count == 1
         close = client.post(
@@ -419,6 +425,38 @@ def test_event_projection_preserves_failures_tool_details_and_reasoning():
     assert events[1].arguments == {"command": "false"}
     assert events[2].metadata["error"]["name"] == "APIError"
     assert events[3].text == "visible"
+
+
+def test_failed_native_diagnostics_are_bounded_and_omit_private_transport_fields():
+    stdout = "\n".join(
+        json.dumps(event)
+        for event in (
+            {"type": "reasoning", "part": {"text": "private reasoning must not appear"}},
+            {"type": "tool_use", "part": {"tool": "read", "state": {"error": "denied", "output": "x" * 50000}}},
+            {
+                "type": "error",
+                "error": {
+                    "message": "provider rejected request",
+                    "requestHeaders": {"Authorization": "private"},
+                    "apiKey": "private",
+                },
+            },
+        )
+    )
+    result = native_failure_detail(
+        message=json.dumps({"message": "provider rejected request", "responseHeaders": {"secret": "private"}}),
+        classification="native_model_error",
+        session_id="session",
+        finish_reason="tool-calls",
+        cleanup={"return_code": 0, "timed_out": False},
+        stdout=stdout,
+    )
+    encoded = json.dumps(result)
+    assert "provider rejected request" in encoded
+    assert "private" not in encoded
+    assert "Headers" not in encoded
+    assert "apiKey" not in encoded
+    assert len(encoded) < 10000
 
 
 def test_prefetched_binary_requires_matching_digest_before_connect(setup, tmp_path):

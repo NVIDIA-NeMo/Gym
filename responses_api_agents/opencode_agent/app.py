@@ -90,7 +90,11 @@ from responses_api_agents.opencode_agent.artifacts import (
     parse_opencode_export,
     parse_opencode_session,
 )
-from responses_api_agents.opencode_agent.continuation import parse_activation_events, visible_activation_log
+from responses_api_agents.opencode_agent.continuation import (
+    native_failure_detail,
+    parse_activation_events,
+    visible_activation_log,
+)
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
@@ -1437,7 +1441,27 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 gap.model_copy(deep=True) for gap in state.observations.gaps[response_gap_start:]
             )
         if error:
-            raise HTTPException(502, error)
+            finish = assistants[-1].get("finish") if assistants else None
+            classification = (
+                "native_model_error"
+                if any(info.get("error") for info in assistants)
+                else "native_process_error"
+                if result and (result["error"] or result["return_code"] not in (0, None))
+                else "native_nonterminal_exit"
+                if assistants and finish not in {"stop", "length"}
+                else "native_artifact_error"
+            )
+            raise HTTPException(
+                502,
+                native_failure_detail(
+                    message=error,
+                    classification=classification,
+                    session_id=state.native_session_id,
+                    finish_reason=finish,
+                    cleanup=result,
+                    stdout=state.activation_log,
+                ),
+            )
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
