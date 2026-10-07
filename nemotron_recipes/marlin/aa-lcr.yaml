@@ -54,10 +54,3 @@ aalcr_v1_1_judge_model:
       openai_base_url: ${judge_base_url}
       openai_api_key: ${judge_api_key}
       openai_model: ${judge_model_name}
-      # Responses API form. The published run sent the benchmark config's Chat Completions
-      # spelling (reasoning_effort), which its endpoint applied as effort medium; OpenAI's
-      # Responses API rejects that spelling.
-      extra_body:
-        _delete_key: reasoning_effort
-        reasoning:
-          effort: medium

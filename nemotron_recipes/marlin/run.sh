@@ -22,7 +22,7 @@
 #
 #   nemotron_recipes/marlin/run.sh gpqa                          # full benchmark
 #   LIMIT=3 nemotron_recipes/marlin/run.sh gpqa                  # quick smoke
-#   nemotron_recipes/marlin/run.sh apex-shortlist                # any <recipe>.yaml here
+#   nemotron_recipes/marlin/run.sh hle-vision                    # any <recipe>.yaml here
 #   OUT=<dir> PARALLEL=<n> nemotron_recipes/marlin/run.sh gpqa   # output dir, concurrency
 #   RESUME=1 nemotron_recipes/marlin/run.sh gpqa                 # continue an interrupted run
 #

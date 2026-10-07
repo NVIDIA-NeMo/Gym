@@ -56,3 +56,13 @@ scicode_benchmark_resources_server:
     scicode:
       # Each sub-step's code may run for up to 300 s against its test cases (default 30 s).
       timeout_secs: 300
+
+# SciCode's agent sends only the prompt, so temperature and top_p from common.yaml never reach
+# the server. Gym's model server adds these to every request instead; without them the server's
+# own defaults apply.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      extra_body:
+        temperature: 1.0
+        top_p: 0.95

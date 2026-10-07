@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# OSWorld-Verified (computer use): 361 desktop tasks x 3 repeats. Each task runs in its own
+# Ubuntu VM; the model sees screenshots and acts with mouse/keyboard commands for up to 100
+# steps, then OSWorld's own checker scores the result from 0 to 1 (partial credit kept).
+# Reported: raw_reward_rate, 100 x the mean score.
+#
+#   nemotron_recipes/marlin/run.sh osworld
+#
+# Needs Linux x86_64 with Docker, read/write /dev/kvm and about 16 GB RAM per VM running at
+# once (4 by default). run.sh first sources osworld.setup.sh, which downloads the VM disk
+# once (Gym's own script: ~11 GB download, 24.5 GB on disk, checksum verified).
+
+# Gym commit the published number was produced with; run.sh pins to it.
+gym_commit: 7f724e17332b6ebcfa9d4494546bdc0ea149fc90
+# Gym's OSWorld agent with the Nemotron Nano Omni computer-use runner, which the published
+# run used: the last 3 screenshots per request, at most 100 steps, temperature 0.6, top_p 0.95.
+benchmark_config: benchmarks/osworld/configs/osworld_agent_nano_omni.yaml
+
+agent_name: osworld_nano_omni_agent
+# The task file is already in place, so prepare only checks it.
+use_cached_prepared_benchmarks: true
+
+responses_create_params:
+  temperature: 0.6
+  top_p: 0.95
+  max_output_tokens: 100000
+
+# The Nano Omni agent inherits this base agent, which has no datasets key at this commit; the
+# key must exist here before the agent below can set its own.
+osworld_simple_agent:
+  responses_api_agents:
+    osworld_agent:
+      datasets: []
+
+osworld_nano_omni_agent:
+  responses_api_agents:
+    osworld_agent:
+      datasets:
+      - name: osworld
+        type: benchmark
+        jsonl_fpath: benchmarks/osworld/data/test_nogdrive.jsonl
+        prepare_script: benchmarks/osworld/prepare.py
+        prompt_config: null
+        num_repeats: 3
+        license: Apache 2.0
+      # VMs run in Docker on this machine (vm_path comes from osworld.setup.sh).
+      sandbox_provider: osworld_sandbox
+      # Task files are downloaded once into this cache when the servers start.
+      setup_cache_dir: ${oc.env:OSWORLD_SETUP_CACHE}
+      asset_input_jsonl: ${oc.env:OSWORLD_TASKS}
+      # VMs running at once.
+      concurrency: ${oc.select:num_samples_in_parallel,4}
+      # Keep OSWorld's partial scores (Gym's default rounds them to 0 or 1).
+      reward_mode: raw
+      # The published run's requests reached the model with max_tokens 100000 (its endpoint
+      # adapter replaced the profile's 4096).
+      max_tokens: 100000

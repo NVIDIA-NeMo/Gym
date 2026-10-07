@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Humanity's Last Exam with images (no tools): all 2500 questions, text and image, one sample
+# each, graded by a gpt-5.6-luna judge. Needs a policy endpoint that accepts image inputs, HF_TOKEN
+# (gated dataset) and the judge endpoint in env.yaml, as for hle.yaml.
+#
+#   nemotron_recipes/marlin/run.sh hle-vision
+#
+# The dataset is not pinned: Gym loads the latest cais/hle test split (2500 questions when the
+# published number was produced).
+
+gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
+benchmark_config:
+  - benchmarks/hle/config_vision.yaml
+  - resources_servers/labbench2_vlm/configs/judge_model_openai.yaml
+
+# Judge: same model and settings as hle.yaml.
+judge_model_name: gpt-5.6-luna
+judge_model:
+  responses_api_models:
+    openai_model:
+      extra_body:
+        reasoning_effort: medium
+hle_vision_equivalence_llm_judge_resources_server:
+  resources_servers:
+    equivalence_llm_judge:
+      judge_model_server:
+        name: judge_model
+
+# The published run sent seed 0 with every request to the model under test.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      extra_body:
+        seed: 0
