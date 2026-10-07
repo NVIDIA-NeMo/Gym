@@ -105,7 +105,7 @@ export SUPPORT_MODEL_API_KEY="<your-api-key>"
 Ask Gym to run the validation dataset's declared preparation script:
 
 ```bash
-gym eval prepare --environment nemo_user_sim
+gym eval prepare --config environments/nemo_user_sim/config.yaml
 ```
 
 The script runs the pinned NeMo User Sim materializer in an isolated dependency environment and writes
