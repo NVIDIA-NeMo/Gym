@@ -11,7 +11,7 @@ environment and asks its canonical sampler to materialize one fully resolved
 input for every registered probe:
 
 ```bash
-gym eval prepare --environment nemo_user_sim
+gym eval prepare --config environments/nemo_user_sim/config.yaml
 ```
 
 The resulting `environments/nemo_user_sim/data/nemo_user_sim.jsonl` contains 14 rows. Each
