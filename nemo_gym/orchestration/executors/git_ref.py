@@ -38,13 +38,12 @@ def _git(*args: str, cwd: str | None = None) -> subprocess.CompletedProcess:
 
 
 def validate_gym_install_ref(config: SubmitConfig) -> None:
-    """Fail the submit early when `driver.gym_install.ref` does not exist in `repo`.
+    """Fail the submit early when `driver.gym_install.ref` cannot be found in `repo`.
 
     A branch or tag is looked up with one `git ls-remote`, which transfers only ref names. A full
-    commit hash that is not a branch/tag tip is probed with a depth-1, blob-less fetch. When the
-    remote cannot be checked (unreachable, private to this machine, git missing, abbreviated
-    hash) this warns and lets the submit continue: the cluster may see what this machine cannot,
-    and a missing ref still fails there.
+    commit hash that is not a branch/tag tip is probed with a depth-1, blob-less fetch. Any git
+    failure (unreachable or nonexistent repo, auth, timeout, git missing) also fails the submit;
+    set NEMO_GYM_SUBMIT_NO_REF_CHECK=true to skip the check.
     """
     install = config.driver.gym_install
     if install is None or os.environ.get(NEMO_GYM_SUBMIT_NO_REF_CHECK_ENV_VAR_NAME, "").lower() == "true":
@@ -53,43 +52,32 @@ def validate_gym_install_ref(config: SubmitConfig) -> None:
     try:
         found = _ref_exists(repo, ref)
     except (OSError, subprocess.SubprocessError) as e:
-        logger.warning("Could not verify that ref %r exists in %s (%s); continuing.", ref, repo, e)
-        return
-    if found is False:
+        raise ValueError(f"Could not verify driver.gym_install.ref {ref!r} in {repo}: {e}") from e
+    if not found:
         raise ValueError(
             f"driver.gym_install.ref {ref!r} was not found in {repo}. "
             "Give an existing branch, tag, or full commit hash."
         )
 
 
-def _ref_exists(repo: str, ref: str) -> bool | None:
-    """True/False when determined, None when the remote cannot answer."""
+def _ref_exists(repo: str, ref: str) -> bool:
     listing = _git("ls-remote", "--heads", "--tags", repo)
     if listing.returncode != 0:
-        logger.warning("Could not list %s to verify ref %r: %s", repo, ref, listing.stderr.strip())
-        return None
+        raise ValueError(f"Could not list {repo} to verify driver.gym_install.ref {ref!r}: {listing.stderr.strip()}")
 
-    lines = [line.split("\t", 1) for line in listing.stdout.splitlines() if "\t" in line]
     wanted = {f"refs/heads/{ref}", f"refs/tags/{ref}"}
     is_hex = _HEX.fullmatch(ref.lower()) is not None
-    for sha, name in lines:
-        if name in wanted or name.removesuffix("^{}") in wanted:
-            return True
-        if is_hex and sha.startswith(ref.lower()):
+    for line in listing.stdout.splitlines():
+        sha, _, name = line.partition("\t")
+        if name.removesuffix("^{}") in wanted or (is_hex and sha.startswith(ref.lower())):
             return True
 
     if not _FULL_SHA.fullmatch(ref.lower()):
-        if is_hex:
-            logger.warning("Cannot verify abbreviated hash %r in %s; use the full hash to have it checked.", ref, repo)
-            return None
         return False
 
     with tempfile.TemporaryDirectory(prefix="gym-ref-check-") as tmp:
         _git("init", "-q", cwd=tmp)
         fetched = _git("fetch", "-q", "--depth=1", "--filter=blob:none", repo, ref.lower(), cwd=tmp)
-    if fetched.returncode == 0:
-        return True
-    if "not our ref" in fetched.stderr or "couldn't find remote ref" in fetched.stderr:
-        return False
-    logger.warning("Could not verify commit %s in %s: %s", ref, repo, fetched.stderr.strip())
-    return None
+    if fetched.returncode != 0:
+        logger.debug("Fetching %s from %s failed: %s", ref, repo, fetched.stderr.strip())
+    return fetched.returncode == 0

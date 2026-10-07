@@ -66,8 +66,9 @@ def test_missing_full_hash_fails(repo):
         validate_gym_install_ref(_config(repo.url, "0" * 40))
 
 
-def test_unreachable_repo_only_warns(tmp_path):
-    validate_gym_install_ref(_config(str(tmp_path / "missing"), "main"))
+def test_unreachable_repo_fails(tmp_path):
+    with pytest.raises(ValueError, match="Could not list"):
+        validate_gym_install_ref(_config(str(tmp_path / "missing"), "main"))
 
 
 def test_no_gym_install_is_a_noop():
@@ -89,8 +90,9 @@ def test_abbreviated_hash_down_to_four_chars_matches_a_tip(repo):
     validate_gym_install_ref(_config(repo.url, repo.head[:4]))
 
 
-def test_unresolvable_abbreviated_hash_only_warns(repo):
-    validate_gym_install_ref(_config(repo.url, repo.first[:4]))
+def test_abbreviated_hash_that_is_not_a_tip_fails(repo):
+    with pytest.raises(ValueError, match="not found"):
+        validate_gym_install_ref(_config(repo.url, repo.first[:4]))
 
 
 def test_three_char_hex_is_a_name_and_must_exist(repo):
