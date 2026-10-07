@@ -1,0 +1,67 @@
+# Resources server for the internal-v1 SWE tasks (swe_internal_v1).
+#
+# Rows are NOT prepared from a public dataset: this is an internal delivery (Python / TypeScript /
+# JavaScript / C++ repositories), distributed offline as data/swe_internal_v1_training.jsonl. See
+# the README.
+#
+# Grading runs each row's own run_script.sh on its selected test files and its parsing_script.py
+# on the output, then requires every FAIL_TO_PASS / PASS_TO_PASS id to be PASSED -- the same
+# contract the swe_agents harness grades this dataset with. See verification.py.
+swe_internal_v1_resources_server:
+  resources_servers:
+    swe_internal_v1:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      # The vendor's recorded evaluation_time is < 1 min for 95% of rows, < 10 min for all.
+      evaluation_timeout: 1800
+      is_verifying_golden_patch: false
+      apply_anti_cheating: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        # jest/vitest and pytest suites with a few cmake/C++ builds -- same sizing as swemer_v1.
+        resources:
+          cpu: 8
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: swe-internal-v1
+
+# Golden-patch validation: grade the dataset's own patch instead of an agent's. A row whose golden
+# patch does not resolve is a broken row, and scoring an agent against it measures noise.
+# Run it with resources_servers/swe_internal_v1/apply_golden_patch.py.
+swe_internal_v1_golden_patch_resources_server:
+  resources_servers:
+    swe_internal_v1:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      evaluation_timeout: 1800
+      is_verifying_golden_patch: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 8
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: swe-internal-v1-golden-patch

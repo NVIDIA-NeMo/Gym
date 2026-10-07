@@ -71,9 +71,40 @@ def _install_node_locally() -> Path:
     return _LOCAL_PREFIX / "bin"
 
 
+def installed_opencode_version() -> str | None:
+    """Return the ``opencode --version`` output, or ``None`` when it cannot be determined."""
+    exe = shutil.which("opencode")
+    if not exe:
+        return None
+    try:
+        out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=60)  # noqa: S603
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    lines = (out.stdout.strip() or out.stderr.strip()).splitlines()
+    return lines[-1].strip() if lines else None
+
+
 def ensure_opencode(version: str | None = None) -> None:
-    """Ensure ``opencode`` is on PATH, installing it via npm if necessary."""
+    """Ensure ``opencode`` is on PATH, installing it via npm if necessary.
+
+    An opencode already on PATH is kept (container images bake one): agent
+    behavior is version-sensitive and the pin governs fresh installs only, so
+    a mismatch with the requested ``version`` is warned about instead of
+    silently running a different build.
+    """
     if shutil.which("opencode"):
+        found = installed_opencode_version()
+        if version and found and found != version:
+            LOG.warning(
+                "opencode %s is on PATH but %s is pinned (config opencode_version) — "
+                "the pin only applies to fresh installs; rebuild the image or "
+                "`npm install -g opencode-ai@%s` to match",
+                found,
+                version,
+                version,
+            )
         return
 
     # Check ~/.local/bin

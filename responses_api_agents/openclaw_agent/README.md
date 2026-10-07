@@ -60,6 +60,30 @@ provider configuration is unchanged.
 - `extra_args`: extra flags appended to `openclaw agent`
 - `env`: extra env vars for the subprocess (e.g. provider API keys)
 - `openclaw_config`: deep-merged into the generated `openclaw.json`
-- `openclaw_version`: npm version to pin on install (null means latest)
+- `openclaw_version`: exact version to pin on install (npm ranges such as `^2026.9.0`
+  are rejected); overridden by the `OPENCLAW_VERSION` env var, and falls back to
+  `setup_openclaw.DEFAULT_OPENCLAW_VERSION`. An already-installed `openclaw` is only
+  reused when `openclaw --version` reports exactly the resolved version; anything else
+  is reinstalled, so changing the override or the config pin takes effect on the next
+  startup. After an install, the launcher selected on `PATH` must report the requested
+  version, or startup fails.
+  Note: releases ≥ 2026.9.0 store session history in SQLite instead of JSONL, which
+  the agent's transcript reader does not support yet — tool results and interrupted
+  sessions are not captured, so stick to 2026.6.11 until that lands.
+- `node_bin_dir`: directory put before `PATH` when running `openclaw`. Setup uses the
+  same order for its version probes and for `npm`, so a bundled runtime is checked
+  as the rollout will use it.
+- `OPENCLAW_NODE_VERSION` (env only): Node.js version fetched when `npm` is absent
+  (default `24.21.0`, the newest release of the Node 24 LTS line OpenClaw supports).
+  The build is picked for the host platform — Linux, macOS and Windows on x64 and
+  arm64. Other platforms raise, since nodejs.org publishes no build for them;
+  install Node.js yourself and put `npm` on `PATH`.
+
+Runtime compatibility is validated before reuse: a system `npm` is only used when
+its `node` satisfies the `engines.node` range of the requested OpenClaw release
+(`setup_openclaw.OPENCLAW_ENGINES_NODE` for pinned releases, `npm view` for
+others), and a cached local toolchain is only
+reused when it reports exactly the requested Node version. Incompatible runtimes
+are replaced, not bypassed silently.
 
 See `configs/openclaw_agent.yaml`.

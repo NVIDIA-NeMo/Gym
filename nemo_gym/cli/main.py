@@ -446,6 +446,10 @@ def _asset_config_path(flag: str, value: str) -> str:
                 for child in (root / parent).iterdir()
                 if child.is_dir()
             ]
+            if server_name in candidates:
+                # The folder exists but has no YAML configs, so the problem is the missing config,
+                # not the name. Suggesting a different server here would point the user elsewhere.
+                candidates = []
 
         hint = did_you_mean(typo, candidates)
 
@@ -575,7 +579,7 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     from rich.markup import escape
 
     from nemo_gym.config_types import ConfigError
-    from nemo_gym.orchestration.api import SubmitConfig
+    from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
     from nemo_gym.orchestration.submit import submit
 
     _reject_scratch_namespace_additions(overrides)
@@ -612,10 +616,11 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
         raise ConfigError(f"Submit config '{config_path}' is invalid: {'. '.join(parts)}.") from e
 
     if args.resolve_only:
+        # Same form persist() writes as the run's record, so the two diff and hash alike.
         if args.json:
-            print(config.model_dump_json(indent=2))
+            print(config.model_dump_json(indent=2, context={HOST_ENV_REFS: True}))
         else:
-            print(yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False))
+            print(yaml.safe_dump(config.model_dump(mode="json", context={HOST_ENV_REFS: True}), sort_keys=False))
         return
 
     record = submit(config, dry_run=args.dry_run)
@@ -1024,6 +1029,11 @@ COMMANDS = {
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
             _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),
+            _bool_flag(
+                "interleave-repeats",
+                "interleave_repeats",
+                "Dispatch repeats round by round rather than each task's back to back.",
+            ),
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
             _value_flag("split", "split", "Dataset split to use (train, validation, or benchmark)."),
@@ -1401,11 +1411,8 @@ def main() -> None:
     if unknown_flags:
         error_parser = getattr(args, "_parser", parser)
         known_options = [opt for action in error_parser._actions for opt in action.option_strings]
-        # A flag rejected for its position (not for being unknown) is still in known_options, so exclude it
-        # from its own candidate set — otherwise it matches itself and is suggested as its own correction.
         hints = "".join(
-            did_you_mean(name, [opt for opt in known_options if opt != name])
-            for name in (flag.split("=", 1)[0] for flag in unknown_flags)
+            did_you_mean(name, known_options) for name in (flag.split("=", 1)[0] for flag in unknown_flags)
         )
         error_parser.error(f"unrecognized arguments: {' '.join(unknown_flags)}{hints}")
 

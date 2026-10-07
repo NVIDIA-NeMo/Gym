@@ -70,8 +70,10 @@ jobs:
           # The telemetry extra installs nemo-lens so the lens-gated tests under
           # tests/unit_tests/telemetry actually run; without it they skip and the
           # telemetry modules count as uncovered, failing the coverage gate below.
-          # Mirrors scripts/ci/core_unit_tests.sh, which syncs the same extra.
-          uv sync --extra dev --extra sandbox --extra openshell --extra telemetry
+          # mlflow/wandb are optional extras; the core suite covers both their
+          # installed- and missing-dependency paths, so they're synced here too.
+          # Mirrors scripts/ci/core_unit_tests.sh, which syncs the same extras.
+          uv sync --extra dev --extra sandbox --extra openshell --extra telemetry --extra mlflow --extra wandb
 
       - name: Test
         run: |

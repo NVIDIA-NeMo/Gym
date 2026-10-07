@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from nemo_gym import __version__
-from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
+from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
 from nemo_gym.orchestration.executors.otel import (
@@ -126,6 +126,9 @@ def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
     entries = [("driver", m) for m in config.driver.mounts]
     for name, service in config.services.items():
         entries += [(f"services.{name}", m) for m in service.mounts]
+        if isinstance(service, VllmPDServiceConfig):
+            for tier in ("prefill", "decode"):
+                entries += [(f"services.{name}.{tier}", m) for m in getattr(service, tier).mounts]
     srcs_by_label = [(label, mount.split(":")[0]) for label, mount in entries]
     if not srcs_by_label:
         return
@@ -150,6 +153,8 @@ class SlurmExecutor(BaseExecutor):
     run inside the container specified in their config. Health checks run as plain
     bash inside the sbatch script (no container needed — they just poll HTTP).
     """
+
+    supports_resumable = True
 
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         compute = next(iter(config.compute.values()))

@@ -4,8 +4,96 @@ description: "Rollout-evidence coverage by agent and execution path."
 position: 5
 ---
 
+# Trajectory Capability Matrix
+
 Use this reference to check which evidence an agent path provides. Start with
 [Rollout Evidence](/main/observability/rollout-evidence) for collection and artifact relationships.
+
+## Generated trajectory evidence (TE)
+
+This table runs the local harnesses against scripted model replies, tool executions,
+retries, and failures, then checks the collected rollouts. The
+[TE-1–TE-9 contracts](/main/observability/harness-conformance) cover model outcomes,
+token preservation, steps, history, tools, verification, payloads, and call joins.
+TE-2 checks that supplied usage is preserved; it does not require every provider
+metric to be available. Remote sandboxes, multimodal inputs, compaction, parallel
+execution, TE-10, and P1 are outside this suite.
+
+{/* BEGIN GENERATED TE TABLE */}
+
+Gym commit: [`939cace5af1436789ead920d0f0b3e663784ad73`](https://github.com/NVIDIA-NeMo/Gym/commit/939cace5af1436789ead920d0f0b3e663784ad73).
+Suite: `harness-p0-probes/v1`. [Generation report](../../../../assets/trajectory-capabilities/425964eadebb395fea46f594177e2373b4195530934ed44be4ead0d755892c90.json).
+
+Cells show **passing / exercised / required** scenarios. PASS requires every required scenario;
+FAIL includes missing exercise or missing evidence. **Not run** makes no capability claim.
+
+| Harness | TE-1 | TE-2 | TE-3 | TE-4 | TE-5 | TE-6 | TE-7 | TE-8 | TE-9 | P0 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `opencode` | PASS 7/7/7 | PASS 7/7/7 | FAIL 0/6/6 | PASS 7/7/7 | PASS 6/6/6 | PASS 6/6/6 | PASS 7/7/7 | PASS 7/7/7 | FAIL 0/7/7 | FAIL |
+| `pi` | PASS 7/7/7 | PASS 7/7/7 | FAIL 0/6/6 | PASS 7/7/7 | PASS 6/6/6 | PASS 6/6/6 | PASS 7/7/7 | FAIL 4/7/7 | FAIL 0/7/7 | FAIL |
+| `codex` | FAIL 6/6/7 | FAIL 6/6/7 | FAIL 0/5/6 | FAIL 6/6/7 | FAIL 0/5/6 | FAIL 5/5/6 | FAIL 6/6/7 | FAIL 0/6/7 | FAIL 0/6/7 | FAIL |
+| `hermes` | Not run | Not run | Not run | Not run | Not run | Not run | Not run | Not run | Not run | Not run |
+
+P0 requires TE-1–TE-7 and either TE-8 or TE-9 **per scenario**.
+
+### Tested dependencies
+
+- `opencode`: `1.17.11`
+- `pi`: `0.80.2`
+- `codex`: `codex-cli 0.155.0-alpha.9.2`
+
+### Unit-test gates
+
+| Suite | Passed | Skipped |
+| --- | ---: | ---: |
+| `runner` | 49 | 0 |
+| `opencode` | 82 | 0 |
+| `pi` | 34 | 0 |
+| `codex` | 46 | 0 |
+| `checker` | 77 | 0 |
+
+{/* END GENERATED TE TABLE */}
+
+### Regenerate the TE table
+
+From a Gym checkout matching the full source commit SHA, install Gym's development
+dependencies and the selected agents' Python dependencies and runtimes. Run:
+
+```bash
+python -m scripts.harness_conformance.table \
+    --commit <40-character-gym-commit-sha> \
+    --output /absolute/path/to/new-conformance-results
+```
+
+The default selects OpenCode, Pi, Codex, and Hermes. Repeat `--harness NAME` to
+select fewer; all others are explicitly marked **Not run**. Every selected harness
+runs the full scenario suite. The probes execute local shell tools in fresh working
+directories and require no model service or model credentials. See
+[`scripts/harness_conformance/README.md`](https://github.com/NVIDIA-NeMo/Gym/blob/main/scripts/harness_conformance/README.md)
+for runtime setup, scenarios, and the execution scope.
+
+Regeneration requires passing runner unit tests, each selected harness's adapter
+unit tests, and checker unit tests at that commit. Failing, empty, or entirely
+skipped suites stop regeneration. Skipped tests in otherwise passing suites are
+reported. Source changes during testing or probing, missing runtimes, and
+execution/checker errors also stop publication, preserving the existing table.
+An unmet evidence requirement produces a FAIL cell and can be published.
+
+The command replaces only the generated block above and writes a content-addressed
+JSON generation report under `fern/assets/trajectory-capabilities/`. The report
+records the Gym commit, runtime versions/source hashes, test counts and log hashes,
+scenario results, and artifact hashes. Full logs, captures, and rollouts remain in
+`--output`; keep them when reviewing a generation. Save source changes first, then
+commit the generated page and report in a subsequent commit so their source pin
+remains stable. Git and jj checkouts are supported.
+
+## Deprecated coverage table (C-table)
+
+<Warning>
+The manually maintained C-table below is deprecated. Use the generated TE table
+above for tested evidence coverage at a specific commit. The historical claims
+remain here temporarily for comparison.
+</Warning>
 
 ✅ **Full** means complete for the documented path; 🟡 **Partial** means some fields or paths are missing;
 ❌ **Unavailable** means the path does not supply that evidence. These are manually maintained coverage
@@ -14,11 +102,11 @@ claims, not guarantees for every configuration.
 <Note>
 The statuses below retain the coverage reported in [main at 88d9d453](https://github.com/NVIDIA-NeMo/Gym/blob/88d9d45385f15b1351cdd055fff396186000f84f/fern/versions/latest/pages/reference/trajectory-capabilities.mdx).
 That source does not record a full runtime-validation date or per-row test configuration.
-Contributors changing an agent should update its row with the config, execution path, and validation
-evidence in the same pull request.
+New validation results belong in the generated TE table above; these historical rows are retained
+for comparison.
 </Note>
 
-## Model Calls and History
+### Model Calls and History
 
 Capture requires `observability_enabled`, a shared `model_call_capture_dir`, and a rollout-prefixed
 Gym Model Server URL. Direct-provider routes bypass capture. Token counts depend on provider usage
@@ -63,7 +151,7 @@ fields. History may come from captured payloads or harness conversations.
 | `toolsandbox_agent` | ✅ | ✅ | ✅ |
 | `verifiers_agent` | ✅ | ✅ | ✅ |
 
-## Agent Activity
+### Agent Activity
 
 Turns require explicit semantic-turn records. Tool execution covers output, status, and timestamps;
 parallel timing requires independent tool intervals. Resource/sandbox coverage means that the
@@ -85,7 +173,7 @@ benchmark path emits standardized agent evidence, not that every resource metric
 The other agents listed above report these four dimensions as unavailable. Model HTTP capture
 alone does not establish tool execution or sandbox activity.
 
-## Path Qualifications
+### Path Qualifications
 
 | Path | Qualification |
 | --- | --- |
@@ -171,7 +259,7 @@ main decisions. Missing or reused response IDs produce gaps instead of guessed a
 reported only when no actual decision response could be represented.
 
 Observed turns enable `rollout_missing_agent_turns` and `agent_turn_hollow`. Invocation ownership enables
-`model_call_failed`, `model_call_missing_token_counts`, `model_call_zero_completion_tokens`,
+`model_call_missing_token_counts`, `model_call_zero_completion_tokens`,
 `model_call_runaway_generation`, and `trajectory_capture_mismatch` under their documented capture and payload
 requirements. See [Rollout health checks](/evaluation/rollout-health).
 
