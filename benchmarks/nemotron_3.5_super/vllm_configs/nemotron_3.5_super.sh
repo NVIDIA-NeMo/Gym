@@ -1,5 +1,6 @@
 #!/bin/bash
 
+# VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 VLLM_COMMON_ARGS=(
     --trust-remote-code
@@ -24,8 +25,8 @@ VLLM_COMMON_ARGS=(
     --skip-mm-profiling
     --data-parallel-size 1
     --api-server-count 1
-    --chat-template /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/venkats/training_actual_0603/super_n4_post/conv_wrappers/super-v24_1mix60-iter6000/evals/hf/chat_template.jinja
 )
+
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
     --max-num-batched-tokens 135680
