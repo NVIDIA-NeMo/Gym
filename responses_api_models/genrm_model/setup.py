@@ -16,6 +16,7 @@ from sys import platform
 
 import setuptools
 
+
 # Keep dependency behavior aligned with
 # responses_api_models/local_vllm_model/setup.py.
 dependencies = [

@@ -15,6 +15,7 @@ from sys import platform
 
 import setuptools
 
+
 dependencies = [
     "nemo-gym[dev]",
 
