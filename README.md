@@ -180,7 +180,7 @@ royalty-bearing binaries. If you are running VLM or audio/video benchmarks
 inside the container, restore them first:
 
 ```bash
-bash docker/install_codec_deps.sh
+bash docker/install_excluded_deps.sh
 ```
 
 This installs the packages at the same versions used during the container

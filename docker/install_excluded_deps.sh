@@ -19,7 +19,7 @@
 #
 # Run this before using VLM or audio/video benchmarks inside the container:
 #
-#   bash docker/install_codec_deps.sh
+#   bash docker/install_excluded_deps.sh
 #
 # Safe to call multiple times — exits immediately if already installed.
 # Versions are pinned to match the container's uv.lock. Update these pins
@@ -28,11 +28,11 @@
 set -euo pipefail
 
 if python -c "import cv2, PyNvVideoCodec, torchcodec, torchvision, torchaudio, pycountry" 2>/dev/null; then
-    echo "[codec-deps] Already installed, skipping."
+    echo "[excluded-deps] Already installed, skipping."
     exit 0
 fi
 
-echo "[codec-deps] Installing excluded packages..."
+echo "[excluded-deps] Installing excluded packages..."
 uv pip install --no-config \
     "opencv-python-headless==5.0.0.93" \
     "pynvvideocodec==2.0.4" \
@@ -41,4 +41,4 @@ uv pip install --no-config \
     "torchaudio==2.11.0" \
     "pycountry==26.2.16"
 
-echo "[codec-deps] Done."
+echo "[excluded-deps] Done."
