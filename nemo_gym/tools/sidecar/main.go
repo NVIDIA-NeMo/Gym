@@ -86,6 +86,9 @@ func main() {
 			TLSClientConfig:     &tls.Config{InsecureSkipVerify: *insecure},
 			TLSHandshakeTimeout: 30 * time.Second,
 			DialContext:         (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			// Closes a connection whose last stream ended after rotate() or release()
+			// already ran (a cancelled request), so retired connections cannot linger.
+			IdleConnTimeout: 90 * time.Second,
 			// ResponseHeaderTimeout is deliberately unset. Waiting a long time for
 			// the first response byte is the entire purpose of this proxy; the
 			// client decides its own deadline.

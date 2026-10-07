@@ -161,7 +161,8 @@ class H2PingSidecarConfig(BaseModel, extra="forbid"):
     """Soft memory limit for the Go runtime, passed as ``GOMEMLIMIT`` (for example ``1GiB``)."""
 
     gomaxprocs: Optional[int] = Field(default=None, ge=1)
-    """CPU threads the Go runtime may use, passed as ``GOMAXPROCS``. Set it inside CPU-limited containers."""
+    """CPU threads the Go runtime may use, passed as ``GOMAXPROCS``. Only needed to cap the Go runtime below the
+    container's CPU quota; setting it disables the runtime's automatic updates."""
 
     startup_timeout_seconds: float = Field(default=30.0, gt=0)
     """Wait this long for each sidecar to bind its port before failing the run."""
