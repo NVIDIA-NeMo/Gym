@@ -23,6 +23,7 @@ from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (
     NeMoGymLLM,
     NeMoGymSandboxEnvironment,
+    NeMoGymTerminus2,
     Terminus2Agent,
     Terminus2AgentConfig,
     _instruction,
@@ -31,6 +32,52 @@ from responses_api_agents.terminus_2_sandboxed_agent.app import (
 
 def test_instruction_joins_text_content():
     assert _instruction([{"content": [{"text": "first"}]}, {"content": "second"}]) == "first\n\nsecond"
+
+
+def test_missing_usage_falls_back_to_counting_current_chat(monkeypatch):
+    import litellm.utils
+
+    counted = []
+
+    def count_tokens(*, model, messages):
+        counted.append((model, messages))
+        return 42
+
+    monkeypatch.setattr(litellm.utils, "token_counter", count_tokens)
+    agent = object.__new__(NeMoGymTerminus2)
+    agent._model_name = "policy_model"
+    agent._is_check_proactive_summarization = True
+    agent._nemo_gym_llm = SimpleNamespace(usages=[SimpleNamespace(total_tokens=1000), None])
+    chat = SimpleNamespace(messages=[{"role": "user", "content": "current prompt"}])
+    assert agent._count_total_tokens(chat) == 42
+    assert counted == [("policy_model", chat.messages)]
+    assert agent._nemo_gym_llm.usages[-1] is None
+
+
+@pytest.mark.asyncio
+async def test_shell_recovery_skips_remaining_commands_and_resets_completion():
+    from responses_api_agents.terminus_2_sandboxed_agent.terminal import ShellExitedError
+
+    sent = []
+
+    async def send_keys(keys, **kwargs):
+        sent.append(keys)
+        if keys == "second":
+            raise ShellExitedError("shell exited after first command")
+
+    async def recover_shell():
+        return "The shell exited. Its state has reset; remaining commands were skipped."
+
+    agent = object.__new__(NeMoGymTerminus2)
+    agent._pending_completion = True
+    agent._completed_command_batches = 0
+    agent._times_spent = []
+    commands = [SimpleNamespace(keystrokes=key, duration_sec=0) for key in ("first", "second", "third")]
+    result = await agent._execute_commands(commands, SimpleNamespace(send_keys=send_keys, recover_shell=recover_shell))
+    assert sent == ["first", "second"]
+    assert result == (False, "The shell exited. Its state has reset; remaining commands were skipped.")
+    assert agent._pending_completion is False
+    assert agent._completed_command_batches == 1
 
 
 @pytest.mark.asyncio
@@ -183,10 +230,9 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output(reasoning
 @pytest.mark.parametrize("dump_trajectory", [False, True])
 @pytest.mark.parametrize("debug", [False, True])
 @pytest.mark.parametrize("interleaved_thinking", [False, True])
-@pytest.mark.parametrize("recover_stalled_interrupts", [False, True])
 @pytest.mark.parametrize("terminal_hidden_mounts", [[], ["/mnt/s3-data", "/mnt/.s3-gate"]])
 async def test_execute_runs_terminus_in_seeded_sandbox(
-    monkeypatch, dump_trajectory, debug, interleaved_thinking, recover_stalled_interrupts, terminal_hidden_mounts
+    monkeypatch, dump_trajectory, debug, interleaved_thinking, terminal_hidden_mounts
 ):
     config = Terminus2AgentConfig(
         host="0.0.0.0",
@@ -205,7 +251,6 @@ async def test_execute_runs_terminus_in_seeded_sandbox(
         model_context_limit=32_000,
         model_output_limit=4_000,
         interleaved_thinking=interleaved_thinking,
-        recover_stalled_interrupts=recover_stalled_interrupts,
         terminal_hidden_mounts=terminal_hidden_mounts,
         llm_request_timeout=60,
         sandbox_provider="opensandbox",
@@ -232,8 +277,6 @@ async def test_execute_runs_terminus_in_seeded_sandbox(
             self._times_spent = [1.0, 3.0]
             self._num_proactive_compactions = 0
             self._num_compactions = 2
-            self._terminal_interrupt_drains = 2
-            self._terminal_interrupt_drain_errors = 1
 
         async def stop(self):
             return None
@@ -245,7 +288,6 @@ async def test_execute_runs_terminus_in_seeded_sandbox(
             assert instruction == "solve this"
             assert self.kwargs["dump_trajectory"] is dump_trajectory
             assert self.kwargs["interleaved_thinking"] is interleaved_thinking
-            assert self.kwargs["recover_stalled_interrupts"] is recover_stalled_interrupts
             assert self.kwargs["terminal_hidden_mounts"] == terminal_hidden_mounts
             await environment.exec("tmux run")
             self.kwargs["llm"]._times_spent.extend([2.0, 4.0])
@@ -299,8 +341,6 @@ async def test_execute_runs_terminus_in_seeded_sandbox(
         "model_calls_gt_10min": 0,
         "num_proactive_compactions": 0,
         "num_compactions": 2,
-        "terminal_interrupt_drains": 2,
-        "terminal_interrupt_drain_errors": 1,
         "error": None,
         "usages": [],
     }

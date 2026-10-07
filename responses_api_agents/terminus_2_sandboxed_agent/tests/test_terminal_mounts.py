@@ -5,12 +5,13 @@ import asyncio
 import shlex
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from harbor.agents.terminus_2 import Terminus2
 
 from responses_api_agents.terminus_2_sandboxed_agent.app import NeMoGymLLM, NeMoGymTerminus2
+from responses_api_agents.terminus_2_sandboxed_agent.terminal import TerminusTmuxSession
 from responses_api_agents.terminus_2_sandboxed_agent.terminal_mounts import private_terminal_bootstrap
 
 
@@ -25,22 +26,26 @@ def make_agent(tmp_path: Path, *, hidden_mounts: list[str] | None = None) -> NeM
     )
 
 
+def make_environment(tmp_path: Path, execute: Any) -> SimpleNamespace:
+    return SimpleNamespace(exec=execute, default_user=None, trial_paths=SimpleNamespace(agent_dir=tmp_path))
+
+
 @pytest.mark.asyncio
-async def test_default_setup_uses_harbor_without_mount_bootstrap(
+async def test_default_setup_starts_tmux_session_without_mount_bootstrap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    setup = AsyncMock()
-    monkeypatch.setattr(Terminus2, "setup", setup)
-    environment = SimpleNamespace(exec=AsyncMock())
+    start = AsyncMock()
+    monkeypatch.setattr(TerminusTmuxSession, "start", start)
+    environment = make_environment(tmp_path, AsyncMock())
 
     await make_agent(tmp_path).setup(environment)
 
-    setup.assert_awaited_once_with(environment)
+    start.assert_awaited_once()
     environment.exec.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_private_setup_brackets_harbor_with_bootstrap_and_cleanup(
+async def test_private_setup_brackets_session_start_with_bootstrap_and_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     events = []
@@ -49,16 +54,16 @@ async def test_private_setup_brackets_harbor_with_bootstrap_and_cleanup(
         events.append((command, kwargs))
         return SimpleNamespace(return_code=0, stdout="", stderr="")
 
-    async def setup(self, environment):
-        events.append("harbor setup")
+    async def start(self):
+        events.append("session start")
 
-    monkeypatch.setattr(Terminus2, "setup", setup)
+    monkeypatch.setattr(TerminusTmuxSession, "start", start)
     mounts = ["/mnt/s3-data", "/mnt/.s3-gate"]
-    await make_agent(tmp_path, hidden_mounts=mounts).setup(SimpleNamespace(exec=execute))
+    await make_agent(tmp_path, hidden_mounts=mounts).setup(make_environment(tmp_path, execute))
 
     assert events == [
         (private_terminal_bootstrap(mounts), {"user": "root", "timeout_sec": 25}),
-        "harbor setup",
+        "session start",
         ("tmux kill-session -t gym-internal-mount-bootstrap", {"user": "root"}),
     ]
 
@@ -67,33 +72,34 @@ async def test_private_setup_brackets_harbor_with_bootstrap_and_cleanup(
 async def test_bootstrap_failure_stops_setup_without_using_unisolated_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    setup = AsyncMock()
-    monkeypatch.setattr(Terminus2, "setup", setup)
-    environment = SimpleNamespace(
-        exec=AsyncMock(return_value=SimpleNamespace(return_code=1, stdout="", stderr="unshare: not permitted"))
+    start = AsyncMock()
+    monkeypatch.setattr(TerminusTmuxSession, "start", start)
+    environment = make_environment(
+        tmp_path, AsyncMock(return_value=SimpleNamespace(return_code=1, stdout="", stderr="unshare: not permitted"))
     )
 
     with pytest.raises(RuntimeError, match="unshare: not permitted"):
         await make_agent(tmp_path, hidden_mounts=["/mnt/s3-data"]).setup(environment)
 
-    setup.assert_not_awaited()
+    start.assert_not_awaited()
     assert environment.exec.await_count == 1
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("setup_error", [RuntimeError("Harbor setup failed"), asyncio.CancelledError()])
+@pytest.mark.parametrize("setup_error", [RuntimeError("session start failed"), asyncio.CancelledError()])
 @pytest.mark.parametrize("cleanup_fails", [False, True])
 async def test_setup_failure_removes_bootstrap_and_preserves_original_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, setup_error: BaseException, cleanup_fails: bool
 ) -> None:
-    monkeypatch.setattr(Terminus2, "setup", AsyncMock(side_effect=setup_error))
-    environment = SimpleNamespace(
-        exec=AsyncMock(
+    monkeypatch.setattr(TerminusTmuxSession, "start", AsyncMock(side_effect=setup_error))
+    environment = make_environment(
+        tmp_path,
+        AsyncMock(
             side_effect=[
                 SimpleNamespace(return_code=0, stdout="", stderr=""),
                 SimpleNamespace(return_code=int(cleanup_fails), stdout="", stderr="cleanup error"),
             ]
-        )
+        ),
     )
     with pytest.raises(type(setup_error)) as error:
         await make_agent(tmp_path, hidden_mounts=["/mnt/s3-data"]).setup(environment)
@@ -107,14 +113,15 @@ async def test_setup_failure_removes_bootstrap_and_preserves_original_error(
 async def test_cleanup_failure_after_successful_setup_is_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(Terminus2, "setup", AsyncMock())
-    environment = SimpleNamespace(
-        exec=AsyncMock(
+    monkeypatch.setattr(TerminusTmuxSession, "start", AsyncMock())
+    environment = make_environment(
+        tmp_path,
+        AsyncMock(
             side_effect=[
                 SimpleNamespace(return_code=0, stdout="", stderr=""),
                 SimpleNamespace(return_code=1, stdout="", stderr="cannot remove bootstrap"),
             ]
-        )
+        ),
     )
     with pytest.raises(RuntimeError, match="cannot remove bootstrap"):
         await make_agent(tmp_path, hidden_mounts=["/mnt/s3-data"]).setup(environment)

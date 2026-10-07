@@ -17,3 +17,11 @@ terminal_bench_4_miniswe:
       - name: example
         type: example
         jsonl_fpath: resources_servers/terminal_bench_4/data/example.jsonl
+
+terminal_bench_4_miniswe_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: terminal_bench_4_miniswe

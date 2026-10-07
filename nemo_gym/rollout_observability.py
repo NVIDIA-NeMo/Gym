@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
@@ -53,12 +54,18 @@ class TrajectoryResponseMetadata(ObservationModel):
     status_code: Optional[int] = None
     response_status: Optional[str] = None
     finish_reason: Optional[str] = None
+    upstream_attempted: Optional[bool] = None
+    response_source: Optional[Literal["upstream", "local"]] = None
+    upstream_status_code: Optional[int] = None
+    local_response_reason: Optional[str] = None
     error_category: Optional[str] = None
     latency_ttft_ms: Optional[float] = Field(default=None, ge=0)
 
 
 class TrajectoryModelCall(ObservationModel):
     model_call_id: Optional[str] = None
+    client_session_id: Optional[str] = None
+    client_assistant_message_id: Optional[str] = None
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
     duration_ms: Optional[float] = Field(default=None, ge=0)
@@ -70,6 +77,12 @@ class TrajectoryModelCall(ObservationModel):
 
 class TrajectoryTurn(ObservationModel):
     invocation_id: str
+    source_message_id: Optional[str] = Field(
+        default=None, description="Persisted assistant-message ID in the harness."
+    )
+    source_model_ref: Optional[ModelServerRef] = Field(
+        default=None, description="Configured model server for matching the source message to captured calls."
+    )
     task_id: str
     rollout_id: str
     turn_no: int = Field(ge=1, description="Turn number within this invocation.")
@@ -161,6 +174,10 @@ class ContextCompactionObservation(ObservationModel):
 
     kind: Literal["context_compaction"] = "context_compaction"
     invocation_id: str
+    source_message_ids: list[str] = Field(
+        default_factory=list, description="Persisted assistant-message IDs explicitly associated with this compaction."
+    )
+    source_model_ref: Optional[ModelServerRef] = None
     observed_at: Optional[float] = None
     trigger: Optional[str] = None
     tokens_before: Optional[int] = Field(
@@ -269,6 +286,93 @@ class TrajectoryRecord(ObservationModel):
                 raise ValueError("turn number must be unique within an invocation")
             keys.add(key)
         return self
+
+
+def join_assistant_message_calls(
+    bundle: AgentObservationBundle,
+    trajectory: TrajectoryRecord | None,
+    calls: list["ModelCallRecord"],
+) -> tuple[AgentObservationBundle, TrajectoryRecord | None]:
+    """Join persisted messages to HTTP attempts using session, message and model-server IDs.
+
+    Run after invocation ownership resolution. Summary attempts belong to compactions;
+    calls without a saved message (for example title generation) stay invocation-owned.
+    Producers declare source_message_id(s), source_model_ref and invocation IDs.
+    Source labels are not dispatch keys. No content or timing fallback is used.
+    """
+    result = bundle.model_copy(
+        update={
+            "records": [
+                record.model_copy(update={"model_calls": list(record.model_calls)})
+                if isinstance(record, ContextCompactionObservation)
+                else record
+                for record in bundle.records
+            ],
+            "gaps": [gap for gap in bundle.gaps if not gap.code.startswith("assistant_message_call_")],
+        }
+    )
+    projected = (
+        trajectory.model_copy(
+            update={
+                "turns": [turn.model_copy(update={"model_calls": list(turn.model_calls)}) for turn in trajectory.turns]
+            }
+        )
+        if trajectory is not None
+        else None
+    )
+    targets: dict[tuple[str, str], list[TrajectoryTurn | ContextCompactionObservation]] = defaultdict(list)
+    for turn in projected.turns if projected is not None else []:
+        if turn.source_message_id:
+            targets[(turn.invocation_id, turn.source_message_id)].append(turn)
+    for compaction in result.records:
+        if isinstance(compaction, ContextCompactionObservation):
+            for message_id in set(compaction.source_message_ids):
+                targets[(compaction.invocation_id, message_id)].append(compaction)
+
+    call_counts = Counter(call.model_call_id for call in calls if call.model_call_id)
+    owners: dict[str, set[str]] = defaultdict(set)
+    for invocation in result.records:
+        if isinstance(invocation, AgentInvocation):
+            for ref in invocation.model_calls:
+                if ref.model_call_id:
+                    owners[ref.model_call_id].add(invocation.invocation_id)
+
+    # Recompute these links on repeated finalization, including newly ambiguous evidence.
+    attributed_ids = {call.model_call_id for call in calls if call.client_assistant_message_id and call.model_call_id}
+    for candidates in targets.values():
+        for target in candidates:
+            target.model_calls = [ref for ref in target.model_calls if ref.model_call_id not in attributed_ids]
+
+    for call in calls:
+        if not call.client_assistant_message_id:
+            continue
+        candidates = targets.get((call.client_session_id or "", call.client_assistant_message_id), [])
+        candidates = [target for target in candidates if target.source_model_ref in (None, call.model_ref)]
+        code = None
+        if len(candidates) != 1:
+            code = "ambiguous" if candidates else "unmatched"
+        elif candidates[0].source_model_ref is None or call.model_ref is None:
+            code = "scope_unavailable"
+        elif not call.model_call_id:
+            code = "identity_unavailable"
+        elif call_counts[call.model_call_id] != 1:
+            code = "ambiguous"
+        elif owners[call.model_call_id] != {call.client_session_id}:
+            code = "ownership_conflict"
+        if code is not None:
+            result.gaps.append(
+                ObservationGap(
+                    code=f"assistant_message_call_{code}",
+                    invocation_id=call.client_session_id,
+                    detail=f"{call.client_assistant_message_id}:{call.model_call_id}",
+                )
+            )
+            continue
+        candidates[0].model_calls.append(
+            ModelCallRef(model_call_id=call.model_call_id, model_ref=call.model_ref, response_id=call.response_id)
+        )
+    result.gaps = list({(gap.code, gap.invocation_id, gap.detail): gap for gap in result.gaps}.values())
+    return result, projected
 
 
 def join_model_call_observations(

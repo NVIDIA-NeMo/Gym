@@ -164,7 +164,6 @@ def test_profile_preserves_evaluation_settings_and_adds_deployment_from_sandbox_
     model = config["policy_model"]["responses_api_models"]["vllm_model"]
     assert agent["entrypoint"] == "app.py"
     assert agent["interleaved_thinking"] is model["uses_interleaved_reasoning"] is True
-    assert agent["recover_stalled_interrupts"] is True
     assert agent["terminal_hidden_mounts"] == (["/mnt/s3-data", "/mnt/.s3-gate"] if deployment else [])
     assert bool(agent["remote_tmux_binary_path"]) is deployment
     assert agent["model_context_limit"] == 1048576

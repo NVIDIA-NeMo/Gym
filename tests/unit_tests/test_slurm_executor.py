@@ -125,6 +125,7 @@ def _submit_config(tmp_path, benchmarks):
             "compute": {"hsg": {"type": "slurm", "account": "my-account", "hostname": None}},
             "driver": {"container": "gym:latest", "benchmarks": {name: {} for name in benchmarks}},
             "job": {"output_path": str(tmp_path / "jobs")},
+            "otel": {"enabled": False},
         }
     )
 
@@ -196,6 +197,23 @@ def test_run_writes_the_local_index(tmp_path, monkeypatch):
     assert SubmissionRecord.load(json.loads(index.read_text())) == record
 
 
+def test_run_dir_is_readable_by_other_users_but_secrets_are_not(tmp_path, monkeypatch):
+    # Staging happens in a 0700 temp dir and the copy keeps modes, so without an explicit
+    # chmod every run dir lands private to the submitter. job.sh holds the resolved secrets;
+    # the resolved config holds only `host:` references, so it is written like the manifest.
+    conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 "])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
+
+    run_dir = Path(record.run_dir)
+    assert oct(run_dir.stat().st_mode & 0o777) == oct(0o755)
+    assert oct((run_dir / "bench_a" / "job.sh").stat().st_mode & 0o777) == oct(0o600)
+    manifest_mode = (run_dir / MANIFEST_NAME).stat().st_mode & 0o777
+    assert oct((run_dir / RESOLVED_CONFIG_NAME).stat().st_mode & 0o777) == oct(manifest_mode)
+
+
 def test_run_records_a_failed_benchmark_without_disturbing_the_others(tmp_path, monkeypatch):
     conn = _FakeConnection(
         ["__GYM_JOB:bench_a:0:111 \n__GYM_JOB:bench_b:1:sbatch: error: bad account \n__GYM_JOB:bench_c:0:333 "]
@@ -241,7 +259,7 @@ def test_two_runs_in_the_same_second_get_different_run_dirs(tmp_path, monkeypatc
 
 def test_a_failed_manifest_write_fails_the_submit_and_names_queued_jobs(tmp_path, monkeypatch):
     class _NoWrite(_FakeConnection):
-        def write_text(self, remote, content):
+        def write_text(self, remote, content, **_):
             raise RuntimeError("permission denied")
 
     conn = _NoWrite(["__GYM_JOB:bench_a:0:111 \n__GYM_JOB:bench_b:0:222 "])

@@ -21,24 +21,27 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
 from nemo_gym.orchestration.executors.script_templates import (
     render_driver_entrypoint,
     render_gym_cmd,
 )
 from nemo_gym.orchestration.executors.slurm_script import (
     _RAY_SERVE_GATEWAY_SOURCE_PATH,
+    _build_ray_command,
     _build_service_command,
     _build_vllm_command,
     _build_vllm_multi_instance_multi_node_command,
     _build_vllm_ray_command,
     _build_vllm_ray_serve_command,
+    _kv_transfer_flag,
     _node_totals,
     _render_directives,
     _render_pool_directives,
     _render_service_command,
     _resolve_env,
     _with_default_capture_dir,
+    _with_resume_flag,
     build_sbatch_script,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
@@ -87,22 +90,44 @@ def test_deeply_nested():
 
 
 def test_render_pool_directives_basic(pool):
-    lines = _render_pool_directives("main", pool)
-    assert "#SBATCH --partition=batch  # pool: main" in lines
+    lines = _render_pool_directives({"main": pool})
+    assert "#SBATCH --partition=batch" in lines
     assert "#SBATCH --nodes=1" in lines
     assert "#SBATCH --ntasks-per-node=4" in lines
 
 
 def test_render_pool_directives_gpus(pool):
     pool.gpus_per_node = 4
-    lines = _render_pool_directives("main", pool)
+    lines = _render_pool_directives({"main": pool})
     assert "#SBATCH --gpus-per-node=4" in lines
 
 
 def test_render_pool_directives_extra_args(pool):
     pool.extra_args["gres"] = "shard:8"
-    lines = _render_pool_directives("main", pool)
+    lines = _render_pool_directives({"main": pool})
     assert "#SBATCH --gres=shard:8" in lines
+
+
+def test_pools_ask_for_the_sum_of_their_nodes_once(pool):
+    # One #SBATCH --nodes for the allocation, not one per pool. Emitting them per
+    # pool made every pool but the last a no-op while the rest of the executor
+    # sized itself on the sum, so a two-pool job asked for one pool's nodes.
+    aux = NodePool(partition="batch", nodes=3, ntasks_per_node=4)
+    lines = _render_pool_directives({"main": pool, "aux": aux})
+    assert [line for line in lines if line.startswith("#SBATCH --nodes")] == ["#SBATCH --nodes=4"]
+
+
+def test_pools_that_disagree_on_a_whole_allocation_directive_are_refused(pool):
+    other = NodePool(partition="interactive", nodes=1, ntasks_per_node=4)
+    with pytest.raises(ValueError, match="disagree on partition"):
+        _render_pool_directives({"main": pool, "other": other})
+
+
+def test_pools_that_disagree_on_extra_args_are_refused(pool):
+    pool.extra_args["gres"] = "shard:8"
+    other = NodePool(partition="batch", nodes=1, ntasks_per_node=4, extra_args={"gres": "shard:4"})
+    with pytest.raises(ValueError, match="conflicts with another pool"):
+        _render_pool_directives({"main": pool, "other": other})
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +182,7 @@ def test_render_service_command_backgrounded():
 
 def test_render_service_command_log_file():
     out = _render_service_command("my_service", "img:latest", "cmd")
-    assert "--output=logs/my_service.log" in out
+    assert "--output=logs/my_service-$SLURM_JOB_ID.log" in out
 
 
 # ---------------------------------------------------------------------------
@@ -379,8 +404,13 @@ def test_build_vllm_ray_serve_command_single_node_model_with_space_survives_quot
     service = VllmServiceConfig(type="vllm", container="vllm:latest", model="org/my model")
     cmd = _build_vllm_ray_serve_command(service, total_nodes=1, gpus_per_node_values=[])
 
-    inner = cmd.replace("pip install --quiet aiohttp", "true").replace("python3 ray_serve_gateway.py", "fake_gateway")
-    script = 'fake_gateway() { for a in "$@"; do echo "ARG:$a"; done; }\nexport -f fake_gateway\n' + inner + "\n"
+    # Stub pip so the aiohttp install and the ray fallback (taken when ray isn't on PATH) never install for real.
+    inner = cmd.replace("python3 ray_serve_gateway.py", "fake_gateway")
+    script = (
+        'pip() { :; }\nfake_gateway() { for a in "$@"; do echo "ARG:$a"; done; }\nexport -f pip fake_gateway\n'
+        + inner
+        + "\n"
+    )
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10, cwd=tmp_path)
 
     assert result.returncode == 0, result.stderr
@@ -710,27 +740,84 @@ def test_with_default_capture_dir_injects_when_observability_on():
     assert out["model_call_capture_dir"] == "/remote/jobs/gym-job-20260729/gsm8k/model-calls"
 
 
-def test_with_default_capture_dir_explicit_value_wins():
-    run = {"observability_enabled": True, "model_call_capture_dir": "/custom/path"}
+@pytest.mark.parametrize("enabled", [True, False])
+def test_with_default_capture_dir_explicit_value_wins(enabled):
+    run = {"observability_enabled": enabled, "model_call_capture_dir": "/custom/path"}
     out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert out["observability_enabled"] is enabled
     assert out["model_call_capture_dir"] == "/custom/path"
 
 
 def test_with_default_capture_dir_no_injection_when_observability_off():
-    run = {"split": "benchmark"}
+    run = {"split": "benchmark", "observability_enabled": False}
     out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
     assert "model_call_capture_dir" not in out
 
 
 def test_with_default_capture_dir_does_not_mutate_input():
-    run = {"observability_enabled": True}
+    run = {}
     _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
-    assert "model_call_capture_dir" not in run
+    assert run == {}
+
+
+# ---------------------------------------------------------------------------
+# _with_resume_flag
+# ---------------------------------------------------------------------------
+
+
+def test_with_resume_flag_injects_when_resumable():
+    assert _with_resume_flag({"split": "benchmark"}, True) == {"split": "benchmark", "resume_from_cache": True}
+
+
+def test_with_resume_flag_no_injection_when_not_resumable():
+    run = {"split": "benchmark"}
+    assert _with_resume_flag(run, False) == run
+
+
+def test_with_resume_flag_explicit_value_wins():
+    run = {"resume_from_cache": False}
+    assert _with_resume_flag(run, True) == {"resume_from_cache": False}
+
+
+def test_with_resume_flag_does_not_mutate_input():
+    run = {"split": "benchmark"}
+    _with_resume_flag(run, True)
+    assert "resume_from_cache" not in run
 
 
 # ---------------------------------------------------------------------------
 # build_sbatch_script (integration)
 # ---------------------------------------------------------------------------
+
+
+def test_build_sbatch_script_resumable_adds_prologue_and_resume_flag(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {"gsm8k": {"resumable": {"max_retries": 5, "max_walltime": "10:00:00"}}},
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "# --- Auto-resume chain ---" in script
+    assert '_this_script="$OUTPUT_DIR/job.sh"' in script
+    assert "_gym_accumulated >= 36000" in script
+    assert "-gt 5" in script
+    assert "+resume_from_cache=True" in script
+
+
+def test_build_sbatch_script_not_resumable_omits_prologue(submit_config, bench_dir):
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "Auto-resume chain" not in script
+    assert "resume_from_cache" not in script
 
 
 def test_build_sbatch_script_auto_default_capture_dir(bench_dir):
@@ -740,7 +827,7 @@ def test_build_sbatch_script_auto_default_capture_dir(bench_dir):
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
             "driver": {
                 "container": "python:3.12",
-                "benchmarks": {"gsm8k": {"run": {"observability_enabled": True}}},
+                "benchmarks": {"gsm8k": {"run": {}}},
             },
             "job": {"output_path": "/remote/jobs"},
         }
@@ -748,6 +835,7 @@ def test_build_sbatch_script_auto_default_capture_dir(bench_dir):
     benchmark = config.driver.benchmarks["gsm8k"]
     compute = next(iter(config.compute.values()))
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "+observability_enabled=True" in script
     assert f"+model_call_capture_dir={bench_dir / 'model-calls'}" in script
 
 
@@ -774,8 +862,10 @@ def test_build_sbatch_script_explicit_capture_dir_wins(bench_dir):
 
 def test_build_sbatch_script_no_capture_dir_when_observability_off(submit_config, bench_dir):
     benchmark = submit_config.driver.benchmarks["gsm8k"]
+    benchmark.run["observability_enabled"] = False
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "+observability_enabled=False" in script
     assert "model_call_capture_dir" not in script
 
 
@@ -794,11 +884,18 @@ def test_build_sbatch_script_contains_vllm_srun(submit_config, bench_dir):
     assert "srun --overlap" in script
 
 
-def test_build_sbatch_script_driver_output_flag(submit_config, bench_dir):
+@pytest.mark.parametrize(
+    ("run_args", "expected"),
+    [({}, True), ({"require_complete": True}, True), ({"require_complete": False}, False)],
+)
+def test_build_sbatch_script_driver_output_flag(submit_config, bench_dir, run_args, expected):
     benchmark = submit_config.driver.benchmarks["gsm8k"]
+    benchmark.run.update(run_args)
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
-    assert "--output=logs/driver.log" in script
+    assert "--output=logs/driver-$SLURM_JOB_ID.log" in script
+    assert f"+require_complete={expected}" in script
+    assert f"+require_complete={not expected}" not in script
 
 
 def test_build_sbatch_script_output_jsonl_fpath(submit_config, bench_dir):
@@ -1043,8 +1140,8 @@ def test_render_service_command_no_pre_command_by_default():
     out = _render_service_command("svc", "img:latest", "vllm serve model")
     assert "bash -c" not in out
     assert (
-        "srun --overlap --no-container-mount-home --container-image=img:latest --output=logs/svc.log vllm serve model &"
-        in out
+        "srun --overlap --no-container-mount-home --container-image=img:latest "
+        "--output=logs/svc-$SLURM_JOB_ID.log vllm serve model &" in out
     )
 
 
@@ -1133,14 +1230,21 @@ def test_build_sbatch_script_driver_mounts(bench_dir):
 
 
 def test_build_sbatch_script_no_service_mounts_by_default(submit_config, bench_dir):
-    """Services get no mounts unless configured. The driver is the exception and
-    always mounts the job directory, because that is where its artifacts go --
-    see test_driver_can_write_its_artifacts_into_the_job_directory."""
+    """Services get no mounts unless configured. The driver and the OTel
+    collector are the exceptions and always mount the job directory, because that
+    is where their artifacts go -- see
+    test_driver_can_write_its_artifacts_into_the_job_directory."""
     benchmark = submit_config.driver.benchmarks["gsm8k"]
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
 
-    service_lines = [line for line in script.splitlines() if "srun" in line and "--output=logs/driver.log" not in line]
+    service_lines = [
+        line
+        for line in script.splitlines()
+        if "srun" in line
+        and "--output=logs/driver-$SLURM_JOB_ID.log" not in line
+        and "--output=logs/otel_collector-$SLURM_JOB_ID.log" not in line
+    ]
     assert service_lines, "expected at least one service srun line"
     for line in service_lines:
         assert "--container-mounts" not in line
@@ -1413,7 +1517,8 @@ def test_build_sbatch_script_non_vllm_service_omits_node_flags_in_multi_node_job
     vllm_line = next(line for line in script.splitlines() if "vllm:latest" in line)
     ray_line = next(line for line in script.splitlines() if "ray:latest" in line)
     assert "--nodes=4" in vllm_line
-    assert "--nodes=" not in ray_line
+    # Once, on the driver's node -- not once per node of the allocation.
+    assert '--nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1' in ray_line
 
 
 # ---------------------------------------------------------------------------
@@ -1514,7 +1619,7 @@ def test_driver_can_write_its_artifacts_into_the_job_directory():
 
     script = build_sbatch_script(config, "gpqa", config.driver.benchmarks["gpqa"], config.compute["hsg"], bench_dir)
 
-    driver_line = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    driver_line = next(line for line in script.splitlines() if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
     assert f"{bench_dir}:{bench_dir}" in driver_line
     # the caller's own mounts must survive alongside the injected one
     assert "/host/cache:/cache" in driver_line
@@ -1538,7 +1643,7 @@ def test_driver_job_dir_is_mounted_even_with_no_configured_mounts():
 
     script = build_sbatch_script(config, "gpqa", config.driver.benchmarks["gpqa"], config.compute["hsg"], bench_dir)
 
-    driver_line = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    driver_line = next(line for line in script.splitlines() if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
     assert f"--container-mounts={bench_dir}:{bench_dir}" in driver_line
 
 
@@ -1565,3 +1670,877 @@ def test_gym_install_runs_from_the_install_root():
     assert entrypoint.index('cd "$GYM_SRC/gym"') < entrypoint.index('exec "$@"')
     # The only `cd` is into the clone -- nothing else may move cwd.
     assert entrypoint.count("cd ") == entrypoint.count('cd "$GYM_SRC/gym"')
+
+
+# ---------------------------------------------------------------------------
+# driver command
+# ---------------------------------------------------------------------------
+
+
+def _command_config(tmp_path, command, **driver):
+    return SubmitConfig.model_validate(
+        {
+            "services": {
+                "policy": {
+                    "type": "vllm",
+                    "container": "img",
+                    "model": "/ckpt",
+                    "port": 8000,
+                    "served_model_name": "super",
+                    "tensor_parallel_size": 4,
+                }
+            },
+            "compute": {
+                "hsg": {
+                    "type": "slurm",
+                    "account": "acct",
+                    "node_pools": {"gpu": {"partition": "batch", "nodes": 1, "gpus_per_node": 4}},
+                }
+            },
+            "driver": {
+                "container": "efb:latest",
+                "policy_model": "policy",
+                "benchmarks": {"osworld": {"command": command}},
+                **driver,
+            },
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+
+def _render_command(tmp_path, command, **driver):
+    config = _command_config(tmp_path, command, **driver)
+    return build_sbatch_script(
+        config,
+        "osworld",
+        config.driver.benchmarks["osworld"],
+        config.compute["hsg"],
+        tmp_path / "jobs" / "x" / "osworld",
+    )
+
+
+def test_a_command_replaces_the_gym_run_invocation(tmp_path):
+    script = _render_command(tmp_path, "run-the-harness --flag")
+
+    assert "GYM_CMD" not in script
+    assert "gym eval run" not in script
+    assert "run-the-harness --flag" in script
+
+
+def test_a_command_is_told_where_to_write_and_how_to_reach_the_policy(tmp_path):
+    # These replace the run arguments the command no longer receives; without them
+    # the script has no way to find the served model or the job directory.
+    bench_dir = tmp_path / "jobs" / "x" / "osworld"
+    script = _render_command(tmp_path, "harness")
+
+    assert f"NEMO_GYM_BENCH_DIR={bench_dir}" in script
+    assert "NEMO_GYM_POLICY_BASE_URL=http://localhost:8000/v1" in script
+    assert "NEMO_GYM_POLICY_MODEL_NAME=super" in script
+    assert "NEMO_GYM_POLICY_API_KEY=dummy" in script
+
+
+def test_a_command_keeps_the_driver_env_the_config_declared(tmp_path):
+    script = _render_command(tmp_path, "harness", env={"AWS_ACCESS_KEY_ID": "lit:AKIAFAKE"})
+
+    assert "AWS_ACCESS_KEY_ID=AKIAFAKE" in script
+    assert "NEMO_GYM_BENCH_DIR=" in script
+
+
+def test_a_command_still_runs_prepare_first(tmp_path):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {},
+            "compute": {"hsg": {"type": "slurm", "account": "acct"}},
+            "driver": {
+                "container": "efb:latest",
+                "benchmarks": {
+                    "osworld": {"prepare": {"config_paths": ["benchmarks/osworld/config.yaml"]}, "command": "harness"}
+                },
+            },
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    script = build_sbatch_script(
+        config, "osworld", config.driver.benchmarks["osworld"], config.compute["hsg"], tmp_path / "jobs" / "osworld"
+    )
+
+    prepare_at = script.index("gym eval prepare")
+    assert prepare_at < script.index("harness")
+
+
+def test_a_multi_line_command_survives_quoting(tmp_path):
+    command = "set -- harness --name 'a b'\nexec \"$@\""
+    script = _render_command(tmp_path, command)
+
+    assert "--name '\"'\"'a b'\"'\"'" in script
+    assert 'exec "$@"' in script
+
+
+def test_a_benchmark_cannot_set_both_command_and_run(tmp_path):
+    with pytest.raises(ValueError, match="`command` replaces"):
+        SubmitConfig.model_validate(
+            {
+                "services": {},
+                "compute": {"hsg": {"type": "slurm", "account": "acct"}},
+                "driver": {
+                    "container": "efb:latest",
+                    "benchmarks": {"osworld": {"command": "harness", "run": {"split": "benchmark"}}},
+                },
+                "job": {"output_path": str(tmp_path / "jobs")},
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
+# node_pool placement
+# ---------------------------------------------------------------------------
+
+
+def _placement_config(tmp_path, services, pools):
+    return SubmitConfig.model_validate(
+        {
+            "services": services,
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools}},
+            "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+
+def _vllm(port, pool, **extra):
+    return {
+        "type": "vllm",
+        "container": "img",
+        "model": "/ckpt",
+        "port": port,
+        "node_pool": pool,
+        **extra,
+    }
+
+
+_TWO_POOLS = {
+    "gpu": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 4},
+    "aux": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 4},
+}
+
+
+def _render(tmp_path, services, pools=None):
+    config = _placement_config(tmp_path, services, pools or _TWO_POOLS)
+    return build_sbatch_script(
+        config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "jobs" / "b"
+    )
+
+
+def test_pinned_services_take_contiguous_node_ranges(tmp_path):
+    # --nodelist names each pool's hosts; --relative is only a hint Slurm can move a
+    # step off (seen on a cluster run: the head landed on the worker's node). Without it both steps
+    # start at node 0 and the second one shares the first one's GPUs.
+    script = _render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+            "scorer": _vllm(8001, "aux", tensor_parallel_size=4),
+        },
+    )
+    assert 'export GYM_POOL_GPU_NODES="$(IFS=,; echo "${gym_nodes[*]:0:1}")"' in script
+    assert 'export GYM_POOL_AUX_NODES="$(IFS=,; echo "${gym_nodes[*]:1:1}")"' in script
+    assert '--nodelist="${GYM_POOL_GPU_NODES}" --nodes=1 --ntasks=1' in script.split("# service: policy")[1]
+    assert '--nodelist="${GYM_POOL_AUX_NODES}" --nodes=1 --ntasks=1' in script.split("# service: scorer")[1]
+
+
+def test_a_pinned_single_node_service_is_not_built_as_multi_node(tmp_path):
+    # The job spans two nodes, but each service owns one. Sizing them by the
+    # allocation total would build both as multi-node Ray deployments.
+    script = _render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+            "scorer": _vllm(8001, "aux", tensor_parallel_size=4),
+        },
+    )
+    assert "ray start" not in script
+    assert script.count("vllm serve") == 2
+
+
+def test_an_unpinned_service_keeps_the_whole_allocation(tmp_path):
+    script = _render(
+        tmp_path,
+        {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000, "tensor_parallel_size": 8}},
+    )
+    policy_line = script.split("# service: policy")[1].splitlines()[1]
+    assert "--nodelist" not in policy_line
+    assert "--nodes=2" in policy_line
+
+
+def test_the_driver_runs_on_node_0_of_a_multi_node_job(tmp_path):
+    # A multi-node policy serves its API from node 0, and the driver reaches it on
+    # localhost. Left unpinned, Slurm may start the driver on any node.
+    script = _render(
+        tmp_path,
+        {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000, "tensor_parallel_size": 8}},
+    )
+    driver_line = next(line for line in script.splitlines() if "logs/driver-$SLURM_JOB_ID.log" in line)
+    assert '--nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1' in driver_line
+    assert 'gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))' in script
+
+
+def test_a_single_node_job_places_nothing(tmp_path):
+    one = {"gpu": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 4}}
+    script = _render(
+        tmp_path,
+        {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000, "tensor_parallel_size": 4}},
+        one,
+    )
+    assert "--nodelist" not in script
+    assert "gym_nodes=" not in script
+
+
+def test_an_unknown_node_pool_is_named(tmp_path):
+    with pytest.raises(ValueError, match="node_pool 'nope' does not match any node pool"):
+        _placement_config(tmp_path, {"policy": _vllm(8000, "nope", tensor_parallel_size=4)}, _TWO_POOLS)
+
+
+# ---------------------------------------------------------------------------
+# ray services
+# ---------------------------------------------------------------------------
+
+
+def test_a_ray_head_blocks_so_slurm_keeps_the_step_alive():
+    # `ray start` daemonises and returns; without --block the srun step exits the
+    # moment the node is up and the service is torn down again.
+    command = _build_ray_command(RayServiceConfig(type="ray", container="img"))
+    assert command == "ray start --block --head --port 6379"
+
+
+def test_a_ray_worker_joins_the_head_and_advertises_its_pools_resources():
+    service = RayServiceConfig(
+        type="ray", container="img", node_pools=["aux"], num_gpus=0, resources={"aux": {"extra_gpu": 4}}
+    )
+    command = _build_ray_command(service, pool="aux", address_var="GYM_RAY_ADDRESS_RAY", worker=True)
+    assert command == (
+        'ray start --block --address "$GYM_RAY_ADDRESS_RAY" --num-gpus 0 --resources=\'{"extra_gpu": 4}\''
+    )
+
+
+def test_a_ray_worker_drops_the_flags_ray_allows_only_on_a_head():
+    service = RayServiceConfig(
+        type="ray", container="img", extra_args="--include-dashboard=false --port 1 --node-manager-port=8366"
+    )
+    command = _build_ray_command(service, address_var="A", worker=True)
+    assert command == 'ray start --block --address "$A" --node-manager-port=8366'
+    assert _build_ray_command(service).endswith("--include-dashboard=false --port 1 --node-manager-port=8366")
+
+
+def test_the_old_head_and_worker_fields_are_gone():
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        RayServiceConfig(type="ray", container="img", mode="worker", address="10.0.0.1:6379")
+
+
+def test_a_ray_service_names_node_pools_not_a_node_pool():
+    with pytest.raises(ValueError, match=r"use node_pools: \[aux\]"):
+        RayServiceConfig(type="ray", container="img", node_pool="aux")
+
+
+def test_ray_resources_for_a_pool_the_service_does_not_span_are_refused():
+    with pytest.raises(ValueError, match="sets resources for aux, which it does not span"):
+        RayServiceConfig(type="ray", container="img", node_pools=["gpu"], resources={"aux": {"extra_gpu": 4}})
+
+
+def test_an_unknown_ray_node_pool_is_named(tmp_path):
+    with pytest.raises(ValueError, match=r"node_pools \['nope'\] do not match any node pool"):
+        _placement_config(tmp_path, {"ray": {"type": "ray", "container": "img", "node_pools": ["nope"]}}, _TWO_POOLS)
+
+
+# ---------------------------------------------------------------------------
+# prefill/decode disaggregation
+# ---------------------------------------------------------------------------
+
+
+_PD_POOLS = {
+    "prefill": {"partition": "batch", "nodes": 4, "ntasks_per_node": 1, "gpus_per_node": 4},
+    "decode": {"partition": "batch", "nodes": 6, "ntasks_per_node": 1, "gpus_per_node": 4},
+}
+
+
+def _pd_service(**overrides):
+    return {
+        "type": "vllm_pd",
+        "container": "img",
+        "model": "/ckpt",
+        "served_model_name": "super35",
+        "prefill": {"node_pool": "prefill", "tensor_parallel_size": 4, "number_of_instances": 4},
+        "decode": {"node_pool": "decode", "tensor_parallel_size": 4, "number_of_instances": 6},
+        **overrides,
+    }
+
+
+def _pd_services(**overrides):
+    return {"policy": _pd_service(**overrides)}
+
+
+def _pd_config(tmp_path, services=None, pools=None):
+    return SubmitConfig.model_validate(
+        {
+            "services": services if services is not None else _pd_services(),
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools or _PD_POOLS}},
+            "driver": {"container": "img", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+
+def _pd_script(tmp_path, **kwargs):
+    config = _pd_config(tmp_path, **kwargs)
+    return build_sbatch_script(
+        config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "jobs" / "b"
+    )
+
+
+def _step(script, name):
+    """The srun step a service renders to."""
+    return script.split(f"# service: {name}\n")[1].split("\n\n")[0]
+
+
+def test_each_tier_carries_its_own_kv_role(tmp_path):
+    script = _pd_script(tmp_path)
+    assert '"kv_role":"kv_producer"' in _step(script, "policy-prefill")
+    assert '"kv_role":"kv_consumer"' in _step(script, "policy-decode")
+
+
+def test_the_kv_transfer_settings_come_from_the_pd_service(tmp_path):
+    services = _pd_services(kv_connector="OtherConnector", kv_load_failure_policy="recompute")
+    script = _pd_script(tmp_path, services=services)
+    for tier in ("policy-prefill", "policy-decode"):
+        assert '"kv_connector":"OtherConnector"' in _step(script, tier)
+        assert '"kv_load_failure_policy":"recompute"' in _step(script, tier)
+
+
+def test_each_tier_coordinates_on_its_own_head(tmp_path):
+    # Pointing both tiers at the allocation's head node would make prefill rank 0 and
+    # decode rank 0 try to coordinate through the same address and port.
+    script = _pd_script(tmp_path)
+    assert "--data-parallel-address ${gym_nodes[0]} --data-parallel-rpc-port 13345" in _step(script, "policy-prefill")
+    assert "--data-parallel-address ${gym_nodes[4]} --data-parallel-rpc-port 13346" in _step(script, "policy-decode")
+
+
+def test_the_tiers_take_separate_node_ranges(tmp_path):
+    script = _pd_script(tmp_path)
+    assert 'GYM_POOL_PREFILL_NODES="$(IFS=,; echo "${gym_nodes[*]:0:4}")"' in script
+    assert 'GYM_POOL_DECODE_NODES="$(IFS=,; echo "${gym_nodes[*]:4:6}")"' in script
+    assert '--nodelist="${GYM_POOL_PREFILL_NODES}" --nodes=4 --ntasks=4' in script
+    assert '--nodelist="${GYM_POOL_DECODE_NODES}" --nodes=6 --ntasks=6' in script
+    assert "#SBATCH --nodes=10" in script
+
+
+def test_the_router_runs_beside_the_driver(tmp_path):
+    # The driver reaches the router on localhost, so both go to node 0.
+    script = _pd_script(tmp_path)
+    driver = next(line for line in script.splitlines() if "logs/driver-$SLURM_JOB_ID.log" in line)
+    assert '--nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1' in _step(script, "policy")
+    assert '--nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1' in driver
+
+
+def test_the_router_addresses_both_tier_heads(tmp_path):
+    router = _step(_pd_script(tmp_path), "policy")
+    assert "vllm-router" in router and "--vllm-pd-disaggregation" in router
+    assert '--prefill "http://${gym_nodes[0]}:8001"' in router
+    assert '--decode "http://${gym_nodes[4]}:8002"' in router
+
+
+def test_a_tier_off_the_first_node_is_probed_where_it_runs(tmp_path):
+    # The probe runs on the allocation's first node; decode answers on node 4.
+    script = _pd_script(tmp_path)
+    assert "Waiting for policy-decode at http://${gym_nodes[4]}:8002" in script
+    assert "Waiting for policy-prefill at http://localhost:8001" in script
+    assert "Waiting for policy at http://localhost:8000" in script
+
+
+def test_each_tier_exports_its_own_nixl_side_channel(tmp_path):
+    script = _pd_script(tmp_path)
+    for tier, port in (("policy-prefill", 5600), ("policy-decode", 5601)):
+        assert "export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname)" in _step(script, tier)
+        assert f"export VLLM_NIXL_SIDE_CHANNEL_PORT={port}" in _step(script, tier)
+
+
+def test_the_node_list_is_resolved_for_the_router(tmp_path):
+    assert 'gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))' in _pd_script(tmp_path)
+
+
+@pytest.mark.parametrize("per_node", [False, True], ids=["data_parallel", "server_per_node"])
+def test_a_pd_service_renders_the_three_service_form_it_replaced(per_node):
+    # The fixtures are the job scripts the earlier form (two tier services wired by hand to a
+    # `type: router` service) rendered for SWE-bench Pro's 4 prefill + 6 decode layout.
+    shape = (lambda n: {}) if per_node else (lambda n: {"number_of_instances": n})
+    pd = _pd_service(
+        container="vllm:img",
+        server_per_node=per_node,
+        prefill={
+            "node_pool": "prefill",
+            "tensor_parallel_size": 4,
+            "extra_args": "--max-model-len 131072",
+            **shape(4),
+        },
+        decode={
+            "node_pool": "decode",
+            "tensor_parallel_size": 4,
+            "env": {"UCX_TLS": "lit:rc,cuda_copy"},
+            "pre_command": "export NCCL_DEBUG=WARN",
+            **shape(6),
+        },
+    )
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"policy": pd},
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _PD_POOLS}},
+            "driver": {"container": "img", "policy_model": "policy", "benchmarks": {"swebench_pro": {"run": {}}}},
+            "job": {"output_path": "/jobs"},
+        }
+    )
+    script = build_sbatch_script(
+        config,
+        "swebench_pro",
+        config.driver.benchmarks["swebench_pro"],
+        config.compute["hsg"],
+        Path("/jobs/swebench_pro"),
+    )
+    fixture = "pd_swebench_pro_server_per_node.sh" if per_node else "pd_swebench_pro_data_parallel.sh"
+    assert script == (Path(__file__).parent / "fixtures" / fixture).read_text()
+
+
+def test_a_pd_service_deploys_as_two_tiers_and_a_router(tmp_path):
+    config = _pd_config(tmp_path)
+    assert list(config.deployed_services) == ["policy-prefill", "policy-decode", "policy"]
+    assert list(config.services) == ["policy"]
+
+
+def test_the_tiers_inherit_the_model_and_take_the_next_ports(tmp_path):
+    services = _pd_services(port=9000)
+    services["policy"]["decode"] |= {"port": 9100, "model": "/other", "container": "other"}
+    deployed = _pd_config(tmp_path, services=services).deployed_services
+    prefill, decode = deployed["policy-prefill"], deployed["policy-decode"]
+    assert (prefill.model, prefill.served_model_name, prefill.container, prefill.port) == (
+        "/ckpt",
+        "super35",
+        "img",
+        9001,
+    )
+    assert (decode.model, decode.served_model_name, decode.container, decode.port) == (
+        "/other",
+        "super35",
+        "other",
+        9100,
+    )
+    assert (prefill.health_check.port, decode.health_check.port) == (9001, 9100)
+
+
+def test_decode_takes_the_nixl_port_one_above_prefills(tmp_path):
+    deployed = _pd_config(tmp_path, services=_pd_services(nixl_side_channel_port=7000)).deployed_services
+    assert deployed["policy-prefill"].nixl_side_channel_port == 7000
+    assert deployed["policy-decode"].nixl_side_channel_port == 7001
+
+
+def test_decode_data_parallel_rpc_port_follows_prefills_unless_set(tmp_path):
+    services = _pd_services()
+    services["policy"]["prefill"]["data_parallel_rpc_port"] = 14000
+    assert _pd_config(tmp_path, services=services).deployed_services["policy-decode"].data_parallel_rpc_port == 14001
+    services["policy"]["decode"]["data_parallel_rpc_port"] = 15000
+    assert _pd_config(tmp_path, services=services).deployed_services["policy-decode"].data_parallel_rpc_port == 15000
+
+
+def test_the_policy_model_is_the_router(tmp_path):
+    run = _pd_config(tmp_path).driver.benchmarks["b"].run
+    assert run["policy_base_url"] == "http://localhost:8000/v1"
+    assert run["policy_model_name"] == "super35"
+
+
+def test_a_pd_service_is_recorded_as_written(tmp_path):
+    # The resolved config written into the job dir must load back, so the tiers stay nested.
+    config = _pd_config(tmp_path)
+    dumped = config.model_dump(mode="json")
+    assert list(dumped["services"]) == ["policy"]
+    for benchmark in dumped["driver"]["benchmarks"].values():
+        benchmark["run"] = {}
+    reloaded = SubmitConfig.model_validate(dumped)
+    assert list(reloaded.deployed_services) == ["policy-prefill", "policy-decode", "policy"]
+    assert reloaded.deployed_services["policy-decode"].kv_transfer_config["kv_role"] == "kv_consumer"
+
+
+def test_a_reloaded_pd_config_keeps_the_derived_tier_values_out(tmp_path):
+    # Written back in, a derived value would be refused on reload or fixed at its old value.
+    services = _pd_services(server_per_node=True, nixl_side_channel_port=7000)
+    for tier in ("prefill", "decode"):
+        services["policy"][tier]["number_of_instances"] = 1
+    dumped = _pd_config(tmp_path, services=services).model_dump(mode="json")
+    for tier in ("prefill", "decode"):
+        derived = {"server_per_node", "nixl_side_channel_port", "kv_transfer_config"} & set(
+            dumped["services"]["policy"][tier]
+        )
+        assert not derived
+    for benchmark in dumped["driver"]["benchmarks"].values():
+        benchmark["run"] = {}
+    dumped["services"]["policy"]["nixl_side_channel_port"] = 8000
+    decode = SubmitConfig.model_validate(dumped).deployed_services["policy-decode"]
+    assert (decode.nixl_side_channel_port, decode.server_per_node) == (8001, True)
+
+
+def test_a_tiers_missing_mount_is_named_by_its_path_in_the_config(tmp_path):
+    services = _pd_services()
+    services["policy"]["decode"]["mounts"] = [f"{tmp_path / 'nonexistent'}:/ckpt"]
+    with pytest.raises(ValueError, match=r"services\.policy\.decode"):
+        _validate_mounts(_pd_config(tmp_path, services=services), LocalConnection())
+
+
+@pytest.mark.parametrize("tier", ["prefill", "decode"])
+@pytest.mark.parametrize("field", ["nixl_side_channel_port", "server_per_node"])
+def test_service_wide_settings_are_refused_on_a_tier(tmp_path, tier, field):
+    services = _pd_services()
+    services["policy"][tier][field] = 1
+    with pytest.raises(ValueError, match=f"{field} is set on the {tier} tier. Set it on the vllm_pd service itself"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_tiers_sharing_a_data_parallel_rpc_port_are_refused(tmp_path):
+    services = _pd_services()
+    services["policy"]["decode"]["data_parallel_rpc_port"] = 13345
+    with pytest.raises(ValueError, match="'policy-prefill' and 'policy-decode' share data_parallel_rpc_port 13345"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_a_tier_without_a_node_pool_is_refused(tmp_path):
+    services = _pd_services()
+    del services["policy"]["prefill"]["node_pool"]
+    with pytest.raises(ValueError, match="'policy-prefill' is a prefill/decode tier without a node_pool"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_a_tier_on_an_unknown_pool_is_refused(tmp_path):
+    services = _pd_services()
+    services["policy"]["decode"]["node_pool"] = "nope"
+    with pytest.raises(ValueError, match="'policy-decode' node_pool 'nope' does not match any node pool"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_a_missing_tier_is_refused(tmp_path):
+    services = _pd_services()
+    del services["policy"]["decode"]
+    with pytest.raises(ValueError, match=r"services\.policy\.vllm_pd\.decode\n  Field required"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_a_tier_name_already_taken_is_refused(tmp_path):
+    services = _pd_services()
+    services["policy-decode"] = {"type": "vllm", "container": "img", "model": "/j", "node_pool": "decode"}
+    with pytest.raises(ValueError, match="deploys its tiers as policy-prefill, policy-decode, but services already"):
+        _pd_config(tmp_path, services=services)
+
+
+@pytest.mark.parametrize("field", ["kv_role", "kv_connector", "kv_load_failure_policy"])
+def test_kv_settings_are_not_accepted_on_a_tier(tmp_path, field):
+    # The P/D service sets each tier's role and owns the connector settings.
+    services = _pd_services()
+    services["policy"]["prefill"][field] = "x"
+    with pytest.raises(ValueError, match=f"prefill.{field}\n  Extra inputs are not permitted"):
+        _pd_config(tmp_path, services=services)
+
+
+@pytest.mark.parametrize("field", ["nixl_side_channel_port", "server_per_node"])
+def test_tier_only_settings_are_not_accepted_on_a_plain_vllm_service(tmp_path, field):
+    services = {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", field: 1}}
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_a_router_away_from_the_driver_is_refused(tmp_path):
+    # driver.policy_model reaches the router over localhost, and the driver runs on
+    # the allocation's first node.
+    with pytest.raises(ValueError, match="reaches it over localhost"):
+        _pd_config(tmp_path, services=_pd_services(node_pool="decode"))
+
+
+def test_an_empty_kv_config_renders_no_kv_transfer_flag():
+    # `--kv-transfer-config '{}'` would start a tier with no KV role at all.
+    tier = VllmPDTierConfig(
+        type="vllm",
+        container="img",
+        model="/ckpt",
+        nixl_side_channel_port=5600,
+        server_per_node=False,
+        kv_transfer_config={},
+    )
+    assert _kv_transfer_flag(tier) == ""
+
+
+def test_a_plain_vllm_service_gets_no_kv_transfer_config(tmp_path):
+    services = {
+        "policy": {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000, "tensor_parallel_size": 4}
+    }
+    pools = {"gpu": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 4}}
+    config = SubmitConfig.model_validate(
+        {
+            "services": services,
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools}},
+            "driver": {"container": "img", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    script = build_sbatch_script(
+        config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "jobs" / "b"
+    )
+    assert "--kv-transfer-config" not in script
+    assert "VLLM_NIXL_SIDE_CHANNEL" not in script
+    assert "gym_nodes=" not in script
+
+
+def _comet_like(tmp_path, pools=None, **ray):
+    return _render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+            "ray": {
+                "type": "ray",
+                "container": "img",
+                "node_pools": ["gpu", "aux"],
+                "port": 6380,
+                "resources": {"aux": {"extra_gpu": 4}},
+                **ray,
+            },
+        },
+        pools,
+    )
+
+
+def test_a_ray_service_starts_its_head_beside_the_driver(tmp_path):
+    script = _comet_like(tmp_path)
+    assert 'export GYM_RAY_ADDRESS_RAY="$(getent hosts ${gym_nodes[0]}' in script
+    assert ':6380"' in script
+    head = script.split("# service: ray\n")[1].split("\n\n")[0]
+    assert '--nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1' in head
+    assert '--head --port 6380 --node-ip-address "${GYM_RAY_ADDRESS_RAY%:*}"' in head
+    # The head's own pool advertises nothing here, so it offers no extra_gpu.
+    assert "extra_gpu" not in head
+
+
+def test_every_other_spanned_node_joins_as_a_worker(tmp_path):
+    pools = {**_TWO_POOLS, "aux": {**_TWO_POOLS["aux"], "nodes": 2}}
+    script = _comet_like(tmp_path, pools)
+    assert 'export GYM_RAY_RAY_AUX_WORKERS="$(IFS=,; echo "${gym_nodes[*]:1:2}")"' in script
+    # The gpu pool's only node is the head, so it gets no worker step.
+    assert "GYM_RAY_RAY_GPU_WORKERS" not in script
+    workers = script.split("# service: ray_aux_workers\n")[1].split("\n\n")[0]
+    assert '--nodelist="${GYM_RAY_RAY_AUX_WORKERS}" --nodes=2 --ntasks=2' in workers
+    assert '--address "$GYM_RAY_ADDRESS_RAY"' in workers
+    assert "extra_gpu" in workers
+
+
+def test_a_ray_service_runs_every_step_in_its_one_container(tmp_path):
+    script = _comet_like(tmp_path, container="ray-img:1", mounts=["/x:/x"], pre_command="setup")
+    for name in ("ray", "ray_aux_workers"):
+        step = script.split(f"# service: {name}\n")[1].split("\n\n")[0]
+        assert "--container-image=ray-img:1" in step
+        assert "--container-mounts=/x:/x" in step
+        assert "setup" in step
+
+
+def test_a_worker_waits_for_the_head_after_its_own_setup(tmp_path):
+    script = _comet_like(tmp_path, pre_command="install-ray")
+    workers = script.split("# service: ray_aux_workers\n")[1].split("\n\n")[0]
+    assert workers.index("install-ray") < workers.index("until ray status") < workers.index("exec ray start")
+
+
+def test_the_ray_head_follows_the_driver_to_a_later_pool(tmp_path):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {
+                "policy": _vllm(8000, "aux", tensor_parallel_size=4),
+                "ray": {"type": "ray", "container": "img", "node_pools": ["gpu", "aux"]},
+            },
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _TWO_POOLS}},
+            "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
+    assert '--nodelist="${gym_nodes[1]}"' in script.split("# service: ray\n")[1].split("\n\n")[0]
+    assert 'export GYM_RAY_ADDRESS_RAY="$(getent hosts ${gym_nodes[1]}' in script
+    assert 'export GYM_RAY_RAY_GPU_WORKERS="$(IFS=,; echo "${gym_nodes[*]:0:1}")"' in script
+    assert "GYM_RAY_RAY_AUX_WORKERS" not in script
+
+
+def test_a_single_node_ray_service_is_just_a_head(tmp_path):
+    one = {"gpu": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 4}}
+    script = _render(tmp_path, {"ray": {"type": "ray", "container": "img", "node_pools": ["gpu"]}}, one)
+    assert "_workers" not in script
+    assert "--nodelist" not in script
+    assert 'export GYM_RAY_ADDRESS_RAY="$(getent hosts ${gym_nodes[0]}' in script
+
+
+def test_a_rendered_ray_service_is_valid_bash(tmp_path):
+    script = _comet_like(tmp_path, pre_command="echo 'quoted'", extra_args="--temp-dir=/tmp/ray-$SLURM_JOB_ID")
+    result = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_driver_goes_to_the_policys_node_when_services_are_pinned(tmp_path):
+    # The driver reaches the policy on localhost. Unpinned, Slurm put it on the aux
+    # node of a real two-node job, where neither the policy nor a local raylet was.
+    config = SubmitConfig.model_validate(
+        {
+            "services": {
+                "scorer": _vllm(8001, "gpu", tensor_parallel_size=4),
+                "policy": _vllm(8000, "aux", tensor_parallel_size=4),
+            },
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _TWO_POOLS}},
+            "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
+    driver = next(line for line in script.splitlines() if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
+    assert '--nodelist="${gym_nodes[1]}" --nodes=1 --ntasks=1' in driver
+
+
+def _per_node_services():
+    services = _pd_services(server_per_node=True)
+    for tier in ("prefill", "decode"):
+        services["policy"][tier]["number_of_instances"] = 1
+    return services
+
+
+def test_a_per_node_tier_runs_one_plain_server_on_every_node(tmp_path):
+    # One srun over the pool, each task a standalone server: no data-parallel ranks.
+    script = _pd_script(tmp_path, services=_per_node_services())
+    prefill = _step(script, "policy-prefill")
+    assert '--nodelist="${GYM_POOL_PREFILL_NODES}" --nodes=4 --ntasks=4' in prefill
+    assert "vllm serve /ckpt --port 8001 --tensor-parallel-size 4" in prefill
+    assert "--data-parallel" not in prefill and "--headless" not in prefill
+
+
+def test_the_router_lists_every_node_of_a_per_node_tier(tmp_path):
+    router = _step(_pd_script(tmp_path, services=_per_node_services()), "policy")
+    assert [f'--prefill "http://${{gym_nodes[{i}]}}:8001"' in router for i in range(4)] == [True] * 4
+    assert [f'--decode "http://${{gym_nodes[{i}]}}:8002"' in router for i in range(4, 10)] == [True] * 6
+    assert "gym_nodes[10]" not in router
+
+
+def test_a_per_node_tier_is_sized_as_one_node(tmp_path):
+    # TP4 on a 4-GPU node fills it; judged against the pool total it would warn of idle GPUs.
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _pd_config(tmp_path, services=_per_node_services())
+
+
+def test_server_per_node_needs_one_instance(tmp_path):
+    services = _per_node_services()
+    services["policy"]["prefill"]["number_of_instances"] = 4
+    with pytest.raises(ValueError, match="number_of_instances must be 1"):
+        _pd_config(tmp_path, services=services)
+
+
+def test_an_unpinned_service_in_a_multi_node_job_runs_on_one_node(tmp_path):
+    # Without a node count srun starts the router on every node, and each copy
+    # tries to bind the hostname the batch script resolved on the first one.
+    router = _step(_pd_script(tmp_path, services=_per_node_services()), "policy")
+    assert router.count("--nodes=1 --ntasks=1") == 1
+
+
+def test_the_router_answers_on_localhost(tmp_path):
+    # driver.policy_model and the health probe both call http://localhost:<port>;
+    # binding $(hostname) would leave nothing listening there.
+    router = _step(_pd_script(tmp_path), "policy")
+    assert "--host 0.0.0.0" in router and "$(hostname)" not in router
+
+
+def test_the_policy_host_can_be_routable(tmp_path):
+    # An agent in a remote sandbox cannot reach the driver's localhost.
+    config = SubmitConfig.model_validate(
+        {
+            "services": _per_node_services(),
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _PD_POOLS}},
+            "driver": {
+                "container": "img",
+                "policy_model": "policy",
+                "policy_host": "${oc.env:HEAD_NODE_IP}",
+                "benchmarks": {"b": {"run": {}}},
+            },
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    assert config.driver.benchmarks["b"].run["policy_base_url"] == "http://${oc.env:HEAD_NODE_IP}:8000/v1"
+    assert _pd_config(tmp_path).driver.benchmarks["b"].run["policy_base_url"] == "http://localhost:8000/v1"
+
+
+# ---------------------------------------------------------------------------
+# health probes
+# ---------------------------------------------------------------------------
+
+
+def _driver_on_aux(tmp_path, services):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"policy": _vllm(8000, "aux", tensor_parallel_size=4), **services},
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _TWO_POOLS}},
+            "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    return build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
+
+
+_RAY_WITH_PROBE = {
+    "type": "ray",
+    "container": "img",
+    "node_pools": ["gpu", "aux"],
+    "health_check": {"port": 8011, "path": "/"},
+}
+
+
+def test_a_pinned_service_on_a_later_pool_is_probed_where_it_runs(tmp_path):
+    # The probe runs on node 0; the aux pool's service answers on node 1.
+    script = _render(tmp_path, {"policy": _vllm(8000, "gpu"), "scorer": _vllm(8001, "aux")})
+    assert "Waiting for scorer at http://${gym_nodes[1]}:8001" in script
+    assert "Waiting for policy at http://localhost:8000" in script
+
+
+def test_a_ray_head_is_probed_beside_a_non_zero_driver_node(tmp_path):
+    script = _driver_on_aux(tmp_path, {"ray": _RAY_WITH_PROBE})
+    assert "Waiting for ray at http://${gym_nodes[1]}:8011" in script
+
+
+def test_the_collector_is_probed_beside_a_non_zero_driver_node(tmp_path):
+    script = _driver_on_aux(tmp_path, {})
+    assert "Waiting for otel_collector at http://${gym_nodes[1]}:13133" in script
+
+
+def test_services_on_node_0_are_probed_locally(tmp_path):
+    script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": _RAY_WITH_PROBE})
+    assert "Waiting for ray at http://localhost:8011" in script
+    assert "Waiting for policy at http://localhost:8000" in script
+
+
+def test_an_unpinned_multi_node_service_is_probed_on_node_0(tmp_path):
+    # It spans the allocation and serves its API from node 0, where the probe runs.
+    script = _driver_on_aux(tmp_path, {"judge": {"type": "vllm", "container": "img", "model": "/j", "port": 9000}})
+    assert "Waiting for judge at http://localhost:9000" in script
+
+
+def test_an_unpinned_service_is_probed_on_the_drivers_node(tmp_path):
+    # The probe runs on node 0, but an unpinned single-node service runs beside the
+    # driver, here on the decode pool's first node.
+    config = _pd_config(tmp_path)
+    config.driver.policy_model = "policy-decode"
+    script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
+    assert '--nodelist="${gym_nodes[4]}"' in _step(script, "policy")
+    assert "Waiting for policy at http://${gym_nodes[4]}:8000" in script
+
+
+def test_a_ray_head_on_node_0_is_probed_locally(tmp_path):
+    ray = {
+        "type": "ray",
+        "container": "img",
+        "node_pools": ["gpu", "aux"],
+        "health_check": {"port": 8011, "path": "/"},
+    }
+    script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": ray})
+    assert "Waiting for ray at http://localhost:8011" in script

@@ -4,7 +4,6 @@
 import asyncio
 import json
 import logging
-import shlex
 import sys
 import tempfile
 from copy import deepcopy
@@ -22,6 +21,7 @@ from harbor.agents.terminus_2.tmux_session import TmuxSession
 from harbor.llms.base import BaseLLM, ContextLengthExceededError, LLMResponse
 from harbor.models.agent.context import AgentContext
 from harbor.models.metric.usage_info import UsageInfo
+from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.logger import logger as harbor_logger
 from pydantic import ConfigDict, Field
 
@@ -59,6 +59,12 @@ from nemo_gym.server_utils import (
     raise_for_status,
 )
 from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
+from responses_api_agents.terminus_2_sandboxed_agent.terminal import (
+    ShellExitedError,
+    TerminusJSONParser,
+    TerminusTmuxSession,
+    TerminusXMLParser,
+)
 from responses_api_agents.terminus_2_sandboxed_agent.terminal_mounts import private_terminal_bootstrap
 
 
@@ -76,7 +82,6 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     model_context_limit: int
     model_output_limit: int | None
     interleaved_thinking: bool
-    recover_stalled_interrupts: bool = True
     terminal_hidden_mounts: list[str] = Field(default_factory=list)
 
     llm_request_timeout: int
@@ -118,8 +123,6 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
     usages: List[Optional[NeMoGymResponseUsage]]
     num_proactive_compactions: int
     num_compactions: int
-    terminal_interrupt_drains: int = 0
-    terminal_interrupt_drain_errors: int = 0
     error: Optional[str]
 
 
@@ -193,7 +196,7 @@ class NeMoGymLLM(BaseLLM):
         self._model_output_limit = model_output_limit
         self._llm_request_timeout = llm_request_timeout
         self.trajectory: list[NeMoGymResponseOutputItem] = []
-        self.usages: list[NeMoGymResponseUsage] = []
+        self.usages: list[NeMoGymResponseUsage | None] = []
         self._times_spent = []
         self._last_input_items = []
         self._model_calls_gt_10min = 0
@@ -341,18 +344,14 @@ class NeMoGymTerminus2(Terminus2):
         *args: Any,
         llm: NeMoGymLLM,
         dump_trajectory: bool,
-        recover_stalled_interrupts: bool = False,
         terminal_hidden_mounts: list[str] | None = None,
         **kwargs: Any,
     ):
         self._nemo_gym_llm = llm
         self._dump_trajectory_enabled = dump_trajectory
-        self._recover_stalled_interrupts = recover_stalled_interrupts
         self._terminal_mount_bootstrap = (
             private_terminal_bootstrap(terminal_hidden_mounts) if terminal_hidden_mounts else None
         )
-        self._terminal_interrupt_drains = 0
-        self._terminal_interrupt_drain_errors = 0
         self._times_spent = []
         self._num_proactive_compactions = 0
         self._completed_command_batches = 0
@@ -362,28 +361,49 @@ class NeMoGymTerminus2(Terminus2):
     def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
         return self._nemo_gym_llm
 
-    async def setup(self, environment: NeMoGymSandboxEnvironment) -> None:
-        if self._terminal_mount_bootstrap is None:
-            return await super().setup(environment)
+    def _get_parser(self) -> TerminusJSONParser | TerminusXMLParser:
+        if self._parser_name == "json":
+            return TerminusJSONParser()
+        if self._parser_name == "xml":
+            return TerminusXMLParser()
+        raise ValueError(f"Unknown parser_name: {self._parser_name}. Use 'json' or 'xml'.")
 
-        # Starting tmux here makes Harbor's subsequent sessions inherit the private
-        # mounts. Direct sandbox execution (including grading) keeps its original view.
-        result = await environment.exec(self._terminal_mount_bootstrap, user="root", timeout_sec=25)
-        if result.return_code != 0:
-            raise RuntimeError(f"Private terminal mount bootstrap failed: {result.stdout}\n{result.stderr}")
+    async def setup(self, environment: NeMoGymSandboxEnvironment) -> None:
+        if self._terminal_mount_bootstrap is not None:
+            # Starting tmux here makes the session below inherit the private mounts. Direct
+            # sandbox execution (including grading) keeps its original view.
+            result = await environment.exec(self._terminal_mount_bootstrap, user="root", timeout_sec=25)
+            if result.return_code != 0:
+                raise RuntimeError(f"Private terminal mount bootstrap failed: {result.stdout}\n{result.stderr}")
+        self._session = TerminusTmuxSession(
+            session_name=self.name(),
+            environment=environment,
+            logging_path=EnvironmentPaths.agent_dir / "terminus_2.pane",
+            local_asciinema_recording_path=(
+                environment.trial_paths.agent_dir / "recording.cast" if self._record_terminal_session else None
+            ),
+            remote_asciinema_recording_path=(
+                EnvironmentPaths.agent_dir / "recording.cast" if self._record_terminal_session else None
+            ),
+            pane_width=self._tmux_pane_width,
+            pane_height=self._tmux_pane_height,
+            extra_env=self._extra_env,
+            user=environment.default_user,
+        )
         setup_succeeded = False
         try:
-            await super().setup(environment)
+            await self._session.start()
             setup_succeeded = True
         finally:
-            try:
-                result = await environment.exec("tmux kill-session -t gym-internal-mount-bootstrap", user="root")
-                if result.return_code != 0:
-                    raise RuntimeError(f"Private terminal mount bootstrap cleanup failed: {result.stderr}")
-            except Exception:
-                if setup_succeeded:
-                    raise
-                self.logger.warning("Private terminal bootstrap cleanup failed after setup failure", exc_info=True)
+            if self._terminal_mount_bootstrap is not None:
+                try:
+                    result = await environment.exec("tmux kill-session -t gym-internal-mount-bootstrap", user="root")
+                    if result.return_code != 0:
+                        raise RuntimeError(f"Private terminal mount bootstrap cleanup failed: {result.stderr}")
+                except Exception:
+                    if setup_succeeded:
+                        raise
+                    self.logger.warning("Private terminal bootstrap cleanup failed after setup failure", exc_info=True)
 
     def _dump_trajectory_with_continuation_index(self, continuation_index: int) -> None:
         if self._dump_trajectory_enabled:
@@ -408,78 +428,25 @@ class NeMoGymTerminus2(Terminus2):
 
     async def _execute_commands(self, commands: list[Command], session: TmuxSession) -> tuple[bool, str]:
         start_time = perf_counter()
-        if self._recover_stalled_interrupts:
-            res = await self._execute_commands_with_interrupt_recovery(commands, session)
-        else:
+        try:
             res = await super()._execute_commands(commands, session)
+        except ShellExitedError:
+            # If the shell exits, do not retry the current command or execute
+            # the remaining commands in the batch. Return partial output and a
+            # shell-reset notice so the model can recover before confirming completion.
+            self._pending_completion = False
+            res = False, self._limit_output_length(await session.recover_shell())
         if commands:
             self._completed_command_batches += 1
         self._times_spent.append(perf_counter() - start_time)
 
         return res
 
-    async def _recover_stalled_interrupt(self, session: TmuxSession) -> None:
-        # A full canonical input queue can block tmux's queued Ctrl+C. Reading the
-        # pending input lets that key reach the terminal's normal signal handler.
-        # Use a separate exec channel; never enqueue recovery behind the blocked key.
-        command = """
-pane_tty=$(tmux display-message -p -t SESSION '#{pane_tty}') || exit 1
-terminal_modes=$(LC_ALL=C stty -F "$pane_tty" -a) || exit 1
-case "$terminal_modes" in
-    *-icanon*|*-isig*) echo skipped; exit 0 ;;
-esac
-case "$terminal_modes" in
-    *'intr = ^C;'*) ;;
-    *) echo skipped; exit 0 ;;
-esac
-case "$terminal_modes" in
-    *-noflsh*) ;;
-    *) echo skipped; exit 0 ;;
-esac
-timeout --kill-after=1 0.5 dd if="$pane_tty" of=/dev/null bs=4096 status=none
-drain_status=$?
-case "$drain_status" in
-    0|124) echo drained ;;
-    *) exit "$drain_status" ;;
-esac
-""".replace("SESSION", shlex.quote(session._session_name))
-        try:
-            result = await session.environment.exec(command, timeout_sec=5, user=session._user)
-        except Exception:
-            # Recovery is best effort. Preserve the ordinary terminal observation
-            # if this separate control operation fails; cancellation still propagates.
-            self.logger.warning("Terminal interrupt input drain failed", exc_info=True)
-            self._terminal_interrupt_drain_errors += 1
-            return
-        if result.return_code != 0:
-            self._terminal_interrupt_drain_errors += 1
-            self.logger.warning("Terminal interrupt input drain failed: %s", result.stderr)
-        else:
-            if result.stdout.strip() == "drained":
-                self._terminal_interrupt_drains += 1
-            self.logger.info("Terminal interrupt input drain: %s", result.stdout.strip())
-
-    async def _execute_commands_with_interrupt_recovery(
-        self, commands: list[Command], session: TmuxSession
-    ) -> tuple[bool, str]:
-        # Keep Harbor's batch ordering, timeout feedback, and single observation.
-        # Recover before the next command in the batch can enter the input queue.
-        for command in commands:
-            try:
-                await session.send_keys(command.keystrokes, block=False, min_timeout_sec=command.duration_sec)
-            except TimeoutError:
-                return True, self._timeout_template.format(
-                    timeout_sec=command.duration_sec,
-                    command=command.keystrokes,
-                    terminal_state=self._limit_output_length(await session.get_incremental_output()),
-                )
-            if command.keystrokes == "C-c":
-                await self._recover_stalled_interrupt(session)
-        return False, self._limit_output_length(await session.get_incremental_output())
-
     def _count_total_tokens(self, *args, **kwargs):
         if self._is_check_proactive_summarization and self._nemo_gym_llm.usages:
-            return self._nemo_gym_llm.usages[-1].total_tokens
+            usage = self._nemo_gym_llm.usages[-1]
+            if usage is not None:
+                return usage.total_tokens
         return super()._count_total_tokens(*args, **kwargs)
 
     async def _check_proactive_summarization(self, *args, **kwargs):
@@ -521,6 +488,7 @@ esac
 
 
 class Terminus2Agent(SimpleResponsesAPIAgent):
+    ray_enabled = False
     config: Terminus2AgentConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -591,7 +559,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 llm=llm,
                 dump_trajectory=self.config.dump_trajectory,
                 interleaved_thinking=self.config.interleaved_thinking,
-                recover_stalled_interrupts=self.config.recover_stalled_interrupts,
                 terminal_hidden_mounts=self.config.terminal_hidden_mounts,
             )
 
@@ -675,8 +642,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             "model_calls_gt_10min": llm._model_calls_gt_10min,
             "num_proactive_compactions": agent._num_proactive_compactions,
             "num_compactions": llm._num_compactions,
-            "terminal_interrupt_drains": agent._terminal_interrupt_drains,
-            "terminal_interrupt_drain_errors": agent._terminal_interrupt_drain_errors,
             "error": error,
             "usages": llm.usages,
         }

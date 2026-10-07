@@ -14,10 +14,10 @@
 # limitations under the License.
 from abc import abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 
 if TYPE_CHECKING:
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from nemo_gym.mcp_auto_exposure import MCPTool
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import validate_failure_kind
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
@@ -34,6 +35,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
+from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 
@@ -67,7 +69,7 @@ def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
 
 
 # Tool names that would collide with the resources server's own endpoints if advertised over MCP.
-RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "aggregate_metrics", "mcp"})
+RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "close_session", "aggregate_metrics", "mcp"})
 
 
 class ReverifyMode(str, Enum):
@@ -179,6 +181,63 @@ class MCPServerMetadata(BaseModel):
     headers: dict[str, str]
 
 
+class ResourcesSeedSessionRequest(BaseModel):
+    """Idempotently initialize resources state under a caller-assigned identifier.
+
+    Repeating the same identifier and episode must return the existing session.
+    Closing an unknown identifier must prevent a racing seed from creating it later.
+    External resources should use provider TTLs when available. Current process-local
+    session records may remain until the server shuts down.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    resources_session_id: str = Field(min_length=1)
+    episode_id: EpisodeId
+    task_id: TaskId
+    task_data: dict[str, JsonValue]
+
+
+class ResourcesSeedSessionResponse(BaseModel):
+    """Confirm resources state and return optional agent access."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resources_session_id: str
+    resources_tools: MCPServerMetadata | None = None
+    sandbox_access: SandboxAccess | None = None
+
+
+VerificationInputT = TypeVar("VerificationInputT")
+
+
+class ResourcesVerifyRequest(BaseModel, Generic[VerificationInputT]):
+    """Carry typed environment output to a resources server."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    episode_id: EpisodeId
+    task_id: TaskId
+    verification_input: VerificationInputT
+
+
+class ResourcesCloseSessionRequest(BaseModel):
+    """Close resources-server state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resources_session_id: str
+    episode_id: EpisodeId
+
+
+class ResourcesCloseSessionResponse(BaseModel):
+    """Confirm resources-server state was closed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resources_session_id: str
+
+
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
 
@@ -189,6 +248,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.add_middleware(RolloutContextMiddleware)
 
         app.post("/seed_session")(self.seed_session)
+        app.post("/close_session")(self.close_resources_session)
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
         app.post("/verify")(
             traced_verify_endpoint(
@@ -216,12 +276,44 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     def mcp_allowed_tools_for_session(self, seed_body: dict[str, Any]) -> Optional[list[str]]:
         """Per-session tool restriction: return the tool names allowed for this rollout's MCP token,
         or ``None`` (the default) for unrestricted. ``seed_body`` is the JSON body POSTed to
-        ``/seed_session``.
+        ``/seed_session``, or its ``task_data`` when an Environment Server seeds the session.
         """
         return None
 
-    async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+    async def seed_session(
+        self,
+        body: ResourcesSeedSessionRequest | BaseSeedSessionRequest,
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        """Seed per-rollout state; the default keeps none.
+
+        An Environment Server seeds with a ``ResourcesSeedSessionRequest`` and gets its caller-assigned
+        ``resources_session_id`` back. An Agent's ``/run`` seeds with its legacy body and gets an empty
+        response. Servers that keep per-rollout state override this method.
+        """
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
         return BaseSeedSessionResponse()
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        """Close state an Environment Server seeded; the default keeps none.
+
+        Served at ``/close_session``. Servers that keep per-rollout state override this method, and may accept
+        other close bodies by overriding it with a different signature. The name differs from the
+        ``close_session`` helpers some servers already define for their own state.
+
+        An override must:
+
+        - succeed when the session is already closed or was never seeded;
+        - keep a seed that arrives after the close from creating the session again;
+        - raise when releasing fails rather than recording the session as closed, so the caller can retry.
+
+        The default seed does not tie the session cookie to ``resources_session_id``. A server that keys state
+        by the cookie's ``SESSION_ID_KEY`` releases it by that key, from ``request.session``, or sets
+        ``request.session[SESSION_ID_KEY] = body.resources_session_id`` in its own seed.
+
+        ``nemo_gym.testing.session_conformance.check_resources_session_contract`` checks these rules from a server's tests.
+        """
+        return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
     @abstractmethod
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
@@ -230,13 +322,14 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         """Compute aggregate metrics from verify responses.
 
-        RewardProfiler provides baseline stats. Override compute_metrics() and/or
-        get_key_metrics() for benchmark-specific customization.
+        RewardProfiler provides baseline stats. Override compute_metrics(),
+        compute_repeat_metrics(), and/or get_key_metrics() for benchmark-specific customization.
         """
         return compute_aggregate_metrics(
             body.verify_responses,
             compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
+            compute_repeat_metrics_fn=self.compute_repeat_metrics,
         )
 
     async def get_reverify_mode(self) -> ReverifyMode:
