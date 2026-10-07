@@ -326,6 +326,7 @@ class CodexAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
+    agent_timed_out: bool = False
     ng_agent_observations: Optional[AgentObservationBundle] = None
 
 
@@ -543,6 +544,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     codex_home, rollout_id, returncode=proc.returncode, timed_out=timed_out
                 )
                 text += "\n" + json.dumps({"type": "_ng_observations", "bundle": observations.model_dump(mode="json")})
+            if timed_out:
+                text += "\n" + json.dumps({"type": "_ng_timed_out"})
             return text, model
         finally:
             await stack.aclose()
@@ -658,6 +661,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 continue
             if event.get("type") == "_ng_observations":
                 response = response.model_copy(update={"_ng_agent_observations": event["bundle"]})
+            elif event.get("type") == "_ng_timed_out":
+                response = response.model_copy(update={"_ng_agent_timed_out": True})
         return response
 
     async def responses(
@@ -695,6 +700,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             )
             agent_resp_json = agent_resp.model_dump(mode="json")
             observations = agent_resp_json.pop("_ng_agent_observations", None)
+            timed_out = bool(agent_resp_json.pop("_ng_agent_timed_out", False))
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -712,11 +718,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
             )
             last = gym_resp.output[-1] if gym_resp.output else None
-            naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
+            # A timed-out run can still end in an assistant message, so the last item alone is not enough.
+            naturally = (
+                not timed_out
+                and getattr(last, "type", None) == "message"
+                and getattr(last, "role", None) == "assistant"
+            )
 
             return CodexAgentVerifyResponse.model_validate(
                 verify_json
-                | {"turns_used": turns, "finished_naturally": naturally}
+                | {"turns_used": turns, "finished_naturally": naturally, "agent_timed_out": timed_out}
                 | ({"ng_agent_observations": observations} if observations is not None else {})
             )
 

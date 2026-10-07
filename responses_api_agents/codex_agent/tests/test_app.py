@@ -333,6 +333,44 @@ class TestRunForwardsSkillsPath:
         assert run_codex.call_args.kwargs["skills_path"] is None
 
 
+class TestRunTimeout:
+    """A run stopped by `timeout` must not be reported as finished naturally."""
+
+    def _run(self, stdout: str):
+        agent = _make_agent()
+        verify_bodies = []
+
+        async def _post(server_name, url_path, json=None, cookies=None, **kw):
+            if url_path == "/verify":
+                verify_bodies.append(json)
+                return _FakeHttpResp(
+                    {"responses_create_params": {"input": []}, "response": _gym_response(), "reward": 0.5}
+                )
+            return _FakeHttpResp({})
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {}
+        body = CodexAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
+        with patch.object(CodexAgent, "_run_codex", AsyncMock(return_value=(stdout, "codex-default"))):
+            result = asyncio.run(agent.run(req, body))
+        return result, verify_bodies[0]
+
+    def test_timed_out_run_is_not_finished_naturally(self) -> None:
+        result, verify_body = self._run(json.dumps({"type": "_ng_timed_out"}))
+
+        assert result.finished_naturally is False
+        assert result.agent_timed_out is True
+        assert result.reward == 0.5
+        assert "_ng_agent_timed_out" not in verify_body["response"]
+
+    def test_completed_run_is_finished_naturally(self) -> None:
+        result, _ = self._run("")
+
+        assert result.finished_naturally is True
+        assert result.agent_timed_out is False
+
+
 class TestRunCodex:
     def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
         agent = _make_agent(openai_api_key="sk-test", system_prompt=None)  # pragma: allowlist secret
@@ -448,7 +486,7 @@ class TestRunCodex:
         ):
             stdout, model = asyncio.run(agent._run_codex("hello"))
 
-        assert stdout == ""
+        assert stdout == "\n" + json.dumps({"type": "_ng_timed_out"})
         assert killed["called"] is True
         assert model == "codex-default"
 
