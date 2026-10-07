@@ -86,3 +86,5 @@ key, and provider configuration are unchanged.
 - `opencode_version`: npm version to pin on install (null means latest)
 
 See `configs/opencode_agent.yaml`.
+
+With `observability_enabled: true` and a Gym `model_server`, the collector builds canonical turns from invocation-owned model captures, retaining full provider prompts and answers. A turn is one provider response rather than one persisted assistant message; HTTP errors remain invocation-owned attempts without becoming turns. Without model capture, the native SQLite turn evidence remains available. Bash exit codes determine execution success even when OpenCode records the tool lifecycle as completed.
