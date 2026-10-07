@@ -5,8 +5,10 @@ description: "Compose task and harness components, declare a workload manifest, 
 # New Environment
 
 An environment is the logical execution composition of a task, agent harness, model bindings, resources, and episode protocol. A Gym config selects and connects these participants. The task defines what must be done and how it is scored; the harness decides how to solve it.
+In Gym, a benchmark is a special kind of environment: a reproducible evaluation workload that requires a canonical split, a data preparation step, and a fixed prompt configuration so any user can reproduce the same score.
+General-purpose environments and benchmarks are stored in `environments` and `benchmarks` directories, respectively.
 
-The onboarding flow below covers a complete environment or benchmark. A resources server may be a reusable scoring, tool, or state component, or it may ship a runnable composition and data. Manifest-backed onboarding currently writes canonical workloads under `environments/` and `benchmarks/`; runnable configs still colocated under `resources_servers/` remain visible as `no-manifest` migration entries.
+The primary contribution path is a manifest-backed environment or benchmark: `gym env init --environment` or `gym env init --benchmark` scaffolds the catalog entry and the resources server component together, then `gym env validate`, `gym env test`, and `gym env publish` complete the onboarding chain. This page follows that path. For a standalone resources server without a catalog entry, see [Standalone Resources Server](#standalone-resources-server).
 
 <Tip>
 For a guide to building your first resources server, refer to [Single Step Environment](/main/environment-tutorials/single-step-environment).
@@ -25,7 +27,7 @@ gym env test my_eval
 gym env publish my_eval
 ```
 
-The scaffold creates a manifest, Gym config, sample data, and README. Names that create Python components must be lowercase Python identifiers. Benchmarks also receive source data, a prompt, and a `prepare()` function. A new scorer adds a resources server and verifier fixture. Non-default templates expose the selected extension point but initially delegate to existing Gym behavior; replace their generated TODO before review. An external-loop scaffold is an adapter starting point under the current runtime; document which responsibilities the framework owns and test the actual execution path.
+`gym env init --environment` writes the manifest, Gym config, README, and sample data under `environments/my_eval/`, and scaffolds a full resources server skeleton under `resources_servers/my_eval/`. Implement the resources server before running `validate`. Names that create Python components must be lowercase Python identifiers. Benchmarks also receive source data, a prompt, and a `prepare()` function. A new scorer adds a resources server and verifier fixture. Non-default templates expose the selected extension point but initially delegate to existing Gym behavior; replace their generated TODO before review. An external-loop scaffold is an adapter starting point under the current runtime; document which responsibilities the framework owns and test the actual execution path.
 
 To reuse a scorer that already exports the verifier-fixture contract, declare its reward contract instead of copying its implementation:
 
@@ -50,18 +52,20 @@ Publication includes an `experimental` annotation only when the manifest's flag 
 
 ## Contribution Workflow
 
-Contributing a resources server follows this sequence:
+Contributing a manifest-backed environment or benchmark follows this sequence:
 
 | Step | Phase | Description |
 | --- | --- | --- |
 | 1 | Curate Tasks | Collect or generate training tasks and create example data |
-| 2 | Implementation | Build resources server with verification logic |
-| 3 | Testing | Write and run unit tests |
-| 4 | Smoke Rollouts | For behavior changes, run a representative model rollout and inspect agent and verifier behavior |
-| 5 | Reward Profiling | Inspect reward distribution and variance when evaluating benchmark fidelity or training utility |
-| 6 | Training Validation | Optionally test training utility |
-| 7 | Submit PR | Submit pull request with all required information |
-| 8 | Review | Address feedback on the required local checks and contribution metadata |
+| 2 | Scaffold | Run `gym env init --environment` or `gym env init --benchmark` |
+| 3 | Implementation | Implement the scaffolded resources server component |
+| 4 | Testing | Write and run unit tests |
+| 5 | Validate | Run `gym env validate` to check the manifest and composition |
+| 6 | Smoke Rollouts | For behavior changes, run a representative model rollout and inspect agent and verifier behavior |
+| 7 | Reward Profiling | Inspect reward distribution and variance when evaluating benchmark fidelity or training utility |
+| 8 | Training Validation | Optionally test training utility |
+| 9 | Publish and submit PR | Run `gym env publish`, then open the pull request |
+| 10 | Review | Address feedback on the required local checks and contribution metadata |
 
 ## Detailed Steps
 
@@ -72,24 +76,44 @@ Prepare the dataset for your environment:
 - Collect or generate prompts/tasks for your environment
 - Create `data/example.jsonl` with at least one representative task example
 
-### 2. Resources Server Implementation
+### 2. Scaffold
 
-Build your resources server:
+Run `gym env init` to create the catalog entry and resources server component together:
 
-- Run `gym env init --resources-server my_server` to scaffold the new resources server
-- Follow the [Single Step Environment](/main/environment-tutorials/single-step-environment) guide to implement your specific logic
-- Implement verification logic for your tasks by defining the `verify()` function
-- Set the `domain` field in your resources server configuration (see `Domain`).
+```bash
+gym env init --environment my_eval --profile custom-gym-verifier
+```
+
+Use `--benchmark` instead of `--environment` for a benchmark. The scaffold writes `environments/my_eval/manifest.yaml`, `config.yaml`, `README.md`, and sample data, and creates a full resources server skeleton under `resources_servers/my_eval/`.
+
+### 3. Implement the Resources Server
+
+Fill in the scaffolded component:
+
+- Replace the `verify()` TODO in `resources_servers/my_eval/app.py` with your scoring logic
+- Follow the [Single Step Environment](/main/environment-tutorials/single-step-environment) guide for implementation patterns
+- Set the `domain` field in the generated config (see [Field Reference](#field-reference) for allowed values)
+- Replace the sample data in `environments/my_eval/data/example.jsonl` with a representative task
 - Complete the auto-generated `README.md` with licensing information
 
-### 3. Testing
+### 4. Testing
 
 Write and run tests for your resources server:
 
 - At least one test per server is required for PR approval
 - You are responsible for ensuring your tests adequately cover your server's functionality
 
-### 4. Generate Example Rollouts (Required for Behavior Changes)
+### 5. Validate
+
+Run static manifest validation:
+
+```bash
+gym env validate my_eval
+```
+
+For benchmarks, run `gym eval prepare --benchmark my_eval` first to generate the prepared data. `gym env validate --sync my_eval` additionally writes corrected composition mirrors if they have drifted.
+
+### 6. Generate Example Rollouts (Required for Behavior Changes)
 
 When environment or agent work changes runtime behavior, configure a model endpoint, run a representative rollout, and inspect the agent and verifier results. For example:
 
@@ -107,7 +131,7 @@ gym eval run --no-serve \
 
 Document the commands and observed behavior in the PR. For a manifest-backed workload, saving the output under `data/example_rollouts.jsonl` is optional. A standalone legacy resources-server contribution must retain the five-row `data/example_rollouts.jsonl` artifact required by its data validator until that validator is migrated. Metadata-only catalog or manifest changes and docs-only changes do not require model compute.
 
-### 5. Reward Profiling (Optional for Training Environments)
+### 7. Reward Profiling (Optional for Training Environments)
 
 For benchmark fidelity checks, follow the reward-profiling guidance in [Add a benchmark](/main/contribute/environments/adding-a-benchmark). For training environments, profiling remains optional:
 
@@ -119,7 +143,7 @@ Run inference to inspect reward distribution:
 - Report reward distribution
 - **For tool calling**: Provide tool call metrics and correlation with rewards
 
-### 6. Training-Based Validation (Optional)
+### 8. Training-Based Validation (Optional)
 
 Validate with actual training:
 
@@ -127,16 +151,16 @@ Validate with actual training:
 - Include training accuracy curve
 - Include test benchmark accuracy curve (if applicable)
 
-### 7. Submit PR
+### 9. Publish and Submit PR
 
-Include the following in your pull request description:
+Run `gym env publish my_eval` to confirm the manifest is valid and discoverable before opening the PR. Then include the following in your pull request description:
 
 - Description of the environment
 - Description of the verification logic
 - Description of the prompts/tasks: What is the source? Which domain does it cover?
 - Provide relevant license information for data and software. If models were used for synthetic data generation, note this in your PR description
 
-### 8. PR Review Process
+### 10. PR Review Process
 
 After submitting your PR:
 
@@ -160,6 +184,18 @@ Your resources server must include these files:
 | `README.md` | Documentation with licensing information |
 
 Optional rollout evidence may be saved in `data/example_rollouts.jsonl`.
+
+## Standalone Resources Server
+
+A standalone resources server contributes a reusable scoring, tool, or state component under `resources_servers/` without creating a manifest-backed catalog entry. Use this path when adding infrastructure shared across multiple workloads, or when the catalog entry comes later.
+
+```bash
+gym env init --resources-server my_server
+```
+
+The scaffold creates `resources_servers/my_server/` with `app.py`, `configs/`, `tests/`, `data/`, `requirements.txt`, and `README.md`, along with a Gym config that wires the component to `simple_agent` and `legacy_agent` so you can start the server and run rollouts immediately. Implement `verify()`, write tests, then run `gym env test --resources-server my_server`. The `gym env validate` and `gym env publish` commands do not apply — there is no manifest to validate or publish. Run smoke rollouts as described in step 6 above and submit the PR; the PR itself is the publication step.
+
+Required files and implementation patterns are the same as for the resources server in the manifest-backed path; see [Required Files](#required-files) and [Recommended Technical Design](#recommended-technical-design).
 
 ## Guiding Principles
 
