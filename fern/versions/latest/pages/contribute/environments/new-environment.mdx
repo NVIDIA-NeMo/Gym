@@ -311,6 +311,8 @@ lifecycle: active
 
 New manifests are `experimental: true` by default. The NeMo Gym team can manually set this field to `false`. This flag does not imply certificate-backed validation, which applies to the specific workload version and configuration covered by a certificate. Unknown keys are validation errors at every manifest level.
 
+For benchmarks and named configs, additional fields apply — in particular `config_path`, `dataset_owner`, `canonical_split`, and `prompt_source`. See the [Field Reference](#field-reference) below.
+
 ### Field Reference
 
 | Field | Type | Requirement and allowed values |
