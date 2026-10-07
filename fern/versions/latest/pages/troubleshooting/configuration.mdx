@@ -218,9 +218,22 @@ my_environment_server:
 ```
 
 For a top-level `_inherit_from` rename with one destination that still defines exactly one agent, Gym automatically points environment server references at the new name.
-The server keeps its name, so `environment_server_routes` still resolve. The migration script leaves these renames alone.
-If several agents inherit the same source and an environment server still references the old name, Gym reports `AmbiguousAgentRenameError` with the destinations and the field to update.
-Set that field to the intended agent's new name. Multiple destinations remain valid when the servers already reference the intended agents.
+The server keeps its name, so `environment_server_routes` still resolve.
+The migration script leaves these renames alone.
+If several destinations inherit the same source and remain agents, and an environment server still references the old name, Gym reports `AmbiguousAgentRenameError` with the destinations and the field to update.
+Give each new agent its own environment server by inheriting the original server and naming that agent, for example:
+
+```yaml
+variant_a_environment_server:
+  _inherit_from: my_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: variant_a
+```
+
+Apply this pattern to each variant so every agent has a declared environment server, including when `error_on_agent_without_environment_server` is enabled.
+Alternatively, point the existing server's field at one agent and ensure the other agents also have environment servers.
 Do not add a second server in front of an agent, because that makes agent-routed rows ambiguous.
 
 #### Require Declared Environment Servers

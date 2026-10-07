@@ -2269,6 +2269,24 @@ class TestConfigLoadErrors:
             "copied_agent": ["copied_environment_server"],
         }
 
+    def test_agent_rename_ignores_non_agent_destination(self) -> None:
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=self._agent_with_environment_server_config(
+                    renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+                    holder={"_inherit_from": "mcqa_simple_agent", "_delete_key": "responses_api_agents"},
+                    error_on_agent_without_environment_server=True,
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "mcqa_simple_agent" not in resolved
+        assert "responses_api_agents" not in resolved.holder
+        assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["mcqa_environment_server"]}
+
     def test_agent_rename_preserves_explicit_environment_server_override(self) -> None:
         config = self._agent_with_environment_server_config(renamed_agent={"_inherit_from": "mcqa_simple_agent"})
         config["other_agent"] = OmegaConf.create(config.mcqa_simple_agent)
@@ -2344,6 +2362,7 @@ class TestConfigLoadErrors:
                 renamed_agent={"_inherit_from": "mcqa_simple_agent"},
                 # Two destinations make the move ambiguous; the wrapper needs an explicit target.
                 other_renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+                holder={"_inherit_from": "mcqa_simple_agent", "_delete_key": "responses_api_agents"},
                 mcqa_environment_server={
                     "environment_servers": {
                         "legacy_agent": {
@@ -2366,8 +2385,10 @@ class TestConfigLoadErrors:
         message = str(error.value)
         assert "mcqa_simple_agent" in message
         assert "'renamed_agent', 'other_renamed_agent'" in message
+        assert "holder" not in message
         assert f"mcqa_environment_server.environment_servers.legacy_agent.{field}.name" in message
-        assert "Set this field to the intended agent's new name" in message
+        assert "Give each new agent its own environment server that inherits 'mcqa_environment_server'" in message
+        assert "ensure the other agents also have environment servers" in message
         assert "add_legacy_agent_environment_servers" not in message
 
     def test_multiple_agent_renames_preserve_explicit_wrapper_targets(self) -> None:
@@ -2393,6 +2414,31 @@ class TestConfigLoadErrors:
         assert _environment_servers_by_agent(resolved) == {
             "renamed_agent": ["mcqa_environment_server"],
             "other_renamed_agent": ["other_environment_server"],
+        }
+
+    def test_multiple_agent_renames_with_inherited_wrappers_load_in_strict_mode(self) -> None:
+        config = self._agent_with_environment_server_config(error_on_agent_without_environment_server=True)
+        for variant in ("variant_a", "variant_b"):
+            config[variant] = {"_inherit_from": "mcqa_simple_agent"}
+            config[f"{variant}_environment_server"] = {
+                "_inherit_from": "mcqa_environment_server",
+                "environment_servers": {"legacy_agent": {"agent_server": {"name": variant}}},
+            }
+
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=config,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "mcqa_simple_agent" not in resolved
+        assert "mcqa_environment_server" not in resolved
+        assert _environment_servers_by_agent(resolved) == {
+            "variant_a": ["variant_a_environment_server"],
+            "variant_b": ["variant_b_environment_server"],
         }
 
     @mark.parametrize(

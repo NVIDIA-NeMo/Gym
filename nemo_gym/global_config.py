@@ -1226,10 +1226,14 @@ For example, on the command line:
         with open_dict(dict_config):
             self._recursively_swap_keys_helper(dict_config, dict_config, frozen_dict_config)
             final_agents = {agent.name for agent in self._agent_instances(dict_config)}
+            destinations = {
+                source: [target for target in targets if target in final_agents]
+                for source, targets in destinations.items()
+            }
             renames = {
                 source: targets[0]
                 for source, targets in destinations.items()
-                if source not in dict_config and len(targets) == 1 and targets[0] in final_agents
+                if source not in dict_config and len(targets) == 1
             }
             ambiguous = {
                 source: targets
@@ -1271,7 +1275,10 @@ For example, on the command line:
                         path = f"{name}.{ENVIRONMENT_SERVER_TYPE_KEY_NAME}.{server_type}.{field}.name"
                         raise AmbiguousAgentRenameError(
                             f"Agent '{source}' was inherited into several names: {targets}. "
-                            f"'{path}' still references '{source}'. Set this field to the intended agent's new name."
+                            f"'{path}' still references '{source}'. "
+                            f"Give each new agent its own environment server that inherits '{name}' "
+                            "and references that agent, or point this field at the one agent that should use "
+                            "this server and ensure the other agents also have environment servers."
                         )
 
     def _recursively_swap_keys_helper(
