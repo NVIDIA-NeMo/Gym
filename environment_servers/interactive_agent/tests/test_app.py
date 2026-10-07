@@ -283,7 +283,8 @@ async def test_failed_activation_retains_http_body_and_deferred_close_observatio
                 "stderr": "permission denied: /outside",
                 "nested": {"api_key": "body-secret-value"},
                 "headers": {"X-Custom": "body-header-value"},
-                "url": "https://name:password@provider/error?credential=query-value",
+                # Synthetic credentials verify that URL userinfo and queries are redacted.
+                "url": "https://name:password@provider/error?credential=query-value",  # pragma: allowlist secret
             }
         }
     )
