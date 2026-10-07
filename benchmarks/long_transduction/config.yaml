@@ -1,0 +1,27 @@
+config_paths:
+  - resources_servers/long_transduction/configs/long_transduction.yaml
+
+long_transduction_resources_server:
+  _inherit_from: long_transduction
+
+long_transduction_agent:
+  _inherit_from: long_transduction_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: long_transduction_resources_server
+      datasets:
+      - name: long_transduction
+        type: benchmark
+        jsonl_fpath: benchmarks/long_transduction/data/long_transduction.jsonl
+        prompt_config: benchmarks/prompts/generic/default.yaml
+        prepare_script: benchmarks/long_transduction/prepare.py
+        prepare_dependencies: [tiktoken, wonderwords]
+        license: Apache 2.0
+
+long_transduction_benchmark_environment_server:
+  _inherit_from: long_transduction_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: long_transduction_agent

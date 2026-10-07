@@ -1,0 +1,31 @@
+long_transduction:
+  resources_servers:
+    long_transduction:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Long-context transduction benchmark — model receives a long structured input and must transduce it into the expected output. Each row's `type` field selects the variant and its parser.
+      value: Tests long-context fidelity on arithmetic chains, per-line UUID sorting, variable expansion, CSV permutation, and key-value lookup.
+
+long_transduction_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: long_transduction
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/long_transduction/data/example.jsonl
+
+long_transduction_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: long_transduction_simple_agent
