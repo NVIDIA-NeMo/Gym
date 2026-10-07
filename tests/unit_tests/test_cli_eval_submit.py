@@ -14,6 +14,7 @@
 # limitations under the License.
 import argparse
 import json
+import re
 import sys
 
 import pytest
@@ -122,7 +123,10 @@ class TestEvalSubmitSelect:
     def _write_config(self, tmp_path):
         config_path = tmp_path / "submit.yaml"
         config_path.write_text(
-            yaml.dump({"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": self.MULTI_DRIVER, "job": JOB})
+            yaml.dump(
+                {"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": self.MULTI_DRIVER, "job": JOB},
+                sort_keys=False,
+            )
         )
         return config_path
 
@@ -152,24 +156,30 @@ class TestEvalSubmitSelect:
 
         assert list(json.loads(capsys.readouterr().out)["driver"]["benchmarks"]) == ["math"]
 
-    def test_select_unknown_name_lists_available(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+    def test_select_unknown_name_lists_available(self, tmp_path, monkeypatch: MonkeyPatch, capsys) -> None:
         _capture_submit(monkeypatch)
 
-        with pytest.raises(ConfigError, match=r"nope.*Available: gsm8k, aime, math"):
+        with pytest.raises(SystemExit):
             _eval_submit(_args(self._write_config(tmp_path), select="aime,nope"), overrides=[])
+
+        output = " ".join(capsys.readouterr().out.split())
+        assert re.search(r"nope.*Available: gsm8k, aime, math", output)
 
     @pytest.mark.parametrize("value", ["", " ", ","])
     def test_select_with_no_names_is_an_error_not_submit_all(
-        self, tmp_path, monkeypatch: MonkeyPatch, value: str
+        self, tmp_path, monkeypatch: MonkeyPatch, capsys, value: str
     ) -> None:
         captured = _capture_submit(monkeypatch)
 
-        with pytest.raises(ConfigError, match="no benchmark names"):
+        with pytest.raises(SystemExit):
             _eval_submit(_args(self._write_config(tmp_path), select=value), overrides=[])
 
+        assert "no benchmark names" in capsys.readouterr().out
         assert "config" not in captured
 
-    def test_empty_benchmarks_is_a_validation_error_even_with_select(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+    def test_empty_benchmarks_is_a_validation_error_even_with_select(
+        self, tmp_path, monkeypatch: MonkeyPatch, capsys
+    ) -> None:
         _capture_submit(monkeypatch)
         config_path = tmp_path / "submit.yaml"
         driver = {"container": "gym:latest", "benchmarks": {}}
@@ -177,8 +187,10 @@ class TestEvalSubmitSelect:
             yaml.dump({"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": driver, "job": JOB})
         )
 
-        with pytest.raises(ConfigError, match=r"driver\.benchmarks"):
+        with pytest.raises(SystemExit):
             _eval_submit(_args(config_path, select="aime"), overrides=[])
+
+        assert "driver.benchmarks" in capsys.readouterr().out
 
 
 class TestEvalSubmitScratchNamespace:
