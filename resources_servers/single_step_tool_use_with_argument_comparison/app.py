@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from fastapi import FastAPI
+from pydantic import Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -25,8 +26,11 @@ from resources_servers.single_step_tool_use_with_argument_comparison.common.resp
 from resources_servers.single_step_tool_use_with_argument_comparison.common.verification_utils import (
     ActionComparator,
     ExpectedAction,
+    FunctionCallAction,
+    ListF1MatchDetail,
     StepRewardCategory,
     ToolCallComparatorConfig,
+    validate_tool_call_against_declared_schema,
 )
 
 
@@ -47,6 +51,7 @@ class SingleStepToolUseArgumentComparisonVerifyRequest(
 class SingleStepToolUseArgumentComparisonVerifyResponse(BaseVerifyResponse):
     expected_action: ExpectedAction
     category: StepRewardCategory
+    list_f1_match_details: list[ListF1MatchDetail] = Field(default_factory=list)
 
 
 class SingleStepToolUseArgumentComparisonResourcesServer(SimpleResourcesServer):
@@ -72,13 +77,29 @@ class SingleStepToolUseArgumentComparisonResourcesServer(SimpleResourcesServer):
                 category=StepRewardCategory.NO_ACTION_FOUND,
             )
 
-        action_comparator = ActionComparator(config=self.config.tool_call_comparator_config)
+        comparator_config = self.config.tool_call_comparator_config
+        is_single_call = isinstance(body.expected_action, FunctionCallAction) and isinstance(
+            actual_action, FunctionCallAction
+        )
+        if comparator_config.validate_against_declared_tool_schema and is_single_call:
+            schema_category = validate_tool_call_against_declared_schema(
+                actual_action, body.responses_create_params.tools
+            )
+            if schema_category is not None:
+                return SingleStepToolUseArgumentComparisonVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    category=schema_category,
+                )
+
+        action_comparator = ActionComparator(config=comparator_config)
         result = action_comparator.compare_action(body.expected_action, actual_action)
 
         return SingleStepToolUseArgumentComparisonVerifyResponse(
             **body.model_dump(),
             reward=result.reward,
             category=result.category,
+            list_f1_match_details=action_comparator.list_f1_match_details,
         )
 
 

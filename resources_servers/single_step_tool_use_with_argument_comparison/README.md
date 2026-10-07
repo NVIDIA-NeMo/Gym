@@ -55,6 +55,21 @@ The two stages are complementary. Under `binary_strict` and `fractional` the gat
 
 Under `f1` the gate instead decides which imperfect shapes are worth *partial* credit, and missing and surplus calls are penalized symmetrically — the same twenty-junk-call response scores `2 * 2 / (2 + 22) = 0.167`. Only an exact set of calls reaches `1.0`. Prefer `f1` for RL, where the permissive gates are otherwise reward-hacking vectors.
 
+# Single-call comparison options
+
+The options below apply only when one expected call is compared with one actual call. A parallel batch is always scored with the settings above, so these options never change a batch reward. All of them are off by default.
+
+| Option | Effect |
+| --- | --- |
+| `use_f1_for_list` | Match list arguments as an unordered set and score the match with F1. With `use_list_f1_threshold: true` (default) the argument passes when F1 >= `list_f1_threshold`; with `false` the reward is the F1 score itself. |
+| `use_strong_list_reward` | A list argument passes only when it clears every guardrail: `list_f1_threshold`, `list_f1_min_precision`, `list_f1_min_recall`, `list_f1_max_actual_to_expected_ratio`, and `list_f1_reject_duplicate_actual_values`. |
+| `argument_filters` | Per tool, the top-level arguments that are compared. An empty list scores the call on its tool name alone. |
+| `argument_comparison_overrides` | Per tool and argument: a word-count threshold and precision / recall / length limits for strings, relaxed list limits for long expected lists, and recovery of a list argument sent as a string. |
+| `keep_quotes` | Keep a run inside matching quotes as one token, so a quoted phrase differs from the same words unquoted. |
+| `validate_against_declared_tool_schema` | Score 0 when the called tool is not declared in the request (`TOOL_SCHEMA_NOT_FOUND`) or its arguments fail the declared JSON Schema (`TOOL_SCHEMA_VALIDATION_FAILED`). |
+
+The verify response carries `list_f1_match_details` with the score matrix, matched pairs and guardrail failures of every list compared with F1. `configs/bc_v4_8.yaml` shows these options together.
+
 # Example usage
 
 ## Running servers
