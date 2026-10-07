@@ -207,7 +207,7 @@ roles:
       mamba-ssm-dtype: float32
       max-prefill-tokens: 262144
       max-running-requests: 1024
-      mem-fraction-static: 0.9
+      mem-fraction-static: 0.8
       moe-a2a-backend: none
       page-size: 64
       random-seed: 42
