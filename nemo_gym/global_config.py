@@ -15,6 +15,7 @@
 import logging
 import re
 import sys
+import textwrap
 from argparse import ArgumentParser
 from collections import Counter, defaultdict
 from copy import deepcopy
@@ -96,6 +97,7 @@ SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME = "server_spinup_timeout_seconds"
 MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
 ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
+UV_LOCK_TIMEOUT_KEY_NAME = "uv_lock_timeout_seconds"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 RESULTS_DIR_KEY_NAME = "results_dir"
 CACHE_DIR_KEY_NAME = "cache_dir"
@@ -124,6 +126,9 @@ ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME = "NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING"
 ENVIRONMENT_SERVER_NAME_KEY_NAME = "environment_server_name"
 ENVIRONMENT_SERVER_ROUTES_KEY_NAME = "environment_server_routes"
 ENVIRONMENT_ROUTING_MODE_KEY_NAME = "environment_routing_mode"
+# When set, an agent without an environment server fails config validation.
+# When unset, Gym generates a legacy_agent relay for the agent and logs a deprecation warning.
+ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME = "error_on_agent_without_environment_server"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -145,6 +150,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     ALLOW_OPENAI_VERSION_SKEW_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
+    UV_LOCK_TIMEOUT_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
     CACHE_DIR_KEY_NAME,
@@ -179,6 +185,47 @@ ALLOWED_AGENTS_KEY_NAME = "allowed_agents"
 ALLOWED_MODEL_TYPES_KEY_NAME = "allowed_model_types"
 MODEL_SERVER_TYPE_KEY_NAME = "responses_api_models"
 RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
+
+
+def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
+    """Return the agent references in one environment server's config.
+
+    An environment server can front several agents, such as a user and an assistant.
+    Any top-level field whose value has `type: responses_api_agents` references an agent.
+    So does `agent_server`, whose type may be left out.
+    `scripts/add_legacy_agent_environment_servers.py` applies the same rule.
+    """
+    return [
+        reference
+        for field, reference in server.items()
+        if isinstance(reference, DictConfig)
+        and (
+            reference.get("type") == AGENT_SERVER_TYPE_KEY_NAME
+            or (field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None)
+        )
+    ]
+
+
+def environment_server_agent_names(server: DictConfig) -> list[str]:
+    """Return the names of the agents one environment server's config references."""
+    return [
+        str(reference["name"])
+        for reference in environment_server_agent_refs(server)
+        if reference.get("name") is not None
+    ]
+
+
+def environment_server_attributed_agent(server: DictConfig) -> Optional[str]:
+    """Return the agent that results from one environment server are attributed to.
+
+    That is the server's `agent_server`, or the only agent it references.
+    A server that fronts several agents without an `agent_server` has no single agent to attribute.
+    """
+    agent_ref = server.get(AGENT_SERVER_REF_KEY_NAME)
+    if isinstance(agent_ref, DictConfig):
+        return agent_ref.get("name")
+    agents = environment_server_agent_names(server)
+    return agents[0] if len(agents) == 1 else None
 
 
 @dataclass(frozen=True)
@@ -582,6 +629,17 @@ Duplicate config paths:
                     else:
                         available = ", ".join(repr(n) for n in sorted(same_type_names)) or "(none)"
                         hint = f"Available {maybe_server_ref.type}: {available}"
+                    if (
+                        maybe_server_ref.type == AGENT_SERVER_TYPE_KEY_NAME
+                        and server_instance_config.get_server_ref().type == ENVIRONMENT_SERVER_TYPE_KEY_NAME
+                    ):
+                        hint += (
+                            "\nIf the agent was renamed with `_inherit_from`, this environment server must reference "
+                            "the agent's new name."
+                            "\nTo fix this automatically, run "
+                            "`python scripts/add_legacy_agent_environment_servers.py <your config paths>` from a NeMo Gym checkout."
+                            f"\nOr point this server's {field_name}.name at the agent's new name."
+                        )
                     raise ServerRefNotFoundError(
                         f"""In server instance '{server_instance_config.name}', field '{field_name}' references {maybe_server_ref.type}/'{maybe_server_ref.name}', which is not defined in the merged config.
 {hint}"""
@@ -826,7 +884,7 @@ Duplicate config paths:
         """Point each environment server at the agent composition put in place of the one it named.
 
         The server is named after the environment, not the agent, so a swap leaves its own name
-        alone and only its `agent_server` reference has to follow.
+        alone and only its references to the swapped agent have to follow.
         """
         for instance in global_config_dict.values():
             if not isinstance(instance, DictConfig):
@@ -835,9 +893,11 @@ Duplicate config paths:
             if not isinstance(servers, DictConfig):
                 continue
             for server in servers.values():
-                reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
-                if isinstance(reference, DictConfig) and reference.get("name") in renames:
-                    reference["name"] = renames[reference["name"]]
+                if not isinstance(server, DictConfig):
+                    continue
+                for reference in environment_server_agent_refs(server):
+                    if reference.get("name") in renames:
+                        reference["name"] = renames[reference["name"]]
 
     @staticmethod
     def _composed_instance_name(target: _AgentInstance, agent_type: str) -> str:
@@ -1065,10 +1125,18 @@ the check."""
             elif OmegaConf.is_missing(original, key):
                 composed[key] = MISSING
 
-    def _raise_on_agent_without_environment_server(self, global_config_dict: DictConfig) -> None:
-        """Reject an agent that rollout collection would otherwise have to call directly.
+    def _front_agents_without_environment_server(self, global_config_dict: DictConfig) -> None:
+        """Give every agent an environment server, since rollout collection reaches agents only through one.
 
         Runs after composition, so every agent left is one a run can dispatch to.
+        An agent that no environment server names gets a generated `legacy_agent` relay.
+        The relay is the same block that scripts/add_legacy_agent_environment_servers.py declares.
+        One deprecation warning lists every generated relay and how to declare it.
+        This keeps configs written before environment servers running.
+        With `error_on_agent_without_environment_server` set, such an agent is an error instead.
+
+        Only agents with no environment server are touched.
+        A generated relay therefore never makes an agent's routing ambiguous, and no existing reference is rewritten.
         """
         with_environment_server = set()
         for instance in global_config_dict.values():
@@ -1078,28 +1146,46 @@ the check."""
             if not isinstance(servers, DictConfig):
                 continue
             for server in servers.values():
-                reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
-                if isinstance(reference, DictConfig):
-                    with_environment_server.add(reference.get("name"))
+                if not isinstance(server, DictConfig):
+                    continue
+                for reference in environment_server_agent_refs(server):
+                    if reference.get("name") is not None:
+                        with_environment_server.add(reference["name"])
 
-        without_environment_server = [
+        without_environment_server = sorted(
             agent.name
             for agent in self._agent_instances(global_config_dict)
             if not self._is_unbound_agent(agent.server_config)
             and agent.name not in with_environment_server
             and agent.server_config.get("entrypoint") is not None
-        ]
+        )
         if not without_environment_server:
             return
 
-        listing = "\n".join(f"  - {name}" for name in sorted(without_environment_server))
-        raise AgentWithoutEnvironmentServerError(
-            f"""Agent instance(s) have no environment server, so rollout collection cannot reach them:
+        if global_config_dict.get(ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME, False):
+            listing = "\n".join(f"  - {name}" for name in without_environment_server)
+            raise AgentWithoutEnvironmentServerError(
+                f"""Agent instance(s) have no environment server, so rollout collection cannot reach them:
 {listing}
 
-Declare one for each, naming the agent in its `{AGENT_SERVER_REF_KEY_NAME}` reference, or run
-scripts/add_legacy_agent_environment_servers.py to update your config."""
-        )
+Declare one for each, naming the agent in its `{AGENT_SERVER_REF_KEY_NAME}` reference.
+To add them automatically, run `python scripts/add_legacy_agent_environment_servers.py <your config paths>` from a NeMo Gym checkout.
+Unset {ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME} to generate a legacy_agent relay for each instead, with a deprecation warning."""
+            )
+
+        agent_types = {agent.name: agent.agent_type for agent in self._agent_instances(global_config_dict)}
+        generated = {}
+        for agent_name in without_environment_server:
+            server_name = legacy_environment_server_name(agent_name, agent_types[agent_name])
+            if server_name in global_config_dict or server_name in generated.values():
+                server_name = f"{agent_name}{LEGACY_ENVIRONMENT_SERVER_SUFFIX}"
+            while server_name in global_config_dict:
+                server_name = f"{server_name}{LEGACY_ENVIRONMENT_SERVER_SUFFIX}"
+            with open_dict(global_config_dict):
+                global_config_dict[server_name] = legacy_environment_server_block(agent_name)
+            generated[agent_name] = server_name
+
+        logger.warning(agents_without_environment_server_deprecation(generated))
 
     def raise_on_missing_values(self, global_config_dict: DictConfig) -> None:
         """Fail fast with one actionable error listing every unset '???' value.
@@ -1310,7 +1396,7 @@ Pass each config with --config (it builds the list for you), e.g.:
         # value surfaces as an opaque MissingMandatoryValue deep in the pipeline.
         self.raise_on_missing_values(global_config_dict)
         # NOTE(martas): this is for catching agents not attached to an environment server
-        self._raise_on_agent_without_environment_server(global_config_dict)
+        self._front_agents_without_environment_server(global_config_dict)
 
         # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
         with open_dict(global_config_dict):
@@ -1482,6 +1568,20 @@ Found global config dict yaml:
             # Runtime subprocesses inherit the configured cache directory.
             if not parse_config.offline:
                 environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+            # Every server installs into that one shared cache, and they all start at once, so
+            # exactly one holds uv's distribution-cache lock while the rest wait out its cold
+            # resolve and download. uv's own default is 300s, which is shorter than a cold install
+            # of a large dependency set - the waiters then abort and the run dies during spinup.
+            # An explicit key wins, then a UV_LOCK_TIMEOUT the user already exported, then 1800.
+            # A null key exports nothing, so the inherited environment (or uv's default) applies.
+            exported_uv_lock_timeout = environ.get("UV_LOCK_TIMEOUT", "").strip()
+            global_config_dict.setdefault(
+                UV_LOCK_TIMEOUT_KEY_NAME,
+                int(exported_uv_lock_timeout) if exported_uv_lock_timeout.isdecimal() else 1800,
+            )
+            uv_lock_timeout = global_config_dict[UV_LOCK_TIMEOUT_KEY_NAME]
+            if not parse_config.offline and uv_lock_timeout is not None:
+                environ["UV_LOCK_TIMEOUT"] = str(uv_lock_timeout)
             # By default, build the directories in their individual folders using the root repository
             # e.g. WORKING_DIR/responses_api_models/my_server
             # Deliberately anchored at WORKING_DIR rather than the cache root: venv
@@ -1702,6 +1802,61 @@ def model_type_for(global_config_dict: DictConfig, model_server_name: Optional[s
     return str(next(iter(models)))
 
 
+LEGACY_ENVIRONMENT_SERVER_SUFFIX = "_environment_server"
+
+
+def legacy_environment_server_name(agent_name: str, agent_type: str) -> str:
+    """Name an agent's legacy_agent relay after its environment, as the migration script does.
+
+    The agent type, or else a trailing `_agent`, is stripped from the agent name.
+    For example, `workplace_assistant_simple_agent` becomes `workplace_assistant_environment_server`.
+    The name then stays the same when the agent is swapped for another type.
+    """
+    stem = agent_name.removesuffix(f"_{agent_type}").removesuffix(agent_type).rstrip("_")
+    if stem == agent_name:
+        stem = agent_name.removesuffix("_agent").rstrip("_")
+    return f"{stem or agent_type}{LEGACY_ENVIRONMENT_SERVER_SUFFIX}"
+
+
+def legacy_environment_server_block(agent_name: str) -> dict[str, Any]:
+    """The legacy_agent environment server config that relays to one agent."""
+    return {
+        ENVIRONMENT_SERVER_TYPE_KEY_NAME: {
+            "legacy_agent": {
+                "entrypoint": "app.py",
+                AGENT_SERVER_REF_KEY_NAME: {"type": AGENT_SERVER_TYPE_KEY_NAME, "name": agent_name},
+            }
+        }
+    }
+
+
+def agents_without_environment_server_deprecation(generated: Mapping[str, str]) -> str:
+    """Explain the deprecation and how to migrate, with the exact config to add for each agent."""
+    blocks = "\n".join(
+        OmegaConf.to_yaml({server: legacy_environment_server_block(agent)}) for agent, server in generated.items()
+    )
+    agents = ", ".join(f"`{agent}`" for agent in generated)
+    return f"""DEPRECATED: agents without an environment server: {agents}.
+Rollout collection reaches an agent only through an environment server.
+This run generated a legacy_agent environment server for each agent above.
+Each one relays /run to its agent unchanged, so results are not affected.
+A future release will reject these configs with AgentWithoutEnvironmentServerError.
+
+To migrate, declare the environment servers in your config. Either:
+
+1. Run the migration script from a NeMo Gym checkout on your config files or directories:
+
+     python scripts/add_legacy_agent_environment_servers.py path/to/config.yaml [more paths] [--check]
+
+   --check reports what would change without writing.
+
+2. Or add these blocks yourself, at the same level as the agents:
+
+{textwrap.indent(blocks, "     ")}
+To make this an error now, set {ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME}: true in your config.
+You can also pass +{ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME}=true on the command line."""
+
+
 def pairing_override_enabled(global_config_dict: DictConfig) -> bool:
     """True when a declared agent/model compatibility guard has been explicitly waived."""
     return bool(global_config_dict.get(ALLOW_UNSUPPORTED_PAIRING_KEY_NAME)) or getenv(
@@ -1747,14 +1902,31 @@ def dataset_agent_pins(global_config_dict: DictConfig, instance_name: str) -> Li
     return pins
 
 
+def taskset_environment_server_name(global_config_dict: DictConfig, taskset: Optional[str]) -> Optional[str]:
+    """The Environment Server ``environment_server_routes`` names for a taskset, or None without one."""
+    routes = global_config_dict.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
+    name = routes.get(taskset) if taskset is not None and isinstance(routes, DictConfig) else None
+    return name if isinstance(name, str) else None
+
+
 def resolve_dataset_agent(
-    global_config_dict: DictConfig, declaring_instance_name: str, pin: Optional[str] = None
-) -> str:
+    global_config_dict: DictConfig,
+    declaring_instance_name: str,
+    pin: Optional[str] = None,
+    *,
+    taskset: Optional[str] = None,
+) -> Optional[str]:
     """Resolve the agent that runs a dataset declared by ``declaring_instance_name``.
 
-    Single source of truth for dataset -> agent routing, shared by benchmark discovery,
-    preparation, manifest validation, and rollout dispatch, so they can never disagree.
-    First hit wins:
+    Shared by benchmark discovery, preparation, manifest validation, and flat-row dispatch.
+    A declared ``taskset`` routes to the Environment Server named by ``environment_server_routes``, not
+    to an agent, so its dataset cannot pin one. Resolution checks the route: every agent the server
+    references (``environment_server_agent_refs``) must exist, a declaring agent must be one of them,
+    and a declaring resources server must be the one the server binds. It returns the declaring agent,
+    or the server's attributed agent (``environment_server_attributed_agent``), or None when the server
+    fronts several agents, such as a user and an assistant, without an ``agent_server``. It does not
+    require an agent -> resources edge.
+    Otherwise, first hit wins:
 
     1. ``pin`` (the dataset's ``agent:`` key) — validated: it must name the declaring agent
        itself, or an agent referencing the declaring resources server. Anything else is a hard
@@ -1764,6 +1936,54 @@ def resolve_dataset_agent(
     """
     block = global_config_dict.get(declaring_instance_name)
     is_agent = isinstance(block, DictConfig) and "responses_api_agents" in block
+
+    if taskset is not None:
+        routes = global_config_dict.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
+        environment_name = routes.get(taskset) if isinstance(routes, DictConfig) else None
+        if not isinstance(environment_name, str) or not environment_name:
+            raise ConfigError(f"No Environment Server route for taskset {taskset!r}; set environment_server_routes.")
+        environment = global_config_dict.get(environment_name)
+        servers = environment.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME) if isinstance(environment, DictConfig) else None
+        if not isinstance(servers, DictConfig) or len(servers) != 1:
+            raise ConfigError(f"Taskset {taskset!r} route {environment_name!r} must name an Environment Server.")
+        environment_config = next(iter(servers.values()))
+        if not isinstance(environment_config, DictConfig):
+            raise ConfigError(f"Environment Server {environment_name!r} must have a configuration mapping.")
+        agent_names = []
+        for agent_ref in environment_server_agent_refs(environment_config):
+            name = agent_ref.get("name")
+            agent = global_config_dict.get(name) if isinstance(name, str) else None
+            if not isinstance(agent, DictConfig) or AGENT_SERVER_TYPE_KEY_NAME not in agent:
+                raise ConfigError(
+                    f"Environment Server {environment_name!r} references {name!r}, which is not an agent. "
+                    "Its agent_server and other agent references must name agents."
+                )
+            agent_names.append(name)
+        if not agent_names:
+            raise ConfigError(
+                f"Environment Server {environment_name!r} must bind a valid agent_server for this dataset."
+            )
+        if pin is not None:
+            raise ConfigError(
+                f"Taskset {taskset!r} pins agent {pin!r}, but a taskset routes to Environment Server "
+                f"{environment_name!r} through environment_server_routes, not to an agent. Remove the `agent` key."
+            )
+        if is_agent and declaring_instance_name not in agent_names:
+            raise ConfigError(f"Taskset {taskset!r} must route to its declaring agent {declaring_instance_name!r}.")
+        if not is_agent:
+            resources_ref = environment_config.get("resources_server")
+            if (
+                not isinstance(resources_ref, DictConfig)
+                or resources_ref.get("name") != declaring_instance_name
+                or resources_ref.get("type", RESOURCES_SERVER_TYPE_KEY_NAME) != RESOURCES_SERVER_TYPE_KEY_NAME
+            ):
+                raise ConfigError(
+                    f"Environment Server {environment_name!r} must bind declaring resources server "
+                    f"{declaring_instance_name!r} for taskset {taskset!r}."
+                )
+        if is_agent:
+            return str(declaring_instance_name)
+        return environment_server_attributed_agent(environment_config)
 
     if is_agent:
         if pin is not None and pin != declaring_instance_name:

@@ -28,6 +28,8 @@ would disagree the first time one dropped a sample.
 | `gym.verify.duration_ms` | Histogram | ms | Wall-clock duration of one verification. |
 | `gym.verify.success_rate` | Gauge | fraction | Cumulative fraction of verifications that completed. See below. |
 | `gym.servers.active` | Gauge | count | Number of servers the orchestrator started. |
+| `gym.http.connection_pool.queue_duration_ms` | Histogram | ms | Time one queued connection acquisition waited for an aiohttp pool slot. |
+| `gym.http.connection_pool.connect_total` | Observable counter | count | All outbound aiohttp connection attempts (`connect()` calls), including attempts that later fail or are abandoned. |
 | `gym.server.memory.usage` | Gauge | bytes | Current RSS or PSS for one managed server and its descendants. |
 | `gym.server.memory.sampled_peak` | Gauge | bytes | Largest value observed by the sampler for one managed server and its descendants. |
 | `gym.server.processes` | Gauge | count | Processes currently attributed to one managed server. |
@@ -83,6 +85,28 @@ server:
 
 Use these for request latency. They are dimensioned, so you can compare `/verify` against
 `/v1/responses`, or isolate 500s, which is what latency questions usually require.
+
+The Gym-specific `gym.http.connection_pool.queue_duration_ms` histogram measures client-side
+connection acquisition separately from request latency. Its bounded attributes identify the
+destination server, queue outcome (`ok` or `abandoned`), and which pool constraint caused the
+wait (`total`, `per_host`, or `unknown`). It records one sample for each queued connection
+acquisition (`connect()`), combining repeated waiter wakeups within that acquisition.
+Redirect hops, aiohttp's internal reconnects, and Gym retries record separate samples when
+their acquisitions queue. Connection attempts that acquire a slot immediately do not record
+a queue-duration histogram sample.
+`abandoned` means the wait ended before a slot became available, including timeout and cancellation.
+Divide the number of `gym.http.connection_pool.queue_duration_ms` histogram samples by
+`gym.http.connection_pool.connect_total` over the same interval and destination to calculate the
+fraction of connection attempts that queued.
+
+Both instruments use `nemo.gym.http.destination.server.name` for the request destination:
+the configured server name for `ServerClient` calls, `remote_agent_service` for calls to the
+remote agent's external service, or `external` for unlabeled direct calls. This differs from
+the resource attribute `nemo.gym.server.name`, which identifies the Gym process recording the metric.
+
+These pool metrics require telemetry initialization before client construction. Standalone
+collection does not initialize telemetry automatically, so missing metrics do not mean no
+queueing. See [HTTP Connection Pool](/reference/configuration#http-connection-pool) for process coverage.
 
 ### A Note on `gym.server.request_duration_ms`
 
