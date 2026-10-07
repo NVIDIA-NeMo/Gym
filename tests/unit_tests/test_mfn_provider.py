@@ -3,8 +3,15 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxPtySpec, SandboxResources, SandboxSpec
+from nemo_gym.sandbox.providers.base import (
+    SandboxCreateVerificationError,
+    SandboxHandle,
+    SandboxPtySpec,
+    SandboxResources,
+    SandboxSpec,
+)
 from nemo_gym.sandbox.providers.mfn import MFNProvider
+from nemo_gym.sandbox.providers.mfn._provider import MFNProbeConfig
 from nemo_gym.sandbox.providers.mfn.protos import mfn_sandbox_pb2 as pb
 from nemo_gym.sandbox.providers.registry import get_provider_class
 
@@ -145,6 +152,27 @@ async def test_exec_and_file_transfer(provider, tmp_path: Path):
     target = tmp_path / "nested" / "target.bin"
     await provider.download_file(handle, "/tmp/target.bin", target)
     assert target.read_bytes() == b"abcd"
+
+
+@pytest.mark.parametrize("error,exit_code", [("", 0), ("", 7), ("process not started", 0)])
+async def test_exec_completion_error_is_not_success(provider, error, exit_code):
+    class CompletionStub(_FakeStub):
+        def ExecStream(self, requests, *, timeout):
+            async def responses():
+                await anext(requests)
+                yield pb.ExecStreamResponse(complete=pb.ExecComplete(exit_code=exit_code, error=error))
+
+            return responses()
+
+    provider._stub = CompletionStub()
+    result = await provider.exec(SandboxHandle("mfn-1", "mfn", object()), "run")
+    assert result.return_code == exit_code
+    assert result.error_type == ("sandbox" if error else None)
+    if error:
+        provider._probe = MFNProbeConfig(expected_stdout=None)
+        with pytest.raises(SandboxCreateVerificationError):
+            await provider.create(SandboxSpec(image="image:tag"))
+        assert provider._stub.shutdown_ids == ["mfn-1"]
 
 
 async def test_status_endpoint_and_close(provider):

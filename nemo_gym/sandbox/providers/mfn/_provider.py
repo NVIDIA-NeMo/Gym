@@ -335,9 +335,13 @@ class MFNProvider:
                 )
             if self._probe.command is not None:
                 result = await self.exec(handle, self._probe.command, timeout_s=self._probe.timeout_s)
-                if result.return_code != 0 or (
-                    self._probe.expected_stdout is not None
-                    and self._probe.expected_stdout not in (result.stdout or "")
+                if (
+                    result.error_type
+                    or result.return_code != 0
+                    or (
+                        self._probe.expected_stdout is not None
+                        and self._probe.expected_stdout not in (result.stdout or "")
+                    )
                 ):
                     raise MFNCreateVerificationError(
                         f"MFN sandbox {response.sandbox_id!r} failed its exec probe: {result}"
@@ -415,6 +419,7 @@ class MFNProvider:
             stdout.decode(errors="replace") or None,
             stderr.decode(errors="replace") or None,
             complete.exit_code,
+            "sandbox" if complete.error else None,
         )
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
