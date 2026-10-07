@@ -1,0 +1,31 @@
+---
+title: "How-To Guides"
+description: "Task-oriented guides for gym eval submit: multi-node vLLM, prefill/decode, node pools, custom harnesses, and resumable runs."
+position: 6
+---
+
+Each guide builds on the [Quickstart](/orchestration/quickstart) and shows only the parts of the config that change. Field details are in the [Configuration Reference](/orchestration/configuration).
+
+<Cards>
+
+<Card title="Multi-Node vLLM" href="/orchestration/how-to/multi-node-vllm">
+Run many replicas, or one very large instance, across nodes, and learn when the Ray Serve gateway takes over.
+</Card>
+
+<Card title="Prefill/Decode Disaggregation" href="/orchestration/how-to/prefill-decode-disaggregation">
+Serve a model as separate prefill and decode tiers behind a router.
+</Card>
+
+<Card title="Node Pools and Ray" href="/orchestration/how-to/node-pools-and-ray">
+Give a judge or scorer nodes of its own, and span a Ray cluster across pools.
+</Card>
+
+<Card title="Custom Harness" href="/orchestration/how-to/custom-harness">
+Run your own script instead of `gym eval run`.
+</Card>
+
+<Card title="Resumable Runs" href="/orchestration/how-to/resumable-runs">
+Continue automatically after a time limit, preemption, or node failure.
+</Card>
+
+</Cards>

@@ -1,0 +1,207 @@
+---
+title: "Configuration Reference"
+description: "Every field of the gym eval submit config, with defaults and validation rules."
+position: 3
+---
+
+A submit config is a YAML file with the top-level sections `services`, `compute`, `driver`, `job`, and optionally `otel`. All models are strict: an unknown key anywhere is an error, which is how typos surface. Top-level keys that start with `_` are the exception; they are [scratch namespaces](/orchestration#scratch-keys) for interpolation and are dropped before validation.
+
+Fields without a default are required.
+
+## env values
+
+`env` appears on every service and on the driver. Every value must start with one of three prefixes; a missing or misspelled prefix is an error, not a guess.
+
+| Prefix | Meaning |
+| --- | --- |
+| `lit:VALUE` | The literal `VALUE`. |
+| `host:VAR` | The value of `VAR` in the shell running `gym eval submit`. The submit fails if `VAR` is unset. The value is baked into the job script. |
+| `runtime:VAR` | Not resolved at submit time. The job script references `$VAR`, so the compute node uses whatever the job's environment holds when the command starts. |
+
+```yaml
+env:
+  HF_TOKEN: host:HF_TOKEN
+  TRUST_REMOTE_CODE: lit:1
+  CUDA_VISIBLE_DEVICES: runtime:CUDA_VISIBLE_DEVICES
+```
+
+`VAR` must be a valid environment variable name. `host:` values are resolved when the config is validated, so they must be set for `--resolve-only` too. In the persisted `resolved-config.yaml` and `gym-job.json` the original `host:VAR` reference is written back, not the secret.
+
+## services
+
+A mapping from service name to a service definition. The `type` field selects the kind: `vllm`, `vllm_pd`, or `ray`. Service names are free-form, but they become part of log file names and shell variable names.
+
+### Fields common to every service
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `container` | required | Container image the service runs in (`srun --container-image`). |
+| `placement` | the only compute resource | Name of the `compute` entry to run on. Filled in automatically; there can only be one compute resource. |
+| `node_pool` | `null` | Name of a pool in the compute's `node_pools`. Pins the service to that pool's nodes. `null` means the whole allocation. See [Node pools](#node-pools). |
+| `health_check` | see per type | `path` (default `/health`), `port`, and `timeout_seconds` (default `60`). The job waits for this endpoint before starting the driver, polling every 5 seconds. |
+| `env` | `{}` | Environment for the service. See [env values](#env-values). |
+| `mounts` | `[]` | Pyxis bind mounts, each `src`, `src:dst`, or `src:dst:flags` (for example `/data:/data:ro`). Source paths are checked for existence before anything is copied. |
+| `pre_command` | `""` | Shell statements run in the same shell, before the service command. Use it for `export`/`unset` or values like `$(hostname -I)` that `env` cannot express. |
+
+### type: vllm
+
+A vLLM server, started with `vllm serve`.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `model` | required | Model name or path passed to `vllm serve`. |
+| `port` | `8000` | Port the server listens on. |
+| `served_model_name` | `null` | Name the model is served under. Defaults to `model` when used as the policy. |
+| `tensor_parallel_size` | `1` | Tensor-parallel size of one instance. |
+| `pipeline_parallel_size` | `1` | Pipeline-parallel size of one instance. |
+| `number_of_instances` | `1` | Data-parallel replicas. Must be at least 1. |
+| `trust_remote_code` | `false` | Adds `--trust-remote-code`. |
+| `use_ray_serve` | `false` | Force the [Ray Serve gateway](/orchestration/how-to/multi-node-vllm#ray-serve-gateway) to manage instances and routing. |
+| `extra_args` | `""` | Raw flags appended verbatim to `vllm serve`, for example `--max-model-len 8192`. |
+| `data_parallel_rpc_port` | `13345` | Port the data-parallel ranks of a multi-node service coordinate on. |
+
+If `health_check` is not set, it defaults to `/health` on `port`. If it is set without a `port`, the service's `port` is used.
+
+### type: vllm_pd
+
+Prefill/decode disaggregated vLLM: two vLLM tiers behind a `vllm-router`. A single `vllm_pd` entry named `X` deploys three services: `X-prefill`, `X-decode`, and the router `X`. Set `driver.policy_model` to `X`. The router's `container` must provide `vllm-router`. See the [how-to](/orchestration/how-to/prefill-decode-disaggregation).
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `container`, `model`, `served_model_name` | `container` and `model` required | Inherited by both tiers unless a tier sets its own. |
+| `port` | `8000` | The router's port. Prefill defaults to `port + 1` and decode to `port + 2`. |
+| `prefill`, `decode` | required | A `vllm` service definition for each tier. Each tier needs its own `node_pool`. |
+| `server_per_node` | `false` | Run an independent server on every node of each tier instead of one data-parallel engine across them. The router then lists each node as an endpoint. Set on the `vllm_pd` entry, not on a tier. |
+| `nixl_side_channel_port` | `5600` | Prefill's NIXL side-channel port. Decode uses this plus 1. Set on the `vllm_pd` entry, not on a tier. |
+| `prefill_policy`, `decode_policy` | `cache_aware` | Router routing policies. |
+| `intra_node_data_parallel_size` | `1` | Passed to the router. |
+| `request_timeout_secs` | `86400` | Router request timeout. Long because agentic benchmarks hold requests open. |
+| `log_level` | `error` | Router log level. |
+| `kv_connector` | `NixlConnector` | KV-transfer connector for both tiers. |
+| `kv_load_failure_policy` | `fail` | `fail` surfaces a broken KV transfer instead of silently recomputing the prefill. |
+
+### type: ray
+
+A Ray cluster. The head starts on the driver's node and every other node of the spanned pools joins it as a worker.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `node_pools` | `[]` | Pools the cluster spans (note the plural; `node_pool` is rejected on a ray service). Empty means a single-node cluster. A pool may be listed once. |
+| `port` | `6379` | Head port. |
+| `resources` | `{}` | Custom Ray resources per pool, for example `{aux: {extra_gpu: 4}}`. Every pool named here must also be in `node_pools`. |
+| `num_cpus`, `num_gpus` | `null` | Passed to `ray start`. |
+| `extra_args` | `""` | Raw flags appended to `ray start` on every node. Head-only flags (`--port`, `--redis-shard-ports`, `--include-dashboard`) are dropped for workers. |
+
+A ray service is not a model service: it cannot be `driver.policy_model` for URL injection, and it has no default health check. The head's address is exported to the job as `GYM_RAY_ADDRESS_<SERVICE>` (service name upper-cased, non-alphanumerics replaced by `_`).
+
+## compute
+
+A mapping with exactly one entry; its key is a name you choose (the examples use `cluster`). More than one is an error.
+
+### type: slurm
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `account` | required | Slurm account (`--account`). |
+| `hostname` | `null` | Login node to submit through over SSH. `null`, or the name of the machine you are on, means run `sbatch` locally with no SSH. |
+| `walltime` | `null` | Job time limit (`--time`). |
+| `node_pools` | `{}` | Named groups of nodes. See below. |
+| `extra_args` | `{}` | Extra job-level `#SBATCH` directives, written without leading dashes: `{comment: my-run}` becomes `#SBATCH --comment=my-run`. |
+
+#### Node pools
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `partition` | required | Slurm partition. |
+| `nodes` | `1` | Number of nodes in the pool. |
+| `ntasks_per_node` | `1` | Tasks per node. |
+| `gpus_per_node` | `null` | GPUs per node (`--gpus-per-node`). Also used to size and check vLLM deployments. |
+| `extra_args` | `{}` | Extra `#SBATCH` directives, written without leading dashes. |
+
+A benchmark is **one** Slurm job. Pools do not create separate Slurm requests; they divide the one allocation between services. The job requests the sum of every pool's `nodes`, and pool `i` owns the contiguous node range after all pools before it, in declaration order. Because Slurm takes one value per job, pools must agree on `partition`, `ntasks_per_node`, and `gpus_per_node`, and may not set the same `extra_args` key to different values. Disagreement is an error.
+
+## driver
+
+The driver runs the benchmarks against the services.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `container` | `python:3.12` | Image the driver runs in. |
+| `gym_install` | `null` | `repo` (default `https://github.com/NVIDIA-NeMo/gym`) and `ref` (required; a git tag or commit). When set, the driver installs Gym from that checkout into a fresh virtual environment, with `uv`, before running. When unset, the image must already contain Gym. |
+| `policy_model` | `null` | Name of a service to use as the policy model. See [Policy wiring](#policy-wiring). |
+| `policy_host` | `localhost` | Host used in the injected `policy_base_url`. Use an address routable from elsewhere when an agent runs remotely, for example `${oc.env:HEAD_NODE_IP}`, which is resolved when the driver runs. |
+| `policy_model_type` | `openai_model` | The `responses_api_models` asset passed to `gym eval run` as `--model-type`. Set it to `""` to pass none, for a benchmark whose own config already declares a complete policy model. |
+| `benchmarks` | required | Mapping from benchmark name to its [run config](#benchmarks). |
+| `env` | `{}` | Environment for the driver. See [env values](#env-values). |
+| `mounts` | `[]` | Extra bind mounts for the driver. The benchmark's own job directory is always mounted at the same path. |
+
+### Policy wiring
+
+When `policy_model` names a `vllm` or `vllm_pd` service, each benchmark's `run` config receives:
+
+- `policy_base_url`: `http://<policy_host>:<service port>/v1`
+- `policy_model_name`: the service's `served_model_name`, or its `model`
+- `policy_api_key`: a dummy value (vLLM does not require authentication)
+
+If a benchmark's `run` already sets any of these keys, validation fails: remove one or the other. `policy_model` must name an existing service.
+
+## benchmarks
+
+Each key under `driver.benchmarks` is a benchmark name. It must match `^[A-Za-z0-9._-]+$`, because it is used in job names and in the line each `sbatch` reports back.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `prepare` | `{}` | Overrides forwarded to `gym eval prepare`. When non-empty, `gym eval prepare` runs in the driver before the benchmark. |
+| `run` | `{}` | Overrides forwarded to `gym eval run`. |
+| `command` | `null` | A shell script that runs **instead of** `gym eval run`. See [Custom Harness](/orchestration/how-to/custom-harness). Cannot be combined with `run` or `resumable`. |
+| `resumable` | `false` | `true` for auto-resume with defaults, or `{max_retries, max_walltime}` to tune it. See [Resumable Runs](/orchestration/how-to/resumable-runs). |
+
+`prepare` and `run` are nested mappings that are flattened to Hydra overrides: `{split: benchmark, config_paths: [a.yaml, b.yaml]}` becomes `+split=benchmark` and `+config_paths=[a.yaml,b.yaml]`, and nested keys become dotted paths.
+
+Submit sets a few defaults on `run` that you can override:
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `output_jsonl_fpath` | `<benchmark dir>/artifacts/rollouts.jsonl` | Always set by submit as an absolute path. |
+| `require_complete` | `true` | Fail the evaluation if any samples are incomplete. |
+| `observability_enabled` | `true` | Capture rollout evidence. |
+| `model_call_capture_dir` | `<benchmark dir>/model-calls` | Where captured model calls are written, when observability is on. |
+| `resume_from_cache` | `true` when `resumable` is set | Lets a resumed job continue from the cache. |
+
+### resumable
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `max_retries` | `3` | How many times a non-timeout failure is resubmitted, so a broken benchmark does not requeue forever. |
+| `max_walltime` | `null` | Cap on the chain's total accumulated walltime as a Slurm-style duration (`MM`, `MM:SS`, `HH:MM:SS`, `D-HH`, `D-HH:MM`, `D-HH:MM:SS`). `null` means no cap. |
+
+Asking for `resumable` on an executor that does not support it is an error rather than a silent no-op.
+
+## job
+
+| Field | Description |
+| --- | --- |
+| `output_path` | Base directory on the cluster. Each submit creates a timestamped subdirectory here. |
+
+## otel
+
+The OpenTelemetry collector that runs beside every benchmark job. It is **enabled by default**, and an enabled collector requires `endpoint`, `service_name`, and the token variable (`token_env`, default `OTEL_TOKEN`) to be set in the submitting shell. Set `enabled: false` to opt out. All fields, and what is exported, are described in [Collector for Submitted Jobs](/observability/eval-submit-collector).
+
+## Cross-field validation
+
+Validation runs when the config is composed, before anything is rendered or contacted:
+
+- **One compute resource.** More than one is rejected. A service's `placement` must name it.
+- **Node pool references.** A service's `node_pool`, and every pool in a ray service's `node_pools`, must exist in the compute's `node_pools`.
+- **Tier name collisions.** A `vllm_pd` service `X` deploys `X-prefill` and `X-decode`; `services` must not already contain those names.
+- **Prefill/decode tiers** each need a `node_pool`, must use different `data_parallel_rpc_port` values, and with `server_per_node` must have `number_of_instances: 1`. The router, if pinned, must be pinned to the first pool, since the driver reaches it over localhost on the first node.
+- **vLLM GPU footprint** (when pools declare `gpus_per_node`). The GPUs a service needs are compared with what it can use. Too few is an error that names the footprint; too many is a warning that GPUs would idle. The calculation depends on the deployment shape:
+  - single node: `tensor_parallel_size x pipeline_parallel_size x number_of_instances` against one node's GPUs;
+  - one instance across nodes: `tensor_parallel_size x pipeline_parallel_size` against all GPUs of the nodes;
+  - multi-node data parallel: the per-node share of replicas against one node's GPUs; and
+  - Ray Serve gateway: the total footprint against all GPUs.
+- **Multi-node data parallelism** requires `number_of_instances` to be evenly divisible by the number of nodes, unless the Ray Serve gateway is in use.
+- **Policy wiring** conflicts, as described above.
+- **Benchmark `command`** combined with `run` or `resumable` is rejected.
+
+Mount source existence, SSH reachability, and OTel destination checks happen later, at submit time.

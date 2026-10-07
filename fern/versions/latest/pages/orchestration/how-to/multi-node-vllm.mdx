@@ -1,0 +1,111 @@
+---
+title: "Multi-Node vLLM"
+description: "Scale a vLLM service across GPUs and nodes with gym eval submit."
+position: 1
+---
+
+How a `vllm` service is deployed is derived from three numbers: how many nodes the service can use, its parallelism (`tensor_parallel_size` x `pipeline_parallel_size`, written TP x PP here), and `number_of_instances`. You do not select a strategy; you describe the shape and the executor picks the command.
+
+A service without a `node_pool` can use every node of the allocation, which is the sum of `nodes` across all pools. Set `gpus_per_node` on the pools so submit can size and check the deployment.
+
+| Nodes | `number_of_instances` | TP x PP | Deployment |
+| --- | --- | --- | --- |
+| 1 | 1 | fits the node | One `vllm serve`. |
+| 1 | N | fits the node, N times | One `vllm serve --data-parallel-size N`. |
+| more than 1 | 1 | any | One instance spread across nodes by Ray: `--distributed-executor-backend ray`. |
+| more than 1 | N, evenly divisible by nodes | fits one node | [Multi-node data parallelism](#many-replicas-across-nodes). |
+| more than 1 | N | larger than one node's GPUs | [Ray Serve gateway](#ray-serve-gateway). |
+
+## Many replicas across nodes
+
+Two nodes of 8 GPUs, eight replicas of a 2-GPU model, four on each node:
+
+```yaml
+compute:
+  cluster:
+    type: slurm
+    account: my-account
+    node_pools:
+      main:
+        partition: batch
+        nodes: 2
+        gpus_per_node: 8
+
+services:
+  policy:
+    type: vllm
+    container: vllm/vllm-openai:v0.9.0
+    model: Qwen/Qwen2.5-7B-Instruct
+    tensor_parallel_size: 2
+    number_of_instances: 8      # 4 per node
+    health_check:
+      timeout_seconds: 1800
+```
+
+The job runs one `vllm serve` per node. The first node serves the API and coordinates, and the others run `--headless` with a `--data-parallel-start-rank` offset, which is vLLM's documented multi-node data-parallel layout. Each node's TP ranks stay local to it. `number_of_instances` must divide evenly across the nodes (8 across 2 nodes here), and the per-node share (4 x TP 2 = 8 GPUs) must fit one node, or the submit fails with a message naming the footprint. The ranks coordinate on `data_parallel_rpc_port` (default `13345`); change it only if that port is taken.
+
+## One instance across nodes
+
+When a single instance needs more GPUs than a node has, leave `number_of_instances` at 1 and set TP x PP to the total:
+
+```yaml
+node_pools:
+  main:
+    partition: batch
+    nodes: 2
+    gpus_per_node: 8
+
+services:
+  policy:
+    type: vllm
+    container: vllm/vllm-openai:v0.9.0
+    model: my-org/very-large-model
+    tensor_parallel_size: 16
+```
+
+The job bootstraps a Ray cluster across the two nodes (`ray symmetric-run` when the image's Ray supports it, otherwise a manual head and workers) and runs vLLM with the Ray executor on the elected head. If the `ray` CLI is not in the image, it is installed with `pip` first, which needs network access on the compute nodes.
+
+<Note>
+
+A multi-node allocation with a single small instance is also deployed through Ray across all nodes, and submit warns about the idle GPUs. To use one node of a larger allocation, pin the service to a smaller pool with `node_pool`. See [Node Pools and Ray](/orchestration/how-to/node-pools-and-ray).
+
+</Note>
+
+## Ray Serve gateway
+
+For many instances where each one itself spans nodes, vLLM's own data parallelism cannot place the ranks. The executor then runs a small Ray Serve gateway instead. It is used when either:
+
+- you set `use_ray_serve: true`, or
+- the allocation has more than one node, `number_of_instances` is greater than 1, and TP x PP exceeds the largest `gpus_per_node` among the pools.
+
+```yaml
+node_pools:
+  main:
+    partition: batch
+    nodes: 4
+    gpus_per_node: 8
+
+services:
+  policy:
+    type: vllm
+    container: vllm/vllm-openai:v0.9.0
+    model: my-org/very-large-model
+    tensor_parallel_size: 16
+    number_of_instances: 2        # 2 instances x 16 GPUs across 4 nodes
+```
+
+The gateway defines one Ray Serve deployment with `number_of_instances` replicas. Each replica launches its own `vllm serve` with the Ray executor and proxies requests to it, and the gateway listens on the service's `port`, so the driver sees one endpoint. Replicas per node are capped using `gpus_per_node`. Requests are not limited by Ray Serve's default concurrency or timeout: the gateway adds neither limit and leaves queueing and request bounds to vLLM.
+
+The gateway's source is embedded in the job script, so you do not need `gym_install` for it. The job installs `aiohttp`, and `ray` if missing, with `pip`. With `use_ray_serve: true` on a single node, the gateway starts its own local Ray.
+
+For the Ray Serve gateway, GPU validation compares the total footprint (TP x PP x `number_of_instances`) against the GPUs across all nodes, and the divisibility rule for `number_of_instances` does not apply.
+
+## Passing extra vLLM flags
+
+`extra_args` is appended verbatim to `vllm serve`:
+
+```yaml
+extra_args: "--max-model-len 32768 --enable-prefix-caching"
+```
+
+JSON-valued flags such as `--hf-overrides '{"...": ...}'` are supported. `--api-server-count` is automatically removed from the commands of headless worker nodes, where vLLM rejects it, so one `extra_args` value works for every node.

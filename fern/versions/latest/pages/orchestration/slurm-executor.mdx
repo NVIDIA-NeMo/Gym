@@ -1,0 +1,111 @@
+---
+title: "Slurm Executor"
+description: "How gym eval submit turns a config into Slurm jobs, and what each job and run directory contains."
+position: 4
+---
+
+The Slurm executor is the only executor today. It targets clusters with [Pyxis](https://github.com/NVIDIA/pyxis): every service and the driver run in `srun --container-image` steps, so each one uses the container image in its own config.
+
+## What the executor needs
+
+- **On the machine you submit from**, when `compute.<name>.hostname` is set to a different machine: `ssh` and `rsync`. Authentication must work without prompts (the connection runs with `BatchMode=yes`, so use keys or an agent) and unknown host keys are accepted on first contact (`StrictHostKeyChecking=accept-new`). Gym opens one SSH master connection and reuses it for the whole submit.
+- **On the cluster login node**: `sbatch`, plus `sacct` if a benchmark is [resumable](/orchestration/how-to/resumable-runs).
+- **On the compute nodes**: Pyxis, and network access to pull container images and, when `gym_install` is used, to clone the repository and install `uv`.
+- **When `hostname` is unset, or equals the current machine's hostname**: nothing is copied over SSH. Commands run locally and files are copied locally. Use this when you submit from the login node.
+
+## Submission sequence
+
+1. Validate benchmark names and, when the collector is on, check its destination, Gym telemetry settings, and token. These checks run before `--dry-run` prints anything.
+2. Allocate the submission identity: `gym-job-<UTC timestamp>-<6 hex>`, which is also the run directory's name. The random suffix keeps two submits in the same second from sharing a directory, which would otherwise let the copy step erase the first one's scripts.
+3. Render one script per benchmark and stage it locally, in a temporary directory, with its `logs/` and `artifacts/` directories.
+4. Open the connection and check that every mount source path exists (see [Troubleshooting](/orchestration/troubleshooting#a-mount-source-does-not-exist)).
+5. Copy the staged tree to `<job.output_path>/<gym_job_id>/`. Over SSH this is `rsync -az --delete`; locally, an existing target directory is replaced.
+6. Run one `sbatch --parsable` per benchmark in a single shell session, each reporting its own benchmark name, exit status, and output, so one failure cannot shift later benchmarks onto the wrong job ID.
+7. Build the record and [persist it](/orchestration/job-records).
+
+A benchmark whose `sbatch` fails is recorded with its error and no job ID. The others are unaffected.
+
+## Run directory layout
+
+```text
+<job.output_path>/gym-job-20260101T120000Z-a1b2c3/
+├── gym-job.json                 # submission record
+├── resolved-config.yaml         # config as submitted (host: values written as references)
+└── <benchmark>/
+    ├── job.sh                   # the sbatch script (mode 0600)
+    ├── logs/
+    │   ├── <service>-<slurm job id>.log
+    │   └── driver-<slurm job id>.log
+    ├── artifacts/
+    │   └── rollouts.jsonl       # plus the sibling files gym eval run writes
+    ├── model-calls/             # captured model calls (observability on by default)
+    ├── otel/                    # collector.yaml and exported *.jsonl, when the collector is on
+    └── .gym_*                   # resume bookkeeping, when resumable
+```
+
+The staged tree is given mode 0755 so other users can read the run directory, for example a collection job under another account. `job.sh` is the exception: it contains the resolved values of every `host:` environment variable, so it is owner-only. Log files carry the Slurm job ID, so a resumed job in the same directory keeps the earlier jobs' logs.
+
+## The job script
+
+`gym eval submit --dry-run` prints each script. Their structure is always the same:
+
+```text
+#!/bin/bash
+<#SBATCH directives>
+
+<resume prologue>        only when resumable
+<node and Ray setup>     only when the job needs it
+<service steps>
+<health checks>
+<driver step>
+```
+
+### Directives
+
+| Directive | Source |
+| --- | --- |
+| `--job-name=gym-<benchmark>` | the benchmark name |
+| `--account` | `compute.<name>.account` |
+| `--time` | `compute.<name>.walltime`, if set |
+| `--chdir=<benchmark dir>` | the benchmark's directory in the run directory, so `logs/...` resolves there |
+| `--partition`, `--nodes`, `--ntasks-per-node`, `--gpus-per-node` | the node pools: one set for the whole allocation, with `--nodes` the sum of the pools' `nodes` |
+| any `--key=value` | `extra_args` on the compute and on its pools |
+
+### Service steps
+
+Each service is one background `srun --overlap` step, so services and the driver share the allocation. A step runs in the service's container with `--no-container-mount-home`, applies the service's `env` to that command only, mounts what `mounts` lists, and writes its output to `logs/<name>-$SLURM_JOB_ID.log`. The script records each step's PID so a health check can notice a service that died during startup.
+
+The collector, when enabled, is started first, ahead of the model services, so its scrape covers their startup. It runs as a host process by default rather than in a container.
+
+### Health checks
+
+For each service with a health check, the script polls `http://<host>:<port><path>` every 5 seconds, for `timeout_seconds / 5` attempts. If the service process exits first, or the attempts run out, the job exits with status 1 and no benchmark runs. A vLLM service gets `/health` on its own port automatically. Set `health_check.timeout_seconds` high enough for model download and load; the default is 60.
+
+### Driver step
+
+The driver is one more `srun --overlap` step, in `driver.container`, with the benchmark's directory mounted at the same path as on the host. Without that mount, a run would write its artifacts into the container's temporary filesystem and lose them when the step ended.
+
+Inside one `bash -c`, in order:
+
+1. If `gym_install` is set: install `uv`, clone the repository to a temporary directory, check out `ref`, create a virtual environment, and `uv pip install -e .` (with the `telemetry` extra when Gym telemetry is on). The step changes into the checkout so a benchmark's relative paths resolve.
+2. If `prepare` is non-empty: `gym eval prepare <overrides>`.
+3. `gym eval run` with `+output_jsonl_fpath=<benchmark dir>/artifacts/rollouts.jsonl`, `--model-type <policy_model_type>` when a policy is set, and the flattened `run` overrides. Or, when the benchmark has a `command`, that script instead.
+
+The job's exit status is the driver's. When the job ends, Slurm stops the service steps.
+
+## Where services run
+
+The driver runs on the first node of the allocation, or on the first node of the policy service's pool when the policy is pinned. The rules for the services:
+
+| Situation | Placement |
+| --- | --- |
+| Single-node allocation | Everything shares the node. |
+| Multi-node, vLLM service without `node_pool` | Spans every node. See [Multi-Node vLLM](/orchestration/how-to/multi-node-vllm). |
+| Multi-node, other unpinned service | One node, beside the driver. |
+| Service with `node_pool` | Only the nodes of that pool. See [Node Pools and Ray](/orchestration/how-to/node-pools-and-ray). |
+
+For anything that spans nodes or is pinned, the script resolves the allocation's hostnames with `scontrol show hostnames`, so addresses are never needed in the config. It exports `HEAD_NODE_IP` and `RAY_HEAD_NODE_IP` when a vLLM service spans nodes, and `GYM_POOL_<POOL>_NODES` for each node pool when services are placed by pool.
+
+## Dry-run output
+
+`--dry-run` prints `[dry-run] remote run dir: <path>` and then, for each benchmark, the full script between `=` rules. With the collector on it also prints that benchmark's rendered `otel/collector.yaml`. It does not stage, copy, or queue anything and writes no record. Because the collector checks run first, a dry run with the collector enabled still needs `otel.endpoint`, `otel.service_name`, and the token variable.

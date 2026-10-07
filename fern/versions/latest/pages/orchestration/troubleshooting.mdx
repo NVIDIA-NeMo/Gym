@@ -1,0 +1,225 @@
+---
+title: "Troubleshooting"
+description: "Errors you may hit with gym eval submit, what they mean, and common questions."
+position: 7
+---
+
+Most problems are caught while the config is validated, before anything touches the cluster, so `gym eval submit -c <file> --resolve-only` is the fastest way to iterate. Error messages below are quoted in part; the parts in angle brackets vary.
+
+## Config errors
+
+### Config file not found
+
+**Error:** `Submit config '<path>' was not found` or `... is a directory, not a file`
+
+`--config` must point to a YAML file. The path is resolved against your current working directory.
+
+### Config fails schema validation
+
+**Error:** `Submit config '<path>' is invalid: missing required configuration: ...; invalid configuration: ...`
+
+The file failed schema validation. The message lists each missing field and each invalid one by its dotted path. Every model rejects unknown keys, so a misspelled field (`tensor_paralel_size`) is reported as invalid rather than ignored. A typo at the top level is reported too, unless the key starts with `_`, which marks a scratch namespace.
+
+### Override rejected for a scratch key
+
+**Error:** `Refusing override '+_x.y=...': scratch namespace '_x' must be fully defined in the config file`
+
+`+` and `++` overrides cannot add keys under a `_` namespace, so a mistyped scratch key fails instead of being silently unused. Define the key in the file, and override it with a plain `key=value`.
+
+### Env value is missing its prefix
+
+**Error:** `env['X']: '<value>' must start with one of the prefixes 'lit:', 'host:', or 'runtime:'`
+
+Every `env` value needs a prefix. A bare value is not treated as a literal. See [env values](/orchestration/configuration#env-values).
+
+### Host environment variable is not set
+
+**Error:** `env['X'] references host:VAR, but 'VAR' is not set in the submitting shell's environment`
+
+Export the variable in the shell where you run `gym eval submit`. This applies to `--resolve-only` and `--dry-run` as well, since `host:` values are resolved at validation time.
+
+### More than one compute resource
+
+**Error:** `Multiple compute resources are not supported yet`
+
+`compute` takes exactly one entry.
+
+### Service points at a compute resource or node pool that does not exist
+
+**Error:** `Service '<name>' placement '<x>' does not match any compute resource` or `Service '<name>' node_pool '<x>' does not match any node pool`
+
+Check the spelling against the keys of `compute.<name>` and its `node_pools`.
+
+### Node pools disagree
+
+**Error:** `Node pools disagree on <partition|ntasks_per_node|gpus_per_node>`
+
+The whole allocation is one Slurm job, which takes a single value for these. Make the pools agree. A conflicting `extra_args` key between pools is reported the same way. If you genuinely need different partitions, you need separate submissions.
+
+### Service needs more GPUs than are available
+
+**Error:** `Service '<name>' requires N GPUs (...), which exceeds ...`
+
+The service's parallelism needs more GPUs than the node pool or allocation has. The message spells out the footprint (`tensor_parallel_size x pipeline_parallel_size x number_of_instances` and how it was derived). Reduce one of those, or add nodes or GPUs. The inverse is a warning, not an error: `leaving K GPU(s) idle`. See [Cross-field validation](/orchestration/configuration#cross-field-validation) for how the footprint is computed.
+
+### Instances do not divide evenly across nodes
+
+**Error:** `Service '<name>' has number_of_instances=N, which must be evenly divisible by the number of nodes`
+
+Multi-node data parallelism places an equal share of replicas on each node. Change `number_of_instances` or the node count, or choose a shape where the [Ray Serve gateway](/orchestration/how-to/multi-node-vllm#ray-serve-gateway) is used.
+
+### Policy settings given twice
+
+**Error:** `Benchmark '<name>' run config already sets ['policy_base_url', ...] but driver.policy_model is also set`
+
+Remove either those keys from `run` or `driver.policy_model`. Submit does not choose between them.
+
+### A custom command combined with run or resumable
+
+**Error:** `A benchmark sets both 'command' and 'run'` or `... both 'command' and 'resumable'`
+
+See [Custom Harness](/orchestration/how-to/custom-harness#what-changes-compared-with-gym-eval-run).
+
+### Resumable runs are not supported
+
+**Error:** `Benchmark(s) <names> set 'resumable', but <Executor> does not support resumable runs`
+
+The chosen executor cannot chain jobs. Slurm can.
+
+### Invalid benchmark name
+
+**Error:** `Invalid benchmark name(s) ...: names must match ^[A-Za-z0-9._-]+$`
+
+Benchmark names appear in Slurm job names and in a result line the submit script prints, so they are restricted. This is checked before `--dry-run` prints anything as well.
+
+### Prefill/decode service name collision
+
+**Error:** `vllm_pd service '<name>' deploys its tiers as ..., but services already has ...`
+
+Rename the colliding service. `X-prefill` and `X-decode` are reserved by a `vllm_pd` service named `X`.
+
+### Tier setting placed on a tier instead of the service
+
+**Error:** `<field> is set on the prefill tier. Set it on the vllm_pd service itself`
+
+`server_per_node` and `nixl_side_channel_port` apply to both tiers, so they live on the `vllm_pd` entry.
+
+## Collector (OpenTelemetry) errors
+
+The collector is on by default, so these appear first on a fresh config. See [Collector for Submitted Jobs](/observability/eval-submit-collector) for the details.
+
+### Collector destination not set
+
+**Error:** `The OTel collector is enabled but otel.endpoint and otel.service_name is not set`
+
+Set them, or `otel: {enabled: false}`. Typically a cluster-wide config fragment supplies them.
+
+### Collector token not set
+
+**Error:** `The OTel collector is enabled but 'OTEL_TOKEN' is not set in the submitting shell's environment`
+
+Export the token under the name in `otel.token_env`, or disable the collector.
+
+### Gym telemetry needs an install
+
+**Error:** `otel.gym_telemetry is on but driver.gym_install is not set`
+
+Gym's own telemetry needs its extra installed with the checkout. Set `driver.gym_install`, or `otel.gym_telemetry: false`.
+
+## Submit-time errors
+
+### A mount source does not exist
+
+**Error:** `Mount src paths do not exist`
+
+The error lists each missing path with the config location (`driver`, `services.<name>`, or a tier). Source paths are checked on the cluster side before anything is copied: create the path or fix the mount. The part before the first `:` is what is checked.
+
+### Cannot open the SSH connection
+
+**Error:** `SSH master to '<host>' exited with code N` or `did not produce a control socket within 10s`
+
+Gym could not open its SSH connection. Check that `ssh <hostname>` works from a plain terminal without a prompt: the connection uses `BatchMode=yes`, so passwords and passphrase prompts fail. If you are already on the login node, leave `hostname` unset to skip SSH.
+
+### Copying the job files fails
+
+**Error:** `Command failed (rsync to <host>:<path>) with exit code N`
+
+The copy to `job.output_path` failed. Check that the path is writable on the cluster and that `rsync` is installed at both ends.
+
+### sbatch rejects a benchmark
+
+**Error:** `failed <benchmark>: <sbatch message>`, followed by `Error: N benchmark(s) failed to submit`
+
+`sbatch` rejected that benchmark's job, typically for an invalid account, partition, or resource request. The message is Slurm's own. Other benchmarks in the same submission are queued as normal and the command exits with status 1. Fix the config and resubmit the failed benchmark; a new submit creates a new run directory.
+
+A message of `sbatch produced no result for this benchmark` means the shell session ended before reaching it.
+
+### Jobs are queued but the record could not be written
+
+**Error:** `Submitted jobs but could not write the manifest/resolved config under <dir>`
+
+The jobs **are** queued. The message lists them as `<benchmark>=<job id>`. Write the IDs down before collecting results; the local index in `~/.cache/nemo-gym/jobs/` may still hold the record. See [Write order and failures](/orchestration/job-records#write-order-and-failures).
+
+## The job runs but does not produce results
+
+Look in `<run dir>/<benchmark>/logs/` first. There is one log per service and one for the driver, each suffixed with the Slurm job ID.
+
+### A service never becomes healthy
+
+**Error (in the job output):** `<service> did not become healthy after N attempts` or `<service> died during startup`
+
+The service did not answer its health endpoint in time (`timeout_seconds / 5` attempts, 5 seconds apart), or its process exited. Read that service's log. Model download and weight load are the usual cause of the first; raise `health_check.timeout_seconds` (the default is only 60 seconds). Container pull failures and out-of-memory errors show in the same log.
+
+### The driver cannot find Gym
+
+**Symptom:** the driver log shows `gym: command not found` or an import error for `nemo_gym`.
+
+The default driver image is `python:3.12`, which does not include Gym. Set `driver.gym_install` (repo and ref), or use a driver image that already has Gym installed.
+
+### A benchmark's relative paths do not resolve
+
+**Symptom:** the driver log shows a file or config path not found.
+
+With `gym_install`, the driver changes into the Gym checkout, so paths like `benchmarks/gpqa/config.yaml` resolve inside it. Without it, they resolve against the container's working directory. Use absolute paths on a mounted filesystem for files of your own, and add them to `driver.mounts`.
+
+### The job succeeded but results are missing
+
+**Symptom:** the job exits 0 and `artifacts/` has no rollouts.
+
+The benchmark's directory is mounted into the driver automatically, and `rollouts.jsonl` is written under `artifacts/` there. If you set your own output path in `run`, or use a `command`, make sure it points inside a mounted path; anything else is written to the container's temporary filesystem and lost.
+
+### One incomplete sample fails the whole run
+
+**Symptom:** the evaluation fails because some samples are incomplete.
+
+Submit sets `require_complete: true` by default, so incomplete samples fail the evaluation. Override `run.require_complete` if you want a partial result.
+
+## Frequently asked questions
+
+### Do benchmarks share services?
+
+No. Each entry in `driver.benchmarks` is its own Slurm job and deploys its own copy of every service. Two benchmarks mean two model deployments, queued separately.
+
+### Can I submit to several clusters at once?
+
+No. `compute` takes one entry. Submit once per cluster.
+
+### Where is the status of my run?
+
+Use Slurm's own tools with the job IDs from the output or the manifest (`squeue`, `sacct`). The record tells you where the logs and artifacts are; there is no Gym command that tracks status for you.
+
+### Can I preview what will be queued?
+
+Yes: `--dry-run` prints every script, and `--resolve-only` prints the validated config. Neither queues anything.
+
+### Do I need the collector?
+
+It is on by default, but you can disable it with `otel.enabled: false`. A dry run or submit with it enabled requires its endpoint, service name, and token.
+
+### Are my secrets stored on the cluster?
+
+`host:` values are written into `job.sh`, which is owner-only. They are not written to `resolved-config.yaml` or `gym-job.json`, where they appear as `host:VAR`. Use `runtime:VAR` to keep a value out of the script altogether and read it from the job's environment instead.
+
+### Is the interface stable?
+
+No. `gym eval submit` is experimental and warns on every run.

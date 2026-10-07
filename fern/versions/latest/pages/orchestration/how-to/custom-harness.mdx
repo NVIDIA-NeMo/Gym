@@ -1,0 +1,43 @@
+---
+title: "Custom Harness"
+description: "Run your own script instead of gym eval run for a benchmark with its own harness."
+position: 4
+---
+
+Some benchmarks do not run through Gym's rollout collection: the harness may provision external machines and drive Gym from there, for example. For those, set `command` on the benchmark. The driver runs your script **instead of** `gym eval run`, in the same container and with the same services running.
+
+```yaml
+driver:
+  policy_model: policy
+  gym_install:
+    ref: main
+  benchmarks:
+    my-harness:
+      prepare:
+        split: benchmark
+      command: |
+        python run_my_harness.py \
+          --base-url "$NEMO_GYM_POLICY_BASE_URL" \
+          --model "$NEMO_GYM_POLICY_MODEL_NAME" \
+          --api-key "$NEMO_GYM_POLICY_API_KEY" \
+          --output "$NEMO_GYM_BENCH_DIR/artifacts/results.json"
+```
+
+## What your script gets
+
+| Variable | Value |
+| --- | --- |
+| `NEMO_GYM_BENCH_DIR` | The benchmark's directory in the run directory, an absolute path. Write results under `$NEMO_GYM_BENCH_DIR/artifacts` so they sit beside the logs. |
+| `NEMO_GYM_POLICY_BASE_URL` | The policy's OpenAI-compatible base URL. Set when `driver.policy_model` is set. |
+| `NEMO_GYM_POLICY_MODEL_NAME` | The served model name. Set when `driver.policy_model` is set. |
+| `NEMO_GYM_POLICY_API_KEY` | The API key to present. Set when `driver.policy_model` is set. |
+
+The variables from `driver.env` are present too, and `driver.container` and `driver.mounts` apply as usual.
+
+## What changes compared with `gym eval run`
+
+- The `command` is emitted verbatim as the last statement of the driver's shell, under `set -euo pipefail`. A multi-line script is fine, and its exit status is the job's.
+- If `gym_install` is set, the install step still runs first, and so does `prepare`. Your script starts in the Gym checkout.
+- Nothing from `run` is applied, which is why `run` and `command` cannot be combined: `run` only configures `gym eval run`. Put those settings in your script.
+- `--model-type`, `require_complete`, observability capture, and the default `rollouts.jsonl` output are properties of `gym eval run`. They do not apply; your script decides where results go and what counts as complete.
+- `resumable` cannot be combined with `command`. A resumed job only passes `resume_from_cache` to `gym eval run`, so a custom command would restart from zero.

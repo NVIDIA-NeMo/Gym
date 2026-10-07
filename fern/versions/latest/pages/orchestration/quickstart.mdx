@@ -1,0 +1,129 @@
+---
+title: "Quickstart"
+description: "Submit a benchmark with one vLLM service to a Slurm cluster."
+position: 2
+---
+
+This page takes you from an empty file to a queued job: one vLLM service on one GPU node, and one benchmark that evaluates it.
+
+## Prerequisites
+
+- NeMo Gym installed on the machine you submit from (`gym eval submit` runs there, not on the cluster).
+- A Slurm cluster with [Pyxis](https://github.com/NVIDIA/pyxis) so that `srun --container-image` works.
+- Either to be logged in to the cluster's login node, or SSH access to it from your machine. With SSH, `ssh` and `rsync` must be available locally.
+- A shared filesystem path on the cluster that the job can write to (`job.output_path`).
+- A benchmark config. List the available ones with `gym list benchmarks`; the example below uses `benchmarks/gpqa/config.yaml` from the Gym repository.
+
+## 1. Write the config
+
+Save this as `submit.yaml`:
+
+```yaml
+services:
+  policy:
+    type: vllm
+    container: vllm/vllm-openai:v0.9.0
+    model: Qwen/Qwen2.5-7B-Instruct
+    tensor_parallel_size: 2
+    number_of_instances: 4        # four replicas x 2 GPUs = 8 GPUs
+    health_check:
+      timeout_seconds: 1200       # model download and load time
+    env:
+      HF_TOKEN: host:HF_TOKEN     # read from this shell at submit time
+
+compute:
+  cluster:
+    type: slurm
+    hostname: my-cluster-login    # omit when already on the login node
+    account: my-account
+    walltime: "02:00:00"
+    node_pools:
+      main:
+        partition: batch
+        nodes: 1
+        gpus_per_node: 8
+
+driver:
+  policy_model: policy            # wires the service into each benchmark run
+  gym_install:
+    ref: main                     # git tag or commit of NeMo Gym to install in the driver
+  env:
+    HF_TOKEN: host:HF_TOKEN
+  benchmarks:
+    gpqa:
+      run:
+        config_paths:
+          - benchmarks/gpqa/config.yaml
+
+job:
+  output_path: /lustre/my-project/evals
+
+otel:
+  enabled: false                  # see the note below
+```
+
+Things worth knowing about this file:
+
+- Every `env` value needs a prefix: `lit:` (literal), `host:VAR` (read from the submitting shell), or `runtime:VAR` (read from the job's environment when it runs). See [env values](/orchestration/configuration#env-values).
+- `driver.policy_model` names a service. Submit fills in `policy_base_url`, `policy_model_name`, and `policy_api_key` for every benchmark, so you do not repeat the address.
+- `gpus_per_node` lets submit check that `tensor_parallel_size x number_of_instances` fits the node (2 x 4 = 8 here). A footprint larger than the GPUs available is an error; a smaller one is a warning about idle GPUs.
+- `gym_install` makes the driver clone Gym at that ref and install it before running. Without it, the driver container must already contain Gym.
+
+<Note>
+
+`otel.enabled` defaults to **true**. An enabled collector requires `otel.endpoint`, `otel.service_name`, and a token in the submitting shell, and the submit fails before anything is staged if they are missing. This quickstart turns the collector off. To keep it, see [Collector for Submitted Jobs](/observability/eval-submit-collector).
+
+</Note>
+
+## 2. Validate the config
+
+```bash
+export HF_TOKEN=...
+gym eval submit -c submit.yaml --resolve-only
+```
+
+This composes and validates the file and prints the resolved result. It does not contact the cluster. Every `host:` variable must be set in your shell even for this step; the resolved output shows the `host:HF_TOKEN` reference, never the secret itself.
+
+## 3. Inspect the generated script
+
+```bash
+gym eval submit -c submit.yaml --dry-run
+```
+
+This prints the `sbatch` script for each benchmark and stops. Read it once before your first submission: it shows the `#SBATCH` directives, the `srun` step for each service, the health checks, and the driver command. See [Slurm Executor](/orchestration/slurm-executor) for how to read it.
+
+## 4. Submit
+
+```bash
+gym eval submit -c submit.yaml
+```
+
+```text
+Run directory: /lustre/my-project/evals/gym-job-20260101T120000Z-a1b2c3
+submitted gpqa → Slurm job 1234567
+```
+
+Add `--json` to get the [submission record](/orchestration/job-records) as JSON, which is easier to parse in scripts.
+
+## 5. Find the results
+
+Everything for the run is under the run directory on the cluster:
+
+```text
+<job.output_path>/gym-job-<timestamp>-<id>/
+├── gym-job.json            # the submission record
+├── resolved-config.yaml    # the config exactly as submitted
+└── gpqa/                   # one directory per benchmark
+    ├── job.sh              # the sbatch script
+    ├── logs/               # service and driver logs
+    └── artifacts/          # rollouts.jsonl and related outputs
+```
+
+Follow progress with the logs (`logs/policy-<slurm job id>.log` for the service, `logs/driver-<slurm job id>.log` for the benchmark) and the usual Slurm tools (`squeue`, `sacct`). The cluster-side layout is described in detail in [Slurm Executor](/orchestration/slurm-executor#run-directory-layout).
+
+## Next steps
+
+- Scale beyond one node: [Multi-Node vLLM](/orchestration/how-to/multi-node-vllm).
+- Survive walltime limits and preemption: [Resumable Runs](/orchestration/how-to/resumable-runs).
+- Look up a field: [Configuration Reference](/orchestration/configuration).
+- Something failed: [Troubleshooting](/orchestration/troubleshooting).
