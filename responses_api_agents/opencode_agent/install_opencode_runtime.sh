@@ -8,16 +8,17 @@ version=$2
 staged_binary=${3:-}
 installer=${4:-}
 musl_binary=${5:-}
+runtime_python=${6:-python3}
 
 require() {
   command -v "$1" >/dev/null 2>&1 || { echo "Native OpenCode requires $1 in the task image" >&2; exit 1; }
 }
-require python3
-python3 -c 'import sys; assert sys.platform == "linux" and sys.version_info >= (3, 8), "Native OpenCode requires Linux and Python >=3.8 in the task image"'
+require "$runtime_python"
+"$runtime_python" -c 'import sys; assert sys.platform == "linux" and sys.version_info >= (3, 8), "Native OpenCode requires Linux and Python >=3.8 in the task image"'
 # Serialize preparation of the version-scoped cache in a shared task sandbox.
 # The lock descriptor remains open across exec and releases on installer exit.
 if [ "${NG_OPENCODE_INSTALL_LOCKED:-0}" != 1 ]; then
-  exec python3 -c 'import fcntl,os,sys; fd=os.open(sys.argv[1]+".lock",os.O_CREAT|os.O_RDWR,0o600); fcntl.flock(fd,fcntl.LOCK_EX); os.set_inheritable(fd,True); os.environ["NG_OPENCODE_INSTALL_LOCKED"]="1"; os.execvp("bash",["bash",*sys.argv[2:]])' "$runtime" "$0" "$@"
+  exec "$runtime_python" -c 'import fcntl,os,sys; fd=os.open(sys.argv[1]+".lock",os.O_CREAT|os.O_RDWR,0o600); fcntl.flock(fd,fcntl.LOCK_EX); os.set_inheritable(fd,True); os.environ["NG_OPENCODE_INSTALL_LOCKED"]="1"; os.execvp("bash",["bash",*sys.argv[2:]])' "$runtime" "$0" "$@"
 fi
 case "$(uname -m)" in
   x86_64) arch=x64-baseline ;;

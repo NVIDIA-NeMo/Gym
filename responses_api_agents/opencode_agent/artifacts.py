@@ -68,6 +68,7 @@ def _parse_opencode_session(
     *,
     model_ref: ModelServerRef | None = None,
     require_terminal_finish: bool = False,
+    message_ids: set[str] | None = None,
 ) -> AgentObservationBundle:
     """Read OpenCode's persisted session tree before its workspace is removed."""
     if not db_path.is_file():
@@ -95,6 +96,12 @@ def _parse_opencode_session(
         ).fetchall()
     finally:
         con.close()
+
+    if message_ids is not None:
+        message_rows = [row for row in message_rows if row["id"] in message_ids]
+        part_rows = [row for row in part_rows if row["message_id"] in message_ids]
+        active_sessions = {row["session_id"] for row in message_rows}
+        session_rows = [row for row in session_rows if row["id"] in active_sessions or row["parent_id"] is None]
 
     messages = {row["id"]: _load_json(row["data"]) for row in message_rows}
     message_sessions = {row["id"]: row["session_id"] for row in message_rows}
@@ -233,8 +240,9 @@ def _parse_opencode_session(
             }.get(native_status, "unknown")
             metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
             exit_code = metadata.get("exit")
-            if native_status == "completed" and part.get("tool") == "bash" and type(exit_code) is int and exit_code != 0:
-                status = "failed"
+            if native_status == "completed" and part.get("tool") == "bash":
+                # A finished native tool can still have failed or unknown execution.
+                status = "unknown" if type(exit_code) is not int else "completed" if exit_code == 0 else "failed"
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(

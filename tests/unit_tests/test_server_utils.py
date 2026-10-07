@@ -2208,3 +2208,38 @@ def test_shared_model_rejects_conflicting_harness_headers(monkeypatch):
     )
     with raises(ValueError, match="different assistant headers"):
         client.assistant_message_header("policy")
+
+
+def test_client_session_header_aliases_are_scoped_to_configured_harness(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    harness = ModuleType("responses_api_agents.test_session_harness")
+    harness._session_id_headers = (b"X-Session-Affinity", b"x-session-id")
+    plain = ModuleType("responses_api_agents.test_plain_session_harness")
+    monkeypatch.setitem(sys.modules, harness.__name__, harness)
+    monkeypatch.setitem(sys.modules, plain.__name__, plain)
+    client = ServerClient(
+        head_server_config={"host": "localhost", "port": 0},
+        global_config_dict=OmegaConf.create(
+            {
+                "native": {
+                    "responses_api_agents": {
+                        "test_session_harness": {
+                            "model_server": {"type": "responses_api_models", "name": "native_model"},
+                        }
+                    }
+                },
+                "plain": {
+                    "responses_api_agents": {
+                        "test_plain_session_harness": {
+                            "model_server": {"type": "responses_api_models", "name": "plain_model"},
+                        }
+                    }
+                },
+            }
+        ),
+    )
+    assert client.client_session_headers("native_model") == (b"x-session-affinity", b"x-session-id")
+    assert client.client_session_headers("plain_model") == (b"x-session-id",)
+    assert client.client_session_headers("unused") == (b"x-session-id",)

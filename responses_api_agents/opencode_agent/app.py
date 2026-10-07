@@ -15,23 +15,28 @@
 
 import asyncio
 import copy
+import gzip
+import hashlib
 import json
 import logging
 import os
 import re
 import shlex
 import shutil
+import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from shlex import quote
-from time import time
+from time import monotonic, time
 from typing import Any, Literal, Optional
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from nemo_gym.agent_runtime_policy import AgentRuntimePolicy
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -45,6 +50,12 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.interactive_agent_types import (
+    AgentActivationObservation,
+    AgentActivationRequest,
+    AgentActivationResponse,
+    AgentContinuationCapabilities,
+)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -68,6 +79,7 @@ from nemo_gym.rollout_observability import (
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox.python_runtime import ensure_python
 from nemo_gym.server_utils import (
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
@@ -77,6 +89,11 @@ from responses_api_agents.opencode_agent.artifacts import (
     _parse_opencode_session,
     parse_opencode_export,
     parse_opencode_session,
+)
+from responses_api_agents.opencode_agent.continuation import (
+    native_failure_detail,
+    parse_activation_events,
+    visible_activation_log,
 )
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
@@ -121,6 +138,10 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
+class _NativeBudgetExpired(Exception):
+    """No native process was dispatched because its interaction window expired."""
+
+
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     execution_mode: Literal["local", "sandbox", "legacy_sandbox"] = "local"
@@ -143,12 +164,35 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int = 262144
     max_output_tokens: int = 131072
     opencode_version: Optional[str] = None
+    native_provider_id: str = "nemo_gym"
+    native_model_id: str = "dummy_model"
+    native_provider_npm: Literal["@ai-sdk/openai-compatible", "@ai-sdk/openai", "@openrouter/ai-sdk-provider"] = (
+        "@ai-sdk/openai-compatible"
+    )
+    native_model_options: dict[str, Any] = Field(default_factory=dict)
+    native_model_catalog: Literal["configured", "native"] = "configured"
+    native_output_token_max: int | Literal["model_limit"] | None = "model_limit"
+    native_env: dict[str, str] = Field(default_factory=dict)
+    native_session_title: str | None = "NeMo Gym"
+    native_auxiliary_model: Literal["primary", "native_default"] = "primary"
+    native_load_project_config: bool = False
+    reasoning_effort: str | None = None
 
     # Native sandbox setup and lifecycle. Resources owns the sandbox itself.
+    python_runtime_url: str | None = None
+    python_runtime_sha256: str | None = None
+    prefetched_opencode_binary_url: str | None = None
+    prefetched_opencode_binary_sha256: str | None = None
+    prefetched_ripgrep_url: str | None = None
+    prefetched_ripgrep_sha256: str | None = None
+    ripgrep_version: str | None = None
+    local_opencode_binary_path: str | None = None
+    local_opencode_binary_sha256: str | None = None
     remote_opencode_install_script_path: str | None = None
     remote_opencode_binary_path: str | None = None
     remote_opencode_musl_binary_path: str | None = None
     session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
+    session_execution_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     # Temporary legacy_sandbox compatibility; unused by native sandbox sessions.
     opencode_max_context_window: int = 262144
@@ -478,6 +522,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(409, "Obsolete OpenCode session cookie; seed a new agent session")
         if session_id is not None:
             state = self._require_agent_session(session_id)
+            if state.request.continuation is not None:
+                raise HTTPException(409, "Interactive OpenCode requires the ordered activation endpoint")
             assert isinstance(state, OpenCodeSandboxSession)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
@@ -590,8 +636,178 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(409, "Invalid native OpenCode session marker")
         return marker
 
+    def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities:
+        return AgentContinuationCapabilities(
+            supports_interaction_budget=True,
+            observations=["ordered_events", "timing", "native_tools", "reasoning", "compaction"],
+            runtime_prerequisites={"os": "linux", "python": ">=3.8", "opencode_version": self.config.opencode_version},
+            budget_semantics={
+                "timeout": "per_activation_seconds",
+                "max_output_tokens": "per_model_call",
+                "episode_deadline": "environment_owned",
+                "interaction_budget": "immutable_utc_deadline_rechecked_before_dispatch",
+                "session_execution_timeout_seconds": "wall_seconds_since_first_activation_including_inter_turn_waits",
+                "provider_calls": "captured_separately",
+            },
+        )
+
+    async def _activate_agent_session_state(
+        self, state: AgentSessionState, body: AgentActivationRequest, request: Request
+    ) -> AgentActivationResponse:
+        """Append one delta using OpenCode's native session store and resume flag."""
+        assert isinstance(state, OpenCodeSandboxSession)
+        if state.task is not None:
+            raise HTTPException(409, "Cannot mix single-turn and interactive activation APIs")
+        prompt, system = self._native_input(body.responses_create_params)
+        if state.system_instructions is None:
+            state.system_instructions = system
+        else:
+            params = body.responses_create_params
+            explicit_system = params.instructions or (not isinstance(params.input, str) and len(params.input) > 1)
+            if explicit_system and system != state.system_instructions:
+                raise HTTPException(422, "OpenCode continuation cannot replace session instructions")
+        if body.activation_id and state.native_session_id is None:
+            raise HTTPException(409, "OpenCode has no persisted conversation to resume")
+        if state.execution_started_at is None:
+            state.execution_started_at = monotonic()
+        interaction_deadline = (
+            body.interaction_budget.deadline_unix_seconds if body.interaction_budget is not None else None
+        )
+        if self._native_execution_timeout(state, interaction_deadline) <= 0:
+            return self._expired_activation(state, body)
+        await state.prepare_activation(body.activation_id)
+        started = monotonic()
+        try:
+            response = await self._native_response(
+                state,
+                body.responses_create_params,
+                prompt=prompt,
+                system=state.system_instructions,
+                interaction_deadline=interaction_deadline,
+            )
+        except _NativeBudgetExpired:
+            return self._expired_activation(state, body)
+        events = parse_activation_events(state.activation_log)
+        if response.status == "completed" and not any(
+            event.kind == "step_finish" and event.metadata.get("part", {}).get("reason") == "stop" for event in events
+        ):
+            gap = ObservationGap(
+                code="native_event_stream_terminal_missing",
+                detail=f"Activation {body.activation_id}: database completed but stdout omitted its terminal step event",
+            )
+            state.event_stream_gaps.append(gap)
+            state.observations.gaps.append(gap)
+            if state.activation_observations is not None:
+                state.activation_observations.gaps.append(gap.model_copy(deep=True))
+        observation = AgentActivationObservation(
+            events=events,
+            raw_log=visible_activation_log(state.activation_log),
+            elapsed_seconds=self._activation_elapsed(state, body),
+            duration_seconds=monotonic() - started,
+            harness_steps=sum(event.kind == "step_finish" for event in events),
+            agent_observations=state.activation_observations,
+        )
+        timed_out = state.session.cleanup and state.session.cleanup["timed_out"]
+        stop_reason = (
+            "session_budget_exhausted"
+            if self._native_execution_timeout(state, interaction_deadline) <= 0
+            else "activation_timeout"
+            if timed_out
+            else "permission_denied"
+            if (response.metadata or {}).get("native_interruption") == "permission_denied"
+            else "model_budget_exhausted"
+            if response.status == "incomplete"
+            else None
+        )
+        return AgentActivationResponse(
+            activation_id=body.activation_id,
+            response=response,
+            observation=observation,
+            turn_complete=response.status == "completed",
+            stop_reason=stop_reason,
+        )
+
+    def _native_execution_timeout(self, state: OpenCodeSandboxSession, interaction_deadline: float | None) -> float:
+        limits = [float(self.config.timeout)]
+        if state.execution_started_at is not None and self.config.session_execution_timeout_seconds is not None:
+            limits.append(state.execution_started_at + self.config.session_execution_timeout_seconds - monotonic())
+        if interaction_deadline is not None:
+            limits.append(interaction_deadline - time())
+        return min(limits)
+
+    @staticmethod
+    def _activation_elapsed(state: OpenCodeSandboxSession, body: AgentActivationRequest) -> float:
+        if body.interaction_budget is not None:
+            return max(0, time() - body.interaction_budget.started_at_unix_seconds)
+        return max(0, monotonic() - state.execution_started_at)
+
+    def _expired_activation(
+        self, state: OpenCodeSandboxSession, body: AgentActivationRequest
+    ) -> AgentActivationResponse:
+        if state.session.launch_started and (
+            state.session.cleanup is None or not state.session.cleanup["cleanup_confirmed"]
+        ):
+            raise RuntimeError("Expired OpenCode session has unconfirmed process cleanup")
+        return AgentActivationResponse(
+            activation_id=body.activation_id,
+            response=NeMoGymResponse(
+                id=f"resp_{uuid4().hex}",
+                created_at=int(time()),
+                model=self.config.model_server.name,
+                object="response",
+                output=[],
+                status="incomplete",
+                usage=None,
+                parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
+                tool_choice=body.responses_create_params.tool_choice,
+                tools=body.responses_create_params.tools,
+                metadata={
+                    "native_input_dispatched": "false",
+                    "opencode_session_id": state.native_session_id or "",
+                },
+            ),
+            observation=AgentActivationObservation(
+                elapsed_seconds=self._activation_elapsed(state, body),
+                harness_steps=0,
+            ),
+            turn_complete=False,
+            stop_reason="session_budget_exhausted",
+        )
+
+    def _validate_agent_runtime_policy(self, policy: AgentRuntimePolicy) -> None:
+        if policy.format != "harbor.agent-kwargs.v1":
+            raise HTTPException(422, f"Unsupported OpenCode runtime policy format: {policy.format}")
+        unsupported = policy.settings.keys() - {"disallowed_tools"}
+        if unsupported:
+            raise HTTPException(422, f"Unsupported OpenCode runtime policy settings: {sorted(unsupported)}")
+        disallowed = policy.settings.get("disallowed_tools")
+        if disallowed is not None and not isinstance(disallowed, str):
+            raise HTTPException(422, "OpenCode disallowed_tools must be a comma-separated string or null")
+
+    def _native_task_config(self, policy: AgentRuntimePolicy | None) -> dict[str, Any]:
+        config = copy.deepcopy(self.config.opencode_config)
+        if policy is None:
+            return config
+        self._validate_agent_runtime_policy(policy)
+        disallowed = [name.strip().lower() for name in (policy.settings.get("disallowed_tools") or "").split(",")]
+        disallowed = [name for name in disallowed if name]
+        if not disallowed:
+            return config
+        # Preserve this format's upstream nested translation, including its native semantics.
+        permission = config.setdefault("permission", {})
+        if not isinstance(permission, dict):
+            permission = {}
+        tools = permission.setdefault("tools", {})
+        if not isinstance(tools, dict):
+            tools = {}
+        tools.update({name: "deny" for name in disallowed})
+        permission["tools"] = tools
+        config["permission"] = permission
+        return config
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
         """Prepare only the harness runtime; Resources owns borrowed task setup."""
+        task_config = self._native_task_config(body.runtime_policy)
         if self.config.model_server is None:
             raise HTTPException(422, "Native OpenCode requires model_server")
         owns_sandbox = body.sandbox_access is None
@@ -631,11 +847,103 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "Native OpenCode max_output_tokens must be positive and not exceed context_window"
             )
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", self.config.native_provider_id):
+            raise HTTPException(
+                422, "Native OpenCode provider ID must contain only letters, digits, underscores or hyphens"
+            )
+        if not self.config.native_model_id or any(char.isspace() for char in self.config.native_model_id):
+            raise HTTPException(422, "Native OpenCode requires a nonempty model ID without whitespace")
+        unsupported_model = self.config.native_model_options.keys() - {
+            "reasoning",
+            "interleaved",
+            "variants",
+            "options",
+        }
+        if unsupported_model:
+            raise HTTPException(422, f"Unsupported native model options: {sorted(unsupported_model)}")
+        if isinstance(self.config.native_output_token_max, int) and self.config.native_output_token_max <= 0:
+            raise HTTPException(422, "Native output-token override must be positive or null")
+        if self.config.reasoning_effort:
+            variants = self.config.native_model_options.get("variants")
+            if (
+                self.config.native_model_options.get("reasoning") is not True
+                or not isinstance(variants, dict)
+                or not isinstance(variants.get(self.config.reasoning_effort), dict)
+            ):
+                raise HTTPException(
+                    422, "Native reasoning_effort requires reasoning=true and an explicit model variant"
+                )
+        reserved_env = {
+            "HOME",
+            "XDG_DATA_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "OPENCODE_CONFIG_CONTENT",
+            "OPENCODE_DISABLE_PROJECT_CONFIG",
+            "OPENCODE_DISABLE_AUTOUPDATE",
+            "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX",
+        }
+        if reserved_env.intersection(self.config.native_env):
+            raise HTTPException(422, "Native OpenCode environment cannot override adapter-owned runtime settings")
+        if any(
+            not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", key) or "\0" in value
+            for key, value in self.config.native_env.items()
+        ):
+            raise HTTPException(422, "Invalid native OpenCode environment variable")
+        if self.config.extra_args:
+            raise HTTPException(422, "Native OpenCode uses explicit settings; extra_args is unsupported")
         unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
         if unsupported:
             raise HTTPException(
                 422, f"Native OpenCode config supports permission/tools only; unsupported: {sorted(unsupported)}"
             )
+        if self.config.prefetched_opencode_binary_url:
+            url = urlparse(self.config.prefetched_opencode_binary_url)
+            if url.scheme not in {"https", "http"} or not url.hostname or url.username or url.password:
+                raise HTTPException(
+                    422, "Prefetched OpenCode URL requires an HTTP(S) URL without embedded credentials"
+                )
+            if any(
+                (
+                    self.config.local_opencode_binary_path,
+                    self.config.remote_opencode_binary_path,
+                    self.config.remote_opencode_install_script_path,
+                    self.config.remote_opencode_musl_binary_path,
+                )
+            ):
+                raise HTTPException(422, "Choose exactly one prefetched or staged OpenCode runtime source")
+            if not self.config.prefetched_opencode_binary_sha256 or not re.fullmatch(
+                r"[a-fA-F0-9]{64}", self.config.prefetched_opencode_binary_sha256
+            ):
+                raise HTTPException(422, "Prefetched OpenCode URL requires the original binary SHA-256")
+            digest = self.config.prefetched_opencode_binary_sha256.lower()
+        elif self.config.prefetched_opencode_binary_sha256:
+            raise HTTPException(422, "Prefetched OpenCode digest requires prefetched_opencode_binary_url")
+        if self.config.local_opencode_binary_path:
+            if self.config.remote_opencode_binary_path or self.config.remote_opencode_install_script_path:
+                raise HTTPException(422, "Choose either a local prefetched OpenCode binary or staged remote runtime")
+            if not self.config.local_opencode_binary_sha256 or not re.fullmatch(
+                r"[a-fA-F0-9]{64}", self.config.local_opencode_binary_sha256
+            ):
+                raise HTTPException(422, "A prefetched OpenCode binary requires its SHA-256 digest")
+            local_binary = Path(self.config.local_opencode_binary_path).expanduser()
+            with local_binary.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if digest != self.config.local_opencode_binary_sha256.lower():
+                raise HTTPException(422, "Prefetched OpenCode binary SHA-256 mismatch")
+        elif self.config.local_opencode_binary_sha256:
+            raise HTTPException(422, "OpenCode binary digest requires local_opencode_binary_path")
+        if any(
+            (self.config.prefetched_ripgrep_url, self.config.prefetched_ripgrep_sha256, self.config.ripgrep_version)
+        ):
+            url = urlparse(self.config.prefetched_ripgrep_url or "")
+            if url.scheme not in {"https", "http"} or not url.hostname or url.username or url.password:
+                raise HTTPException(422, "Prefetched ripgrep requires an HTTP(S) URL without embedded credentials")
+            if not re.fullmatch(r"[a-fA-F0-9]{64}", self.config.prefetched_ripgrep_sha256 or ""):
+                raise HTTPException(422, "Prefetched ripgrep requires the archive SHA-256")
+            if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", self.config.ripgrep_version or ""):
+                raise HTTPException(422, "Prefetched ripgrep requires an exact release version")
         if self.config.remote_opencode_install_script_path and not self.config.remote_opencode_binary_path:
             raise HTTPException(422, "A staged OpenCode installer requires remote_opencode_binary_path")
         if self.config.remote_opencode_musl_binary_path and not self.config.remote_opencode_install_script_path:
@@ -659,6 +967,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             ),
             runtime=runtime,
             model_ref=self.config.model_server,
+            opencode_config=task_config,
         )
         prepared_directory = False
         try:
@@ -670,6 +979,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     raise RuntimeError(
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
+            state.python = await ensure_python(
+                sandbox,
+                runtime_url=self.config.python_runtime_url,
+                runtime_sha256=self.config.python_runtime_sha256,
+                timeout_s=self.config.setup_timeout,
+            )
             # Resolve inside the sandbox: host-side lexical checks cannot detect task symlinks.
             validate_paths = (
                 "from pathlib import Path; import sys; "
@@ -679,7 +994,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "for root in roots), 'OpenCode runtime/session storage overlaps the task workdir'"
             )
             command = (
-                f"python3 -I -c {quote(validate_paths)} {quote(workdir)} "
+                f"{quote(state.python)} -I -c {quote(validate_paths)} {quote(workdir)} "
                 f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)} && mkdir -p {quote(directory)}"
             )
             result = await sandbox.exec(command, timeout_s=30)
@@ -687,19 +1002,105 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             prepared_directory = True
             installer = "install_opencode_runtime.sh"
             await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
+            staged_binary = self.config.remote_opencode_binary_path or ""
+            if self.config.local_opencode_binary_path:
+                staged_binary = f"{directory}/opencode-prefetched"
+                # Standalone binaries are large; compress transport without changing the pinned bytes.
+                with tempfile.TemporaryDirectory(prefix="opencode-runtime-") as temporary:
+                    archive = Path(temporary) / "opencode.gz"
+                    with local_binary.open("rb") as source, gzip.open(archive, "wb", compresslevel=1) as target:
+                        shutil.copyfileobj(source, target)
+                    # Some sandbox gateways buffer multipart uploads and reject large bodies.
+                    chunks = []
+                    with archive.open("rb") as source:
+                        while chunk := source.read(4 * 1024 * 1024):
+                            part = Path(temporary) / "part"
+                            part.write_bytes(chunk)
+                            destination = f"{staged_binary}.gz.part-{len(chunks)}"
+                            await sandbox.upload(part, destination)
+                            chunks.append(destination)
+                unpack = (
+                    "import gzip,shutil,sys\n"
+                    "archive,destination,*parts=sys.argv[1:]\n"
+                    "with open(archive, 'wb') as out:\n"
+                    " for path in parts:\n"
+                    "  with open(path, 'rb') as source: shutil.copyfileobj(source,out)\n"
+                    "with gzip.open(archive, 'rb') as source, open(destination, 'wb') as out:\n"
+                    " shutil.copyfileobj(source,out)\n"
+                )
+                unpacked = await sandbox.exec(
+                    f"{quote(state.python)} -I -c {quote(unpack)} "
+                    + " ".join(quote(path) for path in [staged_binary + ".gz", staged_binary, *chunks]),
+                    timeout_s=self.config.setup_timeout,
+                )
+                self._check_native_setup("unpack prefetched OpenCode binary", unpacked)
+            elif self.config.prefetched_opencode_binary_url:
+                staged_binary = f"{directory}/opencode-prefetched"
+                download = (
+                    "import gzip,shutil,sys,urllib.request\n"
+                    "with urllib.request.urlopen(sys.argv[1], timeout=60) as response:\n"
+                    " with gzip.GzipFile(fileobj=response) as source, open(sys.argv[2], 'wb') as target:\n"
+                    "  shutil.copyfileobj(source,target)\n"
+                )
+                downloaded = await sandbox.exec(
+                    f"{quote(state.python)} -I -c {quote(download)} "
+                    f"{quote(self.config.prefetched_opencode_binary_url)} {quote(staged_binary)}",
+                    timeout_s=self.config.setup_timeout,
+                )
+                self._check_native_setup("download prefetched OpenCode runtime", downloaded)
+            if self.config.local_opencode_binary_path or self.config.prefetched_opencode_binary_url:
+                verify = (
+                    "import hashlib,sys; "
+                    "actual=hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest(); "
+                    "assert actual == sys.argv[2], 'Uploaded OpenCode binary SHA-256 mismatch'"
+                )
+                checked = await sandbox.exec(
+                    f"{quote(state.python)} -I -c {quote(verify)} {quote(staged_binary)} {quote(digest)}",
+                    timeout_s=30,
+                )
+                self._check_native_setup("verify prefetched OpenCode binary", checked)
             command = "bash " + " ".join(
                 quote(arg)
                 for arg in (
                     f"{directory}/{installer}",
                     runtime,
                     self.config.opencode_version,
-                    self.config.remote_opencode_binary_path or "",
+                    staged_binary,
                     self.config.remote_opencode_install_script_path or "",
                     self.config.remote_opencode_musl_binary_path or "",
+                    state.python,
                 )
             )
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.setup_timeout)
             self._check_native_setup(command, result)
+            if self.config.local_opencode_binary_path or self.config.prefetched_opencode_binary_url:
+                checked = await sandbox.exec(
+                    f"{quote(state.python)} -I -c {quote(verify)} {quote(runtime + '/opencode')} {quote(digest)}",
+                    timeout_s=30,
+                )
+                self._check_native_setup("verify installed OpenCode binary", checked)
+            if self.config.prefetched_ripgrep_url:
+                script = "install_ripgrep.py"
+                await sandbox.upload(Path(__file__).with_name(script), f"{directory}/{script}")
+                installed = await sandbox.exec(
+                    " ".join(
+                        quote(arg)
+                        for arg in (
+                            state.python,
+                            "-I",
+                            f"{directory}/{script}",
+                            self.config.prefetched_ripgrep_url,
+                            self.config.prefetched_ripgrep_sha256.lower(),
+                            self.config.ripgrep_version,
+                            f"{state.persistent_directory}/cache/opencode/bin/rg",
+                        )
+                    ),
+                    env=self.config.native_env,
+                    cwd="/",
+                    timeout_s=self.config.setup_timeout,
+                )
+                self._check_native_setup("prepare native ripgrep", installed)
+                state.ripgrep_info = json.loads(installed.stdout)
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
         except BaseException as error:
             try:
@@ -728,8 +1129,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         observations = state.observations or AgentObservationBundle(
             source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
         )
+        observations.gaps.extend(gap for gap in state.event_stream_gaps if gap not in observations.gaps)
         return AgentCloseSessionResponse(
-            agent_session_id=state.request.agent_session_id, agent_observations=observations
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=observations,
+            trajectory=state.trajectory,
+            cleanup_confirmed=True,
         )
 
     def _native_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
@@ -868,74 +1273,114 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         return total
 
     async def _native_response(
-        self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, *, prompt: str, system: str
+        self,
+        state: OpenCodeSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        prompt: str,
+        system: str,
+        timeout: float | None = None,
+        interaction_deadline: float | None = None,
     ) -> NeMoGymResponse:
+        previous_native_session_id = state.native_session_id if state.message_ids else None
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
+        model_options = copy.deepcopy(self.config.native_model_options)
+        if self.config.native_model_catalog == "configured":
+            model_options = {
+                "interleaved": {"field": "reasoning_content"},
+                **model_options,
+                "limit": {
+                    "context": self.config.context_window,
+                    "input": self.config.context_window,
+                    "output": self.config.max_output_tokens,
+                },
+            }
+        output_token_max = self.config.native_output_token_max
+        if output_token_max == "model_limit":
+            output_token_max = self.config.max_output_tokens
         config = {
-            "model": "nemo_gym/dummy_model",
-            "small_model": "nemo_gym/dummy_model",
-            "enabled_providers": ["nemo_gym"],
+            "model": f"{self.config.native_provider_id}/{self.config.native_model_id}",
+            "enabled_providers": [self.config.native_provider_id],
             "autoupdate": False,
             "share": "disabled",
             "provider": {
-                "nemo_gym": {
-                    "npm": "@ai-sdk/openai-compatible",
+                self.config.native_provider_id: {
+                    "npm": self.config.native_provider_npm,
                     "options": {
                         "baseURL": base_url,
                         "apiKey": "dummy_key",
                         "timeout": False,
                     },  # pragma: allowlist secret
-                    "models": {
-                        "dummy_model": {
-                            "limit": {
-                                "context": self.config.context_window,
-                                "input": self.config.context_window,
-                                "output": self.config.max_output_tokens,
-                            }
-                        }
-                    },
+                    "models": {self.config.native_model_id: model_options},
                 }
             },
-            **self.config.opencode_config,
+            **state.opencode_config,
         }
+        if self.config.native_auxiliary_model == "primary":
+            config["small_model"] = config["model"]
         # System instructions are separate from the user's task and applied to every OpenCode model turn.
         if system:
             config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
+        command = [f"{state.runtime}/opencode", "run", "--format", "json", "--thinking"]
+        if self.config.native_session_title is not None:
+            command.extend(["--title", self.config.native_session_title])
+        if self.config.reasoning_effort:
+            command.extend(["--variant", self.config.reasoning_effort])
+        if state.native_session_id:
+            command.extend(["--session", state.native_session_id])
         payload = {
             "instructions": system,
             "directory": state.session.session_dir,
             "cwd": state.session.workdir,
-            "command": [f"{state.runtime}/opencode", "run", "--format", "json", "--thinking", "--title", "NeMo Gym"],
+            "command": command,
+            "native_session_id": state.native_session_id,
+            "previous_message_ids": state.message_ids,
             "prompt": prompt,
             "env": {
-                "HOME": f"{state.session.session_dir}/home",
-                "XDG_DATA_HOME": f"{state.session.session_dir}/data",
-                "XDG_CONFIG_HOME": f"{state.session.session_dir}/config",
-                "XDG_CACHE_HOME": f"{state.session.session_dir}/cache",
-                "XDG_STATE_HOME": f"{state.session.session_dir}/state",
+                **self.config.native_env,
+                "HOME": f"{state.persistent_directory}/home",
+                "XDG_DATA_HOME": f"{state.persistent_directory}/data",
+                "XDG_CONFIG_HOME": f"{state.persistent_directory}/config",
+                "XDG_CACHE_HOME": f"{state.persistent_directory}/cache",
+                "XDG_STATE_HOME": f"{state.persistent_directory}/state",
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
-                "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
+                "OPENCODE_DISABLE_PROJECT_CONFIG": str(not self.config.native_load_project_config).lower(),
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
-                "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
+                **({"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(output_token_max)} if output_token_max else {}),
             },
         }
         error = None
         export = {}
         cancelled = False
+        budget_expired = False
+
+        def resolve_execution_timeout() -> float:
+            nonlocal budget_expired
+            remaining = min(
+                self.config.timeout if timeout is None else timeout,
+                self._native_execution_timeout(state, interaction_deadline),
+            )
+            if remaining <= 0:
+                budget_expired = True
+                raise _NativeBudgetExpired
+            return remaining
+
         try:
             async with self.sem:
+                execution_timeout = resolve_execution_timeout()
                 export = json.loads(
                     await state.execute(
                         payload,
-                        timeout=self.config.timeout,
+                        timeout=execution_timeout,
                         close_timeout=self.config.session_close_timeout_seconds,
+                        timeout_resolver=resolve_execution_timeout,
                     )
                 )
         except asyncio.CancelledError:
             cancelled = True
             raise
         finally:
-            if state.observations is None:
+            if state.observations is None and not budget_expired:
                 state.observations = AgentObservationBundle(
                     source="opencode",
                     gaps=[ObservationGap(code="observation_capture_failed")],
@@ -945,6 +1390,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                         record.status = "incomplete"
                         record.error_type = "cancelled"
+        response_gap_start = len(state.observations.gaps)
         output = []
         usage = None
         if export.get("messages"):
@@ -980,22 +1426,74 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         for info in assistants:
             if info.get("error"):
                 error = error or json.dumps(info["error"])
-        if not assistants:
+        resumed_checkpoint_timeout = bool(
+            previous_native_session_id
+            and state.native_session_id == previous_native_session_id
+            and result
+            and result["timed_out"]
+            and result["cleanup_confirmed"]
+            and not any(event.kind == "error" for event in parse_activation_events(state.activation_log))
+        )
+        if not assistants and not resumed_checkpoint_timeout:
             error = error or "OpenCode produced no assistant result"
+        # A short remaining budget can stop a resumed CLI before it adds an assistant message.
+        # Its successfully exported, same-session checkpoint still survives confirmed cleanup.
         incomplete = result is not None and result["timed_out"]
+        permission_denied = False
         if assistants and not incomplete:
             last = assistants[-1]
             finish = last.get("finish")
-            if finish in {"length", "content-filter", "tool-calls"}:
+            if finish == "length":
                 incomplete = True
             elif finish != "stop" or not last.get("time", {}).get("completed"):
-                error = error or f"OpenCode ended without a successful terminal assistant result (finish={finish!r})"
+                last_message = next(message for message in reversed(export["messages"]) if message["info"] is last)
+                permission_denied = bool(
+                    error is None
+                    and finish == "tool-calls"
+                    and last.get("time", {}).get("completed")
+                    and result
+                    and result["return_code"] == 0
+                    and result["cleanup_confirmed"]
+                    and state.native_session_id
+                    and state.message_ids
+                    and any(
+                        part.get("type") == "tool"
+                        and part.get("state", {}).get("status") == "error"
+                        and part.get("state", {}).get("error")
+                        == "The user rejected permission to use this specific tool call."
+                        for part in last_message.get("parts", [])
+                    )
+                )
+                if permission_denied:
+                    # Native rejection pauses the session for another user turn, without granting permission.
+                    incomplete = True
+                else:
+                    error = (
+                        error or f"OpenCode ended without a successful terminal assistant result (finish={finish!r})"
+                    )
+                    for part in last_message.get("parts", []):
+                        if part.get("type") == "tool" and part.get("state", {}).get("error"):
+                            error += f"; {part.get('tool', 'tool')}: {part['state']['error']}"
         status = "failed" if error else "incomplete" if incomplete else "completed"
+        error_type = (
+            "server_error"
+            if error
+            else "timeout"
+            if result and result["timed_out"]
+            else "permission_denied"
+            if permission_denied
+            else None
+        )
         # Artifact message completion records a model turn, not the entire invocation.
         for record in state.observations.records:
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 record.status = status
-                record.error_type = "server_error" if error else "timeout" if result and result["timed_out"] else None
+                record.error_type = error_type
+        if state.activation_observations is not None:
+            for record in state.activation_observations.records:
+                if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
+                    record.status = status
+                    record.error_type = error_type
         if result is not None:
             state.observations.records.append(
                 SandboxObservation(
@@ -1014,14 +1512,40 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     exit_code=result["return_code"],
                 )
             )
+            if state.activation_observations is not None:
+                state.activation_observations.records.append(state.observations.records[-1].model_copy(deep=True))
         state.observations.gaps.append(
             ObservationGap(
                 code="model_usage_reconciliation_unavailable",
                 detail="Usage comes from OpenCode persisted assistant messages; compare against captured Gym model calls.",
             )
         )
+        if state.activation_observations is not None:
+            state.activation_observations.gaps.extend(
+                gap.model_copy(deep=True) for gap in state.observations.gaps[response_gap_start:]
+            )
         if error:
-            raise HTTPException(502, error)
+            finish = assistants[-1].get("finish") if assistants else None
+            classification = (
+                "native_model_error"
+                if any(info.get("error") for info in assistants)
+                else "native_process_error"
+                if result and (result["error"] or result["return_code"] not in (0, None))
+                else "native_nonterminal_exit"
+                if assistants and finish not in {"stop", "length"}
+                else "native_artifact_error"
+            )
+            raise HTTPException(
+                502,
+                native_failure_detail(
+                    message=error,
+                    classification=classification,
+                    session_id=state.native_session_id,
+                    finish_reason=finish,
+                    cleanup=result,
+                    stdout=state.activation_log,
+                ),
+            )
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -1035,8 +1559,36 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             metadata={
                 "harness_execution": "sandbox",
+                **({"native_interruption": "permission_denied"} if permission_denied else {}),
                 "opencode_version": self.config.opencode_version,
+                "opencode_provider_npm": self.config.native_provider_npm,
+                "opencode_provider_id": self.config.native_provider_id,
+                "opencode_model_id": self.config.native_model_id,
+                "opencode_model_catalog": self.config.native_model_catalog,
+                "opencode_output_token_max": str(output_token_max) if output_token_max else "native_default",
+                "opencode_auxiliary_model": self.config.native_auxiliary_model,
+                "opencode_session_title": self.config.native_session_title or "native_default",
+                **(
+                    {"opencode_reasoning_variant": self.config.reasoning_effort}
+                    if self.config.reasoning_effort
+                    else {}
+                ),
+                **(
+                    {
+                        "opencode_binary_sha256": self.config.local_opencode_binary_sha256
+                        or self.config.prefetched_opencode_binary_sha256
+                    }
+                    if self.config.local_opencode_binary_sha256 or self.config.prefetched_opencode_binary_sha256
+                    else {}
+                ),
+                **({"opencode_session_id": state.native_session_id} if state.native_session_id else {}),
                 **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
+                **({"harness_python": runtime.python} if runtime and runtime.python else {}),
+                **(
+                    {f"ripgrep_{key}": value for key, value in state.ripgrep_info.items()}
+                    if state.ripgrep_info
+                    else {}
+                ),
             },
         )
 

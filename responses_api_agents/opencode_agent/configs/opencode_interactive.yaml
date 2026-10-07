@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Independent native interactive harness. The composition must choose exact runtime,
+# model identity/SDK/variants, budgets and benchmark-appropriate tool permissions.
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      execution_mode: sandbox
+      num_workers: 1
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      opencode_version: null
+      native_provider_id: nemo_gym
+      native_model_id: dummy_model
+      native_provider_npm: "@ai-sdk/openai-compatible"
+      native_model_options: {}
+      native_model_catalog: native
+      native_output_token_max: null
+      native_env: {}
+      native_session_title: null
+      native_auxiliary_model: native_default
+      native_load_project_config: true
+      reasoning_effort: null
+      opencode_config: {}
+      context_window: 262144
+      max_output_tokens: 32768
+      timeout: 1800
+      session_execution_timeout_seconds: null
+      setup_timeout: 600
+      session_close_timeout_seconds: 30
+      python_runtime_url: null
+      python_runtime_sha256: null
+      local_opencode_binary_path: null
+      local_opencode_binary_sha256: null
+      # Optional keyless gzip artifact URL; SHA-256 covers decompressed executable bytes.
+      prefetched_opencode_binary_url: null
+      prefetched_opencode_binary_sha256: null
+      # Optional ripgrep release tar.gz; SHA-256 covers the archive bytes.
+      prefetched_ripgrep_url: null
+      prefetched_ripgrep_sha256: null
+      ripgrep_version: null

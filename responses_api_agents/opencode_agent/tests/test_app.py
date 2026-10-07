@@ -688,7 +688,7 @@ class TestConfigYaml:
         assert inner["execution_mode"] == "local"
 
 
-@pytest.mark.parametrize("exit_code,status", [(0, "completed"), (7, "failed"), (None, "completed")])
+@pytest.mark.parametrize("exit_code,status", [(0, "completed"), (7, "failed"), (None, "unknown")])
 def test_bash_exit_code_is_execution_outcome(tmp_path: Path, exit_code, status: str) -> None:
     from nemo_gym.rollout_observability import ToolCallObservation
 

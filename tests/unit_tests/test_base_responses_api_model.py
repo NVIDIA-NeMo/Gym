@@ -416,6 +416,85 @@ def test_capture_assistant_message_header_round_trip(tmp_path, headers, expected
     assert call.response == {"output": []}
 
 
+@pytest.mark.parametrize(
+    "headers,expected",
+    [
+        ([(b"x-session-affinity", b"native-session")], "native-session"),
+        ([(b"x-session-id", b"native-session")], "native-session"),
+        ([(b"x-session-id", b"native-session"), (b"x-session-affinity", b"native-session")], "native-session"),
+        ([(b"x-session-id", b"other-session"), (b"x-session-affinity", b"native-session")], None),
+        ([(b"x-session-affinity", b"one"), (b"X-Session-Affinity", b"two")], None),
+        ([(b"x-session-id", b"native-session"), (b"x-session-affinity", b"")], None),
+        ([(b"unconfigured-session", b"native-session")], None),
+    ],
+)
+def test_capture_session_aliases_require_agreement_without_rewriting_request(tmp_path, headers, expected):
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+
+    store = CaptureStore(tmp_path)
+    forwarded = []
+    body = b'{"model":"openai/gpt-5.5","messages":[{"role":"user","content":"hi"}]}'
+
+    async def app(scope, receive, send):
+        forwarded.append((scope["headers"], (await receive())["body"]))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b'{"choices":[]}', "more_body": False})
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(_message):
+        pass
+
+    asyncio.run(
+        _CaptureMiddleware(
+            app,
+            store=store,
+            model_server_name="policy",
+            client_session_headers=(b"x-session-id", b"X-Session-Affinity"),
+        )(
+            {
+                "type": "http",
+                "path": "/ng-rollout/native-header/v1/chat/completions",
+                "headers": headers,
+            },
+            receive,
+            send,
+        )
+    )
+    assert forwarded == [(headers, body)]
+    [call] = read_model_call_records(store, "native-header")
+    assert call.client_session_id == expected
+    assert call.client_assistant_message_id is None
+
+
+def test_capture_does_not_accept_undeclared_session_alias(tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, install_model_call_capture
+
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    def respond():
+        return {"choices": []}
+
+    install_model_call_capture(
+        app, ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=str(tmp_path))
+    )
+    with TestClient(app) as client:
+        client.post(
+            "/ng-rollout/undeclared/v1/chat/completions",
+            json={"messages": []},
+            headers={"x-session-affinity": "session"},
+        )
+    [call] = read_model_call_records(CaptureStore(tmp_path), "undeclared")
+    assert call.client_session_id is None
+
+
 def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
     import asyncio
 
