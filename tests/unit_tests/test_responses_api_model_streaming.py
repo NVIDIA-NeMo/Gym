@@ -1061,7 +1061,9 @@ class TestResponsesDispatchRoute:
             (502, "text/plain", b"Upstream unavailable"),
         ],
     )
-    def test_upstream_http_error_is_preserved_before_stream_starts(self, stream, status, content_type, content):
+    def test_upstream_http_error_is_preserved_before_stream_starts(
+        self, stream: bool, status: int, content_type: str, content: bytes
+    ) -> None:
         error = ClientResponseError(
             MagicMock(), (), status=status, message="upstream failed", headers={"Content-Type": content_type}
         )

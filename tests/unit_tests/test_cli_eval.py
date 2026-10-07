@@ -21,11 +21,18 @@ from textwrap import dedent
 from types import SimpleNamespace
 
 import pytest
+import requests
 from omegaconf import DictConfig
+from pytest import MonkeyPatch
 
 import nemo_gym.cli.eval as cli_eval
+import nemo_gym.global_config
+import nemo_gym.server_utils
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.cli.eval import _validate_prepared_split_file_exists, _validate_split_datasets_declared
+from nemo_gym.cli.main import main
 from nemo_gym.config_types import ConfigError, ResponsesAPIAgentServerInstanceConfig
+from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
 
 def _make_agent_instance_config(name: str, dataset_specs: list) -> ResponsesAPIAgentServerInstanceConfig:
@@ -229,3 +236,62 @@ class TestPrepareDependencies:
 
         with pytest.raises(ConfigError, match="prepare_dependencies for benchmark 'b'"):
             cli_eval._install_prepare_dependencies(self._benchmark(["nope"]))
+
+
+class TestEvalRunNoServeWithoutHeadServer:
+    """`gym eval run --no-serve` collects against servers that are already running, so nothing listening
+    on the head server port is the user's most likely mistake (#2687). Driven through the real `main()`
+    so the whole path is exercised: the config is parsed, the rows are materialized, and the head server
+    fetch is the only thing faked (it refuses the connection, exactly as a closed port does)."""
+
+    def _arrange_no_serve_run_against_a_closed_port(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        input_path = tmp_path / "input.jsonl"
+        input_path.write_text(json.dumps({"responses_create_params": {"input": "hi"}}) + "\n")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "gym",
+                "eval",
+                "run",
+                "--no-serve",
+                "--agent",
+                "simple_agent",
+                "-i",
+                str(input_path),
+                "-o",
+                str(tmp_path / "out.jsonl"),
+            ],
+        )
+        # Deterministic config: env.yaml is read from the first of NEMO_GYM_EXTRA_ROOTS, cwd, and the install
+        # root that has one, and a set NEMO_GYM_CONFIG_DICT skips parsing (and the head server fetch) entirely.
+        # So clear both, shadow any developer env.yaml with an empty one in cwd, and force a fresh parse.
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        (tmp_path / "env.yaml").write_text("")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        # Rich soft-wraps at 80 columns when stdout is not a TTY, which would split the message mid-sentence.
+        monkeypatch.setenv("COLUMNS", "1000")
+
+        # `requests.exceptions.ConnectionError` is what `ServerClient.load_from_global_config` catches; it is
+        # unrelated to the builtin `ConnectionError`, which would sail straight through.
+        def refuse(*args, **kwargs):
+            raise requests.exceptions.ConnectionError("[Errno 61] Connection refused")
+
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", refuse)
+
+    def test_exits_one_with_a_single_error_line_and_no_traceback(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, capsys
+    ) -> None:
+        self._arrange_no_serve_run_against_a_closed_port(tmp_path, monkeypatch)
+
+        with pytest.raises(SystemExit) as exit_info:
+            main()
+
+        assert exit_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error: Could not connect to the head server at http://127.0.0.1:11000." in captured.out
+        assert "Start it with: `gym env start`." in captured.out
+        assert "Traceback" not in captured.out + captured.err
+        assert "ValueError" not in captured.out + captured.err

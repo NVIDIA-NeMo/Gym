@@ -328,14 +328,12 @@ def test_direct_run_without_resources_rejected_before_execution(setup):
     agent.server_client.post.assert_not_called()
 
 
-@pytest.mark.parametrize("option", ["no-sandbox", "worker", "required-tool", "no-model", "unpinned"])
+@pytest.mark.parametrize("option", ["no-sandbox", "required-tool", "no-model", "unpinned"])
 def test_unsupported_seed_rejected_before_connection(setup, option):
     agent, sandbox = setup
     body = seed().model_dump(mode="json")
     if option == "no-sandbox":
         body["sandbox_access"] = None
-    elif option == "worker":
-        agent.config.num_workers = 2
     elif option == "no-model":
         agent.config.model_server = None
     elif option == "unpinned":
@@ -346,6 +344,17 @@ def test_unsupported_seed_rejected_before_connection(setup, option):
         ]
     with TestClient(agent.setup_webserver()) as client:
         assert client.post("/v1/agent_sessions", json=body).status_code == 422
+    sandbox.exec.assert_not_awaited()
+
+
+def test_shared_seed_rejects_multiple_workers_before_initialization(setup):
+    agent, sandbox = setup
+    agent.config.num_workers = 2
+    with TestClient(agent.setup_webserver()) as client:
+        # Worker count is server configuration, checked by the shared route before seed.
+        with pytest.raises(ValueError, match="Agent sessions require num_workers=1"):
+            client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert not agent._session_records
     sandbox.exec.assert_not_awaited()
 
 

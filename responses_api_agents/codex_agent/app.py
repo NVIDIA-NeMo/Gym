@@ -37,7 +37,6 @@ from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunReq
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
-    AgentSeedSessionResponse,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -458,11 +457,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if marker is None and _SANDBOX_SESSION_KEY in getattr(request, "scope", {}).get("session", {}):
             raise HTTPException(409, "Codex session cookie has expired")
         return marker
-
-    async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
-        if self.config.num_workers not in (None, 1):
-            raise HTTPException(422, "Codex sessions require num_workers=1")
-        return await super().seed_agent_session(request, body)
 
     def _require_agent_session(self, agent_session_id: str) -> CodexSandboxSession:
         state = super()._require_agent_session(agent_session_id)

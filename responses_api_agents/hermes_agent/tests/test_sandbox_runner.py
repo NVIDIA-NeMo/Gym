@@ -4,6 +4,7 @@
 import asyncio
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from run_agent import AIAgent
 from tools.mcp_tool import shutdown_mcp_servers
 
 from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
 from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
@@ -134,6 +136,42 @@ def _payload(model_base_url: str, **overrides) -> dict:
         "user_message": "fix bug",
         **overrides,
     }
+
+
+@pytest.mark.parametrize("marker", ["present", "absent", "omitted"])
+def test_interruption_uses_supplied_stop_request_path(tmp_path, monkeypatch, restore_process_globals, marker):
+    from responses_api_agents.hermes_agent import sandbox_runner
+
+    class Agent:
+        def __init__(self, **kwargs):
+            self._session_messages = [{"role": "assistant", "content": "partial answer"}]
+
+        def _build_api_kwargs(self, messages):
+            return {}
+
+        def run_conversation(self, *args, **kwargs):
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            return {"completed": True, "messages": self._session_messages}
+
+        def interrupt(self, message):
+            assert message == ("sandbox cancellation" if marker == "present" else "sandbox timeout")
+
+    monkeypatch.setattr("run_agent.AIAgent", Agent)
+    monkeypatch.setattr(sandbox_runner, "_use_model_server", lambda _url: None)
+    payload = _payload("http://unused/v1")
+    if marker != "omitted":
+        marker_path = tmp_path / "custom-stop-marker"
+        payload["stop_request_path"] = str(marker_path)
+        if marker == "present":
+            marker_path.touch()
+    output_path = tmp_path / "output.json"
+    result = _run(payload, tmp_path, output_path=output_path)["result"]
+    expected = "cancelled" if marker == "present" else "wall_time"
+    assert result["stop_reason"] == expected
+    assert result["interrupted"] and not result["completed"]
+    checkpoint = json.loads(output_path.read_text())["result"]
+    assert checkpoint["stop_reason"] == expected
+    assert checkpoint["messages"][-1]["content"] == "partial answer"
 
 
 def test_granted_mcp_tools_reach_the_seeded_resources_session(tmp_path, restore_process_globals) -> None:
@@ -346,7 +384,8 @@ def test_worker_stop_checkpoints_partial_work_before_hard_cleanup(tmp_path, coop
     from responses_api_agents.hermes_agent import sandbox_runner
 
     input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
-    input_path.write_text(json.dumps(_payload("http://unused/v1")))
+    stop_request_path = tmp_path / STOP_REQUEST_FILE
+    input_path.write_text(json.dumps({**_payload("http://unused/v1"), "stop_request_path": str(stop_request_path)}))
     # Run the real worker/observer under the real supervisor, with a deterministic slow harness.
     driver = """
 import os, pathlib, sys, time, types
@@ -385,7 +424,7 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
             "--cleanup-timeout",
             "0.5",
             "--stop-file",
-            str(tmp_path / "runner.stop"),
+            str(stop_request_path),
             "--receipt",
             str(tmp_path / "cleanup.json"),
             "--",
@@ -410,7 +449,7 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
             while not (tmp_path / "model.patch").exists() and process.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.01)
             assert (tmp_path / "model.patch").exists()
-            (tmp_path / "runner.stop").touch()
+            stop_request_path.touch()
             process.terminate()
         _, stderr = process.communicate(timeout=10)
         assert process.returncode == 0, stderr
