@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Select, install, and report advisory harness probes in GitHub Actions."""
+"""Select, install, and report harness probes in GitHub Actions."""
 
 import argparse
 import importlib
@@ -80,13 +80,20 @@ def report(harness: str, *, output: Path, exit_code: int) -> str:
     except (OSError, ValueError, KeyError, TypeError):
         complete = False
     if exit_code not in (0, 1) or not complete:
+        status = "unavailable"
         message = f"{harness}: conformance could not be evaluated (setup, tests, execution, or checker error)."
         print(f"::warning title=Harness conformance unavailable::{message}")
     elif exit_code == 1:
-        message = f"{harness}: conformance requirements are not fulfilled. This check is advisory."
+        status = "failed"
+        message = f"{harness}: P0 conformance requirements are not fulfilled."
         print(f"::warning title=Harness conformance::{message}")
     else:
+        status = "passed"
         message = f"{harness}: all selected conformance requirements are fulfilled."
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "ci-result.json").write_text(
+        json.dumps({"harness": harness, "sha": os.environ.get("GITHUB_SHA", "local"), "status": status}) + "\n"
+    )
     markdown = f"## Harness conformance: {harness}\n\n{message}\n\n"
     markdown += f"Source: `{os.environ.get('GITHUB_SHA', 'local')}`\n\n"
     report_path = output / "conformance_report.md"

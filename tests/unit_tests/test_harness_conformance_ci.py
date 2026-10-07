@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Check advisory routing and distinguish evidence gaps from failed measurements."""
+"""Check CI routing and distinguish evidence gaps from failed measurements."""
 
 import json
 import subprocess
@@ -123,7 +123,7 @@ def test_missing_or_partial_results_never_pass(tmp_path, capsys, summary):
     assert "::warning title=Harness conformance unavailable::" in capsys.readouterr().out
 
 
-def test_advisory_jobs_cannot_gate_required_ci():
+def test_custom_check_is_separate_from_required_ci_and_probe_permissions():
     root = Path(__file__).resolve().parents[2]
     main = yaml.safe_load((root / ".github/workflows/cicd-main.yml").read_text())["jobs"]
     workflow = yaml.safe_load((root / ".github/workflows/harness-conformance.yml").read_text())
@@ -132,5 +132,13 @@ def test_advisory_jobs_cannot_gate_required_ci():
     assert "harness_conformance" not in main["notify-failure"]["needs"]
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["defaults"]["run"]["shell"] == "bash"
-    assert workflow["jobs"]["probe"]["continue-on-error"] is True
+    assert not workflow["jobs"]["probe"].get("continue-on-error", False)
     assert workflow["jobs"]["probe"]["strategy"]["fail-fast"] is False
+    assert "permissions" not in workflow["jobs"]["probe"]
+    assert (
+        workflow["jobs"]["report"]["permissions"]
+        == main["harness_conformance"]["permissions"]
+        == {"contents": "read", "actions": "read", "checks": "write"}
+    )
+    assert workflow["jobs"]["report"]["if"] == "always()"
+    assert set(workflow["jobs"]["report"]["needs"]) == {"select", "probe"}

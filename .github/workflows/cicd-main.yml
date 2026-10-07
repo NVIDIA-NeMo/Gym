@@ -96,11 +96,15 @@ jobs:
     with:
       base-ref: ${{ needs.pre-flight.outputs.base_ref }}
 
-  # Advisory only: deliberately excluded from Nemo_CICD_Test and failure notifications.
+  # P0 is published separately; requiring that check is a repository rules decision.
   harness_conformance:
     name: Harness conformance
     needs: [pre-flight]
     uses: ./.github/workflows/harness-conformance.yml
+    permissions:
+      contents: read
+      actions: read
+      checks: write
     with:
       base-ref: ${{ needs.pre-flight.outputs.base_ref }}
 

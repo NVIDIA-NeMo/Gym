@@ -2,18 +2,30 @@
 
 ## Pull-request feedback
 
-Gym CI runs an advisory harness matrix on approved PR mirrors and merge-queue
+Gym CI runs a harness probe matrix on approved PR mirrors and merge-queue
 revisions. Changes to a registered adapter select that harness; shared code,
 dependency files, CI configuration, and other server code conservatively select
 all registered harnesses. Changes limited to `fern/`, `docs/`, or root Markdown
 files are skipped. Scheduled and manual CI runs exercise all harnesses.
 
 Each job installs the adapter's pinned runtime, validates the runner, checker,
-and adapter tests, then runs every scenario. Conformance failures produce warning
-annotations and a table in the Actions summary. Setup, test, execution, and checker
-errors are reported as unavailable measurements. Download the `harness-conformance-*`
-artifact for test/setup logs and probe evidence. These jobs do not participate in
-the required `Nemo_CICD_Test` gate and do not regenerate documentation.
+and adapter tests, then runs every scenario. Execution errors fail the probe job;
+completed measurements can succeed as jobs even when they find conformance failures.
+Warnings and a detailed table remain available in the Actions summary.
+
+After the probes finish, a separate reporting job publishes **Harness conformance P0**
+in the PR checks list. It succeeds only if every selected harness passes the current
+P0 suite, or no harnesses are affected. Conformance failures and unavailable
+measurements both produce a failed check, with a per-harness breakdown. Only the
+reporting job receives `checks: write`; probe jobs keep read-only permissions.
+Download the `harness-conformance-*` artifacts for test/setup logs and probe evidence.
+The reporter only uses artifacts from the current run attempt; rerun all jobs to
+refresh results for all selected harnesses.
+
+To enforce P0 before merging, add the fixed **Harness conformance P0** check name to
+the repository's required checks. Until configured, it remains optional. It is
+independent of the existing `Nemo_CICD_Test` gate. This workflow does not regenerate
+documentation.
 
 Use the diagnostic command below to reproduce a warning at the reported commit.
 When registering another harness in `registry.HARNESSES`, provide its pinned runtime

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Harness conformance (advisory)
+name: Harness conformance
 
 on:
   workflow_call:
@@ -22,7 +22,6 @@ defaults:
 jobs:
   select:
     runs-on: ubuntu-latest
-    continue-on-error: true
     outputs:
       harnesses: ${{ steps.select.outputs.harnesses }}
     steps:
@@ -43,12 +42,11 @@ jobs:
         run: echo '::warning::Harness conformance could not select affected harnesses; see the selection log.'
 
   probe:
-    name: ${{ matrix.harness }} conformance (advisory)
+    name: ${{ matrix.harness }} conformance probes
     needs: select
     if: needs.select.outputs.harnesses != '' && needs.select.outputs.harnesses != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -101,7 +99,9 @@ jobs:
             code=$?
           fi
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-      - name: Publish advisory results
+          # Exit 1 is a valid nonconforming result; execution errors fail the job.
+          if [[ "$code" -gt 1 ]]; then exit "$code"; fi
+      - name: Record conformance results
         if: always()
         env:
           HARNESS: ${{ matrix.harness }}
@@ -117,3 +117,23 @@ jobs:
           path: ${{ env.RESULTS }}
           if-no-files-found: warn
           retention-days: 14
+
+  report:
+    name: Publish P0 check
+    needs: [select, probe]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Publish P0 result from this attempt's evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELECTED_HARNESSES: ${{ needs.select.outputs.harnesses }}
+        run: python3 -m scripts.harness_conformance.checks
