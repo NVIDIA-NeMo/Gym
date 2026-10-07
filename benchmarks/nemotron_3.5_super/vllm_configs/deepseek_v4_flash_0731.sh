@@ -35,13 +35,13 @@ VLLM_COMMON_ARGS=(
 
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
-    --max-num-batched-tokens 135680
+    --max-num-batched-tokens 131072
     --max-num-seqs 1024
 )
 VLLM_DECODE_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     --max-cudagraph-capture-size 2048
-    --max-num-batched-tokens 33920
+    --max-num-batched-tokens 32768
     --max-num-seqs 1024
 )
