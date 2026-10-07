@@ -14,11 +14,12 @@
 # limitations under the License.
 """Start, supervise and stop the h2-ping-sidecar for ``gym env start``, and point model URLs at it.
 
-``H2PingSidecarManager`` is the orchestrator-side entry point. On the launching node it runs the
-proxy as an ordinary child process. For ``nodes: all`` (or a list of node IPs) it places one small
-Ray actor per node, pinned to that node, and the actor runs the same ``NodeSidecars`` code there.
+``H2PingSidecarManager`` is the entry point. It runs the proxy as an ordinary child process of
+the process that starts the Gym servers (``RunHelper``), so the proxy is always on the same node
+as the model servers that call it, including when ``RunHelper`` itself runs inside a Ray actor.
 """
 
+import hashlib
 import os
 import shutil
 import signal
@@ -40,14 +41,12 @@ from nemo_gym.global_config import (
     CACHE_DIR_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
-    POLICY_BASE_URL_KEY_NAME,
 )
 from nemo_gym.h2_ping_sidecar.config import (
     H2_PING_SIDECAR_KEY_NAME,
     H2PingSidecarConfig,
     SidecarInstanceConfig,
     is_loopback_host,
-    upstream_origin,
 )
 
 
@@ -89,33 +88,55 @@ def h2_ping_sidecar_config_from_global_config(global_config_dict: Any) -> H2Ping
     return H2PingSidecarConfig.model_validate(block)
 
 
-def resolve_instances(config: H2PingSidecarConfig, global_config_dict: Any) -> List[SidecarInstanceConfig]:
-    """The configured instances, or one derived from ``policy_base_url`` when none are configured."""
-    if config.instances:
-        return list(config.instances)
-
-    policy_base_url = global_config_dict.get(POLICY_BASE_URL_KEY_NAME)
-    if not isinstance(policy_base_url, str) or not policy_base_url:
-        raise SidecarError(
-            f"`{H2_PING_SIDECAR_KEY_NAME}` has no `instances` and `{POLICY_BASE_URL_KEY_NAME}` is not set, "
-            "so there is nothing to forward to. Add `instances: [{name: ..., upstream: https://...}]`."
-        )
+def _local_go_version() -> str:
+    """``go env GOVERSION`` of the Go on PATH, or an empty string when there is none."""
+    go = shutil.which("go")
+    if go is None:
+        return ""
     try:
-        return [SidecarInstanceConfig(name="policy", upstream=upstream_origin(policy_base_url))]
-    except ValueError as e:
-        raise SidecarError(
-            f"`{H2_PING_SIDECAR_KEY_NAME}` has no `instances`, so the upstream is taken from "
-            f"`{POLICY_BASE_URL_KEY_NAME}`, but {e}"
-        ) from e
+        result = subprocess.run(
+            [go, "env", "GOVERSION"],
+            env={**os.environ, "GOTOOLCHAIN": "local"},
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _source_digest(go_version: str) -> str:
+    """Short hash of the Go sources and the Go version they are built with.
+
+    A binary built from older sources, or by a Go release that has since been replaced (the proxy
+    is mostly Go's own ``net/http`` and ``crypto/tls``, whose fixes ship as Go releases), must
+    never be reused, so both go into the cache path.
+    """
+    digest = hashlib.sha256(go_version.encode() + b"\0")
+    sources = sorted(path for path in SIDECAR_SOURCE_DIR.glob("*.go") if not path.name.endswith("_test.go"))
+    for path in sources + [SIDECAR_SOURCE_DIR / "go.mod"]:
+        digest.update(path.name.encode() + b"\0" + path.read_bytes())
+    return digest.hexdigest()[:12]
 
 
 def default_binary_path(global_config_dict: Any) -> Path:
     cache_dir = global_config_dict.get(CACHE_DIR_KEY_NAME) or "cache"
-    return Path(cache_dir).expanduser().resolve() / SIDECAR_BINARY_NAME / SIDECAR_BINARY_NAME
+    return (
+        Path(cache_dir).expanduser().resolve()
+        / SIDECAR_BINARY_NAME
+        / _source_digest(_local_go_version())
+        / SIDECAR_BINARY_NAME
+    )
 
 
 def build_sidecar(output_path: Path) -> None:
-    """Compile the bundled Go source into ``output_path``."""
+    """Compile the bundled Go source into ``output_path``.
+
+    The compiler writes to a private temporary file that is moved into place afterwards, so a
+    concurrent run sharing the cache never executes a half-written binary.
+    """
     go = shutil.which("go")
     if go is None:
         raise SidecarError(
@@ -124,18 +145,23 @@ def build_sidecar(output_path: Path) -> None:
             f"`{H2_PING_SIDECAR_KEY_NAME}.binary` to a prebuilt h2-ping-sidecar."
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    partial = output_path.with_name(f".{output_path.name}.{uuid4().hex}.partial")
     print(f"Building h2-ping-sidecar -> {output_path}")
-    result = subprocess.run(
-        [go, "build", "-buildvcs=false", "-trimpath", "-o", str(output_path), "."],
-        cwd=SIDECAR_SOURCE_DIR,
-        env={**os.environ, "CGO_ENABLED": "0", "GOTOOLCHAIN": "local"},
-        capture_output=True,
-        text=True,
-        errors="replace",
-        timeout=_BUILD_TIMEOUT_SEC,
-    )
-    if result.returncode != 0:
-        raise SidecarError(f"`go build` of the h2-ping-sidecar failed:\n{result.stdout}{result.stderr}")
+    try:
+        result = subprocess.run(
+            [go, "build", "-buildvcs=false", "-trimpath", "-o", str(partial), "."],
+            cwd=SIDECAR_SOURCE_DIR,
+            env={**os.environ, "CGO_ENABLED": "0", "GOTOOLCHAIN": "local"},
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=_BUILD_TIMEOUT_SEC,
+        )
+        if result.returncode != 0:
+            raise SidecarError(f"`go build` of the h2-ping-sidecar failed:\n{result.stdout}{result.stderr}")
+        os.replace(partial, output_path)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def resolve_binary(config: H2PingSidecarConfig, global_config_dict: Any) -> Path:
@@ -189,12 +215,12 @@ def _local_url(url: str, instances_by_origin: Dict[str, SidecarInstanceConfig], 
 def rewrite_base_urls(global_config_dict: DictConfig, instances: List[SidecarInstanceConfig]) -> List[RewrittenUrl]:
     """Point every model URL aimed at an instance's upstream at that instance's local address, in place.
 
-    Covers ``policy_base_url`` and any ``*base_url`` key (a string or a list of strings) of a model
-    server under ``responses_api_models``. The *resolved* value is what gets matched, so a URL that
-    comes from a resolver such as ``${oc.env:POLICY_URL}`` is routed through the sidecar too, and is
-    materialized as a literal in memory. An alias such as ``${policy_base_url}`` stays an alias: once
-    its root is rewritten it resolves to an ``http://`` URL, which no instance matches. A field that
-    aliases a whole list is rewritten as a resolved copy, so the list it points at is never changed.
+    Covers any ``*base_url`` key (a string or a list of strings) of a model server under
+    ``responses_api_models``; top-level keys such as ``policy_base_url`` are left as they are. The
+    *resolved* value is what gets matched, so a URL that comes from a resolver such as
+    ``${oc.env:JUDGE_URL}`` or from an alias such as ``${policy_base_url}`` is routed through the
+    sidecar too, and is materialized as a literal in memory for that field only. A field that aliases
+    a whole list is rewritten as a resolved copy, so the list it points at is never changed.
     Raises ``SidecarError`` for a value that is not a parseable URL.
     """
     by_origin = {instance.upstream: instance for instance in instances}
@@ -226,10 +252,6 @@ def rewrite_base_urls(global_config_dict: DictConfig, instances: List[SidecarIns
             container[key] = resolved
 
     with open_dict(global_config_dict):
-        # `in` would resolve the value; `keys()` does not, so an unresolvable policy URL is left for the servers.
-        if POLICY_BASE_URL_KEY_NAME in global_config_dict.keys():
-            rewrite_value(global_config_dict, POLICY_BASE_URL_KEY_NAME, POLICY_BASE_URL_KEY_NAME)
-
         for top_level_path in list(global_config_dict.keys()):
             if top_level_path in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS:
                 continue
@@ -265,7 +287,7 @@ def rewrite_base_urls(global_config_dict: DictConfig, instances: List[SidecarIns
 
 
 # ---------------------------------------------------------------------------------------------
-# Node-side process supervision (runs in this process, or inside a pinned Ray actor)
+# Process supervision
 # ---------------------------------------------------------------------------------------------
 
 
@@ -315,7 +337,7 @@ def _log_tail(log_path: str) -> str:
 
 
 class NodeSidecars:
-    """The sidecar processes of one node. Plain Python so it works locally and inside a Ray actor."""
+    """The sidecar processes this run owns: one child process per instance."""
 
     def __init__(
         self,
@@ -329,8 +351,8 @@ class NodeSidecars:
         self._binary = binary
         self._log_dir = log_dir
         self._host = socket.gethostname()
-        # Distinct owners (concurrent runs, or two actors) must never share or delete one another's
-        # readiness marker, even with the same instance names in the same log directory.
+        # Distinct owners (concurrent runs on one host) must never share or delete one another's
+        # readiness marker or log, even with the same instance names in the same log directory.
         self._ready_id = uuid4().hex
         self._processes: Dict[str, subprocess.Popen] = {}
         self._log_paths: Dict[str, str] = {}
@@ -338,10 +360,7 @@ class NodeSidecars:
     def start(self) -> List[str]:
         """Launch every instance and wait until each has bound its port; returns one summary line each."""
         if not os.access(self._binary, os.X_OK):
-            raise SidecarError(
-                f"{self._host}: h2-ping-sidecar binary {self._binary} is not executable here. With "
-                "`nodes: all` the binary must be at the same path on every node (a shared filesystem)."
-            )
+            raise SidecarError(f"{self._host}: h2-ping-sidecar binary {self._binary} is not executable.")
         os.makedirs(self._log_dir, exist_ok=True)
         try:
             for instance in self._instances:
@@ -360,7 +379,7 @@ class NodeSidecars:
         ready_path = self._ready_path(instance)
         # A stale file from a crashed run would pass for readiness.
         Path(ready_path).unlink(missing_ok=True)
-        log_path = os.path.join(self._log_dir, f"h2ping-{instance.name}-{self._host}.log")
+        log_path = os.path.join(self._log_dir, f"h2ping-{instance.name}-{self._host}-{self._ready_id}.log")
         self._log_paths[instance.name] = log_path
         log_file: IO[bytes] = open(log_path, "ab")
         try:
@@ -388,10 +407,13 @@ class NodeSidecars:
                 return
             code = process.poll()
             if code is not None:
+                tail = _log_tail(self._log_paths[instance.name])
+                # The sidecar logs "cannot bind" when it loses the port; other exits (bad flag, bad
+                # upstream) say something else, so only suggest a busy port when that is what happened.
+                hint = f" (is {instance.listen} already in use?)" if "cannot bind" in tail else ""
                 raise SidecarError(
-                    f"{self._host}: h2-ping-sidecar `{instance.name}` exited with code {code} before it was ready "
-                    f"(is {instance.listen} already in use?). Log {self._log_paths[instance.name]}:\n"
-                    f"{_log_tail(self._log_paths[instance.name])}"
+                    f"{self._host}: h2-ping-sidecar `{instance.name}` exited with code {code} before it was "
+                    f"ready{hint}. Log {self._log_paths[instance.name]}:\n{tail}"
                 )
             if time.monotonic() >= deadline:
                 raise SidecarError(
@@ -440,30 +462,8 @@ class NodeSidecars:
 # ---------------------------------------------------------------------------------------------
 
 
-def _get_ray():
-    import ray
-
-    return ray
-
-
-def select_ray_nodes(config: H2PingSidecarConfig, alive_nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """The alive Ray nodes the sidecar should run on, per ``nodes``."""
-    if config.nodes == "all":
-        selected = list(alive_nodes)
-        if not selected:
-            raise SidecarError("`nodes: all` found no alive Ray nodes.")
-        return selected
-
-    wanted = list(config.nodes)
-    by_ip = {node["NodeManagerAddress"]: node for node in alive_nodes}
-    missing = [ip for ip in wanted if ip not in by_ip]
-    if missing:
-        raise SidecarError(f"`nodes` names {missing}, which are not alive Ray nodes. Alive: {sorted(by_ip)}")
-    return [by_ip[ip] for ip in wanted]
-
-
 class H2PingSidecarManager:
-    """Owns every sidecar a run started, wherever it runs."""
+    """Owns the sidecar processes a run started."""
 
     def __init__(
         self,
@@ -476,89 +476,31 @@ class H2PingSidecarManager:
         self.instances = instances
         self._binary = str(binary)
         self._log_dir = log_dir
-        self._local: Optional[NodeSidecars] = None
-        self._actors: Dict[str, Any] = {}
+        self._sidecars: Optional[NodeSidecars] = None
 
     @property
     def log_dir(self) -> str:
         return self._log_dir
 
     def start(self) -> None:
+        self._sidecars = NodeSidecars(self.config, self.instances, self._binary, self._log_dir)
         try:
-            if self.config.nodes == "local":
-                self._start_local()
-            else:
-                self._start_on_ray_nodes()
+            for line in self._sidecars.start():
+                print(f"h2-ping-sidecar {line}")
         except BaseException:
             self.stop()
             raise
 
-    def _start_local(self) -> None:
-        self._local = NodeSidecars(self.config, self.instances, self._binary, self._log_dir)
-        for line in self._local.start():
-            print(f"h2-ping-sidecar {line}")
-
-    def _start_on_ray_nodes(self) -> None:
-        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-
-        ray = _get_ray()
-        if not ray.is_initialized():
-            raise SidecarError("`nodes` other than `local` needs a Ray cluster, but Ray is not initialized.")
-        nodes = select_ray_nodes(self.config, [node for node in ray.nodes() if node.get("Alive")])
-
-        actor_class = ray.remote(num_cpus=0)(NodeSidecars)
-        for node in nodes:
-            ip = node["NodeManagerAddress"]
-            self._actors[ip] = actor_class.options(
-                scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node["NodeID"], soft=False),
-            ).remote(self.config, self.instances, self._binary, self._log_dir)
-
-        timeout = self.config.startup_timeout_seconds * len(self.instances) + 60.0
-        pending = {ip: actor.start.remote() for ip, actor in self._actors.items()}
-        errors = []
-        for ip, ref in pending.items():
-            try:
-                for line in ray.get(ref, timeout=timeout):
-                    print(f"h2-ping-sidecar {line}")
-            except Exception as e:
-                errors.append(f"node {ip}: {e}")
-        if errors:
-            raise SidecarError("h2-ping-sidecar failed to start:\n" + "\n".join(errors))
-
     def check(self) -> None:
         """Raise if any sidecar has stopped. Called from Gym's poll loop."""
-        messages: List[str] = []
-        if self._local is not None:
-            messages.extend(self._local.failures())
-        if self._actors:
-            ray = _get_ray()
-            for ip, actor in self._actors.items():
-                try:
-                    messages.extend(ray.get(actor.failures.remote(), timeout=30))
-                except Exception as e:
-                    messages.append(f"node {ip}: sidecar supervisor is unreachable: {e}")
+        messages = self._sidecars.failures() if self._sidecars is not None else []
         if messages:
             raise SidecarError("h2-ping-sidecar stopped unexpectedly:\n" + "\n".join(messages))
 
     def stop(self) -> None:
-        if self._local is not None:
-            self._local.stop()
-            self._local = None
-        if self._actors:
-            ray = _get_ray()
-            from nemo_gym.h2_ping_sidecar.config import parse_duration_seconds
-
-            timeout = parse_duration_seconds(self.config.shutdown_grace) + _STOP_SLACK_SEC + 30.0
-            for ip, actor in self._actors.items():
-                try:
-                    ray.get(actor.stop.remote(), timeout=timeout)
-                except Exception as e:
-                    print(f"WARNING: could not stop the h2-ping-sidecar on node {ip}: {e}")
-                try:
-                    ray.kill(actor)
-                except Exception:
-                    pass
-            self._actors = {}
+        if self._sidecars is not None:
+            self._sidecars.stop()
+            self._sidecars = None
 
 
 def start_h2_ping_sidecar(global_config_dict: DictConfig) -> Optional[H2PingSidecarManager]:
@@ -576,7 +518,7 @@ def start_h2_ping_sidecar(global_config_dict: DictConfig) -> Optional[H2PingSide
     if not config.enabled:
         return None
 
-    instances = resolve_instances(config, global_config_dict)
+    instances = list(config.instances)
     if config.rewrite_base_urls:
         # Dry run on a copy: surfaces malformed URLs before a proxy exists.
         rewrite_base_urls(deepcopy(global_config_dict), instances)

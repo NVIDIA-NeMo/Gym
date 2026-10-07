@@ -23,7 +23,7 @@ This module imports only pydantic, so it is safe to import from Gym's config mac
 
 import ipaddress
 import re
-from typing import List, Literal, Optional, Union
+from typing import List, Optional, Union
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -123,18 +123,14 @@ class H2PingSidecarConfig(BaseModel, extra="forbid"):
 
     binary: Optional[str] = None
     """Path to the compiled ``h2-ping-sidecar``. Defaults to a build in Gym's cache directory (see
-    ``build_if_missing``). With ``nodes: all`` it must be readable at the same path on every node."""
+    ``build_if_missing``). It only needs to exist on the node that runs ``gym env start``."""
 
     build_if_missing: bool = True
     """Run ``go build`` on the launching node when the binary does not exist yet. Needs Go on PATH."""
 
-    nodes: Union[Literal["local", "all"], List[str]] = "all"
-    """Where to run it. ``all`` (default): every alive Ray node, so each node that runs a Gym process
-    gets its own sidecar (the proxy listens on loopback). ``local``: only the node running
-    ``gym env start``, started as a plain child process without Ray. A list of node IPs: only those Ray nodes."""
-
     instances: List[SidecarInstanceConfig] = Field(default_factory=list)
-    """One entry per upstream. Empty means one instance whose upstream is the host of ``policy_base_url``."""
+    """One entry per upstream the sidecar forwards to; required when ``enabled``. A model URL is routed through
+    an instance when its host matches the instance's ``upstream``. Give each instance its own ``listen`` port."""
 
     ping_interval: str = "60s"
     """Send an HTTP/2 PING after this much read-idle time. Must stay well below 340s."""
@@ -187,15 +183,13 @@ class H2PingSidecarConfig(BaseModel, extra="forbid"):
             raise ValueError(f"{value!r} must look like '1GiB', '512MiB' or a byte count")
         return value
 
-    @field_validator("nodes")
-    @classmethod
-    def _check_nodes(cls, value: Union[str, List[str]]) -> Union[str, List[str]]:
-        if isinstance(value, list) and not value:
-            raise ValueError("a list of node IPs must not be empty; use 'local' or 'all'")
-        return value
-
     @model_validator(mode="after")
     def _check_consistency(self) -> "H2PingSidecarConfig":
+        if self.enabled and not self.instances:
+            raise ValueError(
+                "instances is required when the sidecar is enabled: list each upstream to forward to, e.g. "
+                "instances: [{name: judge, upstream: 'https://host.example.com', listen: '127.0.0.1:1250'}]"
+            )
         interval = parse_duration_seconds(self.ping_interval)
         if not 0 < interval < GLOBAL_ACCELERATOR_IDLE_TIMEOUT_SECONDS:
             raise ValueError(
