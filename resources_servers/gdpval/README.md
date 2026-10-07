@@ -30,6 +30,12 @@ gym eval run \
 
 See `benchmarks/gdpval/README.md` for the full run recipe.
 
+## Task tools
+
+The server serves the agent's task tools as `POST` routes. `finish` and `abandon_task_finish` record how the
+agent ended the task. `web_search` searches with Tavily and `fetch_web_page` extracts a page as markdown.
+Set `tavily_api_key` (the shipped configs read `TAVILY_API_KEY`).
+
 ## Judge failure telemetry
 
 Comparison judging can optionally write structured request and failure metadata:

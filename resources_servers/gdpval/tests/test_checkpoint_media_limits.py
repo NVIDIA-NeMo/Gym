@@ -300,6 +300,7 @@ async def test_actual_selected_judge_receives_caps_and_nested_inputs(tmp_path, m
         judge_panel=[{"name": "limited", "max_image_base64_bytes": 1}],
         judge_reference_files_recursive=True,
         preconvert_office_to_pdf=False,
+        tavily_api_key="test-key",
     )
     server = app.GDPValResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
     body = app.GDPValVerifyRequest(

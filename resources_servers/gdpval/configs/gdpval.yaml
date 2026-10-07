@@ -13,3 +13,4 @@ gdpval_resources_server:
         name: gdpval_judge_model
       judge_responses_create_params_overrides: {}
       judge_telemetry_output_dir: null
+      tavily_api_key: ${oc.env:TAVILY_API_KEY,dummy}
