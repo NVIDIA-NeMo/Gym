@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import inspect
 import io
 import json
@@ -17,11 +18,13 @@ from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
+from nemo_gym.tasks.harbor.dockerfile import OverlayRun
 from nemo_gym.tasks.harbor.models import HarborEnvironment
 from resources_servers.harbor.app import (
     HarborResourcesServer,
     HarborResourcesServerConfig,
     _verifier_image,
+    overlay_shell_command,
     parse_reward_file,
     select_reward,
 )
@@ -385,6 +388,204 @@ class TestSeedWorkdirAndResources:
         assert spec.resources.gpu == 1 and spec.resources.cpu == 4.0
         task.config.environment.gpus = None
         task.config.environment.gpu_types = None
+
+
+OVERLAY_DOCKERFILE = """\
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y curl
+WORKDIR /app
+ENV PATH="/opt/tools/bin:$PATH" MSG="hi there"
+RUN mkdir -p /opt/tools/bin && echo ok > ready.txt
+USER agent
+RUN echo "as agent" > /tmp/who
+ENTRYPOINT []
+"""
+
+HEALTHCHECK_TOML = (
+    TASK_TOML
+    + """
+[environment.healthcheck]
+command = "test -f /app/ready.txt"
+interval_sec = 0.01
+start_interval_sec = 0.01
+timeout_sec = 5.0
+retries = 3
+"""
+)
+
+
+@dataclass
+class OverlaySandbox(FakeSandbox):
+    """Fails the RUN line whose command holds ``failing`` with the given result."""
+
+    failing: str | None = None
+    failure: SandboxExecResult = SandboxExecResult(
+        stdout="line 1\nline 2\n", stderr="E: no package\n", return_code=100
+    )
+
+    async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        result = await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+        if self.failing and self.failing in command:
+            return self.failure
+        return result
+
+
+class TestOverlay:
+    def overlay_server(self, tmp_path, monkeypatch, *, dockerfile=OVERLAY_DOCKERFILE, toml=TASK_TOML, sandbox=None):
+        sandbox = sandbox or OverlaySandbox()
+        server, task, _, created = make_server(tmp_path, monkeypatch, sandbox, dockerfile=dockerfile)
+        (task.path / "task.toml").write_text(toml)
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        return server, task, sandbox, created
+
+    def test_shell_command_applies_env_and_workdir_before_the_run(self):
+        step = OverlayRun(command="make all", workdir="/app src", env={"PATH": "/opt/bin:$PATH", "Q": 'say "hi" `x`'})
+        assert overlay_shell_command(step) == (
+            'export PATH="/opt/bin:$PATH"; export Q="say \\"hi\\" \\`x\\`"; '
+            "mkdir -p '/app src' && cd '/app src' || exit 1; make all"
+        )
+        assert overlay_shell_command(OverlayRun(command="true")) == "true"
+
+    def test_run_lines_execute_in_order_as_root_before_setup_and_healthcheck(self, tmp_path, monkeypatch):
+        server, task, sandbox, created = self.overlay_server(tmp_path, monkeypatch, toml=HEALTHCHECK_TOML)
+        assert len(task.overlay) == 3 and task.user == "agent"
+
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+
+        assert response.status_code == 200, response.text
+        assert created == [("hello", "/app")]
+        commands = [c["command"] for c in sandbox.execs]
+        first, second, third = sandbox.execs[:3]
+        # Dockerfile order, each with the state in effect at that point.
+        assert first["command"] == "apt-get update && apt-get install -y curl"
+        assert second["command"] == (
+            'export PATH="/opt/tools/bin:$PATH"; export MSG="hi there"; '
+            "mkdir -p /app && cd /app || exit 1; mkdir -p /opt/tools/bin && echo ok > ready.txt"
+        )
+        assert third["command"] == (
+            'export PATH="/opt/tools/bin:$PATH"; export MSG="hi there"; '
+            'mkdir -p /app && cd /app || exit 1; echo "as agent" > /tmp/who'
+        )
+        # Lines before `USER agent` run as root (explicitly, since the image user is non-root); after it, as agent.
+        assert [c["user"] for c in (first, second, third)] == ["root", "root", "agent"]
+        assert all(c["cwd"] == "/" and c["env"] is None for c in (first, second, third))
+        # The overlay shares the task's build budget: the first line sees all of it, later ones what is left.
+        assert first["timeout_s"] == pytest.approx(task.config.environment.build_timeout_sec, abs=1)
+        assert second["timeout_s"] <= first["timeout_s"] and third["timeout_s"] <= second["timeout_s"]
+        # Only then does Gym prepare the workdir, poll the healthcheck and hand the sandbox over.
+        assert commands[3].startswith("mkdir -p /app && chown agent /app")
+        assert commands.index("test -f /app/ready.txt") > commands.index(third["command"])
+
+    def test_root_image_without_user_keeps_the_plain_exec_path(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile="FROM img\nWORKDIR /app\nRUN true\nRUN false\n"
+        )
+        assert TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task)).status_code == 200
+        runs = sandbox.execs[:2]
+        assert [c["command"] for c in runs] == [
+            "mkdir -p /app && cd /app || exit 1; true",
+            "mkdir -p /app && cd /app || exit 1; false",
+        ]
+        # No USER anywhere: root is the image's default user, so no override is needed (every provider supports this).
+        assert [c["user"] for c in runs] == [None, None]
+
+    def test_failing_run_is_a_terminal_task_error_and_cleans_up(self, tmp_path, monkeypatch):
+        sandbox = OverlaySandbox(failing="apt-get install")
+        server, task, sandbox, _ = self.overlay_server(tmp_path, monkeypatch, sandbox=sandbox)
+        client = TestClient(server.setup_webserver())
+
+        response = client.post("/seed_session", json=seed_body(task))
+
+        assert response.status_code == 422, response.text
+        detail = response.json()["detail"]
+        assert "Dockerfile overlay failed for 'hello'" in detail
+        assert "RUN line 1/3 'apt-get update && apt-get install -y curl' exited 100" in detail
+        assert "line 2" in detail and "E: no package" in detail
+        # Nothing after the failing line ran, the sandbox is gone and no session was kept.
+        assert len(sandbox.execs) == 1 and sandbox.stopped
+        assert client.post("/verify", json=verify_body()).status_code == 404
+
+    def test_timed_out_run_names_the_budget(self, tmp_path, monkeypatch):
+        sandbox = OverlaySandbox(
+            failing="echo ok", failure=SandboxExecResult(stdout="", stderr="", return_code=-1, error_type="timeout")
+        )
+        server, task, sandbox, _ = self.overlay_server(tmp_path, monkeypatch, sandbox=sandbox)
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+        assert response.status_code == 422
+        assert "RUN line 2/3" in response.json()["detail"]
+        assert "exceeded [environment].build_timeout_sec=600" in response.json()["detail"]
+        assert sandbox.stopped
+
+    def test_exhausted_budget_skips_the_remaining_lines(self, tmp_path, monkeypatch):
+        class SlowSandbox(OverlaySandbox):
+            async def exec(self, command, **kwargs):
+                await asyncio.sleep(0.05)  # longer than the whole build budget below
+                return await super().exec(command, **kwargs)
+
+        toml = TASK_TOML.replace("cpus = 1", "build_timeout_sec = 0.01\ncpus = 1")
+        server, task, sandbox, _ = self.overlay_server(tmp_path, monkeypatch, toml=toml, sandbox=SlowSandbox())
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "RUN line 2/3" in detail and "build_timeout_sec=0.01 is used up" in detail
+        assert len(sandbox.execs) == 1 and sandbox.stopped
+
+    def test_separate_verifier_in_the_task_image_gets_the_overlay(self, tmp_path, monkeypatch):
+        toml = TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        server, task, agent, _ = self.overlay_server(tmp_path, monkeypatch, toml=toml)
+        assert not task.config.is_shared_verifier and _verifier_image(task) == "debian:bookworm-slim"
+        verifier = OverlaySandbox()
+
+        async def create_verifier(task):
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        client = TestClient(server.setup_webserver())
+        assert client.post("/seed_session", json=seed_body(task)).status_code == 200
+
+        payload = client.post("/verify", json=verify_body()).json()
+
+        assert payload["reward"] == 1.0 and payload["verifier_mode"] == "separate", payload
+        verifier_commands = [c["command"] for c in verifier.execs]
+        assert verifier_commands[0] == "apt-get update && apt-get install -y curl"
+        assert verifier_commands.index("apt-get update && apt-get install -y curl") < next(
+            i for i, c in enumerate(verifier_commands) if "test.sh" in c
+        )
+        assert agent.stopped and verifier.stopped
+
+    def test_separate_verifier_overlay_failure_is_a_task_error(self, tmp_path, monkeypatch):
+        toml = TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        server, task, agent, _ = self.overlay_server(tmp_path, monkeypatch, toml=toml)
+        verifier = OverlaySandbox(failing="apt-get install")
+
+        async def create_verifier(task):
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        client = TestClient(server.setup_webserver())
+        assert client.post("/seed_session", json=seed_body(task)).status_code == 200
+        response = client.post("/verify", json=verify_body())
+        assert response.status_code == 422 and "(verifier)" in response.json()["detail"]
+        assert "RUN line 1/3" in response.json()["detail"]
+        assert verifier.stopped
+
+    def test_prebuilt_verifier_image_gets_no_overlay(self, tmp_path, monkeypatch):
+        toml = TASK_TOML.replace(
+            "[verifier]\n",
+            '[verifier]\nenvironment_mode = "separate"\n\n[verifier.environment]\ndocker_image = "org/verifier:1"\n',
+        )
+        server, task, _, _ = self.overlay_server(tmp_path, monkeypatch, toml=toml)
+        verifier = OverlaySandbox()
+
+        async def create_verifier(task):
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        client = TestClient(server.setup_webserver())
+        assert client.post("/seed_session", json=seed_body(task)).status_code == 200
+        assert client.post("/verify", json=verify_body()).json()["reward"] == 1.0
+        assert not any("apt-get" in c["command"] for c in verifier.execs)
 
 
 class TestVerify:

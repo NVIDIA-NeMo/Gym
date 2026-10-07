@@ -11,7 +11,7 @@ from pathlib import Path
 
 from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
 from nemo_gym.tasks.harbor.digest import content_hash
-from nemo_gym.tasks.harbor.dockerfile import base_image_only
+from nemo_gym.tasks.harbor.dockerfile import DockerfileNeedsBuild, OverlayRun, parse_dockerfile
 from nemo_gym.tasks.harbor.models import HarborTaskConfig
 
 
@@ -31,9 +31,13 @@ class HarborTask:
 
     ``task_id`` is the folder name: ``[task].name`` is an ``org/name`` label that is
     not unique across a dataset. ``image`` is the prebuilt image when the task
-    declares one, else the base image of a base-image-only Dockerfile, else ``None``
-    (a build is required). ``workdir``, ``env`` and ``user`` merge ``task.toml``
+    declares one, else the base image of a pull-mode or overlay-mode Dockerfile, else
+    ``None`` (a build is required). ``workdir``, ``env`` and ``user`` merge ``task.toml``
     with what the Dockerfile recorded; ``task.toml`` wins.
+
+    ``overlay`` is Gym-derived data, not a Harbor field: the Dockerfile's ``RUN`` lines
+    (with the ``WORKDIR``, ``ENV`` and ``USER`` in effect for each) that the server runs
+    in the pulled base image at seed. Empty for a prebuilt image or a pull-mode Dockerfile.
     """
 
     path: Path
@@ -45,6 +49,7 @@ class HarborTask:
     workdir: str | None
     env: dict[str, str]
     user: str | None
+    overlay: tuple[OverlayRun, ...] = ()
 
     @property
     def needs_sandbox(self) -> bool:
@@ -129,21 +134,26 @@ def load_task(path: Path) -> HarborTask:
     workdir = environment.workdir
     env = dict(environment.env)
     user: str | None = None
+    overlay: tuple[OverlayRun, ...] = ()
     dockerfile = path / "environment" / "Dockerfile"
     if dockerfile.is_file():
-        base = base_image_only(dockerfile.read_text())
-        if base is None:
+        try:
+            parsed = parse_dockerfile(dockerfile.read_text())
+        except DockerfileNeedsBuild as exc:
             if image is None:
                 raise HarborTaskError(
-                    f"{dockerfile} needs a build (RUN/COPY/ADD or a multi-stage FROM); "
-                    "building Dockerfiles is not supported yet. Declare [environment].docker_image "
-                    "with a prebuilt image to run this task."
-                )
-        else:
-            image = image or base.image
-            workdir = workdir or base.workdir
-            env = base.env | env
-            user = base.user
+                    f"{dockerfile} needs a build ({exc}); building Dockerfiles is not supported yet. "
+                    "Declare [environment].docker_image with a prebuilt image to run this task."
+                ) from exc
+            parsed = None
+        if parsed is not None and (image is None or not parsed.runs):
+            # A prebuilt image already holds whatever its Dockerfile's RUN lines did; only a
+            # pull-mode Dockerfile contributes settings next to a declared image.
+            image = image or parsed.image
+            workdir = workdir or parsed.workdir
+            env = parsed.env | env
+            user = parsed.user
+            overlay = parsed.runs
     if config.agent.user is not None:
         user = str(config.agent.user)
 
@@ -157,6 +167,7 @@ def load_task(path: Path) -> HarborTask:
         workdir=workdir,
         env=env,
         user=user,
+        overlay=overlay,
     )
 
 

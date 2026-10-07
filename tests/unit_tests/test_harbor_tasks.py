@@ -21,7 +21,13 @@ from nemo_gym.tasks.harbor.cli import (
     resolve_agent,
     runs_in_sandbox,
 )
-from nemo_gym.tasks.harbor.dockerfile import base_image_only
+from nemo_gym.tasks.harbor.dockerfile import (
+    DockerfileNeedsBuild,
+    OverlayRun,
+    base_image_only,
+    overlay_image,
+    parse_dockerfile,
+)
 from nemo_gym.tasks.harbor.hub import (
     HubError,
     HubRef,
@@ -191,6 +197,122 @@ class TestDockerfileDetection:
     def test_anything_else_needs_a_build(self, text):
         assert base_image_only(text) is None
 
+    def test_emptied_entrypoint_is_ignored_in_pull_mode(self):
+        base = base_image_only("FROM ubuntu:24.04\nENTRYPOINT []\nCMD [ ]\nWORKDIR /app\n")
+        assert base is not None and base.image == "ubuntu:24.04" and base.workdir == "/app"
+        assert base_image_only('FROM ubuntu\nENTRYPOINT ["sleep", "infinity"]') is None
+        assert base_image_only('FROM ubuntu\nCMD ["bash"]') is None
+
+
+SWEBENCH_VERIFIED_DOCKERFILE = """\
+FROM swebench/sweb.eval.x86_64.django_1776_django-11099:latest
+
+RUN cd /testbed && git status && git checkout -- . && git clean -fd
+RUN /opt/miniconda3/bin/conda run -n testbed pip install pytest
+RUN echo 'source /opt/miniconda3/bin/activate testbed' >> /root/.bashrc
+"""
+
+TB21_DEBIAN_DOCKERFILE = """\
+FROM debian:bookworm-slim
+
+# Terminal-Bench style: apt setup, then the task's own files
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    curl \\
+    tmux \\
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+ENV PATH="/opt/tools/bin:$PATH" \\
+    DEBIAN_FRONTEND=noninteractive
+RUN mkdir -p /opt/tools/bin && echo ready > /app/ready.txt
+ENTRYPOINT []
+"""
+
+
+class TestOverlayDockerfile:
+    def test_swebench_verified_shape(self):
+        overlay = overlay_image(SWEBENCH_VERIFIED_DOCKERFILE)
+        assert overlay is not None
+        assert overlay.image == "swebench/sweb.eval.x86_64.django_1776_django-11099:latest"
+        assert overlay.workdir is None and overlay.env == {} and overlay.user is None
+        assert [run.command for run in overlay.runs] == [
+            "cd /testbed && git status && git checkout -- . && git clean -fd",
+            "/opt/miniconda3/bin/conda run -n testbed pip install pytest",
+            "echo 'source /opt/miniconda3/bin/activate testbed' >> /root/.bashrc",
+        ]
+        assert all(run.workdir is None and run.env == {} and run.user is None for run in overlay.runs)
+        # The same file is not pull mode.
+        assert base_image_only(SWEBENCH_VERIFIED_DOCKERFILE) is None
+
+    def test_tb21_debian_shape_applies_state_in_order(self):
+        overlay = overlay_image(TB21_DEBIAN_DOCKERFILE)
+        assert overlay is not None and overlay.image == "debian:bookworm-slim"
+        first, second = overlay.runs
+        # The apt line runs before WORKDIR and ENV exist; continuations are joined.
+        assert " ".join(first.command.split()) == (
+            "apt-get update && apt-get install -y --no-install-recommends curl tmux && rm -rf /var/lib/apt/lists/*"
+        )
+        assert first.workdir is None and first.env == {}
+        # The later RUN sees both, and the final image settings are recorded too.
+        assert second == OverlayRun(
+            command="mkdir -p /opt/tools/bin && echo ready > /app/ready.txt",
+            workdir="/app",
+            env={"PATH": "/opt/tools/bin:$PATH", "DEBIAN_FRONTEND": "noninteractive"},
+        )
+        assert overlay.workdir == "/app" and overlay.env == second.env
+
+    def test_user_and_relative_workdir_apply_to_later_runs_only(self):
+        overlay = parse_dockerfile(
+            "FROM img\nRUN id\nUSER agent\nWORKDIR /home/agent\nWORKDIR src\nRUN make\nENV LATE=1\n"
+        )
+        assert [(r.command, r.user, r.workdir) for r in overlay.runs] == [
+            ("id", None, None),
+            ("make", "agent", "/home/agent/src"),
+        ]
+        assert overlay.user == "agent" and overlay.workdir == "/home/agent/src" and overlay.env == {"LATE": "1"}
+        # ENV after the last RUN reaches the image, not the RUN.
+        assert overlay.runs[1].env == {}
+
+    def test_exec_form_run_becomes_a_shell_command(self):
+        overlay = parse_dockerfile('FROM img\nRUN ["bash", "-lc", "echo hi there"]\n')
+        assert overlay.runs[0].command == "bash -lc 'echo hi there'"
+
+    @pytest.mark.parametrize(
+        ("text", "named"),
+        [
+            ("FROM ubuntu\nRUN <<EOF\napt-get update\nEOF\n", "RUN with a heredoc"),
+            ("FROM ubuntu\nRUN python3 <<-'PY'\nprint(1)\nPY\n", "RUN with a heredoc"),
+            ("FROM ubuntu\nRUN --mount=type=cache,target=/root/.cache pip install x", "RUN --mount"),
+            ("FROM ubuntu\nCOPY . /app\nRUN true", "COPY"),
+            ("FROM ubuntu\nRUN true\nADD x.tar /app", "ADD"),
+            ("FROM a AS one\nRUN true\nFROM b\nRUN true", "a second FROM (multi-stage build)"),
+            ("ARG BASE=ubuntu\nFROM $BASE\nRUN true", "ARG before FROM"),
+            ("FROM $BASE\nRUN true", "FROM $BASE (ARG-templated image)"),
+            ('FROM ubuntu\nRUN true\nENTRYPOINT ["/start.sh"]', "ENTRYPOINT"),
+            ("FROM ubuntu\nRUN true\nCMD sleep infinity", "CMD"),
+            ("FROM ubuntu\nHEALTHCHECK CMD curl -f http://localhost/", "HEALTHCHECK"),
+            ("FROM ubuntu\nEXPOSE 8080", "EXPOSE"),
+            ("FROM ubuntu\nVOLUME /data", "VOLUME"),
+            ('FROM ubuntu\nSHELL ["/bin/bash", "-c"]', "SHELL"),
+            ("FROM ubuntu\nSTOPSIGNAL SIGTERM", "STOPSIGNAL"),
+            ("RUN true", "RUN before FROM"),
+            ("# only comments\n", "no FROM instruction"),
+        ],
+    )
+    def test_everything_else_is_rejected_naming_the_instruction(self, text, named):
+        with pytest.raises(DockerfileNeedsBuild) as excinfo:
+            parse_dockerfile(text)
+        assert str(excinfo.value).startswith(named), str(excinfo.value)
+        assert overlay_image(text) is None and base_image_only(text) is None
+
+    def test_here_string_is_not_a_heredoc(self):
+        overlay = parse_dockerfile("FROM img\nRUN cat <<< hello\n")
+        assert overlay.runs[0].command == "cat <<< hello"
+
+    def test_emptied_entrypoint_is_ignored(self):
+        overlay = parse_dockerfile("FROM img\nRUN true\nENTRYPOINT []\n")
+        assert len(overlay.runs) == 1
+
 
 class TestDigest:
     def test_stable_and_sensitive_to_covered_files(self, tmp_path):
@@ -234,13 +356,31 @@ class TestLoadTask:
         assert task.user == "agent"
 
     def test_dockerfile_needing_a_build_without_image_is_rejected(self, tmp_path):
-        with pytest.raises(HarborTaskError, match="needs a build"):
-            load_task(write_task(tmp_path / "t", dockerfile="FROM ubuntu\nRUN true"))
+        with pytest.raises(HarborTaskError, match=r"needs a build \(COPY\)"):
+            load_task(write_task(tmp_path / "t", dockerfile="FROM ubuntu\nRUN true\nCOPY . /app"))
+        with pytest.raises(HarborTaskError, match=r"needs a build \(RUN with a heredoc"):
+            load_task(write_task(tmp_path / "t", dockerfile="FROM ubuntu\nRUN <<EOF\ntrue\nEOF"))
+
+    def test_overlay_dockerfile_records_the_run_lines(self, tmp_path):
+        toml = HELLO_TOML + '\n[environment.env]\nDEBIAN_FRONTEND = "teletype"\n'
+        task = load_task(write_task(tmp_path / "t", dockerfile=TB21_DEBIAN_DOCKERFILE, toml=toml))
+        assert task.image == "debian:bookworm-slim" and task.workdir == "/app" and task.user is None
+        # task.toml wins for the sandbox env, but the RUN lines keep the Dockerfile's own ENV.
+        assert task.env == {"PATH": "/opt/tools/bin:$PATH", "DEBIAN_FRONTEND": "teletype"}
+        assert [run.command[:10] for run in task.overlay] == ["apt-get up", "mkdir -p /"]
+        assert task.overlay[1].env["DEBIAN_FRONTEND"] == "noninteractive"
+        assert task.needs_sandbox
+
+    def test_pull_mode_task_has_no_overlay(self, tmp_path):
+        assert load_task(write_task(tmp_path / "t")).overlay == ()
 
     def test_prebuilt_image_allows_a_real_dockerfile(self, tmp_path):
         toml = HELLO_TOML.replace("cpus = 1", 'docker_image = "org/task:1"\ncpus = 1')
-        task = load_task(write_task(tmp_path / "t", dockerfile="FROM ubuntu\nRUN true", toml=toml))
-        assert task.image == "org/task:1"
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM ubuntu\nRUN true\nWORKDIR /built", toml=toml))
+        # The prebuilt image is the build's result: nothing from the Dockerfile is re-applied.
+        assert task.image == "org/task:1" and task.overlay == () and task.workdir is None
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM ubuntu\nCOPY . /app", toml=toml))
+        assert task.image == "org/task:1" and task.overlay == ()
 
     def test_missing_pieces_are_reported(self, tmp_path):
         with pytest.raises(HarborTaskError, match="no task.toml"):
