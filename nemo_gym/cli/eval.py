@@ -323,7 +323,7 @@ def _datasets_to_prepare(global_config_dict: DictConfig) -> List[BenchmarkConfig
                 if inspected_server_instances
                 else "No server instances with `responses_api_agents` were found in the resolved config."
             )
-            + " Pass a config with `gym eval prepare --config <config path>`."
+            + " Pass a config with `--config <config path>` or a benchmark with `--benchmark <name>`."
         )
 
     return datasets_to_prepare
