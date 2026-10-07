@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Tau2 (retail, airline, telecom): 278 customer-service tasks x 8 repeats. A user-simulator model
+# plays the customer; a task scores 1 if the final state matches the expected outcome.
+#
+#   nemotron_recipes/marlin/run.sh tau2
+#
+# Needs the simulator endpoint in env.yaml (judge_base_url, user_simulator_api_key) and SIM_KEY in
+# your shell; the endpoint must serve Qwen3-235B-A22B-Instruct-2507-FP8 on
+# <judge_base_url>/chat/completions. Gym installs the tau2 code and data from
+# https://github.com/bxyu-nvidia/tau2-bench (unpinned branches, as for tau3.yaml).
+
+gym_commit: 538886bff48f31a1567670fd5ed29c9ddfea59dd
+benchmark_config: benchmarks/tau2/configs/tau2.yaml
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      sequential_reasoning_allowed: false  # as in the published run (Gym's default is true)
+
+# User simulator: Qwen3-235B-A22B-Instruct-2507-FP8 instead of the benchmark default (gpt-5.2).
+# Set tau2_user_simulator_model_name in env.yaml only if your provider uses another id.
+tau2_user_simulator_model_name: Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
+tau2_benchmark_agent:
+  responses_api_agents:
+    tau2:
+      user_model_server:
+        name: Qwen3-235B-A22B-Instruct-2507-FP8
+Qwen3-235B-A22B-Instruct-2507-FP8:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${judge_base_url}
+      api_key: ${user_simulator_api_key}
+      model: ${tau2_user_simulator_model_name}
+      replace_developer_role_with_system: true
+      return_token_id_information: false
+      uses_reasoning_parser: true

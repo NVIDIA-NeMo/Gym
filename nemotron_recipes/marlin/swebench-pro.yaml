@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SWE-bench Pro (public set): 731 harder, larger tasks x 3 repeats. The OpenCode agent fixes each
+# one inside a container holding the project; the project's tests decide. Needs Docker (task images
+# come from Docker Hub; log in to avoid pull limits) and ~4 CPU / 30 GB per concurrent task.
+#
+#   nemotron_recipes/marlin/run.sh swebench-pro
+#
+# Runs in OpenSandbox, the sandbox the published run used (NVIDIA's hosted instance), self-hosted
+# on your machine: README.md has the setup, including the firewall rule it needs. Serve the model
+# with --enable-auto-tool-choice --tool-call-parser qwen3_coder as well as
+# --reasoning-parser nemotron_v3.
+
+gym_commit: 1e668906d2e69a9e8ee9aaafc60050a4025d9688
+benchmark_config:
+  - benchmarks/swebench/pro/opencode.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      # Gym's model server sets these on every request, whatever the agent sends (the agent asks
+      # for its own max_tokens): the published run's values, from the policy-model override
+      # in the Gym it ran with, minus its num_workers and
+      # max_output_tokens, which are not Chat Completions fields (vLLM ignores them; stricter
+      # endpoints reject the request).
+      sampling_overrides:
+        temperature: 1.0
+        top_p: 0.95
+        max_tokens: null
+        max_completion_tokens: null
+      propagate_context_overflow_errors: true
+
+# Sandboxes call Gym's servers back. Docker's default bridge gateway on Linux: reachable from
+# the sandboxes, not from your network. Change it if your Docker network differs.
+default_host: 172.17.0.1
+
+# Tasks at once; PARALLEL overrides it. Each task is a container on your machine, so this stays
+# low. The published run used 1024 on NVIDIA's cluster.
+num_samples_in_parallel: 16

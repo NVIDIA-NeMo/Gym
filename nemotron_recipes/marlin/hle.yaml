@@ -46,12 +46,9 @@ judge_model_name: gpt-5.6-luna
 judge_model:
   responses_api_models:
     openai_model:
-      # Responses API form. The published run sent the Chat Completions spelling
-      # (reasoning_effort), which its endpoint applied as effort medium; OpenAI's Responses
-      # API rejects that spelling.
+      # As the published run sent it.
       extra_body:
-        reasoning:
-          effort: medium
+        reasoning_effort: medium
 hle_equivalence_llm_judge_resources_server:
   resources_servers:
     equivalence_llm_judge:

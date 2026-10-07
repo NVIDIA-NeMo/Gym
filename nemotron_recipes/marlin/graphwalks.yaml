@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# GraphWalks (no tools): 950 long-context prompts, one sample each. Every prompt lists the
+# edges of a directed graph and asks for the parents of a node or for the nodes at exactly
+# depth N of a breadth-first search. Reward: F1 between the returned and the expected node
+# set; there is no judge model.
+#
+#   nemotron_recipes/marlin/run.sh graphwalks
+#
+# run.sh first sources graphwalks.setup.sh, which installs the tokenizer packages prepare
+# needs.
+#
+# Prompts are up to ~361,000 tokens. Serve the model with a context length (--max-model-len)
+# that fits the longest prompt plus the 100,000-token output cap.
+#
+# Like the published run, prepare counts tokens with the Nemotron 3 Super tokenizer
+# (downloaded from the Hugging Face Hub) and drops the 200 of openai/graphwalks' 1150 prompts
+# above 1,048,576 tokens. Neither is pinned to a revision: Gym loads the latest of both, and
+# the dataset had 1150 prompts when the published number was produced. A different prompt
+# count means a different prompt set.
+
+# Gym commit the published number was produced with; run.sh pins to it.
+gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
+# Gym benchmark config this recipe builds on.
+benchmark_config: benchmarks/graphwalks/config.yaml
+
+# The published run's prompt set (the benchmark default keeps all 1150 prompts).
+prepare_script_args:
+  tokenizer_name: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  max_context_tokens: 1048576
+
+responses_create_params:
+  # The published run capped each answer at 100,000 output tokens.
+  max_output_tokens: 100000
