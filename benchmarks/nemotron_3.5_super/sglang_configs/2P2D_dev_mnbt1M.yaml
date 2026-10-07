@@ -186,7 +186,7 @@ roles:
       disaggregation-mode: prefill
       skip-server-warmup: true
       attention-backend: trtllm_mha
-      chunked-prefill-size: 1048576
+      chunked-prefill-size: 262144
       context-length: 262144
       disaggregation-transfer-backend: nixl
       dtype: bfloat16
@@ -205,7 +205,7 @@ roles:
       mamba-full-memory-ratio: 4
       mamba-radix-cache-strategy: extra_buffer
       mamba-ssm-dtype: float32
-      max-prefill-tokens: 1048576
+      max-prefill-tokens: 262144
       max-running-requests: 1024
       mem-fraction-static: 0.9
       moe-a2a-backend: none
