@@ -772,20 +772,21 @@ class TestResultUsage:
         )
         assert response.usage is None
 
-    def test_missing_details_remain_unknown(self) -> None:
+    @pytest.mark.parametrize(("prompt_tokens", "completion_tokens"), [(10, 20), (0, 0)])
+    def test_native_totals_preserve_zero_and_unknown_details(self, prompt_tokens: int, completion_tokens: int) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         response = hermes._response_from_result(
             body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
             result={
                 "messages": [{"role": "assistant", "content": "done"}],
-                "prompt_tokens": 10,
-                "completion_tokens": 20,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
             },
             model_name="model",
         )
-        assert response.usage.input_tokens == 10
-        assert response.usage.output_tokens == 20
-        assert response.usage.total_tokens == 30
+        assert response.usage.input_tokens == prompt_tokens
+        assert response.usage.output_tokens == completion_tokens
+        assert response.usage.total_tokens == prompt_tokens + completion_tokens
         assert response.usage.input_tokens_details.cached_tokens is None
         assert response.usage.output_tokens_details.reasoning_tokens is None
 
@@ -1105,10 +1106,13 @@ class TestMaxTokens:
 
 
 class TestRunUsage:
+    @pytest.mark.parametrize("native_usage_available", [False, True])
     @pytest.mark.parametrize(
-        "capture_mode", ["complete", "missing_usage", "missing_capture", "disabled", "no_identity"]
+        "capture_mode", ["complete", "missing_usage", "missing_capture", "incomplete", "disabled", "no_identity"]
     )
-    def test_legacy_run_reports_agent_usage_before_verification(self, tmp_path: Path, capture_mode: str) -> None:
+    def test_legacy_run_reports_agent_usage_before_verification(
+        self, tmp_path: Path, capture_mode: str, native_usage_available: bool
+    ) -> None:
         client = MagicMock(spec=ServerClient)
         client.global_config_dict = {
             "observability_enabled": capture_mode != "disabled",
@@ -1124,17 +1128,23 @@ class TestRunUsage:
         response = agent._response_from_result(
             body=run_body.responses_create_params,
             model_name="model",
-            result={"messages": [{"role": "assistant", "content": "answer", "prompt_token_ids": [1, 2]}]},
+            result={"messages": [{"role": "assistant", "content": "answer", "prompt_token_ids": [1, 2]}]}
+            | ({"prompt_tokens": 600, "completion_tokens": 80} if native_usage_available else {}),
         ).model_dump(mode="json")
+        expected_counts = None
+        if capture_mode == "complete":
+            expected_counts = (30, 10)
+        elif native_usage_available and capture_mode in {"disabled", "no_identity"}:
+            expected_counts = (600, 80)
         expected_usage = (
             {
-                "input_tokens": 30,
-                "output_tokens": 10,
-                "total_tokens": 40,
+                "input_tokens": expected_counts[0],
+                "output_tokens": expected_counts[1],
+                "total_tokens": sum(expected_counts),
                 "input_tokens_details": {"cached_tokens": None},
                 "output_tokens_details": {"reasoning_tokens": None},
             }
-            if capture_mode == "complete"
+            if expected_counts is not None
             else None
         )
 
@@ -1178,6 +1188,8 @@ class TestRunUsage:
                     record(20, 7)
                 if capture_mode == "missing_usage":
                     store.record(rollout_id, {"response": {}})
+                if capture_mode == "incomplete":
+                    store.mark_incomplete(rollout_id)
                 record(4000, key="1-2")  # A different dispatch attempt.
                 return _FakeResponse(response, cookies)
             assert url_path == "/verify"
@@ -1213,14 +1225,15 @@ class TestRunUsage:
         )
         with TestClient(environment.setup_webserver()) as http:
             reply = http.post("/run", json=body)
-            if capture_mode == "complete":
-                metrics_reply = http.post("/aggregate_metrics", json={"verify_responses": [reply.json()]})
-                assert metrics_reply.status_code == 200
-                metrics = metrics_reply.json()["agent_metrics"]
-                assert metrics["mean/input_tokens"] == 30
-                assert metrics["mean/output_tokens"] == 10
-                assert metrics["mean/total_tokens"] == 40
-        assert reply.status_code == 200
+            assert reply.status_code == 200
+            metrics_reply = http.post("/aggregate_metrics", json={"verify_responses": [reply.json()]})
+            assert metrics_reply.status_code == 200
+            metrics = metrics_reply.json()["agent_metrics"]
+            for field in ("input_tokens", "output_tokens", "total_tokens"):
+                if expected_usage is None:
+                    assert f"mean/{field}" not in metrics
+                else:
+                    assert metrics[f"mean/{field}"] == expected_usage[field]
         result = reply.json()
         assert result["response"]["usage"] == expected_usage
         assert result["response"]["output"] == response["output"]
