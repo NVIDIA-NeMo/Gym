@@ -3003,13 +3003,14 @@ def test_auto_pd_rounds_up_to_full_nodes(tmp_path):
     assert config.compute["hsg"].node_pools["prefill"].nodes == 3
 
 
-def test_auto_pd_server_per_node_is_refused(tmp_path):
+def test_auto_pd_server_per_node_sizes_to_one_node_per_instance(tmp_path):
+    # server_per_node forces instances=1; auto-size gives the pool exactly 1 node.
     services = _pd_services(server_per_node=True)
     for tier in ("prefill", "decode"):
         services["policy"][tier]["number_of_instances"] = 1
     pools = {"prefill": {**_PD_POOLS["prefill"], "nodes": "auto"}, "decode": _PD_POOLS["decode"]}
-    with pytest.raises(ValueError, match="server_per_node"):
-        _pd_config(tmp_path, services=services, pools=pools)
+    config = _pd_config(tmp_path, services=services, pools=pools)
+    assert config.compute["hsg"].node_pools["prefill"].nodes == 1
 
 
 def test_auto_pd_two_tiers_on_same_pool_is_refused(tmp_path):
@@ -3017,7 +3018,7 @@ def test_auto_pd_two_tiers_on_same_pool_is_refused(tmp_path):
     services["policy"]["prefill"]["node_pool"] = "shared"
     services["policy"]["decode"]["node_pool"] = "shared"
     pools = {"shared": {"partition": "batch", "nodes": "auto", "ntasks_per_node": 1, "gpus_per_node": 8}}
-    with pytest.raises(ValueError, match="2 prefill/decode tiers"):
+    with pytest.raises(ValueError, match="share node_pool"):
         _pd_config(tmp_path, services=services, pools=pools)
 
 
