@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import os
 import shlex
 import shutil
 import sqlite3
@@ -22,9 +23,11 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import anyio
+from fastapi import Request
+from pydantic import ValidationError
 from pytest import MonkeyPatch, fixture, mark, raises
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -195,7 +198,7 @@ class TestOpenCodeSandboxedAgent:
         actual_usages = OpenCodeSandboxedAgent._opencode_export_to_usages(None, opencode_export_test_data)
         expected_usages = [
             NeMoGymResponseUsage(
-                input_tokens=55,
+                input_tokens=7863,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=7808),
                 output_tokens=10,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
@@ -211,6 +214,69 @@ class TestOpenCodeSandboxedAgent:
         ]
 
         assert expected_usages == actual_usages
+
+    @mark.parametrize(
+        "cache_read,cache_write,expected_input",
+        [(0, 0, 122), (5760, 0, 5882), (0, 5760, 5882), (5000, 760, 5882)],
+    )
+    def test_usage_includes_cache_in_input_total(self, cache_read: int, cache_write: int, expected_input: int) -> None:
+        export = {
+            "messages": [
+                {
+                    "info": {
+                        "role": "assistant",
+                        "tokens": {
+                            "input": 122,
+                            "output": 22,
+                            "reasoning": 0,
+                            "cache": {"read": cache_read, "write": cache_write},
+                            "total": expected_input + 22,
+                        },
+                    }
+                }
+            ]
+        }
+        (usage,) = OpenCodeSandboxedAgent._opencode_export_to_usages(None, export)
+        assert usage.input_tokens == expected_input
+        assert usage.input_tokens_details.cached_tokens == cache_read
+        assert usage.output_tokens == 22
+        assert usage.total_tokens == expected_input + 22
+
+    def test_cached_input_aggregate_matches_prompt_usage(self) -> None:
+        export = {
+            "messages": [
+                {
+                    "info": {
+                        "role": "assistant",
+                        "tokens": {
+                            "input": 5709,
+                            "output": 161,
+                            "reasoning": 0,
+                            "cache": {"read": 0, "write": 0},
+                            "total": 5870,
+                        },
+                    }
+                },
+                {
+                    "info": {
+                        "role": "assistant",
+                        "tokens": {
+                            "input": 122,
+                            "output": 22,
+                            "reasoning": 0,
+                            "cache": {"read": 5760, "write": 0},
+                            "total": 5904,
+                        },
+                    }
+                },
+            ]
+        }
+        usage = NeMoGymResponseUsage.sum_from_list(OpenCodeSandboxedAgent._opencode_export_to_usages(None, export))
+        assert usage.input_tokens == 11591
+        assert usage.input_tokens_details.cached_tokens == 5760
+        assert usage.output_tokens == 183
+        assert usage.total_tokens == 11774
+        assert usage.total_tokens == usage.input_tokens + usage.output_tokens
 
     @mark.parametrize("reasoning", [0, 4396])
     def test_usage_includes_reasoning_in_output_total(self, reasoning: int) -> None:
@@ -244,17 +310,28 @@ class TestOpenCodeSandboxedAgent:
         assert combined.output_tokens_details.reasoning_tokens == 2 * reasoning
         assert combined.total_tokens == combined.input_tokens + combined.output_tokens
 
+    @mark.parametrize("stage_ripgrep", [False, True])
     @mark.parametrize("remaining_context", [False, True])
     @mark.parametrize("observability_enabled", [False, True])
     async def test_responses_sanity(
         self,
         opencode_export_test_data: Dict[str, Any],
         monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+        stage_ripgrep: bool,
         remaining_context: bool,
         observability_enabled: bool,
     ) -> None:
         config = self._create_config()
         config.output_token_policy = "remaining_context" if remaining_context else "fixed"
+        if stage_ripgrep:
+            binary = tmp_path / "rg with spaces"
+            binary.write_text("#!/bin/sh\necho 'ripgrep test'\n")
+            config = OpenCodeSandboxedAgentConfig.model_validate(
+                config.model_dump() | {"local_ripgrep_binary_path": str(binary)}
+            )
+            config.preinstalled_opencode = True
+            config.opencode_version = "test"
         client = MagicMock(spec=ServerClient)
         client.global_config_dict = {"observability_enabled": observability_enabled}
         server = OpenCodeSandboxedAgent(config=config, server_client=client)
@@ -314,7 +391,9 @@ class TestOpenCodeSandboxedAgent:
         else:
             assert plugins == ["file:///user-plugin.js"]
 
-        assert sandbox_mock.upload.await_count == len(server._runtime_plugins()) + int(observability_enabled)
+        assert sandbox_mock.upload.await_count == (
+            len(server._runtime_plugins()) + int(observability_enabled) + int(stage_ripgrep)
+        )
 
         expected_response = NeMoGymResponse(
             id="resp_",
@@ -384,7 +463,7 @@ class TestOpenCodeSandboxedAgent:
             top_logprobs=None,
             truncation=None,
             usage=NeMoGymResponseUsage(
-                input_tokens=8747,
+                input_tokens=16555,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=7808),
                 output_tokens=81,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
@@ -395,12 +474,109 @@ class TestOpenCodeSandboxedAgent:
 
         assert expected_response == actual_response
         # Execution uploads plugins even when a resource supplied this sandbox.
+        expected_uploads = []
         if remaining_context:
-            sandbox_mock.upload.assert_any_await(
-                Path(app_module.__file__).with_name("remaining-context.js"), "/tmp/nemo-gym-remaining-context.js"
+            expected_uploads.append(
+                call(Path(app_module.__file__).with_name("remaining-context.js"), "/tmp/nemo-gym-remaining-context.js")
             )
+        if observability_enabled:
+            expected_uploads.append(
+                call(app_module._ASSISTANT_MESSAGE_PLUGIN, app_module._REMOTE_ASSISTANT_MESSAGE_PLUGIN)
+            )
+        if stage_ripgrep:
+            expected_uploads.append(call(binary, "/tmp/nemo-gym-ripgrep-"))
+        assert sandbox_mock.upload.await_args_list == expected_uploads
+        assert [mock_call[0] for mock_call in sandbox_mock.mock_calls[: len(expected_uploads) + 1]] == [
+            *(["upload"] * len(expected_uploads)),
+            "exec",
+        ]
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
         assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        if stage_ripgrep:
+            # Run the generated launch command: a readable upload may not be movable.
+            upload_dir = tmp_path / "uploads"
+            upload_dir.mkdir()
+            uploaded = upload_dir / "rg"
+            shutil.copyfile(binary, uploaded)
+            uploaded.chmod(0o444)
+            upload_dir.chmod(0o555)
+            home = tmp_path / "agent home"
+            bin_dir = home / ".opencode/bin"
+            bin_dir.mkdir(parents=True)
+            opencode = bin_dir / "opencode"
+            opencode.write_text(
+                '#!/bin/sh\nif [ "$1" = --version ]; then echo test; '
+                'else rg --version && touch "$HOME/agent-started"; fi\n'
+            )
+            opencode.chmod(0o755)
+            local_command = command.replace("/tmp/nemo-gym-ripgrep-", shlex.quote(str(uploaded))).replace(
+                "/tmp/nemo-gym-mcp-setup-error", shlex.quote(str(tmp_path / "mcp-error"))
+            )
+            try:
+                completed = subprocess.run(
+                    ["sh", "-c", local_command],
+                    env={"HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{os.defpath}"},
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=10,
+                )
+            finally:
+                upload_dir.chmod(0o755)
+            assert completed.returncode == 0, completed.stderr
+            installed = bin_dir / "rg"
+            assert installed.read_bytes() == uploaded.read_bytes() == binary.read_bytes()
+            assert installed.stat().st_mode & 0o777 == 0o755
+            assert installed.stat().st_uid == os.getuid()
+            assert (home / "agent-started").is_file()
+        else:
+            assert "nemo-gym-ripgrep" not in command
+
+    def test_missing_local_ripgrep_is_rejected(self, tmp_path: Path) -> None:
+        with raises(ValidationError, match="Path does not point to a file"):
+            OpenCodeSandboxedAgentConfig.model_validate(
+                self._create_config().model_dump() | {"local_ripgrep_binary_path": str(tmp_path / "missing-rg")}
+            )
+
+    @mark.parametrize("error_type", [PermissionError, FileNotFoundError])
+    async def test_ripgrep_upload_failure_propagates_without_export_and_cleans_up(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, error_type: type[OSError]
+    ) -> None:
+        binary = tmp_path / "rg"
+        binary.write_bytes(b"readable upload")
+        config = OpenCodeSandboxedAgentConfig.model_validate(
+            self._create_config().model_dump() | {"local_ripgrep_binary_path": str(binary)}
+        )
+        seed = SimpleNamespace(ok=True, cookies={}, json=AsyncMock(return_value={"sandbox_handle": "seed"}))
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(return_value=seed)
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        upload_error = error_type("ripgrep upload failed")
+        sandbox = MagicMock(
+            upload=AsyncMock(side_effect=upload_error),
+            exec=AsyncMock(return_value=SimpleNamespace(stdout="[]", stderr="", return_code=0, error_type=None)),
+            download=AsyncMock(),
+            stop=AsyncMock(),
+        )
+        monkeypatch.setattr(server, "_start_sandbox", AsyncMock(return_value=sandbox))
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+        request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "upload-failure"}})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
+
+        with raises(error_type) as caught:
+            await server.run(request, body)
+
+        assert caught.value is upload_error
+        sandbox.exec.assert_not_awaited()
+        sandbox.download.assert_not_awaited()
+        sandbox.stop.assert_awaited_once()
+        assert client.post.await_count == 1  # Seed only; no verification of an unstarted agent.
+        assert server._sandbox_id_to_sandbox == server._sandbox_id_to_run_result == {}
+        assert not hasattr(request.state, "_ng_observation_invocation_id")
+        assert not hasattr(request.state, "_ng_opencode_mcp")
 
     @mark.parametrize("return_code,error_type", [(125, "TimeoutError"), (124, "timeout"), (124, None)])
     def test_agent_sandbox_observation_classifies_timeout_errors(self, return_code, error_type) -> None:

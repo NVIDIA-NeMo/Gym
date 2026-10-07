@@ -1,0 +1,344 @@
+{
+  "date_utc": "2026-10-05",
+  "scope": "Five published bounded model attempts on unchanged public examples, with one earlier attempt interrupted by a model-call timeout retained in this record, plus two golden/null pairs and a Python bootstrap check. A separate final follow-up records one golden/null pair and one three-turn model attempt; not a full benchmark run.",
+  "control_runtime_commit": "ff6841f7056022758b206e41a95cd751b27237f9",
+  "model_runtime_commit": "b051aab4e9f36ef0805c5df3f49b11b1f03354f2",
+  "resource_code_identical_between_runtime_commits": true,
+  "resource_app_sha256": "3cce6aee27b6a70e62f7ffd7ad405ffbae437b218984e90fcb07e298a23eda15",
+  "model_agent_overlay": {
+    "commit": "4abd72820908a28066a6dffcff57c0f10e3d5103",
+    "app_sha256": "9b1f20f4faa42cc50a883990c9ee0961f47430f7b1753f22b9846a636ae473d9",
+    "description": "OpenCode app.py from separately reviewed ripgrep PR #3953; not added to this DeepSWE branch."
+  },
+  "public_source_revision": "435ee89ec2f2e2289f33b0da4f992f0b7b7266b9",
+  "sandbox_provider": "opensandbox",
+  "resource_settings": {
+    "enforce_agent_no_network": true,
+    "agent_model_endpoint_exception": "Enabled for live rollouts only",
+    "enforce_verifier_no_network": false,
+    "clear_verifier_logs": false,
+    "include_model_patch_in_response": true,
+    "task_cpu_multiplier": 2.0,
+    "task_memory_multiplier": 4.0
+  },
+  "controls": [
+    {
+      "task_id": "abs-module-cache-flags",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh75679ajj3b8dtd7se3h7z0a1833y6r-v1.1",
+      "same_image_for_agent_and_verifier": true,
+      "golden_reward": 1.0,
+      "golden_patch_bytes": 23719,
+      "null_reward": 0.0,
+      "null_patch_bytes": 0,
+      "both_evaluations_completed": true,
+      "either_masked": false,
+      "cleanup_errors": []
+    },
+    {
+      "task_id": "adaptix-name-mapping-aliases",
+      "image": "public.ecr.aws/d3j8x8q7/swe-bench-202605:kh73dq4n55jdxasppe6jjmth4183d47n-v1.1",
+      "same_image_for_agent_and_verifier": true,
+      "golden_reward": 1.0,
+      "golden_patch_bytes": 33000,
+      "null_reward": 0.0,
+      "null_patch_bytes": 0,
+      "both_evaluations_completed": true,
+      "either_masked": false,
+      "cleanup_errors": []
+    }
+  ],
+  "control_settings": {
+    "concurrency": 2,
+    "sandbox_ttl_s": 1800,
+    "sandbox_ready_timeout_s": 300
+  },
+  "python_bootstrap": {
+    "image": "debian:bookworm-slim",
+    "python_missing_initially": true,
+    "no_network_setting_refused_installation": true,
+    "no_network_check_scope": "Bootstrap configuration guard, not a separate network-isolation test",
+    "network_allowed_installation_succeeded": true,
+    "repeat_setup_succeeded": true,
+    "stdlib_imports_succeeded": true,
+    "published_image_modified": false
+  },
+  "live_model": {
+    "agent": "opencode_sandboxed_agent",
+    "opencode_version": "1.17.11",
+    "settings": {
+      "agent_turn_limit": 128,
+      "agent_timeout_s": 5400,
+      "model_call_timeout_ms": 180000,
+      "sandbox_ttl_s": 10800,
+      "sandbox_ready_timeout_s": 300,
+      "concurrency": 5,
+      "num_repeats": 1,
+      "delegation_enabled": false,
+      "sampling_overrides": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "max_tokens": 131072
+      },
+      "model": "nvidia/nvidia/nemotron-3.5-super-text-preview",
+      "opencode_max_context_window": 262144
+    },
+    "attempts": [
+      {
+        "task_id": "abs-module-cache-flags",
+        "reward": 0.0,
+        "assistant_turns": 117,
+        "tools": {
+          "bash": 57,
+          "read": 30,
+          "grep": 13,
+          "todowrite": 3,
+          "write": 3,
+          "edit": 18
+        },
+        "tool_statuses": {
+          "completed": 122,
+          "error": 2
+        },
+        "ending": "stop",
+        "model_patch_bytes": 22427,
+        "f2p_passed": 7,
+        "f2p_total": 20,
+        "p2p_passed": 3,
+        "p2p_total": 3,
+        "evaluation_completed": true,
+        "mask_sample": false,
+        "failure_stage": null,
+        "cleanup_errors": [],
+        "deleted_sandboxes_returning_404": 2,
+        "published_attempt": 1,
+        "inspection_notes": "Committed candidate; held-out behavior failures. Recovered from an oversized ripgrep JSON record and an edit mismatch."
+      },
+      {
+        "task_id": "abs-stepped-slices",
+        "reward": 0.0,
+        "assistant_turns": 112,
+        "tools": {
+          "bash": 57,
+          "read": 27,
+          "grep": 6,
+          "glob": 1,
+          "edit": 20
+        },
+        "tool_statuses": {
+          "completed": 109,
+          "error": 2
+        },
+        "ending": "stop",
+        "model_patch_bytes": 34629,
+        "f2p_passed": 4,
+        "f2p_total": 6,
+        "p2p_passed": 5,
+        "p2p_total": 6,
+        "evaluation_completed": true,
+        "mask_sample": false,
+        "failure_stage": null,
+        "cleanup_errors": [],
+        "deleted_sandboxes_returning_404": 2,
+        "published_attempt": 1,
+        "inspection_notes": "Committed candidate; held-out parser and negative-index failures. Native glob and grep calls succeeded with staged ripgrep."
+      },
+      {
+        "task_id": "actionlint-action-pinning-lint",
+        "reward": 0.0,
+        "assistant_turns": 128,
+        "tools": {
+          "bash": 47,
+          "read": 33,
+          "grep": 7,
+          "todowrite": 2,
+          "edit": 41,
+          "write": 7
+        },
+        "tool_statuses": {
+          "completed": 134,
+          "error": 3
+        },
+        "ending": "stop",
+        "model_patch_bytes": 0,
+        "f2p_passed": 0,
+        "f2p_total": 55,
+        "p2p_passed": 145,
+        "p2p_total": 145,
+        "evaluation_completed": true,
+        "mask_sample": false,
+        "failure_stage": null,
+        "cleanup_errors": [],
+        "deleted_sandboxes_returning_404": 2,
+        "published_attempt": 2,
+        "inspection_notes": "Retry completed at the 128-turn limit without committing; final text recommends committing as remaining work, so the submitted patch is empty. Seven native grep calls succeeded; three malformed/no-op edit/write calls were recovered. Some optional native checks could not run because of blocked network or unavailable staticcheck; no hidden-grader access appeared in the reviewed tool inputs."
+      },
+      {
+        "task_id": "adaptix-name-mapping-aliases",
+        "reward": 0.0,
+        "assistant_turns": 128,
+        "tools": {
+          "bash": 44,
+          "read": 43,
+          "edit": 40
+        },
+        "tool_statuses": {
+          "completed": 125,
+          "error": 2
+        },
+        "ending": "stop",
+        "model_patch_bytes": 0,
+        "f2p_passed": 0,
+        "f2p_total": 44,
+        "p2p_passed": 2738,
+        "p2p_total": 2738,
+        "evaluation_completed": true,
+        "mask_sample": false,
+        "failure_stage": null,
+        "cleanup_errors": [],
+        "deleted_sandboxes_returning_404": 2,
+        "published_attempt": 1,
+        "inspection_notes": "Reached the 128-turn budget; final message reports unfinished work and no commit. Only committed changes are transferred, so the submitted patch is empty."
+      },
+      {
+        "task_id": "aiomonitor-task-snapshots-diff",
+        "reward": 0.0,
+        "assistant_turns": 109,
+        "tools": {
+          "bash": 43,
+          "read": 26,
+          "todowrite": 2,
+          "edit": 36,
+          "write": 1
+        },
+        "tool_statuses": {
+          "completed": 107,
+          "error": 1
+        },
+        "ending": "stop",
+        "model_patch_bytes": 43049,
+        "f2p_passed": 49,
+        "f2p_total": 53,
+        "p2p_passed": 7,
+        "p2p_total": 8,
+        "evaluation_completed": true,
+        "mask_sample": false,
+        "failure_stage": null,
+        "cleanup_errors": [],
+        "deleted_sandboxes_returning_404": 2,
+        "published_attempt": 1,
+        "inspection_notes": "Committed candidate; held-out API route failures and a regression. Recovered from an edit mismatch; model-written scratch scripts also hit shell timeouts."
+      }
+    ],
+    "model_call_timeout_retries": [
+      {
+        "task_id": "actionlint-action-pinning-lint",
+        "original_attempt": 1,
+        "published_attempt": 2,
+        "retry_settings": {
+          "agent_turn_limit": 128,
+          "agent_timeout_s": 5400,
+          "model_call_timeout_ms": 180000,
+          "sandbox_ttl_s": 10800,
+          "sandbox_ready_timeout_s": 300,
+          "concurrency": 1,
+          "num_repeats": 1,
+          "delegation_enabled": false,
+          "sampling_overrides": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_tokens": 131072
+          },
+          "model": "nvidia/nvidia/nemotron-3.5-super-text-preview",
+          "opencode_max_context_window": 262144
+        },
+        "original_assistant_turns": 109,
+        "original_error": {
+          "name": "UnknownError",
+          "data": {
+            "message": "The operation timed out."
+          }
+        },
+        "original_opencode_finished": false,
+        "original_reward": 0.0,
+        "original_mask_sample": false,
+        "original_failure_kind": null,
+        "original_model_patch_bytes": 0,
+        "original_deleted_sandboxes_returning_404": 2,
+        "classification": "Attempt interrupted by a model-call timeout; the underlying cause is unconfirmed. The raw unmasked zero is not a valid task-solving result. Raw output and export retained privately, not relabeled or silently discarded."
+      }
+    ],
+    "outcomes": {
+      "tasks": 5,
+      "passes": 0,
+      "failures": 5,
+      "masked": 0,
+      "total_model_attempts": 6,
+      "earlier_interrupted_attempts": 1
+    },
+    "trajectory_file": "example_rollouts.jsonl",
+    "stock_health_summary": "See direct transcript, verifier and independent cleanup inspection; no automatic health certification is claimed."
+  },
+  "cleanup": {
+    "distinct_agent_and_verifier_sandboxes_per_attempt": true,
+    "independent_get_route": "/v1/sandboxes/{sandbox_id}",
+    "deleted_sandboxes_returning_404": 21,
+    "scope": "Eight control sandboxes, twelve model-run sandboxes (including the interrupted attempt and its one retry), and one Python bootstrap sandbox."
+  },
+  "final_followup_smoke": {
+    "date_utc": "2026-10-05",
+    "runtime_base_commit": "379ca4fe2161437be16d9339a35c54d31e9e80e0",
+    "runtime_changes": "Only app.py patch decoding changed from python3 -c to python3 -I -c; exact candidate source hash below. No agent overlay.",
+    "resource_app_sha256": "02821bee1adbc7a85b9569f0b88d38609c903869ba4171c16c591320c666e3fa",
+    "task_id": "abs-module-cache-flags",
+    "task_source": "Unchanged committed public example, provisioned from inline files.",
+    "resource_settings": "Same network, retention, patch-response and resource-multiplier settings recorded above.",
+    "golden_null_controls": {
+      "golden_reward": 1.0,
+      "golden_patch_bytes": 23719,
+      "null_reward": 0.0,
+      "null_patch_bytes": 0,
+      "both_evaluations_completed": true,
+      "either_masked": false,
+      "concurrency": 2,
+      "cleanup_errors": []
+    },
+    "live_model": {
+      "model": "nvidia/nvidia/nemotron-3.5-super-text-preview",
+      "agent": "opencode_sandboxed_agent",
+      "opencode_version": "1.17.11",
+      "agent_turn_limit": 3,
+      "agent_timeout_s": 600,
+      "model_call_timeout_ms": 180000,
+      "sandbox_ttl_s": 1800,
+      "sandbox_ready_timeout_s": 300,
+      "concurrency": 1,
+      "num_repeats": 1,
+      "delegation_enabled": false,
+      "sampling_overrides": {"temperature": 1.0, "top_p": 0.95, "max_tokens": 131072},
+      "assistant_turns": 3,
+      "completed_bash_calls": 3,
+      "opencode_finished": true,
+      "reward": 0.0,
+      "model_patch_bytes": 0,
+      "f2p_passed": 0,
+      "f2p_total": 20,
+      "p2p_passed": 3,
+      "p2p_total": 3,
+      "evaluation_completed": true,
+      "mask_sample": false,
+      "failure_stage": null,
+      "cleanup_errors": [],
+      "inspection_notes": "Three successful repository-inspection bash calls, then a truthful step-limit summary. No committed changes; the empty patch graded zero. This is integration evidence, not task-solving validation."
+    },
+    "deleted_sandboxes_returning_404": 6,
+    "cleanup_scope": "Four control sandboxes and two model-run sandboxes, independently checked after deletion; separate from the 21 earlier sandboxes above.",
+    "limitations": "The Python bootstrap was not rerun for this decoding-only change. Earlier five-task trajectories and bootstrap evidence retain their original runtime provenance."
+  },
+  "limitations": [
+    "Five public examples with one documented model-call-timeout retry are illustrative integration evidence, not a pass@1 or full benchmark accuracy estimate.",
+    "The 128-turn cap can end an attempt before it submits a committed patch; these zeros are retained, not rerun or filtered out.",
+    "Earlier five-task model runs include the separate ripgrep agent fix; those runs are not a pristine whole-repository checkout at the resource runtime commit. The final follow-up has no agent overlay.",
+    "The missing-Python path was checked on Debian; other package managers were not exercised live.",
+    "Invalid-submission classification, non-UTF-8 patches, routing and log retention have separate regression coverage."
+  ]
+}

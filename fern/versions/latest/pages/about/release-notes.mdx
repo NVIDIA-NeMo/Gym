@@ -5,7 +5,102 @@ position: 4
 ---
 
 <AccordionGroup>
-<Accordion title="v0.6.0" defaultOpen>
+<Accordion title="v0.7.0" defaultOpen>
+
+### Release Summary
+
+NeMo Gym v0.7.0 introduces infrastructure for defining reusable agent-environment interaction patterns while improving the reliability of large-scale evaluation and training.
+
+Highlights:
+
+- Define reusable interaction patterns between agents and environments with Environment Servers that manage sessions, verification, cleanup, and failures
+- Reuse compatible agent harnesses across tasks and environments through common sandbox and verification infrastructure
+- Finish large evaluations reliably by respecting job time limits, keeping memory use predictable, and automatically resuming Slurm jobs after timeout or preemption
+- Preserve token-level training trajectories with durable worker-side capture for vLLM and Megatron
+- Launch multi-service OpenSandbox workloads from supported Compose files and pause or resume sandboxes without losing task state
+
+### First-Time Contributors
+
+We welcomed **39 first-time contributors** to NeMo Gym with this release:
+
+- **@pthombre** added durable external-sink token capture with worker-owned staging and terminal attribution
+- **@lauradang** added the Megatron worker capture backend and multimodal Megatron capture
+- **@iguehring-nvidia** added per-job OpenTelemetry collection and routed NeMo Lens telemetry through the job collector
+- **@afourniernv** added ATIF v1.7 export and reverification of supported external ATIF trajectories
+- **@waple0820**, **@deepbuilder**, **@lafrancef**, **@muskank7**, **@lilithgrigoryan**, and **@krishnpci** expanded the environment catalog with Interactive Browser, ViBench, Terminal-Bench 4, Aegis v4, AssayBench, and Indian Banking
+
+Thank you to all **91 NeMo Gym contributors** this cycle, including 39 first-time contributors!
+
+### Build and Configure Environments
+
+- Environment Servers define reusable interaction patterns that coordinate agent and resources sessions, verification, cleanup, and failures; v0.7 includes a built-in single-agent-turn implementation
+- Prepare reusable environment datasets without custom conversion scripts and report metrics at task, dataset, and environment levels
+- Reproduce benchmark setup through resolved manifests and catch configuration problems before servers start with strict validation
+- Reduce startup and memory overhead for servers that do not use distributed execution
+
+### Configure Agent Harnesses
+
+- Reuse compatible agent harnesses across tasks and environments while Environment Servers coordinate sandbox access, verification, and cleanup
+
+### Configure Models
+
+- Scale multi-turn vLLM evaluation across nodes with Ray Serve and prefill/decode disaggregation while keeping each conversation on the backend holding its cached context
+
+### Configure Sandboxes
+
+- Run and debug trusted workloads directly on your machine with the new Local provider; no container runtime required
+- Run multi-service workloads on OpenSandbox from supported Compose YAML; pause or resume sandboxes to preserve long-lived task state
+- Improve OpenSandbox reliability with configurable TLS verification, shared HTTP connections, and cleaner recovery from terminal and cancellation failures
+
+### Evaluation and Training
+
+- Preserve complete token-level training data even when inference runs outside the NeMo Gym process by staging token records on vLLM or Megatron workers before returning responses
+- Resume Slurm evaluations automatically after timeout or preemption while preserving the submission record and resolved configuration
+- Finish within an allocation's walltime by stopping new work at a dispatch budget; unstarted rows remain available when the run resumes, and retry rules control which failures run again
+- Keep driver memory predictable during large runs with bounded task admission and optional non-retaining collection
+- Avoid inflated scores in incomplete runs by optionally counting missing rollouts as zero, and distinguish infrastructure failures from unsuccessful task outcomes
+- Inspect and validate a fully resolved job configuration before submitting it
+- Spread resource-heavy repeats across a run by scheduling each task's first rollout before its second
+
+### Inspect and Export Agent Runs
+
+- Trust saved rollout evidence with health checks that catch failed model calls and missing turns across model and agent harness activity
+- Trace slow or failing submitted evaluations end to end with a per-job OpenTelemetry collector and model-call capture
+- Export NeMo Gym trajectories as ATIF v1.7 and re-verify supported ATIF trajectories from external systems
+
+### Environments and Benchmarks
+
+- **Software engineering and terminal tasks:** repair production repositories with SWE-bench Pro; solve longer terminal tasks with Terminal-Bench 4; evaluate scientific code with SciCodePile; grade workspace changes with JobBench and Workspace-Bench; and build web apps from product requirements with ViBench
+- **Browser, search, and agentic tasks:** interact with websites through local Playwright or remote CDP in Interactive Browser; evaluate deep and broad research with DeepSearchQA and WideSearch; compare chat quality through LMArena proxy evaluations; and train multi-step reasoning with Wordle
+- **Science, chemistry, and mathematics:** rank genes from CRISPR screens with AssayBench, reason about organic reaction mechanisms with FukuyamaBench, edit molecules under toxicity constraints with MolDeTox, and evaluate mathematical proofs with expanded MathArena suites
+- **Safety and reward modeling:** classify multimodal safety with Aegis v4, test sycophancy with False Statement Judge, and train models to act as Generative Reward Model judges
+- **Finance and professional tasks:** evaluate multi-turn retail banking, search a local SEC filings corpus, reason over professional PDF documents with GDP.pdf, and run more robust multimodal and multi-stage GDPVal judging
+
+See the [Available Environments](https://github.com/NVIDIA-NeMo/Gym#-available-environments) table for the full list.
+
+### Deprecation and Compatibility Notices
+
+- NeMo Gym now routes each episode through an Environment Server, which coordinates the agent, resources, verification, cleanup, and failure handling. Existing agent-only configurations continue to work through an automatically generated `legacy_agent` compatibility server but emit a migration warning. Add an explicit Environment Server or run `scripts/add_legacy_agent_environment_servers.py`
+- Ray now requires version 2.58.0 or newer
+- The optional vLLM dependency moved from vLLM 0.25.1 and FlashInfer 0.6.13 to vLLM 0.29.0 and FlashInfer 0.6.18; resync local model-server environments
+
+### Bug Fixes
+
+- Constrained tokenizers and datasets versions for Python 3.13 and PyArrow compatibility and updated dependencies for security fixes
+- Preserved structured Responses fields, upstream execution outcomes, and per-rollout seeds during conversion and replay
+- Stopped local and OpenCode sandbox processes when their rollouts are cancelled
+- Improved reliability across Terminal-Bench, SWE-bench Pro, Spider2, SciCode, and GDPVal
+
+### Documentation
+
+- Added an observability section covering rollout evidence, OpenTelemetry, metrics, and distributed tracing
+- Added a guide for comparing agent harnesses
+- Added sandbox setup and operations guides for Docker Compose, Daytona, and OpenSandbox
+- Expanded the CLI reference for ATIF export, reverification, dispatch budgets, missing-rollout accounting, interleaved repeats, and materialized tasksets
+
+</Accordion>
+
+<Accordion title="v0.6.0">
 
 ### Release Summary
 

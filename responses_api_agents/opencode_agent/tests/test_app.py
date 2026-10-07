@@ -249,14 +249,18 @@ class TestParseOpencodeSession:
         assert isinstance(call, NeMoGymResponseFunctionToolCall)
         assert call.status == "incomplete"
 
-    def test_step_finish_usage(self, tmp_path) -> None:
+    @pytest.mark.parametrize(
+        "cache,expected_input",
+        [({}, 122), ({"read": 5760}, 5882), ({"write": 5760}, 5882), ({"read": 5000, "write": 760}, 5882)],
+    )
+    def test_step_finish_usage(self, tmp_path: Path, cache: dict[str, int], expected_input: int) -> None:
         db = _session_db(
             tmp_path,
-            [("assistant", [{"type": "step-finish", "tokens": {"input": 100, "output": 20, "cache": {"read": 5}}}])],
+            [("assistant", [{"type": "step-finish", "tokens": {"input": 122, "output": 22, "cache": cache}}])],
         )
         _, usage = parse_opencode_session(db)
-        assert usage["input_tokens"] == 105
-        assert usage["output_tokens"] == 20
+        assert usage["input_tokens"] == expected_input
+        assert usage["output_tokens"] == 22
 
     def test_reasoning_usage_reaches_response(self, tmp_path: Path) -> None:
         db = _session_db(
