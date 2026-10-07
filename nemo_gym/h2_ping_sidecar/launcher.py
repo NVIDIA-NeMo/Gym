@@ -131,6 +131,7 @@ def build_sidecar(output_path: Path) -> None:
         env={**os.environ, "CGO_ENABLED": "0"},
         capture_output=True,
         text=True,
+        errors="replace",
         timeout=_BUILD_TIMEOUT_SEC,
     )
     if result.returncode != 0:
