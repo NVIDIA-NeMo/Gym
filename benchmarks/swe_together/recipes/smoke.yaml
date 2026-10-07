@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Apply after reference.yaml, before the independent provider/deployment overrides.
+# Keep real model, simulator, and judge execution; label this as health qualification.
+swe_together_resources:
+  resources_servers:
+    swe_together:
+      protocol_profile: smoke
+      scoring_profile: judge_all
+      datasets:
+        - name: swe_together
+          type: benchmark
+          taskset: swe_together:full109
+          jsonl_fpath: benchmarks/swe_together/data/full109.jsonl
+          prepare_script: benchmarks/swe_together/prepare.py
+          num_repeats: 1
+          license: Apache-2.0
+
+# Smoke-only candidate budget; reference.yaml retains the canonical 80 minutes.
+interactive_agent:
+  environment_servers:
+    interactive_agent:
+      interaction_timeout_seconds: 600
+
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      timeout: 600
+      session_execution_timeout_seconds: 600

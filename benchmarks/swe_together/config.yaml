@@ -1,0 +1,2 @@
+config_paths:
+  - benchmarks/swe_together/recipes/reference.yaml

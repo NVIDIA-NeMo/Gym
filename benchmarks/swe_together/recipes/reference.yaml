@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - resources_servers/swe_together/configs/swe_together.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_interactive.yaml
+  - responses_api_agents/claude_code_agent/configs/native.yaml
+  - environment_servers/interactive_agent/configs/interactive_agent.yaml
+  - ${oc.env:SWE_TOGETHER_MODELS_CONFIG,benchmarks/swe_together/recipes/models.yaml}
+
+swe_together_asset_root: ${oc.env:SWE_TOGETHER_SOURCE}/tasks
+swe_together_artifact_root: ${oc.env:SWE_TOGETHER_OUTPUT,${oc.env:PWD}/artifacts/swe_together}
+swe_together_candidate: opencode_agent
+
+environment_routing_mode: taskset
+environment_server_routes:
+  swe_together:full109: interactive_agent
+
+interactive_agent:
+  environment_servers:
+    interactive_agent:
+      resources_server:
+        type: resources_servers
+        name: swe_together_resources
+      agent_server:
+        type: responses_api_agents
+        name: ${swe_together_candidate}
+      # Includes setup, the 4,800-second candidate, fixed judge, and diagnostics.
+      default_episode_timeout_seconds: 9000
+      interaction_timeout_seconds: 4800
+      cleanup_timeout_seconds: 300
+
+swe_together_resources:
+  resources_servers:
+    swe_together:
+      num_workers: 1
+      python_runtime_url: ${oc.env:RESOURCES_PYTHON_RUNTIME_URL,null}
+      python_runtime_sha256: ${oc.env:RESOURCES_PYTHON_RUNTIME_SHA256,null}
+      user_context_chars: 3000
+      max_resumes: 15
+      protocol_profile: reference
+      scoring_profile: reference
+      sandbox_config:
+        ttl_s: 10800
+        ready_timeout_s: 1200
+      datasets:
+        - name: swe_together
+          type: benchmark
+          taskset: swe_together:full109
+          jsonl_fpath: benchmarks/swe_together/data/full109.jsonl
+          prepare_script: benchmarks/swe_together/prepare.py
+          num_repeats: 2
+          license: Apache-2.0
+
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      concurrency: ${oc.env:CANDIDATE_CONCURRENCY,32}
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      token_id_capture: false
+      opencode_version: 1.15.13
+      native_model_id: openai/gpt-5.5
+      native_provider_id: openrouter
+      native_provider_npm: "@openrouter/ai-sdk-provider"
+      native_session_title: null
+      native_auxiliary_model: native_default
+      native_load_project_config: true
+      native_model_catalog: native
+      native_output_token_max: null
+      native_env:
+        OPENCODE_FAKE_VCS: git
+      native_model_options:
+        reasoning: true
+        variants:
+          none:
+            reasoning:
+              effort: none
+          minimal:
+            reasoning:
+              effort: minimal
+          low:
+            reasoning:
+              effort: low
+          medium:
+            reasoning:
+              effort: medium
+          high:
+            reasoning:
+              effort: high
+          xhigh:
+            reasoning:
+              effort: xhigh
+      reasoning_effort: high
+      timeout: 1800
+      session_execution_timeout_seconds: 4800
+      setup_timeout: 600
+      ripgrep_version: 15.1.0
+      prefetched_ripgrep_url: ${oc.env:OPENCODE_RIPGREP_URL,null}
+      prefetched_ripgrep_sha256: ${oc.env:OPENCODE_RIPGREP_SHA256,null}
+      python_runtime_url: ${oc.env:CANDIDATE_PYTHON_RUNTIME_URL,null}
+      python_runtime_sha256: ${oc.env:CANDIDATE_PYTHON_RUNTIME_SHA256,null}
+      local_opencode_binary_path: ${oc.env:OPENCODE_BINARY}
+      local_opencode_binary_sha256: 8e97f83175c84daeb51e96b34baf9ee9839ae54e5e848a3cce1e0e32dcf41a6c
+      opencode_config:
+        permission:
+          external_directory:
+            /workspace/**: allow
+            /tmp/**: allow
+            /var/tmp/**: allow
+            /opt/**: allow
+            /root/**: allow
+            /home/**: allow
+            /proc/**: allow
+            /usr/**: allow
+            /logs/**: allow
+
+swe_together_judge:
+  responses_api_agents:
+    claude_code_agent:
+      num_workers: 1
+      python_runtime_url: ${oc.env:JUDGE_PYTHON_RUNTIME_URL,null}
+      python_runtime_sha256: ${oc.env:JUDGE_PYTHON_RUNTIME_SHA256,null}
+      claude_code_version: 2.1.108
+      model: claude-opus-4-6
+      max_turns: 50
+      timeout: 1200
+      runtime_archive: ${oc.env:CLAUDE_CODE_ARCHIVE,null}
+      runtime_archive_url: ${oc.env:CLAUDE_CODE_ARCHIVE_URL,null}
+      runtime_archive_sha256: ${oc.env:CLAUDE_CODE_ARCHIVE_SHA256,null}
+
+observability_enabled: true
+model_call_capture_dir: ${swe_together_artifact_root}/model_calls
