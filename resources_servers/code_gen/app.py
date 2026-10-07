@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from lcb_integration.compute_code_generation_metrics import check_correctness_remote
 from lcb_integration.extraction_utils import LMStyle, extract_code
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -37,6 +37,8 @@ from nemo_gym.reward_profile import (
     compute_subset_metrics,
     highest_k_metrics,
 )
+from nemo_gym.sandbox.providers import SandboxSpec
+from resources_servers.code_gen.sandbox_execution import check_in_sandbox
 
 
 # ----------------------------
@@ -47,6 +49,16 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
     unit_test_timeout_secs: int
     debug: bool
     reasoning_format_penalty: float = 0.0
+    sandbox_provider: str | dict[str, Any] | None = None
+    sandbox_spec: SandboxSpec | None = None
+    sandbox_python: str = "python"
+    sandbox_setup_command: str | None = None
+
+    @model_validator(mode="after")
+    def validate_sandbox_config(self) -> "CompCodingResourcesServerConfig":
+        if (self.sandbox_provider is None) != (self.sandbox_spec is None):
+            raise ValueError("sandbox_provider and sandbox_spec must be set together")
+        return self
 
 
 # ----------------------------
@@ -185,7 +197,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 difficulty=difficulty,
             )
 
-        # 4) run (no sandbox)
+        # 4) run with the configured execution backend
         async with self._semaphore:
             """
             Sample looks like this:
@@ -220,8 +232,20 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 self.config.debug,  # debug
             )
 
-            future = check_correctness_remote.remote(*task_args)
-            result, metadata = await future
+            if self.config.sandbox_provider is None:
+                result, metadata = await check_correctness_remote.remote(*task_args)
+            else:
+                result, metadata = await check_in_sandbox(
+                    sample=task_args[0],
+                    generation=task_args[1],
+                    timeout=task_args[2],
+                    debug=task_args[3],
+                    provider=self.config.sandbox_provider,
+                    spec=self.config.sandbox_spec,
+                    python=self.config.sandbox_python,
+                    setup_command=self.config.sandbox_setup_command,
+                    named_configs=self.server_client.global_config_dict,
+                )
 
             unit_tests_time_taken = time() - start_time
 

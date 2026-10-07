@@ -130,6 +130,7 @@ def test_compiled_solution_is_reused_without_recompiling_per_test(monkeypatch, t
     )
     run_script.chmod(0o755)
     monkeypatch.setattr(ccc_eval, "_exec_sync", _execute_shell)
+    monkeypatch.setattr(ccc_eval, "_get_thread_test_sandbox", lambda _factory=None: object())
 
     compiled_solution_dir, compile_result = ccc_eval._compile_solution_once(
         "toy",

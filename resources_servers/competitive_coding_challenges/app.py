@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -28,7 +28,9 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.sandbox.providers import SandboxSpec
 from resources_servers.competitive_coding_challenges.ccc_eval import CCCEvaluator
+from resources_servers.competitive_coding_challenges.sandbox_evaluator import SandboxCCCEvaluator
 
 
 LOG = logging.getLogger(__name__)
@@ -87,6 +89,17 @@ class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig
     shared_dir: str = "/tmp"
     local_compile_dir: Optional[str] = "/tmp/nemo-gym-compile"
     reward_mode: Literal["binary", "fraction"] = "binary"
+    sandbox_provider: str | dict[str, Any] | None = None
+    sandbox_spec: SandboxSpec | None = None
+    sandbox_python: str = "python"
+    sandbox_setup_command: str | None = None
+    sandbox_timeout_secs: int = Field(default=1800, gt=0)
+
+    @model_validator(mode="after")
+    def validate_sandbox_config(self) -> "CompetitiveCodingChallengesResourcesServerConfig":
+        if (self.sandbox_provider is None) != (self.sandbox_spec is None):
+            raise ValueError("sandbox_provider and sandbox_spec must be set together")
+        return self
 
 
 class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
@@ -302,11 +315,22 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
             num_parallel_requests=self.config.num_parallel_requests,
         )
 
+        if self.config.sandbox_provider is not None:
+            self._evaluator = SandboxCCCEvaluator(
+                self._evaluator.config,
+                num_parallel_requests=self.config.num_parallel_requests,
+                provider=self.config.sandbox_provider,
+                spec=self.config.sandbox_spec,
+                python=self.config.sandbox_python,
+                setup_command=self.config.sandbox_setup_command,
+                timeout=self.config.sandbox_timeout_secs,
+                named_configs=self.server_client.global_config_dict,
+            )
         evaluator = self._evaluator
 
         @app.on_event("startup")
         async def _eager_init():
-            print("CCC: pre-loading metadata (~27 GB, ~46s) before first request...")
+            print("CCC: pre-loading metadata before first request...")
             await evaluator._initialize_runtime()
             print("CCC: metadata loaded, server ready.")
 
@@ -336,6 +360,8 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
             details = await self._evaluator.eval_single(evaluation_entry)
             reward = self._compute_reward(body, details)
         except Exception as e:
+            if self.config.sandbox_provider is not None:
+                raise
             details = {"error": str(e)}
 
         if LOG_JSONL_PATH:

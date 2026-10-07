@@ -14,8 +14,8 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-from lcb_integration import compute_code_generation_metrics
-from lcb_integration.compute_code_generation_metrics import check_correctness
+from lcb_integration import checker
+from lcb_integration.checker import check_correctness
 
 
 _SAMPLE: dict[str, str] = {"input_output": json.dumps({"inputs": ["1", "2"], "outputs": ["1", "4"]})}
@@ -30,8 +30,8 @@ def patched_mp(monkeypatch):
     process_instance: MagicMock = MagicMock(name="Process")
     process_factory: MagicMock = MagicMock(return_value=process_instance)
 
-    monkeypatch.setattr(compute_code_generation_metrics.multiprocessing, "Manager", manager_factory)
-    monkeypatch.setattr(compute_code_generation_metrics.multiprocessing, "Process", process_factory)
+    monkeypatch.setattr(checker.multiprocessing, "Manager", manager_factory)
+    monkeypatch.setattr(checker.multiprocessing, "Process", process_factory)
 
     return manager, manager_factory, process_instance, process_factory
 

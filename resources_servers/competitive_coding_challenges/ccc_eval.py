@@ -10,11 +10,10 @@ import shutil
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, is_dataclass
 from uuid import uuid4
-
-import httpx
 
 
 def nested_dataclass(*args, **kwargs):
@@ -97,6 +96,8 @@ class LocalSandbox:
         host: str = os.getenv("NEMO_SKILLS_SANDBOX_HOST", "127.0.0.1"),
         port: str = os.getenv("NEMO_SKILLS_SANDBOX_PORT", "6000"),
     ):
+        import httpx
+
         self.host = host
         self.port = port
         self.http_session = httpx.AsyncClient(
@@ -116,6 +117,8 @@ class LocalSandbox:
         session_id=None,
         traceback_verbosity="plain",
     ):
+        import httpx
+
         if session_id is not None:
             raise RuntimeError("Stateful execution is not supported by this sandbox client.")
 
@@ -170,11 +173,13 @@ def _exec_sync(tls: threading.local, sandbox: LocalSandbox, cmd: str, *, languag
     return loop.run_until_complete(sandbox.execute_code(cmd, language=language, timeout=timeout))[0]
 
 
-def _get_thread_test_sandbox() -> LocalSandbox:
+def _get_thread_test_sandbox(sandbox_factory: Callable[[], LocalSandbox] | None = None) -> LocalSandbox:
+    factory = sandbox_factory or LocalSandbox
     sandbox = getattr(_test_sandbox_tls, "sandbox", None)
-    if sandbox is None:
-        sandbox = LocalSandbox()
+    if sandbox is None or getattr(_test_sandbox_tls, "factory", None) is not factory:
+        sandbox = factory()
         _test_sandbox_tls.sandbox = sandbox
+        _test_sandbox_tls.factory = factory
     return sandbox
 
 
@@ -394,9 +399,11 @@ def _precompile_problem(
     sandbox: LocalSandbox,
     shared_dir: str,
     local_compile_dir: str | None,
+    *,
+    sandbox_factory: Callable[[], LocalSandbox] | None = None,
 ) -> str:
     if getattr(sandbox, "_owner_tid", None) != threading.get_ident():
-        sandbox = LocalSandbox()
+        sandbox = (sandbox_factory or LocalSandbox)()
         wait_for_sandbox(sandbox)
         sandbox._owner_tid = threading.get_ident()
 
@@ -447,6 +454,8 @@ def _compile_solution_once(
     precompiled_dir: str,
     shared_dir: str,
     local_compile_dir: str | None,
+    *,
+    sandbox_factory: Callable[[], LocalSandbox] | None = None,
 ) -> tuple[str, dict]:
     """Compile one generated solution and publish a reusable shared artifact."""
     solution_dir = f"{shared_dir}/ccc_solution_{uuid4().hex}"
@@ -461,7 +470,7 @@ def _compile_solution_once(
             with open(os.path.join(solution_dir, "graders", f"{problem_id}.cpp"), "w", encoding="utf-8") as f:
                 f.write(generated_code)
 
-        sandbox = _get_thread_test_sandbox()
+        sandbox = _get_thread_test_sandbox(sandbox_factory)
         compile_result = _compile_in_sandbox(
             _test_loop_tls,
             sandbox,
@@ -490,7 +499,7 @@ def run_test_case(task_args: dict, worker_id: int) -> dict:
         with open(os.path.join(unique_dir, "correct_output.txt"), "w", encoding="latin1") as f:
             f.write(task_args["test_output"])
 
-        sandbox = _get_thread_test_sandbox()
+        sandbox = _get_thread_test_sandbox(task_args.get("sandbox_factory"))
         run_timeout = max(30, int(30 * float(task_args.get("time_scale", 1.0))))
         run_start = time.monotonic()
         run_result = _exec_sync(
@@ -555,8 +564,15 @@ def add_includes(code: str, problem_header_include: str | None = None, problem_i
 
 
 class CCCEvaluator(BaseEvaluator):
-    def __init__(self, config: dict, num_parallel_requests: int = 20):
+    def __init__(
+        self,
+        config: dict,
+        num_parallel_requests: int = 20,
+        *,
+        sandbox_factory: Callable[[], LocalSandbox] | None = None,
+    ) -> None:
         super().__init__(config, num_parallel_requests)
+        self.sandbox_factory = sandbox_factory or LocalSandbox
         self.eval_cfg = CCCEvaluatorConfig(_init_nested=True, **config)
         self.sandbox = None
         self.metadata = None
@@ -575,7 +591,7 @@ class CCCEvaluator(BaseEvaluator):
                 return
 
             def _setup():
-                sbox = LocalSandbox()
+                sbox = self.sandbox_factory()
                 wait_for_sandbox(sbox)
                 sbox._owner_tid = threading.get_ident()
                 if not os.path.exists(self.eval_cfg.test_file):
@@ -640,6 +656,7 @@ class CCCEvaluator(BaseEvaluator):
             self.sandbox,
             self.eval_cfg.shared_dir,
             self.eval_cfg.local_compile_dir,
+            sandbox_factory=self.sandbox_factory,
         )
         self.precompiled_cache[cache_key] = {"grader": grader_dir}
         return grader_dir
@@ -648,6 +665,7 @@ class CCCEvaluator(BaseEvaluator):
         return {
             "compiled_solution_dir": compiled_solution_dir,
             "compile_result": compile_result,
+            "sandbox_factory": self.sandbox_factory,
             "test_input": test_data["input"],
             "test_output": test_data["output"],
             "time_scale": self.eval_cfg.time_scale,
@@ -786,6 +804,7 @@ class CCCEvaluator(BaseEvaluator):
             pre_dir,
             self.eval_cfg.shared_dir,
             self.eval_cfg.local_compile_dir,
+            sandbox_factory=self.sandbox_factory,
         )
         try:
             return await self._evaluate_compiled_solution(
