@@ -35,7 +35,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import call_judge
+from nemo_gym.judge import call_judge, normalize_math_judge_verdict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -388,7 +388,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
         if last_content.type != "output_text":
             return False, judge_evaluation
 
-        output_text = last_content.text
+        output_text = normalize_math_judge_verdict(last_content.text)
         equal_choice_position = output_text.find(self.JUDGE_EQUAL_LABEL)
         not_equal_choice_position = output_text.find(self.JUDGE_NOT_EQUAL_LABEL)
 
