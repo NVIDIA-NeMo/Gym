@@ -41,6 +41,25 @@ class TestDrainMargin:
         assert _tracker(10, 20, 30, 40).drain_margin(None) is None
 
 
+class TestRecordFailure:
+    def test_a_failure_that_ran_long_raises_the_margin(self):
+        t = _tracker(10, 20, 30, 40, 50)
+        t.record_failure(600)
+        assert t.quantile(1.0) == 600
+        assert t.drain_margin(None) > 40
+
+    def test_an_instant_failure_cannot_drag_the_margin_down(self):
+        t = _tracker(600, 600, 600, 600, 600)
+        for _ in range(20):
+            t.record_failure(0.2)
+        assert t.drain_margin(None) == 600
+
+    def test_failures_before_any_completion_are_ignored(self):
+        t = DispatchLatencyTracker()
+        t.record_failure(3600)
+        assert t.quantile(0.5) is None
+
+
 class TestSummary:
     def test_reports_task_hours_and_drained(self):
         t = _tracker(3600, 3600)

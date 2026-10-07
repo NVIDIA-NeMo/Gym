@@ -5972,12 +5972,22 @@ class TestDispatchBudget:
         assert "No completed rollouts to report latency for." in out
 
     def test_dispatch_budget_requires_finite_concurrency(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="finite positive num_samples_in_parallel"):
+        with pytest.raises(ValueError, match="num_samples_in_parallel or max_resident_rollout_tasks"):
             RolloutCollectionConfig(
                 input_jsonl_fpath=str(tmp_path / "input.jsonl"),
                 output_jsonl_fpath=str(tmp_path / "output.jsonl"),
                 dispatch_budget_s=1800.0,
             )
+
+    def test_dispatch_budget_accepts_max_resident_rollout_tasks_without_num_samples_in_parallel(
+        self, tmp_path: Path
+    ) -> None:
+        RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            dispatch_budget_s=1800.0,
+            max_resident_rollout_tasks=4,
+        )
 
     @pytest.mark.parametrize("concurrency", [0, -1])
     def test_concurrency_must_always_be_positive(self, tmp_path: Path, concurrency: int) -> None:
@@ -6025,6 +6035,30 @@ class TestDispatchBudget:
         assert results[0][1] == {"reward": 1.0}
         # The completed rollout is timed, so the adaptive margin has a basis.
         assert tracker.quantile(0.5) is not None
+
+    @pytest.mark.parametrize(("preloaded_s", "recorded"), [(3600.0, False), (1e-9, True)])
+    async def test_a_failed_run_feeds_the_margin_only_when_it_ran_long(
+        self, monkeypatch: pytest.MonkeyPatch, preloaded_s: float, recorded: bool
+    ) -> None:
+        """A failure counts toward the adaptive margin only when it is at least as long as the median."""
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock(side_effect=http_error(502)))
+        tracker = DispatchLatencyTracker()
+        for _ in range(5):
+            tracker.record(preloaded_s)
+
+        results = [
+            await future
+            for future in self._helper([])._run_examples_with_metadata(
+                [self._row(0)],
+                dispatch_budget_s=3600.0,
+                drain_margin_s=1.0,
+                latency_tracker=tracker,
+                route_failures_to_sidecar=True,
+            )
+        ]
+
+        assert results[0].result[NG_FAILURE_CLASS_KEY] is not None
+        assert (len(tracker._durations) == 6) is recorded
 
     @pytest.mark.parametrize("field", ["dispatch_budget_s", "drain_margin_s"])
     def test_budget_and_margin_cannot_be_negative(self, tmp_path: Path, field: str) -> None:
@@ -8200,6 +8234,19 @@ class TestTurnsFromModelCalls:
 
         assert [(turn.model_calls[0].model_call_id, turn.turn_no) for turn in turns] == [("answered", 1)]
 
+    @pytest.mark.parametrize("status", [400, 429, 500])
+    def test_http_error_payload_is_retained_without_becoming_a_turn(self, status: int) -> None:
+        failed = self._call("failed", {"error": {"message": "try again"}}, started_at=1.0)
+        failed.response_metadata.status_code = status
+        answered = self._call("answered", {"output": []}, started_at=2.0)
+        invocation = self._invocation("root", ["failed", "answered"])
+        turns = nemo_gym.rollout_collection._turns_from_model_calls(
+            "task", "rollout", [invocation], [failed, answered], None
+        )
+        assert [(turn.model_calls[0].model_call_id, turn.turn_no) for turn in turns] == [("answered", 1)]
+        assert [ref.model_call_id for ref in invocation.model_calls] == ["failed", "answered"]
+        assert failed.response == {"error": {"message": "try again"}}
+
     @pytest.mark.parametrize("invocation_count", [1, 2])
     def test_a_call_no_invocation_references_is_skipped(self, invocation_count: int) -> None:
         calls = [
@@ -8500,6 +8547,21 @@ class TestEnvironmentServerRouting:
                 config,
             )
 
+    def test_malformed_materialized_input_still_routes_by_taskset(self) -> None:
+        row = {
+            "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+            "task_input": None,
+        }
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            environment_routing_mode="taskset",
+            environment_server_routes={"swe_pro": "environment"},
+            num_repeats=1,
+        )
+
+        assert nemo_gym.rollout_collection._environment_server_for_config_row(row, config) == "environment"
+
     async def test_routes_legacy_row_to_selected_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         payload = {
             "reward": 1.0,
@@ -8551,7 +8613,7 @@ class TestEnvironmentServerRouting:
         client.global_config_dict = _environment_server_config()
         row = self._row() | {AGENT_REF_KEY_NAME: {"name": "other"}}
 
-        with pytest.raises(ValueError, match="does not match.*agent server"):
+        with pytest.raises(ValueError, match="is not an agent of environment server"):
             next(
                 RolloutCollectionHelper().run_examples(
                     [row],
@@ -9178,3 +9240,57 @@ class TestEnvironmentServerRouting:
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
         assert sorted(r[nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] for r in persisted) == ["a", "b"]
         assert all(r[NG_ENVIRONMENT_SERVER_KEY] == "environment" for r in persisted)
+
+
+class TestMultiAgentEnvironmentServers:
+    """An environment server can front several agents through fields other than `agent_server`."""
+
+    @staticmethod
+    def _config() -> DictConfig:
+        def agent() -> dict:
+            return {"responses_api_agents": {"simple_agent": {"entrypoint": "app.py"}}}
+
+        def reference(name: str) -> dict:
+            return {"type": "responses_api_agents", "name": name}
+
+        def server(**references: dict) -> dict:
+            return {"environment_servers": {"conversation": {"entrypoint": "app.py", **references}}}
+
+        return OmegaConf.create(
+            {
+                "user": agent(),
+                "assistant": agent(),
+                "outsider": agent(),
+                "conversation": server(user_agent=reference("user"), assistant_agent=reference("assistant")),
+                "assistant_only": server(assistant_agent=reference("assistant")),
+                "relay": server(agent_server=reference("assistant")),
+            }
+        )
+
+    @pytest.mark.parametrize(
+        ("server", "agent"),
+        [("relay", "assistant"), ("assistant_only", "assistant"), ("conversation", None)],
+        ids=["agent-server", "only-agent", "several-agents"],
+    )
+    def test_results_are_attributed_to_one_agent_only_when_the_server_has_one(
+        self, server: str, agent: str | None
+    ) -> None:
+        row = {nemo_gym.rollout_collection.NG_ENVIRONMENT_SERVER_KEY: server}
+
+        assert RolloutCollectionHelper._agent_name_for_row(row, self._config()) == agent
+
+    def test_a_row_may_name_any_agent_of_its_environment_server(self) -> None:
+        row = {nemo_gym.rollout_collection.NG_ENVIRONMENT_SERVER_KEY: "conversation", "agent_ref": {"name": "user"}}
+
+        RolloutCollectionHelper._validate_environment_servers([row], self._config())
+
+    def test_a_row_naming_another_agent_is_rejected(self) -> None:
+        row = {
+            nemo_gym.rollout_collection.NG_ENVIRONMENT_SERVER_KEY: "conversation",
+            "agent_ref": {"name": "outsider"},
+        }
+
+        with pytest.raises(
+            ValueError, match="'outsider' is not an agent of environment server 'conversation': 'user', 'assistant'"
+        ):
+            RolloutCollectionHelper._validate_environment_servers([row], self._config())
