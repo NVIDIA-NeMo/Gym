@@ -50,13 +50,15 @@ CONTAINER=/path/to/eval/container \
 ... \
 bash benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh \
     --config benchmarks/swebench/verified/opencode.yaml \
-    ++num_samples_in_parallel=768 \
+    ++num_samples_in_parallel=1024 \
     ++swebench_verified_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.opencode_model_call_timeout=10800000
 ```
 
 - One DP4 x TP1 + EP server per node let vLLM's internal load balancer send an agent's turns to different ranks: prefix-cache hits fell to ~60% (vs ~98% with independent engines), and the lockstep ranks roughly halved decode speed per request.
 - The default 1 h `opencode_model_call_timeout` is shorter than the 3 h harness timeout. With slow serving, long trajectories hit the per-call limit and score zero; raising it to 3 h makes the harness timeout the only limit.
-- On GB300 NVL72, 4 nodes at 768 concurrency complete SWE-bench Verified (500 tasks x 3 repeats) in about 3.75 h. Across six runs of one Nano SFT checkpoint the score was 63.3% on average (run-to-run SD 0.6 points), with no per-call timeouts. That is within noise of a reference run on separately served TP4 prefill/decode engines, and about 2 points above the DP4 x TP1 + EP config with the 1 h call timeout.
+- On GB300 NVL72, 4 nodes at 1024 concurrency complete SWE-bench Verified (500 tasks x 3 repeats) in about 3.4 h, versus 3.75 h at 768. Concurrency 1500 started faster but finished no sooner: the slowest trajectories still run to the 3 h harness timeout. Engines stay below capacity at 1024 (~48 running requests per engine at ~42 generated tok/s each).
+- Scores for one Nano SFT checkpoint, with no per-call timeouts in any run: 64.3% at 1024 concurrency, and 63.3% on average over six runs at 768 (run-to-run SD 0.6 points). Both are within noise of a reference run on separately served TP4 prefill/decode engines, and about 2 points above the DP4 x TP1 + EP config with the 1 h call timeout.
+- An external KV store (Mooncake) does not help this workload: each engine's local prefix cache already serves ~99% of prompt tokens, and the misses are mostly new tool output that no cache holds.
 - Prefill/decode disaggregation is not recommended for this model yet: some runs filled every decode slot with runaway generations, and fp8 KV under P/D produced degenerate output.
 
 ### Batched evaluations
