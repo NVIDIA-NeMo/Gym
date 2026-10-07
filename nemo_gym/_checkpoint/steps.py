@@ -73,6 +73,10 @@ class _Episode:
         self.suspended_remaining = None
 
 
+def _blocks(episode: _Episode) -> bool:
+    return episode.retired or episode.state in _BLOCKING
+
+
 class EpisodeSteps:
     """Track the boundaries and in-flight steps of the episodes one owner runs."""
 
@@ -83,13 +87,14 @@ class EpisodeSteps:
         self.closed = False
 
     def _set_state(self, episode: _Episode, state: _State) -> None:
-        self._blocking += (state in _BLOCKING) - (episode.state in _BLOCKING)
+        blocked = _blocks(episode)
         episode.state = state
+        self._blocking += _blocks(episode) - blocked
 
     def _forget(self, key: str, episode: _Episode) -> None:
         if self._episodes.get(key) is episode:
             del self._episodes[key]
-            self._blocking -= episode.state in _BLOCKING
+            self._blocking -= _blocks(episode)
 
     async def _changed(self) -> None:
         # Only a prepare waits for readiness, and only while admission is closed.
@@ -179,24 +184,25 @@ class EpisodeSteps:
             episode.resume.set()
 
     def blocker_count(self) -> int:
-        """How many episodes are between boundaries or inside a wait step: a checkpoint must wait for them."""
+        """How many episodes are between boundaries, inside a wait step, or retired but not yet stopped: a checkpoint
+        must wait for them."""
         return self._blocking
 
     def blockers(self, limit: int) -> list[str]:
         """The first ``limit`` blocking episodes, by key; empty without a scan when nothing blocks."""
         if not self._blocking:
             return []
-        return heapq.nsmallest(limit, (key for key, episode in self._episodes.items() if episode.state in _BLOCKING))
+        return heapq.nsmallest(limit, (key for key, episode in self._episodes.items() if _blocks(episode)))
 
     def exported(self) -> dict[str, Optional[Boundary]]:
-        """The latest boundary of every episode that is parked or inside a replay step.
+        """The latest boundary of every episode that is parked or inside a replay step, and not retired.
 
         ``None`` for an episode that has not recorded a boundary yet: it starts over from its input.
         """
         return {
             key: episode.boundary
             for key, episode in self._episodes.items()
-            if episode.state in ("parked", "replay_step")
+            if episode.state in ("parked", "replay_step") and not episode.retired
         }
 
     def keys(self) -> list[str]:
@@ -206,13 +212,16 @@ class EpisodeSteps:
         """Stop the episode and wait until its task has ended.
 
         The episode stays tracked until then, so if this wait is cut short, a later retire finds it and waits again,
-        and a duplicate start of the same attempt is refused.
+        and a duplicate start of the same attempt is refused. Until then it blocks a checkpoint whatever its state, so a
+        prepare reports an episode that is still being stopped instead of exporting it.
         """
         episode = self._episodes.get(key)
         if episode is None:
             return
         first = not episode.retired
+        blocked = _blocks(episode)
         episode.retired = True
+        self._blocking += _blocks(episode) - blocked
         episode.resume.set()
         if episode.task is not None and episode.task is not asyncio.current_task():
             # Cancel once: cancelling again would interrupt the cleanup the first cancellation started.

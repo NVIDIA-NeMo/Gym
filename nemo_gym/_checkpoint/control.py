@@ -16,7 +16,7 @@ The control plane here owns everything that is the same for every participant:
 - retire: refusing an attempt's requests, stopping its work and freeing its state before replying. The
   refusal outlives the retire, because a request a caller sent before its own retire can arrive after
   this server's retire finished; it lasts until the controller calls ``forget`` for the rollout;
-- the readiness wait, deadlines, and manifest-last storage;
+- the readiness wait, deadlines, and manifest-last storage, with one write per checkpoint that resume stops;
 - a lease: if the controller that started a checkpoint stops calling, the participant resumes on its
   own when the lease expires, which is the same as an abort.
 
@@ -32,11 +32,14 @@ and admission never disagree.
 
 import asyncio
 import hmac
+import json
 import logging
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Optional
@@ -44,7 +47,7 @@ from typing import Annotated, Any, ClassVar, Optional
 import orjson
 from fastapi import APIRouter, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, PlainValidator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, PlainValidator, ValidationError, model_validator
 
 from nemo_gym._checkpoint.errors import (
     CheckpointConflictError,
@@ -118,15 +121,19 @@ class ForgetRequest(CheckpointRequest):
 
 
 def _check_json(value: Any) -> Any:
-    """Accept only what JSON can carry, as ``JsonValue`` would, without walking the value in Python.
+    """Accept what the writer's standard ``json`` module can write, usually without walking the value in Python.
 
-    ``orjson`` rejects non-string keys and non-JSON types natively. Its output is discarded: records are written
-    with the standard ``json`` module, which round-trips NaN and infinities exactly.
+    ``orjson`` is a fast pre-check. It rejects integers beyond 64 bits that ``json`` writes, so a rejection falls
+    back to ``json``. It accepts some values ``json`` cannot write, such as ``datetime``; for those the writer
+    fails the commit with a ``CheckpointStateError`` naming the episode.
     """
     try:
         orjson.dumps(value)
-    except TypeError as error:
-        raise ValueError(f"checkpoint payload is not JSON: {error}") from error
+    except TypeError:
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"checkpoint payload is not JSON: {error}") from error
     return value
 
 
@@ -318,6 +325,19 @@ def next_attempt(episode_id: EpisodeId) -> EpisodeId:
     return episode_id.model_copy(update={"attempt": episode_id.attempt + 1})
 
 
+@dataclass
+class _Write:
+    """The one write of a checkpoint's records. A retried commit awaits it instead of exporting again."""
+
+    checkpoint_id: str
+    checkpoint_dir: str
+    episode_ids: Optional[list[EpisodeId]]
+    records: list[CheckpointRecord]
+    task: "asyncio.Task[dict[str, Any]]"
+    # Set by resume: the writer stops before its next record and never publishes the manifest.
+    stop: threading.Event = field(default_factory=threading.Event)
+
+
 class ParticipantControlPlane:
     """Checkpoint-ID fencing, phase machine, lease, and storage that drive one participant."""
 
@@ -332,6 +352,7 @@ class ParticipantControlPlane:
         # Recently resumed checkpoint IDs, so a delayed request of a stale controller cannot reopen one.
         self._resumed_ids: OrderedDict[str, None] = OrderedDict()
         self._results: dict[tuple[str, str], dict[str, Any]] = {}
+        self._write: Optional[_Write] = None
         self._lock = asyncio.Lock()
 
     def status(self) -> dict[str, Any]:
@@ -496,19 +517,13 @@ class ParticipantControlPlane:
             report = self.participant.readiness()
             if not report.ready:
                 raise InvalidPhaseError(f"participant is no longer ready to commit: blockers={report.blockers}")
-            records = await _within(request, self.participant.export(request.episode_ids))
-            write = asyncio.to_thread(
-                write_participant_state,
-                Path(request.checkpoint_dir),
-                kind=self.participant.kind,
-                instance=self.instance_name,
-                checkpoint_id=request.checkpoint_id,
-                records=(record.to_json_record() for record in records),
-            )
-            # A write that outlives the deadline fails this call; a retry returns the same manifest.
-            manifest = await _within(request, write)
-            # Restored state outside the scope was not exported, so a retry after a failure here writes the same
-            # records and returns the same manifest.
+            write = await self._start_write(request)
+            # The thread cannot be cancelled: a write that outlives the deadline fails this call and keeps going, and
+            # a retry awaits the same write.
+            manifest = await _within(request, asyncio.shield(write.task))
+            records = write.records
+            # Restored state outside the scope was not exported, so a retry after a failure here returns the same
+            # manifest.
             await _within(request, self._retire_unscoped(request.episode_ids))
             self.phase = CheckpointPhase.COMMITTED
             result = {
@@ -519,6 +534,35 @@ class ParticipantControlPlane:
             }
             self._results[(request.checkpoint_id, "commit")] = result
             return result
+
+    async def _start_write(self, request: CommitRequest) -> _Write:
+        """The checkpoint's write: the running or finished one, or a new one if there is none or it failed."""
+        write = self._write
+        reusable = write is not None and write.checkpoint_id == request.checkpoint_id
+        if reusable and not (write.task.done() and write.task.exception() is not None):
+            if (write.checkpoint_dir, write.episode_ids) != (request.checkpoint_dir, request.episode_ids):
+                raise CheckpointConflictError(
+                    f"checkpoint {request.checkpoint_id!r} is already being written to another directory or scope"
+                )
+            return write
+        records = await _within(request, self.participant.export(request.episode_ids))
+        stop = threading.Event()
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                write_participant_state,
+                Path(request.checkpoint_dir),
+                kind=self.participant.kind,
+                instance=self.instance_name,
+                checkpoint_id=request.checkpoint_id,
+                # Converted in the writer thread: the state is frozen until resume, which stops the writer.
+                records=(record.to_json_record() for record in records),
+                stop=stop,
+            )
+        )
+        # A write nobody awaits any more, after a deadline or a resume, must not log an unretrieved exception.
+        task.add_done_callback(lambda done: done.cancelled() or done.exception())
+        self._write = _Write(request.checkpoint_id, request.checkpoint_dir, request.episode_ids, records, task, stop)
+        return self._write
 
     async def restore(self, request: RestoreRequest) -> dict[str, Any]:
         async with self._lock:
@@ -536,15 +580,20 @@ class ParticipantControlPlane:
             # Validate only the records in scope: the scope can be much smaller than the checkpoint.
             scope = {episode_id.capture_key for episode_id in request.episode_ids}
             records = [
-                self.participant.record_model.model_validate(record)
+                _validate_record(self.participant.record_model, record)
                 for record in raw_records
                 if _record_key(record) in scope
             ]
-            await self.participant.close_admission(request)
             try:
+                await self.participant.close_admission(request)
                 await _within(request, self.participant.install(records))
             except BaseException:
-                await self.participant.open_admission()
+                # Closing can fail part way, for example on one of several workers; nothing else would reopen the
+                # rest, because the phase is still idle.
+                try:
+                    await self.participant.open_admission()
+                except Exception:
+                    LOGGER.exception("reopening admission after a failed restore of %s failed", request.checkpoint_id)
                 raise
             self.checkpoint_id = request.checkpoint_id
             self.phase = CheckpointPhase.RESTORED
@@ -576,6 +625,9 @@ class ParticipantControlPlane:
             self._resumed_ids.popitem(last=False)
 
     async def _reopen(self, *, resume_id: Optional[str] = None) -> None:
+        if self._write is not None:
+            self._write.stop.set()
+            self._write = None
         await self.participant.open_admission()
         if resume_id is not None:
             self._remember_resumed(resume_id)
@@ -595,6 +647,15 @@ def _record_key(record: Any) -> Optional[str]:
         return EpisodeId.model_validate(record["episode_id"]).capture_key
     except (KeyError, TypeError, ValueError) as error:
         raise CheckpointStateError(f"checkpoint record has no valid episode_id: {error}") from error
+
+
+def _validate_record(model: type[CheckpointRecord], record: Any) -> CheckpointRecord:
+    try:
+        return model.model_validate(record)
+    except ValidationError as error:
+        raise CheckpointStateError(
+            f"checkpoint record of episode {_record_key(record)!r} is invalid: {error}"
+        ) from error
 
 
 async def _within(request: CheckpointRequest, operation: Any) -> Any:

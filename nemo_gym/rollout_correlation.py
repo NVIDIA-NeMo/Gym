@@ -79,6 +79,15 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
     attempt = field(ATTEMPT_INDEX_KEY_NAME)
     if attempt is not None and int(attempt) > 0:
         rollout_id = f"{rollout_id}-a{int(attempt)}"
+        # An explicit id may carry its own attempt suffix, but not as well as an attempt index: the key would not
+        # decode to one rollout and attempt.
+        try:
+            EpisodeId.from_capture_key(rollout_id)
+        except ValueError as error:
+            raise ValueError(
+                f"{ROLLOUT_ID_KEY_NAME} {explicit!r} already ends with the attempt suffix '-a<N>'; "
+                f"do not also set {ATTEMPT_INDEX_KEY_NAME}"
+            ) from error
     return rollout_id
 
 

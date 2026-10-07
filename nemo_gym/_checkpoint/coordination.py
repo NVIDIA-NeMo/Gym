@@ -57,8 +57,10 @@ PREPARE_ORDER: tuple[ParticipantKind, ...] = ("environment", "model", "agent", "
 # Retire stops callers before the servers they call: environment servers call agents and resources servers,
 # agents call the policy model and resources servers.
 RETIRE_ORDER: tuple[tuple[ParticipantKind, ...], ...] = (("environment",), ("agent",), ("model", "resources"))
-# A server that is down must not stall discovery: connection errors are retried this many times in all.
+# A server that is down must not stall discovery: connection errors are retried this many times in all, and one
+# that accepts a connection but never replies fails discovery after this many seconds.
 _DISCOVER_TRIES = 3
+_DISCOVER_TIMEOUT_SECONDS = 60.0
 _SERVER_TYPES = ("environment_servers", "responses_api_models", "responses_api_agents", "resources_servers")
 
 
@@ -122,17 +124,23 @@ async def discover(client: ServerClient, *, auth_token: str) -> Participants:
 
     async def probe(name: str) -> None:
         try:
-            response = await client.request(
-                server_name=name,
-                url_path=f"{CHECKPOINT_ROUTE_PREFIX}/status",
-                method="GET",
-                headers=_auth(auth_token),
-                _control=True,
-                _max_num_tries=_DISCOVER_TRIES,
-            )
-            if response.status == 404:
-                return
-            members.append(Participant(server_name=name, kind=(await _payload(response))["kind"]))
+            async with asyncio.timeout(_DISCOVER_TIMEOUT_SECONDS):
+                response = await client.request(
+                    server_name=name,
+                    url_path=f"{CHECKPOINT_ROUTE_PREFIX}/status",
+                    method="GET",
+                    headers=_auth(auth_token),
+                    _control=True,
+                    _max_num_tries=_DISCOVER_TRIES,
+                )
+                if response.status == 404:
+                    return
+                kind = (await _payload(response))["kind"]
+            if kind not in PREPARE_ORDER:
+                raise ValueError(f"unknown participant kind {kind!r}")
+            members.append(Participant(server_name=name, kind=kind))
+        except TimeoutError:
+            failures[name] = f"no status reply within {_DISCOVER_TIMEOUT_SECONDS:g} seconds"
         except Exception as error:
             failures[name] = _describe(error)
 

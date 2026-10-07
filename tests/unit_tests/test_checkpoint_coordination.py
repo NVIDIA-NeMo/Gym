@@ -346,3 +346,32 @@ async def test_discover_reports_a_server_that_is_down_instead_of_retrying_foreve
     with pytest.raises(CoordinationError, match="env"):
         await coordination.discover(client, auth_token=TOKEN)
     assert calls == [coordination._DISCOVER_TRIES]
+
+
+async def test_discover_reports_a_server_that_never_replies(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    import nemo_gym.server_utils as server_utils
+
+    async def silent(**kwargs: Any) -> Any:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(server_utils, "request", silent)
+    monkeypatch.setattr(coordination, "_DISCOVER_TIMEOUT_SECONDS", 0.05)
+    client = ServerClient(
+        head_server_config=BaseServerConfig(host="head", port=1),
+        global_config_dict=OmegaConf.create(
+            {"env": {"environment_servers": {"env": {"host": "127.0.0.1", "port": 9}}}}
+        ),
+    )
+
+    with pytest.raises(CoordinationError, match="env: no status reply within 0.05 seconds"):
+        await asyncio.wait_for(coordination.discover(client, auth_token=TOKEN), 5)
+
+
+async def test_discover_reports_a_participant_of_an_unknown_kind() -> None:
+    client, recorders, _ = deployment(*FULL)
+    recorders["agent"].kind = "planner"
+
+    with pytest.raises(CoordinationError, match="agent: unknown participant kind 'planner'"):
+        await coordination.discover(client, auth_token=TOKEN)

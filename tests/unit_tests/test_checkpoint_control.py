@@ -2,25 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import json
+import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import httpx
 import pytest
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym._checkpoint.control import (
     CheckpointParticipant,
     CheckpointRecord,
     CheckpointRequest,
+    JsonPayload,
     PrepareReport,
     RetiredAttempts,
     StaleAttemptError,
     install_participant,
 )
+from nemo_gym._checkpoint.errors import CheckpointStateError
 from nemo_gym._checkpoint.steps import EpisodeSteps
+from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
 from nemo_gym.episode_types import EpisodeId
 
 
@@ -214,7 +219,8 @@ async def test_restore_rejects_corrupt_records_without_installing(tmp_path: Path
     async with make_client(source) as client:
         await client.post("/ng-control/v1/checkpoint/prepare", json=body())
         await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path)))
-    records = tmp_path / "gym" / "fake" / "fake-1" / "records.jsonl"
+    directory = tmp_path / "gym" / "fake" / "fake-1"
+    records = directory / json.loads((directory / "manifest.json").read_text())["records_file"]
     records.write_text(json.dumps({"episode_id": {"rollout_id": "r", "attempt": 0}, "value": 8}) + "\n")
 
     restored = FakeParticipant()
@@ -790,17 +796,188 @@ def test_records_stream_to_disk_and_a_retried_commit_leaves_no_temporary_file(tm
     directory = participant_dir(tmp_path, kind="fake", instance="f")
     assert first == again == manifest and manifest["record_count"] == 3
     assert [record["episode_id"]["attempt"] for record in restored] == [0, 1, 2]
-    assert sorted(path.name for path in directory.iterdir()) == ["manifest.json", "records.jsonl"]
+    assert sorted(path.name for path in directory.iterdir()) == ["manifest.json", manifest["records_file"]]
+    assert manifest["records_file"] == f"records-{manifest['records_sha256']}.jsonl"
 
 
 def test_a_corrupt_records_file_is_a_checkpoint_state_error(tmp_path: Path) -> None:
     from nemo_gym._checkpoint.errors import CheckpointStateError
     from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
 
-    write_participant_state(
+    manifest = write_participant_state(
         tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=[{"episode_id": {"rollout_id": "r"}}]
     )
-    (participant_dir(tmp_path, kind="fake", instance="f") / "records.jsonl").write_bytes(b"{not json\n")
+    (participant_dir(tmp_path, kind="fake", instance="f") / manifest["records_file"]).write_bytes(b"{not json\n")
 
     with pytest.raises(CheckpointStateError):
         read_participant_state(tmp_path, kind="fake", instance="f")
+
+
+def _gated_write(monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, list[None]]:
+    """Make every write wait for the returned gate; count the writes started."""
+    import nemo_gym._checkpoint.control as control
+
+    real_write = control.write_participant_state
+    gate, started = threading.Event(), []
+
+    def gated(*args, **kwargs):
+        started.append(None)
+        gate.wait(5)
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(control, "write_participant_state", gated)
+    return gate, started
+
+
+async def test_a_commit_retried_while_its_write_runs_awaits_that_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate, started = _gated_write(monkeypatch)
+    participant = FakeParticipant()
+    participant.executions["r"] = {"parked": True, "value": 1}
+    async with make_client(participant) as client:
+        await client.post("/ng-control/v1/checkpoint/prepare", json=body())
+        late = await client.post(
+            "/ng-control/v1/checkpoint/commit", json=body(timeout=0.1, checkpoint_dir=str(tmp_path))
+        )
+        # The exported state changes after the failed call; a second export would write different records.
+        participant.executions["r"]["value"] = 2
+        retried = asyncio.create_task(
+            client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path)))
+        )
+        await asyncio.sleep(0.05)
+        gate.set()
+        retried = await retried
+
+    assert late.json()["error"]["code"] == "deadline_exceeded"
+    assert retried.status_code == 200 and len(started) == 1
+    _, records = read_participant_state(tmp_path, kind="fake", instance="fake-1")
+    assert [record["value"] for record in records] == [1]
+
+
+async def test_resume_stops_a_write_that_outlived_its_commit_before_it_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate, _ = _gated_write(monkeypatch)
+    participant = FakeParticipant()
+    participant.executions["r"] = {"parked": True, "value": 1}
+    async with make_client(participant) as client:
+        await client.post("/ng-control/v1/checkpoint/prepare", json=body())
+        await client.post("/ng-control/v1/checkpoint/commit", json=body(timeout=0.1, checkpoint_dir=str(tmp_path)))
+        await client.post("/ng-control/v1/checkpoint/resume", json=body())
+        gate.set()
+        await asyncio.sleep(0.2)
+
+    directory = participant_dir(tmp_path, kind="fake", instance="fake-1")
+    assert list(directory.iterdir()) == []
+
+
+def test_a_losing_writer_neither_replaces_the_published_records_nor_leaves_its_own(tmp_path: Path) -> None:
+    def records(value: int) -> list[dict]:
+        return [{"episode_id": {"rollout_id": "r"}, "value": value}]
+
+    published = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
+    with pytest.raises(CheckpointStateError, match="different commit"):
+        write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(2))
+
+    manifest, restored = read_participant_state(tmp_path, kind="fake", instance="f")
+    directory = participant_dir(tmp_path, kind="fake", instance="f")
+    assert manifest == published and restored == records(1)
+    assert sorted(path.name for path in directory.iterdir()) == ["manifest.json", published["records_file"]]
+
+
+class PayloadRecord(CheckpointRecord):
+    state: JsonPayload
+
+
+def test_payloads_are_checked_by_what_the_writer_can_write(tmp_path: Path) -> None:
+    big = PayloadRecord(episode_id=EpisodeId(rollout_id="big"), state={"hash": 2**70})
+    write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=[big.to_json_record()])
+    assert read_participant_state(tmp_path, kind="fake", instance="f")[1][0]["state"] == {"hash": 2**70}
+
+    with pytest.raises(ValidationError, match="not JSON"):
+        PayloadRecord(episode_id=EpisodeId(rollout_id="r"), state={"handle": object()})
+
+    # The fast check accepts a datetime that the writer cannot write; the writer names the episode.
+    dated = PayloadRecord(episode_id=EpisodeId(rollout_id="dated"), state={"at": datetime.now(timezone.utc)})
+    with pytest.raises(CheckpointStateError, match="episode .*dated.* is not JSON"):
+        write_participant_state(
+            tmp_path / "other", kind="fake", instance="f", checkpoint_id="c1", records=[dated.to_json_record()]
+        )
+
+
+async def test_a_restore_whose_close_fails_part_way_reopens_admission(tmp_path: Path) -> None:
+    write_participant_state(
+        tmp_path,
+        kind="fake",
+        instance="fake-1",
+        checkpoint_id="c1",
+        records=[{"episode_id": {"rollout_id": "r"}, "value": 1}],
+    )
+
+    class HalfClosing(FakeParticipant):
+        async def close_admission(self, request: CheckpointRequest) -> None:
+            # One worker closed, another failed.
+            self.accepting = False
+            raise RuntimeError("close failed")
+
+    participant = HalfClosing()
+    async with make_client(participant) as client:
+        with pytest.raises(RuntimeError, match="close failed"):
+            await client.post(
+                "/ng-control/v1/checkpoint/restore",
+                json=body("restore-1", checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r"}]),
+            )
+        status = (await client.get("/ng-control/v1/checkpoint/status")).json()
+
+    assert status["phase"] == "idle" and participant.accepting is True
+
+
+async def test_a_restored_record_that_fails_validation_is_a_typed_error_naming_its_episode(tmp_path: Path) -> None:
+    # Written before a schema change: the record lacks a field the participant now requires.
+    write_participant_state(
+        tmp_path, kind="fake", instance="fake-1", checkpoint_id="c1", records=[{"episode_id": {"rollout_id": "r"}}]
+    )
+    participant = FakeParticipant()
+    async with make_client(participant) as client:
+        response = await client.post(
+            "/ng-control/v1/checkpoint/restore",
+            json=body("restore-1", checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r"}]),
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_checkpoint_state"
+    assert "episode 'r' is invalid" in response.json()["error"]["detail"]
+    assert participant.accepting is True and participant.executions == {}
+
+
+async def test_an_episode_whose_retire_was_cut_short_blocks_the_next_checkpoint_and_is_not_exported() -> None:
+    steps = EpisodeSteps(_no_notify)
+    release = asyncio.Event()
+
+    async def episode() -> None:
+        steps.begin("r")
+        try:
+            await steps.boundary("r", {"step": 1})
+        except asyncio.CancelledError:
+            # Slow final cleanup, like closing sessions.
+            await release.wait()
+            raise
+        finally:
+            await steps.end("r")
+
+    steps.close()
+    task = asyncio.create_task(episode())
+    await asyncio.sleep(0.01)
+    steps.open()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(steps.retire("r"), 0.05)
+
+    # A new checkpoint before the retire is retried: the episode is still parked, but it is being stopped.
+    steps.close()
+    assert steps.blocker_count() == 1 and steps.blockers(10) == ["r"]
+    assert steps.exported() == {}
+
+    release.set()
+    await asyncio.wait([task], timeout=1)
+    assert task.cancelled() and steps.blocker_count() == 0 and steps.keys() == []
