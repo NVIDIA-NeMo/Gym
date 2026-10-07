@@ -351,7 +351,7 @@ async def test_undelivered_rows_are_excluded_on_any_capture_path(tmp_path: Path)
         await controller.resume(CheckpointRequest(**control()))
         await call
 
-    rows = (tmp_path / "ckpt" / "gym" / "model" / "policy" / "records.jsonl").read_text()
+    rows = (tmp_path / "ckpt" / "gym" / "model" / "policy" / commit["manifest"]["records_file"]).read_text()
     # The held call wrote its row to the live ledger, but the checkpoint leaves it out.
     assert live_rows == ["c1", "c2"]
     assert commit["manifest"]["record_count"] == 1
