@@ -36,8 +36,19 @@ class RepositorySnapshots:
                 f"{quote(self.python_executable)} {quote(remote + '.py')} {quote(remote + '.json')} {quote(remote + '.out')}",
                 timeout_s=180,
             )
-            if result.return_code != 0:
-                raise RuntimeError(f"Repository snapshot failed: {result.stderr}")
+            if result.return_code != 0 or result.error_type is not None:
+                failure = {
+                    "turn": turn,
+                    "return_code": result.return_code,
+                    "error_type": result.error_type,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                }
+                (self.directory / "snapshot-error.json").write_text(json.dumps(failure, indent=2))
+                # Some providers merge command stderr into stdout and retain
+                # only the exit-status message in their stderr field.
+                detail = "\n".join(value for value in [result.stdout, result.stderr, result.error_type] if value)
+                raise RuntimeError(f"Repository snapshot failed: {detail[-8000:]}")
             raw = await read_text(sandbox, path=remote + ".out")
         finally:
             await sandbox.exec(

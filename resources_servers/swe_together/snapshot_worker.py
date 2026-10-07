@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from hashlib import sha256
 from pathlib import Path
 
 
@@ -28,23 +29,53 @@ def discover():
     return sorted(repos)
 
 
-def git(repo, *args, env=None):
-    result = subprocess.run(
-        ["git", "-c", "safe.directory=*", "-c", "core.hooksPath=/dev/null", "-C", repo, *args],
+def run_git(repo, *args, env=None, git_dir=None):
+    command = ["git", "-c", "safe.directory=*", "-c", "core.hooksPath=/dev/null", "-C", repo]
+    if git_dir is not None:
+        command += ["--git-dir=" + str(git_dir), "--work-tree=" + repo]
+    return subprocess.run(
+        [*command, *args],
         env=env,
         capture_output=True,
     )
+
+
+def git(repo, *args, env=None, git_dir=None):
+    result = run_git(repo, *args, env=env, git_dir=git_dir)
     if result.returncode:
         raise RuntimeError(f"git {args[0]} failed in {repo}: " + result.stderr.decode(errors="replace"))
     return result.stdout.decode(errors="replace")
 
 
-def snapshot(repo):
+def snapshot_store(repo, namespace):
+    """Keep unborn repositories' objects and refs outside their prepared .git.
+
+    Some official images contain a root-owned, empty parent repository around a
+    committed nested repository. Do not initialize a candidate commit or change
+    ownership just to capture the prepared files. Reuse this private store even
+    if the candidate subsequently creates its own first commit.
+    """
+    store = Path(tempfile.gettempdir()) / namespace.replace("/", "-") / sha256(repo.encode()).hexdigest()
+    if not store.is_dir():
+        head = run_git(repo, "rev-parse", "--verify", "--quiet", "HEAD")
+        if head.returncode == 0:
+            return None
+        reference = git(repo, "symbolic-ref", "-q", "HEAD").strip()
+        if run_git(repo, "show-ref", "--verify", "--quiet", reference).returncode != 1:
+            raise RuntimeError(f"Cannot snapshot invalid HEAD in {repo}")
+        object_format = git(repo, "rev-parse", "--show-object-format").strip()
+        git(repo, "init", "--bare", "--quiet", "--object-format=" + object_format, str(store))
+    exclude = Path(git(repo, "rev-parse", "--absolute-git-dir").strip()) / "info" / "exclude"
+    (store / "info" / "exclude").write_bytes(exclude.read_bytes() if exclude.is_file() else b"")
+    return store
+
+
+def snapshot(repo, git_dir=None):
     with tempfile.TemporaryDirectory(prefix="gym-swet-index-") as temp:
         env = dict(os.environ, GIT_INDEX_FILE=temp + "/index")
-        git(repo, "read-tree", "HEAD", env=env)
-        git(repo, "add", "-A", env=env)
-        return git(repo, "write-tree", env=env).strip()
+        git(repo, "read-tree", "HEAD" if git_dir is None else "--empty", env=env, git_dir=git_dir)
+        git(repo, "add", "-A", env=env, git_dir=git_dir)
+        return git(repo, "write-tree", env=env, git_dir=git_dir).strip()
 
 
 def main():
@@ -54,22 +85,24 @@ def main():
     repos = discover() if not base else sorted(base)
     if not repos:
         raise RuntimeError("No task repositories found")
-    trees = {repo: snapshot(repo) for repo in repos}
     namespace = request["namespace"]
     if not namespace.startswith("refs/nemo-gym/") or ".." in namespace:
         raise ValueError("Invalid snapshot ref namespace")
+    stores = {repo: snapshot_store(repo, namespace) for repo in repos}
+    trees = {repo: snapshot(repo, stores[repo]) for repo in repos}
     output = {"trees": trees, "repositories": {}}
     for repo, tree in trees.items():
+        git_dir = stores[repo]
         baseline = base.get(repo, tree)
         # Preserve trees during ordinary candidate git gc without touching HEAD,
         # branches, or the candidate's index. Full patches remain on the host.
-        git(repo, "update-ref", namespace + "/baseline", baseline)
-        git(repo, "update-ref", namespace + "/previous", tree)
+        git(repo, "update-ref", namespace + "/baseline", baseline, git_dir=git_dir)
+        git(repo, "update-ref", namespace + "/previous", tree, git_dir=git_dir)
         prior = previous.get(repo, baseline)
         output["repositories"][repo] = {
-            "cumulative": git(repo, "diff", baseline, tree),
-            "incremental": git(repo, "diff", prior, tree),
-            "binary": git(repo, "diff", "--binary", baseline, tree),
+            "cumulative": git(repo, "diff", baseline, tree, git_dir=git_dir),
+            "incremental": git(repo, "diff", prior, tree, git_dir=git_dir),
+            "binary": git(repo, "diff", "--binary", baseline, tree, git_dir=git_dir),
         }
     Path(sys.argv[2]).write_text(json.dumps(output))
 
