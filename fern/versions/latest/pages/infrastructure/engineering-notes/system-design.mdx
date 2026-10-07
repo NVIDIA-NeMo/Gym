@@ -56,7 +56,9 @@ A config file can list other files in its own `config_paths`. Two rules decide w
 - A config overrides the files it includes. This holds at any nesting depth.
 - Files listed side by side are siblings. A later sibling overrides an earlier one, and it also overrides everything the earlier sibling included.
 
-For example, a benchmark config that includes a shared agent config can redefine one of the agent's fields, and the benchmark's value wins. If you pass `--config my_overrides.yaml` after `--benchmark`, values in `my_overrides.yaml` override the benchmark config. To print the merged result without starting servers, run `gym env resolve`.
+For example, a benchmark config that includes a shared agent config can redefine one of the agent's fields, and the benchmark's value wins.
+
+When mixing named selectors and `--config`, the CLI uses a fixed flag-category order, not their order on the command line: `--config` files are loaded before `--benchmark` files. To override a benchmark with another file, pass both as explicit paths in order: `--config benchmarks/<name>/config.yaml --config my_overrides.yaml`. To print the merged result without starting servers, run `gym env resolve`.
 
 **Port allocation**: Users can explicitly specify `host` and `port` in their config. If not provided, the framework automatically allocates ports from available system ports, tracking used ports to prevent conflicts.
 
@@ -98,7 +100,7 @@ flowchart TB
 
 3. **Readiness Check**: The main process waits in two steps.
    - First, it sends an HTTP request to the root URL of each managed server until every server accepts the connection. The response status code is not checked, because many servers have no route at `/`. A server counts as ready when it accepts connections, not when it returns HTTP 200. `server_spinup_timeout_seconds` bounds this wait.
-   - Second, it waits for every upstream model endpoint named in the config, such as `policy_base_url`, to accept a connection. This step exists because a Gym model server is a proxy. It accepts connections as soon as it starts, even when no inference server is behind it. `model_endpoint_readiness_timeout_seconds` bounds this wait, and `0` skips it.
+   - Second, it performs a best-effort connection check on upstream model endpoints named in the config, such as `policy_base_url`, retrying refused connections and timeouts. If the first probe cannot resolve a hostname, it prints a warning and skips that endpoint; a ready head therefore does not guarantee that every model endpoint is reachable. This step exists because a Gym model server is a proxy. It accepts connections as soon as it starts, even when no inference server is behind it. `model_endpoint_readiness_timeout_seconds` bounds this wait, and `0` skips it.
 
    After both steps pass, the head server is marked ready. If either wait times out, `gym env start` stops with an error that names the servers or endpoints that never answered. See [Gym Server Startup Timeout](/troubleshooting/configuration#gym-server-startup-timeout) and [Model Endpoint Unreachable](/troubleshooting/configuration#model-endpoint-unreachable).
 
