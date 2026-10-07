@@ -25,6 +25,7 @@ from nemo_gym.interactive_agent_types import (
     AgentActivationResponse,
     AgentContinuationCapabilities,
     AgentContinuationRequirements,
+    InteractionBudget,
     ResourcesStepResponse,
 )
 from nemo_gym.openai_utils import NeMoGymResponse
@@ -90,12 +91,14 @@ def agent():
     )
 
 
-async def seed(agent, *, session_id="session", continuation=True, runtime_policy=None):
+async def seed(agent, *, session_id="session", continuation=True, runtime_policy=None, requires_budget=False):
     body = AgentSeedSessionRequest(
         agent_session_id=session_id,
         episode_id={"rollout_id": session_id},
         task_id={"taskset": "test", "task_id": "task"},
-        continuation=AgentContinuationRequirements() if continuation else None,
+        continuation=AgentContinuationRequirements(requires_interaction_budget=requires_budget)
+        if continuation
+        else None,
         runtime_policy=runtime_policy,
     )
     request = SimpleNamespace(session={})
@@ -111,6 +114,51 @@ async def test_unsupported_runtime_policy_rejected_before_setup(agent, monkeypat
     with pytest.raises(HTTPException, match="required runtime policy format") as failure:
         await seed(agent, runtime_policy={"format": "unknown.v1", "settings": {}})
     assert failure.value.status_code == 422
+
+
+async def test_required_interaction_budget_capability_is_checked_before_setup(agent):
+    with pytest.raises(HTTPException, match="required interaction budget") as failure:
+        await seed(agent, requires_budget=True)
+    assert failure.value.status_code == 422 and not agent._session_records
+
+
+async def test_interaction_budget_is_immutable_across_activations_without_poisoning_rejected_ids(agent, monkeypatch):
+    monkeypatch.setattr(
+        agent,
+        "_agent_continuation_capabilities",
+        lambda: AgentContinuationCapabilities(supports_interaction_budget=True),
+    )
+    request, body = await seed(agent, requires_budget=True)
+    budget = InteractionBudget(started_at_unix_seconds=100, deadline_unix_seconds=160)
+    params = activation(body)
+    with pytest.raises(HTTPException, match="requires the seeded interaction budget"):
+        await agent.activate_agent_session(request, params)
+    params.interaction_budget = budget
+    invalid = params.model_copy(update={"activation_id": 3})
+    with pytest.raises(HTTPException, match="out of order"):
+        await agent.activate_agent_session(request, invalid)
+    assert not agent._session_records[body.agent_session_id].interaction_budget_bound
+    agent._release.set()
+    original = await agent.activate_agent_session(request, params)
+    assert await agent.activate_agent_session(request, params) == original
+    next_activation = activation(body, index=1, text="next")
+    next_activation.interaction_budget = InteractionBudget(started_at_unix_seconds=100, deadline_unix_seconds=170)
+    with pytest.raises(HTTPException, match="already bound") as failure:
+        await agent.activate_agent_session(request, next_activation)
+    assert failure.value.status_code == 409
+    next_activation.interaction_budget = budget
+    await agent.activate_agent_session(request, next_activation)
+    assert agent._inputs == ["initial", "next"]
+    assert (await agent.close_agent_session(request, close(body))).cleanup_confirmed
+
+
+async def test_optional_interaction_budget_requires_adapter_support_when_supplied(agent):
+    request, body = await seed(agent)
+    params = activation(body)
+    params.interaction_budget = InteractionBudget(started_at_unix_seconds=100, deadline_unix_seconds=160)
+    with pytest.raises(HTTPException, match="does not support interaction budgets"):
+        await agent.activate_agent_session(request, params)
+    assert not agent._inputs
 
 
 async def test_adapter_validates_policy_and_seed_retry_cannot_change_it(agent, monkeypatch):
