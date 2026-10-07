@@ -1,0 +1,43 @@
+# Build-time environments only; Forge supplies the runtime graph and endpoints.
+default_host: 127.0.0.1
+uv_venv_dir: /opt/nemo-gym
+skip_venv_if_present: false
+policy:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: http://127.0.0.1:1/v1
+      model: image-prefetch
+      api_key: EMPTY
+code_gen:
+  resources_servers:
+    code_gen:
+      entrypoint: app.py
+      domain: coding
+      num_processes: 1
+      unit_test_timeout_secs: 5
+      debug: false
+competitive_coding_challenges:
+  resources_servers:
+    competitive_coding_challenges:
+      entrypoint: app.py
+      domain: coding
+      test_file: /var/run/forge-gym/files/ccc-test-metadata.jsonl
+simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy
+      resources_server:
+        type: resources_servers
+        name: code_gen
+      max_steps: 1
+simple_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: simple_agent

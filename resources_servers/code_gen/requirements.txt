@@ -1,2 +1,2 @@
--e nemo-gym[dev] @ ../../
+-e nemo-gym[dev,sandbox] @ ../../
 numpy==2.2.6
