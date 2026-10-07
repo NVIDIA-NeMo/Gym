@@ -1790,6 +1790,15 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         le=1,
         description="Share of rollouts longer than long_rollout_s above which the timing summary warns.",
     )
+    timing_summary_interval_s: Optional[float] = Field(
+        default=600,
+        ge=0,
+        description=(
+            "Print the run timing summary every this many seconds while rollouts are collected, so a "
+            "run killed at its allocation limit still leaves a recent table in the log. Prints nothing "
+            "unless dispatch_start_report_within_s or long_rollout_s is set; 0 or null disables it."
+        ),
+    )
     timed_out_max_fraction: float = Field(
         default=0.01,
         ge=0,
@@ -2882,6 +2891,7 @@ class RolloutCollectionHelper(BaseModel):
         completed_count = 0
         persisted_count = len(persisted_success_keys)
         collection_succeeded = False
+        timing_heartbeat: Optional[asyncio.Task] = None
         latency_tracker = DispatchLatencyTracker(
             total=len(input_rows),
             start_report_within_s=config.dispatch_start_report_within_s,
@@ -2919,6 +2929,18 @@ class RolloutCollectionHelper(BaseModel):
                         for line in existing_results:
                             if line.strip():
                                 upload_spool.write(orjson.dumps(_rollout_for_export(orjson.loads(line))) + b"\n")
+
+            async def _timing_heartbeat() -> None:
+                while True:
+                    await asyncio.sleep(config.timing_summary_interval_s)
+                    table = latency_tracker.timing_summary()
+                    if table:
+                        tqdm.write(table)
+
+            if config.timing_summary_interval_s and (
+                config.dispatch_start_report_within_s is not None or config.long_rollout_s is not None
+            ):
+                timing_heartbeat = asyncio.create_task(_timing_heartbeat())
 
             completion_iterator = self._run_examples_with_metadata(
                 input_rows,
@@ -3193,6 +3215,10 @@ class RolloutCollectionHelper(BaseModel):
                 )
             collection_succeeded = True
         finally:
+            if timing_heartbeat is not None:
+                timing_heartbeat.cancel()
+            # Printed here, not after the block, so a run that dies mid-way still reports its timing.
+            print(latency_tracker.summary())
             try:
                 if isinstance(completion_iterator, _BoundedCompletionIterator):
                     await completion_iterator.aclose()
@@ -3204,8 +3230,6 @@ class RolloutCollectionHelper(BaseModel):
                         upload_spool_fpath.unlink(missing_ok=True)
                     if owned_token_source is not None:
                         await owned_token_source.close()
-
-        print(latency_tracker.summary())
 
         if config.upload_rollouts and exporters_enabled:  # pragma: no cover
             print("Uploading rollouts. This may take a few minutes if your data is large.")
