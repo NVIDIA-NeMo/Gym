@@ -737,6 +737,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if deadline is not None and monotonic() >= deadline
             else "activation_timeout"
             if timed_out
+            else "permission_denied"
+            if (response.metadata or {}).get("native_interruption") == "permission_denied"
             else "model_budget_exhausted"
             if response.status == "incomplete"
             else None
@@ -1387,30 +1389,61 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if not assistants:
             error = error or "OpenCode produced no assistant result"
         incomplete = result is not None and result["timed_out"]
+        permission_denied = False
         if assistants and not incomplete:
             last = assistants[-1]
             finish = last.get("finish")
             if finish == "length":
                 incomplete = True
             elif finish != "stop" or not last.get("time", {}).get("completed"):
-                error = error or f"OpenCode ended without a successful terminal assistant result (finish={finish!r})"
                 last_message = next(message for message in reversed(export["messages"]) if message["info"] is last)
-                for part in last_message.get("parts", []):
-                    if part.get("type") == "tool" and part.get("state", {}).get("error"):
-                        error += f"; {part.get('tool', 'tool')}: {part['state']['error']}"
+                permission_denied = bool(
+                    error is None
+                    and finish == "tool-calls"
+                    and last.get("time", {}).get("completed")
+                    and result
+                    and result["return_code"] == 0
+                    and result["cleanup_confirmed"]
+                    and state.native_session_id
+                    and state.message_ids
+                    and any(
+                        part.get("type") == "tool"
+                        and part.get("state", {}).get("status") == "error"
+                        and part.get("state", {}).get("error")
+                        == "The user rejected permission to use this specific tool call."
+                        for part in last_message.get("parts", [])
+                    )
+                )
+                if permission_denied:
+                    # Native rejection pauses the session for another user turn, without granting permission.
+                    incomplete = True
+                else:
+                    error = (
+                        error or f"OpenCode ended without a successful terminal assistant result (finish={finish!r})"
+                    )
+                    for part in last_message.get("parts", []):
+                        if part.get("type") == "tool" and part.get("state", {}).get("error"):
+                            error += f"; {part.get('tool', 'tool')}: {part['state']['error']}"
         status = "failed" if error else "incomplete" if incomplete else "completed"
+        error_type = (
+            "server_error"
+            if error
+            else "timeout"
+            if result and result["timed_out"]
+            else "permission_denied"
+            if permission_denied
+            else None
+        )
         # Artifact message completion records a model turn, not the entire invocation.
         for record in state.observations.records:
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 record.status = status
-                record.error_type = "server_error" if error else "timeout" if result and result["timed_out"] else None
+                record.error_type = error_type
         if state.activation_observations is not None:
             for record in state.activation_observations.records:
                 if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                     record.status = status
-                    record.error_type = (
-                        "server_error" if error else "timeout" if result and result["timed_out"] else None
-                    )
+                    record.error_type = error_type
         if result is not None:
             state.observations.records.append(
                 SandboxObservation(
@@ -1476,6 +1509,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             metadata={
                 "harness_execution": "sandbox",
+                **({"native_interruption": "permission_denied"} if permission_denied else {}),
                 "opencode_version": self.config.opencode_version,
                 "opencode_provider_npm": self.config.native_provider_npm,
                 "opencode_provider_id": self.config.native_provider_id,

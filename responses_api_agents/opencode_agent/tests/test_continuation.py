@@ -199,7 +199,7 @@ def test_native_terminal_reason_distinguishes_failure_from_model_budget(setup, t
     agent, sandbox = setup
     install_artifact_runner(sandbox, tmp_path)
     launch = sandbox.launch.side_effect
-    denial = "The user rejected permission to use this specific tool call."
+    denial = "Unexplained tool execution failure"
 
     async def interrupted(**kwargs):
         result = await launch(**kwargs)
@@ -268,6 +268,101 @@ def test_native_terminal_reason_distinguishes_failure_from_model_budget(setup, t
         assert root["status"] == ("incomplete" if finish == "length" else "failed")
         if finish == "tool-calls":
             assert denial in json.dumps(records)
+
+
+@pytest.mark.parametrize("provider_error", [False, True])
+def test_permission_rejection_preserves_checkpoint_and_resumes_after_feedback(setup, tmp_path, provider_error):
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    launch = sandbox.launch.side_effect
+    denial = "The user rejected permission to use this specific tool call."
+
+    async def reject_first_tool(**kwargs):
+        result = await launch(**kwargs)
+        if len(payloads) != 1:
+            return result
+        path = f"{sandbox.directory}/export.json"
+        export = json.loads(sandbox.files[path])
+        message = export["messages"][-1]
+        message["info"]["finish"] = "tool-calls"
+        if provider_error:
+            message["info"]["error"] = {"name": "APIError", "message": "Provider unavailable"}
+        denied = {
+            "type": "tool",
+            "callID": "denied-call",
+            "tool": "read",
+            "state": {
+                "status": "error",
+                "input": {"filePath": "/"},
+                "error": denial,
+                "time": {"start": 10, "end": 20},
+            },
+        }
+        message["parts"].append(denied)
+        sandbox.files[path] = json.dumps(export)
+        with sqlite3.connect(tmp_path / "session.db") as con:
+            con.execute("update message set data=? where id='a0'", (json.dumps(message["info"]),))
+            con.execute("insert into part values('denied', 'a0', 'native-session', ?, 20)", (json.dumps(denied),))
+        sandbox.files[f"{sandbox.directory}/stdout.jsonl"] = "\n".join(
+            json.dumps(event)
+            for event in (
+                {"type": "step_start", "part": {}},
+                {"type": "tool_use", "part": denied},
+                {"type": "step_finish", "part": {"reason": "tool-calls"}},
+            )
+        )
+        return result
+
+    sandbox.launch.side_effect = reject_first_tool
+    request = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=request.model_dump(mode="json")).status_code == 200
+        body = {
+            "agent_session_id": request.agent_session_id,
+            "episode_id": request.episode_id.model_dump(),
+            "activation_id": 0,
+            "responses_create_params": {"input": "Inspect root"},
+        }
+        first = client.post("/v1/agent_sessions/activate", json=body)
+        if provider_error:
+            assert first.status_code == 502
+            assert first.json()["detail"]["classification"] == "native_model_error"
+        else:
+            assert first.status_code == 200, first.text
+            interrupted = first.json()
+            assert interrupted["response"]["status"] == "incomplete"
+            assert interrupted["turn_complete"] is False
+            assert interrupted["stop_reason"] == "permission_denied"
+            assert interrupted["observation"]["events"][1]["result"] == denial
+            records = interrupted["observation"]["agent_observations"]["records"]
+            assert (
+                next(record for record in records if record["kind"] == "agent_invocation")["error_type"]
+                == "permission_denied"
+            )
+            assert next(record for record in records if record["kind"] == "tool_call")["status"] == "failed"
+            assert client.post("/v1/agent_sessions/activate", json=body).json() == interrupted
+            assert sandbox.launch.call_count == 1
+            resumed = client.post(
+                "/v1/agent_sessions/activate",
+                json={
+                    **body,
+                    "activation_id": 1,
+                    "responses_create_params": {"input": "Continue inside the repository"},
+                },
+            )
+            assert resumed.status_code == 200, resumed.text
+            assert resumed.json()["turn_complete"] is True
+            assert resumed.json()["stop_reason"] is None
+            assert payloads[1]["native_session_id"] == "native-session"
+            assert payloads[1]["previous_message_ids"] == ["u0", "a0"]
+        closed = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": request.agent_session_id, "episode_id": request.episode_id.model_dump()},
+        )
+        assert closed.status_code == 200
+        assert closed.json()["cleanup_confirmed"] is True
+        assert denial in json.dumps(closed.json()["agent_observations"])
+        assert len(closed.json()["activations"]) == (0 if provider_error else 2)
 
 
 async def test_ripgrep_setup_uses_private_native_cache_and_records_provenance(setup):

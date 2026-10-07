@@ -61,9 +61,11 @@ tools are confirmed stopped. Per-activation native event ordering, raw logs,
 visible text, reasoning, tool evidence, and native step counts are preserved.
 The raw-log fallback excludes dedicated reasoning events, which remain in typed evidence.
 Provider-call counts remain a separate captured-model measurement.
-Only native `length` termination is a model budget limit. A process that exits after an
-unfinished tool turn or content-filter result fails the activation, preserving its evidence
-for diagnosis and cleanup; a zero process exit code alone does not make it a healthy turn.
+Only native `length` termination is a model budget limit. An explicit tool-permission rejection
+with a valid checkpoint and confirmed cleanup returns an incomplete `permission_denied` activation,
+allowing the caller to supply feedback and resume the same session. The failed tool remains visible
+and permissions stay unchanged. Other unfinished tool turns or content-filter results fail the
+activation; a zero process exit code alone does not make it a healthy turn.
 Failed activations return a bounded structured HTTP 502 detail with the native session,
 finish reason, process outcome, and visible event previews. Transport metadata and dedicated
 reasoning events are omitted; close still retains cumulative failed invocation/tool evidence.
