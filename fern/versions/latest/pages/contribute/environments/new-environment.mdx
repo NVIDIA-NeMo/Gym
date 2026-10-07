@@ -250,16 +250,20 @@ class MyVerifyRequest(BaseVerifyRequest):
 
 ### Error Handling
 
-Tool execution errors should be propagated back to the model rather than crashing the server, enabling the model to learn from mistakes:
+Expected tool errors (bad arguments, unknown inputs) should be propagated back to the model so it can correct itself. Catch specific exception types for those cases; use a broad fallback only for unexpected failures, and log rather than expose internal details:
 
 ```python
 async def execute_tool(self, path: str, body: ToolRequest) -> ToolResponse:
     try:
         result = self.tool_functions[path](**body.model_dump())
         return ToolResponse(output=result)
-    except Exception as e:
-        # Return error to model so it can correct itself
-        return ToolResponse(output=f"Error executing tool '{path}': {str(e)}")
+    except (ValueError, TypeError) as e:
+        # Expected argument errors - return them so the model can correct itself
+        return ToolResponse(output=f"Tool error: {e}")
+    except Exception:
+        # Unexpected failures: log for diagnosis, return a safe message
+        logger.exception("Unexpected error in tool %r", path)
+        return ToolResponse(output=f"Tool '{path}' encountered an unexpected error")
 ```
 
 ### Configuration
