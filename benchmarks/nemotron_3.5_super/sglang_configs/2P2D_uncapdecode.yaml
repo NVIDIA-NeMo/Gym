@@ -237,7 +237,7 @@ roles:
       skip-server-warmup: true
       attention-backend: trtllm_mha
       context-length: 262144
-      cuda-graph-max-bs-decode: 128
+      cuda-graph-max-bs-decode: 256
       disaggregation-decode-extra-slots: 0
       disaggregation-transfer-backend: nixl
       dtype: bfloat16
@@ -249,7 +249,7 @@ roles:
       mamba-backend: flashinfer
       mamba-radix-cache-strategy: extra_buffer
       mamba-ssm-dtype: float32
-      max-running-requests: 128
+      max-running-requests: 256
       max-total-tokens: 16777216
       mem-fraction-static: 0.8
       moe-a2a-backend: none
