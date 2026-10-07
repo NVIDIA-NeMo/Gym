@@ -427,7 +427,8 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
         if ptype == "step-finish":
             tokens = part.get("tokens") or {}
             cache = tokens.get("cache") or {}
-            input_tokens += int(tokens.get("input") or 0) + int(cache.get("read") or 0)
+            # OpenCode separates cache reads and writes from uncached input; Responses includes all three.
+            input_tokens += int(tokens.get("input") or 0) + int(cache.get("read") or 0) + int(cache.get("write") or 0)
             output_tokens += int(tokens.get("output") or 0) + int(tokens.get("reasoning") or 0)
             reasoning_tokens += int(tokens.get("reasoning") or 0)
         elif roles.get(row["message_id"]) == "assistant" and ptype == "text" and (part.get("text") or "").strip():
@@ -616,7 +617,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 model,
                 {
                     "name": self.config.model,
-                    "interleaved": {"field": "reasoning"},
+                    # Gym model servers emit and accept `reasoning_content`; OpenCode replays assistant
+                    # history under this field, and Gym rejects an unknown `reasoning` key with a 422.
+                    "interleaved": {"field": "reasoning_content"},
                     "limit": {"context": self.config.context_window, "output": self.config.max_output_tokens},
                 },
             )

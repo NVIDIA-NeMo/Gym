@@ -695,8 +695,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             if not token_info:
                 continue
 
+            # OpenCode separates cache reads and writes from uncached input; Responses includes all three.
             usage = NeMoGymResponseUsage(
-                input_tokens=token_info["input"],
+                input_tokens=token_info["input"] + token_info["cache"]["read"] + token_info["cache"]["write"],
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=token_info["cache"]["read"]),
                 output_tokens=token_info["output"] + token_info["reasoning"],
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=token_info["reasoning"]),
