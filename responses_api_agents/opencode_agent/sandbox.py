@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
@@ -132,13 +133,21 @@ class OpenCodeSandboxSession(AgentSessionState):
                     raise
                 # The agent base replays the activation error independently of close.
 
-    async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> str:
+    async def execute(
+        self,
+        payload: dict[str, JsonValue],
+        *,
+        timeout: float,
+        close_timeout: float,
+        timeout_resolver: Callable[[], float] | None = None,
+    ) -> str:
         """Run through the common lifecycle; the adapter validates terminal events."""
         artifacts = await self.session.execute(
             stage_activation=lambda: self.stage_activation(payload),
             collect=lambda: self.collect_artifacts(timeout=close_timeout),
             timeout=timeout,
             close_timeout=close_timeout,
+            timeout_resolver=timeout_resolver,
         )
         if self.session.closing:
             raise asyncio.CancelledError

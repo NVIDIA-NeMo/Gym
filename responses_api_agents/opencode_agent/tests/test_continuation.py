@@ -840,3 +840,136 @@ async def test_native_environment_cannot_override_runtime_contract(setup, env):
     with pytest.raises(HTTPException, match="environment"):
         await agent._seed_agent_session_state(seed())
     sandbox.exec.assert_not_awaited()
+
+
+def test_shared_interaction_deadline_clamps_native_execution_and_expired_resume(setup, tmp_path, monkeypatch):
+    import shlex
+
+    from responses_api_agents.opencode_agent import app
+
+    agent, sandbox = setup
+    agent.config.timeout = 300
+    agent.config.session_execution_timeout_seconds = 600
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    clock = [100.0]
+    monkeypatch.setattr(app, "time", lambda: clock[0])
+    request = seed().model_copy(
+        update={"continuation": AgentContinuationRequirements(requires_interaction_budget=True)}
+    )
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        assert created.json()["capabilities"]["supports_interaction_budget"] is True
+        body = {
+            "agent_session_id": request.agent_session_id,
+            "episode_id": request.episode_id.model_dump(),
+            "activation_id": 0,
+            "responses_create_params": {"input": "Initial task"},
+            "interaction_budget": {"started_at_unix_seconds": 90, "deadline_unix_seconds": 120},
+        }
+        first = client.post("/v1/agent_sessions/activate", json=body)
+        assert first.status_code == 200, first.text
+        command = shlex.split(sandbox.launch.await_args.kwargs["command"])
+        assert 0 < float(command[command.index("--timeout") + 1]) <= 20
+        assert first.json()["observation"]["elapsed_seconds"] == 10
+        clock[0] = 121
+        expired = client.post("/v1/agent_sessions/activate", json={**body, "activation_id": 1})
+        assert expired.status_code == 200, expired.text
+        assert expired.json()["stop_reason"] == "session_budget_exhausted"
+        assert expired.json()["response"]["metadata"]["native_input_dispatched"] == "false"
+        assert expired.json()["observation"]["elapsed_seconds"] == 31
+        assert len(payloads) == 1
+        closed = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": request.agent_session_id, "episode_id": request.episode_id.model_dump()},
+        )
+        assert closed.status_code == 200
+        assert closed.json()["cleanup_confirmed"] is True
+        assert len(closed.json()["trajectory"]["turns"]) == 1
+
+
+async def test_interaction_expiring_in_native_queue_does_not_dispatch(setup, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from nemo_gym.interactive_agent_types import AgentActivationRequest
+    from responses_api_agents.opencode_agent import app
+
+    agent, sandbox = setup
+    clock = [100.0]
+    monkeypatch.setattr(app, "time", lambda: clock[0])
+
+    class WaitPastDeadline:
+        async def __aenter__(self):
+            clock[0] = 121.0
+
+        async def __aexit__(self, *_args):
+            pass
+
+    agent.sem = WaitPastDeadline()
+    request = seed()
+    state = await agent._seed_agent_session_state(request)
+    response = await agent._activate_agent_session_state(
+        state,
+        AgentActivationRequest(
+            agent_session_id=request.agent_session_id,
+            episode_id=request.episode_id,
+            activation_id=0,
+            responses_create_params={"input": "Must not run after deadline"},
+            interaction_budget={"started_at_unix_seconds": 90, "deadline_unix_seconds": 120},
+        ),
+        MagicMock(),
+    )
+    assert response.stop_reason == "session_budget_exhausted"
+    assert response.response.metadata["native_input_dispatched"] == "false"
+    sandbox.launch.assert_not_called()
+    assert not state.session.launch_started
+    assert state.observations is None
+    closed = await agent._close_agent_session_state(state)
+    assert closed.cleanup_confirmed is True
+
+
+@pytest.mark.parametrize("after_staging", [115.0, 121.0])
+def test_interaction_deadline_rechecked_after_supervisor_upload(setup, tmp_path, monkeypatch, after_staging):
+    import shlex
+
+    from responses_api_agents.opencode_agent import app
+
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    clock = [100.0]
+    monkeypatch.setattr(app, "time", lambda: clock[0])
+    request = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
+    upload = sandbox.upload
+
+    async def stage_slowly(source, destination):
+        result = await upload(source, destination)
+        if str(destination).endswith("process_supervisor.py"):
+            clock[0] = after_staging
+        return result
+
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=request.model_dump(mode="json")).status_code == 200
+        monkeypatch.setattr(sandbox, "upload", stage_slowly)
+        body = {
+            "agent_session_id": request.agent_session_id,
+            "episode_id": request.episode_id.model_dump(),
+            "activation_id": 0,
+            "responses_create_params": {"input": "Use only remaining time after staging"},
+            "interaction_budget": {"started_at_unix_seconds": 90, "deadline_unix_seconds": 120},
+        }
+        response = client.post("/v1/agent_sessions/activate", json=body)
+        assert response.status_code == 200, response.text
+        if after_staging > 120:
+            assert response.json()["stop_reason"] == "session_budget_exhausted"
+            assert response.json()["response"]["metadata"]["native_input_dispatched"] == "false"
+            assert payloads == []
+            sandbox.launch.assert_not_called()
+        else:
+            command = shlex.split(sandbox.launch.await_args.kwargs["command"])
+            assert float(command[command.index("--timeout") + 1]) == 5
+        closed = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": request.agent_session_id, "episode_id": request.episode_id.model_dump()},
+        )
+        assert closed.status_code == 200
+        assert closed.json()["cleanup_confirmed"] is True

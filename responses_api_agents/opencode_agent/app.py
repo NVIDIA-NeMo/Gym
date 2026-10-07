@@ -138,6 +138,10 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
+class _NativeBudgetExpired(Exception):
+    """No native process was dispatched because its interaction window expired."""
+
+
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     execution_mode: Literal["local", "sandbox", "legacy_sandbox"] = "local"
@@ -634,12 +638,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities:
         return AgentContinuationCapabilities(
+            supports_interaction_budget=True,
             observations=["ordered_events", "timing", "native_tools", "reasoning", "compaction"],
             runtime_prerequisites={"os": "linux", "python": ">=3.8", "opencode_version": self.config.opencode_version},
             budget_semantics={
                 "timeout": "per_activation_seconds",
                 "max_output_tokens": "per_model_call",
                 "episode_deadline": "environment_owned",
+                "interaction_budget": "immutable_utc_deadline_rechecked_before_dispatch",
                 "session_execution_timeout_seconds": "wall_seconds_since_first_activation_including_inter_turn_waits",
                 "provider_calls": "captured_separately",
             },
@@ -664,53 +670,23 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(409, "OpenCode has no persisted conversation to resume")
         if state.execution_started_at is None:
             state.execution_started_at = monotonic()
-        deadline = (
-            state.execution_started_at + self.config.session_execution_timeout_seconds
-            if self.config.session_execution_timeout_seconds is not None
-            else None
+        interaction_deadline = (
+            body.interaction_budget.deadline_unix_seconds if body.interaction_budget is not None else None
         )
-        if deadline is not None and monotonic() >= deadline:
-            if state.session.launch_started and (
-                state.session.cleanup is None or not state.session.cleanup["cleanup_confirmed"]
-            ):
-                raise RuntimeError("Expired OpenCode session has unconfirmed process cleanup")
-            return AgentActivationResponse(
-                activation_id=body.activation_id,
-                response=NeMoGymResponse(
-                    id=f"resp_{uuid4().hex}",
-                    created_at=int(time()),
-                    model=self.config.model_server.name,
-                    object="response",
-                    output=[],
-                    status="incomplete",
-                    usage=None,
-                    parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
-                    tool_choice=body.responses_create_params.tool_choice,
-                    tools=body.responses_create_params.tools,
-                    metadata={
-                        "native_input_dispatched": "false",
-                        "opencode_session_id": state.native_session_id or "",
-                    },
-                ),
-                observation=AgentActivationObservation(
-                    elapsed_seconds=monotonic() - state.execution_started_at,
-                    harness_steps=0,
-                ),
-                turn_complete=False,
-                stop_reason="session_budget_exhausted",
-            )
+        if self._native_execution_timeout(state, interaction_deadline) <= 0:
+            return self._expired_activation(state, body)
         await state.prepare_activation(body.activation_id)
         started = monotonic()
-        timeout = (
-            min(self.config.timeout, max(0.001, deadline - started)) if deadline is not None else self.config.timeout
-        )
-        response = await self._native_response(
-            state,
-            body.responses_create_params,
-            prompt=prompt,
-            system=state.system_instructions,
-            timeout=timeout,
-        )
+        try:
+            response = await self._native_response(
+                state,
+                body.responses_create_params,
+                prompt=prompt,
+                system=state.system_instructions,
+                interaction_deadline=interaction_deadline,
+            )
+        except _NativeBudgetExpired:
+            return self._expired_activation(state, body)
         events = parse_activation_events(state.activation_log)
         if response.status == "completed" and not any(
             event.kind == "step_finish" and event.metadata.get("part", {}).get("reason") == "stop" for event in events
@@ -726,7 +702,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         observation = AgentActivationObservation(
             events=events,
             raw_log=visible_activation_log(state.activation_log),
-            elapsed_seconds=monotonic() - state.execution_started_at,
+            elapsed_seconds=self._activation_elapsed(state, body),
             duration_seconds=monotonic() - started,
             harness_steps=sum(event.kind == "step_finish" for event in events),
             agent_observations=state.activation_observations,
@@ -734,7 +710,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         timed_out = state.session.cleanup and state.session.cleanup["timed_out"]
         stop_reason = (
             "session_budget_exhausted"
-            if deadline is not None and monotonic() >= deadline
+            if self._native_execution_timeout(state, interaction_deadline) <= 0
             else "activation_timeout"
             if timed_out
             else "permission_denied"
@@ -749,6 +725,53 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             observation=observation,
             turn_complete=response.status == "completed",
             stop_reason=stop_reason,
+        )
+
+    def _native_execution_timeout(self, state: OpenCodeSandboxSession, interaction_deadline: float | None) -> float:
+        limits = [float(self.config.timeout)]
+        if state.execution_started_at is not None and self.config.session_execution_timeout_seconds is not None:
+            limits.append(state.execution_started_at + self.config.session_execution_timeout_seconds - monotonic())
+        if interaction_deadline is not None:
+            limits.append(interaction_deadline - time())
+        return min(limits)
+
+    @staticmethod
+    def _activation_elapsed(state: OpenCodeSandboxSession, body: AgentActivationRequest) -> float:
+        if body.interaction_budget is not None:
+            return max(0, time() - body.interaction_budget.started_at_unix_seconds)
+        return max(0, monotonic() - state.execution_started_at)
+
+    def _expired_activation(
+        self, state: OpenCodeSandboxSession, body: AgentActivationRequest
+    ) -> AgentActivationResponse:
+        if state.session.launch_started and (
+            state.session.cleanup is None or not state.session.cleanup["cleanup_confirmed"]
+        ):
+            raise RuntimeError("Expired OpenCode session has unconfirmed process cleanup")
+        return AgentActivationResponse(
+            activation_id=body.activation_id,
+            response=NeMoGymResponse(
+                id=f"resp_{uuid4().hex}",
+                created_at=int(time()),
+                model=self.config.model_server.name,
+                object="response",
+                output=[],
+                status="incomplete",
+                usage=None,
+                parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
+                tool_choice=body.responses_create_params.tool_choice,
+                tools=body.responses_create_params.tools,
+                metadata={
+                    "native_input_dispatched": "false",
+                    "opencode_session_id": state.native_session_id or "",
+                },
+            ),
+            observation=AgentActivationObservation(
+                elapsed_seconds=self._activation_elapsed(state, body),
+                harness_steps=0,
+            ),
+            turn_complete=False,
+            stop_reason="session_budget_exhausted",
         )
 
     def _validate_agent_runtime_policy(self, policy: AgentRuntimePolicy) -> None:
@@ -1257,6 +1280,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         prompt: str,
         system: str,
         timeout: float | None = None,
+        interaction_deadline: float | None = None,
     ) -> NeMoGymResponse:
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         model_options = copy.deepcopy(self.config.native_model_options)
@@ -1327,20 +1351,35 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         error = None
         export = {}
         cancelled = False
+        budget_expired = False
+
+        def resolve_execution_timeout() -> float:
+            nonlocal budget_expired
+            remaining = min(
+                self.config.timeout if timeout is None else timeout,
+                self._native_execution_timeout(state, interaction_deadline),
+            )
+            if remaining <= 0:
+                budget_expired = True
+                raise _NativeBudgetExpired
+            return remaining
+
         try:
             async with self.sem:
+                execution_timeout = resolve_execution_timeout()
                 export = json.loads(
                     await state.execute(
                         payload,
-                        timeout=self.config.timeout if timeout is None else timeout,
+                        timeout=execution_timeout,
                         close_timeout=self.config.session_close_timeout_seconds,
+                        timeout_resolver=resolve_execution_timeout,
                     )
                 )
         except asyncio.CancelledError:
             cancelled = True
             raise
         finally:
-            if state.observations is None:
+            if state.observations is None and not budget_expired:
                 state.observations = AgentObservationBundle(
                     source="opencode",
                     gaps=[ObservationGap(code="observation_capture_failed")],

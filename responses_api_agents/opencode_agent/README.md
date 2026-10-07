@@ -56,7 +56,10 @@ The harness settings remain independent of benchmark prompts and stopping policy
 `timeout` limits each supervised activation. Optional `session_execution_timeout_seconds`
 also caps wall time from the first activation, including waits between user turns;
 expired sessions retain their checkpoint and refuse to launch more work. The
-interactive environment owns the outer episode deadline. New activations cannot start until the previous process and its
+interactive environment can also require an immutable UTC interaction deadline. It is checked
+before native dispatch, after waiting for capacity, and after staging input and the supervisor.
+It covers simulator waits as well as native work; clocks across components must be synchronized.
+The outer episode deadline also covers setup and verification. New activations cannot start until the previous process and its
 tools are confirmed stopped. Per-activation native event ordering, raw logs,
 visible text, reasoning, tool evidence, and native step counts are preserved.
 The raw-log fallback excludes dedicated reasoning events, which remain in typed evidence.
