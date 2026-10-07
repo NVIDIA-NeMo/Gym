@@ -52,7 +52,7 @@ def test_gym_benchmark_sections_match() -> None:
 
 
 @pytest.mark.parametrize("missing_role", [None, "prefill", "decode"])
-@pytest.mark.parametrize("recipe", ["2P2D.yaml", "2P2D_hicachemooncake.yaml"])
+@pytest.mark.parametrize("recipe", ["2P2D.yaml", "2P2D_hicachemooncake.yaml", "2P2D_hicache.yaml"])
 def test_srt_worker_metrics_config(tmp_path: Path, missing_role: str | None, recipe: str) -> None:
     config = yaml.safe_load((CONFIG_DIR / recipe).read_text())
     command = config["benchmark"]["command"]
