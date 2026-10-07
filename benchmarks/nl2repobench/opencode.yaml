@@ -31,6 +31,20 @@ nl2repobench_opencode_sandboxed_agent:
     opencode_sandboxed_agent:
       sandbox_timeout: 21600
 
+      # The shared opencode_sandboxed_agent default (3600000ms = 1hr, see
+      # responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml)
+      # is a single-model-call HTTP client timeout (one `opencode run` request to
+      # policy_model, not the whole session) - if vLLM ever hangs/stalls generating a
+      # single response past that point, OpenCode hard-aborts the call and the run
+      # errors out. Empirically this produced a tight cluster of official/block_target
+      # rollouts landing at exactly ~60.0-60.4 minutes total duration with reward=0 (see
+      # docs/PIPELINE.md's duration-vs-reward analysis) - consistent with a single early
+      # call getting stuck and timing out rather than the agent genuinely giving up.
+      # Raised to 4hr here, scoped to nl2repobench only (not the shared default, so
+      # other opencode_sandboxed_agent benchmarks are unaffected). sandbox_timeout above
+      # is already 21600s (6hr), comfortably above this, so it's left as-is.
+      opencode_model_call_timeout: 14400000
+
       # The agent sandbox denies all egress except the policy model host
       # (enforce_agent_no_network: true), so the default `curl
       # https://opencode.ai/install` fallback fails (confirmed via a live
