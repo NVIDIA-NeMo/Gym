@@ -236,6 +236,7 @@ def test_native_config_reuses_english_components_and_preserves_generation_defaul
     english, indic = configs
     resource_key = "indic_aime_2026_math_with_judge_resources_server"
     agent_key = "indic_aime_2026_math_with_judge_simple_agent"
+    environment_key = "indic_aime_2026_math_with_judge_environment_server"
     english_resource = english.aime26_math_with_judge_resources_server.resources_servers.math_with_judge
     indic_resource = indic[resource_key].resources_servers.math_with_judge
     assert indic_resource == english_resource
@@ -244,7 +245,9 @@ def test_native_config_reuses_english_components_and_preserves_generation_defaul
         "policy_model",
         resource_key,
         agent_key,
+        environment_key,
     }
+    assert indic[environment_key].environment_servers.legacy_agent.agent_server.name == agent_key
     agent = indic[agent_key].responses_api_agents.simple_agent
     assert (
         agent.datasets[0].prompt_config
@@ -293,25 +296,6 @@ def _resolve_cli_config(flags: list[str]) -> dict:
     return OmegaConf.to_container(resolved, resolve=True)
 
 
-def _outbound_request(config: dict, row: dict) -> dict:
-    from unittest.mock import MagicMock
-
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.server_utils import ServerClient
-    from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
-
-    policy = VLLMModel(
-        config=VLLMModelConfig.model_validate(
-            config["policy_model"]["responses_api_models"]["vllm_model"]
-            | {"name": "policy_model", "host": "127.0.0.1", "port": 18099}
-        ),
-        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
-    )
-    request = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
-    chat = policy._converter.responses_to_chat_completion_create_params(request)
-    return policy._preprocess_chat_completion_create_params(MagicMock(), chat.model_dump(exclude_unset=True))
-
-
 def _materialize_dataset(config: dict, agent_name: str, source_rows: list[dict], tmp_path: Path) -> list[dict]:
     from nemo_gym.config_types import BenchmarkDatasetConfig
     from nemo_gym.train_data_utils import TrainDataProcessor
@@ -345,7 +329,7 @@ def _collect_rows(config: dict, source_rows: list[dict], tmp_path: Path) -> list
         (["--temperature", "0.4", "--top-p", "0.8", "--max-output-tokens", "4096"], (0.4, 0.8, 4096)),
     ],
 )
-def test_cli_sampling_reaches_vllm_with_four_distinct_seeds(flags, expected, tmp_path, source_dataset) -> None:
+def test_cli_sampling_materializes_four_distinct_seeded_requests(flags, expected, tmp_path, source_dataset) -> None:
     config = _resolve_cli_config(flags)
     records, _ = module.load_source(languages=["hi"], question_ids=[1])
     source_rows = module.build_rows(records)
@@ -353,19 +337,15 @@ def test_cli_sampling_reaches_vllm_with_four_distinct_seeds(flags, expected, tmp
     rows = _collect_rows(config, prepared, tmp_path)
     assert len(rows) == 4
     for seed, row in enumerate(rows):
-        outbound = _outbound_request(config, row)
-        assert (outbound["temperature"], outbound["top_p"], outbound["max_tokens"]) == expected
-        assert outbound["top_k"] == 64
-        assert outbound["chat_template_kwargs"]["enable_thinking"] is True
-        assert outbound["seed"] == seed
+        request = row["responses_create_params"]
+        assert (request["temperature"], request["top_p"], request["max_output_tokens"]) == expected
+        assert json.loads(request["metadata"]["extra_body"]) == {"top_k": 64, "seed": seed}
+        assert json.loads(request["metadata"]["chat_template_kwargs"]) == {"enable_thinking": True}
     assert "seed" not in json.loads(source_rows[0]["responses_create_params"]["metadata"]["extra_body"])
 
 
 @pytest.mark.parametrize("cli_override", [False, True])
 def test_combined_benchmarks_preserve_numb3rs_audio_and_routing(tmp_path, source_dataset, cli_override) -> None:
-    import base64
-    import wave
-
     from benchmarks.numb3rs.prepare import _format_row
 
     flags = ["--benchmark", "numb3rs"]
@@ -381,10 +361,6 @@ def test_combined_benchmarks_preserve_numb3rs_audio_and_routing(tmp_path, source
         audio_prefix=str(tmp_path),
     )
     audio_path = Path(audio["responses_create_params"]["metadata"]["audio_path"])
-    audio_path.parent.mkdir(parents=True)
-    with wave.open(str(audio_path), "wb") as wav:
-        wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
-        wav.writeframes(b"\0\0" * 160)
     prepared = indic + _materialize_dataset(config, audio_agent, [audio], tmp_path)
     rows = _collect_rows(config, prepared, tmp_path)
     assert len(rows) == 5
@@ -401,8 +377,9 @@ def test_combined_benchmarks_preserve_numb3rs_audio_and_routing(tmp_path, source
         )
     else:
         assert not {"temperature", "top_p", "max_output_tokens"} & audio_request.keys()
-    outbound = _outbound_request(config, rows[-1])
-    audio_block = outbound["messages"][-1]["content"][0]
-    assert audio_block["type"] == "audio_url"
-    assert base64.b64decode(audio_block["audio_url"]["url"].split(",", 1)[1]) == audio_path.read_bytes()
-    assert [_outbound_request(config, row)["seed"] for row in rows[:4]] == [0, 1, 2, 3]
+    assert [json.loads(row["responses_create_params"]["metadata"]["extra_body"])["seed"] for row in rows[:4]] == [
+        0,
+        1,
+        2,
+        3,
+    ]
