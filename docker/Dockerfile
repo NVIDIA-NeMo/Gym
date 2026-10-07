@@ -59,6 +59,9 @@ apt-get purge -y \
     libmp3lame* \
     2>/dev/null || true
 
+# Gym never imports dbus or GObject; drop the base image's Python bindings.
+apt-get purge -y python3-dbus python3-gi
+
 apt-get autoremove -y
 
 # CVE-2026-45447: PKCS#7/S-MIME use-after-free in OpenSSL's PKCS7_verify().
