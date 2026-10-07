@@ -1413,6 +1413,47 @@ COMMANDS = {
         ),
     ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
+    # Temporary migration aid: the parity gate before an old resources server is deleted for its Harbor path.
+    "dev compare": Command(
+        target="nemo_gym.cli.dev:dev_compare",
+        summary="Compare two rollout JSONL files task by task and show the losing verifier output for every flip.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "old_rollouts", metavar="OLD_ROLLOUTS", help="Rollouts JSONL from the old (reference) side."
+                ),
+                translate_to_hydra=lambda args: [f"+old_rollouts={json.dumps(args.old_rollouts)}"],
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "new_rollouts", metavar="NEW_ROLLOUTS", help="Rollouts JSONL from the new (candidate) side."
+                ),
+                translate_to_hydra=lambda args: [f"+new_rollouts={json.dumps(args.new_rollouts)}"],
+            ),
+            _value_flag(
+                "key",
+                "key",
+                "Dotted field holding the task id on both sides (default: detected, e.g. _ng_task_id or task_name).",
+                quote=True,
+            ),
+            _value_flag("tail", "tail", "Lines of the losing side's verifier output to print per flip (default 15)."),
+            _value_flag(
+                "logs-root",
+                "logs_root",
+                "Directory against which a relative verifier_logs_dir is resolved (e.g. resources_servers/harbor).",
+                quote=True,
+            ),
+            # `--json PATH` here writes a file; it deliberately shadows the root `--json` stdout toggle.
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--json", dest="json_output", metavar="PATH", help="Also write a machine-readable summary here."
+                ),
+                translate_to_hydra=lambda args: (
+                    [f"+json_output={json.dumps(args.json_output)}"] if getattr(args, "json_output", None) else []
+                ),
+            ),
+        ),
+    ),
 }
 
 

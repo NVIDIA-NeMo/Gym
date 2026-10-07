@@ -1,0 +1,566 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Per-task parity report between two rollout JSONL files (`gym dev compare`).
+
+A temporary migration aid: before an old resources server is deleted in favour of its Harbor-path replacement,
+both are run on the same tasks and this report is the gate. It joins the rows by task, classifies every task
+(identical, flipped, masked, missing) and prints the losing side's verifier output for every flip, replacing the
+ad-hoc audit scripts used for Terminal Bench 2.1 and Terminal Bench 4.
+
+Rows from either path are accepted: the Harbor path carries `_ng_task_id`, legacy servers carry `task_name` or a
+task id inside `verifier_metadata`. Masked infrastructure failures that the Harbor path writes to the sibling
+`<name>_failures.jsonl` are folded back in as masked rows.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import statistics
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal, Optional
+
+from pydantic import Field
+
+from nemo_gym.config_types import BaseNeMoGymCLIConfig
+
+
+Category = Literal["identical", "flipped", "flipped_agent_error", "masked", "missing"]
+Side = Literal["old", "new"]
+
+# Where a row may name its task, in detection order. Dotted paths descend into nested dicts.
+TASK_KEY_CANDIDATES: tuple[str, ...] = (
+    "_ng_task_id",
+    "task_name",
+    "task_id",
+    "verifier_metadata.task_id",
+    "verifier_metadata.task_name",
+    "verifier_metadata.instance_id",
+    "verifier_metadata.id",
+)
+# Verifier stdout embedded in the row itself (legacy servers), in preference order.
+EMBEDDED_VERIFIER_FIELDS: tuple[str, ...] = ("test_output", "verifier_stdout", "verifier_output")
+# File read under a row's `verifier_logs_dir` (the Harbor resources server writes it there).
+VERIFIER_STDOUT_FILENAME = "test-stdout.txt"
+FAILURES_SUFFIX = "_failures.jsonl"
+
+
+class CompareInputError(Exception):
+    """An input file could not be read or does not look like rollouts."""
+
+
+class RolloutCompareConfig(BaseNeMoGymCLIConfig):
+    """
+    Compare two rollout JSONL files task by task: count identical, flipped, masked and missing tasks and print the
+    losing side's verifier output for every flip. A report, not a gate: the exit code is 0 unless an input cannot
+    be read.
+
+    Examples:
+
+    ```bash
+    # Old server vs Harbor path on the same tasks
+    gym dev compare old/rollouts.jsonl new/rollouts.jsonl
+
+    # Resolve relative `verifier_logs_dir` paths against the Harbor server directory, keep 30 log lines per flip,
+    # and also write a machine-readable summary
+    gym dev compare old.jsonl new.jsonl --logs-root resources_servers/harbor --tail 30 --json compare.json
+
+    # Join on an explicit field when auto-detection picks the wrong one
+    gym dev compare old.jsonl new.jsonl --key verifier_metadata.instance_id
+    ```
+    """
+
+    old_rollouts: str = Field(description="Rollouts JSONL from the old (reference) side.")
+    new_rollouts: str = Field(description="Rollouts JSONL from the new (candidate) side.")
+    key: Optional[str] = Field(
+        default=None,
+        description="Dotted field holding the task id, applied to both sides. Default: detected per side from "
+        + ", ".join(TASK_KEY_CANDIDATES)
+        + ".",
+    )
+    tail: int = Field(default=15, ge=0, description="Lines of the losing side's verifier output to print per flip.")
+    json_output: Optional[str] = Field(default=None, description="Also write a machine-readable summary here.")
+    logs_root: Optional[str] = Field(
+        default=None,
+        description="Extra directory against which a relative `verifier_logs_dir` is resolved (tried after the "
+        "current directory and each JSONL file's directory).",
+    )
+
+
+@dataclass
+class TaskSide:
+    """One side's rows for a task, reduced to what the comparison needs."""
+
+    rows: list[dict[str, Any]]
+    reward: Optional[float]
+    masked: Optional[str]  # why this side is masked, or None
+    agent_error: Optional[str]  # an agent-level error marker (legacy `error`, `*_error_type` metadata), or None
+
+    @property
+    def repeated(self) -> bool:
+        return len(self.rows) > 1
+
+    def reward_text(self) -> str:
+        if self.reward is None:
+            return "none"
+        text = str(round(self.reward, 4))
+        return f"{text} (mean of {len(self.rows)} rows)" if self.repeated else text
+
+
+@dataclass
+class TaskComparison:
+    task: str
+    category: Category
+    old: Optional[TaskSide] = None
+    new: Optional[TaskSide] = None
+    winner: Optional[Side] = None  # for flips: the side with the higher reward
+
+    @property
+    def loser(self) -> Optional[Side]:
+        if self.winner is None:
+            return None
+        return "new" if self.winner == "old" else "old"
+
+
+@dataclass
+class CompareResult:
+    tasks: list[TaskComparison]
+    old_key: str
+    new_key: str
+    old_rows: int
+    new_rows: int
+    old_masked_rows: int = 0
+    new_masked_rows: int = 0
+    old_prefix_stripped: Optional[str] = None
+    new_prefix_stripped: Optional[str] = None
+    notes: list[str] = field(default_factory=list)
+
+    def by_category(self, category: Category) -> list[TaskComparison]:
+        return [t for t in self.tasks if t.category == category]
+
+    def counts(self) -> dict[str, int]:
+        flips = self.by_category("flipped")
+        masked = self.by_category("masked")
+        missing = self.by_category("missing")
+        return {
+            "tasks": len(self.tasks),
+            "identical": len(self.by_category("identical")),
+            "flipped": len(flips),
+            "flipped_old_win": sum(1 for t in flips if t.winner == "old"),
+            "flipped_new_win": sum(1 for t in flips if t.winner == "new"),
+            "flipped_agent_error": len(self.by_category("flipped_agent_error")),
+            "masked": len(masked),
+            "masked_old": sum(1 for t in masked if t.old is not None and t.old.masked),
+            "masked_new": sum(1 for t in masked if t.new is not None and t.new.masked),
+            "missing": len(missing),
+            "missing_old_only": sum(1 for t in missing if t.new is None),
+            "missing_new_only": sum(1 for t in missing if t.old is None),
+        }
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Loading
+# --------------------------------------------------------------------------------------------------------------
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    try:
+        text = path.read_text(errors="replace")
+    except OSError as exc:
+        raise CompareInputError(f"cannot read {path}: {exc.strerror or exc}") from exc
+    rows: list[dict[str, Any]] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as exc:
+            raise CompareInputError(f"{path}:{lineno}: invalid JSON ({exc})") from exc
+        if not isinstance(row, dict):
+            raise CompareInputError(f"{path}:{lineno}: expected a JSON object per line")
+        rows.append(row)
+    return rows
+
+
+def _failure_as_masked_row(failure: dict[str, Any]) -> dict[str, Any]:
+    """A `<name>_failures.jsonl` record becomes a masked row with no reward."""
+    row = dict(failure)
+    row.setdefault("reward", None)
+    row["mask_sample"] = True
+    row.setdefault("failure_kind", failure.get("_ng_failure_class") or "failure")
+    row.setdefault("failure_reason", failure.get("_ng_failure_message"))
+    return row
+
+
+def load_rollouts(path: str | Path) -> list[dict[str, Any]]:
+    """Read a rollouts JSONL plus, when present, its sibling `<name>_failures.jsonl` of masked failures."""
+    path = Path(path)
+    rows = _read_jsonl(path)
+    if path.suffix == ".jsonl":
+        failures_path = path.with_name(path.stem + FAILURES_SUFFIX)
+        if failures_path.is_file():
+            rows.extend(_failure_as_masked_row(f) for f in _read_jsonl(failures_path))
+    return rows
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Task identity
+# --------------------------------------------------------------------------------------------------------------
+
+
+def _lookup(row: dict[str, Any], dotted: str) -> Any:
+    value: Any = row
+    for part in dotted.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return None
+        value = value[part]
+    return value
+
+
+def detect_task_key(rows: list[dict[str, Any]]) -> str:
+    """The first candidate field every row carries."""
+    for candidate in TASK_KEY_CANDIDATES:
+        if rows and all(_lookup(row, candidate) is not None for row in rows):
+            return candidate
+    raise CompareInputError(
+        "no task id field found; rows carry none of " + ", ".join(TASK_KEY_CANDIDATES) + " (use --key)"
+    )
+
+
+def task_id_of(row: dict[str, Any], key: str) -> str:
+    value = _lookup(row, key)
+    if value is None:
+        raise CompareInputError(f"row has no {key!r} field (keys: {sorted(row)[:12]})")
+    if isinstance(value, dict):
+        # The Harbor path's `_ng_task_id` is {"taskset": ..., "task_id": ...}.
+        value = value.get("task_id", value.get("id", json.dumps(value, sort_keys=True)))
+    return str(value)
+
+
+def group_by_task(rows: list[dict[str, Any]], key: str) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(task_id_of(row, key), []).append(row)
+    return grouped
+
+
+def _common_prefix(ids: list[str]) -> Optional[str]:
+    """A `<prefix>/` every id shares (e.g. `terminal-bench/`), or None."""
+    prefixes = {task_id.split("/", 1)[0] + "/" for task_id in ids if "/" in task_id}
+    if len(prefixes) == 1 and all("/" in task_id for task_id in ids):
+        return prefixes.pop()
+    return None
+
+
+def _strip_prefix(grouped: dict[str, list[dict[str, Any]]], prefix: str) -> dict[str, list[dict[str, Any]]]:
+    return {task_id[len(prefix) :]: rows for task_id, rows in grouped.items()}
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Per-row signals
+# --------------------------------------------------------------------------------------------------------------
+
+
+def mask_reason(row: dict[str, Any]) -> Optional[str]:
+    if row.get("mask_sample"):
+        kind = row.get("failure_kind")
+        return f"mask_sample (failure_kind={kind})" if kind else "mask_sample"
+    if row.get("failure_kind"):
+        return f"failure_kind={row['failure_kind']}"
+    if row.get("reward") is None:
+        return "no reward"
+    return None
+
+
+def agent_error(row: dict[str, Any]) -> Optional[str]:
+    """An agent-level error the row reports without being masked: the legacy agent's `error` field or an
+    `*error_type` entry in the response metadata (e.g. Terminus's `terminus2_error_type`)."""
+    error = row.get("error")
+    if error:
+        last_line = str(error).strip().splitlines()[-1] if str(error).strip() else str(error)
+        return f"error: {last_line[:120]}"
+    metadata = (row.get("response") or {}).get("metadata") or {}
+    if isinstance(metadata, dict):
+        for name, value in metadata.items():
+            if name.endswith("error_type") and value:
+                return f"{name}={value}"
+    return None
+
+
+def _reward_of(row: dict[str, Any]) -> Optional[float]:
+    reward = row.get("reward")
+    if isinstance(reward, bool) or not isinstance(reward, (int, float)):
+        return None
+    return float(reward)
+
+
+def summarize_side(rows: list[dict[str, Any]]) -> TaskSide:
+    reasons = [reason for reason in (mask_reason(row) for row in rows) if reason]
+    rewards = [reward for reward in (_reward_of(row) for row in rows) if reward is not None]
+    errors = [err for err in (agent_error(row) for row in rows) if err]
+    masked = None
+    if reasons:
+        masked = reasons[0] if len(rows) == 1 else f"{len(reasons)}/{len(rows)} rows masked: {reasons[0]}"
+    return TaskSide(
+        rows=rows,
+        reward=statistics.fmean(rewards) if rewards else None,
+        masked=masked,
+        agent_error=errors[0] if errors else None,
+    )
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Comparison
+# --------------------------------------------------------------------------------------------------------------
+
+
+def compare_rollouts(
+    old_rows: list[dict[str, Any]], new_rows: list[dict[str, Any]], key: Optional[str] = None
+) -> CompareResult:
+    if key:
+        old_key = new_key = key
+    else:
+        # An empty side (everything missing) borrows the other side's detected key.
+        old_key = detect_task_key(old_rows) if old_rows or not new_rows else detect_task_key(new_rows)
+        new_key = detect_task_key(new_rows) if new_rows else old_key
+    old, new = group_by_task(old_rows, old_key), group_by_task(new_rows, new_key)
+
+    old_prefix = new_prefix = None
+    if old and new and not (set(old) & set(new)):
+        # Legacy servers often namespace the task (`terminal-bench/x`) where the Harbor path does not.
+        old_prefix, new_prefix = _common_prefix(list(old)), _common_prefix(list(new))
+        if old_prefix and not new_prefix:
+            old = _strip_prefix(old, old_prefix)
+        elif new_prefix and not old_prefix:
+            new = _strip_prefix(new, new_prefix)
+        else:
+            old_prefix = new_prefix = None
+
+    tasks: list[TaskComparison] = []
+    repeated: list[str] = []
+    for task in sorted(set(old) | set(new)):
+        old_side = summarize_side(old[task]) if task in old else None
+        new_side = summarize_side(new[task]) if task in new else None
+        if (old_side and old_side.repeated) or (new_side and new_side.repeated):
+            repeated.append(task)
+        if old_side is None or new_side is None:
+            tasks.append(TaskComparison(task, "missing", old_side, new_side))
+            continue
+        if old_side.masked or new_side.masked:
+            tasks.append(TaskComparison(task, "masked", old_side, new_side))
+            continue
+        assert old_side.reward is not None and new_side.reward is not None  # unmasked sides carry rewards
+        if math.isclose(old_side.reward, new_side.reward, rel_tol=0.0, abs_tol=1e-9):
+            tasks.append(TaskComparison(task, "identical", old_side, new_side))
+            continue
+        winner: Side = "old" if old_side.reward > new_side.reward else "new"
+        category: Category = "flipped_agent_error" if (old_side.agent_error or new_side.agent_error) else "flipped"
+        tasks.append(TaskComparison(task, category, old_side, new_side, winner))
+
+    notes = []
+    if repeated:
+        notes.append(
+            f"{len(repeated)} task(s) have several rows on a side; they are compared on the mean reward: "
+            + ", ".join(repeated)
+        )
+    return CompareResult(
+        tasks=tasks,
+        old_key=old_key,
+        new_key=new_key,
+        old_rows=len(old_rows),
+        new_rows=len(new_rows),
+        old_masked_rows=sum(1 for row in old_rows if mask_reason(row)),
+        new_masked_rows=sum(1 for row in new_rows if mask_reason(row)),
+        old_prefix_stripped=old_prefix,
+        new_prefix_stripped=new_prefix,
+        notes=notes,
+    )
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Verifier output
+# --------------------------------------------------------------------------------------------------------------
+
+
+def _resolve_logs_path(logs_dir: str, roots: list[Path]) -> Optional[Path]:
+    candidate = Path(logs_dir)
+    candidates = [candidate] if candidate.is_absolute() else [root / candidate for root in roots]
+    for path in candidates:
+        if path.is_file():
+            return path
+        if (path / VERIFIER_STDOUT_FILENAME).is_file():
+            return path / VERIFIER_STDOUT_FILENAME
+    return None
+
+
+def verifier_output(row: dict[str, Any], roots: list[Path]) -> tuple[Optional[str], str]:
+    """(text, source) for a row's verifier stdout: the file under `verifier_logs_dir` when it exists, else the
+    text embedded in the row; `(None, reason)` when neither is available."""
+    logs_dir = row.get("verifier_logs_dir")
+    if logs_dir:
+        path = _resolve_logs_path(str(logs_dir), roots)
+        if path is not None:
+            return path.read_text(errors="replace"), str(path)
+    for name in EMBEDDED_VERIFIER_FIELDS:
+        text = row.get(name)
+        if isinstance(text, str) and text.strip():
+            return text, f"row field {name!r}"
+    if logs_dir:
+        return None, f"unavailable: {logs_dir} not found under {', '.join(str(r) for r in roots)}"
+    return None, "unavailable: row has no verifier_logs_dir and no embedded verifier output"
+
+
+def tail_lines(text: str, count: int) -> list[str]:
+    lines = text.rstrip("\n").splitlines()
+    return lines[-count:] if count else []
+
+
+def _losing_row(side: TaskSide) -> dict[str, Any]:
+    """The worst row on the losing side (meaningful when a side has repeats)."""
+    return min(side.rows, key=lambda row: _reward_of(row) if _reward_of(row) is not None else math.inf)
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Rendering
+# --------------------------------------------------------------------------------------------------------------
+
+
+def _flip_block(task: TaskComparison, roots: list[Path], tail: int) -> list[str]:
+    assert task.old is not None and task.new is not None and task.loser is not None
+    loser_side = task.old if task.loser == "old" else task.new
+    lines = [f"### {task.task}: old={task.old.reward_text()} new={task.new.reward_text()} -> {task.winner} wins"]
+    for side_name, side in (("old", task.old), ("new", task.new)):
+        if side.agent_error:
+            lines.append(f"    {side_name} agent error: {side.agent_error}")
+    text, source = verifier_output(_losing_row(loser_side), roots)
+    if text is None:
+        lines.append(f"    {task.loser} verifier output {source}")
+    else:
+        lines.append(f"    {task.loser} verifier output (last {tail} lines of {source}):")
+        lines.extend(f"    | {line}" for line in tail_lines(text, tail))
+    return lines
+
+
+def render_report(result: CompareResult, roots: list[Path], tail: int = 15) -> str:
+    counts = result.counts()
+
+    def side_rows(total: int, masked: int) -> str:
+        return f"{total} rows" + (f" incl. {masked} masked" if masked else "")
+
+    lines = [
+        f"gym dev compare: {counts['tasks']} tasks (old {side_rows(result.old_rows, result.old_masked_rows)}, "
+        f"new {side_rows(result.new_rows, result.new_masked_rows)})",
+        "join key: old="
+        + result.old_key
+        + (f" (prefix {result.old_prefix_stripped!r} stripped)" if result.old_prefix_stripped else "")
+        + ", new="
+        + result.new_key
+        + (f" (prefix {result.new_prefix_stripped!r} stripped)" if result.new_prefix_stripped else ""),
+    ]
+    lines.extend(f"note: {note}" for note in result.notes)
+    lines += [
+        "",
+        f"{'category':<24}{'count':>6}",
+        f"{'identical':<24}{counts['identical']:>6}",
+        f"{'flipped':<24}{counts['flipped']:>6}   old-win {counts['flipped_old_win']}, "
+        f"new-win {counts['flipped_new_win']}",
+        f"{'flipped (agent error)':<24}{counts['flipped_agent_error']:>6}   rewards differ and a side reports an "
+        "agent error; rerun before counting",
+        f"{'masked':<24}{counts['masked']:>6}   old {counts['masked_old']}, new {counts['masked_new']}",
+        f"{'missing':<24}{counts['missing']:>6}   old-only {counts['missing_old_only']}, "
+        f"new-only {counts['missing_new_only']}",
+    ]
+
+    flips = result.by_category("flipped")
+    lines += ["", f"## Flips ({len(flips)})"]
+    for task in flips:
+        lines.extend(_flip_block(task, roots, tail))
+    agent_error_flips = result.by_category("flipped_agent_error")
+    if agent_error_flips:
+        lines += ["", f"## Flips with agent errors ({len(agent_error_flips)})"]
+        for task in agent_error_flips:
+            lines.extend(_flip_block(task, roots, tail))
+
+    masked = result.by_category("masked")
+    lines += ["", f"## Masked ({len(masked)})"]
+    for task in masked:
+        assert task.old is not None and task.new is not None
+        reasons = [f"{name} {side.masked}" for name, side in (("old", task.old), ("new", task.new)) if side.masked]
+        lines.append(f"- {task.task}: old={task.old.reward_text()} new={task.new.reward_text()}; {'; '.join(reasons)}")
+
+    missing = result.by_category("missing")
+    lines += ["", f"## Missing ({len(missing)})"]
+    for task in missing:
+        present = "old" if task.new is None else "new"
+        side = task.old if task.new is None else task.new
+        assert side is not None
+        lines.append(f"- {task.task}: only on {present} side (reward {side.reward_text()})")
+    return "\n".join(lines) + "\n"
+
+
+def summary_dict(result: CompareResult) -> dict[str, Any]:
+    def side_dict(side: Optional[TaskSide]) -> Optional[dict[str, Any]]:
+        if side is None:
+            return None
+        return {"reward": side.reward, "rows": len(side.rows), "masked": side.masked, "agent_error": side.agent_error}
+
+    return {
+        "counts": result.counts(),
+        "join": {
+            "old_key": result.old_key,
+            "new_key": result.new_key,
+            "old_prefix_stripped": result.old_prefix_stripped,
+            "new_prefix_stripped": result.new_prefix_stripped,
+        },
+        "notes": result.notes,
+        "tasks": [
+            {
+                "task": t.task,
+                "category": t.category,
+                "winner": t.winner,
+                "old": side_dict(t.old),
+                "new": side_dict(t.new),
+            }
+            for t in result.tasks
+        ],
+    }
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Entry
+# --------------------------------------------------------------------------------------------------------------
+
+
+def run_compare(config: RolloutCompareConfig, out=None) -> int:
+    """Load both sides, print the report (and write the JSON summary), return the process exit code."""
+    out = out or sys.stdout
+    try:
+        old_rows = load_rollouts(config.old_rollouts)
+        new_rows = load_rollouts(config.new_rollouts)
+        result = compare_rollouts(old_rows, new_rows, key=config.key)
+    except CompareInputError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    roots = [Path.cwd(), Path(config.new_rollouts).parent.resolve(), Path(config.old_rollouts).parent.resolve()]
+    if config.logs_root:
+        roots.append(Path(config.logs_root))
+    out.write(render_report(result, roots, tail=config.tail))
+    if config.json_output:
+        Path(config.json_output).write_text(json.dumps(summary_dict(result), indent=2) + "\n")
+        out.write(f"\nwrote {config.json_output}\n")
+    return 0

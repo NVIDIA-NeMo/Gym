@@ -61,6 +61,7 @@ gym eval compare              # compare a baseline eval run against a candidate 
 
 # Contributor helpers
 gym dev test                  # run NeMo Gym's unit tests
+gym dev compare OLD NEW       # per-task parity report between two rollout files (migration aid)
 ```
 
 ## Common Options
@@ -1111,6 +1112,16 @@ Run NeMo Gym's core unit tests with coverage reporting.
 ```bash
 gym dev test
 ```
+
+### `gym dev compare`
+
+Compare two rollout JSONL files task by task. A temporary migration aid: before an old resources server is deleted in favour of its Harbor-path replacement, run both on the same tasks and use this report as the gate.
+
+```bash
+gym dev compare old/rollouts.jsonl new/rollouts.jsonl --logs-root resources_servers/harbor --json compare.json
+```
+
+Rows are joined by task id (`_ng_task_id` on the Harbor path; `task_name` or a `verifier_metadata` id on legacy servers; override with `--key FIELD`). A masked-failures sidecar (`<name>_failures.jsonl`) is folded back in. Each task is classified as identical, flipped (split into old-win and new-win), masked (`mask_sample` or `failure_kind` on either side), or missing (only one side has it); a flip where one side also reports an agent error is listed separately as a rerun candidate. When a side has several rows for a task, the mean reward is compared. For every flip the report prints both rewards and the last `--tail` lines (default 15) of the losing side's verifier output, read from `verifier_logs_dir` (resolved against the current directory, each file's directory, and `--logs-root`) or from the row's embedded `test_output`. The exit code is 0 unless an input cannot be read.
 
 ---
 

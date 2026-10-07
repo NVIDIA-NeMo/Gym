@@ -35,3 +35,22 @@ def dev_test():  # pragma: no cover
 
     proc = Popen("pytest --cov=. --durations=10", shell=True)
     exit(proc.wait())
+
+
+def dev_compare() -> None:
+    """
+    Compare two rollout JSONL files task by task (identical, flipped, masked, missing) and print the losing side's
+    verifier output for every flip. A temporary migration aid: the gate before an old resources server is deleted
+    in favour of its Harbor-path replacement.
+
+    Examples:
+
+    ```bash
+    gym dev compare old/rollouts.jsonl new/rollouts.jsonl --logs-root resources_servers/harbor --json compare.json
+    ```
+    """
+    from nemo_gym.rollout_compare import RolloutCompareConfig, run_compare
+
+    global_config_dict = get_global_config_dict()
+    config = RolloutCompareConfig.model_validate(global_config_dict)
+    exit(run_compare(config))
