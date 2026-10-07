@@ -18,7 +18,7 @@ from scripts.harness_conformance.scenarios import SCENARIOS
 
 from nemo_gym.base_responses_api_model import build_model_call_record
 from nemo_gym.harness_capabilities.behavior import model_checks
-from nemo_gym.harness_capabilities.reader import json_rows
+from nemo_gym.harness_capabilities.cli import json_rows
 from tests.unit_tests.harness_capabilities.synthetic import evidence_record
 
 

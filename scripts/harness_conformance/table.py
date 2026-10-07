@@ -28,7 +28,7 @@ from pathlib import Path
 
 import nemo_gym
 from nemo_gym.harness_capabilities import checker
-from nemo_gym.harness_capabilities.reader import digest_file
+from nemo_gym.harness_capabilities.cli import digest_file
 from nemo_gym.harness_capabilities.results import render_matrices
 
 from . import episode, runner

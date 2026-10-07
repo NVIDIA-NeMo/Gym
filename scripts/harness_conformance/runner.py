@@ -18,8 +18,7 @@ import psutil
 from nemo_gym import harness_capabilities
 from nemo_gym.harness_capabilities.behavior import inspect_behavior
 from nemo_gym.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
-from nemo_gym.harness_capabilities.cli import inspect_bundle
-from nemo_gym.harness_capabilities.reader import digest_file, json_rows
+from nemo_gym.harness_capabilities.cli import digest_file, inspect_bundle, json_rows
 from nemo_gym.harness_capabilities.results import gate_passes, render_matrices
 
 from .episode import HARNESSES

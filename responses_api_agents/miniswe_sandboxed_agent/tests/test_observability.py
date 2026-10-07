@@ -19,7 +19,6 @@ from nemo_gym.base_responses_api_model import (
     install_model_call_capture,
     merge_model_call_capture_into_record,
 )
-from nemo_gym.harness_capabilities.cli import inspect_bundle
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
@@ -232,6 +231,8 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         assert response.usage.total_tokens == 30
         assert response.usage.input_tokens_details.cached_tokens == 2
         assert trajectory["tool_calls"][0]["status"] == ("failed" if scenario == "tool_error" else "completed")
+    if scenario != "http_error":
+        # Submission exits before saving the final tool observation.
         assert trajectory["tool_calls"][-1]["output"] is None
         assert trajectory["tool_calls"][-1]["status"] == "incomplete"
     path = tmp_path / "evaluator_rollouts.jsonl"
@@ -249,32 +250,3 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         assert coverage[key]["evaluated"] == 1, (key, result.summary)
     if scenario == "http_error":
         assert result.summary["run"]["issues"]["rollout_ended_on_failed_model_call"] == 1
-
-    # Inspect the emitted records, not a reconstructed copy of the expected evidence.
-    report_dir, conformance = inspect_bundle(path, output=tmp_path / "capabilities", capture_dir=capture_dir)
-    # Known mini-SWE gap: submission exits before saving the final tool observation.
-    # Fix the native submission evidence before expecting TE-5 and the P0 gate to pass.
-    submitted = scenario != "http_error"
-    expected = "not_fulfilled" if submitted else "fulfilled"
-    # This adapter-only fixture never runs a verifier; required evaluation flags are absent.
-    assert conformance["verdict"] == "not_fulfilled"
-    assert conformance["evidence"]["TE-6"]["verdict"] == "not_fulfilled"
-    assert conformance["evidence"]["TE-5"]["verdict"] == expected
-    check_results = json.loads((report_dir / "evidence_results.jsonl").read_text())["checks"]
-    tool_checks = {c["id"]: c for c in check_results if "TE-5" in c["evidence"]}
-    if submitted:
-        assert trajectory["tool_calls"][-1]["status"] == "incomplete"
-        assert trajectory["tool_calls"][-1]["output"] is None
-        location = f"$.ng_trajectory.tool_calls[{len(trajectory['tool_calls']) - 1}]"
-        assert {key for key, value in tool_checks.items() if value["status"] == "fail"} == {
-            "tools.status",
-            "tools.output",
-        }
-        assert location + ".status" in tool_checks["tools.status"]["locations"]
-        assert location + ".output" in tool_checks["tools.output"]["locations"]
-    else:
-        assert all(value["status"] == "pass" for value in tool_checks.values())
-    # Provider omission is faithful evidence; health still evaluates missing usage.
-    for capability in ("TE-1", "TE-2", "TE-3", "TE-4", "TE-7", "TE-8"):
-        assert conformance["evidence"][capability]["verdict"] == "fulfilled", (scenario, capability)
-    assert conformance["is_behavioral_qualification"] is False

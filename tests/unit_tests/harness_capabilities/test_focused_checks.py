@@ -8,7 +8,6 @@ from copy import deepcopy
 import pytest
 
 from nemo_gym.harness_capabilities.checker import TOKEN_FIELDS, EvidenceScope, inspect_record
-from nemo_gym.harness_capabilities.reader import hydrate_record
 from tests.unit_tests.harness_capabilities.synthetic import evidence_record
 
 
@@ -43,7 +42,6 @@ def test_malformed_unused_copy_cannot_invalidate_authoritative_evidence(duplicat
     record = evidence_record()
     record[duplicate] = {"calls": [False], "records": [False]}
     assert inspect_record(record)["verdict"] == "fulfilled"
-    assert hydrate_record(record) == record
 
 
 def test_no_fallback_from_observations_or_capture():

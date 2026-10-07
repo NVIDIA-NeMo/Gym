@@ -12,11 +12,34 @@ import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from string import ascii_letters, digits
+from typing import Iterator
 
 from . import __version__
 from .checker import NAMES, PROFILE, EvidenceScope, inspect_record
 from .contracts import SCHEMA_VERSION
-from .reader import digest_file, json_rows
+
+
+def _reject_constant(value: str) -> None:
+    raise ValueError("nonfinite JSON number")
+
+
+def json_rows(path: Path) -> Iterator[tuple[int, dict]]:
+    """Read JSONL strictly; malformed/truncated rows are checker errors."""
+    with path.open(encoding="utf-8") as handle:
+        for number, line in enumerate(handle, 1):
+            if line.strip():
+                try:
+                    value = json.loads(line, parse_constant=_reject_constant)
+                except (ValueError, RecursionError) as exc:
+                    raise ValueError(f"{path.name}:{number}: invalid JSON") from exc
+                if not isinstance(value, dict):
+                    raise ValueError(f"{path.name}:{number}: expected an object")
+                yield number, value
+
+
+def digest_file(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def _json(value: object) -> str:
