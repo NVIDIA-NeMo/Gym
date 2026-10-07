@@ -27,11 +27,12 @@ def install(url, archive_sha256, version, destination):
     if system:
         return {"path": system, "version": version_of(system), "source": "system"}
     target = Path(destination)
-    expected = "ripgrep " + version
+    expected = ["ripgrep", version]
     if target.is_file():
-        if version_of(target) != expected:
+        actual = version_of(target)
+        if actual.split()[:2] != expected:
             raise RuntimeError("Cached ripgrep version mismatch")
-        return {"path": str(target), "version": expected, "source": "cache"}
+        return {"path": str(target), "version": actual, "source": "cache"}
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".ripgrep-", dir=target.parent) as temporary:
         archive = Path(temporary) / "archive.tar.gz"
@@ -58,10 +59,11 @@ def install(url, archive_sha256, version, destination):
             with package.extractfile(candidates[0]) as source, binary.open("wb") as output:
                 shutil.copyfileobj(source, output)
         binary.chmod(0o755)
-        if version_of(binary) != expected:
+        actual = version_of(binary)
+        if actual.split()[:2] != expected:
             raise RuntimeError("Prefetched ripgrep version mismatch")
         os.replace(binary, target)
-    return {"path": str(target), "version": expected, "source": "prefetched", "archive_sha256": archive_sha256}
+    return {"path": str(target), "version": actual, "source": "prefetched", "archive_sha256": archive_sha256}
 
 
 if __name__ == "__main__":

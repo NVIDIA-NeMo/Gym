@@ -14,7 +14,7 @@ def archive_bytes(binary_version="15.1.0", *, symlink=False):
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w:gz") as package:
         member = tarfile.TarInfo("ripgrep-15.1.0-x86_64-unknown-linux-musl/rg")
-        binary = f"#!/bin/sh\necho 'ripgrep {binary_version}'\n".encode()
+        binary = f"#!/bin/sh\necho 'ripgrep {binary_version} (rev fixture)'\n".encode()
         if symlink:
             member.type = tarfile.SYMTYPE
             member.linkname = "/bin/sh"
@@ -48,8 +48,8 @@ def test_installs_verified_release_once_in_native_cache(tmp_path, monkeypatch):
     info = install_ripgrep.install("https://artifacts.example/rg.tar.gz", digest, "15.1.0", destination)
     assert info["source"] == "prefetched"
     assert info["archive_sha256"] == digest
-    assert info["version"] == "ripgrep 15.1.0"
-    assert install_ripgrep.version_of(destination) == "ripgrep 15.1.0"
+    assert info["version"] == "ripgrep 15.1.0 (rev fixture)"
+    assert install_ripgrep.version_of(destination) == "ripgrep 15.1.0 (rev fixture)"
     assert sorted(path.name for path in destination.parent.iterdir()) == ["rg"]
     assert not (tmp_path / "cache/unexpected").exists()
     assert install_ripgrep.install("unused", digest, "15.1.0", destination)["source"] == "cache"
