@@ -36,9 +36,16 @@ JOB = {"output_path": "/tmp/gym-jobs"}
 
 
 def _args(
-    config_path, *, dry_run: bool = False, resolve_only: bool = False, json_output: bool = False
+    config_path,
+    *,
+    dry_run: bool = False,
+    resolve_only: bool = False,
+    json_output: bool = False,
+    select: str | None = None,
 ) -> argparse.Namespace:
-    return argparse.Namespace(config=str(config_path), dry_run=dry_run, resolve_only=resolve_only, json=json_output)
+    return argparse.Namespace(
+        config=str(config_path), dry_run=dry_run, resolve_only=resolve_only, json=json_output, select=select
+    )
 
 
 def _capture_submit(monkeypatch: MonkeyPatch) -> dict:
@@ -107,6 +114,71 @@ class TestEvalSubmitFlatConfig:
         _eval_submit(_args(config_path), overrides=["+driver.env.FOO=lit:bar"])
 
         assert captured["config"].driver.env == {"FOO": "bar"}
+
+
+class TestEvalSubmitSelect:
+    MULTI_DRIVER = {"container": "gym:latest", "benchmarks": {"gsm8k": {}, "aime": {}, "math": {}}}
+
+    def _write_config(self, tmp_path):
+        config_path = tmp_path / "submit.yaml"
+        config_path.write_text(
+            yaml.dump({"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": self.MULTI_DRIVER, "job": JOB})
+        )
+        return config_path
+
+    def test_select_keeps_only_named_benchmark(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        captured = _capture_submit(monkeypatch)
+
+        _eval_submit(_args(self._write_config(tmp_path), select="aime"), overrides=[])
+
+        assert list(captured["config"].driver.benchmarks) == ["aime"]
+
+    def test_select_accepts_comma_separated_names(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        captured = _capture_submit(monkeypatch)
+
+        _eval_submit(_args(self._write_config(tmp_path), select="gsm8k, math"), overrides=[])
+
+        assert list(captured["config"].driver.benchmarks) == ["gsm8k", "math"]
+
+    def test_no_select_keeps_all_benchmarks(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        captured = _capture_submit(monkeypatch)
+
+        _eval_submit(_args(self._write_config(tmp_path)), overrides=[])
+
+        assert list(captured["config"].driver.benchmarks) == ["gsm8k", "aime", "math"]
+
+    def test_select_is_reflected_in_resolve_only_output(self, tmp_path, capsys) -> None:
+        _eval_submit(_args(self._write_config(tmp_path), select="math", resolve_only=True, json_output=True), [])
+
+        assert list(json.loads(capsys.readouterr().out)["driver"]["benchmarks"]) == ["math"]
+
+    def test_select_unknown_name_lists_available(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        _capture_submit(monkeypatch)
+
+        with pytest.raises(ConfigError, match=r"nope.*Available: gsm8k, aime, math"):
+            _eval_submit(_args(self._write_config(tmp_path), select="aime,nope"), overrides=[])
+
+    @pytest.mark.parametrize("value", ["", " ", ","])
+    def test_select_with_no_names_is_an_error_not_submit_all(
+        self, tmp_path, monkeypatch: MonkeyPatch, value: str
+    ) -> None:
+        captured = _capture_submit(monkeypatch)
+
+        with pytest.raises(ConfigError, match="no benchmark names"):
+            _eval_submit(_args(self._write_config(tmp_path), select=value), overrides=[])
+
+        assert "config" not in captured
+
+    def test_empty_benchmarks_is_a_validation_error_even_with_select(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        _capture_submit(monkeypatch)
+        config_path = tmp_path / "submit.yaml"
+        driver = {"container": "gym:latest", "benchmarks": {}}
+        config_path.write_text(
+            yaml.dump({"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": driver, "job": JOB})
+        )
+
+        with pytest.raises(ConfigError, match=r"driver\.benchmarks"):
+            _eval_submit(_args(config_path, select="aime"), overrides=[])
 
 
 class TestEvalSubmitScratchNamespace:

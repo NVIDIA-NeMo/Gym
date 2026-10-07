@@ -18,7 +18,7 @@ import re
 import warnings
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, PrivateAttr, Tag, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, PrivateAttr, Tag, field_validator, model_validator
 
 
 # Reject unknown fields on all config models so typos in YAML surface immediately.
@@ -396,7 +396,7 @@ class DriverConfig(_StrictModel):
     # server that was never composed. Set to "" to compose no policy model config
     # at all, for a benchmark whose own config already declares a complete one.
     policy_model_type: str = "openai_model"
-    benchmarks: dict[str, BenchmarkRunConfig]
+    benchmarks: dict[str, BenchmarkRunConfig] = Field(min_length=1)
     # Values may be prefixed `lit:` (literal), `host:VAR` (read from the submitting
     # machine's env), or `runtime:VAR` (resolved from the job's own env at run time).
     # Every value must use one of these prefixes. See resolve_env_dict.

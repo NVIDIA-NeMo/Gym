@@ -596,6 +596,22 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     # strict validation so it fails loudly instead of being silently dropped.
     resolved = OmegaConf.to_container(composed, resolve=True)
     scratch_keys = {key for key in resolved if key.startswith("_")}
+    # A missing or empty driver.benchmarks is left for SubmitConfig validation to report.
+    available = (resolved.get("driver") or {}).get("benchmarks")
+    if args.select is not None and available:
+        selected = [name.strip() for name in args.select.split(",") if name.strip()]
+        if not selected:
+            raise ConfigError(
+                f"--select was given no benchmark names. Available: {', '.join(available)}. "
+                "Omit --select to submit all of them."
+            )
+        unknown = [name for name in selected if name not in available]
+        if unknown:
+            raise ConfigError(
+                f"--select named {', '.join(unknown)}, which {'is' if len(unknown) == 1 else 'are'} not under "
+                f"driver.benchmarks in '{config_path}'. Available: {', '.join(available)}."
+            )
+        resolved["driver"]["benchmarks"] = {name: available[name] for name in selected}
     # SubmitConfig is an orchestration model: report schema errors against its YAML file
     # rather than using the generic CLI handler's +key=<value> hint.
     try:
@@ -1191,6 +1207,14 @@ COMMANDS = {
             Flag(
                 register=lambda p: p.add_argument(
                     "--config", "-c", required=True, metavar="PATH", help="Submit config YAML file."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--select",
+                    metavar="NAME[,NAME...]",
+                    help="Submit only the named entries under driver.benchmarks (comma-separated). "
+                    "Default: submit all of them.",
                 ),
             ),
             Flag(
