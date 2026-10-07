@@ -1,8 +1,6 @@
 #!/bin/bash
 
-GYM_MODEL_PARAMS=(
-    "++model_endpoint_readiness_timeout_seconds=1200"
-)
+GYM_MODEL_PARAMS=()
 
 # @bxyu-nvidia: V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
 export VLLM_USE_V2_MODEL_RUNNER=0
