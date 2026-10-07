@@ -99,3 +99,46 @@ class TestObservedElapsed:
     def test_non_positive_is_none(self):
         assert observed_elapsed({NG_ELAPSED_KEY: 0}) is None
         assert observed_elapsed({NG_ELAPSED_KEY: -3}) is None
+
+
+class TestTimingSummary:
+    def test_empty_without_thresholds(self):
+        assert DispatchLatencyTracker().timing_summary() == ""
+
+    def test_start_coverage_and_timed_out_rows(self):
+        t = DispatchLatencyTracker(total=4, start_report_within_s=1800, long_rollout_s=9000)
+        t0 = t._t0
+        for offset in (60, 600, 1500, 2400):  # three in the window, one late
+            t.record_start(t0 + offset)
+        for result in ({"reward": 1.0}, {"reward": 0.0, "timed_out": 1}, {"reward": 0.0}, {"reward": 1.0}):
+            t.record_outcome(result)
+        for seconds in (1200, 10800, 3000, 9500):
+            t.record(seconds)
+        table = t.timing_summary()
+        assert "all rollouts started by" in table and "40.0 min" in table
+        assert "started within 30 min" in table and "75.0%" in table and "WARNING" in table
+        assert "ended by wall-clock limit" in table and "25.0% (1)" in table
+        assert "longer than 150 min" in table and "50.0%" in table
+
+    def test_healthy_run_has_no_warnings(self):
+        t = DispatchLatencyTracker(total=2, start_report_within_s=1800, long_rollout_s=9000)
+        for offset in (10, 20):
+            t.record_start(t._t0 + offset)
+        for _ in range(2):
+            t.record_outcome({"reward": 1.0})
+            t.record(100)
+        assert "WARNING" not in t.timing_summary()
+        assert "[OK] Start coverage" in t.summary()
+
+    def test_live_warning_fires_once_on_first_late_start(self, capsys):
+        t = DispatchLatencyTracker(total=3, start_report_within_s=60, start_report_min_fraction=0.99)
+        t.record_start(t._t0 + 1)
+        t.record_start(t._t0 + 120)
+        t.record_start(t._t0 + 130)
+        out = capsys.readouterr().out
+        assert out.count("Start coverage") == 1 and "[WARNING]" in out and "33.3%" in out
+
+    def test_timeout_failure_class_counts_as_timed_out(self):
+        t = DispatchLatencyTracker(total=1, start_report_within_s=60)
+        t.record_outcome({"_ng_failure_class": "timeout_exceeded"})
+        assert "100.0% (1)" in t.timing_summary()

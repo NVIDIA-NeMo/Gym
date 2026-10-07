@@ -1194,14 +1194,131 @@ class DispatchLatencyTracker:
     makes that trade visible while there is still time to react to it.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        total: Optional[int] = None,
+        start_report_within_s: Optional[float] = None,
+        start_report_min_fraction: float = 0.99,
+        long_rollout_s: Optional[float] = None,
+        long_rollout_max_fraction: float = 0.05,
+        timed_out_max_fraction: float = 0.01,
+    ) -> None:
         # Kept sorted: the adaptive drain margin reads a quantile before every dispatch.
         self._durations: List[float] = []
         self._drained = 0
+        # Start-coverage and wall-clock-limit accounting for the end-of-run timing summary.
+        self._total = total
+        self._start_report_within_s = start_report_within_s
+        self._start_report_min_fraction = start_report_min_fraction
+        self._long_rollout_s = long_rollout_s
+        self._long_rollout_max_fraction = long_rollout_max_fraction
+        self._timed_out_max_fraction = timed_out_max_fraction
+        self._t0 = time.monotonic()
+        self._start_offsets: List[float] = []
+        self._outcomes = 0
+        self._timed_out = 0
+        self._start_report_done = False
 
     def record(self, seconds: float) -> None:
         if seconds > 0:
             bisect.insort(self._durations, seconds)
+
+    def record_start(self, now: Optional[float] = None) -> None:
+        """A rollout was dispatched; remember how far into the run that happened."""
+        offset = (time.monotonic() if now is None else now) - self._t0
+        self._start_offsets.append(offset)
+        if (
+            self._start_report_within_s is not None
+            and not self._start_report_done
+            and offset > self._start_report_within_s
+        ):
+            # First dispatch past the window: everything started so far is the window's coverage.
+            self._start_report_done = True
+            print(self._start_coverage_line(live=True), flush=True)
+
+    def record_outcome(self, result: Mapping[str, Any]) -> None:
+        """A rollout returned a result row; count the ones ended by their wall-clock limit."""
+        self._outcomes += 1
+        if result.get("timed_out") or result.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded":
+            self._timed_out += 1
+
+    def _started_within(self) -> Optional[float]:
+        if self._start_report_within_s is None or not self._start_offsets:
+            return None
+        within = sum(1 for o in self._start_offsets if o <= self._start_report_within_s)
+        denominator = self._total if self._total else len(self._start_offsets)
+        return within / denominator if denominator else None
+
+    def _start_coverage_line(self, *, live: bool) -> str:
+        fraction = self._started_within()
+        window_min = (self._start_report_within_s or 0) / 60
+        if fraction is None:
+            return f"Start coverage: no rollouts started within {window_min:.0f} min."
+        level = "WARNING" if fraction < self._start_report_min_fraction else "OK"
+        when = "so far" if live else "in total"
+        return (
+            f"[{level}] Start coverage: {fraction:.1%} of rollouts started within {window_min:.0f} min "
+            f"({len(self._start_offsets)} dispatched {when}); expected >= {self._start_report_min_fraction:.0%}."
+        )
+
+    def timing_summary(self) -> str:
+        """Two-row table, this run against healthy values, so a log reader sees at a glance
+        whether the run started promptly, how many rollouts hit their wall-clock limit and how
+        many ran long. Empty when neither a start window nor a long-rollout threshold is set."""
+        if self._start_report_within_s is None and self._long_rollout_s is None:
+            return ""
+        n_results = len(self._durations)
+        rows: List[Tuple[str, str, str, bool]] = []
+        if self._start_offsets:
+            started_by = max(self._start_offsets) / 60
+            if self._start_report_within_s is not None:
+                window_min = self._start_report_within_s / 60
+                fraction = self._started_within() or 0.0
+                rows.append(
+                    (
+                        "all rollouts started by",
+                        f"{started_by:.1f} min",
+                        f"<= {window_min:.0f} min",
+                        started_by <= window_min,
+                    )
+                )
+                rows.append(
+                    (
+                        f"started within {window_min:.0f} min",
+                        f"{fraction:.1%}",
+                        f">= {self._start_report_min_fraction:.0%}",
+                        fraction >= self._start_report_min_fraction,
+                    )
+                )
+        if self._outcomes:
+            timed_out = self._timed_out / self._outcomes
+            rows.append(
+                (
+                    "ended by wall-clock limit",
+                    f"{timed_out:.1%} ({self._timed_out})",
+                    f"<= {self._timed_out_max_fraction:.0%}",
+                    timed_out <= self._timed_out_max_fraction,
+                )
+            )
+        if self._long_rollout_s is not None and n_results:
+            long = sum(1 for d in self._durations if d > self._long_rollout_s) / n_results
+            rows.append(
+                (
+                    f"longer than {self._long_rollout_s / 60:.0f} min",
+                    f"{long:.1%}",
+                    f"<= {self._long_rollout_max_fraction:.0%}",
+                    long <= self._long_rollout_max_fraction,
+                )
+            )
+        if not rows:
+            return ""
+        width = max(len(r[0]) for r in rows)
+        lines = ["Run timing summary (this run | healthy):"]
+        for label, value, healthy, ok in rows:
+            flag = "" if ok else "   <-- WARNING"
+            lines.append(f"  {label:<{width}} : {value:>12} | {healthy}{flag}")
+        return "\n".join(lines)
 
     def record_failure(self, seconds: float) -> None:
         """Record a failed attempt only when it ran at least as long as the median so far.
@@ -1260,6 +1377,11 @@ class DispatchLatencyTracker:
                 f"Drained (not dispatched, no time left in the budget): {self._drained}. "
                 "These wrote no row and will be re-dispatched on resume."
             )
+        if self._start_report_within_s is not None:
+            lines.append(self._start_coverage_line(live=False))
+        timing = self.timing_summary()
+        if timing:
+            lines.append(timing)
         return "\n".join(lines)
 
 
@@ -1641,6 +1763,42 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         ),
     )
 
+    dispatch_start_report_within_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Report the share of rollouts that had started this many seconds into collection: "
+            "once in the log when that point passes, and again in the end-of-run timing summary. "
+            "Diagnostic only, nothing is aborted. Set it to the start window a per-rollout "
+            "wall-clock limit assumes, e.g. 1800 for a 3 h limit inside a 4 h allocation."
+        ),
+    )
+    dispatch_start_report_min_fraction: float = Field(
+        default=0.99,
+        ge=0,
+        le=1,
+        description="Share of rollouts expected to have started within dispatch_start_report_within_s; below it the report is a WARNING.",
+    )
+    long_rollout_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="Rollouts running longer than this many seconds are counted in the end-of-run timing summary.",
+    )
+    long_rollout_max_fraction: float = Field(
+        default=0.05,
+        ge=0,
+        le=1,
+        description="Share of rollouts longer than long_rollout_s above which the timing summary warns.",
+    )
+    timed_out_max_fraction: float = Field(
+        default=0.01,
+        ge=0,
+        le=1,
+        description=(
+            "Share of rollouts ended by a per-rollout wall-clock limit (result field `timed_out`, or "
+            "failure class `timeout_exceeded`) above which the timing summary warns."
+        ),
+    )
     retry_terminal_timeouts: bool = Field(
         default=False,
         description=(
@@ -2724,7 +2882,14 @@ class RolloutCollectionHelper(BaseModel):
         completed_count = 0
         persisted_count = len(persisted_success_keys)
         collection_succeeded = False
-        latency_tracker = DispatchLatencyTracker()
+        latency_tracker = DispatchLatencyTracker(
+            total=len(input_rows),
+            start_report_within_s=config.dispatch_start_report_within_s,
+            start_report_min_fraction=config.dispatch_start_report_min_fraction,
+            long_rollout_s=config.long_rollout_s,
+            long_rollout_max_fraction=config.long_rollout_max_fraction,
+            timed_out_max_fraction=config.timed_out_max_fraction,
+        )
         if config.dispatch_budget_s is not None:
             print(
                 f"Dispatch budget: {config.dispatch_budget_s / 60:.0f} min. New rollouts stop being "
@@ -3663,6 +3828,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
                 started = time.monotonic()
                 started_at = time.time()
+                tracker.record_start(started)
                 res = None
                 succeeded = False
                 try:
@@ -3670,6 +3836,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
                     result = await get_response_json(res)
+                    if isinstance(result, Mapping):
+                        tracker.record_outcome(result)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000

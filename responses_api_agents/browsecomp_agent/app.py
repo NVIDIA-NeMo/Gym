@@ -15,6 +15,7 @@
 import hashlib
 import json
 import re
+import time
 import traceback
 from pathlib import Path
 from typing import List, Optional
@@ -141,6 +142,10 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = 400
+    # Wall-clock budget per rollout, measured from the first model call. Past it the loop
+    # stops, the response carries `timed_out`, and the harness scores the sample 0 without
+    # a judge call. None keeps the loop bounded by max_steps only.
+    rollout_timeout_s: Optional[float] = None
     keep_rounds: int = 9999
     nudge_steps: bool = True
     max_context_tokens: int = 196608
@@ -287,6 +292,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
         reset_threshold = self._reset_threshold(self.config)
+        loop_started = time.monotonic()
+        timed_out = False
 
         # --- Progress board state (ported from the reference harness) ---
         # The board lives in the system prompt and is re-rendered only at the
@@ -352,6 +359,19 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         max_reset_count = self.config.max_reset_count
 
         while True:
+            if (
+                self.config.rollout_timeout_s is not None
+                and step > 0
+                and time.monotonic() - loop_started > self.config.rollout_timeout_s
+            ):
+                print(
+                    f"[browsecomp][timeout][{qid}] step={step} "
+                    f"elapsed_min={(time.monotonic() - loop_started) / 60:.1f} "
+                    f"limit_min={self.config.rollout_timeout_s / 60:.1f}",
+                    flush=True,
+                )
+                timed_out = True
+                break
             step += 1
 
             if self.config.keep_rounds is not None and new_outputs:
@@ -731,6 +751,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         model_response.reset_count = reset_count
         model_response.num_tool_calls = num_tool_calls
         model_response.pre_reset_warning_steps = pre_reset_warning_steps
+        model_response.timed_out = timed_out
         return model_response
 
     async def run(self, request: Request, body: BrowsecompAgentRunRequest) -> BrowsecompAgentVerifyResponse:
@@ -787,7 +808,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 raw_output_text = self._last_message_text(NeMoGymResponse.model_validate(response_json))
                 cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()
                 # Need to get last_verify_response if all attempts are exhausted
-                if not cleaned_output_text and attempt != self.config.max_run_retries - 1:
+                # A timed-out rollout is final: retrying would spend the budget twice.
+                if (
+                    not cleaned_output_text
+                    and not response_json.get("timed_out")
+                    and attempt != self.config.max_run_retries - 1
+                ):
                     print(
                         f"[browsecomp][retry][{qid}] attempt={attempt + 1}/{self.config.max_run_retries} "
                         f"reason=empty_output_after_think_strip",
