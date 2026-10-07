@@ -120,10 +120,12 @@ benchmark:
             raise SystemExit(f"SRT must provide {variable} for inference metrics")
         for index, address in enumerate(addresses.split(",")):
             endpoints[f"{role}{index}"] = f"http://{address.strip()}/metrics"
+    metrics = {"enabled": True, "endpoints": endpoints}
+    # SRT provides this service address only for Mooncake HiCache recipes.
+    if mooncake_host := os.environ.get("SRT_SERVICE_HICACHE_MASTER_IPS"):
+        metrics["mooncake_endpoint"] = f"http://{mooncake_host}:9003/metrics"
     # JSON is valid YAML and safely quotes endpoint addresses.
-    Path(sys.argv[1]).write_text(json.dumps({
-        "inference_metrics": {"enabled": True, "endpoints": endpoints}
-    }))
+    Path(sys.argv[1]).write_text(json.dumps({"inference_metrics": metrics}))
     PY_METRICS
 
     gym eval prepare --config $GYM_CONFIG +use_cached_prepared_benchmarks=true

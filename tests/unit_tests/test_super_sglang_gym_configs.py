@@ -52,8 +52,9 @@ def test_gym_benchmark_sections_match() -> None:
 
 
 @pytest.mark.parametrize("missing_role", [None, "prefill", "decode"])
-def test_srt_worker_metrics_config(tmp_path: Path, missing_role: str | None) -> None:
-    config = yaml.safe_load((CONFIG_DIR / "2P2D.yaml").read_text())
+@pytest.mark.parametrize("recipe", ["2P2D.yaml", "2P2D_hicachemooncake.yaml"])
+def test_srt_worker_metrics_config(tmp_path: Path, missing_role: str | None, recipe: str) -> None:
+    config = yaml.safe_load((CONFIG_DIR / recipe).read_text())
     command = config["benchmark"]["command"]
     syntax = subprocess.run(["bash", "-n"], input=command, text=True, capture_output=True)
     assert syntax.returncode == 0, syntax.stderr
@@ -68,6 +69,10 @@ def test_srt_worker_metrics_config(tmp_path: Path, missing_role: str | None) -> 
         "SRT_PREFILL_ENDPOINTS": "10.0.0.1:6100,10.0.0.2:6100",
         "SRT_DECODE_ENDPOINTS": "10.0.0.3:6200,10.0.0.3:6201",
     }
+    env.pop("SRT_SERVICE_HICACHE_MASTER_IPS", None)
+    master = next((service for service in config.get("services", []) if service["name"] == "hicache-master"), None)
+    if master:
+        env["SRT_SERVICE_HICACHE_MASTER_IPS"] = "10.0.0.5"
     if missing_role:
         env.pop(f"SRT_{missing_role.upper()}_ENDPOINTS")
     result = subprocess.run(["bash", "-euc", setup], env=env, text=True, capture_output=True)
@@ -80,6 +85,11 @@ def test_srt_worker_metrics_config(tmp_path: Path, missing_role: str | None) -> 
     assert result.returncode == 0, result.stderr
     metrics = InferenceMetricsConfig.model_validate(yaml.safe_load(output.read_text())["inference_metrics"])
     assert metrics.enabled
+    if master:
+        assert str(metrics.mooncake_endpoint) == "http://10.0.0.5:9003/metrics"
+        assert "--metrics_port=9003" in master["args"]
+    else:
+        assert metrics.mooncake_endpoint is None
     assert {name: str(url) for name, url in metrics.endpoints.items()} == {
         "prefill0": "http://10.0.0.1:6100/metrics",
         "prefill1": "http://10.0.0.2:6100/metrics",
