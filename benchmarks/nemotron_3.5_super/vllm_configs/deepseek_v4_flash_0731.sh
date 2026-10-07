@@ -28,7 +28,7 @@ VLLM_COMMON_ARGS=(
     --data-parallel-size-local 1
     --tensor-parallel-size 4
     --api-server-count 1
-    --attention_config.use_fp4_indexer_cache True
+    --attention-config '{"indexer_kv_dtype":"mxfp4"}'
     --moe-backend deep_gemm_mega_moe
     --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"greedy"}'
 )
