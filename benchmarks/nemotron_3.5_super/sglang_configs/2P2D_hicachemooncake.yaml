@@ -5,6 +5,8 @@
 # HiCache/L3 is prefill-only; NIXL still transfers live KV to decode.
 # https://kvcache-ai.github.io/Mooncake/deployment/integrations/sglang/hicache-integration-v1.html#prefill-decode-disaggregation
 # Requires mooncake_master and mooncake.mooncake_store_service in model.container.
+# Startup patches the SGLang 0.5.20 HiCache layer span for Nemotron's sparse IDs.
+# This addresses the scheduler IndexError; GPU cache-restoration validation is pending.
 # Host-memory starting budget per prefill node: TP4 * 64 GB HiCache + 150 GiB
 # Mooncake Store, plus runtime overhead. Size against available host RAM.
 # The store is ephemeral and is stopped with the Slurm job.
@@ -41,6 +43,8 @@ sbatch_directives:
   # Match the vLLM Mooncake launcher's host-memory allocation.
   mem: '0'
 engine: sglang
+# SRT resolves setup_script relative to /configs; reuse the /opt/Gym mount.
+setup_script: ../opt/Gym/benchmarks/nemotron_3.5_super/sglang_configs/patch-hicache-mamba.sh
 dynamo:
   install: false
 identity:
