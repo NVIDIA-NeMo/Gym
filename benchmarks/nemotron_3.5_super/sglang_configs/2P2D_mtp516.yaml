@@ -154,7 +154,6 @@ roles:
       UCX_CUDA_IPC_ENABLE_MNNVL: y
       NCCL_MNNVL_ENABLE: '1'
       NCCL_CUMEM_ENABLE: '1'
-      UCX_PROTO_INFO: y
       UCX_LOG_LEVEL: error
       SGLANG_DISABLE_USAGE_REPORT: '1'
       HF_HOME: /tmp/nemotron35-hf
@@ -219,7 +218,6 @@ roles:
       UCX_CUDA_IPC_ENABLE_MNNVL: y
       NCCL_MNNVL_ENABLE: '1'
       NCCL_CUMEM_ENABLE: '1'
-      UCX_PROTO_INFO: y
       UCX_LOG_LEVEL: error
       SGLANG_DISABLE_USAGE_REPORT: '1'
       HF_HOME: /tmp/nemotron35-hf
