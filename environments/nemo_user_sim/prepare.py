@@ -19,8 +19,8 @@ TASKS_FPATH = DATA_DIR / "nemo_user_sim.jsonl"
 PREPARE_REQUIREMENTS_FPATH = ENVIRONMENT_DIR / "requirements.txt"
 USERSIM_REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
 NEMOTRON_PERSONAS_VERSION = "0.0.2"
-NEMOTRON_PERSONAS_SHA256 = (  # pragma: allowlist secret
-    "0341192b00a376cf5643d98cb244e596529030fb3011694ca6ab381f149d3ae8"
+NEMOTRON_PERSONAS_SHA256 = (
+    "0341192b00a376cf5643d98cb244e596529030fb3011694ca6ab381f149d3ae8"  # pragma: allowlist secret
 )
 NEMOTRON_PERSONAS_DOWNLOAD_COMMAND = (
     'ngc registry resource download-version "nvidia/nemotron-personas/nemotron-personas-dataset-en_us:0.0.2"'
