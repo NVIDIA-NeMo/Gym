@@ -44,5 +44,6 @@ def load_task(directory: Path, task: TaskData) -> dict:
     return {
         "record": record,
         "environment": toml["environment"],
+        "agent_kwargs": toml.get("agent", {}).get("kwargs", {}),
         "judge_timeout": 1200 if match and float(match[1]) >= 600 else 600,
     }

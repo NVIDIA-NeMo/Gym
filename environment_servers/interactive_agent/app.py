@@ -140,6 +140,7 @@ class InteractiveAgentEnvironmentServer(BaseEnvironmentServer[InteractiveAgentRe
                     task_id=request.task.task_id,
                     sandbox_access=seed.sandbox_access,
                     continuation=seed.continuation,
+                    runtime_policy=seed.runtime_policy,
                 ).model_dump(mode="json"),
             )
             await raise_for_status(response)

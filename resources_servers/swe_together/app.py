@@ -186,7 +186,7 @@ class SWETResourcesServer(SimpleResourcesServer):
             (state.directory / f"{role}-sandbox-close.json").write_text(json.dumps(receipt, indent=2))
 
     async def _prepare(self, state: Session) -> InteractiveResourcesSeedResponse:
-        load_task(state.task_dir, state.task)
+        metadata = load_task(state.task_dir, state.task)
         sandbox = await self._new_sandbox(state)
         state.directory.mkdir(parents=True, exist_ok=True)
         python = await ensure_python(
@@ -219,6 +219,11 @@ class SWETResourcesServer(SimpleResourcesServer):
         )
         result = InteractiveResourcesSeedResponse(
             resources_session_id=state.request.resources_session_id,
+            runtime_policy=(
+                {"format": "harbor.agent-kwargs.v1", "settings": metadata["agent_kwargs"]}
+                if metadata["agent_kwargs"]
+                else None
+            ),
             sandbox_access=SandboxAccess(
                 connection=DirectSandboxConnection(
                     provider_config_ref=self.config.sandbox_provider, descriptor=await sandbox.serialize()
@@ -235,7 +240,8 @@ class SWETResourcesServer(SimpleResourcesServer):
                     "source_revision": SOURCE_REVISION,
                     "python_executable": python,
                     "python_runtime_sha256": self.config.python_runtime_sha256,
-                    "history_policy": load_task(state.task_dir, state.task)["record"]["history_policy"],
+                    "history_policy": metadata["record"]["history_policy"],
+                    "agent_kwargs": metadata["agent_kwargs"],
                     "task": state.task.model_dump(),
                     "protocol_profile": self.config.protocol_profile,
                     "network_qualification": self.config.network_qualification,

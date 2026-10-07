@@ -205,3 +205,47 @@ async def test_simulator_failure_retains_exact_inputs_without_noop(tmp_path):
     assert evidence["error"] == "User simulator request failed"
     assert state.noops == 0 and state.messages == []
     assert json.loads((tmp_path / "simulator-model-calls.json").read_text())[0]["error"] == "transport unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs", [{}, {"disallowed_tools": "WebFetch,WebSearch"}])
+async def test_prepare_forwards_canonical_agent_kwargs_without_harness_translation(tmp_path, monkeypatch, kwargs):
+    from resources_servers.swe_together import app
+
+    server, state, _ = session(tmp_path, [])
+    server.config = SimpleNamespace(
+        sandbox_provider="sandbox",
+        python_runtime_url=None,
+        python_runtime_sha256=None,
+        simulator_model=SimpleNamespace(name="simulator"),
+        simulator_temperature=0.5,
+        protocol_profile="smoke",
+        network_qualification={},
+        scoring_profile="judge_all",
+        judge_agent=SimpleNamespace(name="fixed_judge"),
+    )
+    server.server_client = SimpleNamespace()
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="prepared", stderr="")),
+        serialize=AsyncMock(return_value={"sandbox_id": "fixture"}),
+    )
+    monkeypatch.setattr(SWETResourcesServer, "_new_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(
+        app, "load_task", lambda *args: {"agent_kwargs": kwargs, "record": {"history_policy": "upstream"}}
+    )
+    monkeypatch.setattr(app, "ensure_python", AsyncMock(return_value="python3"))
+    monkeypatch.setattr(app, "discover_repo_config_files", AsyncMock(return_value=""))
+    monkeypatch.setattr(app, "session_analysis", lambda path: ("", []))
+    monkeypatch.setattr(app, "RepositorySnapshots", lambda *args, **kw: state.snapshots)
+    (tmp_path / "instruction.md").write_text("Public task instruction")
+
+    result = await server._prepare(state)
+    if kwargs:
+        assert result.runtime_policy.format == "harbor.agent-kwargs.v1"
+        assert result.runtime_policy.settings == kwargs
+        assert "permission" not in result.runtime_policy.settings
+    else:
+        assert result.runtime_policy is None
+    provenance = json.loads((tmp_path / "provenance.json").read_text())
+    assert provenance["agent_kwargs"] == kwargs
+    assert result.sandbox_access.connection.descriptor == {"sandbox_id": "fixture"}

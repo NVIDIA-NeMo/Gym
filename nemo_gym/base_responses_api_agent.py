@@ -26,6 +26,7 @@ from warnings import warn
 from fastapi import Body, FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
+from nemo_gym.agent_runtime_policy import AgentRuntimePolicy
 from nemo_gym.agent_utils.ordered_operations import OrderedOperationLedger
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -88,6 +89,7 @@ class AgentSeedSessionRequest(BaseModel):
     tool_accesses: list[ToolAccess] = Field(default_factory=list)
     sandbox_access: SandboxAccess | None = None
     continuation: AgentContinuationRequirements | None = None
+    runtime_policy: AgentRuntimePolicy | None = None
 
     @field_validator("tool_accesses")
     @classmethod
@@ -283,6 +285,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """Seed once per caller ID; identical retries reuse the same harness state."""
         if self.config.num_workers not in (None, 1):
             raise ValueError("Agent sessions require num_workers=1")
+        if body.runtime_policy is not None:
+            self._validate_agent_runtime_policy(body.runtime_policy)
         capabilities = self._agent_continuation_capabilities()
         if body.continuation is not None:
             if capabilities is None or capabilities.mode != body.continuation.mode:
@@ -359,6 +363,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities | None:
         """Opt into native continuation; existing one-activation adapters stay unchanged."""
         return None
+
+    def _validate_agent_runtime_policy(self, policy: AgentRuntimePolicy) -> None:
+        """Opt into a policy format and validate every setting before creating runtime state."""
+        raise HTTPException(422, f"Agent does not support required runtime policy format: {policy.format}")
 
     async def activate_agent_session(self, request: Request, body: AgentActivationRequest) -> AgentActivationResponse:
         """Append one ordered input delta, joining identical retries across HTTP disconnects."""

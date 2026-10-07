@@ -9,6 +9,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import PrivateAttr
 
+from nemo_gym.agent_runtime_policy import AgentRuntimePolicy
 from nemo_gym.agent_utils.ordered_operations import OrderedOperationLedger
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
@@ -89,16 +90,44 @@ def agent():
     )
 
 
-async def seed(agent, *, session_id="session", continuation=True):
+async def seed(agent, *, session_id="session", continuation=True, runtime_policy=None):
     body = AgentSeedSessionRequest(
         agent_session_id=session_id,
         episode_id={"rollout_id": session_id},
         task_id={"taskset": "test", "task_id": "task"},
         continuation=AgentContinuationRequirements() if continuation else None,
+        runtime_policy=runtime_policy,
     )
     request = SimpleNamespace(session={})
     await agent.seed_agent_session(request, body)
     return request, body
+
+
+async def test_unsupported_runtime_policy_rejected_before_setup(agent, monkeypatch):
+    async def setup(_):
+        raise AssertionError("Unsupported policy must not create runtime state")
+
+    monkeypatch.setattr(agent, "_seed_agent_session_state", setup)
+    with pytest.raises(HTTPException, match="required runtime policy format") as failure:
+        await seed(agent, runtime_policy={"format": "unknown.v1", "settings": {}})
+    assert failure.value.status_code == 422
+
+
+async def test_adapter_validates_policy_and_seed_retry_cannot_change_it(agent, monkeypatch):
+    def validate(policy: AgentRuntimePolicy) -> None:
+        if policy.format != "fixture.v1" or policy.settings.keys() != {"mode"}:
+            raise HTTPException(422, "Unsupported fixture policy")
+
+    monkeypatch.setattr(agent, "_validate_agent_runtime_policy", validate)
+    request, body = await seed(agent, runtime_policy={"format": "fixture.v1", "settings": {"mode": "native"}})
+    assert (await agent.seed_agent_session(request, body)).agent_session_id == body.agent_session_id
+    conflicting = body.model_copy(deep=True)
+    conflicting.runtime_policy.settings["mode"] = "changed"
+    with pytest.raises(HTTPException, match="another seed request"):
+        await agent.seed_agent_session(request, conflicting)
+    assert agent._require_agent_session(body.agent_session_id).request.runtime_policy.settings == {"mode": "native"}
+    with pytest.raises(HTTPException, match="Unsupported fixture policy"):
+        await seed(agent, session_id="bad", runtime_policy={"format": "fixture.v1", "settings": {"unknown": True}})
 
 
 def activation(body, index=0, text="initial"):

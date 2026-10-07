@@ -154,7 +154,10 @@ def test_task_assets_and_image_match_official_definition(tmp_path, monkeypatch):
     from resources_servers.swe_together import task
 
     toml = tmp_path / "task.toml"
-    toml.write_text('[environment]\ndocker_image = "ghcr.io/official/task:pin"\nbuild_timeout_sec = 600\n')
+    toml.write_text(
+        '[environment]\ndocker_image = "ghcr.io/official/task:pin"\nbuild_timeout_sec = 600\n'
+        '[agent.kwargs]\ndisallowed_tools = "WebFetch,WebSearch"\n'
+    )
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
         json.dumps(
@@ -164,6 +167,7 @@ def test_task_assets_and_image_match_official_definition(tmp_path, monkeypatch):
     monkeypatch.setattr(task, "MANIFEST", manifest)
     data = task.TaskData(task_id="fixture", image="ghcr.io/official/task:pin", image_digest="sha256:" + "a" * 64)
     assert task.load_task(tmp_path, data)["judge_timeout"] == 1200
+    assert task.load_task(tmp_path, data)["agent_kwargs"] == {"disallowed_tools": "WebFetch,WebSearch"}
     with pytest.raises(ValueError, match="Task image"):
         task.load_task(tmp_path, data.model_copy(update={"image": "unrelated:latest"}))
     toml.write_text(toml.read_text() + "# changed\n")

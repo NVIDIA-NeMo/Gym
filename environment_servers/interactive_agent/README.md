@@ -28,6 +28,13 @@ artifact capture, and scoring; the adapter owns native execution and evidence.
 Resources orchestration does not require exposing simulator calls as candidate
 tools. Candidate-native tools operate directly in the granted sandbox.
 
+Resources may return a required `runtime_policy` with a versioned `format` and
+JSON `settings`. The environment forwards it unchanged to the adapter, including
+it in the immutable session seed. Adapters override
+`_validate_agent_runtime_policy(policy)` to reject unsupported formats and settings
+before runtime setup, then apply the policy during setup. The default rejects any
+policy; orchestration does not translate native settings or silently discard them.
+
 Adapters implement `_agent_continuation_capabilities()` and
 `_activate_agent_session_state(state, body, request)`. The shared session layer
 handles ordered IDs, full-input fingerprints, retry join/replay, and close fencing.
