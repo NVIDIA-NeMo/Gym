@@ -23,6 +23,7 @@ import time
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
+from functools import partial
 from ipaddress import ip_network
 from os import environ, getenv
 from pathlib import Path
@@ -55,6 +56,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
@@ -268,17 +270,33 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
 
     global_aiohttp_client_request_debug: bool = False
 
+    # Bounds match the Linux kernel limits; values outside them make setsockopt fail with EINVAL.
     global_aiohttp_tcp_keepalive_idle_seconds: int = Field(
         default=60,
-        description=("TCP_KEEPIDLE: seconds a socket must be idle before the kernel starts sending keepalive probes."),
+        ge=1,
+        le=32767,
+        description=(
+            "TCP_KEEPIDLE: seconds a socket must be idle before the kernel starts sending keepalive probes. "
+            "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
+        ),
     )
     global_aiohttp_tcp_keepalive_interval_seconds: int = Field(
         default=10,
-        description=("TCP_KEEPINTVL: seconds between successive keepalive probes."),
+        ge=1,
+        le=32767,
+        description=(
+            "TCP_KEEPINTVL: seconds between successive keepalive probes. "
+            "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
+        ),
     )
     global_aiohttp_tcp_keepalive_probes: int = Field(
         default=3,
-        description=("TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection."),
+        ge=1,
+        le=127,
+        description=(
+            "TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection. "
+            "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
+        ),
     )
 
 
@@ -300,6 +318,18 @@ def get_global_aiohttp_client(
     return set_global_aiohttp_client(cfg)
 
 
+def _set_tcp_keepalive(sock: socket.socket, idle_seconds: int, interval_seconds: int, probes: int) -> None:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    for opt, opt_value in (
+        # macOS has no TCP_KEEPIDLE; CPython exposes its equivalent as TCP_KEEPALIVE.
+        (getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None)), idle_seconds),
+        (getattr(socket, "TCP_KEEPINTVL", None), interval_seconds),
+        (getattr(socket, "TCP_KEEPCNT", None), probes),
+    ):
+        if opt is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, opt, opt_value)
+
+
 def _make_keepalive_socket_factory(
     idle_seconds: int,
     interval_seconds: int,
@@ -308,18 +338,34 @@ def _make_keepalive_socket_factory(
     def factory(addr_info) -> socket.socket:
         family, type_, proto, _canonname, _sockaddr = addr_info
         sock = socket.socket(family=family, type=type_, proto=proto)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        for opt_name, opt_value in (
-            ("TCP_KEEPIDLE", idle_seconds),
-            ("TCP_KEEPINTVL", interval_seconds),
-            ("TCP_KEEPCNT", probes),
-        ):
-            opt = getattr(socket, opt_name, None)
-            if opt is not None:
-                sock.setsockopt(socket.IPPROTO_TCP, opt, opt_value)
+        _set_tcp_keepalive(sock, idle_seconds, interval_seconds, probes)
         return sock
 
     return factory
+
+
+class KeepaliveHttpToolsProtocol(HttpToolsProtocol):
+    """Uvicorn's httptools protocol with TCP keepalive on every accepted connection.
+
+    A model server answers only after generation finishes, so a client connection can carry no bytes for many
+    minutes. Stateful network hops on some paths evict flows that stay idle that long, which silently drops the
+    eventual reply and leaves the client waiting on a half-open connection. Keepalive probes keep the flow alive and
+    let the kernel reap peers that are really gone. Uses the same ``global_aiohttp_tcp_keepalive_*`` settings as the
+    outgoing client connections.
+
+    Handed to uvicorn as ``partial(KeepaliveHttpToolsProtocol, keepalive=(idle, interval, probes))``: multi-worker
+    uvicorn pickles its config into worker processes, so this class must stay importable at module level.
+    """
+
+    def __init__(self, *args: Any, keepalive: Tuple[int, int, int], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._keepalive = keepalive
+
+    def connection_made(self, transport: asyncio.Transport) -> None:
+        sock = transport.get_extra_info("socket")
+        if sock is not None and sock.family in (socket.AF_INET, socket.AF_INET6):
+            _set_tcp_keepalive(sock, *self._keepalive)
+        super().connection_made(transport)
 
 
 def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
@@ -1340,6 +1386,7 @@ repr(e): {repr(e)}"""
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
         uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
+        keepalive_cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
         if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok and is_main_fastapi_proc:
             print(
                 "Disabling a uvicorn access logging so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
@@ -1354,10 +1401,17 @@ repr(e): {repr(e)}"""
             timeout_worker_healthcheck=global_config_dict.get(UVICORN_TIMEOUT_WORKER_HEALTHCHECK, 30),
             # Ensure server keepalive > client keepalive
             timeout_keep_alive=30,
-            # Parse HTTP with httptools instead of pure-Python h11.
-            # Explicit selection prevents Uvicorn from silently falling back to h11.
-            # A missing or incompatible httptools wheel now fails during startup.
-            http="httptools",
+            # Parse HTTP with httptools instead of pure-Python h11, and enable TCP keepalive on every accepted
+            # connection. Explicit selection prevents Uvicorn from silently falling back to h11; a missing or
+            # incompatible httptools wheel fails at import.
+            http=partial(
+                KeepaliveHttpToolsProtocol,
+                keepalive=(
+                    keepalive_cfg.global_aiohttp_tcp_keepalive_idle_seconds,
+                    keepalive_cfg.global_aiohttp_tcp_keepalive_interval_seconds,
+                    keepalive_cfg.global_aiohttp_tcp_keepalive_probes,
+                ),
+            ),
             access_log=uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
             # Internal-only by default. Enabling this requires an explicit trusted-proxy allowlist,
             # so forwarded headers are never honored from an arbitrary peer.
