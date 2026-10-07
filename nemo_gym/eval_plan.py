@@ -96,7 +96,10 @@ def build_eval_plan(
     tasks: dict[str, PlanTask] = {}
     duplicates: set[str] = set()
     for row in rows:
-        materialized = materialize_task(row, taskset=taskset)
+        try:
+            materialized = materialize_task(row, taskset=taskset)
+        except ValueError as e:
+            raise ConfigError(f"Benchmark {benchmark.name!r}: {e}") from e
         task_id = TaskId.model_validate(materialized["task_id"])
         if task_id.task_id in tasks:
             duplicates.add(task_id.task_id)

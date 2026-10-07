@@ -80,6 +80,12 @@ class TestBuildEvalPlan:
         with pytest.raises(ConfigError, match=r"1 of 2 tasks have no task id .*rows \[1\]"):
             _plan(rows)
 
+    def test_already_materialized_rows_are_refused(self) -> None:
+        row = {"task_id": {"taskset": "bench", "task_id": "a"}, "task_input": {"prompt": "solve it"}}
+
+        with pytest.raises(ConfigError, match=r"Benchmark 'bench': Expected a flat dataset row"):
+            _plan([row])
+
     def test_duplicate_ids_are_refused(self) -> None:
         with pytest.raises(ConfigError, match=r"not unique: \['a'\]"):
             _plan([_row("a", "one"), _row("a", "two"), _row("b")])
