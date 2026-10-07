@@ -495,3 +495,36 @@ def test_prompt_tokens_from_tokenize_response_shapes():
 
     with pytest.raises(KeyError):
         _prompt_tokens_from_tokenize_response({"max_model_len": 131072})
+
+
+class TestRolloutTimeout:
+    """rollout_timeout_s stops the loop after the first model call once the budget is spent."""
+
+    async def test_timed_out_rollout_stops_and_is_flagged(self) -> None:
+        agent = BrowsecompAgent(config=_make_config(rollout_timeout_s=0.0), server_client=MagicMock(spec=ServerClient))
+        fn_call = _make_fn_call("search", call_id="c1", args={"queries": ["q"]})
+        tool_turn = _make_model_response([fn_call])
+
+        http = MagicMock()
+        http.ok = True
+        http.status = 200
+        # Only one model call is ever read: the loop times out before the second one.
+        http.read = AsyncMock(return_value=json.dumps(tool_turn).encode())
+        http.content.read = AsyncMock(return_value=b'{"results_string": "r"}')
+        http.cookies = {}
+        agent.server_client.post = AsyncMock(return_value=http)
+
+        request_mock = MagicMock()
+        request_mock.cookies = {}
+        response_mock = MagicMock()
+        response_mock.set_cookie = MagicMock()
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Q?"}])
+
+        result = await agent.responses(request_mock, response_mock, body)
+
+        assert result.timed_out is True
+        # One model call plus one tool call, then the timeout check fires.
+        assert agent.server_client.post.call_count == 2
+
+    def test_default_has_no_timeout(self) -> None:
+        assert _make_config().rollout_timeout_s is None

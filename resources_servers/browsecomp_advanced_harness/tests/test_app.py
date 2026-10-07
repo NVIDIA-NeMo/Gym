@@ -273,6 +273,26 @@ class TestApp:
         assert res.reward == approx(0.0)
         assert res.extracted_final_answer == "London"
 
+    async def test_verify_timed_out_rollout_skips_judge(self, config: TavilySearchResourcesServerConfig) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        server = TavilySearchResourcesServer(config=config, server_client=server_client)
+        server_client.post = AsyncMock()  # the judge must not be called
+
+        response = self._create_model_response("I am still searching...")
+        response.timed_out = True
+        req = TavilySearchVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=response,
+            ground_truth="Paris",
+            question="What is the capital of France?",
+        )
+        res = await server.verify(self._create_dummy_request(), req)
+
+        assert res.reward == approx(0.0)
+        assert res.timed_out == 1
+        assert res.extracted_final_answer == ""
+        server_client.post.assert_not_called()
+
     # ---- _verify_answer_with_regex ----
 
     def test_verify_answer_with_regex_correct(self, server: TavilySearchResourcesServer) -> None:
