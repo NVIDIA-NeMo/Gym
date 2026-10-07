@@ -981,3 +981,141 @@ async def test_an_episode_whose_retire_was_cut_short_blocks_the_next_checkpoint_
     release.set()
     await asyncio.wait([task], timeout=1)
     assert task.cancelled() and steps.blocker_count() == 0 and steps.keys() == []
+
+
+async def test_a_commit_retried_after_its_write_failed_stores_the_same_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import nemo_gym._checkpoint.control as control
+
+    real_write = control.write_participant_state
+    failures = [OSError("disk full")]
+
+    def failing_once(*args, **kwargs):
+        if failures:
+            raise CheckpointStateError(str(failures.pop()))
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(control, "write_participant_state", failing_once)
+    participant = FakeParticipant()
+    participant.executions["r"] = {"parked": True, "value": 1}
+    async with make_client(participant) as client:
+        await client.post("/ng-control/v1/checkpoint/prepare", json=body())
+        failed = await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path)))
+        # The exported state moves after the failure; the retry must still store the first export.
+        participant.executions["r"]["value"] = 2
+        elsewhere = await client.post(
+            "/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path / "other"))
+        )
+        retried = await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path)))
+
+    assert failed.status_code == 422
+    assert elsewhere.json()["error"]["code"] == "checkpoint_conflict"
+    assert retried.status_code == 200
+    _, records = read_participant_state(tmp_path, kind="fake", instance="fake-1")
+    assert [record["value"] for record in records] == [1]
+
+
+async def test_resume_waits_for_a_publication_under_way_so_none_appears_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import nemo_gym._checkpoint.store as store
+
+    real_create = store._create
+    publishing, release = threading.Event(), threading.Event()
+
+    def slow_create(*args, **kwargs):
+        publishing.set()
+        release.wait(5)
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_create", slow_create)
+    participant = FakeParticipant()
+    participant.executions["r"] = {"parked": True, "value": 1}
+    manifest = participant_dir(tmp_path, kind="fake", instance="fake-1") / "manifest.json"
+    async with make_client(participant) as client:
+        await client.post("/ng-control/v1/checkpoint/prepare", json=body())
+        late = await client.post(
+            "/ng-control/v1/checkpoint/commit", json=body(timeout=0.2, checkpoint_dir=str(tmp_path))
+        )
+        assert publishing.is_set() and late.json()["error"]["code"] == "deadline_exceeded"
+        resume = asyncio.create_task(client.post("/ng-control/v1/checkpoint/resume", json=body()))
+        await asyncio.sleep(0.1)
+        # The writer passed its last stop check: resume waits for the manifest instead of racing it.
+        assert not resume.done() and not manifest.exists()
+        release.set()
+        await resume
+
+    assert manifest.exists() and participant.accepting is True
+
+
+def test_a_read_keeps_only_the_selected_records_but_verifies_the_whole_file(tmp_path: Path) -> None:
+    rows = [{"episode_id": {"rollout_id": f"r{index}"}, "value": index} for index in range(5)]
+    write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c", records=rows)
+
+    manifest, kept = read_participant_state(
+        tmp_path, kind="fake", instance="f", select=lambda row: row["value"] if row["value"] % 2 else None
+    )
+
+    assert kept == [1, 3] and manifest["record_count"] == 5
+
+
+async def test_prepare_asks_whether_ready_and_lists_blockers_only_for_its_reply() -> None:
+    class Counting(FakeParticipant):
+        listings = 0
+
+        def readiness(self) -> PrepareReport:
+            Counting.listings += 1
+            return super().readiness()
+
+        def ready(self) -> bool:
+            return all(execution["parked"] for execution in self.executions.values())
+
+    participant = Counting()
+    for index in range(20):
+        participant.executions[f"r{index}"] = {"parked": False, "value": index}
+    async with make_client(participant) as client:
+        prepare = asyncio.create_task(client.post("/ng-control/v1/checkpoint/prepare", json=body()))
+        await asyncio.sleep(0.01)
+        for index in range(20):
+            await participant.park(f"r{index}")
+        reply = (await prepare).json()
+
+    assert reply["phase"] == "prepared"
+    assert Counting.listings <= 2
+
+
+async def test_a_retire_after_a_restore_that_ran_out_of_time_waits_for_its_install(tmp_path: Path) -> None:
+    write_participant_state(
+        tmp_path,
+        kind="fake",
+        instance="fake-1",
+        checkpoint_id="c1",
+        records=[{"episode_id": {"rollout_id": "r"}, "value": 1}],
+    )
+    release = threading.Event()
+
+    class SlowInstall(FakeParticipant):
+        async def install(self, records) -> None:
+            # Like the model ledger import: a thread the restore's deadline cannot stop.
+            await asyncio.to_thread(release.wait, 5)
+            self.restore_records(records)
+
+    participant = SlowInstall()
+    async with make_client(participant) as client:
+        restore = await client.post(
+            "/ng-control/v1/checkpoint/restore",
+            json=body("r1", timeout=0.1, checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r"}]),
+        )
+        retire = asyncio.create_task(
+            client.post(
+                "/ng-control/v1/checkpoint/retire", json=body("r1", episode_ids=[{"rollout_id": "r", "attempt": 1}])
+            )
+        )
+        await asyncio.sleep(0.1)
+        assert not retire.done()
+        release.set()
+        retired = await retire
+
+    assert restore.json()["error"]["code"] == "deadline_exceeded"
+    assert retired.status_code == 200 and participant.executions == {}

@@ -60,7 +60,7 @@ class UnauthorizedError(ControlError):
 
 
 class CheckpointStateError(ControlError):
-    """A participant directory is missing, corrupt, or belongs to another checkpoint."""
+    """A participant directory is missing, corrupt, unreadable or unwritable, or belongs to another checkpoint."""
 
     status_code = 422
     code = "invalid_checkpoint_state"
