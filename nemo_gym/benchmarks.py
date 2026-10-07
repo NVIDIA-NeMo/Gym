@@ -24,7 +24,7 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.config_types import BenchmarkDatasetConfig, ConfigError
+from nemo_gym.config_types import BenchmarkDatasetConfig, ConfigError, DatasetConfig
 from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values, discover_components
 from nemo_gym.global_config import (
     POLICY_MODEL_KEY_NAME,
@@ -47,7 +47,7 @@ class BenchmarkConfig(BaseModel):
     # None when the dataset routes by taskset to an Environment Server that fronts several agents.
     agent_name: Optional[str]
     num_repeats: int
-    dataset: BenchmarkDatasetConfig
+    dataset: BenchmarkDatasetConfig | DatasetConfig
     # The Environment Server a taskset dataset routes to; None for datasets routed by agent.
     environment_server: Optional[str] = None
 
