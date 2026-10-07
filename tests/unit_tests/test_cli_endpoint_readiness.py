@@ -190,6 +190,27 @@ class TestCheckStopsStartupCleanly:
         assert [("base_url", "http://lb:8000/v1")] == unreachable
         assert clock() >= 30
 
+    def test_an_endpoint_that_requires_a_key_does_not_hold_startup(self, monkeypatch: MonkeyPatch) -> None:
+        """A server started with --api-key answers 401 unless the request carries its key, and 200
+        with it. The probe sends no key, so it sees the 401, which proves the server is up: startup
+        must go ahead without waiting rather than block until the timeout."""
+
+        def keyed_server(url, headers=None, **kwargs):
+            authorized = (headers or {}).get("Authorization") == "Bearer secret-key"
+            return MagicMock(status_code=200 if authorized else 401)
+
+        get_mock = MagicMock(side_effect=keyed_server)
+        monkeypatch.setattr(nemo_gym.cli.env.requests, "get", get_mock)
+        sleep_mock = MagicMock()
+
+        unreachable = _wait_for_model_endpoints(
+            [("base_url", "http://keyed:8000/v1")], timeout_seconds=600, sleep_fn=sleep_mock
+        )
+
+        assert [] == unreachable
+        assert 1 == get_mock.call_count
+        sleep_mock.assert_not_called()
+
     def test_failure_is_a_config_error_not_a_system_exit(self, monkeypatch: MonkeyPatch) -> None:
         """NeMo-RL imports RunHelper, so a library method must not exit the process."""
         monkeypatch.setattr(
