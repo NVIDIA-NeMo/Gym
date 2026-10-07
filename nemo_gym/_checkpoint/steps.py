@@ -109,6 +109,7 @@ class EpisodeSteps:
         episode = self._episodes[key]
         episode.boundary = state
         if not self.closed:
+            episode.state = "running"
             return
         episode.state = "parked"
         episode.resume.clear()
@@ -136,8 +137,13 @@ class EpisodeSteps:
             yield
         finally:
             if self._episodes.get(key) is episode:
-                episode.state = "running"
-                episode.resume_deadline()
+                if mode == "replay" and self.closed:
+                    # The checkpoint already counts this episode at the boundary before the step; it stays there,
+                    # not a blocker, until its next boundary parks it with the step's result.
+                    pass
+                else:
+                    episode.state = "running"
+                    episode.resume_deadline()
             await self._notify()
 
     def close(self) -> None:
