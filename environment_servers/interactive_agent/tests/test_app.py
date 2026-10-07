@@ -26,7 +26,7 @@ from nemo_gym.interactive_agent_types import (
 )
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_collection import _episode_record
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.server_utils import ServerClient
 
 
@@ -77,6 +77,30 @@ def agent_response():
     )
 
 
+def native_trajectory():
+    return TrajectoryRecord(
+        task_id="repair",
+        rollout_id="rollout-a2",
+        invocations=[{"invocation_id": "native", "status": "incomplete"}],
+        turns=[
+            {
+                "invocation_id": "native",
+                "source_message_id": "saved-message",
+                "task_id": "repair",
+                "rollout_id": "rollout-a2",
+                "turn_no": 1,
+                "timestamp": 42.125,
+                "step_count": 3,
+                "question": {"native": ["unchanged", 7]},
+                "answer": {"text": "partial native answer"},
+                "model_calls": [{"model_call_id": "captured-call"}],
+            }
+        ],
+        tool_calls=[{"invocation_id": "native", "tool_call_id": "tool-1", "output": {"stdout": "native output"}}],
+        gaps=[{"code": "fixture_unavailable_timing", "detail": "Preserve this producer diagnostic"}],
+    )
+
+
 class ScriptedComposition:
     """Independent wire-only endpoints; no environment imports of Resources or harness code."""
 
@@ -95,6 +119,7 @@ class ScriptedComposition:
         self.block_activation = False
         self.activation_failure = None
         self.close_observations = None
+        self.close_trajectory = None
         self.entered = asyncio.Event()
 
     async def post(self, *, server_name, url_path, json, cookies=None):
@@ -154,6 +179,7 @@ class ScriptedComposition:
                     "cleanup_confirmed": self.cleanup_confirmed,
                     "activations": self.activations,
                     "agent_observations": self.close_observations,
+                    **({"trajectory": self.close_trajectory} if self.close_trajectory is not None else {}),
                     "resources_cookies": {"session": "resources-cookie"},
                 },
                 "agent-cookie",
@@ -249,6 +275,19 @@ async def test_runtime_policy_reaches_adapter_without_environment_interpretation
     assert [path for _, path, _, _ in script.calls][-1] == "/close_session"
 
 
+@pytest.mark.parametrize("present", [False, True])
+async def test_native_trajectory_is_optional_and_forwarded_without_projection(present):
+    env, script = environment()
+    trajectory = native_trajectory() if present else None
+    script.close_trajectory = trajectory.model_dump(mode="json") if trajectory else None
+    result = await env.run_request(request())
+    assert result.failure is None
+    assert result.result.ng_agent_close.trajectory == trajectory
+    assert result.result.ng_trajectory == trajectory
+    collected = _episode_record(result.model_dump(mode="json"))
+    assert collected["ng_trajectory"] == script.close_trajectory
+
+
 @pytest.mark.parametrize(
     "path,stage",
     [
@@ -275,6 +314,7 @@ async def test_dependency_failure_closes_sessions_and_preserves_failure_stage(pa
 
 async def test_failed_activation_retains_http_body_and_deferred_close_observations():
     env, script = environment()
+    script.close_trajectory = native_trajectory().model_dump(mode="json")
     script.activation_failure = ErrorReply(
         {
             "detail": {
@@ -309,6 +349,7 @@ async def test_failed_activation_retains_http_body_and_deferred_close_observatio
     assert not failure.dependency_error.body_truncated
     assert failure.agent_close.cleanup_confirmed
     assert failure.agent_close.agent_observations == AgentObservationBundle.model_validate(script.close_observations)
+    assert failure.agent_close.trajectory == native_trajectory()
     assert (
         failure.agent_close.agent_observations.records[0].conversation[0].content
         == "Partial diagnostic before failure"
@@ -333,6 +374,7 @@ async def test_failed_activation_retains_http_body_and_deferred_close_observatio
     assert collected["_ng_failure"] == orjson.loads(serialized)["failure"]
     assert collected["_ng_failure"]["agent_close"]["agent_observations"]["records"][0]["status"] == "failed"
     assert collected["_ng_failure"]["dependency_error"]["status_code"] == 502
+    assert collected["_ng_failure"]["agent_close"]["trajectory"] == script.close_trajectory
 
 
 async def test_dependency_body_is_bounded_and_redacted_when_not_json():

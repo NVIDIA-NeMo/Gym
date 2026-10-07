@@ -64,6 +64,10 @@ and observations collected during deferred cleanup, including failed-invocation
 evidence that is absent from the completed activation history.
 The collector saves the complete failure under `_ng_failure` in its failures
 sidecar alongside the existing summary fields.
+Adapters may include a shared `TrajectoryRecord` in `close.trajectory`. The
+environment forwards it as `ng_trajectory` without reconstructing native turns,
+and failed episodes retain it inside the close receipt. Omitted trajectories stay
+optional; collector projection joins available captured calls using shared IDs.
 
 Validation covers scripted independent endpoints, multi-turn retry/disconnect/close
 races, capability rejection, failure propagation, and cleanup before verification.

@@ -8909,11 +8909,47 @@ class TestEnvironmentServerRouting:
         assert "reward" not in nested
         assert nested["verification"] == {"reward": 1.0}
 
-    def test_episode_result_may_not_use_collector_keys(self) -> None:
-        reply = self._native_identity("a") | {"result": {"reward": 1.0, "ng_trajectory": {}}}
+    @pytest.mark.parametrize("key", ["_ng_internal", "ng_model_call_capture", "ng_perf"])
+    def test_episode_result_may_not_use_collector_keys(self, key: str) -> None:
+        reply = self._native_identity("a") | {"result": {"reward": 1.0, key: {}}}
 
-        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
+        with pytest.raises(ValueError, match="reserved for rollout collection"):
             nemo_gym.rollout_collection._episode_record(reply)
+
+    def test_episode_result_preserves_producer_trajectory(self) -> None:
+        trajectory = {
+            "task_id": "a",
+            "rollout_id": "0-a",
+            "invocations": [{"invocation_id": "native"}],
+            "turns": [
+                {
+                    "invocation_id": "native",
+                    "source_message_id": "saved-message",
+                    "task_id": "a",
+                    "rollout_id": "0-a",
+                    "turn_no": 1,
+                    "timestamp": 10,
+                    "step_count": 3,
+                    "answer": {"text": "native turn"},
+                }
+            ],
+        }
+        reply = self._native_identity("a") | {"result": {"reward": 1.0, "ng_trajectory": trajectory}}
+        record = nemo_gym.rollout_collection._episode_record(reply)
+        assert record["ng_trajectory"] == trajectory
+        projected = nemo_gym.rollout_collection._build_trajectory_record(
+            {
+                "task_id": {"taskset": "swe_pro", "task_id": "a"},
+                "_ng_rollout_id": "0-a",
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            },
+            record,
+        )
+        assert projected.task_id == "a" and projected.rollout_id == "0-a"
+        assert projected.turns[0].source_message_id == "saved-message"
+        assert projected.turns[0].answer == {"text": "native turn"}
+        assert not any(gap.code.startswith("producer_trajectory_") for gap in projected.gaps)
 
     def test_episode_detection_needs_object_identities_and_an_object_failure(self) -> None:
         """An agent reply echoing identity fields as strings is not an episode reply; a bad failure is an error."""

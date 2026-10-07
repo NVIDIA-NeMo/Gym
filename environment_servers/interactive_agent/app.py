@@ -263,6 +263,7 @@ class InteractiveAgentEnvironmentServer(BaseEnvironmentServer[InteractiveAgentRe
                     "ng_steps": steps,
                     "ng_agent_close": agent_close,
                     "ng_agent_observations": agent_close.agent_observations,
+                    "ng_trajectory": agent_close.trajectory,
                 }
             ),
         )
