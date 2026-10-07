@@ -794,7 +794,6 @@ gym eval run --no-serve \
 
 # Per-agent repeats: one input file pins different agents per row via agent_ref.name
 gym eval run --no-serve \
-    --model-type openai_model \
     --input mixed_agents.jsonl \
     --output results/mixed_rollouts.jsonl \
     --num-repeats '{agent_alpha: 4, agent_beta: 1, _default: 1}'
