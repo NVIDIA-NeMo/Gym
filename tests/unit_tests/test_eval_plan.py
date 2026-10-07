@@ -190,6 +190,20 @@ class TestPlanBenchmarkCommand:
         assert "plans do not support prompt templates yet" in " ".join(capsys.readouterr().out.split())
         assert not (tmp_path / "p").exists()
 
+    def test_several_benchmarks_are_refused(self, tmp_path: Path, capsys) -> None:
+        config = self._config(tmp_path, plan_output_fpath=str(tmp_path / "p"))
+        second = json.loads(json.dumps(config["fake_agent"]))
+        second["responses_api_agents"]["simple_agent"]["datasets"][0]["name"] = "other_bench"
+        config["other_agent"] = second
+
+        with pytest.raises(SystemExit):
+            self._run(config)
+
+        assert "A plan covers exactly one benchmark, but the config declares 2" in " ".join(
+            capsys.readouterr().out.split()
+        )
+        assert not (tmp_path / "p").exists()
+
     def test_out_is_required(self, tmp_path: Path, capsys) -> None:
         with pytest.raises(SystemExit):
             self._run(self._config(tmp_path))
