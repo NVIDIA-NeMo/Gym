@@ -9,7 +9,7 @@ stirrup>=0.1.12,<0.2
 transformers>=5.17.0  # CVE mitigation
 # Deliverable-processing deps for resources_servers/gdpval/file_reader.py AND the libraries the agent
 # tells the policy model are available in the sandbox (see
-# prompts/gdpval_user_prompt.txt). The subprocess venv created by ng_run
+# benchmarks/gdpval/prompts/default-stirrup.yaml). The subprocess venv created by ng_run
 # from this requirements.txt does not see these via transitive resolution,
 # so we pin them explicitly.
 jinja2>=3.1

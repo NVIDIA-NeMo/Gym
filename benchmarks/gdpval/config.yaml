@@ -210,8 +210,6 @@ gdpval_stirrup_agent:
       # instruction that is not recorded in the trajectory. Generic Stirrup
       # agents leave this off so their rollouts stay unsteered.
       truncation_recovery: true
-      system_prompt_template: ${oc.env:SYSTEM_PROMPT_TEMPLATE,null}
-      user_prompt_template: ${oc.env:USER_PROMPT_TEMPLATE,null}
       gdpval_container_path: ${oc.env:GDPVAL_CONTAINER_PATH,null}
       persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR,output/gdpval/deliverables}
       # Task-only execution mode. When true, runs each task and caches deliverables
@@ -244,7 +242,7 @@ gdpval_stirrup_agent:
         - name: gdpval
           type: benchmark
           jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark.jsonl
-          prompt_config: null
+          prompt_config: benchmarks/gdpval/prompts/default-stirrup.yaml
           prepare_script: benchmarks/gdpval/prepare.py
           num_repeats: 1
 

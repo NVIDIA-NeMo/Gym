@@ -25,7 +25,7 @@ healthcare, and engineering.
 ## Overview
 
 Stirrup Agent is a pluggable agent wrapper built on the Stirrup framework. Task-specific
-logic (prompt construction, scoring, file handling) lives in a `TaskStrategy` — this repo
+logic (scoring, file handling) lives in a `TaskStrategy` — this repo
 ships the GDPVal strategy out of the box, and new benchmarks can be added in a single file.
 
 For each GDPVal task, the agent:
@@ -121,8 +121,6 @@ The agent reads its Hydra config at `configs/stirrup_agent.yaml`. Notable keys:
 | `agent_max_turns` | `100` | Turn cap for the agent loop. |
 | `concurrency` | `32` | Stirrup's internal parallelism per worker. |
 | `temperature` | `1.0` | Policy sampling temperature. |
-| `system_prompt_template` | `???` | Path to the system prompt Jinja2 template. |
-| `user_prompt_template` | `???` | Path to the user prompt Jinja2 template. |
 | `resources_server` | required | Reference to the GDPVal resources server (which scores the deliverable via `/verify`). |
 | `gdpval_container_path` | `null` | Path to an Apptainer `.sif` (see below). |
 | `persist_deliverables_dir` | `null` | If set, each task's artifacts land in `<dir>/task_<task_id>/`. The resources server reads this dir to score the deliverable. |
@@ -468,8 +466,7 @@ To give the agent web access (some GDPVal tasks benefit from fresh facts), set
 To add a benchmark `my_bench`:
 
 1. Implement `responses_api_agents/stirrup_agent/tasks/my_bench.py` as a `TaskStrategy`
-   subclass (`extract_task_info`, `build_system_prompt`, `build_user_prompt`,
-   `score_deliverable`).
+   subclass (`extract_task_info`, `score_deliverable`).
 2. Register it in `app.py:_load_task_registry()`.
 3. Add `configs/stirrup_my_bench.yaml` setting `task: my_bench`.
 

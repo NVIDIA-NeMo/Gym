@@ -49,16 +49,6 @@ class TaskStrategy(ABC):
         """
         ...
 
-    @abstractmethod
-    def build_system_prompt(self, task_info: Dict[str, Any], config: Any) -> str:
-        """Return the system prompt for the Stirrup agent."""
-        ...
-
-    @abstractmethod
-    def build_user_prompt(self, task_info: Dict[str, Any], config: Any) -> str:
-        """Return the user/task prompt for the Stirrup agent."""
-        ...
-
     def prepare_input_files(self, task_info: Dict[str, Any]) -> Optional[str]:
         """Download / stage any input files the agent needs.
 

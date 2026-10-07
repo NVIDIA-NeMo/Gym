@@ -35,7 +35,7 @@ async def test_runtime_knobs_reach_the_client_and_agent(monkeypatch):
 
     with pytest.raises(_Built):
         await _run_stirrup_agent(
-            task_prompt="t",
+            task_messages=[],
             system_prompt="",
             model_base_url="http://127.0.0.1:9/v1",
             model_name="policy",
