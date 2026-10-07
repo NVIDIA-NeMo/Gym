@@ -186,6 +186,7 @@ gdpval_resources_server:
       # Seed for reproducible per-call judge sampling (null = seed only on task
       # identity, still stable per task).
       judge_sampling_seed: ${oc.env:JUDGE_SAMPLING_SEED,null}
+      tavily_api_key: ${oc.env:TAVILY_API_KEY,dummy}
 
 # Stirrup agent paired with the resources server above.
 gdpval_stirrup_agent:

@@ -104,6 +104,7 @@ def test_removed_handles_audio_video_flag_is_migrated_inside_the_server_config()
         entrypoint="app.py",
         judge_model_server={"type": "responses_api_models", "name": "gdpval_judge_model"},
         judge_panel=[{"name": "gemini", "handles_audio_video": True}, {"name": "gpt"}],
+        tavily_api_key="test-key",
     )
 
     assert [(m.handles_audio, m.handles_video) for m in config.judge_panel] == [(True, True), (False, False)]

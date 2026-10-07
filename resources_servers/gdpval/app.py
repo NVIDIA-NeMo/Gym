@@ -37,11 +37,13 @@ unset — there is one panel-based code path either way.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Set, Tuple
+from typing import Annotated, Any, Dict, List, Literal, Optional, Set, Tuple, Union
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from fastapi import FastAPI, Request
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -51,7 +53,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
-from nemo_gym.server_utils import get_server_url
+from nemo_gym.server_utils import SESSION_ID_KEY, get_server_url
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
     dir_media_modalities,
@@ -60,6 +62,7 @@ from resources_servers.gdpval.judge_panel import (
 )
 from resources_servers.gdpval.judge_telemetry import JudgeTelemetrySink, classify_judge_error
 from resources_servers.gdpval.scoring import SCORING_ERROR_KEY
+from resources_servers.gdpval.tavily_search import TavilySearch, fetch_web_page, web_client
 
 
 LOGGER = logging.getLogger(__name__)
@@ -387,6 +390,78 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # prompts, base64, credentials, or absolute paths.
     judge_telemetry_output_dir: Optional[str] = None
 
+    # Keys for the ``web_search`` tool: a key, a list of keys, or a comma-separated string
+    # with optional surrounding ``[...]``. Each call makes ``tavily_max_sweeps × len(keys)``
+    # attempts at most, rotating keys on 401/403/429 and 5xx.
+    tavily_api_key: Union[str, List[str]]
+    tavily_max_sweeps: int = Field(default=1, ge=1)
+
+
+# Tool descriptions and request-model titles reproduce the tool JSON of the certified runs.
+FINISH_TOOL_DESCRIPTION = (
+    "Signal task completion with a reason. Use when the task is finished or cannot proceed further. "
+    "Note that you will need a separate turn to finish."
+)
+ABANDON_TASK_FINISH_TOOL_DESCRIPTION = (
+    "Signal that you do not believe the task can be completed, with a brief reason, instead of submitting "
+    "files. Use only when required inputs are missing, a hard dependency is unavailable, or the request is "
+    "incoherent. Do not use it to escape difficulty. Note that you will need a separate turn to finish."
+)
+WEB_SEARCH_TOOL_DESCRIPTION = "Search the web using Tavily. Returns top results with content snippets."
+FETCH_WEB_PAGE_TOOL_DESCRIPTION = "Fetch and extract the main content from a web page as markdown."
+
+
+class FinishRequest(BaseModel):
+    """Same shape as stirrup.tools.finish.FinishParams, with ``paths`` coercion."""
+
+    model_config = ConfigDict(title="CoercingFinishParams")
+
+    reason: Annotated[str, Field(description="Reason for finishing.")]
+    paths: Annotated[
+        list[str],
+        Field(description="List of file paths created or modified. Do not include directories, only files."),
+    ]
+
+    @field_validator("paths", mode="before")
+    @classmethod
+    def _coerce_paths(cls, v):
+        # Some tool-call parsers deliver the list as a JSON-encoded string or a bare filename.
+        if isinstance(v, list):
+            return [str(p) for p in v]
+        if isinstance(v, str):
+            stripped = v.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, list):
+                    return [str(p) for p in parsed]
+            if stripped:
+                return [stripped]
+            return []
+        return v
+
+
+class AbandonTaskFinishRequest(BaseModel):
+    """Early-exit finish tool: abandon the task without submitting deliverables."""
+
+    model_config = ConfigDict(title="AbandonFinishParams")
+
+    reason: Annotated[str, Field(description="Brief reason the task cannot be completed.")]
+
+
+class WebSearchRequest(BaseModel):
+    model_config = ConfigDict(title="_SearchParams")
+
+    query: Annotated[str, Field(description="Natural language search query.")]
+
+
+class FetchWebPageRequest(BaseModel):
+    model_config = ConfigDict(title="_FetchParams")
+
+    url: Annotated[str, Field(description="Full HTTP or HTTPS URL of the web page to fetch.")]
+
 
 class GDPValVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(populate_by_name=True)
@@ -465,6 +540,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any) -> None:
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
         self._judge_telemetry = JudgeTelemetrySink(self.config.judge_telemetry_output_dir)
+        self._tavily = TavilySearch(api_keys=self.config.tavily_api_key, max_sweeps=self.config.tavily_max_sweeps)
+        # Session id -> the finish or abandon_task_finish call the agent made.
+        self._finish_calls: Dict[str, Dict[str, Any]] = {}
         # Normalize the reference-model set: prefer the multi-reference
         # ``reference_models`` mapping; fall back to the legacy single-reference
         # fields (treated as a single reference id ``"reference"``).
@@ -494,6 +572,30 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     "deployment container, or set preconvert_office_to_pdf=false to opt out."
                 )
         super().model_post_init(context)
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/finish", description=FINISH_TOOL_DESCRIPTION)(self.finish)
+        app.post("/abandon_task_finish", description=ABANDON_TASK_FINISH_TOOL_DESCRIPTION)(self.abandon_task_finish)
+        app.post("/web_search", description=WEB_SEARCH_TOOL_DESCRIPTION)(self.web_search)
+        app.post("/fetch_web_page", description=FETCH_WEB_PAGE_TOOL_DESCRIPTION)(self.fetch_web_page)
+        return app
+
+    async def finish(self, request: Request, body: FinishRequest) -> str:
+        self._finish_calls[request.session[SESSION_ID_KEY]] = {"tool": "finish", **body.model_dump()}
+        return body.reason
+
+    async def abandon_task_finish(self, request: Request, body: AbandonTaskFinishRequest) -> str:
+        self._finish_calls[request.session[SESSION_ID_KEY]] = {"tool": "abandon_task_finish", **body.model_dump()}
+        return body.reason
+
+    async def web_search(self, body: WebSearchRequest) -> str:
+        async with web_client() as client:
+            return await self._tavily.search(body.query, client)
+
+    async def fetch_web_page(self, body: FetchWebPageRequest) -> str:
+        async with web_client() as client:
+            return await fetch_web_page(body.url, client)
 
     def _effective_panel(self) -> List[JudgePanelMember]:
         """The panel to grade with — always a non-empty list of members.

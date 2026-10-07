@@ -8,3 +8,4 @@ pdfminer.six>=20251230
 cryptography>=42.0
 trafilatura>=1.12
 PyMuPDF>=1.24
+httpx>=0.27

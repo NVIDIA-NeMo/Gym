@@ -43,6 +43,7 @@ def _server(reward_mode: str = "rubric", **extra) -> GDPValResourcesServer:
         name="",
         reward_mode=reward_mode,
         judge_model_server={"type": "responses_api_models", "name": "judge"},
+        tavily_api_key="test-key",
         # Default off in tests: avoids triggering the host-libreoffice install
         # check in model_post_init. Tests that exercise the preconvert path
         # set this back to True explicitly.
