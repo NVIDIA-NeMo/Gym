@@ -128,7 +128,7 @@ def build_sidecar(output_path: Path) -> None:
     result = subprocess.run(
         [go, "build", "-buildvcs=false", "-trimpath", "-o", str(output_path), "."],
         cwd=SIDECAR_SOURCE_DIR,
-        env={**os.environ, "CGO_ENABLED": "0"},
+        env={**os.environ, "CGO_ENABLED": "0", "GOTOOLCHAIN": "local"},
         capture_output=True,
         text=True,
         errors="replace",
