@@ -187,7 +187,7 @@ roles:
       disaggregation-mode: prefill
       skip-server-warmup: true
       attention-backend: trtllm_mha
-      chunked-prefill-size: 8192
+      chunked-prefill-size: 131072
       context-length: 262144
       disaggregation-transfer-backend: nixl
       dtype: bfloat16
@@ -206,8 +206,8 @@ roles:
       mamba-full-memory-ratio: 4
       mamba-radix-cache-strategy: extra_buffer
       mamba-ssm-dtype: float32
-      max-prefill-tokens: 16384
-      max-running-requests: 256
+      max-prefill-tokens: 131072
+      max-running-requests: 1024
       mem-fraction-static: 0.9
       moe-a2a-backend: none
       page-size: 64
@@ -216,8 +216,8 @@ roles:
       speculative-algorithm: EAGLE
       speculative-draft-model-path: /model
       speculative-eagle-topk: 1
-      speculative-num-draft-tokens: 4
-      speculative-num-steps: 3
+      speculative-num-draft-tokens: 2
+      speculative-num-steps: 1
       tokenizer-worker-num: 4
       tool-call-parser: qwen3_coder
       tp-size: 4
@@ -259,8 +259,8 @@ roles:
       skip-server-warmup: true
       attention-backend: trtllm_mha
       context-length: 262144
-      cuda-graph-max-bs-decode: 128
-      disaggregation-decode-extra-slots: 0
+      cuda-graph-max-bs-decode: 256
+      disaggregation-decode-extra-slots: 64
       disaggregation-transfer-backend: nixl
       dtype: bfloat16
       enable-cache-report: true
@@ -271,8 +271,8 @@ roles:
       mamba-backend: flashinfer
       mamba-radix-cache-strategy: extra_buffer
       mamba-ssm-dtype: float32
-      max-running-requests: 128
-      max-total-tokens: 16777216
+      max-running-requests: 256
+      max-total-tokens: 67108864
       mem-fraction-static: 0.8
       moe-a2a-backend: none
       page-size: 64
@@ -281,8 +281,8 @@ roles:
       speculative-algorithm: EAGLE
       speculative-draft-model-path: /model
       speculative-eagle-topk: 1
-      speculative-num-draft-tokens: 4
-      speculative-num-steps: 3
+      speculative-num-draft-tokens: 6
+      speculative-num-steps: 5
       tokenizer-worker-num: 4
       tool-call-parser: qwen3_coder
       tp-size: 4
