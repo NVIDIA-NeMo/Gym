@@ -4,9 +4,10 @@
 
 import asyncio
 import json
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from time import monotonic
+from time import monotonic, time
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
@@ -24,6 +25,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import AgentServerRef, ModelServerRef
 from nemo_gym.interactive_agent_types import (
+    InteractionBudget,
     InteractiveResourcesSeedResponse,
     InteractiveVerificationInput,
     ResourcesStepRequest,
@@ -63,7 +65,7 @@ class SWETConfig(BaseResourcesServerConfig):
     scoring_profile: Literal["reference", "judge_all"] = "reference"
     protocol_profile: Literal["reference", "smoke"] = "reference"
     close_timeout: float = 90
-    trial_budget_seconds: float = 5400
+    trial_budget_seconds: float = Field(default=5400, gt=0, allow_inf_nan=False)
     python_runtime_url: str | None = None
     python_runtime_sha256: str | None = None
 
@@ -94,7 +96,8 @@ class Session:
     messages: list[dict] = field(default_factory=list)
     noops: int = 0
     stopped: bool = False
-    started_at: float = field(default_factory=monotonic)
+    started_at: float | None = None
+    interaction_budget: InteractionBudget | None = None
     steps: OrderedOperationLedger = field(default_factory=OrderedOperationLedger)
     verification: asyncio.Task | None = None
     verification_body: object = None
@@ -219,6 +222,7 @@ class SWETResourcesServer(SimpleResourcesServer):
         )
         result = InteractiveResourcesSeedResponse(
             resources_session_id=state.request.resources_session_id,
+            supports_interaction_budget=True,
             runtime_policy=(
                 {"format": "harbor.agent-kwargs.v1", "settings": metadata["agent_kwargs"]}
                 if metadata["agent_kwargs"]
@@ -288,6 +292,8 @@ class SWETResourcesServer(SimpleResourcesServer):
 
     async def step(self, request: Request, body: ResourcesStepRequest) -> ResourcesStepResponse:
         state = self._get(request, body.resources_session_id, body.episode_id)
+        if state.started_at is not None and body.interaction_budget != state.interaction_budget:
+            raise HTTPException(409, "Interaction budget changed during the Resources session")
         return await state.steps.execute(
             index=body.activation.activation_id, request=body, operation=lambda: self._step(state, body)
         )
@@ -297,13 +303,23 @@ class SWETResourcesServer(SimpleResourcesServer):
             raise HTTPException(409, "Episode has already stopped")
         activation = body.activation
         turn = activation.activation_id
+        if state.started_at is None:
+            state.interaction_budget = body.interaction_budget
+            elapsed = (
+                max(0.0, time() - body.interaction_budget.started_at_unix_seconds)
+                if body.interaction_budget
+                else activation.observation.elapsed_seconds
+            )
+            state.started_at = monotonic() - elapsed
+        elif body.interaction_budget != state.interaction_budget:
+            raise HTTPException(409, "Interaction budget changed during the Resources session")
         if turn >= self.config.max_resumes:
             state.stopped = True
             return ResourcesStepResponse(activation_id=turn, continue_episode=False, stop_reason="max_resumes")
         diff = await state.snapshots.capture(state.sandbox, turn)
         if (
             activation.stop_reason in {"session_budget_exhausted", "budget_exhausted", "model_budget_exhausted"}
-            or monotonic() - state.started_at >= self.config.trial_budget_seconds
+            or self._remaining_interaction_seconds(state) <= 0
         ):
             state.stopped = True
             return ResourcesStepResponse(
@@ -334,23 +350,33 @@ class SWETResourcesServer(SimpleResourcesServer):
         activity, report = project_turn(
             activation.observation, raw_history=state.raw_history, context_chars=self.config.user_context_chars
         )
+        # Keep a proposed turn isolated until it can be accepted before the
+        # deadline. The auxiliary client stays shared so canceled calls retain
+        # their diagnostics, while late simulator history/counters are discarded.
+        simulator = deepcopy(state.simulator, {id(state.simulator._llm): state.simulator._llm})
+        timer = asyncio.timeout(max(0.0, self._remaining_interaction_seconds(state)))
         try:
-            decision = await state.simulator.process(
-                task_description=state.prompt,
-                recent_trajectory=activity,
-                latest_observation=report,
-                latest_analysis=None,
-                step_count=turn + 1,
-                is_completion_attempt=activation.turn_complete,
-                elapsed_sec=activation.observation.elapsed_seconds,
-                turn_duration_sec=activation.observation.duration_seconds,
-                code_changes_diff=diff,
-            )
+            async with timer:
+                decision = await simulator.process(
+                    task_description=state.prompt,
+                    recent_trajectory=activity,
+                    latest_observation=report,
+                    latest_analysis=None,
+                    step_count=turn + 1,
+                    # The source wrapper consults the simulator after an exit-zero
+                    # permission rejection, then resumes the same conversation.
+                    is_completion_attempt=activation.turn_complete or activation.stop_reason == "permission_denied",
+                    elapsed_sec=activation.observation.elapsed_seconds,
+                    turn_duration_sec=activation.observation.duration_seconds,
+                    code_changes_diff=diff,
+                )
         except BaseException as error:
+            if isinstance(error, TimeoutError) and timer.expired():
+                return self._expired_simulator_turn(state, body, simulator)
             evidence = {
                 "turn": turn + 1,
                 "error": str(error) or type(error).__name__,
-                "simulator_messages": state.simulator.last_messages_sent,
+                "simulator_messages": simulator.last_messages_sent,
                 "source_observation": activation.observation.model_dump(mode="json"),
             }
             (state.directory / f"turn-{turn}-simulator.json").write_text(json.dumps(evidence, indent=2))
@@ -358,6 +384,9 @@ class SWETResourcesServer(SimpleResourcesServer):
                 json.dumps(state.simulator_model.calls, indent=2)
             )
             raise
+        if timer.expired() or self._remaining_interaction_seconds(state) <= 0:
+            return self._expired_simulator_turn(state, body, simulator)
+        state.simulator = simulator
         evidence = {
             "turn": turn + 1,
             "action": decision.action,
@@ -399,6 +428,35 @@ class SWETResourcesServer(SimpleResourcesServer):
                 input=[{"role": "user", "content": message}]
             ),
             metadata={"decision": decision.action, "original_cursor": state.simulator._cursor},
+        )
+
+    def _remaining_interaction_seconds(self, state: Session) -> float:
+        assert state.started_at is not None
+        remaining = self.config.trial_budget_seconds - (monotonic() - state.started_at)
+        if state.interaction_budget:
+            remaining = min(remaining, state.interaction_budget.deadline_unix_seconds - time())
+        return remaining
+
+    def _expired_simulator_turn(
+        self, state: Session, body: ResourcesStepRequest, simulator: UserAgent
+    ) -> ResourcesStepResponse:
+        state.stopped = True
+        evidence = {
+            "turn": body.activation.activation_id + 1,
+            "stop_reason": "session_budget_exhausted",
+            "discarded": True,
+            "simulator_messages": simulator.last_messages_sent,
+            "source_observation": body.activation.observation.model_dump(mode="json"),
+        }
+        (state.directory / f"turn-{body.activation.activation_id}-simulator.json").write_text(
+            json.dumps(evidence, indent=2)
+        )
+        (state.directory / "simulator-model-calls.json").write_text(json.dumps(state.simulator_model.calls, indent=2))
+        return ResourcesStepResponse(
+            activation_id=body.activation.activation_id,
+            continue_episode=False,
+            stop_reason="session_budget_exhausted",
+            metadata={"simulator_turn_discarded": True},
         )
 
     async def verify(

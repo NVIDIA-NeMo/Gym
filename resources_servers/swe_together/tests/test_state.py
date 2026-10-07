@@ -3,13 +3,14 @@
 import asyncio
 import json
 import subprocess
+from time import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.interactive_agent_types import AgentActivationResponse, ResourcesStepRequest
+from nemo_gym.interactive_agent_types import AgentActivationResponse, InteractionBudget, ResourcesStepRequest
 from nemo_gym.openai_utils import NeMoGymResponse
 from resources_servers.swe_together import snapshot_worker
 from resources_servers.swe_together.app import Session, SWETResourcesServer
@@ -58,6 +59,7 @@ def session(tmp_path, decisions):
         )
     )
     state.simulator = UserAgent(llm, original_user_messages=["a", "b"])
+    state.simulator_model = SimpleNamespace(calls=[])
     server = SWETResourcesServer.model_construct(
         config=SimpleNamespace(max_resumes=15, user_context_chars=3000, trial_budget_seconds=5400)
     )
@@ -169,6 +171,21 @@ async def test_declared_session_budget_stops_before_simulator(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_permission_denied_consults_simulator_as_completion_and_resumes(tmp_path):
+    server, state, llm = session(tmp_path, [("redirect", "Use the repository copy instead.")])
+    request = ResourcesStepRequest(
+        resources_session_id="s",
+        episode_id=state.request.episode_id,
+        activation=activation(0, turn_complete=False, stop_reason="permission_denied"),
+    )
+    result = await server._step(state, request)
+    assert result.continue_episode and not result.synthetic
+    assert result.responses_create_params.input[0].content == "Use the repository copy instead."
+    assert "The agent is signaling completion." in llm.call.call_args.kwargs["prompt"]
+    assert state.simulator._cursor == 1 and len(state.messages) == 1 and state.noops == 0
+
+
+@pytest.mark.asyncio
 async def test_close_retains_late_creation_until_owned_handle_is_stopped(tmp_path):
     server, state, _ = session(tmp_path, [])
     server.config.close_timeout = 0.01
@@ -201,7 +218,8 @@ async def test_simulator_failure_retains_exact_inputs_without_noop(tmp_path):
     with pytest.raises(RuntimeError, match="User simulator request failed"):
         await server._step(state, request)
     evidence = json.loads((tmp_path / "turn-0-simulator.json").read_text())
-    assert evidence["simulator_messages"] == state.simulator.last_messages_sent
+    assert evidence["simulator_messages"][-1]["content"] == llm.call.call_args.kwargs["prompt"]
+    assert state.simulator.last_messages_sent == []
     assert evidence["error"] == "User simulator request failed"
     assert state.noops == 0 and state.messages == []
     assert json.loads((tmp_path / "simulator-model-calls.json").read_text())[0]["error"] == "transport unavailable"
@@ -249,3 +267,136 @@ async def test_prepare_forwards_canonical_agent_kwargs_without_harness_translati
     provenance = json.loads((tmp_path / "provenance.json").read_text())
     assert provenance["agent_kwargs"] == kwargs
     assert result.sandbox_access.connection.descriptor == {"sandbox_id": "fixture"}
+    assert result.supports_interaction_budget
+
+
+def budget_request(state, *, seconds=0.01, index=0):
+    now = time()
+    return ResourcesStepRequest(
+        resources_session_id="s",
+        episode_id=state.request.episode_id,
+        activation=activation(index),
+        interaction_budget=InteractionBudget(started_at_unix_seconds=now, deadline_unix_seconds=now + seconds),
+    )
+
+
+@pytest.mark.asyncio
+async def test_budget_expiry_cancels_simulator_once_and_replays_terminal_step(tmp_path):
+    server, state, llm = session(tmp_path, [])
+    canceled = asyncio.Event()
+
+    async def wait_for_cancellation(**kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            canceled.set()
+
+    llm.call.side_effect = wait_for_cancellation
+    request = budget_request(state)
+
+    async def invoke():
+        return await state.steps.execute(index=0, request=request, operation=lambda: server._step(state, request))
+
+    first, duplicate = await asyncio.gather(invoke(), invoke())
+    assert first == duplicate == await invoke()
+    assert first.stop_reason == "session_budget_exhausted" and not first.continue_episode
+    assert canceled.is_set() and llm.call.await_count == 1
+    assert state.stopped and state.messages == [] and state.noops == 0
+    assert state.simulator._cursor == 0 and state.simulator._messages == []
+    assert state.snapshots.capture.await_count == 1
+    evidence = json.loads((tmp_path / "turn-0-simulator.json").read_text())
+    assert evidence["discarded"] and evidence["simulator_messages"]
+
+
+@pytest.mark.asyncio
+async def test_late_simulator_reply_cannot_commit_after_cancel_is_suppressed(tmp_path):
+    server, state, llm = session(tmp_path, [])
+
+    async def delayed_reply(**kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await asyncio.sleep(0)
+            return SimpleNamespace(
+                content="",
+                tool_calls=[{"function": {"name": "redirect", "arguments": '{"content":"late instruction"}'}}],
+            )
+
+    llm.call.side_effect = delayed_reply
+    response = await server._step(state, budget_request(state))
+    assert response.stop_reason == "session_budget_exhausted"
+    assert state.messages == [] and state.noops == 0
+    assert state.simulator._cursor == 0 and state.simulator._messages == []
+    assert state.simulator.message_count == 0 and state.simulator._counts == {}
+
+
+@pytest.mark.asyncio
+async def test_post_await_deadline_check_discards_reply_before_timer_callback(tmp_path, monkeypatch):
+    from resources_servers.swe_together import app
+
+    server, state, llm = session(tmp_path, [])
+    request = budget_request(state, seconds=60)
+    clock = [request.interaction_budget.started_at_unix_seconds]
+    monkeypatch.setattr(app, "time", lambda: clock[0])
+
+    async def reply_after_clock_advance(**kwargs):
+        clock[0] = request.interaction_budget.deadline_unix_seconds + 1
+        return SimpleNamespace(
+            content="", tool_calls=[{"function": {"name": "redirect", "arguments": '{"content":"too late"}'}}]
+        )
+
+    llm.call.side_effect = reply_after_clock_advance
+    response = await server._step(state, request)
+    assert response.stop_reason == "session_budget_exhausted"
+    assert state.messages == [] and state.simulator._messages == [] and state.simulator._cursor == 0
+
+
+@pytest.mark.asyncio
+async def test_model_timeout_before_interaction_deadline_remains_failure(tmp_path):
+    server, state, llm = session(tmp_path, [])
+    llm.call.side_effect = TimeoutError("model request timed out")
+    with pytest.raises(RuntimeError, match="User simulator request failed"):
+        await server._step(state, budget_request(state, seconds=60))
+    assert not state.stopped and state.messages == [] and state.noops == 0
+    assert "error" in json.loads((tmp_path / "turn-0-simulator.json").read_text())
+
+
+@pytest.mark.asyncio
+async def test_wrapper_budget_starts_at_execution_and_is_not_reset_by_steps(tmp_path, monkeypatch):
+    from resources_servers.swe_together import app
+
+    server, state, llm = session(tmp_path, [("redirect", "continue implementation")])
+    server.config.trial_budget_seconds = 20
+    clock = [5000.0]
+    monkeypatch.setattr(app, "monotonic", lambda: clock[0])
+    request = ResourcesStepRequest(
+        resources_session_id="s",
+        episode_id=state.request.episode_id,
+        activation=activation(0, observation={"elapsed_seconds": 10}),
+    )
+    first = await server._step(state, request)
+    assert first.continue_episode and state.started_at == 4990
+    clock[0] = 5011
+    request.activation = activation(1)
+    final = await server._step(state, request)
+    assert final.stop_reason == "session_budget_exhausted" and llm.call.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_resources_rejects_interaction_budget_change(tmp_path):
+    from fastapi import HTTPException
+
+    from nemo_gym.server_utils import SESSION_ID_KEY
+
+    server, state, llm = session(tmp_path, [("redirect", "continue implementation")] * 2)
+    server._sessions["s"] = state
+    http_request = SimpleNamespace(session={SESSION_ID_KEY: "s"})
+    request = budget_request(state, seconds=60)
+    assert (await server.step(http_request, request)).continue_episode
+    changed = budget_request(state, seconds=120, index=1)
+    with pytest.raises(HTTPException, match="Interaction budget changed"):
+        await server.step(http_request, changed)
+    assert llm.call.await_count == 1 and len(state.messages) == 1
+    request.activation = activation(1)
+    assert (await server.step(http_request, request)).continue_episode
+    assert llm.call.await_count == 2 and len(state.messages) == 2

@@ -51,6 +51,23 @@ The ledger is process-local and does not provide recovery after a server crash.
 Resources can use `OrderedOperationLedger` for the same semantics on `/step`;
 Resources must bind its own episode identity and session cookie.
 
+Set `interaction_timeout_seconds` to bound candidate execution and Resources
+steps together. Both participants must declare `supports_interaction_budget`;
+the environment rejects incompatible participants before the first activation.
+After both seed calls finish, it creates one immutable `InteractionBudget` with
+UTC start and deadline timestamps and sends it unchanged on every activation and
+step. Setup, final verification, and cleanup are outside this execution window.
+Deployments using this option require synchronized clocks across services.
+
+Deadline enforcement belongs inside each participant's shared operation, so a
+disconnected HTTP waiter cannot leave a simulator call running past verification.
+An adapter stops candidate processes and returns a partial checkpoint on its own
+budget expiry. Resources cancels and awaits simulator work, discards decisions
+that arrive after the deadline, and returns a terminal step before grading can
+begin. A simulator's independent timeout remains a failed step. Retries cannot
+extend the window; benchmark-specific limits may shorten it. Omitting the option
+preserves the existing continuation contract.
+
 Ordered events distinguish visible text, tools, reasoning, and compaction. Timing,
 harness steps, and provider calls have separate fields. Preserve raw native
 artifacts and model-call correlation in the adapter; each benchmark chooses its
@@ -58,6 +75,16 @@ permitted view without discarding the underlying evidence. Simulator failures ar
 reported at stage `step`. Candidate runtime/provider failures must raise; declared
 model or wall-time limits may return a partial checkpoint after confirmed cleanup.
 The environment's `max_activations` is a safety fence: exceeding it fails the episode.
+Failed dependency calls retain their HTTP status and a redacted response-body
+preview of at most 8192 characters. The failure includes the agent close receipt
+and observations collected during deferred cleanup, including failed-invocation
+evidence that is absent from the completed activation history.
+The collector saves the complete failure under `_ng_failure` in its failures
+sidecar alongside the existing summary fields.
+Adapters may include a shared `TrajectoryRecord` in `close.trajectory`. The
+environment forwards it as `ng_trajectory` without reconstructing native turns,
+and failed episodes retain it inside the close receipt. Omitted trajectories stay
+optional; collector projection joins available captured calls using shared IDs.
 
 Validation covers scripted independent endpoints, multi-turn retry/disconnect/close
 races, capability rejection, failure propagation, and cleanup before verification.

@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 from nemo_gym.base_resources_server import ResourcesSeedSessionResponse
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
 
 
@@ -20,6 +20,7 @@ class AgentContinuationRequirements(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["native_conversation"] = "native_conversation"
     observations: list[str] = Field(default_factory=lambda: ["ordered_events", "timing"])
+    requires_interaction_budget: bool = False
 
 
 class AgentContinuationCapabilities(AgentContinuationRequirements):
@@ -27,6 +28,26 @@ class AgentContinuationCapabilities(AgentContinuationRequirements):
 
     runtime_prerequisites: dict[str, JsonValue] = Field(default_factory=dict)
     budget_semantics: dict[str, JsonValue] = Field(default_factory=dict)
+    supports_interaction_budget: bool = False
+
+
+class InteractionBudget(BaseModel):
+    """Immutable execution window shared across services with synchronized UTC clocks.
+
+    Starts after setup and covers candidate activations plus Resources steps.
+    Deadline owners cancel and await their work before returning a terminal checkpoint;
+    an HTTP waiter timing out does not establish that the owned operation stopped.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    started_at_unix_seconds: float = Field(gt=0, allow_inf_nan=False)
+    deadline_unix_seconds: float = Field(gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_deadline(self) -> "InteractionBudget":
+        if self.deadline_unix_seconds <= self.started_at_unix_seconds:
+            raise ValueError("interaction deadline must follow its start")
+        return self
 
 
 class AgentActivationEvent(BaseModel):
@@ -71,6 +92,7 @@ class AgentActivationRequest(BaseModel):
     episode_id: EpisodeId
     activation_id: int = Field(ge=0)
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    interaction_budget: InteractionBudget | None = None
 
 
 class AgentActivationResponse(BaseModel):
@@ -91,6 +113,7 @@ class InteractiveAgentCloseReceipt(BaseModel):
     agent_session_id: str
     agent_observations: AgentObservationBundle | None = None
     resources_cookies: dict[str, str] | None = None
+    trajectory: TrajectoryRecord | None = None
     activations: list[AgentActivationResponse] = Field(default_factory=list)
     cleanup_confirmed: bool = False
 
@@ -100,6 +123,7 @@ class InteractiveResourcesSeedResponse(ResourcesSeedSessionResponse):
 
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     continuation: AgentContinuationRequirements = Field(default_factory=AgentContinuationRequirements)
+    supports_interaction_budget: bool = False
 
 
 class ResourcesStepRequest(BaseModel):
@@ -109,6 +133,7 @@ class ResourcesStepRequest(BaseModel):
     resources_session_id: str = Field(min_length=1)
     episode_id: EpisodeId
     activation: AgentActivationResponse
+    interaction_budget: InteractionBudget | None = None
 
 
 class ResourcesStepResponse(BaseModel):
@@ -157,6 +182,16 @@ class InteractiveAgentResult(SingleAgentTurnResult):
     ng_activations: list[AgentActivationResponse] = Field(default_factory=list)
     ng_steps: list[ResourcesStepResponse] = Field(default_factory=list)
     ng_agent_close: InteractiveAgentCloseReceipt | None = None
+    ng_trajectory: TrajectoryRecord | None = None
+
+
+class InteractiveDependencyError(BaseModel):
+    """Bounded dependency diagnostics, excluding transport headers and request metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+    status_code: int
+    body: str | None = Field(default=None, max_length=8192)
+    body_truncated: bool = False
 
 
 class InteractiveAgentFailure(SingleAgentTurnFailure):
@@ -165,6 +200,7 @@ class InteractiveAgentFailure(SingleAgentTurnFailure):
     activations: list[AgentActivationResponse] = Field(default_factory=list)
     steps: list[ResourcesStepResponse] = Field(default_factory=list)
     agent_close: InteractiveAgentCloseReceipt | None = None
+    dependency_error: InteractiveDependencyError | None = None
 
 
 class InteractiveAgentResponse(BaseEpisodeResponse[InteractiveAgentResult]):

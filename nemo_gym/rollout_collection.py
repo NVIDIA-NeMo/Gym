@@ -332,7 +332,9 @@ def _is_episode_response(result: Any) -> bool:
 
 def _is_collector_key(key: str) -> bool:
     """Keys rollout collection writes itself; an Environment Server result must not use them."""
-    return key.startswith("_ng_") or key in (NG_TRAJECTORY_KEY, "ng_model_call_capture", NG_PERF_KEY)
+    # A producer may supply ng_trajectory; the common projection validates it and
+    # joins captured calls without discarding native turn/message identity.
+    return key.startswith("_ng_") or key in ("ng_model_call_capture", NG_PERF_KEY)
 
 
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -359,6 +361,9 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
             NG_TERMINAL_KEY: bool(failure.get("terminal", False)),
             "_ng_failure_message": failure.get("failure_reason"),
+            # Keep protocol-specific diagnostics opaque, including evidence produced
+            # during deferred cleanup. Summary fields remain stable for old readers.
+            "_ng_failure": dict(failure),
         }
         if failure.get("stage") is not None:
             record["_ng_failure_stage"] = failure["stage"]
@@ -437,9 +442,12 @@ def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
 
 
 def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
-    task_id = next(
-        (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
-        str(row[TASK_INDEX_KEY_NAME]),
+    raw_task_id = next(
+        (row[key] for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
+        row[TASK_INDEX_KEY_NAME],
+    )
+    task_id = str(
+        raw_task_id["task_id"] if isinstance(raw_task_id, Mapping) and "task_id" in raw_task_id else raw_task_id
     )
     rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return task_id, rollout_id
