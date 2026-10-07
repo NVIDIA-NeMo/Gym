@@ -58,6 +58,16 @@ permitted view without discarding the underlying evidence. Simulator failures ar
 reported at stage `step`. Candidate runtime/provider failures must raise; declared
 model or wall-time limits may return a partial checkpoint after confirmed cleanup.
 The environment's `max_activations` is a safety fence: exceeding it fails the episode.
+Failed dependency calls retain their HTTP status and a redacted response-body
+preview of at most 8192 characters. The failure includes the agent close receipt
+and observations collected during deferred cleanup, including failed-invocation
+evidence that is absent from the completed activation history.
+The collector saves the complete failure under `_ng_failure` in its failures
+sidecar alongside the existing summary fields.
+Adapters may include a shared `TrajectoryRecord` in `close.trajectory`. The
+environment forwards it as `ng_trajectory` without reconstructing native turns,
+and failed episodes retain it inside the close receipt. Omitted trajectories stay
+optional; collector projection joins available captured calls using shared IDs.
 
 Validation covers scripted independent endpoints, multi-turn retry/disconnect/close
 races, capability rejection, failure propagation, and cleanup before verification.

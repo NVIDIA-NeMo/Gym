@@ -7,7 +7,10 @@ from unittest.mock import MagicMock
 
 import orjson
 import pytest
+from aiohttp import ClientResponseError, RequestInfo
+from multidict import CIMultiDict, CIMultiDictProxy
 from pydantic import BaseModel
+from yarl import URL
 
 from environment_servers.interactive_agent.app import (
     InteractiveAgentEnvironmentServer,
@@ -22,6 +25,8 @@ from nemo_gym.interactive_agent_types import (
     InteractiveVerificationInput,
 )
 from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.rollout_collection import _episode_record
+from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.server_utils import ServerClient
 
 
@@ -36,6 +41,29 @@ class Reply:
         return self.body
 
 
+class ErrorReply(Reply):
+    ok = False
+
+    def __init__(self, body):
+        super().__init__(body)
+        self.content = self
+        self.request_info = RequestInfo(
+            url=URL("http://candidate/activate?credential=request-value"),
+            real_url=URL("http://candidate/activate?credential=request-value"),
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict({"Authorization": "Bearer request-header-value"})),
+        )
+
+    def raise_for_status(self):
+        raise ClientResponseError(
+            self.request_info,
+            (),
+            status=502,
+            message="Bad Gateway",
+            headers=CIMultiDict({"Set-Cookie": "response-header-value"}),
+        )
+
+
 def agent_response():
     return NeMoGymResponse(
         id="reply",
@@ -46,6 +74,30 @@ def agent_response():
         tool_choice="auto",
         parallel_tool_calls=True,
         tools=[],
+    )
+
+
+def native_trajectory():
+    return TrajectoryRecord(
+        task_id="repair",
+        rollout_id="rollout-a2",
+        invocations=[{"invocation_id": "native", "status": "incomplete"}],
+        turns=[
+            {
+                "invocation_id": "native",
+                "source_message_id": "saved-message",
+                "task_id": "repair",
+                "rollout_id": "rollout-a2",
+                "turn_no": 1,
+                "timestamp": 42.125,
+                "step_count": 3,
+                "question": {"native": ["unchanged", 7]},
+                "answer": {"text": "partial native answer"},
+                "model_calls": [{"model_call_id": "captured-call"}],
+            }
+        ],
+        tool_calls=[{"invocation_id": "native", "tool_call_id": "tool-1", "output": {"stdout": "native output"}}],
+        gaps=[{"code": "fixture_unavailable_timing", "detail": "Preserve this producer diagnostic"}],
     )
 
 
@@ -65,6 +117,9 @@ class ScriptedComposition:
         self.invalid_step_id = False
         self.mask = False
         self.block_activation = False
+        self.activation_failure = None
+        self.close_observations = None
+        self.close_trajectory = None
         self.entered = asyncio.Event()
 
     async def post(self, *, server_name, url_path, json, cookies=None):
@@ -95,6 +150,8 @@ class ScriptedComposition:
             self.entered.set()
             if self.block_activation:
                 await asyncio.Event().wait()
+            if body["activation_id"] == 1 and self.activation_failure is not None:
+                return self.activation_failure
             assert cookies == {"session": "agent-cookie"}
             self.inputs.append(body["responses_create_params"]["input"])
             response = AgentActivationResponse(
@@ -121,6 +178,9 @@ class ScriptedComposition:
                     "agent_session_id": body["agent_session_id"],
                     "cleanup_confirmed": self.cleanup_confirmed,
                     "activations": self.activations,
+                    "agent_observations": self.close_observations,
+                    **({"trajectory": self.close_trajectory} if self.close_trajectory is not None else {}),
+                    "resources_cookies": {"session": "resources-cookie"},
                 },
                 "agent-cookie",
             )
@@ -215,6 +275,19 @@ async def test_runtime_policy_reaches_adapter_without_environment_interpretation
     assert [path for _, path, _, _ in script.calls][-1] == "/close_session"
 
 
+@pytest.mark.parametrize("present", [False, True])
+async def test_native_trajectory_is_optional_and_forwarded_without_projection(present):
+    env, script = environment()
+    trajectory = native_trajectory() if present else None
+    script.close_trajectory = trajectory.model_dump(mode="json") if trajectory else None
+    result = await env.run_request(request())
+    assert result.failure is None
+    assert result.result.ng_agent_close.trajectory == trajectory
+    assert result.result.ng_trajectory == trajectory
+    collected = _episode_record(result.model_dump(mode="json"))
+    assert collected["ng_trajectory"] == script.close_trajectory
+
+
 @pytest.mark.parametrize(
     "path,stage",
     [
@@ -237,6 +310,83 @@ async def test_dependency_failure_closes_sessions_and_preserves_failure_stage(pa
         assert "/v1/agent_sessions/close" in paths
     if stage != "verification":
         assert "/verify" not in paths
+
+
+async def test_failed_activation_retains_http_body_and_deferred_close_observations():
+    env, script = environment()
+    script.close_trajectory = native_trajectory().model_dump(mode="json")
+    script.activation_failure = ErrorReply(
+        {
+            "detail": {
+                "message": "Native runtime ended without successful terminal result",
+                "finish": "tool-calls",
+                "stderr": "permission denied: /outside",
+                "nested": {"api_key": "body-secret-value"},
+                "headers": {"X-Custom": "body-header-value"},
+                # Synthetic credentials verify that URL userinfo and queries are redacted.
+                "url": "https://name:password@provider/error?credential=query-value",  # pragma: allowlist secret
+            }
+        }
+    )
+    script.close_observations = {
+        "source": "independent-native-fixture",
+        "records": [
+            {
+                "kind": "agent_invocation",
+                "invocation_id": "native-session",
+                "status": "failed",
+                "error_type": "permission denied: /outside",
+                "conversation": [{"role": "assistant", "content": "Partial diagnostic before failure"}],
+            }
+        ],
+    }
+    result = await env.run_request(request())
+    assert result.result is None and result.failure.stage == "agent" and not result.failure.terminal
+    failure = result.failure
+    assert failure.dependency_error.status_code == 502
+    detail = orjson.loads(failure.dependency_error.body)["detail"]
+    assert detail["finish"] == "tool-calls" and detail["stderr"] == "permission denied: /outside"
+    assert not failure.dependency_error.body_truncated
+    assert failure.agent_close.cleanup_confirmed
+    assert failure.agent_close.agent_observations == AgentObservationBundle.model_validate(script.close_observations)
+    assert failure.agent_close.trajectory == native_trajectory()
+    assert (
+        failure.agent_close.agent_observations.records[0].conversation[0].content
+        == "Partial diagnostic before failure"
+    )
+    assert len(failure.activations) == len(failure.agent_close.activations) == 1
+    assert failure.partial_response == failure.activations[0].response
+    assert [path for _, path, _, _ in script.calls][-2:] == ["/v1/agent_sessions/close", "/close_session"]
+    serialized = result.model_dump_json()
+    for sensitive in [
+        "request-header-value",
+        "response-header-value",
+        "request-value",
+        "body-secret-value",
+        "body-header-value",
+        "name:password",
+        "query-value",
+        "resources-cookie",
+    ]:
+        assert sensitive not in serialized
+    assert InteractiveAgentResponse.model_validate_json(serialized).failure == failure
+    collected = _episode_record(orjson.loads(serialized))
+    assert collected["_ng_failure"] == orjson.loads(serialized)["failure"]
+    assert collected["_ng_failure"]["agent_close"]["agent_observations"]["records"][0]["status"] == "failed"
+    assert collected["_ng_failure"]["dependency_error"]["status_code"] == 502
+    assert collected["_ng_failure"]["agent_close"]["trajectory"] == script.close_trajectory
+
+
+async def test_dependency_body_is_bounded_and_redacted_when_not_json():
+    env, script = environment()
+    reply = ErrorReply({})
+    reply.body = b'Authorization: Bearer body-auth-value\napi_key="body-key-value"\n' + b"x" * 40000
+    script.activation_failure = reply
+    result = await env.run_request(request())
+    detail = result.failure.dependency_error
+    assert detail.status_code == 502 and detail.body_truncated and len(detail.body) == 8192
+    assert "body-auth-value" not in detail.body and "body-key-value" not in detail.body
+    assert result.failure.agent_close.cleanup_confirmed
 
 
 @pytest.mark.parametrize("fault", ["cleanup_confirmed", "capabilities", "invalid_activation_id", "invalid_step_id"])
