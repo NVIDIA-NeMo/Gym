@@ -58,8 +58,8 @@ VLLM_PREFILL_ARGS=(
             ]
         }
     }'
-    --max-num-batched-tokens 131072
-    --max-num-seqs 1024
+    --max-num-batched-tokens 65536
+    --max-num-seqs 256
 )
 VLLM_DECODE_ARGS=(
     --kv-transfer-config '{
