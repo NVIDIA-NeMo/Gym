@@ -36,7 +36,7 @@ gym env init --benchmark my_benchmark --profile custom-gym-verifier \
   --reuse-verifier existing_scorer --reward-range 0 1 --higher-is-better
 ```
 
-Scaffolding is non-destructive: an identical rerun is a no-op, and any conflicting file aborts the complete write set. `gym env validate --sync NAME` updates only mirrored composition fields after all static checks pass. `gym env test --update-expected NAME` updates fixture rewards only after every behavioral check passes. `gym env publish NAME` runs validation and the fixture, rejects manifest metadata placeholders, and confirms that the exact manifest is discoverable. The manifest is the registry record, so this structural check is idempotent and does not commit or push changes.
+Scaffolding is non-destructive: an identical rerun is a no-op, and any conflicting file aborts the complete write set. `gym env validate --sync NAME` updates only mirrored composition fields after all static checks pass. `gym env test --update-expected NAME` updates fixture rewards only after every behavioral check passes. `gym env publish NAME` is a local readiness check: it runs validation and the fixture, rejects manifest metadata placeholders, and confirms that the exact manifest is discoverable without committing or pushing changes.
 
 Run `gym eval prepare --benchmark NAME` before validating a benchmark whose prepared data is not yet present. Static validation reads the declared JSONL but does not execute preparation code.
 
@@ -219,7 +219,7 @@ async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
     return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 ```
 
-Avoid spawning additional threads or processes unless necessary. A single Gym instance can handle tens of thousands of concurrent requests when properly implemented.
+Avoid spawning additional threads or processes unless necessary. Async-first implementations scale to high concurrent request volumes during training.
 
 ### NeMo Gym OpenAI Client
 
