@@ -1090,7 +1090,6 @@ async def test_cancelled_http_waiter_does_not_cancel_shared_activation(setup):
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
-@pytest.mark.parametrize("session", [False, True])
 @pytest.mark.parametrize(
     "control",
     [
@@ -1101,11 +1100,10 @@ async def test_cancelled_http_waiter_does_not_cancel_shared_activation(setup):
         {"store": True},
     ],
 )
-async def test_local_and_sandbox_reject_unsupported_controls(setup, session, control):
+async def test_sandbox_rejects_unsupported_controls(setup, control):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": "pi-smoke-a2"}})
-    if session:
-        await agent.seed_agent_session(request, seed())
+    await agent.seed_agent_session(request, seed())
     with patch.object(agent, "_run_pi", AsyncMock()) as run:
         with pytest.raises(HTTPException) as error:
             await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task", **control))

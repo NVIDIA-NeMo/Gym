@@ -94,6 +94,35 @@ class TestSanity:
         assert agent.sem._value == 4
 
 
+@pytest.mark.parametrize("with_scope", [True, False], ids=["anyswe-anyterminal", "harness-agent"])
+async def test_legacy_runner_request_preserves_configured_pi_controls(with_scope: bool) -> None:
+    # AnySWE/AnyTerminal pass sampling fields in both config and the request;
+    # HarnessAgent forwards the entire Responses body using a scope-less request.
+    agent = _make_agent(model="configured-model", max_output_tokens=128, system_prompt="config")
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"role": "user", "content": "fix the code"}],
+        model="caller-model",
+        max_output_tokens=128,
+        temperature=0.7,
+        top_p=0.8,
+        metadata={"instance_id": "example"},
+    )
+    original = body.model_dump()
+    request = Request({"type": "http", "path_params": {}}) if with_scope else SimpleNamespace(path_params={})
+    items, usage = parse_pi_events(
+        _msg_end("assistant", [{"type": "text", "text": "fixed"}], usage={"input": 2, "output": 1})
+    )
+    with patch.object(agent, "_run_pi", AsyncMock(return_value=(items, usage, "configured-model", []))) as run:
+        result = await agent.responses(request, body)
+
+    run.assert_awaited_once_with("fix the code", "config", rollout_id=None, collect_observations=False)
+    assert result.output[0].content[0].text == "fixed"
+    assert result.model == "configured-model"
+    assert result.usage.total_tokens == 3
+    assert agent.config.max_output_tokens == 128
+    assert body.model_dump() == original
+
+
 class TestLocalRuntimeSetup:
     @pytest.mark.parametrize("timed_out, collect", [(False, True), (True, True), (True, False)])
     async def test_local_exit_preserves_events_and_removes_workspace(self, tmp_path, timed_out, collect) -> None:

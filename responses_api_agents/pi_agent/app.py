@@ -592,7 +592,7 @@ class PiAgent(SimpleResponsesAPIAgent):
     def _validate_request(
         self, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponseCreateParamsNonStreaming:
-        """Apply the same supported-control boundary to local and sandbox execution."""
+        """Validate the supported controls for a native sandbox activation."""
         if body.model is not None and body.model != self.config.model:
             raise HTTPException(422, "Pi model must match the configured model")
         if body.max_output_tokens is not None:
@@ -1110,9 +1110,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        body = self._validate_request(body)
         session_id = self._agent_session_id_from_request(request)
         if session_id is not None:
+            body = self._validate_request(body)
             state = self._require_agent_session(session_id)
             assert isinstance(state, PiSandboxSession)
             rollout_id = request.path_params.get("rollout_id")
@@ -1129,6 +1129,9 @@ class PiAgent(SimpleResponsesAPIAgent):
                 raise HTTPException(409, "Pi sandbox sessions support one activation; retry the same request")
             # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
+        # AnySWE, AnyTerminal and HarnessAgent pass generic Responses fields here.
+        # Preserve their local CLI contract; only native sessions enforce the new
+        # request boundary. Legacy model selection and caps remain config-owned.
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         episode = await self._create_episode(
