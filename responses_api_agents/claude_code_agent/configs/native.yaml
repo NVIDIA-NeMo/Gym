@@ -1,0 +1,12 @@
+swe_together_judge:
+  responses_api_agents:
+    claude_code_agent:
+      entrypoint: native.py
+      model_server:
+        type: responses_api_models
+        name: swe_together_judge_model
+      model: claude-opus-4-6
+      claude_code_version: 2.1.108
+      max_turns: 50
+      timeout: 1200
+      close_timeout: 90

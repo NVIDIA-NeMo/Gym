@@ -1,0 +1,23 @@
+swe_together_resources:
+  resources_servers:
+    swe_together:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Interactive coding tasks with a simulated user and a fixed agentic judge.
+      asset_root: ${swe_together_asset_root}
+      artifact_root: ${swe_together_artifact_root}
+      sandbox_provider: sandbox
+      simulator_model:
+        type: responses_api_models
+        name: swe_together_simulator_model
+      interaction_model:
+        type: responses_api_models
+        name: swe_together_interaction_model
+      judge_agent:
+        type: responses_api_agents
+        name: swe_together_judge
+      protocol_profile: reference
+      scoring_profile: reference
+      simulator_temperature: 0.5
+      max_resumes: 15
