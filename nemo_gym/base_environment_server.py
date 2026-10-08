@@ -16,9 +16,9 @@ from fastapi import Body, FastAPI
 from pydantic import ConfigDict, JsonValue, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
-from nemo_gym._checkpoint.control import install_participant
 from nemo_gym._checkpoint.environment import EnvironmentParticipant
 from nemo_gym._checkpoint.errors import ControlError
+from nemo_gym._checkpoint.participant_workers import install_server_participant
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._checkpoint.steps import StepMode
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
@@ -206,6 +206,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 try:
                     async with deadline:
                         if self._checkpoint is not None:
+                            await self._checkpoint.claim(request.episode_id)
                             self._checkpoint.begin(
                                 request.episode_id,
                                 request.task.model_dump(mode="json"),
@@ -268,12 +269,11 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        if (self.config.num_workers or 1) != 1:
-            raise ValueError("environment checkpointing requires num_workers=1: episodes live in one process")
         self._checkpoint = EnvironmentParticipant()
-        install_participant(
+        install_server_participant(
             app,
             self._checkpoint,
+            num_workers=self.config.num_workers or 1,
             auth_token=settings.control_auth_token,
             lease_grace_seconds=settings.lease_grace_seconds,
             instance_name=self.config.name,
