@@ -28,7 +28,7 @@ uv pip install -U "vllm>=0.12.0"
 The published NeMo-Gym container already includes vLLM, but intentionally omits codec-bearing packages. vLLM 0.24 imports `torchvision` during kernel warmup for this configuration, so container users must restore the image's pinned optional dependencies before launching the server:
 
 ```bash
-bash docker/install_codec_deps.sh
+bash docker/install_excluded_deps.sh
 ```
 
 The script is idempotent. On later checkout runs, skip the vLLM installation when `vllm --version` reports version 0.12.0 or newer. The model weights are also reused from the Hugging Face cache after the first download.
