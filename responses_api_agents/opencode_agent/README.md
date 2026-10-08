@@ -5,6 +5,11 @@ EnvironmentServer sessions and local CLI calls. An agent session selects the
 sandbox; without one, requests run locally. Invalid or closed sessions fail.
 Local `/run` requires a Resources binding; direct `/v1/responses` does not.
 
+The main config loads `configs/permissions/benchmark.yaml` through `config_paths`.
+It preserves the existing command restrictions; run configs can override individual
+permissions under `opencode_agent.responses_api_agents.opencode_agent.opencode_config.permission`.
+These command filters are not network or filesystem isolation.
+
 Existing flat-row benchmarks keep the `opencode_sandboxed_agent` entrypoint
 and configuration for their Resources-owned lifecycle.
 

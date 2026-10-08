@@ -90,6 +90,7 @@ async def test_session_composition_routes_collector_through_environment_and_resp
     )
     # Session routing must not require an execution-mode override.
     assert agent.config.execution_mode == "local"
+    assert agent.config.opencode_config["permission"]["bash"]["*git submodule update*"] == "deny"
     agent.server_client.global_config_dict = config
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = config

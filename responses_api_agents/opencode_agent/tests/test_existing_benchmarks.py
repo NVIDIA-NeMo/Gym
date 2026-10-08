@@ -6,15 +6,17 @@ from pathlib import Path
 import pytest
 from omegaconf import DictConfig, OmegaConf
 
+from nemo_gym.agent_registry import discover_agents
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
 from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
 
 
-def _resolve_config(path: str, monkeypatch: pytest.MonkeyPatch) -> DictConfig:
+def _resolve_config(path: str, monkeypatch: pytest.MonkeyPatch, *, cli_args: tuple[str, ...] = ()) -> DictConfig:
     monkeypatch.chdir(Path(__file__).resolve().parents[3])
+    monkeypatch.setattr("sys.argv", ["gym", *cli_args])
     return GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
-            skip_load_from_cli=True,
+            skip_load_from_cli=not cli_args,
             skip_load_from_dotenv=True,
             offline=True,
             initial_global_config_dict=OmegaConf.create(
@@ -27,6 +29,40 @@ def _resolve_config(path: str, monkeypatch: pytest.MonkeyPatch) -> DictConfig:
             ),
         )
     )
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_permission_profile_loads_with_cli_override(override: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    cli_args = (
+        ("++opencode_agent.responses_api_agents.opencode_agent.opencode_config.permission.edit=deny",)
+        if override
+        else ()
+    )
+    config = _resolve_config(
+        "responses_api_agents/opencode_agent/configs/opencode_agent.yaml", monkeypatch, cli_args=cli_args
+    )
+    settings = get_first_server_config_dict(config, "opencode_agent")
+    permissions = settings.opencode_config.permission
+    assert permissions.edit == ("deny" if override else {"**": "allow"})
+    assert permissions["*"] == "allow"
+    assert permissions.bash["*"] == "allow"
+    for command in (
+        "*git submodule add*",
+        "*git submodule update*",
+        "*git submodule sync*",
+        "*git submodule init*",
+        "*git archive*--remote*",
+        "*git *://*",
+        "*git *@*:*",
+    ):
+        assert permissions.bash[command] == "deny"
+    assert settings.opencode_config.tools.webfetch is False
+    assert settings.opencode_version == "1.17.11"
+
+
+def test_permission_profile_is_not_a_standalone_agent_variant(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(Path(__file__).resolve().parents[3])
+    assert list(discover_agents()["opencode_agent"].variants) == ["opencode_agent"]
 
 
 @pytest.mark.parametrize(

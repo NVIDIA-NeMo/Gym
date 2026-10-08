@@ -9,6 +9,7 @@ from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 
+from nemo_gym.global_config import GlobalConfigDictParser
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
@@ -52,10 +53,14 @@ async def test_local_runtime_install_is_deferred_until_execution() -> None:
 
 @pytest.mark.parametrize("mode", ["default", "local", "sandbox"])
 @pytest.mark.parametrize("path", ["/v1/responses", "/ng-rollout/local-smoke/v1/responses"])
-def test_unseeded_responses_run_local_cli(mode: str, path: str) -> None:
+def test_unseeded_responses_run_local_cli(mode: str, path: str, monkeypatch: pytest.MonkeyPatch) -> None:
     agent = make_agent("local" if mode == "default" else mode)
     if mode == "default":
-        config = OmegaConf.load(Path(__file__).parents[1] / "configs/opencode_agent.yaml")
+        monkeypatch.chdir(Path(__file__).resolve().parents[3])
+        _, configs = GlobalConfigDictParser().load_extra_config_paths(
+            [str(Path(__file__).resolve().parents[1] / "configs/opencode_agent.yaml")]
+        )
+        config = OmegaConf.merge(*configs)
         agent.config = OpenCodeAgentConfig.model_validate(
             dict(config.opencode_agent.responses_api_agents.opencode_agent)
             | {"host": "localhost", "port": 8001, "name": "opencode"}
