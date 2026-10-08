@@ -117,12 +117,15 @@ class SandboxSession[Artifacts]:
         collect: Callable[[], Awaitable[Artifacts]],
         timeout: float,
         close_timeout: float,
+        timeout_resolver: Callable[[], float] | None = None,
     ) -> Artifacts:
         """Run once, preserving captured artifacts even when execution raises.
 
         Cancellation stops the remote harness before releasing provider exec.
         Callers that merely stop waiting (such as disconnected HTTP requests)
         must shield their shared activation task.
+        An optional synchronous resolver runs after input/supervisor staging and
+        may shorten the timeout or raise to prevent launch when a budget expired.
         """
         if self.closing or self._stage_task is not None:
             raise RuntimeError(f"{self.harness} sandbox session is closing or already activated")
@@ -133,6 +136,8 @@ class SandboxSession[Artifacts]:
             command = await asyncio.shield(self._stage_task)
             if self.closing or self._finalize_task is not None:
                 raise RuntimeError(f"{self.harness} sandbox session closed before launch")
+            if timeout_resolver is not None:
+                timeout = min(timeout, timeout_resolver())
             cleanup_timeout, provider_timeout = supervision_timeouts(timeout=timeout, close_timeout=close_timeout)
             launch = supervised_launch_command(
                 session_dir=self.session_dir,

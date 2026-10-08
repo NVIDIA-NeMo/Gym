@@ -642,6 +642,16 @@ class Domain(str, Enum):
 class BaseServerConfig(BaseModel):
     host: str
     port: int
+    bind_host: Optional[str] = Field(
+        default=None,
+        description="Local listening address; defaults to host. Client connections continue to use host.",
+    )
+    bind_port: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=65535,
+        description="Local listening port; defaults to port. Client connections continue to use port.",
+    )
     num_workers: Optional[int] = None
 
 

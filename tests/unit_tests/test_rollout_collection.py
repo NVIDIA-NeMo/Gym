@@ -8855,6 +8855,7 @@ class TestEnvironmentServerRouting:
                 "terminal": False,
                 "stage": "agent",
                 "partial_response": {"id": "partial"},
+                "protocol_evidence": {"cleanup_confirmed": True, "diagnostic": ["native failure"]},
             },
         }
         assert nemo_gym.rollout_collection._is_episode_response(reply)
@@ -8866,6 +8867,7 @@ class TestEnvironmentServerRouting:
         assert record["_ng_failure_message"] == "agent unavailable"
         assert record["_ng_failure_stage"] == "agent"
         assert record["_ng_failure_partial_response"] == {"id": "partial"}
+        assert record["_ng_failure"] == reply["failure"]
         assert record[nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] == "a"
         assert "reward" not in record
 
@@ -8907,11 +8909,47 @@ class TestEnvironmentServerRouting:
         assert "reward" not in nested
         assert nested["verification"] == {"reward": 1.0}
 
-    def test_episode_result_may_not_use_collector_keys(self) -> None:
-        reply = self._native_identity("a") | {"result": {"reward": 1.0, "ng_trajectory": {}}}
+    @pytest.mark.parametrize("key", ["_ng_internal", "ng_model_call_capture", "ng_perf"])
+    def test_episode_result_may_not_use_collector_keys(self, key: str) -> None:
+        reply = self._native_identity("a") | {"result": {"reward": 1.0, key: {}}}
 
-        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
+        with pytest.raises(ValueError, match="reserved for rollout collection"):
             nemo_gym.rollout_collection._episode_record(reply)
+
+    def test_episode_result_preserves_producer_trajectory(self) -> None:
+        trajectory = {
+            "task_id": "a",
+            "rollout_id": "0-a",
+            "invocations": [{"invocation_id": "native"}],
+            "turns": [
+                {
+                    "invocation_id": "native",
+                    "source_message_id": "saved-message",
+                    "task_id": "a",
+                    "rollout_id": "0-a",
+                    "turn_no": 1,
+                    "timestamp": 10,
+                    "step_count": 3,
+                    "answer": {"text": "native turn"},
+                }
+            ],
+        }
+        reply = self._native_identity("a") | {"result": {"reward": 1.0, "ng_trajectory": trajectory}}
+        record = nemo_gym.rollout_collection._episode_record(reply)
+        assert record["ng_trajectory"] == trajectory
+        projected = nemo_gym.rollout_collection._build_trajectory_record(
+            {
+                "task_id": {"taskset": "swe_pro", "task_id": "a"},
+                "_ng_rollout_id": "0-a",
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            },
+            record,
+        )
+        assert projected.task_id == "a" and projected.rollout_id == "0-a"
+        assert projected.turns[0].source_message_id == "saved-message"
+        assert projected.turns[0].answer == {"text": "native turn"}
+        assert not any(gap.code.startswith("producer_trajectory_") for gap in projected.gaps)
 
     def test_episode_detection_needs_object_identities_and_an_object_failure(self) -> None:
         """An agent reply echoing identity fields as strings is not an episode reply; a bad failure is an error."""
@@ -9137,6 +9175,12 @@ class TestEnvironmentServerRouting:
         output_jsonl_fpath = tmp_path / "output.jsonl"
         dispatched: list[tuple[str, dict]] = []
         failed_once: set[str] = set()
+        failure_payload = {
+            "failure_reason": "agent unavailable",
+            "terminal": False,
+            "agent_close": {"cleanup_confirmed": True, "agent_observations": {"records": ["partial diagnostics"]}},
+            "dependency_error": {"status_code": 502, "body": "native failure"},
+        }
 
         async def post(server_name: str, url_path: str, json, **kwargs):
             if url_path == "/run":
@@ -9147,8 +9191,7 @@ class TestEnvironmentServerRouting:
                     failed_once.add(task)
                     return FakeResponse(
                         200,
-                        identity
-                        | {"result": None, "failure": {"failure_reason": "agent unavailable", "terminal": False}},
+                        identity | {"result": None, "failure": failure_payload},
                     )
                 return FakeResponse(
                     200,
@@ -9186,6 +9229,7 @@ class TestEnvironmentServerRouting:
         assert len(failures) == 1
         assert failures[0][NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
         assert failures[0][NG_TERMINAL_KEY] is False
+        assert failures[0]["_ng_failure"] == failure_payload
         assert failures[0][NG_ENVIRONMENT_SERVER_KEY] == "environment"
         assert failures[0][nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] == "a"
         metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(

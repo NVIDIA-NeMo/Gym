@@ -1872,6 +1872,8 @@ class TestRunWebserverProxyKwargs:
         num_workers: int | None,
         ray_enabled: bool | None = None,
         is_worker: bool = False,
+        bind_host: str | None = None,
+        bind_port: int | None = None,
     ) -> dict:
         from fastapi import FastAPI
 
@@ -1898,7 +1900,13 @@ class TestRunWebserverProxyKwargs:
         monkeypatch.setattr(nemo_gym.server_utils.uvicorn, "run", lambda **kwargs: captured.update(kwargs))
 
         server_config = BaseRunServerInstanceConfig(
-            name="my_server", host="127.0.0.1", port=8000, entrypoint="app.py", num_workers=num_workers
+            name="my_server",
+            host="127.0.0.1",
+            port=8000,
+            entrypoint="app.py",
+            num_workers=num_workers,
+            bind_host=bind_host,
+            bind_port=bind_port,
         )
         ray_setting = ray_enabled
 
@@ -1921,6 +1929,25 @@ class TestRunWebserverProxyKwargs:
 
         TestSimpleServer.run_webserver()
         return captured
+
+    @mark.parametrize("num_workers", [1, 4])
+    @mark.parametrize("bind_host,bind_port", [(None, None), ("0.0.0.0", 8080), (None, 0)])
+    def test_listening_address_preserves_advertised_host(
+        self, monkeypatch: MonkeyPatch, num_workers: int, bind_host: str | None, bind_port: int | None
+    ) -> None:
+        kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch, {}, num_workers=num_workers, bind_host=bind_host, bind_port=bind_port
+        )
+
+        assert kwargs["host"] == (bind_host or "127.0.0.1")
+        assert kwargs["port"] == (8000 if bind_port is None else bind_port)
+        client = ServerClient(head_server_config=BaseServerConfig(host="", port=0), global_config_dict=DictConfig({}))
+        assert (
+            client._build_server_base_url(
+                DictConfig({"host": "127.0.0.1", "port": 8000, "bind_host": bind_host, "bind_port": bind_port})
+            )
+            == "http://127.0.0.1:8000"
+        )
 
     def test_proxy_headers_disabled_by_default_single_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
@@ -2068,11 +2095,15 @@ class TestHeadServerProxyKwargs:
     """The independently launched head server must use the same proxy-header policy."""
 
     @staticmethod
-    def _capture_uvicorn_kwargs(monkeypatch: MonkeyPatch, config_dict: dict) -> dict:
+    def _capture_uvicorn_kwargs(
+        monkeypatch: MonkeyPatch, config_dict: dict, bind_host: str | None = None, bind_port: int | None = None
+    ) -> dict:
         monkeypatch.setattr(
             ServerClient,
             "load_head_server_config",
-            MagicMock(return_value=BaseServerConfig(host="127.0.0.1", port=11000)),
+            MagicMock(
+                return_value=BaseServerConfig(host="127.0.0.1", port=11000, bind_host=bind_host, bind_port=bind_port)
+            ),
         )
         monkeypatch.setattr(
             nemo_gym.server_utils,
@@ -2092,6 +2123,15 @@ class TestHeadServerProxyKwargs:
 
         HeadServer.run_webserver()
         return captured
+
+    @mark.parametrize("bind_host,bind_port", [(None, None), ("0.0.0.0", 8080), (None, 0)])
+    def test_head_server_listening_address(
+        self, monkeypatch: MonkeyPatch, bind_host: str | None, bind_port: int | None
+    ) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, bind_host=bind_host, bind_port=bind_port)
+
+        assert kwargs["host"] == (bind_host or "127.0.0.1")
+        assert kwargs["port"] == (11000 if bind_port is None else bind_port)
 
     def test_proxy_headers_are_disabled_by_default(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {})

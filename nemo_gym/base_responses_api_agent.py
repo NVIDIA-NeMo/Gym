@@ -26,6 +26,8 @@ from warnings import warn
 from fastapi import Body, FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
+from nemo_gym.agent_runtime_policy import AgentRuntimePolicy
+from nemo_gym.agent_utils.ordered_operations import OrderedOperationLedger
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -39,13 +41,20 @@ from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
+from nemo_gym.interactive_agent_types import (
+    AgentActivationRequest,
+    AgentActivationResponse,
+    AgentContinuationCapabilities,
+    AgentContinuationRequirements,
+    InteractionBudget,
+    InteractiveAgentCloseReceipt,
+)
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
-from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -80,6 +89,8 @@ class AgentSeedSessionRequest(BaseModel):
     task_id: TaskId
     tool_accesses: list[ToolAccess] = Field(default_factory=list)
     sandbox_access: SandboxAccess | None = None
+    continuation: AgentContinuationRequirements | None = None
+    runtime_policy: AgentRuntimePolicy | None = None
 
     @field_validator("tool_accesses")
     @classmethod
@@ -96,6 +107,7 @@ class AgentSeedSessionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_session_id: str
+    capabilities: AgentContinuationCapabilities | None = None
 
 
 class AgentCloseSessionRequest(BaseModel):
@@ -107,17 +119,12 @@ class AgentCloseSessionRequest(BaseModel):
     episode_id: EpisodeId
 
 
-class AgentCloseSessionResponse(BaseModel):
-    """Confirm closure and return captured observations."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    agent_session_id: str
-    agent_observations: AgentObservationBundle | None = None
-    resources_cookies: dict[str, str] | None = None
+class AgentCloseSessionResponse(InteractiveAgentCloseReceipt):
+    """Confirm closure and return cumulative captured observations."""
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
+    session_activation_close_timeout_seconds: float = Field(default=180, gt=0, allow_inf_nan=False)
     session_close_retry_window_seconds: float = Field(
         default=300,
         gt=0,
@@ -171,6 +178,10 @@ class _AgentSessionRecord:
     episode_id: EpisodeId | None = None
     close_response: AgentCloseSessionResponse | None = None
     expires_at: float = float("inf")
+    activations: OrderedOperationLedger[AgentActivationResponse] = field(default_factory=OrderedOperationLedger)
+    close_task: asyncio.Task[AgentCloseSessionResponse] | None = None
+    interaction_budget: InteractionBudget | None = None
+    interaction_budget_bound: bool = False
 
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
@@ -261,6 +272,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         app.post("/v1/agent_sessions")(self.seed_agent_session)
         app.post("/v1/agent_sessions/close")(self.close_agent_session)
+        app.post("/v1/agent_sessions/activate")(self.activate_agent_session)
+        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/agent_sessions/activate")(self.activate_agent_session)
+        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/agent_sessions/activate")(
+            self.activate_agent_session
+        )
 
         return app
 
@@ -272,6 +288,17 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """Seed once per caller ID; identical retries reuse the same harness state."""
         if self.config.num_workers not in (None, 1):
             raise ValueError("Agent sessions require num_workers=1")
+        if body.runtime_policy is not None:
+            self._validate_agent_runtime_policy(body.runtime_policy)
+        capabilities = self._agent_continuation_capabilities()
+        if body.continuation is not None:
+            if capabilities is None or capabilities.mode != body.continuation.mode:
+                raise HTTPException(422, "Agent does not support the required native continuation mode")
+            missing = set(body.continuation.observations) - set(capabilities.observations)
+            if missing:
+                raise HTTPException(422, f"Agent lacks required continuation observations: {sorted(missing)}")
+            if body.continuation.requires_interaction_budget and not capabilities.supports_interaction_budget:
+                raise HTTPException(422, "Agent does not support the required interaction budget")
         current = self._agent_session_id_from_request(request)
         if current is not None and current != body.agent_session_id:
             raise HTTPException(409, "agent_session_id does not match the session cookie")
@@ -293,7 +320,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             elif record.state.request != body:
                 raise HTTPException(409, "agent_session_id is already bound to another seed request")
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
-            return AgentSeedSessionResponse(agent_session_id=body.agent_session_id)
+            return AgentSeedSessionResponse(agent_session_id=body.agent_session_id, capabilities=capabilities)
 
     async def close_agent_session(
         self,
@@ -319,10 +346,16 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             if record.state is None:
                 if current is not None:
                     raise HTTPException(409, "Agent close receipt has expired")
-                result = AgentCloseSessionResponse(agent_session_id=body.agent_session_id)
+                result = AgentCloseSessionResponse(agent_session_id=body.agent_session_id, cleanup_confirmed=True)
             else:
                 record.closing = True
-                result = await self._close_agent_session_state(record.state)
+                if record.close_task is None or (
+                    record.close_task.done()
+                    and (record.close_task.cancelled() or record.close_task.exception() is not None)
+                ):
+                    record.close_task = asyncio.create_task(self._close_agent_session_record(record))
+                    record.close_task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+                result = await asyncio.shield(record.close_task)
             record.state = None
             record.episode_id = body.episode_id
             record.close_response = result.model_copy(deep=True)
@@ -331,6 +364,65 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             # Keep the marker so a stale /responses request cannot fall back to the non-session path.
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
             return result
+
+    def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities | None:
+        """Opt into native continuation; existing one-activation adapters stay unchanged."""
+        return None
+
+    def _validate_agent_runtime_policy(self, policy: AgentRuntimePolicy) -> None:
+        """Opt into a policy format and validate every setting before creating runtime state."""
+        raise HTTPException(422, f"Agent does not support required runtime policy format: {policy.format}")
+
+    async def activate_agent_session(self, request: Request, body: AgentActivationRequest) -> AgentActivationResponse:
+        """Append one ordered input delta, joining identical retries across HTTP disconnects."""
+        if self._agent_session_id_from_request(request) != body.agent_session_id:
+            raise HTTPException(409, "Activation requires the seeded agent session cookie")
+        async with self._locked_agent_session(body.agent_session_id) as record:
+            state = self._require_agent_session(body.agent_session_id)
+            if state.request.episode_id != body.episode_id:
+                raise HTTPException(409, "episode_id does not match the seeded agent session")
+            if state.request.continuation is None:
+                raise HTTPException(422, "Session was not seeded for native continuation")
+            if state.request.continuation.requires_interaction_budget and body.interaction_budget is None:
+                raise HTTPException(422, "Activation requires the seeded interaction budget")
+            capabilities = self._agent_continuation_capabilities()
+            if body.interaction_budget is not None and (
+                capabilities is None or not capabilities.supports_interaction_budget
+            ):
+                raise HTTPException(422, "Agent does not support interaction budgets")
+            if record.interaction_budget_bound and record.interaction_budget != body.interaction_budget:
+                raise HTTPException(409, "Agent interaction budget is already bound to another execution window")
+            # Capture input before the shared task starts; no caller may mutate its binding.
+            activation = body.model_copy(deep=True)
+
+        async def execute() -> AgentActivationResponse:
+            # Bind only after the ledger accepts an ordered activation. Rejected IDs
+            # must not change the session's deadline, and retries keep the same window.
+            if not record.interaction_budget_bound:
+                record.interaction_budget = activation.interaction_budget
+                record.interaction_budget_bound = True
+            result = await self._activate_agent_session_state(state, activation, request)
+            if result.activation_id != activation.activation_id:
+                raise ValueError("Agent returned a different activation_id")
+            return result.model_copy(deep=True)
+
+        return await record.activations.execute(index=activation.activation_id, request=activation, operation=execute)
+
+    async def _activate_agent_session_state(
+        self, state: AgentSessionState, body: AgentActivationRequest, request: Request
+    ) -> AgentActivationResponse:
+        """Run one delta using the retained native conversation, HOME, and sandbox."""
+        raise NotImplementedError("This agent does not implement native continuation")
+
+    async def _close_agent_session_record(self, record: _AgentSessionRecord) -> AgentCloseSessionResponse:
+        await record.activations.close(timeout=self.config.session_activation_close_timeout_seconds)
+        assert record.state is not None
+        result = await self._close_agent_session_state(record.state)
+        if record.state.request.continuation is not None:
+            if not result.cleanup_confirmed:
+                raise RuntimeError("Interactive agent cleanup was not confirmed")
+            result = result.model_copy(update={"activations": record.activations.completed}, deep=True)
+        return result
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
         """Validate grants and initialize harness state.
