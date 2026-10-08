@@ -47,6 +47,12 @@ class AdmissionClosedError(ControlError):
     code = "admission_closed"
 
 
+class RetireIncompleteError(ControlError):
+    """A forget for a rollout whose retire has not finished freeing it: forgetting it would make it live again."""
+
+    code = "retire_incomplete"
+
+
 class ExportFailedError(ControlError):
     """A participant's export for this checkpoint failed, so the checkpoint can never be committed.
 
