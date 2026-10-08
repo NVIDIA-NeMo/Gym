@@ -440,11 +440,12 @@ build-backend = "setuptools.build_meta"
 [tool.uv]
 managed = true
 required-version = ">=0.9.30"
-# grpcio is a transitive dependency of ray. Pin the lower bound here to
+# grpcio and msgpack are transitive dependencies of ray. Pin the lower bounds here to
 # ensure uv selects a CVE-safe version across all resolver paths.
 # Updated Sun Jun 22, 2026 (CVE remediation)
 constraint-dependencies = [
     "grpcio>=1.81.0rc1",
+    "msgpack>=1.2.1",
 ]
 # override-dependencies overrides transitive dep version pins that conflict with
 # Python 3.13 wheel availability. Server venvs inherit this via the editable
