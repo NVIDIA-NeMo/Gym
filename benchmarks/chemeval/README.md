@@ -109,8 +109,9 @@ dependencies and upstream sources documented above.
 
 ## Local validation evidence
 
-The English V2 integration is checked against the original module's system and
-user messages for all nine judged tasks. Full preparation preserves all 2,210
+Eight English V2 rubrics are checked against the original module's system and
+user messages. A separate regression test checks that molecular-description
+questions use a property-description rubric instead of a naming rubric. Full preparation preserves all 2,210
 generation inputs and all 1,760 deterministic rows; the 450 judged rows carry the
 new protocol and question metadata. Unit tests cover both score scales, full
 verdict retention, malformed judge output, and rejection of stale prepared inputs.

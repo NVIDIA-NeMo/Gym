@@ -3,7 +3,8 @@
 """English V2 judge prompts and score parsing for ChemEval's nine judged tasks.
 
 Judge text comes from the team's chemeval_english module at commit
-1f37bdf1206a52e28777628500f5e9742226eeda. Only judge messages are included;
+1f37bdf1206a52e28777628500f5e9742226eeda, with a corrected molecular-description
+rubric for the physicochemical task. Only judge messages are included;
 candidate-generation prompts and structured-output API settings are unchanged.
 """
 
@@ -20,7 +21,7 @@ RUBRIC_TO_TASK = {
     "calculation": "calculation",
     "abstract_generation": "paper_abstract",
     "outline_generation": "research_outline",
-    "physicochemical": "molecular_name",
+    "physicochemical": "molecular_description",
     "single_step_synthesis": "single_step_synthesis",
     "multi_step_synthesis": "multi_step_synthesis",
     "reaction_intermediate": "reaction_intermediate",
@@ -32,7 +33,15 @@ JUDGE_CRITERIA = {
     "calculation": "Assess equation selection, substitutions, arithmetic, units, significant figures or tolerance, and the final answer separately; supplied deterministic numerical checks take precedence over the judge doing its own arithmetic, and an incorrect final answer does not erase correct intermediate work.",
     "paper_abstract": "Assess factual grounding, coverage, organization, and task compliance separately; do not require imitation of a single reference wording or section order. When no source facts are available, a claim that cannot be adjudicated must be not_covered rather than automatically treated as fabricated.",
     "research_outline": "Assess source grounding, coverage, organization, and task compliance separately; do not require imitation of a single reference wording or section order, and mark claims with insufficient evidence as not_covered.",
-    "molecular_name": "Assess parent selection, atom numbering, substituents and locants, functional-group priority, ring and fused-ring nomenclature, stereochemistry, and equivalence to the reference structure or an acceptable name; structure-level verification facts take precedence over superficial string differences.",
+    "molecular_description": (
+        "Assess the molecular description for factual correctness, coverage of reference-supported points, and "
+        "consistency with the supplied structure. Check structural features, functional groups, chemical class, "
+        "physicochemical properties, and biological or chemical roles as relevant to the question and references. "
+        "Distinguish omissions from contradictions and accept chemically equivalent paraphrases. Do not require a "
+        "systematic name, atom numbering, naming rules, or numerical property values unless requested by the question "
+        "or needed to express a reference fact. Claims that cannot be adjudicated from the supplied evidence are "
+        "not_covered, not automatically incorrect."
+    ),
     "single_step_synthesis": "Check reaction context, reactants, target, conditions, reaction center, bond changes, atom/charge/stereochemistry conservation, and chemical selectivity. If evidence supports feasibility, an alternative route is not penalized for differing from the reference.",
     "multi_step_synthesis": "Check each step for reaction context, reactants, products, conditions, reaction center, bond changes, atom/charge/stereochemistry conservation, chemical selectivity, and step compatibility. An evidence-supported alternative route can receive full credit.",
     "reaction_intermediate": "Check reaction context, intermediate identity, formation and consumption, reaction center, atom/charge/stereochemistry conservation, and feasibility. When sufficient reaction context or verification facts are absent, report uncertainty and do not invent verification.",

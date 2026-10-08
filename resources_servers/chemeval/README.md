@@ -46,8 +46,9 @@ MCQ extraction prefers the leading answer label, so explanatory text such as `B 
 
 The judge text in [`english_judge.py`](english_judge.py) comes from the team's
 `chemeval_english/improved_eval/chemeval_prompts_v2_en.py`, commit
-`1f37bdf1206a52e28777628500f5e9742226eeda`. Its English system messages and JSON
-payloads match the prior V2 rejudging setup. Only the judge portion is used;
+`1f37bdf1206a52e28777628500f5e9742226eeda`. Eight task rubrics retain the original
+English V2 messages; the molecular-description rubric is corrected as described
+below. Only the judge portion is used;
 candidate prompts and deterministic grading remain unchanged. This is a changed
 judging protocol, so judged scores are not directly comparable with results from
 the original Chinese rubrics.
@@ -59,14 +60,21 @@ the original Chinese rubrics.
 | `calculation` | `calculation` |
 | `abstract_generation` | `paper_abstract` |
 | `outline_generation` | `research_outline` |
-| `physicochemical` | `molecular_name` |
+| `physicochemical` | `molecular_description` |
 | `single_step_synthesis` | `single_step_synthesis` |
 | `multi_step_synthesis` | `multi_step_synthesis` |
 | `reaction_intermediate` | `reaction_intermediate` |
 
-The mapping, including `physicochemical` to `molecular_name`, preserves the prior
-V2 setup. The judge separates outcome correctness from visible process quality
-and requests quoted evidence. The entire parsed JSON verdict is saved in
+The 50 L3 `physicochemical` questions ask for descriptions of molecules from SMILES.
+Their rubric evaluates reference-supported structural features, chemical classes,
+properties, and roles, rather than systematic naming. It does not require naming
+details or numerical properties absent from the question and reference. This
+corrects the previous `molecular_name` mapping; previously judged scores for these
+50 questions need rejudging to use the correction. Prepared inputs and the 1–5
+score scale remain compatible.
+
+The judge separates outcome correctness from visible process quality and requests
+quoted evidence. The entire parsed JSON verdict is saved in
 `judge_v2`; `judgement` and `judge_response` retain the raw response. Scoring
 validates both numeric fields, not the full diagnostic schema: legacy scores
 must be integers 1–5, and outcome scores must be finite numbers in [0, 1].

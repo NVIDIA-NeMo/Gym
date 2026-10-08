@@ -12,14 +12,13 @@ from resources_servers.chemeval.english_judge import RUBRIC_TO_TASK, build_judge
 from resources_servers.chemeval.task_data import TaskData
 
 
-# SHA-256 of each system message from the team's original V2 module, commit 1f37bdf.
+# SHA-256 of the eight unchanged system messages from the original V2 module, commit 1f37bdf.
 SYSTEM_HASHES = {
     "fill_in_the_blank": "9353975f3bc6015514d335fa1a5420888950d8db461d141e5371f741ebdf9732",  # pragma: allowlist secret
     "short_answer": "e8824cdcb38f955a56ca3556d17527e4161d7e925d76303a3d8df03fc5d55161",  # pragma: allowlist secret
     "calculation": "2065bced75667fe9033c43436c3a4269f9a84b871cd4575668d47affbab1283e",  # pragma: allowlist secret
     "abstract_generation": "1638c1d51b05f3c2f44109bb4a86af0acd7d82abd5f9f78790008e1858f0e7e5",  # pragma: allowlist secret
     "outline_generation": "57883f1ff709ef02d6dd47fd08986b872698a1ac39527c2e3d5d919a0fc8afff",  # pragma: allowlist secret
-    "physicochemical": "355016c271894d9e14909263fe7b2ac9a25b813777bbd0600ec5aa81cd2e0411",  # pragma: allowlist secret
     "single_step_synthesis": "88dedebae08fb9a8f2d2601543276fbd8740fcf9d400ac2b5c5905ae00277d1b",  # pragma: allowlist secret
     "multi_step_synthesis": "762e5c14a95aa4d592cea8c75dab423f9d15123c9e73ec480e60f7cecb947c06",  # pragma: allowlist secret
     "reaction_intermediate": "dd9d067884e9bba93cf022b61adf572c08e95fb1b90a8eef5545aa551a688634",  # pragma: allowlist secret
@@ -38,6 +37,25 @@ def test_pinned_v2_messages(rubric):
         "references": [{"fact_id": "ref-1", "claim": "Reference"}],
         "verifier_facts": [],
     }
+
+
+def test_molecular_description_rubric():
+    from benchmarks.chemeval.utils import TASKS
+
+    rubric = TASKS["基于分子结构描述分子的物理化学性质"][3]
+    reference = "The molecule is a primary alcohol and a polar solvent."
+    messages = build_judge_messages(
+        rubric=rubric,
+        question="Describe the molecule represented by CCO.",
+        candidate=reference,
+        reference=reference,
+    )
+    payload = json.loads(messages[1]["content"])
+    assert payload["task_type"] == "molecular_description"
+    assert payload["references"] == [{"fact_id": "ref-1", "claim": reference}]
+    assert "physicochemical properties" in messages[0]["content"]
+    assert "biological or chemical roles" in messages[0]["content"]
+    assert "substituents and locants" not in messages[0]["content"]
 
 
 def test_untrusted_values_are_json_data_and_empty_reference_is_explicit():
