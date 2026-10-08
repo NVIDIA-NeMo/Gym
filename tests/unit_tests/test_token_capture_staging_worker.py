@@ -25,6 +25,7 @@ from nemo_gym.token_id_capture.sink import (
 )
 from nemo_gym.token_id_capture.staging import (
     CaptureAdmission,
+    GenerationCutContinuation,
     StagedCallRecord,
     StageResult,
     compute_chain_hash,
@@ -172,6 +173,127 @@ def test_root_stages_exact_full_delta_before_returning_coords() -> None:
     assert record.digest == coords.digest
     assert record.chain_hash == coords.chain_hash
     assert record.cumulative_hash == coords.cumulative_hash
+
+
+def test_prefix_record_does_not_complete_or_stage_the_live_call() -> None:
+    capture, sink = _capture()
+    call = capture.begin_call(_root())
+
+    prefix = capture.build_prefix_record(
+        call,
+        prompt_token_ids=[10, 11],
+        generated_token_ids=[12],
+        generated_logprobs=[-0.25],
+    )
+
+    assert sink.records == []
+    assert not call.completed
+    assert prefix.token_ids_delta == [10, 11, 12]
+    final = capture.complete_call(
+        call,
+        prompt_token_ids=[10, 11],
+        generated_token_ids=[12, 13],
+        generated_logprobs=[-0.25, -0.5],
+    )
+    assert final.disposition == "staged"
+    assert sink.records[0].token_ids_delta == [10, 11, 12, 13]
+
+
+def test_generation_chunk_record_contains_only_new_generated_tokens() -> None:
+    capture, _ = _capture()
+    call = capture.begin_call(_root())
+
+    chunk = capture.build_generation_chunk_record(
+        call,
+        generated_token_ids=[13, 14],
+        generated_logprobs=[-0.5, -0.75],
+    )
+
+    assert chunk.token_ids_delta == [13, 14]
+    assert chunk.token_mask_delta == [1.0, 1.0]
+    assert chunk.generation_log_probs_delta == [-0.5, -0.75]
+    assert chunk.weight_version == 7
+
+
+def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> None:
+    original_capture, sink = _capture(weight_version=7)
+    original = original_capture.begin_call(_root())
+    cut = original_capture.build_prefix_record(
+        original,
+        prompt_token_ids=[10, 11],
+        generated_token_ids=[12],
+        generated_logprobs=[-0.25],
+    )
+    admission = CaptureAdmission(
+        rollout_id="rollout-1-a1",
+        model_call_id="c2",
+        mode="text",
+        generation_cut=GenerationCutContinuation(
+            source_capture_key="rollout-1",
+            source_model_call_id="c1",
+            staging_keys=("__generation_cut__/checkpoint-1/rollout-1/c1",),
+            prefix_token_count=1,
+            prefix_digest=cut.digest,
+            effective_output_limit=128,
+        ),
+    )
+    resumed_capture, _ = _capture(sink, weight_version=9)
+    resumed = resumed_capture.begin_call(
+        admission,
+        prefix_token_ids=[],
+        generation_cut=cut,
+        generation_cut_staging_keys=admission.generation_cut.staging_keys,
+    )
+
+    coords = resumed_capture.complete_call(
+        resumed,
+        prompt_token_ids=[10, 11, 12],
+        generated_token_ids=[13],
+        generated_logprobs=[-0.5],
+    )
+
+    assert coords.disposition == "staged"
+    assert sink.records[-1].rollout_id == "rollout-1-a1"
+    assert sink.records[-1].model_call_id == "c2"
+    assert sink.records[-1].token_ids_delta == [10, 11, 12, 13]
+    assert sink.records[-1].token_mask_delta == [0.0, 0.0, 1.0, 1.0]
+    assert sink.records[-1].generation_log_probs_delta == [0.0, 0.0, -0.25, -0.5]
+    # The exact old/new behavior logprobs survive the resume.
+    # The aggregate record uses the oldest version so staleness admission is conservative.
+    assert coords.weight_version == 7
+    assert sink.records[-1].weight_version == 7
+
+
+def test_generation_cut_resume_rejects_a_prefix_from_newer_weights() -> None:
+    newer_capture, _ = _capture(weight_version=9)
+    cut = newer_capture.build_prefix_record(
+        newer_capture.begin_call(_root()),
+        prompt_token_ids=[10, 11],
+        generated_token_ids=[12],
+        generated_logprobs=[-0.25],
+    )
+    admission = CaptureAdmission(
+        rollout_id="rollout-1-a1",
+        model_call_id="c2",
+        mode="text",
+        generation_cut=GenerationCutContinuation(
+            source_capture_key="rollout-1",
+            source_model_call_id="c1",
+            staging_keys=("__generation_cut__/checkpoint-1/rollout-1/c1",),
+            prefix_token_count=1,
+            prefix_digest=cut.digest,
+            effective_output_limit=128,
+        ),
+    )
+    older_capture, _ = _capture(weight_version=7)
+
+    with pytest.raises(CaptureError, match="newer than current rollout version"):
+        older_capture.begin_call(
+            admission,
+            prefix_token_ids=[],
+            generation_cut=cut,
+            generation_cut_staging_keys=admission.generation_cut.staging_keys,
+        )
 
 
 def test_child_stages_only_tokens_after_verified_parent_prefix() -> None:
@@ -732,3 +854,43 @@ def test_external_commit_marker_rejects_cross_request_acknowledgement() -> None:
             mark_external_staging_committed(rollout_id="rollout-2", model_call_id="c1")
     finally:
         reset_token_sink(token)
+
+
+def test_generation_cut_resume_rejects_a_prefix_built_on_other_parent_tokens() -> None:
+    capture, _ = _capture()
+
+    def child(rollout_id: str, parent_tokens: list[int], continuation=None) -> CaptureAdmission:
+        return CaptureAdmission(
+            rollout_id=rollout_id,
+            model_call_id="c1",
+            parent_call_id="p",
+            prev_len=len(parent_tokens),
+            mode="token_in",
+            required_prefix_token_ids=parent_tokens,
+            parent_chain_hash=compute_chain_hash(None, parent_tokens),
+            generation_cut=continuation,
+        )
+
+    source = child("rollout-1", [1, 2, 3])
+    cut = capture.build_prefix_record(
+        capture.begin_call(source),
+        prompt_token_ids=[1, 2, 3, 9],
+        generated_token_ids=[7, 8],
+        generated_logprobs=[-0.1, -0.2],
+    )
+    continuation = GenerationCutContinuation(
+        source_capture_key="rollout-1",
+        source_model_call_id="c1",
+        staging_keys=("__generation_cut__/c1",),
+        prefix_token_count=2,
+        prefix_digest=cut.digest,
+        effective_output_limit=10,
+    )
+    # Same parent call ID and length, different parent tokens: the cut would splice onto the wrong prefix.
+    replacement = child("rollout-1-a1", [4, 5, 6], continuation)
+
+    with pytest.raises(CaptureError, match="does not extend the replacement's parent chain"):
+        capture.begin_call(replacement, generation_cut=cut, generation_cut_staging_keys=continuation.staging_keys)
+    # The replacement of the same parent is accepted.
+    same = child("rollout-1-a1", [1, 2, 3], continuation)
+    capture.begin_call(same, generation_cut=cut, generation_cut_staging_keys=continuation.staging_keys)
