@@ -308,7 +308,7 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     if rollout_id is None:
         rollout_id = f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return {
-        "episode_id": {"rollout_id": rollout_id, "attempt": attempt},
+        "episode_id": {"rollout_id": rollout_id, "attempt": attempt, "repeat": row.get(ROLLOUT_INDEX_KEY_NAME, 0)},
         "task": {
             "task_id": row["task_id"],
             "task_input": row["task_input"],
