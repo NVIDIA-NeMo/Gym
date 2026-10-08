@@ -9,6 +9,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Protocol
 
+from nemo_gym.token_id_capture import metrics
 from nemo_gym.token_id_capture.config import ExternalStagingBackend
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
 from nemo_gym.token_id_capture.protocols import CaptureLedger
@@ -24,6 +25,7 @@ from nemo_gym.token_id_capture.sink import (
     CaptureContext,
     current_capture_context,
     mark_external_staging_committed,
+    record_ledger_failure,
 )
 from nemo_gym.token_id_capture.staging.records import (
     INVALID_COMMIT_COORDS_REASON,
@@ -181,7 +183,8 @@ class _BaseExternalCaptureHandler(ABC):
                 context.model_call_id,
             )
             try:
-                await ledger.record_failure(
+                await record_ledger_failure(
+                    ledger,
                     context.rollout_id,
                     context.model_call_id,
                     self._INVALID_CAPTURE_REASON,
@@ -216,7 +219,8 @@ class _BaseExternalCaptureHandler(ABC):
         engine response by ``prepare_response``.
         """
         if coords_payload is None:
-            await ledger.record_failure(
+            await record_ledger_failure(
+                ledger,
                 context.rollout_id,
                 context.model_call_id,
                 WORKER_MISSING_COMMIT_COORDS_REASON,
@@ -229,7 +233,8 @@ class _BaseExternalCaptureHandler(ABC):
                 f"active capture context {context.rollout_id}/{context.model_call_id}"
             )
         if coords.disposition == "capture_failed":
-            await ledger.record_failure(
+            await record_ledger_failure(
+                ledger,
                 context.rollout_id,
                 context.model_call_id,
                 WORKER_CAPTURE_FAILED_REASON,
@@ -293,7 +298,8 @@ class _BaseExternalCaptureHandler(ABC):
         if context.publish_on_delivery:
             context.deferred_commit = commit
             return
-        await ledger.record(commit)
+        with metrics.timed("ledger.record", component=ledger, tokens=record.cum_len):
+            await ledger.record(commit)
         mark_external_staging_committed(
             rollout_id=coords.rollout_id,
             model_call_id=coords.model_call_id,
@@ -308,13 +314,16 @@ async def publish_deferred_commit(context: CaptureContext) -> None:
     """
     ledger = context.lineage_store
     try:
-        await ledger.record(context.deferred_commit)
+        with metrics.timed("ledger.record", component=ledger, tokens=context.deferred_commit.record.cum_len):
+            await ledger.record(context.deferred_commit)
     except Exception:
         LOGGER.exception(
             "Could not publish the ledger row of rollout %s call %s", context.rollout_id, context.model_call_id
         )
         try:
-            await ledger.record_failure(context.rollout_id, context.model_call_id, INVALID_COMMIT_COORDS_REASON)
+            await record_ledger_failure(
+                ledger, context.rollout_id, context.model_call_id, INVALID_COMMIT_COORDS_REASON
+            )
         except Exception:
             LOGGER.exception(
                 "Could not poison rollout %s call %s after its ledger row failed",

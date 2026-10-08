@@ -34,6 +34,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from nemo_gym.token_id_capture import metrics
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import stamp_continuation
 from nemo_gym.token_id_capture.protocols import (
@@ -150,7 +151,14 @@ _CAPTURE_FAILURES = [0]
 _RESOLVER_UNAVAILABLE_NOTED = [False]
 
 
-def _count_resolution(status_value: str) -> None:
+# Reasons Gym's resolvers give; a custom resolver's other reasons are counted as ``other``.
+_RESOLUTION_REASONS = frozenset(
+    {"resolver_unavailable", "lookup_error", "not_attempted", "no_match", "ambiguous", "attribution_error"}
+)
+
+
+def _count_resolution(status_value: str, reason: str | None = None) -> None:
+    metrics.count(status_value, metrics.bounded_reason(reason, _RESOLUTION_REASONS))
     with _STATS_LOCK:
         _RESOLUTION_COUNTS[status_value] = _RESOLUTION_COUNTS.get(status_value, 0) + 1
         total = sum(_RESOLUTION_COUNTS.values())
@@ -243,8 +251,9 @@ async def resolve_parent(request_messages: list | None) -> None:
                     "and multi-call rollouts will be masked (allow_unresolved_continuations is set)."
                 )
         else:
-            context.parent_resolution = await context.lineage_store.resolve(context.rollout_id, request_messages)
-        _count_resolution(context.parent_resolution.status.value)
+            with metrics.timed("lineage.resolve", component=context.lineage_store):
+                context.parent_resolution = await context.lineage_store.resolve(context.rollout_id, request_messages)
+        _count_resolution(context.parent_resolution.status.value, context.parent_resolution.reason)
     except Exception as error:
         # Worker custody fails closed: an unresolved parent would silently
         # break the ledger's chained-ancestry guarantees.
@@ -292,7 +301,8 @@ async def resolve_parent(request_messages: list | None) -> None:
                 context.rollout_id,
                 exc_info=True,
             )
-            await ledger.record_failure(
+            await record_ledger_failure(
+                ledger,
                 context.rollout_id,
                 context.model_call_id,
                 UNRESOLVED_PARENT_REASON,
@@ -322,11 +332,19 @@ async def resolve_parent(request_messages: list | None) -> None:
         context.model_call_id,
         context.rollout_id,
     )
-    await ledger.record_failure(
+    await record_ledger_failure(
+        ledger,
         context.rollout_id,
         context.model_call_id,
         UNRESOLVED_PARENT_REASON,
     )
+
+
+async def record_ledger_failure(ledger: CaptureLedger, rollout_id: str, model_call_id: str, reason: str) -> None:
+    """Record a failure row that poisons a call, and count it by reason."""
+    metrics.count("poisoned", reason)
+    with metrics.timed("ledger.record_failure", component=ledger):
+        await ledger.record_failure(rollout_id, model_call_id, reason)
 
 
 async def register_call_intent() -> None:
@@ -344,7 +362,8 @@ async def register_call_intent() -> None:
     begin = getattr(context.token_sink, "begin_call", None)
     if begin is None:
         return
-    await begin(context.rollout_id, context.model_call_id)
+    with metrics.timed("sink.begin_call", component=context.token_sink):
+        await begin(context.rollout_id, context.model_call_id)
 
 
 async def capture_tokens(
@@ -484,9 +503,11 @@ async def commit_entry(
             cumulative=cumulative,
         )
         entry.parent_resolution_reason = resolution.reason or ""
-        await context.token_sink.put(entry)
+        with metrics.timed("sink.put", component=context.token_sink, tokens=entry.cum_len):
+            await context.token_sink.put(entry)
         context.committed = True
     except TokenCaptureFrozenError:
+        metrics.count("late_write_dropped", "frozen")
         # The rollout finished and its capture was frozen while this call was
         # still in flight (for example its harness was killed at a timeout
         # backstop). The freeze already judged completeness from the durable
@@ -513,6 +534,7 @@ async def _capture_failed(context: CaptureContext, stage: str) -> None:
     """
     if not await _mark_incomplete(context):
         return
+    metrics.count("capture_failed", stage)
     with _STATS_LOCK:
         _CAPTURE_FAILURES[0] += 1
         failures = _CAPTURE_FAILURES[0]
@@ -579,4 +601,6 @@ async def _mark_incomplete(context: CaptureContext) -> bool:
         return False
     except Exception:
         logger.warning("Could not mark rollout %s incomplete.", context.rollout_id, exc_info=True)
+        return True
+    metrics.count("marked_incomplete")
     return True
