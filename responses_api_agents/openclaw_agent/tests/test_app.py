@@ -68,7 +68,7 @@ def _invocations(bundle):
 
 
 def _config(**kwargs) -> OpenClawAgentConfig:
-    kwargs.setdefault("openclaw_version", "2026.6.11")
+    kwargs.setdefault("openclaw_version", "2026.6.35")
     return OpenClawAgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -329,7 +329,7 @@ class TestBuildOpenclawConfig:
                     "profile": "minimal",
                     "alsoAllow": ["exec"],
                     "deny": ["session_status"],
-                }
+                },
             }
         )
         cfg = agent._build_openclaw_config({})
@@ -971,3 +971,4 @@ class TestConfigYaml:
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 32
         assert inner["command"] == "openclaw"
+        assert inner["openclaw_version"] == "2026.6.35"
