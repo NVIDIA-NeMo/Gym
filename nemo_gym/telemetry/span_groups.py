@@ -100,8 +100,17 @@ class GymSpanGroup:
     Each server process emits ``gym.server.startup`` or ``gym.server.startup.worker`` with one child span per stage.
     """
 
+    CHECKPOINT = "checkpoint"
+    """Partial-rollout checkpoint spans, in no preset but ``all``.
+
+    Each participant's control operations (prepare, commit, restore, resume, retire, and forget) get a span,
+    with child spans for their export, write, read, and install steps.
+    The controller's coordination calls get spans too.
+    Enable the group with ``default,checkpoint``; the checkpoint metrics are recorded either way.
+    """
+
     ALL_GROUPS: Final[frozenset] = frozenset(
-        [JOB, SERVER, HTTP_CLIENT, ROLLOUT, VERIFY, AGENT, MODEL_CALL, SANDBOX, STARTUP]
+        [JOB, SERVER, HTTP_CLIENT, ROLLOUT, VERIFY, AGENT, MODEL_CALL, SANDBOX, STARTUP, CHECKPOINT]
     )
 
     #: The groups that make one rollout appear as one trace across Gym's server
