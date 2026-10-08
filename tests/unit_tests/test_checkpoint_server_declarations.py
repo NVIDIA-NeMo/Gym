@@ -21,6 +21,7 @@ DECLARED = {
     "equivalence_llm_judge": "LLMJudgeResourcesServer",
     "math_with_judge": "LibraryJudgeMathResourcesServer",
     "genrm_compare": "GenRMCompareResourcesServer",
+    "math_formal_lean": "MathFormalLeanResourcesServer",
 }
 
 
