@@ -104,7 +104,7 @@ def test_saved_record_requires_explicit_run_and_delivery_evidence() -> None:
 def test_public_response_schema_keeps_the_explicit_failure_fields() -> None:
     schema = RolloutFailure.model_json_schema(mode="serialization")
     failure = schema["$defs"]["EpisodeFailure"]
-    assert schema["properties"]["schema_version"]["const"] == 1
+    assert schema["properties"]["schema_version"]["const"] == 2
     properties = {
         "RolloutFailure": set(schema["properties"]),
         "EpisodeFailure": set(failure["properties"]),
@@ -122,8 +122,8 @@ def test_public_response_schema_keeps_the_explicit_failure_fields() -> None:
             "exception_type",
         },
         "EpisodeFailure": {"failure_reason", "terminal", "failure_kind", "stage"},
-        "EpisodeId": {"rollout_id", "attempt"},
-    }, "Changing version-1 saved fields requires reviewing the RolloutFailure schema_version bump policy"
+        "EpisodeId": {"rollout_id", "attempt", "repeat"},
+    }, "Changing version-2 saved fields requires reviewing the RolloutFailure schema_version bump policy"
     assert failure["additionalProperties"] is False
     assert failure["required"] == ["failure_reason", "terminal"]
     assert failure["properties"]["failure_reason"]["maxLength"] == 2000
@@ -138,7 +138,7 @@ def test_public_response_schema_keeps_the_explicit_failure_fields() -> None:
     assert "failure_kind" in failure["properties"]
 
 
-@pytest.mark.parametrize("schema_version", [None, 1, 2])
+@pytest.mark.parametrize("schema_version", [None, 1, 2, 3])
 def test_saved_failure_record_versions(schema_version: int | None) -> None:
     payload = {
         "episode_id": {"rollout_id": "task-7"},
@@ -149,17 +149,32 @@ def test_saved_failure_record_versions(schema_version: int | None) -> None:
     }
     if schema_version is not None:
         payload["schema_version"] = schema_version
-    if schema_version == 2:
+    if schema_version == 3:
         with pytest.raises(ValidationError, match="schema_version"):
             RolloutFailure.model_validate(payload)
     else:
         record = RolloutFailure.model_validate(payload)
         saved = json.loads(record.model_dump_json())
-        assert saved["schema_version"] == 1
+        assert saved["schema_version"] == 2
+        assert saved["episode_id"] == {"rollout_id": "task-7", "attempt": 0, "repeat": 0}
         assert saved["failure"]["failure_reason"] == "Input could not be sent"
         assert RolloutFailure.model_validate_json(record.model_dump_json()) == record
         with pytest.raises(ValidationError, match="Extra inputs"):
             RolloutFailure.model_validate(saved | {"future_transport_field": "unknown"})
+
+
+def test_a_version_1_record_cannot_carry_a_repeat() -> None:
+    payload = {
+        "schema_version": 1,
+        "episode_id": {"rollout_id": "task-7", "repeat": 5},
+        "run_id": "eval-1",
+        "source": "collector",
+        "delivery": "not_sent",
+        "failure": {"failure_reason": "Input could not be sent", "terminal": True},
+    }
+
+    with pytest.raises(ValidationError, match="version-1 record cannot carry"):
+        RolloutFailure.model_validate(payload)
 
 
 @pytest.mark.parametrize("http_status", [None, 100, 599, 99, 600])

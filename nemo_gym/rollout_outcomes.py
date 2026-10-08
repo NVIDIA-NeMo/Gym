@@ -3,7 +3,8 @@
 
 """Shared failure record for evaluation collectors and other run owners."""
 
-from typing import Literal
+from collections.abc import Mapping
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
@@ -27,7 +28,8 @@ class RolloutFailure(BaseModel):
     conversion from legacy markers, and retry budgets belong to the caller.
 
     ``schema_version`` identifies the entire saved record, including nested
-    contracts. Missing versions are treated as version 1 for pre-version records.
+    contracts. A record without a version is read as the current one. Version 2
+    added ``EpisodeId.repeat``; a version-1 record is read as version 2 with repeat 0.
     Changes that older readers cannot parse (including added fields) require a
     version bump. Readers reject unsupported versions and unknown fields; callers
     must report an incompatible record or explicitly migrate it, never silently
@@ -36,7 +38,7 @@ class RolloutFailure(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     episode_id: EpisodeId
     run_id: str = Field(min_length=1)
     source: Literal["environment", "collector"]
@@ -44,6 +46,17 @@ class RolloutFailure(BaseModel):
     failure: EpisodeFailure
     http_status: int | None = Field(default=None, ge=100, le=599)
     exception_type: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_version_1(cls, data: Any) -> Any:
+        """Read a version-1 record, which predates ``EpisodeId.repeat``, as version 2."""
+        if not isinstance(data, Mapping) or data.get("schema_version") != 1:
+            return data
+        episode_id = data.get("episode_id")
+        if isinstance(episode_id, Mapping) and "repeat" in episode_id:
+            raise ValueError("A version-1 record cannot carry episode_id.repeat")
+        return {**data, "schema_version": 2}
 
     @model_validator(mode="after")
     def validate_delivery(self) -> Self:
