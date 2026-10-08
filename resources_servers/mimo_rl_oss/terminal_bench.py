@@ -48,7 +48,7 @@ class TerminalBenchEnvironment(DatasetEnvironment):
             finally:
                 os.unlink(f.name)
         res = self.execute(
-            "sh /tests/test.sh",
+            "bash /tests/test.sh",
             cwd=self.repo_path,
             timeout=int(timeout or float(self.instance.get("verifier_timeout_sec") or 900)),
         )
