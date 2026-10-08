@@ -56,6 +56,8 @@ class SimpleWeatherVerifier:
 
 class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer):
     ray_enabled = False
+    # Tool results depend only on the request, so a continuation needs no session state.
+    checkpoint_mode = "stateless"
     config: SimpleWeatherResourcesServerConfig
     _session_episodes: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
     _closed_session_ids: set[str] = PrivateAttr(default_factory=set)

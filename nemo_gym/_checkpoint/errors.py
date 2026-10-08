@@ -47,6 +47,12 @@ class AdmissionClosedError(ControlError):
     code = "admission_closed"
 
 
+class RetireIncompleteError(ControlError):
+    """A forget for a rollout whose retire has not finished freeing it: forgetting it would make it live again."""
+
+    code = "retire_incomplete"
+
+
 class RestartInScopeError(ControlError):
     """A commit scope names an episode this participant reported as a restart, which it cannot continue."""
 
