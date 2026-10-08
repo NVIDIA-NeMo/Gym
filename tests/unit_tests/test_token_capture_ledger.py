@@ -10,6 +10,8 @@ fail-closed poisoning.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION
@@ -339,6 +341,35 @@ async def test_file_store_cross_handle_visibility(tmp_path):
     manifest = RolloutManifest.model_validate(await reader.manifest("r1"))
     assert len(manifest.records) == 1 and len(manifest.failures) == 1
     assert await reader.has_rows("r1")
+
+
+@pytest.mark.asyncio
+async def test_file_store_ledger_cache_is_bounded(tmp_path):
+    store = FileLineageStore(tmp_path, max_cached_rollouts=2)
+    for rollout_id in ("r1", "r2", "r3"):
+        await store.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id=rollout_id))
+
+    # The oldest rollout is evicted; reading it again re-reads its ledger.
+    assert list(store._ledger_cache) == ["r2", "r3"]
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.records == [_call_record("c1")]
+    assert list(store._ledger_cache) == ["r3", "r1"]
+
+
+@pytest.mark.asyncio
+async def test_file_store_ledger_cache_stays_bounded_under_concurrent_writes(tmp_path):
+    store = FileLineageStore(tmp_path, max_cached_rollouts=8)
+    rollout_ids = [f"r{index}" for index in range(200)]
+    await asyncio.gather(
+        *(
+            store.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id=rollout_id))
+            for rollout_id in rollout_ids
+        )
+    )
+
+    assert len(store._ledger_cache) == 8
+    for rollout_id in rollout_ids:
+        assert await store.has_rows(rollout_id)
 
 
 @pytest.mark.asyncio
