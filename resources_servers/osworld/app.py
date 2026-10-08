@@ -561,9 +561,7 @@ class OSWorldResourcesServer(SimpleResourcesServer):
             json.dump(sandbox_state.get("headers") or {}, f)
         service_endpoints_path: Optional[str] = None
         if sandbox_state.get("service_endpoints"):
-            service_fd, service_endpoints_path = tempfile.mkstemp(
-                suffix=".json", prefix="osw_service_endpoints_"
-            )
+            service_fd, service_endpoints_path = tempfile.mkstemp(suffix=".json", prefix="osw_service_endpoints_")
             os.chmod(service_endpoints_path, 0o600)
             with os.fdopen(service_fd, "w") as f:
                 json.dump(sandbox_state["service_endpoints"], f)
@@ -733,8 +731,7 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                     platform = await self._guest_request(state, "GET", "/platform")
                     if platform.status != 200:
                         raise RuntimeError(
-                            f"forked OSWorld sandbox {state['sandbox_id']} returned "
-                            f"{platform.status} from /platform"
+                            f"forked OSWorld sandbox {state['sandbox_id']} returned {platform.status} from /platform"
                         )
                     states.append(state)
         except Exception:
@@ -785,9 +782,7 @@ class OSWorldResourcesServer(SimpleResourcesServer):
         async with self._fork_groups_lock:
             group = self._fork_groups.get(key)
             if group is None:
-                preparation = asyncio.create_task(
-                    self._prepare_fork_group(verifier_metadata, active_indices)
-                )
+                preparation = asyncio.create_task(self._prepare_fork_group(verifier_metadata, active_indices))
                 group = _ForkGroup(active_indices=active_indices, preparation=preparation)
                 self._fork_groups[key] = group
             elif group.active_indices != active_indices:
@@ -806,9 +801,7 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                 group.states = dict(prepared)
             sandbox_state = group.states.pop(rollout_index, None)
             if sandbox_state is None:
-                raise RuntimeError(
-                    f"fork oversampling generation {rollout_index} was already claimed for group {key}"
-                )
+                raise RuntimeError(f"fork oversampling generation {rollout_index} was already claimed for group {key}")
             if group.states:
                 if group.expiry is None:
                     group.expiry = asyncio.create_task(self._expire_fork_group(key, group))
@@ -835,9 +828,7 @@ class OSWorldResourcesServer(SimpleResourcesServer):
             await self._release(previous)
         self.session_id_to_sandbox[session_id] = sandbox_state
         logger.info("Assigned OSWorld sandbox %s to session %s", sandbox_state["sandbox_id"], session_id)
-        return OSWorldSeedSessionResponse(
-            sandbox_id=sandbox_state["sandbox_id"], screen=sandbox_state.get("screen")
-        )
+        return OSWorldSeedSessionResponse(sandbox_id=sandbox_state["sandbox_id"], screen=sandbox_state.get("screen"))
 
     async def screenshot(self, request: Request) -> ScreenshotResponse:
         sandbox_state = self._get_session_sandbox(request)

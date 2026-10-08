@@ -55,9 +55,7 @@ VNC_PORT = 8006
 VLC_PORT = 8080
 
 
-def _load_evaluator_module(
-    path: Path, *, package: ModuleType, role: str, task_id: str
-) -> None:
+def _load_evaluator_module(path: Path, *, package: ModuleType, role: str, task_id: str) -> None:
     digest = hashlib.sha256(str(path).encode()).hexdigest()[:16]
     module_name = f"{package.__name__}._rlvr_{digest}"
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -96,15 +94,9 @@ def _register_rlvr_evaluators(task_config: dict[str, Any]) -> None:
     loaded = 0
     for role, package in (("getters", getters), ("metrics", metrics)):
         role_root = task_root / role
-        paths = sorted(
-            path
-            for path in role_root.glob("*.py")
-            if path.name != "__init__.py"
-        )
+        paths = sorted(path for path in role_root.glob("*.py") if path.name != "__init__.py")
         for path in paths:
-            _load_evaluator_module(
-                path, package=package, role=role, task_id=task_id
-            )
+            _load_evaluator_module(path, package=package, role=role, task_id=task_id)
             loaded += 1
     if loaded == 0:
         raise FileNotFoundError(f"{task_id}: frozen evaluator modules not found")

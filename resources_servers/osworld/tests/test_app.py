@@ -446,9 +446,7 @@ class TestApp:
 
 
 class TestAgentEnvForkOversampling:
-    async def test_group_initializes_once_and_claims_each_active_generation(
-        self, monkeypatch: MonkeyPatch
-    ) -> None:
+    async def test_group_initializes_once_and_claims_each_active_generation(self, monkeypatch: MonkeyPatch) -> None:
         server = OSWorldResourcesServer(
             config=_make_config(fork_oversampling=True),
             server_client=MagicMock(spec=ServerClient),
@@ -482,9 +480,7 @@ class TestAgentEnvForkOversampling:
         assert [state["sandbox_id"] for state in states] == ["fork-1", "fork-3", "fork-7"]
         assert server._fork_groups == {}
 
-    async def test_prepare_group_forks_after_single_initialized_parent(
-        self, monkeypatch: MonkeyPatch
-    ) -> None:
+    async def test_prepare_group_forks_after_single_initialized_parent(self, monkeypatch: MonkeyPatch) -> None:
         server = OSWorldResourcesServer(config=_make_config(), server_client=MagicMock(spec=ServerClient))
 
         class Child:
@@ -607,8 +603,7 @@ class TestEvalTaskAddressing:
             eval_task._configure_remote_addressing("http://osb.test/sandboxes/s1/proxy/9999", True, {})
 
     def test_agentenv_service_endpoint_map_routes_each_port(self, monkeypatch: MonkeyPatch) -> None:
-        from resources_servers.osworld import eval_task
-        from resources_servers.osworld import local_forwarder
+        from resources_servers.osworld import eval_task, local_forwarder
 
         calls: List[tuple[str, Dict[str, str]]] = []
 

@@ -68,9 +68,7 @@ class AgentEnvProviderOptions:
             raise TypeError("AgentEnv provider_options must be a mapping")
         unknown = set(options) - {"template"}
         if unknown:
-            raise ValueError(
-                f"Unknown AgentEnv provider option(s): {', '.join(sorted(unknown))}. Supported: template"
-            )
+            raise ValueError(f"Unknown AgentEnv provider option(s): {', '.join(sorted(unknown))}. Supported: template")
         template = options.get("template")
         if template is not None and (not isinstance(template, str) or not template.strip()):
             raise ValueError("AgentEnv provider option 'template' must be a non-empty string")
@@ -151,7 +149,9 @@ class AgentEnvProvider:
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         if spec.entrypoint:
-            raise SandboxCreateError("AgentEnv templates define their entrypoint; SandboxSpec.entrypoint is unsupported")
+            raise SandboxCreateError(
+                "AgentEnv templates define their entrypoint; SandboxSpec.entrypoint is unsupported"
+            )
         if spec.env or spec.files:
             raise SandboxCreateError("AgentEnv OSWorld templates do not support per-sandbox env or files")
         options = AgentEnvProviderOptions.from_mapping(spec.provider_options)
@@ -199,7 +199,9 @@ class AgentEnvProvider:
         )
         payload = response.json()
         if not isinstance(payload, list) or len(payload) != count:
-            raise RuntimeError(f"AgentEnv fork returned {len(payload) if isinstance(payload, list) else 'invalid'} children")
+            raise RuntimeError(
+                f"AgentEnv fork returned {len(payload) if isinstance(payload, list) else 'invalid'} children"
+            )
 
         children: list[tuple[SandboxProvider, SandboxHandle]] = []
         for item in payload:
