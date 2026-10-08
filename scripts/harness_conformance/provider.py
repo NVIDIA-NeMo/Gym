@@ -32,6 +32,7 @@ class Probe:
     tool_calls: list[dict] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
     verifications: list[dict] = field(default_factory=list)
+    timeout_setting: dict | None = None
     seeded: int = 0
     finished: bool = False
 
@@ -42,6 +43,7 @@ class Probe:
             "tool_calls": self.tool_calls,
             "violations": self.violations,
             "verifications": self.verifications,
+            "timeout_setting": self.timeout_setting,
             "seeded": self.seeded,
             "finished": self.finished,
         }
@@ -117,33 +119,56 @@ class Probe:
         self._observe_tool_results(body)
         index = len(self.attempts)
         status = 200
-        if index < len(self.scenario.http_errors) and self.scenario.model_timeout_seconds is None:
+        if index < len(self.scenario.http_errors):
             status = self.scenario.http_errors[index]
         elif self.scenario.terminal_error:
             status = self.scenario.http_errors[-1]
-        timeout = None
-        if index == 0 and self.scenario.model_timeout_seconds is not None:
-            # Exercise an actual Model Server deadline, not a preselected HTTP error.
-            # The controlled model never completes this first generation.
-            deadline = asyncio.timeout(self.scenario.model_timeout_seconds)
-            try:
-                async with deadline:
-                    await asyncio.Event().wait()
-            except TimeoutError:
-                timeout = {
-                    "scope": "model_call",
-                    "model_server": "policy_model",
-                    "limit_seconds": self.scenario.model_timeout_seconds,
-                    "expired": deadline.expired(),
-                }
-                status = 504
+        if index == 0 and self.scenario.timeout_kind == "harness_deadline":
+            # Save the in-flight request before waiting. A disconnect is a witness
+            # of cancellation, NOT proof of which deadline fired.
+            attempt = {
+                "attempt_id": f"attempt-{index}",
+                "request": body,
+                "response": None,
+                "status_code": None,
+                "response_withheld": True,
+            }
+            self.attempts.append(attempt)
+            self.save()
+
+            async def wait_for_client() -> None:
+                while not await request.is_disconnected():
+                    await asyncio.sleep(0.01)
+                attempt["client_disconnected"] = True
+                self.save()
+
+            if self.timeout_setting and self.timeout_setting.get("stream_idle"):
+
+                async def silent_stream():
+                    # Codex starts its stream-idle clock after response headers.
+                    # This SSE comment contains no model output.
+                    yield ": conformance wait\n\n"
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        attempt["stream_closed"] = True
+                        self.save()
+
+                return StreamingResponse(silent_stream(), media_type="text/event-stream")
+            await wait_for_client()
+            # Match cancellation at the capture boundary without manufacturing
+            # an HTTP timeout response for a client-enforced deadline.
+            raise asyncio.CancelledError("client disconnected during withheld model response")
+        server_timeout = index == 0 and self.scenario.timeout_kind == "server_response"
+        if server_timeout:
+            status = 504
         response_id = f"resp_{uuid4().hex}"
         namespaces = {}
         if status != 200:
             payload = {
                 "error": {
-                    "message": "policy model deadline exceeded" if timeout else "controlled model failure",
-                    "type": "model_timeout" if timeout else "conformance_error",
+                    "message": "policy model request timed out" if server_timeout else "controlled model failure",
+                    "type": "model_timeout" if server_timeout else "conformance_error",
                     "code": str(status),
                 }
             }
@@ -238,8 +263,6 @@ class Probe:
         self.attempts.append(
             {"attempt_id": f"attempt-{index}", "request": body, "response": payload, "status_code": status}
         )
-        if timeout is not None:
-            self.attempts[-1]["timeout"] = timeout
         self.save()
         if status != 200 or not body.get("stream"):
             return JSONResponse(payload, status_code=status, headers={"Retry-After": "0"})

@@ -81,9 +81,7 @@ def test_expected_fault_must_actually_occur(tmp_path, record):
     assert checks["rollout_ended_on_failed_model_call"]["reasons"] == ["expected unhealthy; observed healthy"]
 
 
-@pytest.mark.parametrize(
-    "name,status", [("retry_429", 429), ("retry_500", 500), ("policy_model_timeout", 504), ("model_error", 400)]
-)
+@pytest.mark.parametrize("name,status", [("retry_429", 429), ("retry_500", 500), ("model_error", 400)])
 def test_owned_http_failures_match_the_declared_scenario(tmp_path, record, name, status):
     scenario = next(s for s in SCENARIOS if s.name == name)
     trajectory = record["ng_trajectory"]

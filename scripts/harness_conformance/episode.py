@@ -9,9 +9,11 @@ import importlib
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import socket
 import subprocess
+import sys
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
 
@@ -114,6 +116,39 @@ def _config(harness: str, directory: Path, ports: list[int], timeout: float) -> 
     }
 
 
+def _configure_request_timeout(harness: str, config: dict, directory: Path, seconds: float) -> dict:
+    """Use the runtime's own request deadline, separate from the episode guard."""
+    agent = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
+    milliseconds = int(seconds * 1000)
+    if harness == "opencode":
+        agent["opencode_config"]["provider"] = {"nemo": {"options": {"timeout": milliseconds}}}
+        limit = "provider.nemo.options.timeout"
+    elif harness == "hermes":
+        os.environ["HERMES_API_TIMEOUT"] = str(seconds)
+        limit = "HERMES_API_TIMEOUT"
+    elif harness == "codex":
+        agent["stream_idle_timeout_ms"] = milliseconds
+        return {"limit": "stream_idle_timeout_ms", "configured_s": seconds, "stream_idle": True}
+    elif harness == "pi":
+        # Gym creates Pi's working directory at launch. Use its public command
+        # hook to update the isolated user settings before executing the real CLI.
+        # Project settings may be ignored in an untrusted temporary workspace.
+        launcher = directory / "pi-timeout-launcher.py"
+        launcher.write_text(
+            "import json, os, sys\nfrom pathlib import Path\n"
+            "settings_path = Path.home() / '.pi/agent/settings.json'\n"
+            "settings = json.loads(settings_path.read_text())\n"
+            f"settings['httpIdleTimeoutMs'] = {milliseconds}\n"
+            "settings_path.write_text(json.dumps(settings))\n"
+            f"os.execv({shutil.which('pi')!r}, [{shutil.which('pi')!r}, *sys.argv[1:]])\n"
+        )
+        agent["command"] = shlex.join([sys.executable, str(launcher)])
+        limit = "httpIdleTimeoutMs"
+    else:
+        raise ValueError(f"no model request deadline driver for {harness}")
+    return {"limit": limit, "configured_s": seconds, "stream_idle": False}
+
+
 async def run_episode(*, harness: str, scenario_name: str, directory: Path, timeout: float) -> None:
     """Start fresh servers and let Gym write the rollout without modifying the harness."""
     runtime = check_runtime(harness)
@@ -131,6 +166,13 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
         for sock in sockets:
             sock.bind(("127.0.0.1", 0))
         config = _config(harness, directory, [s.getsockname()[1] for s in sockets], timeout)
+        if scenario.timeout_kind == "harness_deadline":
+            if timeout <= scenario.request_timeout_seconds:
+                raise ValueError("episode --timeout must exceed the harness model request deadline")
+            probe.timeout_setting = _configure_request_timeout(
+                harness, config, directory, scenario.request_timeout_seconds
+            )
+            probe.save()
         os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps(config)
         (directory / "launch.json").write_text(json.dumps(config, indent=2) + "\n")
         # Import after the isolated process's config has been injected, like Gym's launcher.

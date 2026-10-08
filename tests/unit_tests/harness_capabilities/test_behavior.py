@@ -114,71 +114,60 @@ def test_missing_output_witness_cannot_qualify_artifacts(behavior_episode):
     ]
 
 
+@pytest.mark.parametrize("kind", ["harness_deadline", "server_response"])
 @pytest.mark.parametrize(
-    "mutation,failed_check",
-    [
-        (None, None),
-        ("no_deadline", "model.timeout_triggered"),
-        ("no_capture", "model.timeout_retained"),
-        ("wrong_category", "model.timeout_retained"),
-        ("no_retry", "model.retry_after_timeout"),
-        ("changed_request", "model.retry_after_timeout"),
-        ("incomplete_verification", "verifier.completed_after_timeout"),
-        ("no_verifier", "verifier.completed_after_timeout"),
-    ],
+    "mutation", [None, "missing", "wrong_request", "wrong_origin", "cancelled_only", "partial_stream"]
 )
-def test_policy_timeout_requires_observed_fault_recovery_and_saved_evaluation(mutation, failed_check):
+def test_timeout_recording_does_not_require_retry_or_verification(kind, mutation):
     request = {"input": [{"role": "user", "content": "task"}]}
-    error = {"error": {"type": "model_timeout"}}
-    witness = {
-        "attempts": [
-            {
-                "request": request,
-                "response": error,
-                "status_code": 504,
-                "timeout": {
-                    "expired": True,
-                    "scope": "model_call",
-                    "model_server": "policy_model",
-                    "limit_seconds": 0.1,
-                },
-            },
-            {"request": copy.deepcopy(request), "response": {"id": "recovered"}, "status_code": 200},
-        ],
-        "verifications": [{"evaluation_completed": True}],
+    error = {"error": {"message": "policy model request timed out", "type": "model_timeout", "code": "504"}}
+    first = {"request": request, "response": error, "status_code": 504}
+    setting = {"limit": "test_request_timeout", "configured_s": 2.0}
+    if kind == "harness_deadline":
+        first.update(response=None, status_code=None, response_withheld=True)
+    witness = {"attempts": [first], "timeout_setting": setting}
+    call = {
+        "model_call_id": "call-1",
+        "request": copy.deepcopy(request),
+        "response": first["response"],
+        "response_metadata": {"status_code": first["status_code"], "response_id": None},
     }
     record = {
-        "evaluation_completed": True,
         "ng_trajectory": {
-            "model_calls": [
+            "model_calls": [call],
+            "time_limits": [
                 {
-                    "request": request,
-                    "response": error,
-                    "response_metadata": {"status_code": 504, "error_category": "timeout", "response_id": None},
+                    "scope": "model_call",
+                    "limit": setting["limit"],
+                    "configured_s": 2.0,
+                    "enforced_by": "harness",
+                    "evidence": "harness_output",
+                    "target": {"model_call_id": "call-1"},
                 }
-            ]
-        },
+            ],
+        }
     }
-    if mutation == "no_deadline":
-        del witness["attempts"][0]["timeout"]
-    elif mutation == "no_capture":
-        record["ng_trajectory"]["model_calls"] = []
-    elif mutation == "wrong_category":
-        record["ng_trajectory"]["model_calls"][0]["response_metadata"]["error_category"] = "upstream_error"
-    elif mutation == "no_retry":
-        witness["attempts"].pop()
-    elif mutation == "changed_request":
-        witness["attempts"][1]["request"] = {"input": []}
-    elif mutation == "incomplete_verification":
-        record["evaluation_completed"] = False
-    elif mutation == "no_verifier":
-        witness["verifications"] = []
-    checks = {c["id"]: c for c in model_timeout_checks(witness, record, timeout_seconds=0.1, fingerprint=fingerprint)}
-    if failed_check:
-        assert checks[failed_check]["status"] == "fail"
-    else:
-        assert all(c["status"] == "pass" for c in checks.values())
-    assert all(
-        c["status"] == "not_applicable"
-        for c in model_timeout_checks(None, None, timeout_seconds=None, fingerprint=fingerprint)
-    )
+    if mutation == "missing":
+        record = None
+    elif mutation == "wrong_request":
+        call["request"] = {"input": []}
+    elif mutation == "wrong_origin":
+        record["ng_trajectory"]["time_limits"][0]["enforced_by"] = "gym"
+        call["response_metadata"]["status_code"] = 500
+    elif mutation == "cancelled_only":
+        record["ng_trajectory"]["time_limits"] = []
+        call["response"] = None
+        call["response_metadata"]["error_category"] = "cancelled"
+    elif mutation == "partial_stream":
+        call["response"] = ": conformance wait\n\n"
+        call["response_metadata"]["error_category"] = "stream_truncated"
+    checks = model_timeout_checks(witness, record, timeout_kind=kind, fingerprint=fingerprint)
+    assert {c["id"] for c in checks} == {"model.timeout_stimulus", "model.timeout_retained"}
+    assert checks[0]["status"] == "pass"
+    expected = "pass" if mutation is None or (kind == "harness_deadline" and mutation == "partial_stream") else "fail"
+    assert checks[1]["status"] == expected
+
+
+def test_unexercised_timeout_cannot_pass_with_plausible_artifacts():
+    checks = model_timeout_checks({}, {"ng_trajectory": {}}, timeout_kind="harness_deadline", fingerprint=fingerprint)
+    assert all(c["status"] == "fail" for c in checks)

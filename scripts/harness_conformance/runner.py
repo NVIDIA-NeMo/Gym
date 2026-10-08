@@ -16,7 +16,7 @@ from pathlib import Path
 import psutil
 
 from nemo_gym import harness_capabilities
-from nemo_gym.harness_capabilities.behavior import inspect_behavior
+from nemo_gym.harness_capabilities.behavior import inspect_behavior, model_timeout_checks
 from nemo_gym.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
 from nemo_gym.harness_capabilities.cli import digest_file, inspect_bundle, json_rows
 from nemo_gym.harness_capabilities.health import inspect_health
@@ -106,33 +106,43 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     health_report = directory / "health" / "quality_summary.json"
     records = list(json_rows(bundle)) if bundle.exists() else []
     record = records[0][1] if len(records) == 1 else None
-    scope = EvidenceScope(tools=scenario.tool_steps > 0, verifier=not scenario.terminal_error, steps=scenario.steps)
-    artifact = inspect_record(record, scope=scope)
-    checks = artifact["checks"] + inspect_behavior(
-        witness,
-        record,
-        http_errors=scenario.http_errors,
-        terminal_error=scenario.terminal_error,
-        tool_steps=scenario.tool_steps,
-        expected_reward=scenario.expected_reward,
-        model_timeout_seconds=scenario.model_timeout_seconds,
-        fingerprint=_fingerprint,
-    )
-    health_inputs = [path for path in (bundle, directory / "rollouts_failures.jsonl") if path.is_file()]
-    checks += inspect_health(
-        health_inputs,
-        output=health_report.parent,
-        expectations=scenario.health_expectations,
-        steps=scenario.steps,
-    )
     summary, report = None, None
-    if record is not None:
-        destination, summary = inspect_bundle(bundle, output=directory / "evidence", scope=scope)
-        report = str(destination.relative_to(directory) / "evidence_summary.json")
-    evidence = {}
-    for key in scenario.evidence:
-        verdict = artifact["evidence"][key]["verdict"]
-        evidence[key] = {"verdict": verdict, "artifact_verdict": verdict}
+    health_inputs = [path for path in (bundle, directory / "rollouts_failures.jsonl") if path.is_file()]
+    if scenario.timeout_kind:
+        # A timeout may end normally or route to the failure file. Inspect the
+        # actual saved row in either delivery mode; never repair it from capture.
+        if record is None and (directory / "rollouts_failures.jsonl").exists():
+            failures = list(json_rows(directory / "rollouts_failures.jsonl"))
+            record = failures[0][1] if len(failures) == 1 else None
+        checks = model_timeout_checks(witness, record, timeout_kind=scenario.timeout_kind, fingerprint=_fingerprint)
+        evidence = {}
+    else:
+        scope = EvidenceScope(
+            tools=scenario.tool_steps > 0, verifier=not scenario.terminal_error, steps=scenario.steps
+        )
+        artifact = inspect_record(record, scope=scope)
+        checks = artifact["checks"] + inspect_behavior(
+            witness,
+            record,
+            http_errors=scenario.http_errors,
+            terminal_error=scenario.terminal_error,
+            tool_steps=scenario.tool_steps,
+            expected_reward=scenario.expected_reward,
+            fingerprint=_fingerprint,
+        )
+        checks += inspect_health(
+            health_inputs,
+            output=health_report.parent,
+            expectations=scenario.health_expectations,
+            steps=scenario.steps,
+        )
+        if record is not None:
+            destination, summary = inspect_bundle(bundle, output=directory / "evidence", scope=scope)
+            report = str(destination.relative_to(directory) / "evidence_summary.json")
+        evidence = {}
+        for key in scenario.evidence:
+            verdict = artifact["evidence"][key]["verdict"]
+            evidence[key] = {"verdict": verdict, "artifact_verdict": verdict}
     behavioral = [c for c in checks if c["kind"] == "behavioral"]
     behavior_passed = all(c["status"] in ("pass", "not_applicable") for c in behavioral)
     return {
@@ -144,14 +154,14 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         "behavioral_status": "pass" if behavior_passed else "fail",
         "execution": execution,
         "delivery": "rollout"
-        if record is not None
+        if len(records) == 1
         else "failure_record"
         if (directory / "rollouts_failures.jsonl").exists() and (directory / "rollouts_failures.jsonl").stat().st_size
         else "missing",
         "model_attempts": len((witness or {}).get("attempts", [])),
         "evidence": evidence,
         "artifact_report": report,
-        "health_report": str(health_report.relative_to(directory)) if health_inputs else None,
+        "health_report": str(health_report.relative_to(directory)) if health_inputs and not scenario.timeout_kind else None,
         "hashes": {
             path.name: digest_file(path)
             for path in (

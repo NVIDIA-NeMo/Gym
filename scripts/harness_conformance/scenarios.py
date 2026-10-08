@@ -4,6 +4,7 @@
 """Versioned, model-independent requests used by every harness preset."""
 
 from dataclasses import asdict, dataclass, field
+from typing import Literal
 
 from nemo_gym.health.types import Verdict
 
@@ -22,7 +23,8 @@ class Scenario:
     usage: bool = True
     http_errors: tuple[int, ...] = ()
     terminal_error: bool = False
-    model_timeout_seconds: float | None = None
+    timeout_kind: Literal["harness_deadline", "server_response"] | None = None
+    request_timeout_seconds: float = 2.0
     expected_reward: float = 1.0
     steps: bool = True
     health_expectations: dict[str, Verdict] = field(default_factory=dict)
@@ -73,15 +75,20 @@ SCENARIOS = (
         },
     ),
     Scenario(
-        "policy_model_timeout",
-        "The first policy call exceeds the Model Server deadline; retry, finish and verify.",
-        model_timeout_seconds=0.1,
-        http_errors=(504,),
-        health_expectations={
-            "model_call_missing_token_counts": "unhealthy",
-            # The timed-out attempt has no usage, even after successful recovery.
-            "rollout_token_count_mismatch": "unobserved",
-        },
+        "harness_model_request_timeout",
+        "Withhold the first model reply until the harness client deadline; check saved timeout evidence only.",
+        evidence=(),  # Recording probe only; it does not qualify the whole TE-1 contract.
+        tool_steps=0,
+        steps=False,
+        timeout_kind="harness_deadline",
+    ),
+    Scenario(
+        "model_server_timeout_response",
+        "Return an explicit HTTP 504 timeout on the first model request; check saved timeout evidence only.",
+        evidence=(),  # Recording probe only; it does not qualify the whole TE-1 contract.
+        tool_steps=0,
+        steps=False,
+        timeout_kind="server_response",
     ),
     Scenario(
         "model_error",
