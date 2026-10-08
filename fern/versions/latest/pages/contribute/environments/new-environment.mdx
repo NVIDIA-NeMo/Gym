@@ -6,7 +6,7 @@ description: "Compose task and harness components, declare a workload manifest, 
 
 An environment is the logical execution composition of a task, agent harness, model bindings, resources, and episode protocol. A Gym config selects and connects these participants. The task defines what must be done and how it is scored; the harness decides how to solve it.
 In Gym, a benchmark is a special kind of environment: a reproducible evaluation workload that requires a canonical split, a data preparation step, and a fixed prompt configuration so any user can reproduce the same score.
-General-purpose environments and benchmarks are stored in `environments` and `benchmarks` directories, respectively.
+General-purpose environments and benchmarks are stored in `environments` and `benchmarks` directories, respectively, each composed with a resources server under `resources_servers/`.
 
 The primary contribution path is a manifest-backed environment or benchmark: `gym env init --environment` or `gym env init --benchmark` scaffolds the catalog entry and the resources server component together, then `gym env validate`, `gym env test`, and `gym env publish` complete the onboarding chain. This page follows that path. For a standalone resources server without a catalog entry, see [Standalone Resources Server](#standalone-resources-server).
 
