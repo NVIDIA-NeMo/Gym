@@ -21,7 +21,11 @@ from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.base_responses_api_agent import (
+    AGENT_SESSION_COOKIE_KEY,
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+)
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -521,8 +525,8 @@ class TestApp:
         with pytest.raises(ValueError, match="does not support required MCP"):
             await server.seed_agent_session(request, body)
 
-    async def test_several_workers_are_allowed_but_reject_sessions(self) -> None:
-        """The legacy /run path keeps no session, so only session seeding needs a single worker."""
+    async def test_several_workers_seed_sessions(self) -> None:
+        """Session routing sends a session's later requests to the worker that seeded it."""
         server, _ = _make_agent(False)
         server = type(server)(
             config=server.config.model_copy(update={"num_workers": 2}), server_client=server.server_client
@@ -533,8 +537,11 @@ class TestApp:
             task_id=TaskId(taskset="example", task_id="0"),
         )
 
-        with pytest.raises(ValueError, match="sessions require num_workers=1"):
-            await server.seed_agent_session(MagicMock(session={}), body)
+        request = MagicMock(session={})
+        await server.seed_agent_session(request, body)
+
+        assert server._require_agent_session("agent-session").request == body
+        assert request.session[AGENT_SESSION_COOKIE_KEY] == "agent-session"
 
     async def test_agent_session_without_a_grant_refuses_tool_calls(self, monkeypatch: MonkeyPatch) -> None:
         # The configured resources_server has no session for this episode, so a tool call must not fall back to it.
