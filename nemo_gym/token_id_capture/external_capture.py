@@ -108,6 +108,9 @@ class _BaseExternalCaptureHandler(ABC):
         admission = context.capture_admission
         if admission is None:
             return request_payload
+        if context.admission_hook is not None:
+            admission = context.admission_hook(context, admission)
+            context.capture_admission = admission
         return self._prepare_admitted_request(request_payload, admission)
 
     @abstractmethod
