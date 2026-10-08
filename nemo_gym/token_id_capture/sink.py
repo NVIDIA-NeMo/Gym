@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -117,6 +118,10 @@ class CaptureContext:
     # A normal worker completion was received, even if its acknowledgement is
     # missing. Synthetic guard/overflow completions leave this false.
     external_worker_response_seen: bool = False
+    # Lets a checkpoint participant amend this call's admission before dispatch,
+    # for example to continue a restored generation cut.
+    # Set per call; never process-global.
+    admission_hook: Callable[[CaptureContext, CaptureAdmission], CaptureAdmission] | None = None
 
     @property
     def parent_call_id(self) -> str | None:
