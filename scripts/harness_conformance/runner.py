@@ -11,14 +11,15 @@ import os
 import subprocess
 import sys
 import time
-from collections import Counter
 from pathlib import Path
 
 import psutil
 
-from nemo_gym.harness_capabilities.checker import NAMES
-from nemo_gym.harness_capabilities.cli import inspect_bundle
-from nemo_gym.harness_capabilities.reader import digest_file, hydrate_record, json_rows
+from nemo_gym import harness_capabilities
+from nemo_gym.harness_capabilities.behavior import inspect_behavior
+from nemo_gym.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
+from nemo_gym.harness_capabilities.cli import digest_file, inspect_bundle, json_rows
+from nemo_gym.harness_capabilities.results import gate_passes, render_matrices
 
 from .episode import HARNESSES
 from .scenarios import SCENARIOS, SUITE, Scenario, suite_manifest
@@ -96,136 +97,48 @@ def run_process(command: list[str], *, directory: Path, timeout: float) -> dict:
     return {"returncode": proc.returncode, "timed_out": timed_out}
 
 
-def _tool_witness_issues(record: dict, witnessed: list[dict]) -> list[str]:
-    """Join independently witnessed tools to retained executions and conversation items."""
-    trajectory = record.get("ng_trajectory") or {}
-    observations = (record.get("ng_agent_observations") or {}).get("records", [])
-    # Match the inspector's supported trajectory/observation fallbacks.
-    tools = trajectory.get("tool_calls") or [r for r in observations if r.get("kind") == "tool_call"]
-    invocations = [r for r in observations if r.get("kind") == "agent_invocation"] or trajectory.get("invocations", [])
-    expected_ids = Counter(t["id"] for t in witnessed)
-    if any(count != 1 for count in expected_ids.values()) or expected_ids != Counter(t["tool_call_id"] for t in tools):
-        return ["retained tool identities differ from the independent tool witness"]
-
-    issues = []
-    by_id = {t["tool_call_id"]: t for t in tools}
-    for expected in witnessed:
-        tool = by_id[expected["id"]]
-        items = [
-            item
-            for invocation in invocations
-            if invocation.get("invocation_id") == tool.get("invocation_id")
-            for item in invocation.get("conversation", [])
-            if item.get("call_id") == expected["id"]
-        ]
-        requests = [i for i in items if i.get("type") == "function_call"]
-        results = [i for i in items if i.get("type") == "function_call_output"]
-        if len(requests) != 1 or len(results) != 1:
-            issues.append("retained tool request/result does not join uniquely to the witnessed execution")
-            continue
-        request = requests[0]
-        try:
-            arguments = json.loads(request["arguments"])
-        except (KeyError, TypeError, ValueError):
-            arguments = None
-        name = request.get("name")
-        if request.get("namespace"):
-            name = f"{request['namespace']}__{name}"
-        if (
-            name != expected["name"]
-            or arguments != expected["arguments"]
-            or tool.get("tool_name") != request.get("name")
-        ):
-            issues.append("retained tool name or arguments differ from the independent tool witness")
-        # Each probe command terminates with its prescribed code. A nonzero exit
-        # must remain a failed execution even when its stdout was retained.
-        status = "failed" if expected["exit_code"] else "completed"
-        if tool.get("status") != status:
-            issues.append("retained tool status differs from the independent tool witness")
-        output = results[0].get("output")
-        outputs = expected.get("outputs", [])
-        if (
-            not outputs
-            or any(observed != output for observed in outputs)
-            or (tool.get("output") is not None and tool["output"] != output)
-        ):
-            issues.append("retained tool output differs from the independent tool witness")
-    return issues
-
-
 def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dict:
-    """Require witnessed exercise and a real rollout before counting a TE as passing."""
-    issues = []
-    if execution["timed_out"]:
-        issues.append("episode exceeded its timeout")
-    if execution["returncode"] != 0:
-        issues.append("episode process failed; see episode.log")
+    """Keep artifact results, behavioral results and execution status independent."""
     witness_path = directory / "witness.json"
-    witness = json.loads(witness_path.read_text()) if witness_path.exists() else {}
-    attempts = witness.get("attempts", [])
-    issues.extend(witness.get("violations", []))
-    statuses = [attempt["status_code"] for attempt in attempts]
-    if witness.get("seeded") != 1:
-        issues.append("expected one fresh episode initialization")
-    if not attempts:
-        issues.append("the harness never reached the controlled model endpoint")
-    if statuses[: len(scenario.http_errors)] != list(scenario.http_errors):
-        issues.append("not all prescribed model failures were observed")
-    if len(scenario.http_errors) > 1 and len(attempts) >= len(scenario.http_errors):
-        if any(a["request"] != attempts[0]["request"] for a in attempts[1 : len(scenario.http_errors)]):
-            issues.append("retry scenario did not repeat the same request body")
-    if scenario.terminal_error:
-        if not statuses or any(status != scenario.http_errors[-1] for status in statuses):
-            issues.append("terminal model failure was not observed")
-    elif not witness.get("finished"):
-        issues.append("the harness did not finish the scripted model exchange")
-    tools = witness.get("tool_calls", [])
-    if len(tools) != scenario.tool_steps or any(
-        not tool.get("executed") or not tool.get("result_seen") for tool in tools
-    ):
-        issues.append("prescribed tool executions and their returned results were not all witnessed")
-    verifications = witness.get("verifications", [])
-    if len(verifications) != 1 or verifications[0]["reward"] != scenario.expected_reward:
-        issues.append("expected verifier outcome was not observed")
-    elif not scenario.terminal_error and not verifications[0]["answer_seen"]:
-        issues.append("the verifier did not receive the scripted final answer")
+    witness = json.loads(witness_path.read_text()) if witness_path.exists() else None
     bundle = directory / "rollouts.jsonl"
     records = list(json_rows(bundle)) if bundle.exists() else []
-    summary = None
-    report = None
-    if len(records) != 1:
-        issues.append("expected exactly one collected rollout")
-    else:
-        record = hydrate_record(records[0][1])
-        calls = record.get("ng_model_call_capture", {}).get("calls", [])
-        expected = Counter(_fingerprint(a["request"], a["status_code"], a["response"]) for a in attempts)
-        observed = Counter(_fingerprint(c.get("request"), c.get("status_code"), c.get("response")) for c in calls)
-        if expected != observed:
-            issues.append("retained model attempts differ from the independent endpoint witness")
-        issues.extend(_tool_witness_issues(record, tools))
-        if record.get("reward") != scenario.expected_reward:
-            issues.append("rollout reward differs from the verifier witness")
-        destination, summary = inspect_bundle(bundle, output=directory / "evidence", capture_dir=directory / "capture")
+    record = records[0][1] if len(records) == 1 else None
+    scope = EvidenceScope(tools=scenario.tool_steps > 0, verifier=not scenario.terminal_error, steps=scenario.steps)
+    artifact = inspect_record(record, scope=scope)
+    checks = artifact["checks"] + inspect_behavior(
+        witness,
+        record,
+        http_errors=scenario.http_errors,
+        terminal_error=scenario.terminal_error,
+        tool_steps=scenario.tool_steps,
+        expected_reward=scenario.expected_reward,
+        fingerprint=_fingerprint,
+    )
+    summary, report = None, None
+    if record is not None:
+        destination, summary = inspect_bundle(bundle, output=directory / "evidence", scope=scope)
         report = str(destination.relative_to(directory) / "evidence_summary.json")
-    exercised = not issues
     evidence = {}
     for key in scenario.evidence:
-        verdict = summary["evidence"][key]["verdict"] if summary else "not_fulfilled"
-        evidence[key] = {
-            "verdict": "fulfilled" if exercised and verdict == "fulfilled" else "not_fulfilled",
-            "artifact_verdict": verdict,
-        }
-    # The two join contracts remain alternatives, just as in the P0 inspector.
-    mandatory = [key for key in scenario.evidence if key not in ("TE-8", "TE-9")]
-    passed = exercised and all(evidence[key]["verdict"] == "fulfilled" for key in mandatory)
-    passed = passed and any(evidence[key]["verdict"] == "fulfilled" for key in ("TE-8", "TE-9"))
+        verdict = artifact["evidence"][key]["verdict"]
+        evidence[key] = {"verdict": verdict, "artifact_verdict": verdict}
+    behavioral = [c for c in checks if c["kind"] == "behavioral"]
+    behavior_passed = all(c["status"] in ("pass", "not_applicable") for c in behavioral)
     return {
         "scenario": scenario.name,
-        "exercised": exercised,
-        "verdict": "fulfilled" if passed else "not_fulfilled",
-        "issues": issues,
+        "exercised": record is not None,
+        "verdict": "fulfilled" if gate_passes(checks) else "not_fulfilled",
+        "issues": [reason for c in checks if c["status"] == "fail" for reason in c["reasons"]],
+        "checks": checks,
+        "behavioral_status": "pass" if behavior_passed else "fail",
         "execution": execution,
-        "model_attempts": len(attempts),
+        "delivery": "rollout"
+        if record is not None
+        else "failure_record"
+        if (directory / "rollouts_failures.jsonl").exists() and (directory / "rollouts_failures.jsonl").stat().st_size
+        else "missing",
+        "model_attempts": len((witness or {}).get("attempts", [])),
         "evidence": evidence,
         "artifact_report": report,
         "hashes": {
@@ -250,6 +163,9 @@ def run_suite(
         timeout=timeout,
         python=sys.version,
         runner_sources={p.name: digest_file(p) for p in sorted(Path(__file__).parent.glob("*.py"))},
+        checker_sources={
+            p.name: digest_file(p) for p in sorted(Path(harness_capabilities.__file__).parent.glob("*.py"))
+        },
     )
     (output / "suite.json").write_text(_json(manifest))
     rows = {}
@@ -318,27 +234,11 @@ def run_suite(
         "harnesses": rows,
         "limits": [
             "local harness runtime and controlled Chat/Responses model only; no remote sandbox qualification",
-            "TE-10, P1, multimodal, compaction, parallelism and deployment health are outside this suite",
+            "all current checks are P0, including ownership and call-to-step checks",
+            "multimodal, compaction, parallelism and deployment health are outside this suite",
         ],
     }
-    table = [
-        "# Live harness P0 probes",
-        "",
-        "Each cell is passing / exercised / required scenarios.",
-        "",
-        "| Harness | " + " | ".join(NAMES) + " | Gate |",
-        "|---|" + "---|" * (len(NAMES) + 1),
-    ]
-    for harness, row in rows.items():
-        cells = [f"{c['passed']}/{c['observed']}/{c['required']}" for c in row["evidence"].values()]
-        table.append("| " + " | ".join([harness, *cells, row["verdict"]]) + " |")
-    table += [
-        "",
-        "TE-8 or TE-9 is sufficient per scenario. A selected subset does not qualify the full suite.",
-        "See each scenario_result.json for execution gaps and the unmodified artifact-checker report.",
-        "",
-    ]
-    (output / "conformance_report.md").write_text("\n".join(table))
+    (output / "conformance_report.md").write_text(render_matrices(rows))
     temporary = output / ".conformance_summary.json.tmp"
     temporary.write_text(_json(summary))
     os.replace(temporary, output / "conformance_summary.json")

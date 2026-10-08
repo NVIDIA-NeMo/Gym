@@ -1,0 +1,247 @@
+---
+title: "Reverify Rollouts"
+description: "Recompute rewards from existing rollouts without re-running model inference."
+---
+
+`gym eval reverify` replays stored rollouts through a resources server's `/verify` endpoint to produce new rewards. Use it when you want to change a verifier parameter — a grading mode, a threshold, a judge prompt — and measure the effect on the **same trajectories** you already collected, without paying for model inference again.
+
+## When to use
+
+Rollout collection fuses two steps that have very different costs: model inference (expensive) and reward computation (cheap). Both outputs land in `rollouts.jsonl` at collection time, and the reward is frozen there.
+
+`gym eval reverify` is the right tool when:
+
+- You changed a verifier hyperparameter and want to recompute rewards on existing rollouts.
+- You want to compare two verifier configurations on the **same** rollouts, without sampling noise from different trajectories.
+- You iterated on a judge prompt and want to rescore a rollout set without re-running the policy.
+
+<Note>
+LLM-as-judge verifiers will re-invoke the judge model during reverification. This is still far cheaper than re-running the full policy.
+</Note>
+
+## Prerequisites
+
+### Native Gym rollouts
+
+You need the two artifact files that `gym eval run` writes alongside the main rollouts output:
+
+| File | Contents |
+| --- | --- |
+| `rollouts.jsonl` | One row per rollout — includes the model `response` (the expensive artifact) |
+| `rollouts_materialized_inputs.jsonl` | One row per rollout — includes per-task verifier inputs (for example, `options` and `expected_answer` in the `mcqa` resources server) that are not echoed back into the rollout row |
+
+Both files are required. `rollouts.jsonl` alone is not sufficient because many resources servers drop verifier-specific fields from the verify response; those fields are preserved in `*_materialized_inputs.jsonl`.
+
+### Relay ATIF trajectories
+
+The initial external-trajectory path accepts the completed, text-only ATIF v1.7 profile emitted by NeMo Relay. It does not load the Relay runtime. You need:
+
+| File | Contents |
+| --- | --- |
+| Relay ATIF trajectory | The external agent's messages, reasoning, function calls, and correlated function outputs |
+| Materialized Gym inputs | The authoritative verifier metadata, task identity, expected answer, and resources-server routing |
+| ATIF manifest | An explicit one-to-one mapping from each trajectory to `(_ng_task_index, _ng_rollout_index)`; it may pin the trajectory's SHA-256 |
+
+Gym never joins a trajectory to a task by filename or row order.
+
+## Step 1 — Run reverification
+
+`gym eval reverify` starts the resources server automatically from the config you provide. It does **not** need a model server or an agent — pass a resources-server-only config to avoid starting inference infrastructure you don't need.
+
+```yaml
+# my_resources_server.yaml
+mcqa:
+  resources_servers:
+    mcqa:
+      entrypoint: app.py
+      domain: knowledge
+      grading_mode: lenient_boxed   # the updated hyperparameter
+```
+
+Then run:
+
+```bash
+gym eval reverify \
+  --config my_resources_server.yaml \
+  --inputs results/rollouts_materialized_inputs.jsonl \
+  --rollouts results/rollouts.jsonl \
+  --output results/rollouts_lenient_reverified.jsonl
+```
+
+The command:
+1. Starts the resources server from the provided config.
+2. Loads both input files and joins rows on `(_ng_task_index, _ng_rollout_index)`.
+3. Checks that the resources server supports reverification (see [ReverifyMode](#reverifymode) below).
+4. POSTs each joined row to `/verify` — no model calls.
+5. Writes recomputed rollouts to `--output` and aggregate metrics to `<output>_aggregate_metrics.json`.
+
+## Reverify a Relay ATIF trajectory
+
+Create a JSONL manifest with one row per trajectory:
+
+```json
+{"trajectory_path":"trajectory-01.json","_ng_task_index":0,"_ng_rollout_index":0,"expected_sha256":"<sha256-of-trajectory-01.json>"}
+```
+
+`trajectory_path` is resolved relative to the manifest. `expected_sha256` is optional; when present, Gym rejects the trajectory if its bytes have changed. If it is omitted, Gym warns that the source is not pinned while still recording the observed SHA-256 in the result provenance.
+
+Then run:
+
+```bash
+gym eval reverify \
+  --config my_resources_server.yaml \
+  --input-format atif \
+  --inputs results/materialized_inputs.jsonl \
+  --atif-manifest relay-atif/manifest.jsonl \
+  --output results/relay_atif_reverified.jsonl
+```
+
+Every selected resources server must report `stateless`. ATIF mode does not permit `--force`, `--resume`, `--judge-failed-only`, or `--append`. Each result records the ATIF schema version, trajectory and session IDs, source SHA-256, and canonical projection status under `_ng_atif_provenance`; local source paths are not persisted or sent to the verifier. Because ATIF mode cannot resume, a verifier result marked `no_persist` is written to the failures sidecar and counted as missing instead of disappearing. The projection status covers the canonical ATIF fields Gym consumes, not the producer's conversion from a provider-native response.
+
+This is a deliberately bounded canonical ATIF profile, not general ATIF ingestion. Gym reads the ATIF fields it maps and ignores provider-native payloads and producer-private status records carried in optional `extra` metadata; the producer is responsible for faithfully converting those details into canonical ATIF. Gym rejects shapes it cannot map without changing what the verifier sees, including multimodal content, continuations or subagents, uncorrelated or incomplete tool call/result pairs, aggregated LLM calls, training token metadata, or output ordering that ATIF does not prove. A trajectory may end with a tool step when every call has a correlated observation result.
+
+<Warning>
+This initial path preserves harness-facing function names and call/result correlation, but ATIF does not by itself prove Gym MCP `(server, tool)` identity. Gym therefore rejects a tool-bearing ATIF trajectory when its selected resources server sets `expose_tools_over_mcp: true`. Text-only trajectories and generic tool trajectories sent to non-MCP stateless verifiers remain supported.
+</Warning>
+
+### Reverifying against a benchmark config
+
+You don't have to write a resources-server-only config. You can point `--config` at an existing benchmark or agent config and override verifier parameters inline with `++` — convenient when you'd rather not maintain a separate file just to tweak a hyperparameter e.g.:
+
+```bash
+gym eval reverify \
+  --config benchmarks/birdbench/config.yaml \
+  --model-type vllm_model \
+  "++birdbench_bird_sql_resources_server.resources_servers.bird_sql.sql_execution_timeout_s=60" \
+  --inputs results/rollouts_materialized_inputs.jsonl \
+  --rollouts results/rollouts.jsonl \
+  --output results/rollouts_reverified.jsonl
+```
+
+<Note>
+A benchmark/agent config's agent references a model server, so a model config must also be present for that reference to resolve — pass `--model-type` (or the model config you used at collection time). The trade-off of this convenience: reverify then starts **all** the servers in the config (agent and model included), even though it only calls the resources server's `/verify`.
+</Note>
+
+## Output files
+
+| File | Contents |
+| --- | --- |
+| `<output>.jsonl` | Recomputed rollouts with updated `reward` and any verifier-specific fields |
+| `<output>_failures.jsonl` | Sidecar with rows that encountered a non-terminal verifier failure |
+| `<output>_aggregate_metrics.json` | Aggregate metrics computed from the recomputed rollouts |
+
+## Options
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Resources-server config YAML. Repeatable. |
+| `--input-format gym\|atif` | Select native Gym rollout input or the bounded Relay ATIF v1.7 profile. Defaults to `gym`. |
+| `--inputs PATH` | `*_materialized_inputs.jsonl` from `gym eval run`. |
+| `--rollouts PATH` | `rollouts.jsonl` from `gym eval run`. Required for native Gym input and invalid with ATIF input. |
+| `--atif-manifest PATH` | JSONL manifest joining Relay ATIF trajectories to materialized task and rollout IDs. Required with `--input-format atif`. |
+| `--output PATH`, `-o` | Output JSONL for recomputed rollouts. |
+| `--force` | Override the `UNSUPPORTED` or `UNKNOWN` reverify mode guard (see below). Output is prefixed with `unsafe_`. |
+| `--overwrite` | Delete an existing output file instead of raising an error. |
+| `--resume` | Resume a partial run: skip rows already in the output (and its failures sidecar) and re-verify only the rest. |
+| `--judge-failed-only` | Recover only the rollouts whose judge call failed in the original run (see [Recover judge failures](#recover-judge-failures)). |
+| `--append` | With `--judge-failed-only`: append recovered rows to an existing `--output` instead of writing a fresh file. Mutually exclusive with `--overwrite`. |
+| `--disable-aggregation` | Skip aggregate-metrics computation. Use when sharding (see [Sharding](#sharding)). |
+
+`--force`, `--resume`, `--judge-failed-only`, and `--append` apply only to native Gym rollout input.
+
+Hydra overrides work the same as in other `gym eval` commands:
+
+```bash
+gym eval reverify \
+  --config my_resources_server.yaml \
+  "++mcqa.resources_servers.mcqa.grading_mode=strict_single_letter_boxed" \
+  --inputs results/rollouts_materialized_inputs.jsonl \
+  --rollouts results/rollouts.jsonl \
+  --output results/rollouts_strict_reverified.jsonl
+```
+
+## ReverifyMode
+
+Before starting, `gym eval reverify` calls `GET /reverify_mode` on each resources server it will use. Servers report one of three modes:
+
+| Mode | Meaning |
+| --- | --- |
+| `stateless` | Reverification is safe. The verifier is a pure function of `(request body, server config)`. Set `REVERIFY_MODE = ReverifyMode.STATELESS` on your resources server config once you have verified this. |
+| `unsupported` | Reverification is not safe. The verifier reads per-rollout session state that was seeded during the original run and is no longer present. Results would be silently wrong. |
+| `unknown` | The resources server has not declared its reverification behaviour. This is the **default** for all resources servers until explicitly set. Treat it as potentially unsafe. |
+
+Session-stateful resources servers (for example, those that use cookie-keyed state seeded by `/seed_session`) should report `unsupported`. Resources servers that have not yet been audited for reverification safety report `unknown` (the default).
+
+By default, `gym eval reverify` refuses to proceed against any server reporting `unsupported` or `unknown`, and prints a clear error.
+
+If you understand the risk and want to run anyway — for example, to get an approximate lower-bound estimate — pass `--force`. The output file will be prefixed with `unsafe_` to mark it as potentially incorrect:
+
+```bash
+gym eval reverify \
+  --config my_stateful_server.yaml \
+  --inputs results/rollouts_materialized_inputs.jsonl \
+  --rollouts results/rollouts.jsonl \
+  --output results/rollouts_reverified.jsonl \
+  --force
+# Output written to: results/unsafe_rollouts_reverified.jsonl
+```
+
+## Recover judge failures
+
+When a run uses an LLM-as-judge verifier, the judge is a second model call made *after* the expensive policy inference. If that judge call fails (bad key, unreachable or rate-limited endpoint), the sample fails even though the policy `response` is already computed and stored in `<rollouts>_failures.jsonl`. `--judge-failed-only` re-runs the judge on **only** those rollouts, reusing the stored responses — no inference — and merges the recovered rows back with the ones that already scored, so the metrics match a clean run.
+
+- `--rollouts` is the run's **successful** rollouts (`rollouts.jsonl`); they are carried through unchanged.
+- The failed subset is read automatically from the sidecar next to it (`rollouts_failures.jsonl`), filtered to the rows tagged as judge failures.
+- The reverify-mode guard is skipped, so `--force` is not needed and the output is not prefixed with `unsafe_`.
+
+```bash
+gym eval reverify --judge-failed-only \
+  --config my_resources_server.yaml \
+  --inputs results/rollouts_materialized_inputs.jsonl \
+  --rollouts results/rollouts.jsonl \
+  --output results/rollouts_recovered.jsonl
+```
+
+The output holds the successes plus the recovered rows. Re-running is idempotent, and `--resume` picks up any rows a fixed-but-still-flaky judge left behind.
+
+<Note>
+The judge model must be healthy (and configured the same as the original run) when you recover. Since the recovered rewards are computed now while the successes were scored during the original run, keep the verifier/judge config identical between the two so the merged metrics stay consistent.
+</Note>
+
+To add the recovered rows onto a file that already holds the successes — for example, to complete the run's own `rollouts.jsonl` in place — use `--append` instead of writing a fresh output:
+
+```bash
+gym eval reverify --judge-failed-only --append \
+  --config my_resources_server.yaml \
+  --inputs results/rollouts_materialized_inputs.jsonl \
+  --rollouts results/rollouts.jsonl \
+  --output results/rollouts.jsonl
+```
+
+## Sharding
+
+For large rollout sets you can shard reverification across multiple jobs by splitting the input files, passing `--disable-aggregation` on each shard, and then combining with `gym eval aggregate`:
+
+```bash
+# Shard 0
+gym eval reverify \
+  --config my_resources_server.yaml \
+  --inputs shards/inputs_0.jsonl \
+  --rollouts shards/rollouts_0.jsonl \
+  --output shards/reverified_0.jsonl \
+  --disable-aggregation
+
+# Shard 1
+gym eval reverify \
+  --config my_resources_server.yaml \
+  --inputs shards/inputs_1.jsonl \
+  --rollouts shards/rollouts_1.jsonl \
+  --output shards/reverified_1.jsonl \
+  --disable-aggregation
+
+# Merge and compute aggregate metrics
+gym eval aggregate \
+  --config my_resources_server.yaml \
+  --input-glob 'shards/reverified_*.jsonl' \
+  --output results/reverified.jsonl
+```

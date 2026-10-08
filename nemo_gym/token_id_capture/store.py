@@ -40,7 +40,7 @@ from uuid import uuid4
 
 import orjson
 
-from nemo_gym.token_id_capture.protocols import TokenCaptureSnapshot
+from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenCaptureSnapshot
 from nemo_gym.token_id_capture.records import TokenEntry
 
 
@@ -240,7 +240,7 @@ class TokenCaptureStore:
             if state.get("retired", False):
                 raise RuntimeError(f"Token capture for rollout {rollout_id} is retired")
             if state.get("frozen", False):
-                raise RuntimeError(f"Token capture for rollout {rollout_id} is already frozen")
+                raise TokenCaptureFrozenError(f"Token capture for rollout {rollout_id} is already frozen")
             index_changed = self._sync_entry_index(rollout_id, state)
             entry_digests = state["entry_digests"]
             existing_digest = entry_digests.get(entry.model_call_id)
@@ -291,7 +291,7 @@ class TokenCaptureStore:
             if state.get("retired", False):
                 raise RuntimeError(f"Token capture for rollout {rollout_id} is retired")
             if state.get("frozen", False):
-                raise RuntimeError(f"Token capture for rollout {rollout_id} is already frozen")
+                raise TokenCaptureFrozenError(f"Token capture for rollout {rollout_id} is already frozen")
             with self.intents_path_for(rollout_id).open("ab") as handle:
                 handle.write(model_call_id.encode("utf-8") + b"\n")
                 handle.flush()
@@ -406,6 +406,53 @@ class TokenCaptureStore:
                 self.intents_path_for(rollout_id).unlink(missing_ok=True)
                 self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
                 self.lock_path_for(rollout_id).unlink(missing_ok=True)
+                removed += 1
+        if removed:
+            self._fsync_root()
+        return removed
+
+    def sweep_stale(self, older_than_seconds: float) -> int:
+        """Remove abandoned unretired captures older than the cutoff and return the count removed.
+
+        A rollout whose request was cancelled between its first captured call
+        and the post-delivery retire leaves an unretired capture behind, the
+        token JSONL and its side files, which ``sweep_retired`` deliberately
+        skips. A capture counts as abandoned only when every file of it (state,
+        token records, intents, incomplete marker) is older than the cutoff, so
+        an in-flight rollout, whose records are still being appended, is never
+        touched; callers pass a cutoff above the longest possible session.
+        Unlike ``sweep_retired`` this removes the token records too, because no
+        ``drop`` ever ran for an abandoned capture.
+        """
+        cutoff = time.time() - older_than_seconds
+        removed = 0
+        for state_path in self._root.glob("*.tokens.state.json"):
+            rollout_id = state_path.name[: -len(".tokens.state.json")]
+            try:
+                validate_rollout_id(rollout_id)
+            except ValueError:
+                continue
+            with self._locked(rollout_id):
+                if self._read_state(rollout_id).get("retired", False):
+                    continue
+                newest = 0.0
+                for path in (
+                    state_path,
+                    self.path_for(rollout_id),
+                    self.intents_path_for(rollout_id),
+                    self.incomplete_path_for(rollout_id),
+                ):
+                    try:
+                        newest = max(newest, path.stat().st_mtime)
+                    except FileNotFoundError:
+                        continue
+                if newest > cutoff:
+                    continue
+                self.path_for(rollout_id).unlink(missing_ok=True)
+                state_path.unlink(missing_ok=True)
+                self.intents_path_for(rollout_id).unlink(missing_ok=True)
+                self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+                # Preserve the inode so waiting and subsequent writers use the same lock.
                 removed += 1
         if removed:
             self._fsync_root()
