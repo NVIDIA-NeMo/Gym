@@ -6,6 +6,7 @@
 required-version = ">=0.11.25"
 constraint-dependencies = [
     "grpcio>=1.81.0rc1",
+    "msgpack>=1.2.1",
 ]
 
 # Mirror Gym's public resolver policy because an explicit config file does not
