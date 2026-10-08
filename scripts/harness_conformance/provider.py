@@ -262,7 +262,7 @@ class Probe:
             reward = float(complete and self.scenario.expected_reward == 1.0)
             self.verifications.append({"reward": reward, "answer_seen": complete})
             self.save()
-            return {**body, "reward": reward}
+            return {**body, "reward": reward, "evaluation_completed": True, "mask_sample": False}
 
         for prefix in ("", "/ng-rollout/{rollout_id}"):
             app.post(prefix + "/seed_session")(seed)

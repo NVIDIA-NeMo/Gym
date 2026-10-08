@@ -715,6 +715,7 @@ def _resolved_row() -> dict[str, Any]:
         "usersim_config": {"max_turns": 1},
         "usersim_provenance": {
             "code_sha": "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee",  # pragma: allowlist secret
+            "nemotron_personas_version": "synthetic",
         },
     }
 

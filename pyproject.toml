@@ -386,11 +386,6 @@ telemetry = [
 
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
 dev = [
-    # gprof2dot: Used for outputting dot graphs for profiling.
-    # Updated: Wed Feb 25, 2026 with gprof2dot==2025.4.14
-    # License: LGPLv3+ https://github.com/jrfonseca/gprof2dot/blob/master/COPYING.LESSER
-    "gprof2dot",
-
     # Pre-commit: Used for pre-commit hooks.
     # Updated: Thu Sep 04, 2025 with pre-commit==4.3.0
     # License: MIT https://github.com/pre-commit/pre-commit/blob/e70b313c8017b2b6d7844e91795c9d41b9ceb9fb/LICENSE
@@ -435,7 +430,7 @@ dev = [
 [dependency-groups]
 # Codec-bearing packages excluded from the shipped package and container.
 # Not published to PyPI. Versions are resolved and tracked in uv.lock.
-# docker/install_codec_deps.sh pins these explicitly to their uv.lock versions;
+# docker/install_excluded_deps.sh pins these explicitly to their uv.lock versions;
 # update the script when uv lock bumps them.
 codec = [
     "opencv-python-headless",
@@ -452,11 +447,12 @@ build-backend = "setuptools.build_meta"
 [tool.uv]
 managed = true
 required-version = ">=0.9.30"
-# grpcio is a transitive dependency of ray. Pin the lower bound here to
+# grpcio and msgpack are transitive dependencies of ray. Pin the lower bounds here to
 # ensure uv selects a CVE-safe version across all resolver paths.
 # Updated Sun Jun 22, 2026 (CVE remediation)
 constraint-dependencies = [
     "grpcio>=1.81.0rc1",
+    "msgpack>=1.2.1",
 ]
 # override-dependencies overrides transitive dep version pins that conflict with
 # Python 3.13 wheel availability. Server venvs inherit this via the editable
@@ -474,13 +470,18 @@ override-dependencies = [
     # that may incur MPEG-LA royalties. Servers that genuinely need these declare
     # them in their own overrides.txt (requirements.txt servers) or
     # [tool.uv] override-dependencies (pyproject.toml servers), which takes
-    # precedence. Reinstall for testing via docker/install_codec_deps.sh.
+    # precedence. Reinstall for testing via docker/install_excluded_deps.sh.
     "opencv-python-headless; sys_platform == 'never'",
     "pynvvideocodec; sys_platform == 'never'",
     "torchcodec; sys_platform == 'never'",
     "torchvision; sys_platform == 'never'",
     "torchaudio; sys_platform == 'never'",
     "pycountry; sys_platform == 'never'",
+
+    # Copyleft-licensed packages (LGPL/MPL) — never installed in the shipped package
+    # or container. Servers that need one declare it in their own overrides.txt.
+    "gprof2dot; sys_platform == 'never'",
+    "pathspec; sys_platform == 'never'",
 ]
 # NOTE: server venvs install nemo-gym editably and inherit this list, so anything
 # here is also silently dropped from them (uv >=0.11.24). Servers that need a

@@ -69,7 +69,10 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
         "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee",  # pragma: allowlist secret
         pattern=r"^[0-9a-f]{40}$",
     )
+    nemotron_personas_version: str = "0.0.2"
     probe_scorer_model: ModelServerRef
+    judge_max_output_tokens: int = Field(16_384, gt=0)
+    judge_max_output_tokens_non_ascii: int = Field(32_768, gt=0)
     model_call_timeout_seconds: float = Field(300.0, gt=0)
     evaluation_timeout_seconds: float = Field(1200.0, gt=0)
     session_ttl_seconds: float = Field(1980.0, gt=0)
@@ -190,7 +193,11 @@ class UserSimResourcesServer(SimpleResourcesServer):
     ) -> UserSimSeedResponse:
         try:
             task = UserSimTaskInput.model_validate(body.task_data)
-            _validate_resolved_row(task.resolved_row, expected_revision=self.config.usersim_revision)
+            _validate_resolved_row(
+                task.resolved_row,
+                expected_revision=self.config.usersim_revision,
+                expected_personas_version=self.config.nemotron_personas_version,
+            )
         except (ValidationError, ValueError) as error:
             detail = error.errors() if isinstance(error, ValidationError) else str(error)
             raise HTTPException(status_code=422, detail=detail) from error
@@ -393,6 +400,8 @@ class UserSimResourcesServer(SimpleResourcesServer):
             judges=[{"alias": "judge_model"}],
             scorers=[scorer_name] if scorer_name else [],
             skip_if_existing=False,
+            max_judge_tokens=self.config.judge_max_output_tokens,
+            max_judge_tokens_non_ascii=self.config.judge_max_output_tokens_non_ascii,
         )
         model = _ResourcesModelFacade(self, self.config.probe_scorer_model)
         evaluator = _create_evaluator(config, {"judge_model": model})
@@ -453,7 +462,12 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 del self.closed_resources_session_ids[resources_session_id]
 
 
-def _validate_resolved_row(row: Mapping[str, Any], *, expected_revision: str) -> None:
+def _validate_resolved_row(
+    row: Mapping[str, Any],
+    *,
+    expected_revision: str,
+    expected_personas_version: str,
+) -> None:
     required = ("persona", "probe_type", "conversation_language", "trajectory_id", "usersim_config")
     missing = [name for name in required if not row.get(name)]
     if missing:
@@ -464,6 +478,12 @@ def _validate_resolved_row(row: Mapping[str, Any], *, expected_revision: str) ->
     if provenance.get("code_sha") != expected_revision:
         raise ValueError(
             f"Resolved UserSim row revision {provenance.get('code_sha')!r} does not match {expected_revision!r}"
+        )
+    personas_version = provenance.get("nemotron_personas_version")
+    if personas_version != "synthetic" and personas_version != expected_personas_version:
+        raise ValueError(
+            f"Resolved UserSim row Nemotron-Personas version {personas_version!r} "
+            f"is neither 'synthetic' nor the configured version {expected_personas_version!r}"
         )
 
 

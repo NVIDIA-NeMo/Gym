@@ -617,7 +617,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 model,
                 {
                     "name": self.config.model,
-                    "interleaved": {"field": "reasoning"},
+                    # Gym model servers emit and accept `reasoning_content`; OpenCode replays assistant
+                    # history under this field, and Gym rejects an unknown `reasoning` key with a 422.
+                    "interleaved": {"field": "reasoning_content"},
                     "limit": {"context": self.config.context_window, "output": self.config.max_output_tokens},
                 },
             )
