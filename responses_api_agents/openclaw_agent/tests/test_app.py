@@ -397,7 +397,7 @@ class TestBuildOpenclawConfig:
         assert len(resp.output) == 1
         assert resp.output[0].content[0].text == ""
         assert resp.usage.total_tokens == 0
-        assert resp.metadata == {"openclaw_agent_timed_out": "true"}
+        assert resp.model_dump(mode="json")["_ng_agent_timed_out"] is True
 
     def test_env_passthrough(self) -> None:
         agent = _make_agent(env={"NVIDIA_API_KEY": "k", "EMPTY": ""})
@@ -785,6 +785,7 @@ class TestTimeoutReporting:
 
         assert result.finished_naturally is True
         assert result.agent_timed_out is False
+        assert "_ng_agent_timed_out" not in verify_json["response"]
         assert verify_json["response"]["metadata"] is None
 
     def test_agent_run_timeout_is_not_natural(self, tmp_path: Path) -> None:
@@ -801,6 +802,9 @@ class TestTimeoutReporting:
         assert result.finished_naturally is False
         assert result.agent_timed_out is True
         assert result.reward == 0.5
+        # the internal flag is removed before /verify and nothing is added to the metadata
+        assert "_ng_agent_timed_out" not in verify_json["response"]
+        assert verify_json["response"]["metadata"] is None
         # the salvaged partial transcript is still what gets verified
         assert [item["content"][0]["text"] for item in verify_json["response"]["output"]] == ["partial"]
 
@@ -816,6 +820,8 @@ class TestTimeoutReporting:
         assert result.finished_naturally is False
         assert result.agent_timed_out is True
         assert result.reward == 0.5
+        assert "_ng_agent_timed_out" not in verify_json["response"]
+        assert verify_json["response"]["metadata"] is None
         # the padded empty assistant message is still what gets verified
         assert [item["content"][0]["text"] for item in verify_json["response"]["output"]] == [""]
 

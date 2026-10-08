@@ -72,8 +72,9 @@ from responses_api_agents.openclaw_agent.setup_openclaw import ensure_openclaw
 
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
-# Set on the response metadata when a Gym time limit (setup_timeout or timeout) cut the run short.
-_TIMED_OUT_METADATA_KEY = "openclaw_agent_timed_out"
+# Set on the response only when a Gym time limit (setup_timeout or timeout) cut the run short;
+# run() removes it before /verify.
+_INTERNAL_TIMED_OUT_KEY = "_ng_agent_timed_out"
 
 
 def _decode_last_json_dict_suffix(raw: str) -> Optional[dict[str, Any]]:
@@ -732,7 +733,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         output_tokens = usage.get("output_tokens", 0)
         cached_tokens = usage.get("cached_tokens", 0)
 
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=model_name,
@@ -748,8 +749,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,
             ),
-            metadata={_TIMED_OUT_METADATA_KEY: "true"} if timed_out else None,
         )
+        if timed_out:
+            response = response.model_copy(update={_INTERNAL_TIMED_OUT_KEY: True})
+        return response
 
     async def responses(
         self,
@@ -867,6 +870,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             await raise_for_status(agent_resp)
             cookies = agent_resp.cookies
             agent_resp_json = await get_response_json(agent_resp)
+            timed_out = bool(agent_resp_json.pop(_INTERNAL_TIMED_OUT_KEY, False))
             raw_observations = (
                 agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
             )
@@ -891,9 +895,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             )
             last = gym_resp.output[-1] if gym_resp.output else None
             naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
-            # A timed-out run still ends in an assistant message (salvaged or padded), so check explicitly.
-            timed_out = (gym_resp.metadata or {}).get(_TIMED_OUT_METADATA_KEY) == "true"
 
+            # A timed-out run still ends in an assistant message (salvaged or padded), so check explicitly.
             result = verify_json | {
                 "turns_used": turns,
                 "finished_naturally": naturally and not timed_out,
