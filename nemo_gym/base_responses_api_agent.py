@@ -15,17 +15,21 @@
 import asyncio
 from abc import abstractmethod
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from functools import wraps
 from time import monotonic
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 from warnings import warn
 
-from fastapi import Body, FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+from fastapi import Body, FastAPI, HTTPException, Request, Response
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
 
+from nemo_gym._checkpoint.agent import AgentSessionParticipant, RestartOnlyAgentParticipant, RestoredAgentSession
+from nemo_gym._checkpoint.control import install_participant
+from nemo_gym._checkpoint.settings import checkpoint_settings
+from nemo_gym._checkpoint.steps import CHECKPOINT_RESTART_HEADER
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -44,7 +48,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body, rollout_context
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import (
@@ -222,6 +226,69 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             raise HTTPException(409, "Unknown or closing agent_session_id")
         return record.state
 
+    # Agents that implement the AgentSessionHooks methods set this to take part in partial-rollout
+    # checkpoints. Other agents restart unfinished rollouts from their input.
+    checkpoint_sessions_supported: ClassVar[bool] = False
+    _checkpoint_participant: Optional[AgentSessionParticipant] = PrivateAttr(default=None)
+    _restart_only: Optional[RestartOnlyAgentParticipant] = PrivateAttr(default=None)
+
+    def _restart_only_tracked(self, handler: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+        """Count a /run or /v1/responses call against a restart-only checkpoint participant.
+
+        The call is keyed by its ``/ng-rollout/<id>`` path when the handler receives the request, and
+        otherwise by the rollout context, which ``/run`` sets before this wrapper runs.
+        """
+
+        @wraps(handler)
+        async def tracked(*args: Any, **kwargs: Any) -> Any:
+            if self._restart_only is None:
+                return await handler(*args, **kwargs)
+            request = kwargs.get("request") or next((arg for arg in args if isinstance(arg, Request)), None)
+            path_key = request.path_params.get("rollout_id") if request is not None else None
+            async with self._restart_only.track(path_key or current_rollout_id()):
+                return await handler(*args, **kwargs)
+
+        return tracked
+
+    @property
+    def checkpoint_participant(self) -> Optional[AgentSessionParticipant]:
+        """The checkpoint participant, or ``None`` when checkpointing is off for this agent."""
+        return self._checkpoint_participant
+
+    def setup_agent_checkpoint(self, app: FastAPI) -> None:
+        settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
+        if settings is None:
+            return
+        if (self.config.num_workers or 1) != 1:
+            # Each worker would track only its own calls, so a checkpoint could miss work in the others.
+            raise ValueError("agent checkpointing requires num_workers=1: sessions live in one process")
+        if not self.checkpoint_sessions_supported:
+            # Fail closed: in-flight work blocks a checkpoint until the controller retires it.
+            self._restart_only = RestartOnlyAgentParticipant()
+            participant = self._restart_only
+        else:
+            self._checkpoint_participant = AgentSessionParticipant(self)
+            participant = self._checkpoint_participant
+        install_participant(
+            app,
+            participant,
+            auth_token=settings.control_auth_token,
+            lease_grace_seconds=settings.lease_grace_seconds,
+            instance_name=self.config.name,
+        )
+
+    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+        """Return the state of every session in ``session_keys`` for a checkpoint."""
+        raise NotImplementedError
+
+    async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
+        """Validate every session, then install all of them; never install a partial set."""
+        raise NotImplementedError
+
+    async def retire_agent_session(self, session_key: str) -> None:
+        """Discard a session whose attempt was retired."""
+        raise NotImplementedError
+
     def effective_tool_accesses(self, request: AgentSeedSessionRequest) -> list[ToolAccess]:
         """Overlay episode-scoped tool access onto configured declarations by name."""
         accesses = {access.name: access for access in self.config.tool_accesses}
@@ -232,9 +299,12 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        self.setup_agent_checkpoint(app)
 
         agent_attributes = {"nemo.gym.server.name": self.config.name}
-        traced_responses = traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", self.responses, agent_attributes)
+        traced_responses = self._restart_only_tracked(
+            traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", self.responses, agent_attributes)
+        )
         app.post("/v1/responses")(traced_responses)
         # A self-call made with ``url_path_for_run`` lands on a prefixed twin.
         # ``responses`` recovers the rollout id from the path.
@@ -247,7 +317,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         # start the span before the ContextVar is set and every rollout span would be
         # missing its `nemo.gym.rollout.id` — which is exactly what a first run on real
         # hardware showed.
-        run = traced_rollout_endpoint(self.run, agent_attributes)
+        run = self._restart_only_tracked(traced_rollout_endpoint(self.run, agent_attributes))
 
         @wraps(run)
         async def run_with_rollout_context(*args: Any, **kwargs: Any) -> BaseVerifyResponse:
@@ -268,14 +338,23 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         self,
         request: Request,
         body: AgentSeedSessionRequest,
+        response: Response = None,
     ) -> AgentSeedSessionResponse:
         """Seed once per caller ID; identical retries reuse the same harness state."""
+        if self._restart_only is not None:
+            await self._restart_only.wait_open()
+            if response is not None:
+                # This agent cannot capture the session, so the episode that seeds it starts over after a crash.
+                response.headers[CHECKPOINT_RESTART_HEADER] = "1"
         if self.config.num_workers not in (None, 1):
             raise ValueError("Agent sessions require num_workers=1")
         current = self._agent_session_id_from_request(request)
         if current is not None and current != body.agent_session_id:
             raise HTTPException(409, "agent_session_id does not match the session cookie")
-        async with self._locked_agent_session(body.agent_session_id) as record:
+        participant = self._checkpoint_participant
+        # With checkpointing, a seed waits out an open checkpoint, and one in progress holds up prepare.
+        seeding = participant.seeding(body.agent_session_id, body.episode_id) if participant else nullcontext()
+        async with seeding, self._locked_agent_session(body.agent_session_id) as record:
             if record.close_response is not None:
                 raise HTTPException(409, "Agent session is already closed")
             if record.closing:
@@ -290,6 +369,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     record.state = error.state
                     record.closing = True
                     raise error.error from None
+                if participant is not None:
+                    participant.open_session(body.agent_session_id, body.episode_id, seed=True)
             elif record.state.request != body:
                 raise HTTPException(409, "agent_session_id is already bound to another seed request")
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
@@ -323,6 +404,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             else:
                 record.closing = True
                 result = await self._close_agent_session_state(record.state)
+                if self._checkpoint_participant is not None:
+                    self._checkpoint_participant.close_session(body.agent_session_id)
             record.state = None
             record.episode_id = body.episode_id
             record.close_response = result.model_copy(deep=True)
@@ -331,6 +414,21 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             # Keep the marker so a stale /responses request cannot fall back to the non-session path.
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
             return result
+
+    def _session_state(self, agent_session_id: str) -> Optional[AgentSessionState]:
+        """The open state of a session, or ``None``; checkpoint hooks export it."""
+        record = self._session_records.get(agent_session_id)
+        return record.state if record is not None and not record.closing else None
+
+    def _install_restored_session(self, agent_session_id: str, state: AgentSessionState) -> None:
+        """Install a session restored from a checkpoint, as its replacement attempt's seed would have."""
+        self._session_records[agent_session_id] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+
+    def _free_session(self, agent_session_id: str) -> None:
+        """Free a retired session that has no close receipt: its episode's close then finds nothing to free."""
+        record = self._session_records.get(agent_session_id)
+        if record is not None and record.close_response is None:
+            self._session_records.pop(agent_session_id, None)
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
         """Validate grants and initialize harness state.
@@ -351,9 +449,16 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
         Training capture requires ``token_id_capture.enabled``.
         It also requires the static agent flag or run-level ``all_agents``.
+        Partial-rollout checkpointing also needs it for this agent.
         Missing global configuration disables correlation.
         """
-        return self._model_call_capture_enabled() or self._token_id_capture_enabled()
+        return (
+            self._model_call_capture_enabled()
+            or self._token_id_capture_enabled()
+            # Checkpointing keys a legacy /run by its rollout, so its self-dispatch must carry the rollout.
+            or self._checkpoint_participant is not None
+            or self._restart_only is not None
+        )
 
     def _model_call_capture_enabled(self) -> bool:
         """Whether evaluation model-call observability is enabled."""
