@@ -75,6 +75,33 @@ Missing, malformed, or unsupported reports yield null counts. Verifier timeouts
 also yield null counts. Report parsing diagnostics identify the source file.
 The official reward and evaluation-completion rules remain unchanged.
 
+## Other pinned Harbor datasets
+
+`manifest_path` selects the pinned dataset. It defaults to Terminal-Bench 4.0; a relative
+path is read from the repository root. Task names take the dataset's organization prefix, so
+[Terminal-Bench-Science](../../benchmarks/terminal_bench_science/README.md) serves
+`terminal-bench-science/<task>`. Its packages pass the same content-hash check.
+
+Packages that ship only Dockerfiles leave `docker_image` unset. Supply images through
+`environment.task_images`:
+
+- `agent` and `verifier`: templates that accept `{org}`, `{task}` and `{digest}`.
+- `by_task.<task>.agent|verifier`: explicit per-task images, which take precedence over the
+  templates.
+
+An image declared by the package always wins. A separate verifier without
+`[verifier.environment]` uses the agent image, as in Harbor. A role with no image fails at
+seed, before allocation.
+
+For local checks on a workstation, a single-container task can also use Gym's `docker`
+sandbox provider. An offline verifier then runs with `docker run --network none`. EFS logs
+and Compose still require OpenSandbox.
+
+`/verify` also reports `partial_credit`: the fraction of reported tests that passed
+(`num_tests_passed / num_tests_total`, so skipped tests count as not passed), never below the
+official reward. Without usable test counts it equals the official reward, and it is null when
+the official evaluation did not complete. `reward` stays the official binary grade.
+
 ## Non-root Compose services
 
 When loading agent Compose YAML, two task-specific adaptations use the
