@@ -59,7 +59,7 @@ def _inputs(**overrides) -> VerificationInputs:
         instance_id="getmoto__moto-7365",
         repo="getmoto/moto",
         version="5.0",
-        base_commit="7f6c9cb1deafb280fe7fcc7551c38e397f11a706",
+        base_commit="7f6c9cb1deafb280fe7fcc7551c38e397f11a706",  # pragma: allowlist secret
         patch="diff --git a/moto/dynamodb/models/dynamo_type.py b/moto/dynamodb/models/dynamo_type.py\n",
         test_patch="diff --git a/tests/test_dynamodb/test_update.py b/tests/test_dynamodb/test_update.py\n",
         fail_to_pass=["tests/test_dynamodb/test_update.py::test_update_item_add_float"],
