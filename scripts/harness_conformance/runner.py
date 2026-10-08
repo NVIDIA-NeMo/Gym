@@ -103,6 +103,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     witness_path = directory / "witness.json"
     witness = json.loads(witness_path.read_text()) if witness_path.exists() else None
     bundle = directory / "rollouts.jsonl"
+    health_report = directory / "health" / "quality_summary.json"
     records = list(json_rows(bundle)) if bundle.exists() else []
     record = records[0][1] if len(records) == 1 else None
     scope = EvidenceScope(tools=scenario.tool_steps > 0, verifier=not scenario.terminal_error, steps=scenario.steps)
@@ -119,7 +120,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     health_inputs = [path for path in (bundle, directory / "rollouts_failures.jsonl") if path.is_file()]
     checks += inspect_health(
         health_inputs,
-        output=directory / "health",
+        output=health_report.parent,
         expectations=scenario.health_expectations,
         steps=scenario.steps,
     )
@@ -149,7 +150,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         "model_attempts": len((witness or {}).get("attempts", [])),
         "evidence": evidence,
         "artifact_report": report,
-        "health_report": "health/quality_summary.json" if health_inputs else None,
+        "health_report": str(health_report.relative_to(directory)) if health_inputs else None,
         "hashes": {
             path.name: digest_file(path)
             for path in (
@@ -158,6 +159,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
                 witness_path,
                 directory / "runtime.json",
                 directory / "launch.json",
+                health_report,
             )
             if path.exists()
         },
