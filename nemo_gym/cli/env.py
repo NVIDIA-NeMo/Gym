@@ -533,8 +533,6 @@ class RunHelper:  # pragma: no cover
         if ray_server_names:
             print(f"Initializing Ray for servers that may use it: {', '.join(ray_server_names)}")
             initialize_ray()
-        else:
-            print("No configured server uses Ray, so NeMo Gym is not starting or joining a Ray cluster")
 
         # Start the HTTP/2 PING sidecar (if `sidecar.enabled`) and point model URLs at it. This
         # must come before the config is serialized below, which is how every server learns its URLs.
