@@ -6,6 +6,10 @@ miniswe_sandboxed_agent:
     miniswe_sandboxed_agent:
       entrypoint: app.py
       num_workers: 1
+      # Unbound template: `gym eval run` binds the resources server at prepare.
+      resources_server:
+        type: resources_servers
+        name: ???
       model_server:
         type: responses_api_models
         name: policy_model

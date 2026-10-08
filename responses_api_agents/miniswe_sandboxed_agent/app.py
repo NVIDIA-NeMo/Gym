@@ -20,10 +20,9 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import Field, field_validator
 
 from nemo_gym.base_responses_api_agent import (
-    AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
-    AgentSeedSessionResponse,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
@@ -88,6 +87,14 @@ class MiniSWESession:
     provider: Any | None = None
     episode: AgentSeedSessionRequest | None = None
     observations: AgentObservationBundle | None = None
+
+
+@dataclass
+class MiniSWEEpisodeSession(AgentSessionState):
+    """The base agent's record of an episode session; the execution state lives in ``_sessions``."""
+
+    key: tuple[str, str]
+    state: MiniSWESession
 
 
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
@@ -184,10 +191,6 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
         self._runs = {}
         self._sessions: dict[tuple[str, str], MiniSWESession] = {}
-        # Episode sessions by agent_session_id -> key into _sessions.
-        self._agent_sessions: dict[str, tuple[str, str]] = {}
-        self._agent_session_locks: dict[str, asyncio.Lock] = {}
-        self._closed_agent_session_ids: set[str] = set()
         self._finalizers = set()
         self._closing = False
         self._shutdown_deadline: float | None = None
@@ -251,81 +254,64 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                     budget = min(budget, task_timeout)
         return budget
 
-    async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> MiniSWEEpisodeSession:
         """Borrow the resources server's sandbox for this episode."""
-        agent_session_id = body.agent_session_id
-        owner = request.session[SESSION_ID_KEY]
-        lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
-        async with lock:
-            if agent_session_id in self._closed_agent_session_ids:
-                raise HTTPException(409, f"Agent session is already closed: {agent_session_id}")
-            key = self._agent_sessions.get(agent_session_id)
-            state = self._sessions.get(key) if key else None
-            if state is not None and state.episode is not None:
-                if (state.episode.episode_id, state.episode.task_id) != (body.episode_id, body.task_id):
-                    raise HTTPException(409, "agent_session_id is already bound to another episode or task")
-                return AgentSeedSessionResponse(agent_session_id=agent_session_id)
-            if body.sandbox_access is None:
-                raise HTTPException(422, "mini-SWE needs sandbox_access from the resources server")
-            connection = body.sandbox_access.connection
-            if not isinstance(connection, DirectSandboxConnection):
-                raise HTTPException(422, "mini-SWE supports only direct sandbox connections")
-            provider_config = resolve_provider_config(connection.provider_config_ref, get_global_config_dict())
-            # mini-SWE runs inside the sandbox and calls the Model Server itself, so a loopback URL (the
-            # default without use_absolute_ip) would make every model call fail and the episode score 0.
-            try:
-                assert_model_url_reachable_from_sandbox(
-                    self._model_base_url(), provider_name=next(iter(provider_config), None)
-                )
-            except ValueError as exc:
-                raise HTTPException(422, str(exc)) from exc
-            provider = create_provider(provider_config)
-            try:
-                sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
-            except BaseException:
-                await provider.aclose()
-                raise
-            # The environment server addresses the turn as /ng-rollout/<capture_key>/v1/responses.
-            key = (owner, body.episode_id.capture_key)
-            self._sessions[key] = MiniSWESession(
-                sandbox=sandbox,
-                seed=SeedSessionResponse(
-                    session_id=agent_session_id,
-                    task_id=body.task_id.task_id,
-                    agent_timeout_sec=self.config.agent_timeout_sec,
-                ),
-                original_params=None,
-                rollout_id=body.episode_id.capture_key,
-                capture_model_calls=True,
-                artifact_directory=self.config.artifacts_dir / agent_session_id,
-                workdir=body.sandbox_access.workdir,
-                provider=provider,
-                episode=body,
+        if body.sandbox_access is None:
+            raise HTTPException(422, "mini-SWE needs sandbox_access from the resources server")
+        connection = body.sandbox_access.connection
+        if not isinstance(connection, DirectSandboxConnection):
+            raise HTTPException(422, "mini-SWE supports only direct sandbox connections")
+        provider_config = resolve_provider_config(connection.provider_config_ref, get_global_config_dict())
+        # mini-SWE runs inside the sandbox and calls the Model Server itself, so a loopback URL (the
+        # default without use_absolute_ip) would make every model call fail and the episode score 0.
+        try:
+            assert_model_url_reachable_from_sandbox(
+                self._model_base_url(), provider_name=next(iter(provider_config), None)
             )
-            self._agent_sessions[agent_session_id] = key
-            return AgentSeedSessionResponse(agent_session_id=agent_session_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        provider = create_provider(provider_config)
+        try:
+            sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+        except BaseException:
+            await provider.aclose()
+            raise
+        # The environment server addresses the turn as /ng-rollout/<capture_key>/v1/responses and the base
+        # agent's session cookie finds the state, so the owner half of the key only has to be unique.
+        key = (f"episode:{body.agent_session_id}", body.episode_id.capture_key)
+        state = MiniSWESession(
+            sandbox=sandbox,
+            seed=SeedSessionResponse(
+                session_id=body.agent_session_id,
+                task_id=body.task_id.task_id,
+                agent_timeout_sec=self.config.agent_timeout_sec,
+            ),
+            original_params=None,
+            rollout_id=body.episode_id.capture_key,
+            capture_model_calls=True,
+            artifact_directory=self.config.artifacts_dir / body.agent_session_id,
+            workdir=body.sandbox_access.workdir,
+            provider=provider,
+            episode=body,
+        )
+        self._sessions[key] = state
+        return MiniSWEEpisodeSession(request=body, key=key, state=state)
 
-    async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
-        agent_session_id = body.agent_session_id
-        lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
-        observations = None
-        async with lock:
-            key = self._agent_sessions.get(agent_session_id)
-            state = self._sessions.get(key) if key else None
-            if state is not None:
-                if state.episode is None or state.episode.episode_id != body.episode_id:
-                    raise HTTPException(409, "episode_id does not match the seeded agent session")
-                self._sessions.pop(key, None)
-                self._agent_sessions.pop(agent_session_id, None)
-                observations = state.observations
-                try:
-                    await state.sandbox.disconnect()
-                finally:
-                    if state.provider is not None:
-                        # Resources retains sandbox/Compose ownership; release only our transport.
-                        await state.provider.aclose()
-            self._closed_agent_session_ids.add(agent_session_id)
-        return AgentCloseSessionResponse(agent_session_id=agent_session_id, agent_observations=observations)
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, MiniSWEEpisodeSession):
+            raise TypeError("Expected a mini-SWE episode session state")
+        session = state.state
+        if self._sessions.get(state.key) is session:
+            self._sessions.pop(state.key, None)
+        try:
+            await session.sandbox.disconnect()
+        finally:
+            if session.provider is not None:
+                # Resources retains sandbox/Compose ownership; release only our transport.
+                await session.provider.aclose()
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id, agent_observations=session.observations
+        )
 
     async def _bind_episode_turn(
         self, state: MiniSWESession, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: str | None
@@ -344,21 +330,27 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         if self._closing:
             raise HTTPException(503, "Agent server is shutting down")
-        owner = request.session[SESSION_ID_KEY]
         rollout_id = current_rollout_id()
-        matches = [key for key in self._sessions if key[0] == owner]
-        if rollout_id is None:
-            if len(matches) > 1:
-                raise HTTPException(
-                    409, "Multiple mini-SWE rollouts for this session; use /ng-rollout/<id>/v1/responses"
-                )
-            state = self._sessions.get(matches[0]) if matches else None
+        agent_session_id = self._agent_session_id_from_request(request)
+        if agent_session_id is not None:
+            # An episode session: the base agent's cookie names the seeded state.
+            record = self._require_agent_session(agent_session_id)
+            if not isinstance(record, MiniSWEEpisodeSession):
+                raise TypeError("Expected a mini-SWE episode session state")
+            state = record.state
         else:
-            state = self._sessions.get((owner, rollout_id))
-            if state is None and len(matches) == 1 and self._sessions[matches[0]].episode is not None:
-                state = self._sessions[matches[0]]
-        if state is None:
-            raise HTTPException(404 if not matches else 409, "No seeded mini-SWE sandbox for this session")
+            owner = request.session[SESSION_ID_KEY]
+            matches = [key for key in self._sessions if key[0] == owner]
+            if rollout_id is None:
+                if len(matches) > 1:
+                    raise HTTPException(
+                        409, "Multiple mini-SWE rollouts for this session; use /ng-rollout/<id>/v1/responses"
+                    )
+                state = self._sessions.get(matches[0]) if matches else None
+            else:
+                state = self._sessions.get((owner, rollout_id))
+            if state is None:
+                raise HTTPException(404 if not matches else 409, "No seeded mini-SWE sandbox for this session")
         if state.original_params is None:
             await self._bind_episode_turn(state, body, rollout_id)
         if body != state.original_params:
