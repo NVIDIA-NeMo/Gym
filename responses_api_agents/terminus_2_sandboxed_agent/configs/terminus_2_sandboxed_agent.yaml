@@ -21,7 +21,7 @@ terminus_2_sandboxed_agent:
       model_context_limit: 262144
       model_output_limit: null
       llm_request_timeout: 600  # 10 mins, Litellm default
-      interleaved_thinking: true
+      interleaved_thinking: false
       # Opt-in mount points to hide from terminal sessions. Requires Linux root,
       # tmux installed before setup, and user/mount namespace support.
       terminal_hidden_mounts: []

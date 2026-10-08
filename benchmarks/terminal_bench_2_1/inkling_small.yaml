@@ -16,6 +16,13 @@ terminal_bench_2_1_terminus_2_sandboxed_agent:
       model_context_limit: 1048576
       sandbox_timeout: 10800
       llm_request_timeout: 3600
+      # Send earlier reasoning back on later turns; the shared agent default is off.
+      interleaved_thinking: true
+      # Hide unrelated service mounts from task terminals; a find / over them stalls the shell. Needs Linux
+      # root, user/mount namespaces and the tmux binary that sandbox_utils.yaml configures.
+      terminal_hidden_mounts:
+        - /mnt/s3-data
+        - /mnt/.s3-gate
       datasets:
         - name: terminal_bench_2_1_inkling_small
           type: benchmark
