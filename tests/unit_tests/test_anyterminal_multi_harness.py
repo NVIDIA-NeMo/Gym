@@ -43,6 +43,10 @@ def test_profile_composes_all_four_terminal_harnesses_with_one_dataset_owner() -
     assert list(config.anyterminal_hermes.responses_api_agents.anyterminal_agent.agent_request_sampling_fields) == [
         "temperature"
     ]
+    openclaw_tools = config.anyterminal_openclaw.responses_api_agents.anyterminal_agent.agent_kwargs.openclaw_config.tools
+    assert openclaw_tools.profile == "minimal"
+    assert list(openclaw_tools.alsoAllow) == ["exec"]
+    assert list(openclaw_tools.deny) == ["session_status"]
 
     dataset_owners = []
     for instance_name, block in config.items():

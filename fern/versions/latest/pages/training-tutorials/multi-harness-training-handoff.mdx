@@ -21,10 +21,10 @@ The P0 harnesses are:
 
 ## Current stop line
 
-This snapshot was taken on **2026-10-08 at 13:58 PDT**. The routing
+This snapshot was updated on **2026-10-08 at 14:03 PDT**. The routing
 implementation and its 15,872-token OpenCode/OpenClaw serving guards are
 pushed. The latest real two-node Nano run exposed one remaining runtime
-blocker that is **not fixed in the pushed heads**:
+blocker:
 
 - OpenClaw no longer sends an over-limit request to vLLM.
 - OpenClaw rejects the request locally because its `coding` tool profile makes
@@ -36,10 +36,11 @@ blocker that is **not fixed in the pushed heads**:
 - Therefore no optimizer step completed, and neither PR should yet be called
   end-to-end runtime validated.
 
-The first action on the new cluster is to reduce the OpenClaw tool surface to
-the terminal tool required by Terminal-Bench, test it, push it to the Gym PR,
-and rerun Nano sync before spending an 8- or 16-node allocation. The exact
-candidate change is recorded in [Remaining OpenClaw fix](#remaining-openclaw-fix).
+The branch now reduces the OpenClaw tool surface to the terminal tool required
+by Terminal-Bench, and its focused tests pass 57/57. This change still needs a
+real Nano sync rerun before its runtime behavior or either Super allocation can
+be accepted. The exact change is recorded in
+[OpenClaw runtime fix](#openclaw-runtime-fix).
 
 ## Pull requests and exact heads
 
@@ -243,16 +244,16 @@ logger.wandb.log_nemo_gym_full_result_tables=true
 The target project is
 [adlr/multi-harness-RL](https://wandb.ai/adlr/multi-harness-RL).
 
-## Remaining OpenClaw fix
+## OpenClaw runtime fix
 
 The unresolved configuration is in
 `responses_api_agents/anyterminal_agent/configs/anyterminal_openclaw.yaml`.
-It currently selects `tools.profile: coding`. OpenClaw 2026.6.11 expands that
-profile into a broad tool catalog, including web, memory, sessions, cron,
+It previously selected `tools.profile: coding`. OpenClaw 2026.6.11 expands
+that profile into a broad tool catalog, including web, memory, sessions, cron,
 media, planning, and other tools that Terminal-Bench does not need. Their
 schemas overflow this model's initial context before the first model request.
 
-The smallest proposed Terminal-Bench policy is:
+The branch now uses this minimal Terminal-Bench policy:
 
 ```yaml
 openclaw_config:
@@ -274,11 +275,11 @@ so the intended effective tool set is only `exec`. That is enough to inspect,
 edit, and test files in a Terminal-Bench container while keeping the prompt
 small.
 
-Treat this as the next fix to validate, not as already-proven behavior. Add a
-focused assertion to `tests/unit_tests/test_anyterminal_multi_harness.py` for
-the resolved profile. Also add or extend an OpenClaw app unit test to assert
-that config construction preserves `profile`, `alsoAllow`, and the user deny
-while adding the headless `message` deny. Then run at least:
+The resolved profile is asserted in
+`tests/unit_tests/test_anyterminal_multi_harness.py`. An OpenClaw app unit test
+also verifies that config construction preserves `profile`, `alsoAllow`, and
+the user deny while adding the headless `message` deny. The focused tests pass
+57/57 with:
 
 ```bash
 uv run pytest -q tests/unit_tests/test_anyterminal_multi_harness.py
@@ -454,9 +455,8 @@ both Super jobs remained queued:
 
 These job IDs are historical cluster evidence. Submit new jobs on a different
 cluster rather than trying to reuse them. The two pending Super jobs read the
-working checkouts at launch time and do not contain the proposed OpenClaw fix;
-cancel or update them deliberately on the source cluster before allowing them
-to consume GPUs.
+working checkouts at launch time. Verify their resolved config contains the
+pushed terminal-only OpenClaw policy before accepting their results.
 
 ## Source-cluster artifact map
 
@@ -480,8 +480,8 @@ or sandbox timeout.
 ## Resume checklist
 
 1. Fetch both latest PR branch tips and verify the imported package paths.
-2. Apply and unit-test the terminal-only OpenClaw tool policy described above;
-   commit and push it to Gym PR #4082.
+2. Confirm the terminal-only OpenClaw tool policy is present and the focused
+   57-test suite passes.
 3. Recreate or locate the Terminal-Bench data, task directories, verifier
    tests, and Enroot images.
 4. Configure W&B as `adlr/multi-harness-RL` with full result tables.
@@ -498,8 +498,9 @@ or sandbox timeout.
    worktrees still match their remote branches.
 
 <Warning>
-The routing implementation and focused configuration checks are pushed, but
-the terminal-only OpenClaw profile and requested Super-model Terminal-Bench
-training proof are still pending. Do not present the two pull requests as
-runtime-validated until the acceptance gates above pass.
+The routing implementation, terminal-only OpenClaw profile, and focused
+configuration checks are pushed, but the corrected Nano and requested
+Super-model Terminal-Bench training proofs are still pending. Do not present
+the two pull requests as runtime-validated until the acceptance gates above
+pass.
 </Warning>

@@ -21,7 +21,14 @@ anyterminal_openclaw:
             defaults:
               workspace: "."
           tools:
-            profile: coding
+            # Keep the initial tool schema below the policy context limit. Terminal-Bench only
+            # needs a shell; the broad coding profile also enables web, memory, sessions, cron,
+            # media, and planning tools whose schemas can overflow before the first model call.
+            profile: minimal
+            alsoAllow:
+              - exec
+            deny:
+              - session_status
 
       container_formatter: "docker://{docker_image}"
 
