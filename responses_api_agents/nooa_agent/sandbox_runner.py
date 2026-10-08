@@ -27,7 +27,7 @@ class SandboxNOOARunner:
         invocation: NOOAInvocationConfig,
         model_base_url: str,
         model_server_name: str,
-        max_policy_calls: int,
+        max_policy_calls: int | None,
     ) -> None:
         self.sandbox = sandbox
         self.workdir = workdir

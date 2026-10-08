@@ -61,8 +61,10 @@ def complete_files(r: SandboxNOOARunner, s: MemorySandbox, error: RunnerError | 
 
 
 @pytest.mark.asyncio
-async def test_launch_quotes_paths_runs_in_task_and_preserves_cookies() -> None:
+@pytest.mark.parametrize("limit", [None, 3])
+async def test_launch_quotes_paths_runs_in_task_and_preserves_cookies(limit: int | None) -> None:
     r, s = runner()
+    r.max_policy_calls = limit
     await r.prepare()
     assert r.directory.startswith("/tmp/nemo-gym-nooa/")
     assert r.directory + "/supervisor.py" in s.files
@@ -76,6 +78,7 @@ async def test_launch_quotes_paths_runs_in_task_and_preserves_cookies() -> None:
     assert "stdout.log" in command and "stderr.log" in command
     assert s.exec.await_args.kwargs == {"cwd": "/app", "timeout_s": None}
     launch = SandboxInput.model_validate_json(s.files[r.directory + "/input.json"])
+    assert launch.max_policy_calls == limit
     assert launch.request.rollout_id == request.rollout_id
     assert launch.request.model_url_path == request.model_url_path
     assert request.resource_cookies == result.resource_cookies == {"resource": "new"}
