@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# EnvironmentServer sessions. Use openclaw_local_agent.yaml for host CLI execution.
+# Agent sessions run in a sandbox; unseeded requests run the local CLI.
+# openclaw_local_agent.yaml provides an alternative local provider/Resources example.
 openclaw_agent:
   responses_api_agents:
     openclaw_agent:

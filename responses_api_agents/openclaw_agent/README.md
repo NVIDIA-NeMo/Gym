@@ -94,8 +94,11 @@ The host installer settings above apply only to local CLI calls, with installati
 until the first call. Native sessions use their separate in-sandbox installer and the exact
 configured `openclaw_version`; host environment overrides do not change that runtime.
 
-Use `configs/openclaw_agent.yaml` for EnvironmentServer sessions and
-`configs/openclaw_local_agent.yaml` for the local CLI settings above.
+`configs/openclaw_agent.yaml` supports both paths: an agent session selects sandbox
+execution; no agent session selects the local CLI. Invalid or closed sessions are
+rejected, never retried on the host. `configs/openclaw_local_agent.yaml` is an
+alternative local provider/Resources example, not a required routing switch.
+Local `/run` requires a Resources binding; direct `/v1/responses` does not.
 
 
 ## Native EnvironmentServer sessions
