@@ -16,7 +16,7 @@ from time import monotonic
 from typing import Any, Literal
 
 import yaml
-from pydantic import Field, model_validator
+from pydantic import Field, PositiveFloat, model_validator
 
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -91,6 +91,14 @@ class EnvironmentConfig(Settings):
     efs_logs_host_path: str | None
     efs_logs_init_image: str
     task_images: TaskImages = Field(default_factory=TaskImages)
+    # A separate verifier environment that declares no cpus/memory_mb gets the agent environment's
+    # values instead of the provider default. Harbor leaves them unset (no limit on Docker).
+    verifier_resources_from_agent: bool = False
+    # Short task name -> verifier timeout (seconds) replacing the package's [verifier].timeout_sec.
+    verifier_timeout_overrides: dict[str, PositiveFloat] = Field(default_factory=dict)
+
+    def verifier_timeout_sec(self, task: Task) -> float:
+        return self.verifier_timeout_overrides.get(task.name.split("/")[-1], task.config.verifier.timeout_sec)
 
 
 class HealthcheckError(RuntimeError):
@@ -104,6 +112,15 @@ class Environment:
         self.session_id = session_id
         self.directory = Path(directory)
         self.settings = task.config.verifier_environment if verifier else task.config.environment
+        if verifier and config.verifier_resources_from_agent:
+            agent = task.config.environment
+            self.settings = self.settings.model_copy(
+                update={
+                    field: getattr(agent, field)
+                    for field in ("cpus", "memory_mb")
+                    if getattr(self.settings, field) is None
+                }
+            )
         self.environment_dir = task.path / ("tests" if verifier else "environment")
         # Like Harbor, a separate verifier without its own environment reuses the task image.
         role = "verifier" if verifier and task.config.verifier.environment is not None else "agent"

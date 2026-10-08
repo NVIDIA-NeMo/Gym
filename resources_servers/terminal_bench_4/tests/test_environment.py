@@ -135,6 +135,29 @@ def test_specs_keep_resource_units_and_task_deployment(tmp_path, monkeypatch, ag
         assert role.build_spec().metadata["nemo-gym.nvidia.com/resource-pool"] == pool
 
 
+@pytest.mark.parametrize("from_agent", [False, True])
+def test_resource_less_verifiers_can_inherit_agent_resources(tmp_path, monkeypatch, from_agent):
+    env, *_ = make_environment(
+        tmp_path,
+        monkeypatch,
+        config={"verifier_resources_from_agent": from_agent},
+        task_config={"verifier": {"environment": {"docker_image": "public/verifier", "cpus": 8}}},
+    )
+    resources = Environment(env.task, env.config, "verify", tmp_path, verifier=True).build_spec().resources
+    # A value the verifier declares always wins; only unset ones come from the agent.
+    assert resources.cpu == 8
+    assert resources.memory_mib == (4096 if from_agent else None)
+    assert env.task.config.verifier.environment.memory_mb is None
+
+
+def test_verifier_timeout_overrides_apply_by_short_task_name(tmp_path, monkeypatch):
+    env, *_ = make_environment(tmp_path, monkeypatch, config={"verifier_timeout_overrides": {"test": 1800}})
+    assert env.config.verifier_timeout_sec(env.task) == 1800
+    assert environment_config().verifier_timeout_sec(env.task) == env.task.config.verifier.timeout_sec
+    with pytest.raises(ValueError):
+        environment_config(verifier_timeout_overrides={"test": 0})
+
+
 async def test_cpu_compose_services_follow_gpu_verifier_deployment(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENSANDBOX_DOMAIN_GPU", "gpu.invalid")
     monkeypatch.setenv("OPENSANDBOX_API_KEY_GPU", "gpu-credential")

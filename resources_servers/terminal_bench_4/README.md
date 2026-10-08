@@ -93,6 +93,15 @@ An image declared by the package always wins. A separate verifier without
 `[verifier.environment]` uses the agent image, as in Harbor. A role with no image fails at
 seed, before allocation.
 
+Two opt-in verifier settings adapt packages to a deployment. Both default to the package
+values:
+
+- `environment.verifier_resources_from_agent: true` gives a separate verifier environment
+  that declares no CPUs or memory the agent environment's values. Without it, the provider
+  default applies.
+- `environment.verifier_timeout_overrides: {<task>: <seconds>}` replaces a task's
+  `[verifier].timeout_sec`. An applied override is recorded in diagnostics.
+
 For local checks on a workstation, a single-container task can also use Gym's `docker`
 sandbox provider. An offline verifier then runs with `docker run --network none`. EFS logs
 and Compose still require OpenSandbox.
