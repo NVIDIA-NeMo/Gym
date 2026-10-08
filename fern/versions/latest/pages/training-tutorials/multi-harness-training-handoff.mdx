@@ -24,10 +24,10 @@ The P0 harnesses are:
 Both repositories use the branch
 `ehosseiniasl/multi-harness-training-routing`.
 
-| Repository | Pull request | Validated implementation head |
+| Repository | Pull request | Minimum required PR head |
 |---|---|---|
 | NeMo Gym | [NVIDIA-NeMo/Gym#4082](https://github.com/NVIDIA-NeMo/Gym/pull/4082) | `a1b3466cad5f68a5c396bb834804326a37caa4ed` |
-| NeMo RL | [NVIDIA-NeMo/RL#4521](https://github.com/NVIDIA-NeMo/RL/pull/4521) | `8bf35a990eb72d313f88d7af339099f1e459b003` |
+| NeMo RL | [NVIDIA-NeMo/RL#4521](https://github.com/NVIDIA-NeMo/RL/pull/4521) | `85c7997529c6db3601420c6278ccc47877bd4720` |
 
 Before this handoff page was added, each local head exactly matched its fork
 branch and both Git worktrees were clean. The Gym documentation commit is newer
@@ -50,7 +50,7 @@ git remote add contributor https://github.com/ehosseiniasl/NeMo-RL.git
 git fetch contributor ehosseiniasl/multi-harness-training-routing
 git switch -c ehosseiniasl/multi-harness-training-routing \
   --track contributor/ehosseiniasl/multi-harness-training-routing
-git merge-base --is-ancestor 8bf35a990eb72d313f88d7af339099f1e459b003 HEAD
+git merge-base --is-ancestor 85c7997529c6db3601420c6278ccc47877bd4720 HEAD
 ```
 
 ## Implemented contract
@@ -205,6 +205,8 @@ From the RL checkout, load the two-node recipe and confirm:
 - OpenCode limits are context `15872`, input `7680`, output `8192`. The
   512-token difference from vLLM's 16K limit is required for OpenCode's
   automatic compaction request.
+- OpenClaw context is `15872` for the same serving-boundary guard; its output
+  limit is adapted from the request's `8192`-token generation budget.
 - the fan-out list contains exactly the four P0 harnesses
 - W&B and full Gym result tables are enabled
 
@@ -297,8 +299,15 @@ autotuning. A second diagnostic run
 real two-sibling dispatch through all four harnesses, but showed that an
 OpenCode automatic-compaction prompt could still reach the full advertised
 16K boundary and leave no serving token. Commit `8bf35a99` therefore advertises
-15,872 tokens to OpenCode while retaining vLLM's 16,384-token hard limit. Both
-runs are diagnostic evidence only, not passing training runs.
+15,872 tokens to OpenCode while retaining vLLM's 16,384-token hard limit.
+
+A subsequent run
+([`ygai6fjs`](https://wandb.ai/adlr/multi-harness-RL/runs/ygai6fjs)) made the
+request owner unambiguous: both OpenClaw siblings rendered 16,384-token prompts,
+received HTTP 400, and finalized with `rollout_failed:no_records`. Commit
+`85c79975` applies the 15,872-token advertised context to OpenClaw in all three
+multi-harness recipes. These runs are diagnostic evidence only, not passing
+training runs.
 
 An older Qwen3-0.6B plumbing run is available as
 [`zx1q7m3q`](https://wandb.ai/adlr/multi-harness-RL/runs/zx1q7m3q), but its
@@ -310,7 +319,7 @@ were submitted but had not started:
 
 | Job | Topology | State at handoff | Reason |
 |---|---|---|---|
-| `2177704` | Nano sync, 2 nodes | Pending | `Priority` |
+| `2177783` | Nano sync, 2 nodes | Pending | `Priority` |
 | `2172269` | Super sync, 8 nodes | Pending | `Priority` |
 | `2172270` | Super async, 16 nodes | Pending | `Priority` |
 
