@@ -258,7 +258,7 @@ roles:
       attention-backend: trtllm_mha
       context-length: 262144
       cuda-graph-max-bs-decode: 256
-      disaggregation-decode-extra-slots: 256
+      disaggregation-decode-extra-slots: 128
       disaggregation-transfer-backend: nixl
       dtype: bfloat16
       enable-cache-report: true
