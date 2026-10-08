@@ -140,10 +140,12 @@ the reasoning and tool history OpenCode sends through Chat Completions.
 ## Runtime and cleanup
 
 The supported native runtime is Linux glibc or musl, x86_64 or aarch64, with Bash and Python 3.8+
-(including SQLite and `fcntl`). Online installation needs GitHub release access and
-tar/gzip. Missing curl and CA certificates are installed only when root and apt-get or apk are
-available. Other images must include them. Setup failures report the command, exit
-code, and stderr.
+(including SQLite and `fcntl`). Session setup bootstraps missing Python and Bash
+using POSIX sh before running the Bash installer. Online installation needs GitHub
+release access and tar/gzip. Missing Python, Bash, curl, and CA certificates are
+installed only when root and apt-get or apk are available; other images must include
+them. Existing tools are preserved. Setup failures report the command, exit code,
+provider error, stdout, and stderr.
 
 For offline setup, `remote_opencode_binary_path` can identify a binary already inside
 the sandbox. Optional staged installer and dual-binary fields remain available; the
