@@ -3266,7 +3266,7 @@ Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if not config.disable_aggregation and not config.disable_health_check:
-            from nemo_gym.rollout_health import JournalHealthUnavailable, format_health_report, run_health_checks
+            from nemo_gym.rollout_health import format_health_report, run_health_checks
 
             try:
                 health_result = await asyncio.to_thread(
@@ -3275,8 +3275,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
                 )
-            except JournalHealthUnavailable as error:
-                print(f"Rollout health checks skipped: {error}")
             except Exception:
                 logger.exception(
                     "Rollout health checks failed after collection; rollout artifacts are still available."
@@ -4435,7 +4433,7 @@ Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if not config.disable_health_check:
-            from nemo_gym.rollout_health import JournalHealthUnavailable, format_health_report, run_health_checks
+            from nemo_gym.rollout_health import format_health_report, run_health_checks
 
             try:
                 health_result = await asyncio.to_thread(
@@ -4445,8 +4443,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
                 )
-            except JournalHealthUnavailable as error:
-                print(f"Rollout health checks skipped: {error}")
             except Exception:
                 logger.exception(
                     "Rollout health checks failed after aggregation; aggregate artifacts are still available."

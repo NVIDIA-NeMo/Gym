@@ -134,6 +134,9 @@ class _LineSlice:
     ordinal: int
     source_index: int
     line_number: int
+    file_identity: tuple[int, int]
+    expected_identity: tuple[str | None, str, int] | None = None
+    legacy_attempt_index: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

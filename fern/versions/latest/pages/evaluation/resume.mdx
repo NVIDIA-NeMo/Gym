@@ -157,11 +157,9 @@ reconciliation and its partial bytes are removed before appending. Malformed com
 An old materialized inventory alone does not establish validated completion coverage during aggregation.
 Merged rollout files are selected-result projections; keep the original shard artifacts for further recovery.
 
-Every newly collected run has recovery history, including its first collection. Manifest-aware health reads are a
-follow-up, so automatic checks print a short skip message for all these runs;
-collection and scoring still finish. Use `+disable_health_check=true` to skip those checks, or run health checks
-on the merged selected-result projection written by `gym eval aggregate`. Standalone health checks reject a
-manifest-backed source rather than treating superseded attempts as extra samples.
+Health reports from collection, aggregation (with or without merging), and standalone health checks inspect the same
+selected completed attempts. Older successes superseded by a failed or unknown attempt are excluded. Passing a failure
+sidecar directly to health checks still inspects its saved diagnostic records.
 
 Known runtime connection references (for example `${policy_base_url}` and `${policy_api_key}` inside agent client
 settings) do not change experiment identity when their values change. Model names and task parameters still do.

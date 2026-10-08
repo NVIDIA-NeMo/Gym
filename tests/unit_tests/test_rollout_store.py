@@ -504,22 +504,6 @@ async def test_journal_reverification_waits_for_followup_without_changing_files(
     assert snapshot(output) == before
 
 
-@pytest.mark.parametrize("alias", [False, True])
-def test_journal_health_waits_for_followup_without_reporting_stale_results(prepared_run, alias):
-    from nemo_gym.rollout_health import run_health_checks
-
-    output, prepare = prepared_run
-    RolloutStore.start_or_resume(output, prepare, resume=False)
-    if alias:
-        shortcut = output.with_name("shortcut.jsonl")
-        shortcut.symlink_to(output)
-        output = shortcut
-    before = snapshot(output)
-    with pytest.raises(ConfigError, match="Manifest-aware health reports are a follow-up"):
-        run_health_checks(output, workers=1)
-    assert snapshot(output) == before
-
-
 @pytest.mark.parametrize("artifact", ["output", "failures"])
 @pytest.mark.parametrize("complete_corruption", [False, True])
 def test_migration_repairs_only_validated_incomplete_tails(prepared_run, artifact, complete_corruption):
