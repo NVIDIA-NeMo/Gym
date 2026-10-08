@@ -25,7 +25,7 @@ if [[ -z "${NEMO_GYM_RUN_ID:-}" && "${VLLM_ENGINES_PER_NODE:-1}" != 4 ]]; then
     exit 1
 fi
 
-# bf16 KV: fp8 KV produced degenerate generations on GB300 when served with P/D.
+# fp8 KV is for aggregated serving; with P/D on GB300 it produced degenerate generations.
 # The fine-grained Mamba prefix cache lets the next agent turn reuse the previous turn's full context.
 VLLM_COMMON_ARGS=(
     --trust-remote-code
@@ -38,9 +38,9 @@ VLLM_COMMON_ARGS=(
     --reasoning-parser nemotron_v3
     --enable-chunked-prefill
     --enable-prefix-caching
-    --kv-cache-dtype auto
+    --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
-    --no-async-scheduling
+    --async-scheduling
     --block-size 128
     --prefix-match-unit 128
     --mamba-cache-mode align
