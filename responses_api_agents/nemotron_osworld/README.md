@@ -64,6 +64,15 @@ Do not launch `cc_app.py` by itself for training. Use the companion NeMo RL
 which composes the training model server, agent, resources server, and
 OpenSandbox configs in the required order.
 
+## Validated long-running training
+
+This Gym implementation is the companion environment for
+[NeMo RL PR 3966](https://github.com/NVIDIA-NeMo/RL/pull/3966). The aligned
+asynchronous Molt configuration (`B=8`, `K=8`) was resumed through training
+step 300 (2,400 consumed samples and 124,133,782 valid tokens). The shared
+component setup lock, context-exhaustion handling, and compaction-serving
+fixes in this branch are part of that validated runtime.
+
 # Licensing information
 Code: Apache 2.0
 Data: Apache 2.0
