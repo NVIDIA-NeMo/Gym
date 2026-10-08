@@ -46,7 +46,7 @@ Save as `run.yaml` in the Gym checkout:
 ```yaml
 config_paths:
   - resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml
-  - responses_api_agents/openclaw_agent/configs/openclaw_agent_native.yaml
+  - responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
 environment_routing_mode: legacy
@@ -58,10 +58,10 @@ single_agent_turn_legacy:
       resources_server:
         name: terminal_bench_2_1_resources_server
       agent_server:
-        name: openclaw_agent_native
+        name: openclaw_agent
       resources_tool_transports: []
 
-openclaw_agent_native:
+openclaw_agent:
   responses_api_agents:
     openclaw_agent:
       context_window: 32768
@@ -129,7 +129,7 @@ In a second terminal, in the same checkout and Python environment:
 
 ```bash
 gym eval run --no-serve --config run.yaml --config model-provider.yaml ++use_absolute_ip=true \
-  --agent openclaw_agent_native --input results/openclaw-tb21-input.jsonl \
+  --agent openclaw_agent --input results/openclaw-tb21-input.jsonl \
   --output results/openclaw-tb21-rollouts.jsonl --limit 1 --num-repeats 1 --concurrency 1
 ```
 

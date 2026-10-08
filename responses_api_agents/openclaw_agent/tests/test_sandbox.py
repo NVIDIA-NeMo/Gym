@@ -1380,7 +1380,7 @@ async def test_independent_configs_route_prepared_rows_through_environment_run(s
                 {
                     "config_paths": [
                         "resources_servers/swebench_pro/configs/swebench_pro.yaml",
-                        "responses_api_agents/openclaw_agent/configs/openclaw_agent_native.yaml",
+                        "responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml",
                         "environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml",
                     ],
                     "single_agent_turn_legacy": {
@@ -1390,7 +1390,7 @@ async def test_independent_configs_route_prepared_rows_through_environment_run(s
                                     "type": "resources_servers",
                                     "name": "swebench_pro_resources_server",
                                 },
-                                "agent_server": {"type": "responses_api_agents", "name": "openclaw_agent_native"},
+                                "agent_server": {"type": "responses_api_agents", "name": "openclaw_agent"},
                             }
                         }
                     },

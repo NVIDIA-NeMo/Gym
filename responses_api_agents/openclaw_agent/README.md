@@ -94,7 +94,8 @@ The host installer settings above apply only to local CLI calls, with installati
 until the first call. Native sessions use their separate in-sandbox installer and the exact
 configured `openclaw_version`; host environment overrides do not change that runtime.
 
-See `configs/openclaw_agent.yaml`.
+Use `configs/openclaw_agent.yaml` for EnvironmentServer sessions and
+`configs/openclaw_local_agent.yaml` for the local CLI settings above.
 
 
 ## Native EnvironmentServer sessions
@@ -110,7 +111,7 @@ with an already prepared SWE-Pro JSONL and a reachable policy model, create a ru
 ```yaml
 config_paths:
   - resources_servers/swebench_pro/configs/swebench_pro.yaml
-  - responses_api_agents/openclaw_agent/configs/openclaw_agent_native.yaml
+  - responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
 # Route existing prepared flat rows through native session orchestration.
@@ -121,18 +122,18 @@ single_agent_turn_legacy:
   environment_servers:
     single_agent_turn_legacy:
       resources_server: {type: resources_servers, name: swebench_pro_resources_server}
-      agent_server: {type: responses_api_agents, name: openclaw_agent_native}
+      agent_server: {type: responses_api_agents, name: openclaw_agent}
 ```
 
-Save it as `native-run.yaml`, then run:
+Save it as `run.yaml`, then run:
 
 ```bash
-gym env start --config native-run.yaml --model-type openai_model
+gym env start --config run.yaml --model-type openai_model
 
 NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1 \
-  gym eval run --no-serve --config native-run.yaml --model-type openai_model \
-  --agent openclaw_agent_native \
-  --input /path/to/prepared-swe-pro.jsonl --output outputs/openclaw-native.jsonl --limit 1
+  gym eval run --no-serve --config run.yaml --model-type openai_model \
+  --agent openclaw_agent \
+  --input /path/to/prepared-swe-pro.jsonl --output outputs/openclaw-rollout.jsonl --limit 1
 ```
 
 Supply the sandbox provider config through `env.yaml` or an additional `--config` file, and ensure
@@ -156,7 +157,7 @@ route is embedded in OpenClaw's Chat Completions provider configuration to retai
 
 The native adapter sets OpenClaw's provider `timeoutSeconds` to `model_timeout_seconds` (600 seconds
 by default). This raises the upstream 120-second idle watchdog so buffered reasoning responses can
-finish. For example, set `openclaw_agent_native.responses_api_agents.openclaw_agent.model_timeout_seconds`
+finish. For example, set `openclaw_agent.responses_api_agents.openclaw_agent.model_timeout_seconds`
 to `1200` for a 20-minute model-call limit. Increase the separate `timeout` and EnvironmentServer episode
 deadline when a task needs more total time; increasing those alone does not raise the model-idle limit.
 
