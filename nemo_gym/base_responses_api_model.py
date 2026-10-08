@@ -257,11 +257,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
+        """Allow adapters to retain an explicit upstream-status compatibility policy."""
+        return True
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         @app.exception_handler(ClientResponseError)
         async def upstream_error(request: Request, error: ClientResponseError) -> Response:
+            if not self._should_propagate_upstream_http_error(error):
+                raise error
             # Preserve the provider's structured error while the buffered response
             # is still uncommitted, including context limits and rate limits.
             return Response(

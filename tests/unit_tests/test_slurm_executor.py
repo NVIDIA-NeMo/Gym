@@ -406,3 +406,19 @@ class TestValidateMounts:
                 raise AssertionError("no mounts, so there is nothing to check")
 
         _validate_mounts(_config_with_driver_mounts(tmp_path, []), _Explodes())
+
+
+def test_a_missing_gym_install_ref_fails_before_anything_is_copied_or_queued(tmp_path, monkeypatch):
+    conn = _FakeConnection([])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    def reject(config):
+        raise ValueError("ref not found")
+
+    monkeypatch.setattr(slurm_module, "validate_gym_install_ref", reject)
+
+    with pytest.raises(ValueError, match="ref not found"):
+        SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
+
+    assert conn.commands == []

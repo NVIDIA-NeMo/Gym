@@ -5,8 +5,10 @@ runners, and an explicit compatibility mode for legacy Resources lifecycles.
 
 Native sessions use ordinary sandbox `exec`, not a PTY. The supervisor enforces the
 runner deadline and confirms descendant cleanup before verification; uncertain
-cleanup remains retryable and blocks verification. The task image needs Linux,
-Bash and Python 3.8+; the installer selects a glibc or musl OpenCode release binary.
+cleanup remains retryable and blocks verification. The task image needs Linux.
+Session setup installs missing Python and Bash with apt-get or apk when running
+as root; otherwise preinstall Python 3.8+ and Bash. Existing tools are preserved.
+The installer selects a glibc or musl OpenCode release binary.
 
 `context_window` and `max_output_tokens` are independent native settings. For a
 bounded 262144-context smoke, use `max_output_tokens: 32768`; this is a per-call

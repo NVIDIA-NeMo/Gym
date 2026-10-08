@@ -412,7 +412,7 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
         if ptype == "step-finish":
             tokens = part.get("tokens") or {}
             cache = tokens.get("cache") or {}
-            input_tokens += int(tokens.get("input") or 0) + int(cache.get("read") or 0)
+            input_tokens += int(tokens.get("input") or 0) + int(cache.get("read") or 0) + int(cache.get("write") or 0)
             output_tokens += int(tokens.get("output") or 0) + int(tokens.get("reasoning") or 0)
             reasoning_tokens += int(tokens.get("reasoning") or 0)
         elif roles.get(row["message_id"]) == "assistant" and ptype == "text" and (part.get("text") or "").strip():
@@ -537,7 +537,9 @@ def opencode_export_usages(opencode_export: Dict[str, Any]) -> List[NeMoGymRespo
             continue
 
         usage = NeMoGymResponseUsage(
-            input_tokens=token_info["input"],
+            input_tokens=token_info["input"]
+            + (token_info.get("cache") or {}).get("read", 0)
+            + (token_info.get("cache") or {}).get("write", 0),
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=token_info["cache"]["read"]),
             output_tokens=token_info["output"] + token_info["reasoning"],
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=token_info["reasoning"]),

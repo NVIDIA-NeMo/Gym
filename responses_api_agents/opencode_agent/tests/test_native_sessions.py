@@ -175,6 +175,38 @@ def active_sessions(agent):
     return {key: record.state for key, record in agent._session_records.items() if record.state is not None}
 
 
+@pytest.mark.parametrize("stage", ["prepare", "install"])
+@pytest.mark.parametrize("error_type", ["timeout", "sandbox"])
+@pytest.mark.parametrize("owned", [False, True])
+async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage, error_type, owned):
+    agent, sandbox = setup
+    request = Request({"type": "http", "session": {}})
+    body = seed()
+    if owned:
+        agent.config.sandbox_provider = "sandbox"
+        agent.config.sandbox_config = {"image": "test-image", "workdir": "/app"}
+        body = body.model_copy(update={"sandbox_access": None})
+        sandbox.start = AsyncMock()
+    ok = SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+    error = SimpleNamespace(return_code=0, error_type=error_type, stdout="bootstrap output", stderr="provider failed")
+    sandbox.exec.side_effect = ([ok] if owned else []) + ([error, ok] if stage == "prepare" else [ok, error, ok])
+    with patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox) as sandbox_class:
+        sandbox_class.connect = AsyncMock(return_value=sandbox)
+        with pytest.raises(RuntimeError, match=f"error={error_type}") as failed:
+            await agent.seed_agent_session(request, body)
+    assert "bootstrap output" in str(failed.value)
+    assert "provider failed" in str(failed.value)
+    assert not request.session
+    sandbox.launch.assert_not_awaited()
+    if owned:
+        sandbox.start.assert_awaited_once()
+        sandbox.stop.assert_awaited_once()
+    else:
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
+    assert not any(record.state is not None for record in agent._session_records.values())
+
+
 def close_body(session_id):
     return {"agent_session_id": session_id, "episode_id": seed().episode_id.model_dump()}
 
@@ -888,7 +920,7 @@ async def test_resolved_workdir_check_runs_before_session_files_are_created(setu
     agent, sandbox = setup
     await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
     command = shlex.split(sandbox.exec.await_args_list[0].args[0])
-    script = command[3]
+    script = command[command.index("-I") + 2]
     sessions = tmp_path / "sessions"
     sessions.mkdir()
     workdir = tmp_path / "task"

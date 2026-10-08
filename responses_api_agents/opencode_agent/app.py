@@ -121,6 +121,38 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
+def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
+    # Bootstrap with POSIX sh; the runtime installer itself requires Bash.
+    bootstrap = """set -eu
+set --
+command -v python3 >/dev/null 2>&1 || set -- "$@" python3
+command -v bash >/dev/null 2>&1 || set -- "$@" bash
+if [ "$#" -gt 0 ]; then
+    [ "$(id -u)" = 0 ] || { echo "Native OpenCode requires $*: preinstall these tools or use a root image." >&2; exit 1; }
+    if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache "$@"
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+    else
+        echo "Native OpenCode requires $*: preinstall these tools (automatic installation requires apt-get or apk)." >&2
+        exit 1
+    fi
+fi
+"""
+    validate_paths = (
+        "from pathlib import Path; import sys; "
+        "workdir,*roots=[Path(p).resolve() for p in sys.argv[1:]]; "
+        "assert workdir.is_dir(), 'OpenCode task workdir is missing'; "
+        "assert all(workdir != root and workdir not in root.parents and root not in workdir.parents "
+        "for root in roots), 'OpenCode runtime/session storage overlaps the task workdir'"
+    )
+    return (
+        bootstrap + f"python3 -I -c {quote(validate_paths)} {quote(workdir)} "
+        f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)} && mkdir -p {quote(directory)}"
+    )
+
+
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     execution_mode: Literal["local", "sandbox", "legacy_sandbox"] = "local"
@@ -269,7 +301,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 model,
                 {
                     "name": self.config.model,
-                    "interleaved": {"field": "reasoning"},
+                    # Gym model servers emit and accept `reasoning_content`; OpenCode replays assistant
+                    # history under this field, and Gym rejects an unknown `reasoning` key with a 422.
+                    "interleaved": {"field": "reasoning_content"},
                     "limit": {"context": self.config.context_window, "output": self.config.max_output_tokens},
                 },
             )
@@ -665,19 +699,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     raise RuntimeError(
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
-            # Resolve inside the sandbox: host-side lexical checks cannot detect task symlinks.
-            validate_paths = (
-                "from pathlib import Path; import sys; "
-                "workdir,*roots=[Path(p).resolve() for p in sys.argv[1:]]; "
-                "assert workdir.is_dir(), 'OpenCode task workdir is missing'; "
-                "assert all(workdir != root and workdir not in root.parents and root not in workdir.parents "
-                "for root in roots), 'OpenCode runtime/session storage overlaps the task workdir'"
-            )
-            command = (
-                f"python3 -I -c {quote(validate_paths)} {quote(workdir)} "
-                f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)} && mkdir -p {quote(directory)}"
-            )
-            result = await sandbox.exec(command, timeout_s=30)
+            command = _sandbox_prepare_command(workdir, directory, runtime)
+            result = await sandbox.exec(command, timeout_s=self.config.setup_timeout)
             self._check_native_setup(command, result)
             prepared_directory = True
             installer = "install_opencode_runtime.sh"
