@@ -775,9 +775,19 @@ class TestValidateSamplesAndAggregateMetrics:
         processor._validate_samples_and_aggregate_metrics_single_sample(
             state=state,
             sample_idx=12345,
-            sample_dict_str='{"some irrelevant key": 2}',
+            sample_dict_str='["not", "an", "object"]',
         )
         assert state.offending_example_idxs == [12345]
+
+        # A row that is not a single-agent run request is still an example; its task schema validates it.
+        state = DatasetValidatorState()
+        processor._validate_samples_and_aggregate_metrics_single_sample(
+            state=state,
+            sample_idx=12345,
+            sample_dict_str='{"some irrelevant key": 2}',
+        )
+        assert state.offending_example_idxs == []
+        assert state.metrics.number_of_examples == 1
 
         state = DatasetValidatorState()
         processor._validate_samples_and_aggregate_metrics_single_sample(
@@ -833,7 +843,6 @@ class TestValidateSamplesAndAggregateMetrics:
             state=state,
             sample_idx=0,
             sample_dict_str=json.dumps({"environment_owned_input": "value"}),
-            require_responses=False,
         )
 
         output = state.metrics.aggregate().model_dump_for_output()
@@ -852,7 +861,8 @@ class TestValidateSamplesAndAggregateMetrics:
                 "Standard deviation": 0,
             }
         assert "Number of tasks" not in output
-        assert "Json-dumped task-input words (proxy for token count)" not in output
+        # A row that is not a run request reports its size as task input, so nested changes are fingerprinted.
+        assert output["Json-dumped task-input words (proxy for token count)"]["Total # non-null values"] == 1
 
     def test_validate_materialized_task_metrics_with_owner_hook(self) -> None:
         processor = TrainDataProcessor()
@@ -1178,7 +1188,7 @@ class TestNumRepeatsMetricsAggregation:
         test_file = tmp_path / "test_data.jsonl"
         test_data = [
             '{"responses_create_params": {"input": [{"role": "user", "content": "test1"}]}, "temperature": 0.5}',
-            '{"invalid": "sample"}',  # Invalid sample for testing enumeration
+            '"not an object"',  # Invalid sample for testing enumeration
         ]
         test_file.write_text("\n".join(test_data) + "\n")
 

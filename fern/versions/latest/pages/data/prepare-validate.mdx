@@ -334,10 +334,14 @@ Metrics files are written to two locations:
 
 | Metric | Description |
 |--------|-------------|
-| Number of examples | Valid sample count |
+| Number of examples | Count of rows that are JSON objects |
 | Number of tools | Tool count stats (avg/min/max/stddev) |
 | Number of turns | User messages per sample |
 | Temperature | Temperature parameter stats |
+| Json-dumped task-input words (proxy for token count) | Size of rows that are not run requests: the `task_input` of materialized rows, and the fields of other rows, such as task rows for an Environment Server with its own input. Reported only for datasets that have such rows. |
+
+Tools, turns, and temperature come from `responses_create_params`, so they cover only rows that are single-agent run requests.
+Each top-level numeric or string field of a row also gets a summary under its own name.
 
 <Accordion title="Example metrics file">
 
