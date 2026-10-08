@@ -57,6 +57,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import AGENT_RUN_ERROR, AGENT_TIMEOUT, PROVIDER_OOM_KILLED, VERIFIER_ERROR
 from nemo_gym.global_config import (
     CACHE_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
@@ -311,6 +312,10 @@ class SWEBenchMetrics(BaseModel):
     resolved: Optional[bool] = None
     patch_exists: Optional[bool] = None
     model_patch: Optional[str] = None
+
+    # Mirror BaseVerifyResponse's failure fields so the worker's verdict reaches the response.
+    failure_kind: Optional[str] = None
+    failure_reason: Optional[str] = None
 
     # Failure-mode signals used to decide mask_sample downstream.
     agent_error_kind: Optional[str] = None
@@ -2576,6 +2581,11 @@ class ActiveContainerCommand(BaseModel):
     watchdog_stats: Dict[str, Any] = Field(default_factory=dict)
 
 
+_CONTAINER_COMMAND_POLL_INTERVAL_S = 5.0
+_OPENHANDS_COMPLETION_MARKER = "Instances processed: 100%"
+_OPENHANDS_OUTPUT_GRACE_S = 60.0
+
+
 class RunOpenHandsAgent(BaseModel):
     config: SWEBenchWrapperInstanceConfig
 
@@ -2721,14 +2731,70 @@ class RunOpenHandsAgent(BaseModel):
             )
         return active_command
 
+    async def _terminate_lingering_process(self, active_command: ActiveContainerCommand) -> None:
+        """SIGKILL a container whose useful work is done but whose process lingers."""
+        if active_command.process.returncode is not None:
+            return
+        _kill_container_tree(active_command.process.pid)
+        try:
+            active_command.process.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(active_command.process.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            pass
+
     async def _finish_container_command(
         self, active_command: ActiveContainerCommand, command: ExecuteContainerCommandArgs
     ) -> str:
         data_point = self.config.problem_info
+        terminated_after_completion = False
+        completion_marker_seen_at: Optional[float] = None
 
         try:
-            # Wait for completion with timeout
-            await asyncio.wait_for(active_command.process.communicate(), timeout=command.timeout)
+            # Wait for completion with timeout, polling so a finished-but-lingering
+            # agent can be rescued. This happens when a command is left running.
+            # Without the polling rescue, such episodes spend their full timeout
+            # and are reported as failures, despite having valid output files.
+            deadline = asyncio.get_running_loop().time() + command.timeout
+            while active_command.process.returncode is None:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                try:
+                    await asyncio.wait_for(
+                        active_command.process.wait(),
+                        timeout=min(_CONTAINER_COMMAND_POLL_INTERVAL_S, remaining),
+                    )
+                except asyncio.TimeoutError:
+                    if command.mode != "agent":
+                        continue
+
+                    active_command.log_file.flush()
+                    log_text = active_command.log_file_path.read_text(errors="replace")
+                    if _OPENHANDS_COMPLETION_MARKER in log_text:
+                        now = asyncio.get_running_loop().time()
+                        if completion_marker_seen_at is None:
+                            completion_marker_seen_at = now
+                        pred_files = glob.glob(command.expected_file_pattern, recursive=True)
+                        complete_pred_files = []
+                        for pred_file in pred_files:
+                            try:
+                                orjson.loads(Path(pred_file).read_text().strip())
+                                complete_pred_files.append(pred_file)
+                            except (OSError, orjson.JSONDecodeError):
+                                continue
+                        if complete_pred_files:
+                            await self._terminate_lingering_process(active_command)
+                            terminated_after_completion = True
+                            break
+                        if now - completion_marker_seen_at >= _OPENHANDS_OUTPUT_GRACE_S:
+                            await self._terminate_lingering_process(active_command)
+                            raise RuntimeError(
+                                "OpenHands finished without output or with incomplete output; "
+                                "terminated its lingering container process group"
+                            )
         except asyncio.TimeoutError:
             if active_command.process.returncode is None:
                 _kill_container_tree(active_command.process.pid)
@@ -2749,7 +2815,7 @@ class RunOpenHandsAgent(BaseModel):
                 f"Peak tree RSS: {active_command.watchdog_stats.get('agent_peak_rss_mb')}MB."
             )
 
-        if active_command.process.returncode != 0:
+        if active_command.process.returncode != 0 and not terminated_after_completion:
             raise RuntimeError(
                 f"Command failed with return code {active_command.process.returncode}. "
                 f"Logs:\n{active_command.log_file_path.read_text(errors='replace')}"
@@ -2833,6 +2899,19 @@ class RunOpenHandsAgent(BaseModel):
                 metrics.openhands_run_time is not None
                 and metrics.openhands_run_time >= self.config.swebench_agent_timeout
             )
+            # An agent command that died without output is an infrastructure failure, not a model one.
+            if metrics.agent_timed_out:
+                metrics.failure_kind = AGENT_TIMEOUT
+                metrics.failure_reason = (
+                    f"agent run exceeded swebench_agent_timeout ({self.config.swebench_agent_timeout}s)"
+                )
+            elif metrics.oom_killed:
+                metrics.failure_kind = PROVIDER_OOM_KILLED
+                metrics.failure_reason = "agent container OOM-killed by the memory watchdog"
+            else:
+                metrics.failure_kind = AGENT_RUN_ERROR
+                metrics.failure_reason = f"agent command failed: {str(e)[:500]}"
+            metrics.agent_error_kind = metrics.agent_error_kind or "other"
             update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
             if self.config.debug:
                 profiler.stop()
@@ -3900,19 +3979,35 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # 4) Memory watchdog killed the agent container (OOM).
         # 5) Memory watchdog killed the eval container.
         persisted_metrics = SWEBenchMetrics.model_validate(update_and_read_metrics(params.metrics_fpath))
+        resolved_now = metrics_to_update.get("resolved", False)
         agent_error_kind = persisted_metrics.agent_error_kind
         eval_timed_out = bool(persisted_metrics.eval_timed_out)
         agent_timed_out = bool(persisted_metrics.agent_timed_out)
         oom_killed = bool(persisted_metrics.oom_killed)
         eval_oom_killed = bool(persisted_metrics.eval_oom_killed)
-        if (
-            agent_error_kind in ("max_iteration", "context_window")
-            or eval_timed_out
-            or agent_timed_out
-            or oom_killed
-            or eval_oom_killed
-        ):
+        failure_kind = persisted_metrics.failure_kind
+        failure_reason = persisted_metrics.failure_reason
+        if failure_kind is None:
+            if agent_timed_out:
+                failure_kind = AGENT_TIMEOUT
+                failure_reason = f"agent run exceeded swebench_agent_timeout ({params.swebench_agent_timeout}s)"
+            elif eval_timed_out:
+                failure_kind = VERIFIER_ERROR
+                failure_reason = f"final eval exceeded swebench_tests_timeout ({params.swebench_tests_timeout}s)"
+            elif oom_killed:
+                failure_kind = PROVIDER_OOM_KILLED
+                failure_reason = "agent container OOM-killed by the memory watchdog"
+            elif eval_oom_killed:
+                failure_kind = PROVIDER_OOM_KILLED
+                failure_reason = "eval container OOM-killed by the memory watchdog"
+            elif resolved_now and agent_error_kind in ("max_iteration", "context_window"):
+                failure_kind = f"swe_agents:agent_{agent_error_kind}"
+                failure_reason = f"patch resolved but the agent hit {agent_error_kind} without submitting"
+        # A named failure means the reward is not policy evidence; a valid wrong answer names nothing.
+        if failure_kind is not None:
             params.mask_sample = True
+            metrics_to_update["failure_kind"] = failure_kind
+            metrics_to_update["failure_reason"] = failure_reason
 
         trajectories_dir = params.persistent_dir / "trajectories"
         (
