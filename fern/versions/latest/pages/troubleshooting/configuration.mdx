@@ -172,11 +172,133 @@ Bypassing validation means invalid servers won't start. Use this only for debugg
 
 </Warning>
 
+### Agent Without an Environment Server
+
+```
+DEPRECATED: agents without an environment server: `my_simple_agent`.
+Rollout collection reaches an agent only through an environment server.
+This run generated a legacy_agent environment server for each agent above.
+Each one relays /run to its agent unchanged, so results are not affected.
+A future release will reject these configs with AgentWithoutEnvironmentServerError.
+```
+
+**When**: An agent instance has no environment server naming it in `agent_server`.
+Rollout collection reaches agents only through an environment server.
+Gym therefore generates a `legacy_agent` relay in front of the agent and logs this warning.
+Your config keeps running for now, but a future release will make this an error, so migrate it.
+
+**Fix**: Declare the environment servers in your config.
+From a NeMo Gym checkout, run the migration script on your config files or directories:
+
+```bash
+# Report what would change
+python scripts/add_legacy_agent_environment_servers.py path/to/configs/ --check
+
+# Add the blocks
+python scripts/add_legacy_agent_environment_servers.py path/to/configs/
+```
+
+The script appends a block to each config that needs one and leaves the existing content unchanged, comments included.
+It skips agents that an environment server already names.
+It also skips agents that only override fields of an agent defined elsewhere.
+Run without paths, it updates this repository's configs.
+It exits with 1 under `--check` when something needs adding, and with 2 when a file cannot be read.
+
+You can also add the block by hand.
+The warning prints the exact block for each agent; add it at the same level as the agents:
+
+```yaml
+my_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: my_simple_agent
+```
+
+For a top-level `_inherit_from` rename with one destination that still defines exactly one agent, Gym automatically points environment server references at the new name.
+The server keeps its name, so `environment_server_routes` still resolve.
+The migration script leaves these renames alone.
+If several destinations inherit the same source and remain agents, and an environment server still references the old name, Gym reports `AmbiguousAgentRenameError` with the destinations and the field to update.
+Give each new agent its own environment server by inheriting the original server and naming that agent, for example:
+
+```yaml
+variant_a_environment_server:
+  _inherit_from: my_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: variant_a
+```
+
+Apply this pattern to each variant so every agent has a declared environment server, including when `error_on_agent_without_environment_server` is enabled.
+Alternatively, point the existing server's field at one agent and ensure the other agents also have environment servers.
+Do not add a second server in front of an agent, because that makes agent-routed rows ambiguous.
+
+#### Require Declared Environment Servers
+
+To make a missing environment server an error instead (`AgentWithoutEnvironmentServerError`):
+
+```yaml
+# In env.yaml
+error_on_agent_without_environment_server: true
+```
+
+```bash
+# Or via command line
+gym env start \
+    --config config.yaml \
+    +error_on_agent_without_environment_server=true
+```
+
 ---
 
 ## Connection Errors
 
 Errors where the config is valid but an endpoint it names cannot be reached.
+
+### Head Server Unreachable
+
+```
+Error: Could not connect to the head server at http://127.0.0.1:11000. Is the head server running?
+Start it with: `gym env start`. If it is already running on a different host or port, pass
+`++head_server.host=<host>` / `++head_server.port=<port>` so this command can find it.
+```
+
+**When**: `gym eval run --no-serve` collects against servers that are already running, and found nothing
+listening at the head server address in its config. Either no `gym env start` is running, or it was started
+with a different head server address than this command is using. That address is `head_server.host` /
+`head_server.port` (default `127.0.0.1:11000`). When `head_server.host` is not set, the host is the machine's
+IP address if [`use_absolute_ip`](/reference/configuration#multi-node-configuration) is `true`, and otherwise
+`default_host` (default `127.0.0.1`), so a `gym env start` run with either setting can listen on a different
+address than a command run without it.
+
+**Fix**: Check which head server address `gym env start` used (from its config and overrides), then run
+`gym env status` with matching overrides before concluding that nothing is running. `gym env status` only
+queries the head server address in its own config, so servers running on another host or port also show
+`No NeMo Gym servers found running.`
+
+```bash
+gym env status "++head_server.port=<port>"
+```
+
+If status lists your servers, pass the same overrides to the collecting command:
+
+```bash
+gym eval run --no-serve "++head_server.port=<port>" ...
+```
+
+If status finds no servers at the matching address either, start them with `gym env start` (in another
+terminal or the background) and retry.
+
+### Gym Server Startup Timeout
+
+Gym stops waiting when its managed servers have not become ready within `server_spinup_timeout_seconds` (default 600). The error names the server instances still waiting. This bound also catches a multi-worker Uvicorn manager that remains alive while repeatedly replacing workers that fail during application construction.
+
+The budget starts when Gym begins polling its servers for readiness, which happens after it has launched them and its head server is answering. Head-server startup does not count against it. The budget covers whatever each server still has to do before it opens its port. That includes installing the server's dependencies and, for a locally launched model such as `local_vllm_model`, downloading and loading the model weights: that server waits for its inference engine before the Gym port opens. `model_endpoint_readiness_timeout_seconds` is a separate, later check of the model endpoints named in the config, so raising it does not help at this stage.
+
+Raise the value for servers with legitimately long initialization with `++server_spinup_timeout_seconds=<seconds>`, or set it to `0` to preserve an unbounded wait while debugging. The value must be a number of seconds; anything else is reported as a configuration error before any server starts. A deterministic startup exception should be fixed rather than hidden behind a larger timeout.
 
 ### Model Endpoint Unreachable
 

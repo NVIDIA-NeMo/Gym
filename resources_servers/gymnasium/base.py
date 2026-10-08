@@ -107,6 +107,10 @@ class GymnasiumServer(SimpleResourcesServer):
     ) -> tuple[Optional[str], float, bool, bool, dict]: ...
 
     async def close_session(self, session_id: Optional[str]) -> None:
+        self._cleanup_session(session_id)
+
+    def _cleanup_session(self, session_id: Optional[str]) -> None:
+        """Release state owned by a session. Safe to call repeatedly."""
         self.session_state.pop(session_id, None)
 
     @staticmethod

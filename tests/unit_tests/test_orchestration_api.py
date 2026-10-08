@@ -95,13 +95,63 @@ def test_policy_model_conflict_raises():
 
 
 def test_service_env_accepted():
-    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "bar"}}}))
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "lit:bar"}}}))
     assert config.services["svc"].env == {"FOO": "bar"}
 
 
 def test_driver_env_accepted():
-    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "env": {"KEY": "val"}}))
+    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "env": {"KEY": "lit:val"}}))
     assert config.driver.env == {"KEY": "val"}
+
+
+def test_env_lit_prefix_strips_to_literal():
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "lit:600"}}}))
+    assert config.services["svc"].env == {"FOO": "600"}
+
+
+def test_env_no_prefix_raises():
+    with pytest.raises(ValidationError, match="must start with one of the prefixes"):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "bar"}}}))
+
+
+def test_env_host_prefix_reads_submitting_env(monkeypatch):
+    monkeypatch.setenv("MY_HOST_VAR", "host-value")
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "host:MY_HOST_VAR"}}}))
+    assert config.services["svc"].env == {"FOO": "host-value"}
+
+
+def test_env_host_prefix_missing_var_raises(monkeypatch):
+    monkeypatch.delenv("MY_MISSING_HOST_VAR", raising=False)
+    with pytest.raises(ValidationError, match="MY_MISSING_HOST_VAR"):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "host:MY_MISSING_HOST_VAR"}}}))
+
+
+def test_env_runtime_prefix_left_unresolved():
+    config = SubmitConfig.model_validate(
+        _config(services={"svc": {**SERVICE, "env": {"FOO": "runtime:NEL_INVOCATION_ID"}}})
+    )
+    assert config.services["svc"].env == {"FOO": "runtime:NEL_INVOCATION_ID"}
+
+
+def test_env_host_prefix_invalid_var_name_raises():
+    with pytest.raises(ValidationError, match="not a valid environment variable name"):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "host:1BAD"}}}))
+
+
+def test_env_runtime_prefix_invalid_var_name_raises():
+    with pytest.raises(ValidationError, match="not a valid environment variable name"):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "runtime:1BAD"}}}))
+
+
+def test_driver_env_host_prefix_reads_submitting_env(monkeypatch):
+    monkeypatch.setenv("MY_DRIVER_HOST_VAR", "driver-host-value")
+    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "env": {"KEY": "host:MY_DRIVER_HOST_VAR"}}))
+    assert config.driver.env == {"KEY": "driver-host-value"}
+
+
+def test_driver_env_runtime_prefix_left_unresolved():
+    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "env": {"KEY": "runtime:NEL_INVOCATION_ID"}}))
+    assert config.driver.env == {"KEY": "runtime:NEL_INVOCATION_ID"}
 
 
 def test_service_unknown_field_raises():
@@ -329,3 +379,44 @@ def test_gpu_footprint_no_node_pools_skips_validation():
     # Default COMPUTE fixture has no node_pools, so nothing to validate against.
     config = SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}))
     assert config.services["svc"].number_of_instances == 4
+
+
+# ---------------------------------------------------------------------------
+# resumable / ResumeConfig
+# ---------------------------------------------------------------------------
+
+
+def test_resumable_defaults_to_false():
+    config = SubmitConfig.model_validate(_config())
+    benchmark = config.driver.benchmarks["gsm8k"]
+    assert benchmark.resumable is False
+    assert benchmark.resume_config is None
+
+
+def test_resumable_true_uses_resume_config_defaults():
+    driver = {**DRIVER, "benchmarks": {"gsm8k": {"resumable": True}}}
+    config = SubmitConfig.model_validate(_config(driver=driver))
+    resume = config.driver.benchmarks["gsm8k"].resume_config
+    assert resume.max_retries == 3
+    assert resume.max_walltime is None
+
+
+def test_resumable_object_overrides_defaults():
+    driver = {**DRIVER, "benchmarks": {"gsm8k": {"resumable": {"max_retries": 7, "max_walltime": "48:00:00"}}}}
+    config = SubmitConfig.model_validate(_config(driver=driver))
+    resume = config.driver.benchmarks["gsm8k"].resume_config
+    assert resume.max_retries == 7
+    assert resume.max_walltime == "48:00:00"
+
+
+@pytest.mark.parametrize("resumable", [True, {"max_retries": 5}])
+def test_resumable_is_rejected_on_command_benchmarks(resumable):
+    driver = {**DRIVER, "benchmarks": {"gsm8k": {"command": "bash run.sh", "resumable": resumable}}}
+    with pytest.raises(ValidationError, match="both `command` and `resumable`"):
+        SubmitConfig.model_validate(_config(driver=driver))
+
+
+def test_command_benchmark_without_resumable_is_accepted():
+    driver = {**DRIVER, "benchmarks": {"gsm8k": {"command": "bash run.sh", "resumable": False}}}
+    config = SubmitConfig.model_validate(_config(driver=driver))
+    assert config.driver.benchmarks["gsm8k"].resume_config is None

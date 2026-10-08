@@ -1,50 +1,76 @@
 # Hermes Agent
 
-# Quick start
+Runs [Hermes](https://github.com/NousResearch/hermes-agent) inside a task sandbox through
+Gym's agent-session interface. The agent server stays outside as an adapter.
 
-## Create env.yaml in Gym/
+## Configure and run
 
+[configs/hermes_agent.yaml](configs/hermes_agent.yaml) is the default harness definition.
+The benchmark owns task data, preparation, verification, and task sandbox settings.
+The harness owns its runtime and model/tool loop. The Environment Server binds the two
+and closes the agent before verification.
+
+Run from the Gym repository root with Gym and the benchmark's preparation dependencies
+installed. For SWE-bench Pro, save this composition as `run.yaml`:
+
+```yaml
+config_paths:
+  - resources_servers/swebench_pro/configs/swebench_pro.yaml
+  - responses_api_agents/hermes_agent/configs/hermes_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+single_agent_turn_legacy:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: swebench_pro_resources_server
+      agent_server:
+        name: hermes_agent
+      resources_tool_transports: []
+
+hermes_agent:
+  responses_api_agents:
+    hermes_agent:
+      enabled_toolsets: [terminal]
 ```
-policy_base_url: https://api.openai.com/v1
-policy_api_key: sk...
-policy_model_name: gpt-4o
-```
 
-## Launch nemo gym servers
+Supply the `policy_model` Gym Model Server, `policy_model_name`, and `sandbox` provider in
+`model-provider.yaml`. The agent's `model` defaults to `${policy_model_name}` and remains
+overridable. The sandbox must be able to reach the Model Server.
 
 ```bash
-gym env start \
-    --config environments/hermes_math/config.yaml \
-    --model-type openai_model
-```
+python benchmarks/swebench/pro/prepare.py
 
-## Collect rollouts
+gym env start --config run.yaml --config model-provider.yaml
 
-```bash
 gym eval run --no-serve \
-    --agent hermes_math_agent \
-    --input environments/hermes_math/data/example.jsonl \
-    --output hermes_agent_rollout.jsonl \
-    --limit 1
+  --config run.yaml --config model-provider.yaml \
+  --agent hermes_agent \
+  -i benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
+  -o rollouts.jsonl --limit 3 --concurrency 3
 ```
 
-Example math rollouts are in `environments/hermes_math/data/example_rollouts.jsonl`.
+The collector calls Environment Server `/run`: seed Resources, seed the agent, call its
+rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
+flat rows use `single_agent_turn_legacy` with this native session lifecycle; no additional
+materialization script is needed. Collection does not call the agent's compatibility `/run`.
+Pass the same configuration to startup and `--no-serve` collection; collection does not
+inherit routing settings from the running servers.
 
-Example training reward for small multi environment test is shown [here](https://github.com/NVIDIA-NeMo/Gym/pull/1033#issuecomment-4399509664).
+### Switch harness or benchmark
 
-## Description
+To change a compatible harness, replace its config import, harness-specific settings,
+the Environment Server's `agent_server.name`, and the collection command's `--agent`.
+Keep benchmark data, preparation, and verifier settings unchanged. To change a compatible
+benchmark, replace its Resources config/reference and prepared input, keeping the harness
+definition unchanged. Check tool grants, task-image/runtime support, model API, and the
+benchmark's declared `allowed_agents` before running a new pairing.
 
-Runs [hermes-agent](https://github.com/NousResearch/hermes-agent) in a nemo gym agent server via the `run_agent.AIAgent` entrypoint, which matches the hermes-agent CLI and user experience. Can be used for benchmarks with hermes agent, or training in the harness.
-
-## Setup
-
-`hermes-agent` is pinned in `requirements.txt` to a fork branch with patches for token id tracking, chat template, and sampling parameters needed for training.
-
-For agent integrations like this, the agent must point at Gym's model server, it must include prompt and generation token id in requests for Nemo RL and other trainer integration on policy token id correction, it must not override sampling parameters like temperature and top p, and it must not do non-monotonic things like dropping past reasoning content or context compaction.
-
-## Resources server compatibility
-
-Works with any resources server based verifier, but does not work for resources server tools or other endpoints out of the box. Hermes Agent ships its own toolset (terminal, file, code_execution, web, etc.), so it does not rely on tools defined in the dataset. It may work with Gymnasium style resources servers, though. In testing, only the resources server's task data and `verify` are used. This means existing benchmarks (math, code, reasoning_gym, mcqa, instruction_following, ...) can be used as-is by adding a `<server>_hermes_agent` config.
+Use this explicit composition for now. `--agent` selects a configured agent; it does not
+install or rebind one. The existing `--agent-type` swap and automatic benchmark-data lookup
+still depend on legacy Agent-to-Resources bindings; they are not equivalent to this workflow.
+Existing [Hermes SWE-Pro recipes](../../benchmarks/swebench/pro/hermes.yaml) remain supported
+for compatibility; a new pairing does not need another combined preset.
 
 ## Configuration example
 
@@ -53,17 +79,20 @@ hermes_agent:
   responses_api_agents:
     hermes_agent:
       entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: my_verifier
+      resources_server: null
       model_server:
         type: responses_api_models
         name: policy_model
-      model: served-model-name
+      model: ${policy_model_name}
       enabled_toolsets: [terminal, file, code_execution]
       max_turns: 30
       concurrency: 32
       temperature: 1.0
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: my-agent-image
+        ttl_s: 3600
+        workdir: /workspace
       system_prompt: |
         your system prompt here.
 ```
@@ -72,12 +101,65 @@ hermes_agent:
 |-------|---------|-------------|
 | `enabled_toolsets` | `null` (all) | forwarded to `AIAgent(enabled_toolsets=...)` |
 | `disabled_toolsets` | `null` | forwarded to `AIAgent(disabled_toolsets=...)` |
-| `model` | `null` | served model id; defaults to `model_server.name` for backward compatibility |
+| `model` | `${policy_model_name}` in the default YAML | served model ID; configs that omit it retain the legacy `model_server.name` fallback |
+| `resources_server` | `null` | required only for the agent's compatibility `/run`; Environment Server binds Resources for native sessions |
 | `max_turns` | `30` | maps to `AIAgent.max_iterations` |
 | `concurrency` | `32` | max simultaneous `run()` calls |
-| `temperature` | `1.0` | sampling temperature passed to `AIAgent` |
+| `temperature` | `null` | sampling temperature passed to `AIAgent`; request `temperature` overrides it, including `0.0` |
 | `terminal_backend` | `local` | sets `TERMINAL_ENV` (process-global); `local`, `docker`, `daytona`, `modal`, `ssh` |
 | `terminal_timeout` | `60` | sets `TERMINAL_TIMEOUT` (process-global); per-command wall-clock seconds |
-| `system_prompt` | `null` | passed as `system_message` to `run_conversation`; falls back to any system item in `body.input` |
+| `sandbox_provider` | `null` | named provider used to create an agent-owned sandbox when Resources does not supply `sandbox_access` |
+| `sandbox_config` | `{}` | `SandboxSpec` fields used with `sandbox_provider`; ignored when Resources supplies a sandbox |
+| `sandbox_runner_timeout_seconds` | `21600` | bounds one sandbox activation; the episode deadline still applies |
+| `system_prompt` | `null` | joined with request `instructions` and the first input system message, in that order; appended to Hermes' built-in prompt |
+| `session_close_retry_window_seconds` | `300` | session close receipt retention from successful cleanup; retries do not extend expiry |
 
 The model-server url is resolved at request time and passed to `AIAgent(base_url=..., api_key="gym")`. <!-- pragma: allowlist secret -->
+
+Host and sandbox execution use the same request rules. User tasks remain user messages.
+Request `model` must match the configured model. Unsupported non-default controls return
+HTTP 422, including `top_p` (even `1.0`), `store`, `service_tier`, and request metadata.
+`max_output_tokens` also returns 422: Hermes does not enforce a total response token budget.
+Config `max_tokens` limits each model call. Only text input is supported; `developer` messages
+are rejected.
+
+Compatibility: the host path previously let config `system_prompt` replace the dataset's
+system message and ignored request `temperature`. It now combines the prompts and honors
+the request temperature, just like sandbox execution. These changes can affect scores.
+Remove unsupported fields that older versions silently ignored.
+
+## Runtime and model requirements
+
+Sandbox sessions live in the memory of the worker that seeded them, so seeding a session requires `num_workers: 1`. Calling the agent's `/run` directly keeps no session and still supports several workers.
+
+Each sandbox session installs the Hermes version pinned in `requirements.txt`, the same one this server runs, at seed time unless it already imports from `/tmp/nemo-gym-hermes-runtime-<commit>/venv`, for example because the image bakes it in or an earlier session in the same sandbox installed it. Installing needs outbound access to GitHub and the Python package index. Hermes calls the Model Server directly from the sandbox, so the sandbox must also reach the Model Server at its configured host and port. Its image must also match the host CPU architecture and C library because the host's `uv` executable is copied into the sandbox.
+
+Sessions use MCP tool grants and reject other required grants. Each granted MCP server is added to that session's Hermes configuration, so the sandbox must reach it at the granted URL, usually the Resources Server's `/mcp` endpoint. An activation fails before its first model call when a required server does not connect. Hermes names MCP tools `mcp_<server>_<tool>`; the response reports them as `mcp__<server>__<tool>`, the form Gym strips before verification, while captured model calls keep Hermes' names. The session token in each grant is readable inside the sandbox and gives access only to that episode's tools.
+
+The Hermes runner and the model's terminal tool execute as the same user in the same sandbox. The host reads the final result, including token IDs, from `/tmp/nemo-gym-hermes-sessions/<session-id>/output.json`; commands issued by the model can also write that file. Sandbox mode is suitable for evaluation, but it must not be used to produce RL training data until results are returned through a channel the model cannot modify.
+
+## Local compatibility
+
+Calls without an agent session run Hermes on the agent-server host. They do not operate on
+a Resources-owned task sandbox. The agent's compatibility `/run` requires an explicit
+`resources_server`; native sessions and direct `/v1/responses` do not.
+
+The default YAML now selects native composition rather than acting as an unbound legacy
+swap source. Legacy swap configurations must explicitly restore
+`resources_server: {type: resources_servers, name: "???"}` on the agent. Existing bound
+recipes, including `hermes_math` and `swebench/pro/hermes`, keep their bindings.
+
+For the existing host-side math example, put `policy_base_url`, `policy_api_key`, and
+`policy_model_name` in `env.yaml`, then run:
+
+```bash
+gym env start --config environments/hermes_math/config.yaml --model-type openai_model
+
+gym eval run --no-serve \
+  --config environments/hermes_math/config.yaml --model-type openai_model \
+  --agent hermes_math_agent \
+  --input environments/hermes_math/data/example.jsonl \
+  --output hermes_agent_rollout.jsonl --limit 1
+```
+
+Example math rollouts are in `environments/hermes_math/data/example_rollouts.jsonl`.
