@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from nemo_gym.token_id_capture import metrics
+from nemo_gym.token_id_capture import capture_metrics
 from nemo_gym.token_id_capture.staging.digest import (
     build_staging_delta,
     compute_chain_hash,
@@ -238,7 +238,7 @@ class RolloutTokenCapture:
         """
         admission = call.admission
         try:
-            with metrics.timed("stage.build_record") as timer:
+            with capture_metrics.timed("staging.build_record") as timer:
                 record = self.build_prefix_record(
                     call,
                     prompt_token_ids=prompt_token_ids,
@@ -249,7 +249,7 @@ class RolloutTokenCapture:
                 timer.tokens = record.cum_len
         except (TypeError, ValueError, OverflowError):
             self._claim_completion(call)
-            metrics.count("stage_failed", "build")
+            capture_metrics.count("capture_failed", "build")
             LOGGER.exception(
                 "token capture could not build rollout %s call %s",
                 call.rollout_id,
@@ -267,7 +267,7 @@ class RolloutTokenCapture:
             # is passed exactly when the caller supplied attachments so such a
             # sink fails loudly (TypeError -> capture_failed) instead of having
             # its attachments silently dropped by a retry without them.
-            with metrics.timed("stage.sink", component=self._sink, tokens=record.cum_len):
+            with capture_metrics.timed("staging_sink.stage", component=self._sink, tokens=record.cum_len):
                 if attachments is None:
                     result = self._sink.stage(record)
                 else:
@@ -278,7 +278,7 @@ class RolloutTokenCapture:
             # The sink is framework code outside Gym's exception hierarchy.
             # This deliberately broad boundary keeps capture failure from
             # failing the model completion.
-            metrics.count("stage_failed", "sink_error")
+            capture_metrics.count("capture_failed", "staging_sink_error")
             LOGGER.exception(
                 "token staging failed for rollout %s call %s",
                 admission.rollout_id,
@@ -286,7 +286,7 @@ class RolloutTokenCapture:
             )
             return self._failed_coords(call)
         if not result.ok:
-            metrics.count("stage_failed", "sink_rejected")
+            capture_metrics.count("capture_failed", "staging_sink_rejected")
             LOGGER.warning(
                 "token staging sink rejected rollout %s call %s: %s",
                 admission.rollout_id,
@@ -311,7 +311,7 @@ class RolloutTokenCapture:
         )
 
     def build_prefix_record(self, call: ActiveCall, **kwargs: Any) -> StagedCallRecord:
-        with metrics.timed("cut.build_prefix_record") as timer:
+        with capture_metrics.timed("cut.build_prefix_record") as timer:
             record = self._build_prefix_record(call, **kwargs)
             timer.tokens = record.cum_len
         return record
@@ -379,7 +379,7 @@ class RolloutTokenCapture:
         )
 
     def build_generation_chunk_record(self, call: ActiveCall, **kwargs: Any) -> StagedCallRecord:
-        with metrics.timed("cut.build_chunk_record") as timer:
+        with capture_metrics.timed("cut.build_chunk_record") as timer:
             record = self._build_generation_chunk_record(call, **kwargs)
             timer.tokens = record.cum_len
         return record

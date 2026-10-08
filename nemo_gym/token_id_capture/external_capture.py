@@ -9,7 +9,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Protocol
 
-from nemo_gym.token_id_capture import metrics
+from nemo_gym.token_id_capture import capture_metrics
 from nemo_gym.token_id_capture.config import ExternalStagingBackend
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
 from nemo_gym.token_id_capture.protocols import CaptureLedger
@@ -293,7 +293,7 @@ class _BaseExternalCaptureHandler(ABC):
         if context.publish_on_delivery:
             context.deferred_commit = commit
             return
-        with metrics.timed("ledger.record", component=ledger, tokens=record.cum_len):
+        with capture_metrics.timed("ledger.record", component=ledger, tokens=record.cum_len):
             await ledger.record(commit)
         mark_external_staging_committed(
             rollout_id=coords.rollout_id,
@@ -309,7 +309,7 @@ async def publish_deferred_commit(context: CaptureContext) -> None:
     """
     ledger = context.lineage_store
     try:
-        with metrics.timed("ledger.record", component=ledger, tokens=context.deferred_commit.record.cum_len):
+        with capture_metrics.timed("ledger.record", component=ledger, tokens=context.deferred_commit.record.cum_len):
             await ledger.record(context.deferred_commit)
     except Exception:
         LOGGER.exception(
