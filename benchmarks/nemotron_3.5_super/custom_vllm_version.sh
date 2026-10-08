@@ -29,19 +29,20 @@ if [[ "${1:-}" == __inside_build ]]; then
     vllm_sha=$(git rev-parse HEAD)
     test -z "${VLLM_HEAD_SHA:-}" || test "${vllm_sha}" = "${VLLM_HEAD_SHA}"
 
-    # The compatibility branch must remain Python-only so the selected wheel's
-    # native extensions can be reused safely.
+    # Allow Python, text, and YAML changes when reusing the wheel's native code.
+    # Other file types still require review before using precompiled artifacts.
     git fetch --depth=1 https://github.com/vllm-project/vllm.git \
         "${VLLM_PRECOMPILED_WHEEL_COMMIT}" 2>&1 | tail -3
     # An explicitly fetched tag may exist only as FETCH_HEAD in a shallow clone.
     precompiled_base_sha=$(git rev-parse 'FETCH_HEAD^{commit}')
     changed_files=$(git diff --name-only "${precompiled_base_sha}" HEAD --)
-    non_python_changes=$(
-        printf '%s\n' "${changed_files}" | grep -Ev '(^$|\.py$)' || true
+    unsupported_changes=$(
+        printf '%s\n' "${changed_files}" | grep -Ev \
+            '(^$|\.(py|txt|yaml)$)' || true
     )
-    if [[ -n "${non_python_changes}" ]]; then
-        echo "ERROR: precompiled build cannot consume non-Python changes:" >&2
-        echo "${non_python_changes}" >&2
+    if [[ -n "${unsupported_changes}" ]]; then
+        echo "ERROR: precompiled build cannot consume changes outside .py, .txt, and .yaml files:" >&2
+        echo "${unsupported_changes}" >&2
         exit 1
     fi
 
