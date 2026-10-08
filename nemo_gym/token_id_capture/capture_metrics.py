@@ -22,7 +22,7 @@ already been loaded, which every process that exports metrics does when it sets 
 
 Usage::
 
-    with metrics.timed("sink.put", component=sink, tokens=entry.cum_len):
+    with capture_metrics.timed("sink.put", component=sink, tokens=entry.cum_len):
         await sink.put(entry)
 """
 

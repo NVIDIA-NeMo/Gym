@@ -30,8 +30,8 @@ for example ``TokenCaptureStore`` or a framework's sink), ``nemo.gym.token_captu
 the operation has no record), and ``nemo.gym.token_capture.error`` (``error`` or ``cancelled``,
 present only when the operation did not complete, so successful calls add no extra series).
 Operations timed at a protocol call site include time spent waiting for a worker thread and the
-event loop; Gym's file stores also report their in-thread work (``token_store.append``,
-``ledger_store.record``), so the difference is queueing. Lock waits (``file_lock.wait``) are
+event loop; Gym's file stores also report their in-thread work (``sink.put.in_thread``,
+``ledger.record.in_thread``), so the difference is queueing. Lock waits (``file_lock.wait``) are
 recorded only when the wait exceeded a threshold; ``lock_acquired`` outcomes count every acquisition.
 
 ``gym.token_capture.operation.tokens_total`` (counter): tokens of the records each operation
