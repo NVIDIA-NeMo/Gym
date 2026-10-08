@@ -105,6 +105,11 @@ When an environment requires an external tool (compiler, runtime, etc.), auto-in
 3. For tests: add a `pytest_configure` hook in `conftest.py` that calls `ensure_<tool>()` before collection, so `skipif(shutil.which("tool") is None)` markers see the installed tool
 4. Build-from-source scripts should be idempotent (skip if artifacts exist) and install into a local prefix (e.g. `.<tool_name>/` in the server dir, gitignored)
 
+For sandboxed harnesses, install the harness runtime inside the sandbox during agent-session setup, before activation;
+do not install an unused copy on the agent-server host. An optional local execution path may install its host runtime
+on first use instead of startup. Document that first-call setup, share concurrent installation attempts, surface
+installation failures, and allow a later call to retry. Required host tools still follow the startup rule above.
+
 ## Common Commands for Building & Testing Environments
 
 ```bash
