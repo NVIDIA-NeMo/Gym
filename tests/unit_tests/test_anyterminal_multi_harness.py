@@ -43,7 +43,16 @@ def test_profile_composes_all_four_terminal_harnesses_with_one_dataset_owner() -
     assert list(config.anyterminal_hermes.responses_api_agents.anyterminal_agent.agent_request_sampling_fields) == [
         "temperature"
     ]
-    openclaw_tools = config.anyterminal_openclaw.responses_api_agents.anyterminal_agent.agent_kwargs.openclaw_config.tools
+    openclaw_config = config.anyterminal_openclaw.responses_api_agents.anyterminal_agent.agent_kwargs.openclaw_config
+    openclaw_defaults = openclaw_config.agents.defaults
+    assert openclaw_defaults.workspace == "."
+    assert openclaw_defaults.skipBootstrap is True
+    assert openclaw_defaults.contextInjection == "never"
+    assert openclaw_defaults.startupContext.enabled is False
+    assert list(openclaw_defaults.skills) == []
+    assert openclaw_config.skills.limits.maxSkillsInPrompt == 0
+    assert openclaw_config.skills.limits.maxSkillsPromptChars == 0
+    openclaw_tools = openclaw_config.tools
     assert openclaw_tools.profile == "minimal"
     assert list(openclaw_tools.alsoAllow) == ["exec"]
     assert list(openclaw_tools.deny) == ["session_status"]
