@@ -27,7 +27,7 @@ Both repositories use the branch
 | Repository | Pull request | Validated implementation head |
 |---|---|---|
 | NeMo Gym | [NVIDIA-NeMo/Gym#4082](https://github.com/NVIDIA-NeMo/Gym/pull/4082) | `a1b3466cad5f68a5c396bb834804326a37caa4ed` |
-| NeMo RL | [NVIDIA-NeMo/RL#4521](https://github.com/NVIDIA-NeMo/RL/pull/4521) | `c4f1a073a5241397ef2369989e292866a01bb53c` |
+| NeMo RL | [NVIDIA-NeMo/RL#4521](https://github.com/NVIDIA-NeMo/RL/pull/4521) | `8bf35a990eb72d313f88d7af339099f1e459b003` |
 
 Before this handoff page was added, each local head exactly matched its fork
 branch and both Git worktrees were clean. The Gym documentation commit is newer
@@ -50,7 +50,7 @@ git remote add contributor https://github.com/ehosseiniasl/NeMo-RL.git
 git fetch contributor ehosseiniasl/multi-harness-training-routing
 git switch -c ehosseiniasl/multi-harness-training-routing \
   --track contributor/ehosseiniasl/multi-harness-training-routing
-git merge-base --is-ancestor c4f1a073a5241397ef2369989e292866a01bb53c HEAD
+git merge-base --is-ancestor 8bf35a990eb72d313f88d7af339099f1e459b003 HEAD
 ```
 
 ## Implemented contract
@@ -202,7 +202,9 @@ From the RL checkout, load the two-node recipe and confirm:
 - `policy.max_total_sequence_length == 16384`
 - `policy.generation.max_new_tokens == 8192`
 - `policy.generation.vllm_kwargs.kernel_config.enable_flashinfer_autotune == false`
-- OpenCode limits are context `16384`, input `7680`, output `8192`
+- OpenCode limits are context `15872`, input `7680`, output `8192`. The
+  512-token difference from vLLM's 16K limit is required for OpenCode's
+  automatic compaction request.
 - the fan-out list contains exactly the four P0 harnesses
 - W&B and full Gym result tables are enabled
 
@@ -288,22 +290,27 @@ diagnostic evidence only, not a passing training run:
 - SingleController failed closed before optimizer step 0 when only three of
   four required prompt groups remained.
 
-Commit `c4f1a073` fixes the debug recipe by raising the policy context to 16K,
-raising generation to 8K, reserving OpenCode input/output headroom, and
-disabling debug-only FlashInfer autotuning. Preserve these values when
-rebuilding the launch on another cluster.
+Commit `c4f1a073` raises the policy context to 16K, raises generation to 8K,
+reserves OpenCode input/output headroom, and disables debug-only FlashInfer
+autotuning. A second diagnostic run
+([`174bdvd7`](https://wandb.ai/adlr/multi-harness-RL/runs/174bdvd7)) proved
+real two-sibling dispatch through all four harnesses, but showed that an
+OpenCode automatic-compaction prompt could still reach the full advertised
+16K boundary and leave no serving token. Commit `8bf35a99` therefore advertises
+15,872 tokens to OpenCode while retaining vLLM's 16,384-token hard limit. Both
+runs are diagnostic evidence only, not passing training runs.
 
 An older Qwen3-0.6B plumbing run is available as
 [`zx1q7m3q`](https://wandb.ai/adlr/multi-harness-RL/runs/zx1q7m3q), but its
 reward, advantages, loss, and gradient norm were all zero. It proves neither
 learning nor Super-model behavior.
 
-At the time of this handoff, the corrected Nano job and both Super jobs were
-submitted but had not started:
+At the latest handoff update, the guarded Nano replacement and both Super jobs
+were submitted but had not started:
 
 | Job | Topology | State at handoff | Reason |
 |---|---|---|---|
-| `2177484` | Nano sync, 2 nodes | Pending | `QOSMaxNodePerUserLimit` |
+| `2177704` | Nano sync, 2 nodes | Pending | `Priority` |
 | `2172269` | Super sync, 8 nodes | Pending | `Priority` |
 | `2172270` | Super async, 16 nodes | Pending | `Priority` |
 
