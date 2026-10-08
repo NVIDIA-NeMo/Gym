@@ -41,7 +41,6 @@ from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
 import orjson
 import ray
 import tomlkit
-from gprof2dot import main as gprof2dot_main
 from openai.types.responses.function_tool import FunctionTool
 from pydantic import BaseModel, ConfigDict, Field
 from pydot import graph_from_dot_file
@@ -2871,6 +2870,8 @@ class RunOpenHandsAgent(BaseModel):
         # Dump out dot and png files from profiling on OpenHands level
         if self.config.debug:
             try:
+                from gprof2dot import main as gprof2dot_main
+
                 profiling_name = "openhands"
                 callgrind_path = self.config.profiling_dir / f"{profiling_name}.callgrind"
                 callgrind_dotfile_path = self.config.profiling_dir / f"{profiling_name}.dot"
