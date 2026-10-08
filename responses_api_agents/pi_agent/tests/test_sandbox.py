@@ -378,6 +378,31 @@ def test_unsupported_request_is_not_silently_ignored(setup, override):
     sandbox.launch.assert_not_awaited()
 
 
+@pytest.mark.parametrize("return_code", [1, 137])
+@pytest.mark.parametrize("timed_out", [False, True])
+def test_aborted_preserves_worker_failure_unless_deadline_confirmed(setup, return_code, timed_out):
+    agent, sandbox = setup
+    sandbox.events = events(stop_reason="aborted")
+    sandbox.result.update(return_code=return_code, timed_out=timed_out)
+    app = agent.setup_webserver()
+    agent.setup_exception_middleware(app)
+    with TestClient(app) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
+        if timed_out:
+            assert result.status_code == 200
+            assert result.json()["status"] == "incomplete"
+            assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
+        else:
+            assert result.status_code == 500
+            assert f"Pi exited with code {return_code}" in result.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200
+        assert closed.json()["agent_observations"]["records"]
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
 def test_rejected_request_does_not_consume_activation(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:

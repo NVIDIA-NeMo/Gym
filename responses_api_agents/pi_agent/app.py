@@ -784,8 +784,12 @@ class PiAgent(SimpleResponsesAPIAgent):
         cleanup = state.session.cleanup
         runtime = state.runtime_info
         assert cleanup is not None
-        error = cleanup["error"] or terminal_error
         model_limit = bool(stop_reasons and stop_reasons[-1] == "error" and context_overflow)
+        if model_limit or (stop_reasons and stop_reasons[-1] == "aborted"):
+            # Expected model limits/interruptions do not invalidate partial work.
+            # They must not erase an independently confirmed worker or cleanup failure.
+            terminal_error = None
+        error = cleanup["error"] or terminal_error
         if cleanup["return_code"] not in (None, 0) and not cleanup["timed_out"] and not model_limit:
             error = error or f"Pi exited with code {cleanup['return_code']}"
         if not stop_reasons:
@@ -796,8 +800,6 @@ class PiAgent(SimpleResponsesAPIAgent):
         incomplete = (
             cleanup["timed_out"] or model_limit or (stop_reasons and stop_reasons[-1] in ("length", "aborted"))
         )
-        if model_limit or (stop_reasons and stop_reasons[-1] == "aborted"):
-            error = cleanup["error"]  # Model limits/interruptions preserve a gradable partial patch.
         if cleanup["timed_out"] and not stop_reasons and cleanup["error"] is None:
             error = None
         response = NeMoGymResponse(
