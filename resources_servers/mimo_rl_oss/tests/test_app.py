@@ -53,7 +53,7 @@ def test_terminal_bench_uploads_tests_and_reads_reward() -> None:
     reward, _, extra = TerminalBenchEnvironment(env, _instance())._do_calculate_reward()
     assert reward == 1.0
     assert env.files == {"/tests/test.sh": "echo hi"}
-    assert "sh /tests/test.sh" in env.commands
+    assert "bash /tests/test.sh" in env.commands
 
 
 def test_terminal_bench_missing_reward_is_zero() -> None:
@@ -87,7 +87,7 @@ def test_terminal_bench_transport_failure_is_masked() -> None:
     env = FakeEnv("")
     env.execute = lambda command, cwd="", timeout=None: (
         {"output": "", "returncode": None, "reason": "transport_error"}
-        if command.startswith("sh /tests")
+        if command.startswith("bash /tests")
         else {"output": "", "returncode": 0, "reason": "ok"}
     )
     env.copy_to = lambda src, dest, **_: None
