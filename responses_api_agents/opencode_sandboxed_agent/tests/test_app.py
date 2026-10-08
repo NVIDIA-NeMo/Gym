@@ -830,7 +830,9 @@ class TestOpenCodeSandboxedAgent:
             if url_path == "/seed_session":
                 return Response({"sandbox_handle": "seed-sandbox"})
             assert url_path == "/verify"
-            assert (tmp_path / "results/session-1/generation.json").is_file()
+            export_path = tmp_path / "results/session-1/export.json"
+            assert export_path.is_file()
+            assert json["response"]["output"]
             return Response(
                 json
                 | {
@@ -1292,10 +1294,11 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
     server._start_sandbox = AsyncMock(return_value=sandbox)
     server._create_opencode_config = AsyncMock(return_value={})
     monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app_module, "_read_opencode_child_messages", lambda *args: [])
     monkeypatch.setattr(
         app_module,
         "parse_opencode_observations",
-        lambda *args: AgentObservationBundle(
+        lambda *args, **kwargs: AgentObservationBundle(
             source="opencode", records=[AgentInvocation(invocation_id="rollout", status="completed")]
         ),
     )
@@ -1321,10 +1324,10 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
     if collect_observations:
         invocation = next(r for r in result.ng_agent_observations.records if isinstance(r, AgentInvocation))
         assert invocation.status == ("incomplete" if limited else "completed")
-    receipt = json.loads((tmp_path / "trial" / "generation.json").read_text())
-    assert receipt["execution"]["opencode_failed"] is limited
-    assert receipt["response"]["output"]
-    assert receipt["response"]["status"] == result.response.status
+        assert "observation_capture_failed" not in {gap.code for gap in result.ng_agent_observations.gaps}
+    export_path = tmp_path / "trial" / "export.json"
+    assert Path(result.opencode_results_fpath) == export_path
+    assert json.loads(export_path.read_text()) == export
     sandbox.stop.assert_awaited_once()
 
 
