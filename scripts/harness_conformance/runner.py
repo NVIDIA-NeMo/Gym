@@ -292,10 +292,5 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, TypeError, KeyError) as exc:
         print(f"runner_error: {exc}", file=sys.stderr)
         return 2
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        print(
-            "The job summary links the uploaded report and probe logs (probes/conformance_report.md in the artifact)."
-        )
-    else:
-        print(args.output.resolve() / "conformance_report.md")
+    print(args.output.resolve() / "conformance_report.md")
     return code
