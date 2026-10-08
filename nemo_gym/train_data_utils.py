@@ -24,7 +24,7 @@ from shutil import copyfileobj
 from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
 
 from devtools import pprint
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from tqdm.auto import tqdm
 
@@ -492,6 +492,25 @@ class DatasetValidatorState(BaseModel):
     other_metrics: Dict[str, Any] = Field(default_factory=dict)
 
 
+def _declares_prepared_dataset(value: object, dataset: DatasetConfig) -> bool:
+    if isinstance(value, Mapping):
+        if str(value.get("jsonl_fpath", "")) == str(dataset.jsonl_fpath) and value.get("prepare_script") is not None:
+            return True
+        return any(_declares_prepared_dataset(item, dataset) for item in value.values())
+    if isinstance(value, list):
+        return any(_declares_prepared_dataset(item, dataset) for item in value)
+    return False
+
+
+def _prepare_command(global_config: DictConfig, dataset: DatasetConfig) -> str:
+    for raw_config_path in global_config.get("config_paths") or []:
+        config_path = _resolve_under_cwd_or_install(raw_config_path)
+        config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=False)
+        if _declares_prepared_dataset(config, dataset):
+            return f"gym eval prepare --config {raw_config_path}"
+    return "gym eval prepare --config <config path>"
+
+
 class TrainDataProcessor(BaseModel):
     def run(self, global_config_dict: DictConfig):  # pragma: no cover
         """
@@ -659,23 +678,27 @@ class TrainDataProcessor(BaseModel):
         if not local_datasets_not_found:
             return
 
+        global_config = get_global_config_dict()
+
         hf_backend_ok, hf_error_msg = validate_backend_credentials("huggingface")
         gitlab_backend_ok, gitlab_error_msg = validate_backend_credentials("gitlab")
-
-        global_config = get_global_config_dict()
 
         for (
             server_name,
             datasets,
-        ) in local_datasets_not_found.items():  # pragma: no cover
+        ) in local_datasets_not_found.items():
             for d in datasets:
-                if not isinstance(d, DatasetConfig):
-                    # Benchmark datasets have no registry identifiers; their file comes from
-                    # their prepare_script (`gym eval prepare`), not a download.
+                prepare_script = getattr(d, "prepare_script", None)
+                if prepare_script is not None:
+                    # Locally prepared datasets have no registry identifiers; their file comes
+                    # from their prepare_script (`gym eval prepare`), not a download.
                     raise ValueError(
-                        f"Benchmark dataset {d.name!r} ({d.jsonl_fpath}) is missing on disk. Run "
-                        f"`gym eval prepare` (its prepare_script is {d.prepare_script}) before collating."
+                        f"Dataset {d.name!r} ({d.jsonl_fpath}) is missing on disk. Run "
+                        f"`{_prepare_command(global_config, d)}` "
+                        f"(its prepare_script is {prepare_script}) before collating."
                     )
+                if not isinstance(d, DatasetConfig):
+                    raise ValueError(f"Benchmark dataset {d.name!r} has no prepare_script")
                 if d.gitlab_identifier and d.huggingface_identifier:
                     backend = config.data_source
                 elif not d.gitlab_identifier:
@@ -891,8 +914,13 @@ class TrainDataProcessor(BaseModel):
                 aggregate_metrics_dict = aggregate_metrics.model_dump_for_output()
                 # Agent and taskset select routing, not source data. Exclude both so taskset
                 # and flat declarations of the same file can share its metrics sidecar.
+                excluded_dataset_fields = {"agent", "taskset"}
+                if isinstance(d, DatasetConfig):
+                    # Preparation controls how a local source file is produced; they are not
+                    # properties of the rows and defaults must not churn existing sidecars.
+                    excluded_dataset_fields.update({"prepare_script", "prepare_dependencies"})
                 aggregate_metrics_dict = (
-                    d.model_dump(mode="json", exclude={"agent", "taskset"}) | aggregate_metrics_dict
+                    d.model_dump(mode="json", exclude=excluded_dataset_fields) | aggregate_metrics_dict
                 )
 
                 data_fpath = Path(d.jsonl_fpath)

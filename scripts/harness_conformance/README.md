@@ -91,7 +91,8 @@ reported as exercise failures.
 The runner observes actual retry behavior. A runtime that does not retry the
 injected error leaves that scenario incomplete. A terminal error must still
 produce a collected rollout to satisfy its evidence checks; a failure sidecar
-alone cannot qualify it. TE-8 and TE-9 remain alternatives per scenario.
+alone cannot qualify it. Every applicable individual P0 check must pass;
+TE labels group results and do not determine priority or grant exemptions.
 
 ## Results
 
@@ -109,8 +110,9 @@ rejected, so previous rollouts cannot accidentally qualify a new run.
   execution markers, returned tool results, and verifier outcomes.
 - `<harness>/<scenario>/scenario_result.json` and `evidence/`: execution gaps,
   input hashes, and the existing artifact checker reports.
-- `conformance_summary.json` and `conformance_report.md`: harness × evidence
-  matrix with passing / exercised / required scenario counts.
+- `conformance_summary.json` and `conformance_report.md`: individual results and
+  one table per harness, with check rows and scenario columns. Artifact and
+  behavioral results stay independent; execution status is recorded separately.
 
 A scenario counts as passing only when its independent observations agree with
 the retained rollout and the relevant evidence checks pass. Attempt comparison
@@ -130,8 +132,8 @@ tree, including harnesses that start new process groups.
 Exit codes: **0** when all selected gates pass, **1** for evidence or scenario
 failures, and **2** for execution, dependency, input, or checker errors. Existing
 harness evidence gaps are expected to remain visible as failures. This suite
-covers the current P0 checks; multimodal content, compaction, parallelism,
-transport disconnects, TE-10 and P1 remain outside its qualification scope.
+covers P0 checks, including ownership and call-to-step checks. Multimodal content,
+compaction, parallelism and transport disconnects remain outside its qualification scope.
 
 Run regression checks with:
 
