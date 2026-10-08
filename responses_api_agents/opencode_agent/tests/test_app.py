@@ -707,11 +707,14 @@ class TestConfigYaml:
         compile(app_path.read_text(), str(app_path), "exec")
 
     def test_config_yaml_parses(self) -> None:
-        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "opencode_local_agent.yaml"
+        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "opencode_agent.yaml"
         data = yaml.safe_load(cfg_path.read_text())
         assert "opencode_agent" in data
         inner = data["opencode_agent"]["responses_api_agents"]["opencode_agent"]
-        assert inner["entrypoint"] == "app.py"
-        assert inner["concurrency"] == 8
-        assert inner["command"] == "opencode"
-        assert inner["execution_mode"] == "local"
+        config = OpenCodeAgentConfig.model_validate(inner | {"host": "localhost", "port": 8000, "name": "opencode"})
+        assert config.entrypoint == "app.py"
+        assert config.concurrency == 8
+        assert config.command == "opencode"
+        assert config.execution_mode == "local"
+        assert config.resources_server is None
+        assert config.model_server.name == "policy_model"

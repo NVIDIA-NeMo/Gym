@@ -22,8 +22,6 @@ EnvironmentServer owns the episode lifecycle.
 No mode override is needed for ordinary session/local routing. Older `local` and
 `sandbox` values remain accepted as aliases for this behavior. Invalid or closed
 session markers are errors, never a fallback to local execution or the legacy bridge.
-`opencode_local_agent.yaml` provides an alternative local provider/Resources example;
-`opencode_legacy_agent.yaml` is only for a Resources lifecycle that has not migrated.
 Local agent `/run` still requires a Resources binding; direct `/v1/responses` does not.
 
 ## Wire a native episode
@@ -36,9 +34,7 @@ address must be reachable from inside the task sandbox.
 The [taskset SWE-bench Pro composition](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/swebench/pro/opencode_taskset.yaml)
 provides those bindings and selects `environment_routing_mode: taskset`. It routes
 `swebench_pro:smoke` tasks to the `swebench_pro_opencode` EnvironmentServer. Add your
-model and sandbox provider configurations when starting the servers. The
-`opencode_agent_swebench_pro.yaml` config includes this composition and preserves
-its direct API deployment alias.
+model and sandbox provider configurations when starting the servers.
 
 ```yaml
 config_paths:
@@ -208,21 +204,21 @@ deployment names, including the Nemotron evaluation overlays. Their compatibilit
 EnvironmentServer still delegates orchestration to agent `/run`; migrating these
 recipes is separate from adding session support. Use
 `swebench/pro/opencode_taskset` for taskset-routed SWE-bench Pro collection. ViBench uses the
-compatibility implementation in `opencode_agent.legacy`
+existing `opencode_sandboxed_agent` entrypoint, which delegates to `opencode_agent.legacy`,
 because it owns and harvests its build sandbox. This keeps the package name stable
 while those lifecycles migrate; the compatibility bridge is outside the native path.
 
-To swap OpenCode into another supported flat-row benchmark, select the explicit
-package/flavor rather than the native default:
+To swap OpenCode into another supported flat-row benchmark, use the existing
+sandboxed entrypoint:
 
 ```bash
 gym eval run \
     --benchmark terminal_bench_2_1/terminus_2 \
-    --agent-type opencode_agent/opencode_legacy_agent \
+    --agent-type opencode_sandboxed_agent \
     --model-type vllm_model
 ```
 
-The resulting instance is `terminal_bench_2_1_opencode_agent`. The native default requires
+The resulting instance is `terminal_bench_2_1_opencode_sandboxed_agent`. The native default requires
 taskset-routed EnvironmentServer composition and materialized rows; an agent-only swap
 does not migrate the Resources lifecycle.
 

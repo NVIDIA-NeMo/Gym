@@ -50,19 +50,12 @@ def _resolved_config(path: str):
     )
 
 
-@pytest.mark.parametrize(
-    "config_path",
-    [
-        "benchmarks/swebench/pro/opencode_taskset.yaml",
-        "responses_api_agents/opencode_agent/configs/opencode_agent_swebench_pro.yaml",
-    ],
-)
 async def test_native_recipe_routes_collector_through_environment_and_responses(
-    setup, monkeypatch: pytest.MonkeyPatch, config_path: str
+    setup, monkeypatch: pytest.MonkeyPatch
 ):
     agent, sandbox = setup
     monkeypatch.chdir(Path(__file__).resolve().parents[3])
-    config = _resolved_config(config_path)
+    config = _resolved_config("benchmarks/swebench/pro/opencode_taskset.yaml")
     agent_name = "swebench_pro_opencode_agent"
     resources_name = "swebench_pro_opencode_resources_server"
     environment_name = config.environment_server_routes["swebench_pro:smoke"]

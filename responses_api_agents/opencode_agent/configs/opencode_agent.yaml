@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Agent sessions run in a sandbox; unseeded requests run the local CLI.
-# Use opencode_local_agent.yaml for local CLI execution or opencode_legacy_agent.yaml
-# for existing flat-row benchmark /run recipes.
 opencode_agent:
   responses_api_agents:
     opencode_agent:
@@ -22,10 +20,6 @@ opencode_agent:
       setup_timeout: 600
       session_close_timeout_seconds: 30
       session_close_retry_window_seconds: 300
-
-      remote_opencode_install_script_path: null
-      remote_opencode_binary_path: null
-      remote_opencode_musl_binary_path: null
 
       # Taken from https://github.com/sdevare-nv/nv-opencode/blob/f261004b4e4269a6e193fd242e5ec8ced9a7aec0/packages/opencode/src/bench/cli.ts#L198-L325
       opencode_config:
@@ -61,14 +55,6 @@ opencode_agent:
             "*rm -rf /dev*": deny
             "*rm -rf /proc*": deny
             "*rm -rf /sys*": deny
-
-            # system control
-            # "*shutdown*": deny
-            # "*reboot*": deny
-            # "*poweroff*": deny
-            # "*halt*": deny
-            # "init 0*": deny
-            # "init 6*": deny
 
             # disk devices
             "dd *of=/dev/sd*": deny
