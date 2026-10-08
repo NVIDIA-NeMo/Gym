@@ -81,3 +81,13 @@ async def test_sigterm_hook_installs_and_restores():
     loop.add_signal_handler(signal.SIGTERM, lambda: None)
     _restore_sigterm(previous)
     assert signal.getsignal(signal.SIGTERM) == before
+
+
+def test_timed_out_inside_an_episode_response_is_counted():
+    r = _report(2)
+    r.record_start(r._t0)
+    r.record_start(r._t0)
+    episode = {"episode_id": {"id": "e"}, "task_id": {"id": "t"}, "result": {"reward": 0.0, "timed_out": 1}}
+    r.record_result(episode, 10800)
+    r.record_result({"episode_id": {}, "task_id": {}, "result": {"reward": 1.0, "timed_out": 0}}, 100)
+    assert "50.0% (1)" in _row(r.table(), "ended by wall-clock limit")

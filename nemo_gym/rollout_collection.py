@@ -1217,7 +1217,9 @@ class RunTimingReport:
 
     def record_result(self, result: Mapping[str, Any], seconds: float) -> None:
         self._durations.append(seconds)
-        if result.get("timed_out") or result.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded":
+        # An Environment Server reply wraps the agent's result in a BaseEpisodeResponse.
+        body = result.get("result") if isinstance(result.get("result"), Mapping) else result
+        if body.get("timed_out") or body.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded":
             self._timed_out += 1
 
     def table(self) -> str:
