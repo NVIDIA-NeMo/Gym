@@ -62,7 +62,7 @@ frontend:
   args:
     request-timeout-secs: 1200
     worker-startup-timeout-secs: 1200
-    max-concurrent-requests: 512
+    max-concurrent-requests: 32768
     pool-max-idle-per-host: 0
     pool-idle-timeout-secs: 2
     health-check-interval-secs: 5
@@ -70,7 +70,8 @@ frontend:
     dp-aware: false
     prefill-policy: cache_aware
     decode-policy: cache_aware
-    balance-abs-threshold: 64
+    balance-abs-threshold: 16
+    balance-rel-threshold: 1.1
 # Keep the Gym checkout and its results visible outside the evaluation container.
 # SRT already mounts its job log directory at /logs and the checkpoint at /model.
 container_mounts:
