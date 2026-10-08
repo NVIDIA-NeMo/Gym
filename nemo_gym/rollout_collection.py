@@ -24,7 +24,7 @@ import time
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict, deque
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
@@ -58,7 +58,7 @@ from nemo_gym.config_types import (
     UploadRolloutsConfigMixin,
 )
 from nemo_gym.deliverables import is_deliverable
-from nemo_gym.episode_types import is_materialized_task_row
+from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import CANCELLED, is_namespaced, is_registered
 from nemo_gym.global_config import (
@@ -304,18 +304,37 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
     if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
         raise ValueError(f"Invalid episode attempt: {attempt!r}")
-    base_identity_row = dict(row)
-    base_identity_row[ATTEMPT_INDEX_KEY_NAME] = 0
-    rollout_id = maybe_rollout_id_from_run_body(base_identity_row)
-    if rollout_id is None:
-        rollout_id = f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+    # Decode the identity the way the agent does.
+    # An explicit id may carry the attempt suffix itself, as a restored attempt does.
+    capture_key = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return {
-        "episode_id": {"rollout_id": rollout_id, "attempt": attempt},
+        "episode_id": EpisodeId.from_capture_key(capture_key).model_dump(mode="json"),
         "task": {
             "task_id": row["task_id"],
             "task_input": row["task_input"],
         },
     }
+
+
+def _reject_attempt_qualified_rollout_ids(rows: Iterable[Mapping[str, Any]], fpath: Path) -> None:
+    """Refuse dataset rows whose explicit rollout ID names an attempt.
+
+    The suffix ``-a<N>`` is reserved: ``"<id>-a<N>"`` always means attempt N of rollout ``<id>``,
+    which is how a training controller names a restored attempt.
+    A resume retry stamps the next attempt on a row, and an ID that already names one would then fail mid-run,
+    so the row is refused when the input loads.
+    """
+    for line_no, row in enumerate(rows, 1):
+        explicit = row.get(ROLLOUT_ID_KEY_NAME) if isinstance(row, Mapping) else None
+        if not isinstance(explicit, str):
+            continue
+        episode_id = EpisodeId.from_capture_key(explicit)
+        if episode_id.attempt:
+            raise ConfigError(
+                f"Row at line {line_no} of '{fpath}' has {ROLLOUT_ID_KEY_NAME} {explicit!r}, "
+                f"which ends with the reserved suffix '-a<N>': it names attempt {episode_id.attempt} "
+                f"of rollout {episode_id.rollout_id!r}. Give the row a rollout ID without that suffix."
+            )
 
 
 def _is_episode_response(result: Any) -> bool:
@@ -2123,6 +2142,7 @@ class RolloutCollectionHelper(BaseModel):
                 (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
                 for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
             ]
+        _reject_attempt_qualified_rollout_ids([row for _, _, row in raw_rows], _input_path)
 
         # Validate and apply prompt config before per-row processing
         if prompt_cfg is not None:
@@ -2416,6 +2436,7 @@ class RolloutCollectionHelper(BaseModel):
             migrate_invalid_judge_main_rows(Path(config.output_jsonl_fpath))
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
+        _reject_attempt_qualified_rollout_ids(original_input_rows, config.materialized_jsonl_fpath)
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 

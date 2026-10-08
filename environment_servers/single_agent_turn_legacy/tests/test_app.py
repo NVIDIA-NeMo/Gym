@@ -251,6 +251,44 @@ def test_task_identity_preserves_index_fallback_and_zero(task_fields: dict[str, 
     assert request.episode_id == EpisodeId(rollout_id="3-2", attempt=0)
 
 
+@pytest.mark.parametrize(
+    "identity, expected",
+    [
+        # A restored attempt carries its attempt in the explicit id.
+        ({"_ng_rollout_id": "restored-a1"}, EpisodeId(rollout_id="restored", attempt=1)),
+        # Gym's own retries stamp the attempt index.
+        (
+            {"_ng_task_index": 3, "_ng_rollout_index": 2, "_ng_attempt_index": 2},
+            EpisodeId(rollout_id="3-2", attempt=2),
+        ),
+        ({"_ng_task_index": 3, "_ng_rollout_index": 2}, EpisodeId(rollout_id="3-2", attempt=0)),
+    ],
+)
+def test_flat_rows_decode_the_capture_key_like_the_agent(identity: dict, expected: EpisodeId) -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    request = adapter._episode_request_from_row(
+        {"task_id": "task", "responses_create_params": {"input": "task"}, **identity}
+    )
+
+    assert request.episode_id == expected
+
+
+def test_a_restored_attempt_runs_under_its_capture_key() -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    response = TestClient(adapter.setup_webserver()).post(
+        "/run",
+        json={"task_id": "task", "_ng_rollout_id": "restored-a1", "responses_create_params": {"input": "task"}},
+    )
+
+    assert response.status_code == 200
+    assert client.calls[0][2]["json"]["episode_id"] == {"rollout_id": "restored", "attempt": 1}
+    assert client.calls[2][1] == "/ng-rollout/restored-a1/v1/responses"
+
+
 @pytest.mark.parametrize("task_source", ["resources", "agent"])
 def test_task_source_may_name_the_bound_resources_server_or_agent(task_source: str) -> None:
     # Collation stamps task_source with the instance that declares the dataset, usually the agent.

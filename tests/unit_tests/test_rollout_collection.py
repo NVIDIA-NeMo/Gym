@@ -91,6 +91,7 @@ from nemo_gym.rollout_collection import (
     loads_jsonl_line,
     migrate_invalid_judge_main_rows,
 )
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
@@ -3488,6 +3489,57 @@ class TestRolloutCollection:
         assert resumed_rows[0]["skills_ref"] == stamped_skills_ref
         # And the still-to-run rows do too, so the second pass stamps results identically.
         assert all(r["skills_ref"] == stamped_skills_ref for r in input_rows)
+
+    def test_a_dataset_row_whose_rollout_id_names_an_attempt_is_rejected_when_the_input_loads(
+        self, tmp_path: Path
+    ) -> None:
+        fpath = tmp_path / "input.jsonl"
+        rows = [
+            {"responses_create_params": {"input": []}, "_ng_rollout_id": rollout_id}
+            for rollout_id in ("job", "job-a2")
+        ]
+        fpath.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        config = RolloutCollectionConfig(
+            agent_name="my_agent", input_jsonl_fpath=str(fpath), output_jsonl_fpath=str(tmp_path / "out.jsonl")
+        )
+
+        with pytest.raises(
+            ConfigError, match=r"line 2 .*'job-a2'.*reserved suffix '-a<N>'.*attempt 2 of rollout 'job'"
+        ):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+    def _resume_retry(self, tmp_path: Path, rollout_id: str) -> RolloutCollectionConfig:
+        """Leave a run whose one row failed once, so a resume retries it as its next attempt."""
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            resume_from_cache=True,
+        )
+        identity = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "my_agent"}}
+        # The run that wrote these inputs predates the check at input load.
+        row = {"responses_create_params": {"input": []}, "_ng_rollout_id": rollout_id, **identity}
+        config.materialized_jsonl_fpath.write_bytes(orjson.dumps(row) + b"\n")
+        Path(config.output_jsonl_fpath).write_bytes(b"")
+        _failures_path_for(Path(config.output_jsonl_fpath)).write_bytes(orjson.dumps(identity) + b"\n")
+        return config
+
+    def test_a_resume_retry_of_a_row_whose_rollout_id_names_an_attempt_fails_when_the_input_loads(
+        self, tmp_path: Path
+    ) -> None:
+        config = self._resume_retry(tmp_path, "job-a2")
+
+        # Without the check, the retry stamps attempt 1 on it, and its /run fails mid-run.
+        with pytest.raises(ConfigError, match=r"line 1 .*'job-a2'.*reserved suffix '-a<N>'"):
+            RolloutCollectionHelper()._load_from_cache(config)
+
+    def test_a_resume_retry_of_a_plain_explicit_rollout_id_runs_as_its_next_attempt(self, tmp_path: Path) -> None:
+        config = self._resume_retry(tmp_path, "job")
+
+        (retried,), _rows, _results, _result_strs = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert retried[ATTEMPT_INDEX_KEY_NAME] == 1
+        assert maybe_rollout_id_from_run_body(retried) == "job-a1"
 
     def test_preprocess_rows_num_repeats_add_seed_passes_pydantic_validation(self, tmp_path: Path) -> None:
         """Rows emitted with num_repeats_add_seed=True must round-trip through the strict
