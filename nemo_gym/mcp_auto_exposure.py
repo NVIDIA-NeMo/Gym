@@ -79,7 +79,7 @@ from aiohttp import ClientResponseError
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.routing import APIRoute
-from itsdangerous import BadSignature, URLSafeSerializer
+from itsdangerous import URLSafeSerializer
 from mcp.server.lowlevel import Server as _LowLevelMCPServer
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
@@ -90,12 +90,13 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 
 from nemo_gym.base_resources_server import (
-    _MCP_TOKEN_SALT,
     NEMO_GYM_MCP_METADATA_KEY,
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
     RESERVED_MCP_TOOL_NAMES,
     MCPServerMetadata,
     ResourcesSeedSessionResponse,
+    mcp_session_token_payload,
+    mcp_session_token_serializer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 
@@ -107,6 +108,7 @@ LOG = logging.getLogger(__name__)
 TOKEN_HEADER = NEMO_GYM_MCP_SESSION_TOKEN_HEADER
 
 MCP_URL_PATH = "/mcp"
+CONTROL_ROUTE_PREFIX = "/ng-control/"
 
 PERMISSIVE_SCHEMA: dict = {"type": "object", "additionalProperties": True}
 
@@ -443,6 +445,8 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             continue  # Correlation prefixes are handled before resource routes; direct MCP dispatch has no prefix.
         if f"{cls.__module__}.{cls.__name__}" == ("nemo_gym.server_utils.ClientDisconnectCancellationMiddleware"):
             continue  # Direct MCP dispatch has no client connection to monitor.
+        if getattr(cls, "applies_to_mcp_requests", False):
+            continue  # It does its job on the /mcp request as a whole (for example, checkpoint admission).
         dispatch = m.kwargs.get("dispatch")
         if dispatch is not None and getattr(dispatch, "__module__", None) in _GYM_MIDDLEWARE_MODULES:
             continue  # Gym's add_session_id / exception middleware
@@ -460,6 +464,9 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             continue
         # Never tools. GET docs/openapi are excluded by the POST filter above; /mcp by path.
         if route.path.lstrip("/") in RESERVED_MCP_TOOL_NAMES or route.path == MCP_URL_PATH:
+            continue
+        # Gym's control plane (checkpoint control) is for the controller, never for the model.
+        if route.path.startswith(CONTROL_ROUTE_PREFIX):
             continue
         if "{" in route.path:
             catchall_routes.append(route)
@@ -722,10 +729,9 @@ def _parse_session_token(
         if required:
             raise ValueError(f"Missing {NEMO_GYM_MCP_SESSION_TOKEN_HEADER} for Gym MCP tool call.")
         return None, None
-    try:
-        # Verified per call: caching claims per token would grow one entry per rollout with nothing to evict it.
-        payload = serializer.loads(token)
-    except BadSignature:
+    # Verified per call: caching claims per token would grow one entry per rollout with nothing to evict it.
+    payload = mcp_session_token_payload(serializer, token)
+    if payload is None:
         if required:
             raise ValueError("Invalid Gym MCP session token.")
         return None, None
@@ -771,7 +777,7 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
         )
 
     secret = server.get_session_middleware_key()
-    serializer = URLSafeSerializer(secret, salt=_MCP_TOKEN_SALT)
+    serializer = mcp_session_token_serializer(secret)
     tools = harvest_tools(app, server)
 
     mint_metadata = functools.partial(_mint_session_metadata, server, serializer)
