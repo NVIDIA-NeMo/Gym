@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Agent sessions run in a sandbox; unseeded requests run the local CLI.
-# openclaw_local_agent.yaml provides an alternative local provider/Resources example.
 openclaw_agent:
   responses_api_agents:
     openclaw_agent:
