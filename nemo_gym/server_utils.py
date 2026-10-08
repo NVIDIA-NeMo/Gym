@@ -1365,6 +1365,12 @@ class SimpleServer(BaseServer):
     def setup_webserver(self) -> FastAPI:
         pass
 
+    def setup_checkpoint_participant(self, app: FastAPI) -> None:
+        """Take part in partial-rollout checkpoints on the app ``setup_webserver`` built, if it does not yet.
+
+        Called for every server, so a server whose ``setup_webserver`` builds its own app takes part too.
+        """
+
     def setup_telemetry(self) -> None:
         """Initialise this process's nemo-lens telemetry. Idempotent, once per process.
 
@@ -1565,6 +1571,7 @@ repr(e): {repr(e)}"""
         server.setup_telemetry()
 
         app = server.setup_webserver()
+        server.setup_checkpoint_participant(app)
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):

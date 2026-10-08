@@ -8,7 +8,9 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
+from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import orjson
 import pytest
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
@@ -139,6 +141,7 @@ def _environment_server(
     *,
     token_capture: bool = False,
     resources_tool_transports: list[Literal["direct_http", "mcp"]] | None = None,
+    client_type: type[_Client] = _Client,
 ) -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
     global_config = OmegaConf.create(
         {
@@ -157,7 +160,7 @@ def _environment_server(
         }
     )
     response = _agent_response()
-    client = _Client(
+    client = client_type(
         head_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=global_config,
         calls=[],
@@ -690,3 +693,128 @@ async def test_boundary_payloads_are_not_built_without_checkpointing(monkeypatch
 
     # The return boundary's payload is the only dump of the verification result, and nothing records it here.
     assert dumps == []
+
+
+class _ForwardedResponse:
+    """An agent server's reply, as the environment server's HTTP client presents it."""
+
+    def __init__(self, reply: httpx.Response) -> None:
+        self.ok = reply.is_success
+        self.status = reply.status_code
+        self.headers = reply.headers
+        self.cookies = {name: SimpleNamespace(value=value) for name, value in reply.cookies.items()}
+        self.body = reply.content
+
+    async def read(self) -> bytes:
+        return self.body
+
+
+class _AgentForwardingClient(_Client):
+    """Sends the environment server's agent calls to a real agent server; scripts every other call."""
+
+    agent: Any = None
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> Any:
+        if server_name != "agent":
+            return await super().post(server_name, url_path, **kwargs)
+        self.calls.append((server_name, url_path, kwargs))
+        body = kwargs.get("json")
+        if isinstance(body, BaseModel):
+            body = body.model_dump(mode="json", exclude_unset=True)
+        headers = dict(kwargs.get("headers") or {})
+        cookies = kwargs.get("cookies") or {}
+        if cookies:
+            headers["cookie"] = "; ".join(f"{name}={value}" for name, value in cookies.items())
+        reply = await self.agent.post(url_path, json=body, headers=headers)
+        # The environment server keeps the agent's cookies in its handles, as a checkpoint records them.
+        self.agent.cookies.clear()
+        return _ForwardedResponse(reply)
+
+
+def _checkpointed_agent(model_calls: list[str]) -> tuple[Any, httpx.AsyncClient]:
+    """A Simple Agent with checkpointing on, whose model replies at once and records each call."""
+    from responses_api_agents.simple_agent.app import ModelServerRef, SimpleAgent, SimpleAgentConfig
+
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {
+        "observability_enabled": True,
+        "checkpoint": {"enabled": True, "control_auth_token": "t"},
+    }
+
+    async def model(*, url_path: str, **kwargs: Any) -> Any:
+        model_calls.append(url_path)
+        reply = MagicMock(status=200, cookies={}, ok=True)
+        reply.read = AsyncMock(return_value=orjson.dumps(_agent_response().model_dump(mode="json")))
+        return reply
+
+    client.post = AsyncMock(side_effect=model)
+    agent = SimpleAgent(
+        config=SimpleAgentConfig(
+            host="agent",
+            port=8001,
+            entrypoint="app.py",
+            name="agent",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+        ),
+        server_client=client,
+    )
+    return agent, httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=agent.setup_webserver()), base_url="http://agent"
+    )
+
+
+async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_the_activation() -> None:
+    from environment_servers.single_agent_turn.app import SessionHandles
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.base_resources_server import ResourcesSeedSessionResponse
+
+    request = _request()
+    first_attempt = request.model_copy(update={"episode_id": request.episode_id.model_copy(update={"attempt": 1})})
+    model_calls: list[str] = []
+    handles = SessionHandles(resources_session_id="resources-session", agent_session_id="agent-session")
+
+    # Before the crash, the agent finishes the activation and its checkpoint follows the reply,
+    # while the environment server's checkpoint precedes the reply: its episode is still at invoke_agent.
+    agent, agent_http = _checkpointed_agent(model_calls)
+    environment, client = _environment_server(client_type=_AgentForwardingClient)
+    client.agent = agent_http
+    async with agent_http:
+        await environment._seed_agent(
+            first_attempt, handles, ResourcesSeedSessionResponse(resources_session_id="resources-session")
+        )
+        environment_boundary = {"next": "invoke_agent", "handles": handles.model_dump()}
+        await environment._invoke_agent(first_attempt, handles)
+        agent_records = await agent.checkpoint_participant.export(None)
+    observations = agent._session_state("agent-session").observations
+
+    # Both are restored, and the environment server invokes the activation again.
+    restored_agent, restored_http = _checkpointed_agent(model_calls)
+    await restored_agent.checkpoint_participant.install(agent_records, [first_attempt.episode_id])
+    environment, client = _environment_server(client_type=_AgentForwardingClient)
+    client.agent = restored_http
+    # Only the verification and the resources close are scripted; the agent answers the rest.
+    del client.responses[:4]
+    participant = EnvironmentParticipant()
+    environment._checkpoint = participant
+    participant.restore_records(
+        [
+            EpisodeRecord(
+                episode_id=first_attempt.episode_id,
+                task_digest=task_digest(request.task.model_dump(mode="json")),
+                boundary=environment_boundary,
+            )
+        ]
+    )
+    async with restored_http:
+        response = await environment.run_request(request)
+
+    assert [path for _, path, _ in client.calls] == [
+        "/ng-rollout/rollout-a2/v1/responses",
+        "/v1/agent_sessions/close",
+        "/verify",
+        "/close_session",
+    ]
+    # The agent gave the reply it already gave, without calling the model again.
+    assert model_calls == ["/ng-rollout/rollout-a1/v1/responses"]
+    assert response.result.reward == 1.0
+    assert response.result.ng_agent_observations == observations

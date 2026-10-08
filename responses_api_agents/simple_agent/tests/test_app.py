@@ -12,16 +12,27 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
+import time
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, call
 
+import httpx
 import orjson
 import pytest
 from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym._checkpoint.agent import AgentSessionParticipant, AgentSessionRecord
+from nemo_gym._checkpoint.control import CheckpointRequest, CommitRequest, ParticipantControlPlane
+from nemo_gym.base_responses_api_agent import (
+    AGENT_ACTIVATION_HEADER,
+    AGENT_SESSION_COOKIE_KEY,
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+)
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -47,6 +58,7 @@ from responses_api_agents.simple_agent.app import (
     ResourcesServerRef,
     SimpleAgent,
     SimpleAgentConfig,
+    SimpleAgentLoopState,
     SimpleAgentRunRequest,
     SimpleAgentVerifyRequest,
 )
@@ -1519,3 +1531,529 @@ class TestApp:
         assert post_call_kwargs[0]["server_name"] == "my resources server"
         assert post_call_kwargs[1]["server_name"] == "simple_agent"
         assert post_call_kwargs[1]["cookies"] == {"session": "seeded"}
+
+
+class _RecordingActivation:
+    """Stands in for a checkpoint activation: supplies a continuation and records boundaries."""
+
+    def __init__(self, continuation=None) -> None:
+        self.continuation = continuation
+        self.snapshots: list = []
+        self.eager: list[dict] = []
+
+    async def boundary(self, snapshot) -> None:
+        # Keep the lazy snapshot and also evaluate it now, to check that evaluating it later agrees.
+        self.snapshots.append(snapshot)
+        self.eager.append(snapshot())
+
+    @property
+    def boundaries(self) -> list[dict]:
+        return [snapshot() for snapshot in self.snapshots]
+
+    @asynccontextmanager
+    async def awaiting_model(self):
+        yield
+
+
+_TOOL_CALL_RESPONSE = {
+    "id": "response-1",
+    "created_at": 1.0,
+    "model": "model",
+    "object": "response",
+    "output": [
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "get_weather",
+            "arguments": '{"city": "SF"}',
+            "id": "fc-1",
+        }
+    ],
+    "parallel_tool_calls": True,
+    "tool_choice": "auto",
+    "tools": [],
+    "usage": {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 15,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": 0},
+    },
+}
+_FINAL_RESPONSE = _TOOL_CALL_RESPONSE | {
+    "id": "response-2",
+    "output": [
+        {
+            "type": "message",
+            "id": "msg-1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "cold", "annotations": []}],
+        }
+    ],
+}
+
+
+class TestCheckpointContinuation:
+    async def test_boundaries_capture_a_resumable_loop_and_resume_skips_regeneration(self) -> None:
+        server, server_client = _make_agent(False)
+        calls: list[str] = []
+        # The first model call asks for the tool; every later one answers.
+        model_calls = 0
+
+        async def post(*, server_name, url_path, **kwargs):
+            nonlocal model_calls
+            calls.append(url_path)
+            if url_path == "/get_weather":
+                return _mock_response(content="cold")
+            model_calls += 1
+            return _mock_response(_TOOL_CALL_RESPONSE if model_calls == 1 else _FINAL_RESPONSE)
+
+        server_client.post = AsyncMock(side_effect=post)
+        body = NeMoGymResponseCreateParamsNonStreaming(input="weather?")
+        original = _RecordingActivation()
+        first, *_ = await server._create_episode(body, model_url_path="/v1/responses", activation=original)
+
+        # Snapshots evaluated after the loop finished still describe their own boundary.
+        assert original.boundaries == original.eager
+        # The boundary after the first model response has its tool call pending.
+        pending = next(state for state in original.boundaries if state["pending_tools"])
+        assert pending["step"] == 1 and calls[:2] == ["/v1/responses", "/get_weather"]
+
+        calls.clear()
+        resumed_activation = _RecordingActivation(continuation=pending)
+        resumed, *_ = await server._create_episode(body, model_url_path="/v1/responses", activation=resumed_activation)
+
+        assert calls == ["/get_weather", "/v1/responses"]
+        assert resumed.model_dump(mode="json")["output"] == first.model_dump(mode="json")["output"]
+        assert resumed.usage.total_tokens == first.usage.total_tokens == 30
+
+    async def test_restored_legacy_run_skips_resources_seeding(self) -> None:
+        # Observability is off: checkpointing alone must key the legacy /run by its rollout.
+        server, server_client = _make_agent(False)
+        participant = AgentSessionParticipant(server)
+        server._checkpoint_participant = participant
+        await participant.install(
+            [
+                AgentSessionRecord(
+                    session_key="run:0-0",
+                    episode_id=EpisodeId(rollout_id="0-0"),
+                    session={},
+                    boundary={"step": 0},
+                    episode={"next": "loop", "cookies": {}},
+                )
+            ],
+            [EpisodeId(rollout_id="0-0")],
+        )
+
+        async def post(*, url_path, **kwargs):
+            if url_path.endswith("/v1/responses"):
+                return _mock_response(_FINAL_RESPONSE)
+            assert url_path == "/verify"
+            return _mock_response(kwargs["json"] | {"reward": 1.0})
+
+        server_client.post = AsyncMock(side_effect=post)
+        body = SimpleAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": "question"},
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                ATTEMPT_INDEX_KEY_NAME: 1,
+            }
+        )
+
+        await server.run(MagicMock(cookies={}), body)
+
+        assert [call.kwargs["url_path"] for call in server_client.post.await_args_list] == [
+            "/ng-rollout/0-0-a1/v1/responses",
+            "/verify",
+        ]
+
+    @pytest.mark.parametrize("reported, blocks_while_verifying", [("replay", False), (None, True)])
+    async def test_legacy_verify_mode_comes_from_the_seed_reply(
+        self, reported: str | None, blocks_while_verifying: bool
+    ) -> None:
+        server, server_client = _make_agent(False)
+        participant = AgentSessionParticipant(server)
+        server._checkpoint_participant = participant
+        blocked_during_verify: list[bool] = []
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                response = _mock_response({})
+                response.headers = {"x-ng-checkpoint-verify": reported} if reported else {}
+                return response
+            if url_path.endswith("/v1/responses"):
+                return _mock_response(_FINAL_RESPONSE)
+            # A replayed verification does not hold a checkpoint; a waited-on one does.
+            blocked_during_verify.append(not participant.readiness().ready)
+            return _mock_response(kwargs["json"] | {"reward": 1.0})
+
+        server_client.post = AsyncMock(side_effect=post)
+        body = SimpleAgentRunRequest.model_validate(
+            {"responses_create_params": {"input": "question"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        )
+
+        await server.run(MagicMock(cookies={}), body)
+
+        assert blocked_during_verify == [blocks_while_verifying]
+
+    async def test_a_legacy_run_on_a_resources_server_that_cannot_capture_it_is_a_restart(self) -> None:
+        server, server_client = _make_agent(False)
+        participant = AgentSessionParticipant(server)
+        server._checkpoint_participant = participant
+        during_verify: list[tuple[bool, list[str], int]] = []
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                response = _mock_response({})
+                response.headers = {"x-ng-checkpoint-restart": "1"}
+                return response
+            if url_path.endswith("/v1/responses"):
+                return _mock_response(_FINAL_RESPONSE)
+            # Its verification would hold up a checkpoint, but nothing of a restart is in one.
+            report = participant.readiness()
+            during_verify.append((report.ready, report.restarts, len(await participant.export(None))))
+            return _mock_response(kwargs["json"] | {"reward": 1.0})
+
+        server_client.post = AsyncMock(side_effect=post)
+        body = SimpleAgentRunRequest.model_validate(
+            {"responses_create_params": {"input": "question"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        )
+
+        await server.run(MagicMock(cookies={}), body)
+
+        assert during_verify == [(True, ["0-0"], 0)]
+
+    async def test_direct_legacy_responses_call_leaves_no_session(self) -> None:
+        server, server_client = _make_agent(False)
+        participant = AgentSessionParticipant(server)
+        server._checkpoint_participant = participant
+        server_client.post = AsyncMock(return_value=_mock_response(_FINAL_RESPONSE))
+        request = MagicMock(path_params={"rollout_id": "direct-1"}, cookies={}, session={})
+
+        await server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="q"))
+
+        assert participant.readiness().counts["sessions"] == 0
+
+
+def _message_response(response_id: str) -> MagicMock:
+    return _mock_response(
+        {
+            "id": response_id,
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {
+                    "id": f"msg-{response_id}",
+                    "content": [{"annotations": [], "text": "Done.", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+        }
+    )
+
+
+async def _session_after_two_activations() -> tuple[str, dict]:
+    """Seed a session, run two activations, and export it as a checkpoint would."""
+    server, server_client = _make_agent(True)
+    server_client.post = AsyncMock(side_effect=[_message_response("resp-1"), _message_response("resp-2")])
+    client = TestClient(server.setup_webserver())
+    seed = client.post(
+        "/v1/agent_sessions",
+        json=AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="example", task_id="0"),
+        ).model_dump(mode="json"),
+    )
+    for question in ("first?", "second?"):
+        assert client.post("/ng-rollout/rollout/v1/responses", json={"input": question}).status_code == 200
+    session_id = seed.json()["agent_session_id"]
+    return session_id, (await server.export_agent_sessions([session_id]))[session_id]
+
+
+async def _restore_and_activate(session_id: str, session: dict, boundary: dict | None) -> list[str]:
+    """Restore the session into a fresh server, run one activation, and return the invocation IDs at close."""
+    server, server_client = _make_agent(True)
+    participant = AgentSessionParticipant(server)
+    server._checkpoint_participant = participant
+    await participant.install(
+        [
+            AgentSessionRecord(
+                session_key=session_id, episode_id=EpisodeId(rollout_id="rollout"), session=session, boundary=boundary
+            )
+        ],
+        [EpisodeId(rollout_id="rollout")],
+    )
+    server_client.post = AsyncMock(return_value=_message_response("resp-3"))
+    request = MagicMock(cookies={}, session={AGENT_SESSION_COOKIE_KEY: session_id}, headers={})
+    request.path_params = {"rollout_id": "rollout-a1"}
+    await server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="third?"))
+    return [record.invocation_id for record in server._session_state(session_id).observations.records]
+
+
+class TestRestoredSessionActivations:
+    async def test_the_next_activation_of_a_restored_session_does_not_reuse_an_invocation_id(self) -> None:
+        session_id, session = await _session_after_two_activations()
+
+        invocation_ids = await _restore_and_activate(session_id, session, boundary=None)
+
+        assert invocation_ids == ["root", "activation-2", "activation-3"]
+
+    async def test_an_activation_continued_from_its_restored_boundary_keeps_its_invocation_id(self) -> None:
+        session_id, session = await _session_after_two_activations()
+        # The checkpoint caught a third activation before its first model call.
+        session = session | {"activations": 3}
+        boundary = SimpleAgentLoopState(
+            step=0,
+            pending_tools=False,
+            new_outputs=[],
+            usage=None,
+            last_model_response=None,
+            model_server_cookies={},
+            resources_server_cookies={},
+            turns=[],
+            tool_records=[],
+            model_calls=[],
+            gaps=[],
+        ).model_dump(mode="json")
+
+        invocation_ids = await _restore_and_activate(session_id, session, boundary=boundary)
+
+        assert invocation_ids == ["root", "activation-2", "activation-3"]
+
+
+async def _until(condition) -> None:
+    async with asyncio.timeout(5):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+def _checkpoint(checkpoint_id: str, **extra) -> dict:
+    return {"checkpoint_id": checkpoint_id, "deadline_ts": time.time() + 5, **extra}
+
+
+_SESSION_ID = "agent-session"
+_STEP_ZERO = SimpleAgentLoopState(
+    step=0,
+    pending_tools=False,
+    new_outputs=[],
+    usage=None,
+    last_model_response=None,
+    model_server_cookies={},
+    resources_server_cookies={},
+    turns=[],
+    tool_records=[],
+    model_calls=[],
+    gaps=[],
+).model_dump(mode="json")
+
+
+async def _restored_session(server: SimpleAgent, *, activations: int, boundary: dict | None) -> MagicMock:
+    """Restore one agent session into ``server`` and return a request that activates it."""
+    participant = AgentSessionParticipant(server)
+    server._checkpoint_participant = participant
+    seed = AgentSeedSessionRequest(
+        agent_session_id=_SESSION_ID,
+        episode_id=EpisodeId(rollout_id="rollout"),
+        task_id=TaskId(taskset="example", task_id="0"),
+    )
+    session = {
+        "request": seed.model_dump(mode="json"),
+        "resources_cookies": {},
+        "observations": None,
+        "activations": activations,
+        "completed_activation": activations - 1 if boundary is not None else activations,
+        "completed_reply": None,
+    }
+    await participant.install(
+        [
+            AgentSessionRecord(
+                session_key=_SESSION_ID, episode_id=EpisodeId(rollout_id="rollout"), session=session, boundary=boundary
+            )
+        ],
+        [EpisodeId(rollout_id="rollout")],
+    )
+    await participant.open_admission()
+    request = MagicMock(cookies={}, session={AGENT_SESSION_COOKIE_KEY: _SESSION_ID}, headers={})
+    request.path_params = {"rollout_id": "rollout-a1"}
+    return request
+
+
+def _held_model(server_client: MagicMock, payload: dict) -> tuple[list[str], asyncio.Event]:
+    """Answer model calls with ``payload`` once the returned event is set; record each call."""
+    calls: list[str] = []
+    reply = asyncio.Event()
+
+    async def post(*, url_path, **kwargs):
+        calls.append(url_path)
+        await reply.wait()
+        return _mock_response(payload)
+
+    server_client.post = AsyncMock(side_effect=post)
+    return calls, reply
+
+
+class TestCheckpointAcrossModelCalls:
+    async def test_a_restored_activation_keeps_its_boundary_through_a_second_checkpoint(self) -> None:
+        server, server_client = _make_agent(False)
+        # A checkpoint caught the session's first activation before its model call.
+        request = await _restored_session(server, activations=1, boundary=_STEP_ZERO)
+        participant = server.checkpoint_participant
+        controller = ParticipantControlPlane(participant, instance_name="agent", lease_grace_seconds=60)
+        calls, reply = _held_model(server_client, _FINAL_RESPONSE)
+        activation = asyncio.create_task(
+            server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="q"))
+        )
+        await _until(lambda: calls)
+        # A second checkpoint while the restored activation waits on its model call.
+        prepared = await controller.prepare(CheckpointRequest(**_checkpoint("c2")))
+        [record] = await participant.export(None)
+        await controller.resume(CheckpointRequest(**_checkpoint("c2")))
+        reply.set()
+        await asyncio.wait_for(activation, 5)
+
+        assert prepared["phase"] == "prepared"
+        assert record.boundary == _STEP_ZERO
+        assert server._session_state(_SESSION_ID).activations == 1
+
+    async def test_a_model_reply_that_arrives_after_prepare_is_held_at_the_boundary_before_the_call(
+        self, tmp_path
+    ) -> None:
+        server, server_client = _make_agent(False)
+        request = await _restored_session(server, activations=0, boundary=None)
+        participant = server.checkpoint_participant
+        controller = ParticipantControlPlane(participant, instance_name="agent", lease_grace_seconds=60)
+        calls, reply = _held_model(server_client, _FINAL_RESPONSE)
+        held = asyncio.Event()
+        park = participant.park
+
+        async def signalling_park(session) -> None:
+            held.set()
+            await park(session)
+
+        participant.park = signalling_park
+        activation = asyncio.create_task(
+            server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="q"))
+        )
+        await _until(lambda: calls)
+        prepared = await controller.prepare(CheckpointRequest(**_checkpoint("c1")))
+        # The model server delivered the reply before its own prepare; the agent reads it only now.
+        reply.set()
+        await asyncio.wait_for(held.wait(), 5)
+        ready_with_the_reply = participant.ready()
+        committed = await controller.commit(CommitRequest(**_checkpoint("c1", checkpoint_dir=str(tmp_path))))
+        [record] = await participant.export(None)
+        await controller.resume(CheckpointRequest(**_checkpoint("c1")))
+        result = await asyncio.wait_for(activation, 5)
+
+        assert prepared["phase"] == "prepared" and ready_with_the_reply
+        assert committed["phase"] == "committed"
+        # The boundary before the call: a restore calls the model again from there.
+        assert record.boundary == _STEP_ZERO
+        # After resume the activation continues with the reply it held.
+        assert len(calls) == 1
+        assert result.output[0].content[0].text == "cold"
+
+    async def test_an_activation_already_completed_is_answered_with_its_reply_without_running_again(self) -> None:
+        server, server_client = _make_agent(True)
+        server_client.global_config_dict = {
+            "observability_enabled": True,
+            "checkpoint": {"enabled": True, "control_auth_token": "t"},
+        }
+        server_client.post = AsyncMock(
+            side_effect=lambda **kwargs: _message_response(f"resp-{server_client.post.await_count}")
+        )
+        app = server.setup_webserver()
+        seed = AgentSeedSessionRequest(
+            agent_session_id=_SESSION_ID,
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="example", task_id="0"),
+        )
+        path = "/ng-rollout/rollout/v1/responses"
+
+        def activation(index: int) -> dict:
+            return {"json": {"input": "q"}, "headers": {AGENT_ACTIVATION_HEADER: str(index)}}
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://agent") as http:
+            assert (await http.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))).status_code == 200
+            first = await http.post(path, **activation(1))
+            state = server._session_state(_SESSION_ID)
+            observations = state.observations.model_dump(mode="json")
+            # The environment server was restored from a checkpoint taken before it received the reply.
+            again = await http.post(path, **activation(1))
+            calls_after_again = server_client.post.await_count
+            unchanged = (state.observations.model_dump(mode="json"), state.activations) == (observations, 1)
+            ahead = await http.post(path, **activation(3))
+            second = await http.post(path, **activation(2))
+            behind = await http.post(path, **activation(1))
+            unnumbered = await http.post(path, json={"input": "q"})
+
+        assert first.status_code == again.status_code == 200
+        assert again.json() == first.json()
+        assert calls_after_again == 1 and unchanged
+        assert ahead.status_code == 409 and ahead.json()["error"]["code"] == "activation_out_of_order"
+        assert second.status_code == 200 and second.json()["id"] == "resp-2"
+        assert behind.status_code == 409 and behind.json()["error"]["code"] == "activation_out_of_order"
+        # Without the header every invocation is a new activation, as before.
+        assert unnumbered.status_code == 200 and unnumbered.json()["id"] == "resp-3"
+
+
+@pytest.mark.parametrize("stage", ["verify", "return"])
+async def test_a_legacy_run_restored_at_verify_or_return_still_reports_its_trajectory(stage: str) -> None:
+    trajectory = TrajectoryRecord(task_id="0", rollout_id="0-0").model_dump(mode="json")
+
+    async def post(*, url_path, **kwargs):
+        if url_path == "/seed_session":
+            return _mock_response({})
+        if url_path.endswith("/v1/responses"):
+            return _mock_response(_FINAL_RESPONSE | {"_ng_trajectory": trajectory})
+        return _mock_response(kwargs["json"] | {"reward": 1.0})
+
+    def run_request(attempt: int) -> SimpleAgentRunRequest:
+        return SimpleAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": "question"},
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                ATTEMPT_INDEX_KEY_NAME: attempt,
+            }
+        )
+
+    server, server_client = _make_agent(True)
+    participant = AgentSessionParticipant(server)
+    server._checkpoint_participant = participant
+    server_client.post = AsyncMock(side_effect=post)
+    boundaries: list[dict] = []
+    record_boundary = participant.legacy_episodes.boundary
+
+    async def recording(key: str, state: dict) -> None:
+        boundaries.append(state)
+        await record_boundary(key, state)
+
+    participant.legacy_episodes.boundary = recording
+    await server.run(MagicMock(cookies={}), run_request(0))
+    [episode] = [state for state in boundaries if state["next"] == stage]
+
+    restored, restored_client = _make_agent(True)
+    restored_participant = AgentSessionParticipant(restored)
+    restored._checkpoint_participant = restored_participant
+    restored_client.post = AsyncMock(side_effect=post)
+    await restored_participant.install(
+        [
+            AgentSessionRecord(
+                session_key="run:0-0", episode_id=EpisodeId(rollout_id="0-0"), session={}, episode=episode
+            )
+        ],
+        [EpisodeId(rollout_id="0-0")],
+    )
+    result = await restored.run(MagicMock(cookies={}), run_request(1))
+
+    assert result.model_dump()["ng_trajectory"]["rollout_id"] == "0-0-a1"

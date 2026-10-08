@@ -23,6 +23,7 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionResponse,
 )
 from nemo_gym.base_responses_api_agent import (
+    AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -332,6 +333,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 url_path=self._agent_responses_path(request),
                 json=request.task.task_input.responses_create_params,
                 cookies=handles.agent_cookies,
+                # The episode's only activation.
+                # A restore before its reply invokes it again, and the agent gives the reply it already gave.
+                headers={AGENT_ACTIVATION_HEADER: "1"},
             )
             await raise_for_status(agent_http_response)
             response_cookies = _cookies(agent_http_response)
