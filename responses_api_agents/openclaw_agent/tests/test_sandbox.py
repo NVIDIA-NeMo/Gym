@@ -186,6 +186,38 @@ def setup():
         yield agent, sandbox
 
 
+@pytest.mark.parametrize("stage", ["prepare", "install"])
+@pytest.mark.parametrize("error_type", ["timeout", "sandbox"])
+@pytest.mark.parametrize("owned", [False, True])
+async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage, error_type, owned):
+    agent, sandbox = setup
+    request = Request({"type": "http", "session": {}})
+    body = seed()
+    if owned:
+        agent.config.sandbox_provider = "sandbox"
+        agent.config.sandbox_config = {"image": "test-image", "workdir": "/app"}
+        body = body.model_copy(update={"sandbox_access": None})
+        sandbox.start = AsyncMock()
+    ok = SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+    error = SimpleNamespace(return_code=0, error_type=error_type, stdout="bootstrap output", stderr="provider failed")
+    sandbox.exec.side_effect = ([ok] if owned else []) + ([error, ok] if stage == "prepare" else [ok, error, ok])
+    with patch("responses_api_agents.openclaw_agent.app.AsyncSandbox", return_value=sandbox) as sandbox_class:
+        sandbox_class.connect = AsyncMock(return_value=sandbox)
+        with pytest.raises(RuntimeError, match=f"error={error_type}") as failed:
+            await agent.seed_agent_session(request, body)
+    assert "bootstrap output" in str(failed.value)
+    assert "provider failed" in str(failed.value)
+    assert not request.session
+    sandbox.launch.assert_not_awaited()
+    if owned:
+        sandbox.start.assert_awaited_once()
+        sandbox.stop.assert_awaited_once()
+    else:
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
+    assert not any(record.state is not None for record in agent._session_records.values())
+
+
 def close_body(session_id):
     return {"agent_session_id": session_id, "episode_id": seed().episode_id.model_dump()}
 
@@ -442,15 +474,18 @@ def test_wall_limit_returns_gradable_partial_output(setup, stop_reason):
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
 
 
+@pytest.mark.parametrize("stop_reason", ["stop", "length", "aborted"])
 @pytest.mark.parametrize("failure", ["runner", "exit"])
-def test_runtime_failures_cannot_become_successful_responses(setup, failure):
+def test_runtime_failures_cannot_become_successful_responses(setup, failure, stop_reason):
     agent, sandbox = setup
     sandbox.result.update(error="runner failed" if failure == "runner" else None, return_code=1)
+    sandbox.events = events(stop_reason=stop_reason)
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
         assert response.status_code == 502
-        assert ("runner failed" if failure == "runner" else "exited 1") in response.json()["detail"]
+        expected = "runner failed" if failure == "runner" else "aborted" if stop_reason == "aborted" else "exited 1"
+        assert expected in response.json()["detail"]
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         invocation = closed.json()["agent_observations"]["records"][0]
         assert invocation["status"] == "failed"
@@ -702,7 +737,7 @@ async def test_install_failure_disconnects_without_stopping_owner(setup):
     agent, sandbox = setup
     sandbox.exec.side_effect = [
         SimpleNamespace(return_code=0, error_type=None),
-        SimpleNamespace(return_code=1, stderr="npm failed"),
+        SimpleNamespace(return_code=1, error_type=None, stdout="", stderr="npm failed"),
         SimpleNamespace(return_code=0, error_type=None),
     ]
     request = Request({"type": "http", "session": {}})
@@ -1219,7 +1254,9 @@ def test_workdir_validation_accepts_separate_repository_and_rejects_missing(tmp_
 
 async def test_path_check_failure_never_uploads_or_installs(setup):
     agent, sandbox = setup
-    sandbox.exec.return_value = SimpleNamespace(return_code=1, stderr="task workdir overlaps adapter-owned storage")
+    sandbox.exec.return_value = SimpleNamespace(
+        return_code=1, error_type=None, stdout="", stderr="task workdir overlaps adapter-owned storage"
+    )
     request = Request({"type": "http", "session": {}})
     with pytest.raises(RuntimeError, match="overlaps adapter-owned storage"):
         await agent.seed_agent_session(request, seed())
@@ -1484,7 +1521,7 @@ async def test_failed_seed_with_confirmed_cleanup_accepts_cookie_less_close(setu
     body = seed()
     sandbox.exec.side_effect = [
         SimpleNamespace(return_code=0, error_type=None),
-        SimpleNamespace(return_code=1, stderr="npm unavailable"),
+        SimpleNamespace(return_code=1, error_type=None, stdout="", stderr="npm unavailable"),
         SimpleNamespace(return_code=0, error_type=None),
     ]
     with pytest.raises(RuntimeError, match="npm unavailable"):
@@ -1501,7 +1538,7 @@ async def test_failed_seed_cleanup_retains_state_until_explicit_retry(setup):
     body = seed()
     sandbox.exec.side_effect = [
         SimpleNamespace(return_code=0, error_type=None),
-        SimpleNamespace(return_code=1, stderr="npm unavailable"),
+        SimpleNamespace(return_code=1, error_type=None, stdout="", stderr="npm unavailable"),
         SimpleNamespace(return_code=0, error_type=None),
     ]
     sandbox.disconnect.side_effect = RuntimeError("disconnect unavailable")

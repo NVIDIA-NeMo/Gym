@@ -107,7 +107,8 @@ def test_native_capable_overlay_keeps_inherited_resources(tmp_path: Path, agent_
     )
     assert migration.main([str(base), str(overlay)]) == 0
     resolved = _parse(base, overlay, strict=True)
-    assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["renamed_environment_server"]}
+    # Main retargets the agent reference while preserving the environment's public name.
+    assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["my_environment_server"]}
     assert resolved.renamed_agent.responses_api_agents[agent_type].resources_server.name == "my_resources"
 
 

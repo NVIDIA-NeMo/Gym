@@ -161,13 +161,15 @@ to `1200` for a 20-minute model-call limit. Increase the separate `timeout` and 
 deadline when a task needs more total time; increasing those alone does not raise the model-idle limit.
 
 The installer supports Linux glibc on x86_64/aarch64 and musl on x86_64, with Python 3.8 or later for the
-supervisor. Node 22.19.0 and OpenClaw are installed under
+supervisor. Session setup installs missing Python and Bash with apt-get or apk
+when running as root; otherwise preinstall Python 3.8+ and Bash. Existing tools
+are preserved. Node 22.19.0 and OpenClaw are installed under
 `/tmp/nemo-gym-openclaw-node-22.19.0-<version>`. Node archives are checked against upstream SHA-256
 sums; the installed package version is verified before caching and when reusing a cached runtime.
 A version-scoped `flock` serializes runtime installation and cache validation across session setup
 attempts. Missing `flock`, `curl`, CA certificates, `tar`, `gzip`, `sha256sum`, and `awk` are installed with `apt-get` or `apk` only when
 running as root. Other images receive an actionable prerequisite error. Installation errors include
-the failed command, exit status, and stderr. Supporting these architectures does not establish
+the failed command, exit status, provider error, stdout, and stderr. Supporting these architectures does not establish
 validation on every task image; record the actual image digest and runtime versions with each run.
 
 The runner uses ordinary sandbox `exec`; no PTY/session API is required. Its internal deadline

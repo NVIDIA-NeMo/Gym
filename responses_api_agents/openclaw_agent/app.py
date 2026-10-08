@@ -389,6 +389,31 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
+def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
+    # Bootstrap with POSIX sh; the runtime installer itself requires Bash.
+    bootstrap = """set -eu
+set --
+command -v python3 >/dev/null 2>&1 || set -- "$@" python3
+command -v bash >/dev/null 2>&1 || set -- "$@" bash
+if [ "$#" -gt 0 ]; then
+    [ "$(id -u)" = 0 ] || { echo "Native OpenClaw requires $*: preinstall these tools or use a root image." >&2; exit 1; }
+    if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache "$@"
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+    else
+        echo "Native OpenClaw requires $*: preinstall these tools (automatic installation requires apt-get or apk)." >&2
+        exit 1
+    fi
+fi
+"""
+    check_paths = shlex.join(
+        ["python3", "-I", "-c", _SANDBOX_PATH_CHECK, workdir, str(Path(directory).parent), runtime]
+    )
+    return bootstrap + f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.openclaw')}"
+
+
 class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: Optional[ResourcesServerRef] = None
     model_server: Optional[ModelServerRef] = None
@@ -512,24 +537,15 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     raise RuntimeError(
                         f"Cannot create OpenClaw sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
-            check_paths = shlex.join(
-                [
-                    "python3",
-                    "-c",
-                    _SANDBOX_PATH_CHECK,
-                    workdir,
-                    "/tmp/nemo-gym-openclaw-sessions",
-                    runtime,
-                ]
-            )
             prepared = await sandbox.exec(
-                "command -v python3 >/dev/null 2>&1 || "
-                "{ echo 'Native OpenClaw requires Python >=3.8 in the task image' >&2; exit 1; }; "
-                f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.openclaw')}",
-                timeout_s=30,
+                _sandbox_prepare_command(workdir, directory, runtime),
+                timeout_s=self.config.sandbox_install_timeout_seconds,
             )
-            if prepared.return_code != 0 or getattr(prepared, "error_type", None):
-                raise RuntimeError(prepared.stderr or "Cannot create OpenClaw sandbox session directory")
+            if prepared.return_code != 0 or prepared.error_type:
+                raise RuntimeError(
+                    f"OpenClaw sandbox preparation failed (exit {prepared.return_code}, error={prepared.error_type}): "
+                    f"stderr={prepared.stderr[-16000:]}; stdout={prepared.stdout[-16000:]}"
+                )
             prepared_directory = True
             # Install only the agent runtime in the existing task sandbox.
             # Resources has already prepared the task repository and its dependencies.
@@ -541,11 +557,11 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 cwd=workdir,
                 timeout_s=self.config.sandbox_install_timeout_seconds,
             )
-            if installed.return_code != 0 or getattr(installed, "error_type", None):
+            if installed.return_code != 0 or installed.error_type:
                 raise RuntimeError(
-                    f"OpenClaw runtime setup failed (exit {installed.return_code}): "
+                    f"OpenClaw runtime setup failed (exit {installed.return_code}, error={installed.error_type}): "
                     f"bash {directory}/{installer} {runtime} {self.config.openclaw_version}\n"
-                    f"{installed.stderr or installed.stdout}"
+                    f"stderr={installed.stderr[-16000:]}; stdout={installed.stdout[-16000:]}"
                 )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
         except BaseException as error:
