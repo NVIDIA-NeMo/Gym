@@ -81,14 +81,19 @@ def test_expected_fault_must_actually_occur(tmp_path, record):
     assert checks["rollout_ended_on_failed_model_call"]["reasons"] == ["expected unhealthy; observed healthy"]
 
 
-@pytest.mark.parametrize("name,status", [("retry_429", 429), ("retry_500", 500), ("model_error", 400)])
+@pytest.mark.parametrize(
+    "name,status", [("retry_429", 429), ("retry_500", 500), ("policy_model_timeout", 504), ("model_error", 400)]
+)
 def test_owned_http_failures_match_the_declared_scenario(tmp_path, record, name, status):
     scenario = next(s for s in SCENARIOS if s.name == name)
     trajectory = record["ng_trajectory"]
     failed = deepcopy(trajectory["model_calls"][0])
     failed.update(model_call_id="failed-attempt", started_at=0.0, completed_at=0.5, token_stats={})
     failed["response_metadata"].update(
-        response_id=None, status_code=status, error_category="http_error", response_status=None
+        response_id=None,
+        status_code=status,
+        error_category="timeout" if status == 504 else "http_error",
+        response_status=None,
     )
     failed["response"] = {"error": {"message": "injected failure"}}
     ref = {"model_call_id": "failed-attempt", "model_ref": failed["response_metadata"]["model_ref"]}

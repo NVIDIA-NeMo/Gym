@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from nemo_gym.harness_capabilities.behavior import inspect_behavior, model_checks, tool_checks
+from nemo_gym.harness_capabilities.behavior import inspect_behavior, model_checks, model_timeout_checks, tool_checks
 from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
 
 
@@ -112,3 +112,73 @@ def test_missing_output_witness_cannot_qualify_artifacts(behavior_episode):
     assert checks["tools.witness_output"]["reasons"] == [
         "retained tool output differs from the independent tool witness"
     ]
+
+
+@pytest.mark.parametrize(
+    "mutation,failed_check",
+    [
+        (None, None),
+        ("no_deadline", "model.timeout_triggered"),
+        ("no_capture", "model.timeout_retained"),
+        ("wrong_category", "model.timeout_retained"),
+        ("no_retry", "model.retry_after_timeout"),
+        ("changed_request", "model.retry_after_timeout"),
+        ("incomplete_verification", "verifier.completed_after_timeout"),
+        ("no_verifier", "verifier.completed_after_timeout"),
+    ],
+)
+def test_policy_timeout_requires_observed_fault_recovery_and_saved_evaluation(mutation, failed_check):
+    request = {"input": [{"role": "user", "content": "task"}]}
+    error = {"error": {"type": "model_timeout"}}
+    witness = {
+        "attempts": [
+            {
+                "request": request,
+                "response": error,
+                "status_code": 504,
+                "timeout": {
+                    "expired": True,
+                    "scope": "model_call",
+                    "model_server": "policy_model",
+                    "limit_seconds": 0.1,
+                },
+            },
+            {"request": copy.deepcopy(request), "response": {"id": "recovered"}, "status_code": 200},
+        ],
+        "verifications": [{"evaluation_completed": True}],
+    }
+    record = {
+        "evaluation_completed": True,
+        "ng_trajectory": {
+            "model_calls": [
+                {
+                    "request": request,
+                    "response": error,
+                    "response_metadata": {"status_code": 504, "error_category": "timeout", "response_id": None},
+                }
+            ]
+        },
+    }
+    if mutation == "no_deadline":
+        del witness["attempts"][0]["timeout"]
+    elif mutation == "no_capture":
+        record["ng_trajectory"]["model_calls"] = []
+    elif mutation == "wrong_category":
+        record["ng_trajectory"]["model_calls"][0]["response_metadata"]["error_category"] = "upstream_error"
+    elif mutation == "no_retry":
+        witness["attempts"].pop()
+    elif mutation == "changed_request":
+        witness["attempts"][1]["request"] = {"input": []}
+    elif mutation == "incomplete_verification":
+        record["evaluation_completed"] = False
+    elif mutation == "no_verifier":
+        witness["verifications"] = []
+    checks = {c["id"]: c for c in model_timeout_checks(witness, record, timeout_seconds=0.1, fingerprint=fingerprint)}
+    if failed_check:
+        assert checks[failed_check]["status"] == "fail"
+    else:
+        assert all(c["status"] == "pass" for c in checks.values())
+    assert all(
+        c["status"] == "not_applicable"
+        for c in model_timeout_checks(None, None, timeout_seconds=None, fingerprint=fingerprint)
+    )

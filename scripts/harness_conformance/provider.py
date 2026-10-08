@@ -3,6 +3,7 @@
 
 """Controlled Chat/Responses endpoints and private episode witnesses."""
 
+import asyncio
 import json
 import shlex
 from dataclasses import dataclass, field
@@ -116,15 +117,35 @@ class Probe:
         self._observe_tool_results(body)
         index = len(self.attempts)
         status = 200
-        if index < len(self.scenario.http_errors):
+        if index < len(self.scenario.http_errors) and self.scenario.model_timeout_seconds is None:
             status = self.scenario.http_errors[index]
         elif self.scenario.terminal_error:
             status = self.scenario.http_errors[-1]
+        timeout = None
+        if index == 0 and self.scenario.model_timeout_seconds is not None:
+            # Exercise an actual Model Server deadline, not a preselected HTTP error.
+            # The controlled model never completes this first generation.
+            deadline = asyncio.timeout(self.scenario.model_timeout_seconds)
+            try:
+                async with deadline:
+                    await asyncio.Event().wait()
+            except TimeoutError:
+                timeout = {
+                    "scope": "model_call",
+                    "model_server": "policy_model",
+                    "limit_seconds": self.scenario.model_timeout_seconds,
+                    "expired": deadline.expired(),
+                }
+                status = 504
         response_id = f"resp_{uuid4().hex}"
         namespaces = {}
         if status != 200:
             payload = {
-                "error": {"message": "controlled model failure", "type": "conformance_error", "code": str(status)}
+                "error": {
+                    "message": "policy model deadline exceeded" if timeout else "controlled model failure",
+                    "type": "model_timeout" if timeout else "conformance_error",
+                    "code": str(status),
+                }
             }
         else:
             try:
@@ -217,6 +238,8 @@ class Probe:
         self.attempts.append(
             {"attempt_id": f"attempt-{index}", "request": body, "response": payload, "status_code": status}
         )
+        if timeout is not None:
+            self.attempts[-1]["timeout"] = timeout
         self.save()
         if status != 200 or not body.get("stream"):
             return JSONResponse(payload, status_code=status, headers={"Retry-After": "0"})
@@ -260,7 +283,7 @@ class Probe:
                 for item in output
             )
             reward = float(complete and self.scenario.expected_reward == 1.0)
-            self.verifications.append({"reward": reward, "answer_seen": complete})
+            self.verifications.append({"reward": reward, "answer_seen": complete, "evaluation_completed": True})
             self.save()
             return {**body, "reward": reward, "evaluation_completed": True, "mask_sample": False}
 

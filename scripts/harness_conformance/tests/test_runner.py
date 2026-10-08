@@ -60,7 +60,10 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, tmp_path):
         getattr(module, HARNESSES[harness] + "Config").model_validate(agent)
 
 
-@pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure", "usage_omitted", "retry_429", "retry_500"])
+@pytest.mark.parametrize(
+    "scenario_name",
+    ["tool_success", "tool_failure", "usage_omitted", "retry_429", "retry_500", "policy_model_timeout"],
+)
 def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path, scenario_name):
     scenario = SCENARIO[scenario_name]
     probe = Probe(scenario, tmp_path)
@@ -96,6 +99,15 @@ def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path,
     assert len(captures) == len(scenario.http_errors) + 3
     assert len({c["model_call_id"] for c in captures}) == len(captures)
     assert [c["status_code"] for c in captures] == [*scenario.http_errors, 200, 200, 200]
+    if scenario.model_timeout_seconds is not None:
+        assert probe.attempts[0]["timeout"] == {
+            "scope": "model_call",
+            "model_server": "policy_model",
+            "limit_seconds": scenario.model_timeout_seconds,
+            "expired": True,
+        }
+        assert captures[0]["error_category"] == "timeout"
+        assert captures[0]["response_id"] is None
     if not scenario.usage:
         assert all(c.get("tokens_in") is None and c.get("tokens_out") is None for c in captures)
     else:
@@ -174,7 +186,7 @@ def test_verifier_records_actual_final_answer(tmp_path, name, reward):
     assert response.json()["reward"] == reward
     assert response.json()["evaluation_completed"] is True
     assert response.json()["mask_sample"] is False
-    assert probe.verifications == [{"reward": reward, "answer_seen": True}]
+    assert probe.verifications == [{"reward": reward, "answer_seen": True, "evaluation_completed": True}]
     assert probe.seeded == 1
 
 

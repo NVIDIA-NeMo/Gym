@@ -22,6 +22,7 @@ class Scenario:
     usage: bool = True
     http_errors: tuple[int, ...] = ()
     terminal_error: bool = False
+    model_timeout_seconds: float | None = None
     expected_reward: float = 1.0
     steps: bool = True
     health_expectations: dict[str, Verdict] = field(default_factory=dict)
@@ -68,6 +69,17 @@ SCENARIOS = (
         health_expectations={
             "model_call_missing_token_counts": "unhealthy",
             # Injected HTTP errors have no usage; retained attempts stay unknown.
+            "rollout_token_count_mismatch": "unobserved",
+        },
+    ),
+    Scenario(
+        "policy_model_timeout",
+        "The first policy call exceeds the Model Server deadline; retry, finish and verify.",
+        model_timeout_seconds=0.1,
+        http_errors=(504,),
+        health_expectations={
+            "model_call_missing_token_counts": "unhealthy",
+            # The timed-out attempt has no usage, even after successful recovery.
             "rollout_token_count_mismatch": "unobserved",
         },
     ),

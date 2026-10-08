@@ -79,6 +79,7 @@ python scripts/run_harness_conformance.py --harness codex \
 | `usage_omitted` | Successful tool sequence with no provider usage fields | TE-1–TE-9, including unknown usage |
 | `retry_429` | Two 429 replies before the tool sequence | TE-1–TE-9, including distinct attempts with identical request bodies |
 | `retry_500` | One 500 reply before the tool sequence | TE-1–TE-9, including retained error payloads |
+| `policy_model_timeout` | First policy request exceeds a 100 ms Model Server deadline and returns 504; retry succeeds, then tools and verification run | Retained timeout attempt, unchanged retry, completed verification, and TE-1–TE-9 |
 | `model_error` | Persistent 400 with no model response ID | TE-1, TE-2, TE-4, TE-7, and TE-8/TE-9 |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
 
@@ -87,6 +88,15 @@ usage includes prompt, completion, reasoning, total, and cached counts. Chat
 replies also include reasoning text. Requests adapt only the shell-tool name and
 argument schema advertised by the harness. Unsupported tool protocols are
 reported as exercise failures.
+
+`policy_model_timeout` uses an actual deadline in the controlled Model Server.
+It checks that the deadline fired, the timeout attempt was saved, the harness
+retried the same request successfully, and verification ran with saved
+`evaluation_completed=true`. It tests a server-reported model timeout, not a
+harness client deadline or the runner's whole-episode `--timeout`.
+The timed-out attempt has no token usage: this scenario explicitly expects
+`model_call_missing_token_counts=unhealthy` and
+`rollout_token_count_mismatch=unobserved`; other health checks must be healthy.
 
 The runner observes actual retry behavior. A runtime that does not retry the
 injected error leaves that scenario incomplete. A terminal error must still

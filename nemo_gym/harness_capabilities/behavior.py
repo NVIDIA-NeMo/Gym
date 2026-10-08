@@ -140,6 +140,7 @@ def inspect_behavior(
     tool_steps: int,
     expected_reward: float,
     fingerprint: Callable,
+    model_timeout_seconds: float | None = None,
 ) -> list[dict]:
     """Check saved evidence and observations against explicit test expectations."""
     results = Results()
@@ -286,6 +287,7 @@ def inspect_behavior(
         results.dump()
         + model_checks(record, attempts, fingerprint=fingerprint, available=available)
         + tool_checks(record, tools, applies=tool_steps > 0, available=available)
+        + model_timeout_checks(witness, record, timeout_seconds=model_timeout_seconds, fingerprint=fingerprint)
     )
 
 
@@ -368,3 +370,83 @@ def model_checks(
         )
     )
     return result.dump()
+
+
+def model_timeout_checks(
+    witness: dict | None, record: dict | None, *, timeout_seconds: float | None, fingerprint: Callable
+) -> list[dict]:
+    """Require a witnessed policy deadline, retained timeout, retry and completed verification."""
+    results = Results()
+    attempts = (witness or {}).get("attempts", [])
+    first = attempts[0] if attempts else {}
+    timeout = _mapping(first.get("timeout"))
+    calls = _objects(_mapping((record or {}).get("ng_trajectory")).get("model_calls"))
+    failed = [
+        c
+        for c in calls
+        if fingerprint(c.get("request"), _mapping(c.get("response_metadata")).get("status_code"), c.get("response"))
+        == fingerprint(first.get("request"), first.get("status_code"), first.get("response"))
+    ]
+    verifications = (witness or {}).get("verifications", [])
+    applies = timeout_seconds is not None
+    results.run(
+        BehavioralCheck(
+            id="model.timeout_triggered",
+            tier="P0",
+            evidence=("TE-1",),
+            location="witness.json",
+            reason="the configured policy-model call deadline did not fire",
+            predicate=lambda: timeout.get("expired") is True
+            and timeout.get("scope") == "model_call"
+            and timeout.get("model_server") == "policy_model"
+            and timeout.get("limit_seconds") == timeout_seconds
+            and first.get("status_code") == 504,
+            available=witness is not None,
+            applies=applies,
+        )
+    )
+    results.run(
+        BehavioralCheck(
+            id="model.timeout_retained",
+            tier="P0",
+            evidence=("TE-1",),
+            location="$.ng_trajectory.model_calls",
+            reason="the timed-out policy attempt must be retained as a timeout without a response ID",
+            predicate=lambda: len(failed) == 1
+            and _mapping(failed[0].get("response_metadata")).get("error_category") == "timeout"
+            and _mapping(failed[0].get("response_metadata")).get("response_id") is None,
+            available=record is not None and witness is not None,
+            applies=applies,
+            depends_on=("model.timeout_triggered",),
+        )
+    )
+    results.run(
+        BehavioralCheck(
+            id="model.retry_after_timeout",
+            tier="P0",
+            evidence=("TE-1",),
+            location="witness.json",
+            reason="the harness must retry the timed-out request unchanged and receive a successful response",
+            predicate=lambda: len(attempts) >= 2
+            and attempts[1].get("request") == first.get("request")
+            and attempts[1].get("status_code") == 200,
+            available=witness is not None,
+            applies=applies,
+            depends_on=("model.timeout_triggered",),
+        )
+    )
+    results.run(
+        BehavioralCheck(
+            id="verifier.completed_after_timeout",
+            tier="P0",
+            evidence=("TE-6",),
+            location="$.evaluation_completed",
+            reason="verification must complete after recovery and retain evaluation_completed=true",
+            predicate=lambda: len(verifications) == 1
+            and verifications[0].get("evaluation_completed") is True
+            and (record or {}).get("evaluation_completed") is True,
+            available=witness is not None and record is not None,
+            applies=applies,
+        )
+    )
+    return results.dump()
