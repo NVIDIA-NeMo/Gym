@@ -16,6 +16,7 @@
 import json
 from collections import defaultdict
 from collections.abc import Mapping
+from datetime import datetime
 from functools import partial
 from os import environ
 from pathlib import Path
@@ -41,15 +42,28 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputTokensDetails,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    ModelCallRef,
+    ObservationGap,
+    TrajectoryRecord,
+    TrajectoryTurn,
+)
 from nemo_gym.server_utils import get_server_url, is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
-from tau2.data_model.simulation import SimulationRun, TextRunConfig
+from tau2.data_model.message import Message
+from tau2.data_model.simulation import SimulationRun, TerminationReason, TextRunConfig
 from tau2.data_model.tasks import Task
 from tau2.evaluator.evaluator import EvaluationType
 from tau2.runner.batch import run_single_task
@@ -210,6 +224,7 @@ class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
     mean_completion_tokens: Optional[float]
     max_prompt_tokens: Optional[float]
     max_completion_tokens: Optional[float]
+    ng_trajectory: Optional[TrajectoryRecord] = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class Tau2FailureResponse(BaseVerifyResponse):
@@ -221,6 +236,115 @@ class Tau2Agent(SimpleResponsesAPIAgent):
     config: Tau2Config
 
     __key_metrics: Optional[List[str]] = None
+
+    def _observed_trajectory(
+        self,
+        body: Tau2RunRequest,
+        result: SimulationRun,
+        messages: list[Message],
+        conversation: list[Any],
+    ) -> tuple[TrajectoryRecord, NeMoGymResponseUsage | None]:
+        """Retain Tau2's agent turns and policy-call IDs for Gym health checks."""
+        indices = body.model_extra or {}
+        task_index = indices.get(TASK_INDEX_KEY_NAME)
+        task_id = str(
+            next(
+                (indices[key] for key in ("task_id", "problem_id", "instance_id") if indices.get(key) is not None),
+                task_index if task_index is not None else result.task_id,
+            )
+        )
+        rollout_id = maybe_rollout_id_from_run_body(body) or result.id
+        invocation_id = result.id
+        turns: list[TrajectoryTurn] = []
+        policy_calls: list[ModelCallRef] = []
+        gaps: list[ObservationGap] = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        usage_complete = True
+
+        for message in messages:
+            if message.role == "assistant":
+                raw_data = message.raw_data
+                if raw_data is not None and not isinstance(raw_data, dict):
+                    raise ValueError("Tau2 assistant raw_data must be an object")
+                response_id = raw_data.get("id") if raw_data is not None else None
+                if response_id is not None and (not isinstance(response_id, str) or not response_id):
+                    raise ValueError("Tau2 assistant response ID must be a non-empty string")
+                turn_calls = []
+                if response_id is not None:
+                    reference = ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
+                    turn_calls.append(reference)
+                    policy_calls.append(reference)
+                    if message.usage is None:
+                        usage_complete = False
+                    else:
+                        prompt = message.usage.get("prompt_tokens")
+                        completion = message.usage.get("completion_tokens")
+                        if type(prompt) is not int or prompt < 0 or type(completion) is not int or completion < 0:
+                            raise ValueError("Tau2 assistant usage must contain non-negative integer token counts")
+                        prompt_tokens += prompt
+                        completion_tokens += completion
+                else:
+                    if not turns and message.turn_idx == 0 and raw_data is None and message.usage is None:
+                        gaps.append(ObservationGap(code="synthetic_opening_turn_without_model_call"))
+                    else:
+                        gaps.append(
+                            ObservationGap(code="turn_model_call_scope_incomplete", detail=f"turn:{len(turns) + 1}")
+                        )
+                        usage_complete = False
+
+                timestamp = datetime.fromisoformat(message.timestamp or result.start_time).timestamp()
+                answer = to_litellm_messages([message])[0]
+                turns.append(
+                    TrajectoryTurn(
+                        invocation_id=invocation_id,
+                        task_id=task_id,
+                        rollout_id=rollout_id,
+                        turn_no=len(turns) + 1,
+                        timestamp=timestamp,
+                        answer=answer,
+                        step_count=message.turn_idx if message.turn_idx is not None else len(turns),
+                        model_calls=turn_calls,
+                    )
+                )
+
+        if result.termination_reason in {TerminationReason.USER_STOP, TerminationReason.AGENT_STOP}:
+            status = "completed"
+        elif result.termination_reason in {
+            TerminationReason.MAX_STEPS,
+            TerminationReason.MAX_AGENT_STEPS,
+            TerminationReason.TIMEOUT,
+        }:
+            status = "incomplete"
+        else:
+            status = "failed"
+        trajectory = TrajectoryRecord(
+            task_id=task_id,
+            rollout_id=rollout_id,
+            invocations=[
+                AgentInvocation(
+                    invocation_id=invocation_id,
+                    status=status,
+                    duration_ms=result.duration * 1000,
+                    model_calls=policy_calls,
+                    conversation=[*body.responses_create_params.input, *conversation],
+                )
+            ],
+            turns=turns,
+            gaps=gaps,
+        )
+        usage = (
+            NeMoGymResponseUsage(
+                input_tokens=prompt_tokens,
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=None),
+                output_tokens=completion_tokens,
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
+                total_tokens=prompt_tokens + completion_tokens,
+            )
+            if policy_calls and usage_complete
+            else None
+        )
+        return trajectory, usage
 
     def setup_webserver(self):
         ensure_tau2_data_dir(DATA_DIR)
@@ -320,6 +444,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         input_items_1 += output_items[:1]
         input_items_2, output_items = split_responses_input_output_items(output_items[1:])
 
+        trajectory, response_usage = self._observed_trajectory(body, result, messages_to_convert, all_items)
+
         prompt_usages = []
         completion_usages = []
         num_agent_calls = 0
@@ -355,6 +481,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                 tool_choice=body.responses_create_params.tool_choice,
                 tools=body.responses_create_params.tools,
             ),
+            ng_trajectory=trajectory,
             response=dict(
                 id=f"tau2-{body.config.domain}-{body.task.id}",
                 created_at=int(time()),
@@ -364,6 +491,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                 parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
                 tool_choice=body.responses_create_params.tool_choice,
                 tools=body.responses_create_params.tools,
+                usage=response_usage,
             ),
             reward=result.reward_info.reward,
             result=result,
