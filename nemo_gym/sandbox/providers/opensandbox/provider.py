@@ -1875,14 +1875,29 @@ class OpenSandboxProvider:
         # The execution has finished, so one call returns its whole buffer; the
         # cursor this endpoint reports back is the end offset rather than a
         # more-data flag, so there is no tail to follow.
-        logs = await self._await_sdk_operation(
-            lambda: handle.raw.commands.get_background_command_logs(execution_id),
-            operation="command logs",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=poll_timeout_s,
-            retries=self._operations.retries,
-            is_retryable=_command_read_is_retryable,
-        )
+        try:
+            logs = await self._await_sdk_operation(
+                lambda: handle.raw.commands.get_background_command_logs(execution_id),
+                operation="command logs",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=poll_timeout_s,
+                retries=self._operations.retries,
+                is_retryable=_command_read_is_retryable,
+            )
+        except Exception as error:
+            # execd keeps the output under /tmp/opensandbox-execd, so a command that
+            # empties /tmp (e.g. a verifier resetting its scratch roots) deletes it.
+            # The status read above already holds the authoritative exit code.
+            message = str(error)
+            if "combined output file" not in message or "no such file or directory" not in message:
+                raise
+            LOGGER.warning(
+                "OpenSandbox command output was deleted by the command itself; keeping its exit status. "
+                "sandbox_id=%r execution_id=%r",
+                handle.sandbox_id,
+                execution_id,
+            )
+            logs = None
         stdout = getattr(logs, "content", None) or None
         status_error = getattr(status, "error", None)
         stderr = status_error or None
