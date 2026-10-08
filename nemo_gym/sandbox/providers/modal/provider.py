@@ -58,6 +58,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import shlex
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -164,7 +165,7 @@ def _coerce_str_list(value: Any, what: str) -> list[str]:
     if value is None:
         return []
     if isinstance(value, str):
-        return [value]
+        value = [value]
     if isinstance(value, (list, tuple)):
         out: list[str] = []
         for item in value:
@@ -173,6 +174,15 @@ def _coerce_str_list(value: Any, what: str) -> list[str]:
             out.append(item)
         return out
     raise TypeError(f"{what} must be a string or list of strings")
+
+
+def _validate_exec_user(user: str | int | None, *, allow_user_rewrite: bool) -> None:
+    if user is None or user == "root" or (type(user) is int and user == 0):
+        return
+    if not isinstance(user, str) or not user.strip() or user.startswith("-") or user.isdecimal():
+        raise ValueError("modal user rewrite requires a non-option username; non-root numeric UIDs are unsupported")
+    if not allow_user_rewrite:
+        raise ValueError("Non-root modal exec users require exec.allow_user_rewrite: true and su in the image")
 
 
 @dataclass(frozen=True)
@@ -230,13 +240,17 @@ class ModalCreateConfig:
     def __post_init__(self) -> None:
         _validate_optional_number("create.timeout_s", self.timeout_s, positive=True)
         _validate_optional_number("create.idle_timeout_s", self.idle_timeout_s, positive=True)
-        if not self.keepalive_shell or not all(isinstance(p, str) and p for p in self.keepalive_shell):
+        if (
+            not isinstance(self.keepalive_shell, list)
+            or not self.keepalive_shell
+            or not all(isinstance(p, str) and p.strip() for p in self.keepalive_shell)
+        ):
             raise ValueError("create.keepalive_shell must be a non-empty list of strings")
         if not isinstance(self.keepalive_cmd, str) or not self.keepalive_cmd.strip():
             raise ValueError("create.keepalive_cmd must be a non-empty string")
         if self.port_mode not in _PORT_MODES:
             raise ValueError(f"create.port_mode must be one of {', '.join(_PORT_MODES)}")
-        _coerce_str_list(self.secrets, "create.secrets")
+        object.__setattr__(self, "secrets", _coerce_str_list(self.secrets, "create.secrets"))
         if not isinstance(self.default_tags, Mapping):
             raise TypeError("create.default_tags must be a mapping")
 
@@ -252,8 +266,8 @@ class ModalProbeConfig:
     command: str | None = "printf ok"
     expected_stdout: str | None = "ok"
     timeout_s: float = 30.0
-    # Overall deadline for the probe to pass. ``SandboxSpec.ready_timeout_s``
-    # overrides it per sandbox. ``None`` means a single failed probe raises.
+    # Budget for App lookup, allocation and probing. ``SandboxSpec.ready_timeout_s``
+    # overrides it. ``None`` disables the overall deadline; a failed probe raises.
     deadline_s: float | None = 180.0
     stable_count: int = 1
     stable_delay_s: float = 0.5
@@ -277,14 +291,19 @@ class ModalExecConfig:
     # ``exec`` receives a shell string; this is the shell that runs it.
     shell: list[str] = field(default_factory=lambda: ["/bin/sh", "-c"])
     # Default user for every exec. Modal has no native per-exec user, so a user
-    # is honoured only through ``su`` when ``allow_user_rewrite`` is on.
-    user: str | None = None
+    # other than root requires ``su`` and ``allow_user_rewrite``.
+    user: str | int | None = None
     allow_user_rewrite: bool = False
 
     def __post_init__(self) -> None:
         _validate_optional_number("exec.default_timeout_s", self.default_timeout_s, positive=False)
-        if not self.shell or not all(isinstance(p, str) and p for p in self.shell):
+        if (
+            not isinstance(self.shell, list)
+            or not self.shell
+            or not all(isinstance(p, str) and p.strip() for p in self.shell)
+        ):
             raise ValueError("exec.shell must be a non-empty list of strings")
+        _validate_exec_user(self.user, allow_user_rewrite=self.allow_user_rewrite)
 
 
 @dataclass(frozen=True)
@@ -408,6 +427,7 @@ class ModalProvider:
             ),
             "exec_timeout": pick("ExecTimeoutError"),
             "sandbox_gone": pick("SandboxTimeoutError", "SandboxTerminatedError"),
+            "exec_sandbox": pick("NotFoundError", "ConflictError", "ClientClosed", "InvalidError"),
             "retryable": pick("ConnectionError", "InternalError", "ServiceError"),
         }
 
@@ -526,19 +546,12 @@ class ModalProvider:
     def _shell_argv(self, command: str, *, user: str | int | None) -> list[str]:
         """Wrap a shell command string in the configured shell, honouring ``user`` via ``su``."""
         effective_user = user if user is not None else self._exec.user
-        if effective_user is None:
-            return [*self._exec.shell, command]
-        if not self._exec.allow_user_rewrite:
-            raise ValueError(
-                "The modal provider cannot run commands as a specific user natively. Set exec.allow_user_rewrite: "
-                "true to wrap commands in `su`, or leave user unset."
-            )
-        # ``su -s SHELL USER -c COMMAND``: -s pins the shell so the target user's
-        # login shell (often nologin) is irrelevant. Quote defensively.
-        shell = self._exec.shell[0]
-        if not isinstance(effective_user, str) or not effective_user or effective_user.startswith("-"):
-            raise ValueError("modal user rewrite requires a non-option username; numeric UIDs are unsupported")
-        return ["su", "-s", shell, "-c", command, "--", effective_user]
+        _validate_exec_user(effective_user, allow_user_rewrite=self._exec.allow_user_rewrite)
+        argv = [*self._exec.shell, command]
+        if effective_user in (None, "root", 0):
+            return argv
+        # Run the complete shell argv inside su, preserving flags such as bash -lc.
+        return ["su", "-s", "/bin/sh", "-c", shlex.join(argv), "--", effective_user]
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -562,10 +575,7 @@ class ModalProvider:
         if image_secret is not None and (not isinstance(image_secret, str) or not image_secret.strip()):
             raise ModalCreateError("modal image_secret must be a non-empty modal.Secret name")
 
-        app = await self._get_app()
-        image = self._build_image(modal, spec.image, image_secret)
-
-        kwargs: dict[str, Any] = {"app": app, "image": image}
+        kwargs: dict[str, Any] = {}
         if ttl_s is not None:
             kwargs["timeout"] = max(1, math.ceil(ttl_s))
         idle = options.get("idle_timeout_s", self._create.idle_timeout_s)
@@ -600,19 +610,24 @@ class ModalProvider:
         kwargs["block_network"] = block_network
 
         secret_names = [*self._create.secrets, *_coerce_str_list(options.get("secrets"), "provider_options.secrets")]
-        if secret_names:
-            kwargs["secrets"] = [self._secret(modal, n) for n in secret_names]
 
         volumes = options.get("volumes")
-        if volumes:
+        if volumes is not None:
             if not isinstance(volumes, Mapping):
                 raise ModalCreateError("modal provider option 'volumes' must map mount paths to Volume names")
-            kwargs["volumes"] = {str(mount): self._volume(modal, str(vol)) for mount, vol in volumes.items()}
+            for mount, vol in volumes.items():
+                if (
+                    not isinstance(mount, str)
+                    or not mount.startswith("/")
+                    or not isinstance(vol, str)
+                    or not vol.strip()
+                ):
+                    raise ModalCreateError("modal volumes require absolute mount paths and non-empty Volume names")
 
         tags: dict[str, str] = {str(k): str(v) for k, v in self._create.default_tags.items()}
         tags.update({str(k): str(v) for k, v in spec.metadata.items()})
         extra_tags = options.get("tags")
-        if extra_tags:
+        if extra_tags is not None:
             if not isinstance(extra_tags, Mapping):
                 raise ModalCreateError("modal provider option 'tags' must be a mapping")
             tags.update({str(k): str(v) for k, v in extra_tags.items()})
@@ -639,22 +654,30 @@ class ModalProvider:
         else:
             entrypoint = [*self._create.keepalive_shell, self._create.keepalive_cmd]
 
-        create_task = asyncio.create_task(modal.Sandbox.create.aio(*entrypoint, **kwargs))
+        deadline_s = spec.ready_timeout_s if spec.ready_timeout_s is not None else self._probe.deadline_s
+        deadline = asyncio.get_running_loop().time() + deadline_s if deadline_s is not None else None
+        create_task = None
         try:
-            # Creating a sandbox is not idempotent; a retry on an ambiguous failure
-            # could leak a billable sandbox. One attempt, then fail loudly.
-            sandbox = await asyncio.shield(create_task)
-        except asyncio.CancelledError:
-            # Once submitted, allocation may succeed even if the caller cancels.
-            # Obtain its id and terminate it before propagating cancellation.
-            try:
-                sandbox = await create_task
-                async with asyncio.timeout(self._operations.close_timeout_s):
-                    await sandbox.terminate.aio(wait=True)
-                    await sandbox.detach.aio()
-            except Exception:
-                LOGGER.exception("Could not reconcile cancelled Modal create; app=%s", self._connection.app_name)
-            raise
+            async with asyncio.timeout_at(deadline):
+                # All local validation precedes App lookup, which can allocate an App.
+                kwargs["app"] = await self._get_app()
+                kwargs["image"] = self._build_image(modal, spec.image, image_secret)
+                if secret_names:
+                    kwargs["secrets"] = [self._secret(modal, n) for n in secret_names]
+                if volumes:
+                    kwargs["volumes"] = {mount: self._volume(modal, vol) for mount, vol in volumes.items()}
+                # The SDK owns request idempotency/retries; the provider adds no
+                # retry that could allocate a second billable sandbox.
+                create_task = asyncio.create_task(modal.Sandbox.create.aio(*entrypoint, **kwargs))
+                sandbox = await asyncio.shield(create_task)
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            if create_task is not None:
+                await asyncio.shield(self._reconcile_interrupted_create(create_task))
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise ModalCreateError(
+                f"modal sandbox creation exceeded ready timeout of {deadline_s}s for image {spec.image!r}"
+            ) from exc
         except Exception as exc:
             raise ModalCreateError(f"Failed to create modal sandbox from image {spec.image!r}: {exc}") from exc
 
@@ -670,45 +693,69 @@ class ModalProvider:
             ),
         )
         try:
-            await self._verify_created_handle(handle, ready_timeout_s=spec.ready_timeout_s)
+            await self._verify_created_handle(handle, ready_timeout_s=deadline_s, deadline=deadline)
         except BaseException:
-            await asyncio.shield(self._cleanup_failed_create_handle(handle))
+            await asyncio.shield(self._cleanup_after_error(handle))
             raise
         return handle
 
-    async def _cleanup_failed_create_handle(self, handle: SandboxHandle) -> None:
+    async def _reconcile_interrupted_create(self, create_task: asyncio.Task) -> None:
+        # Allocation can finish after the caller's deadline. Bound both waiting
+        # for its id and cleanup; the remote TTL is the backstop for an unknown id.
+        try:
+            async with asyncio.timeout(self._operations.close_timeout_s):
+                sandbox = await create_task
+                await sandbox.terminate.aio(wait=True)
+                await sandbox.detach.aio()
+        except Exception:
+            LOGGER.exception(
+                "Could not reconcile interrupted Modal create; app=%s; remote TTL remains the cleanup backstop",
+                self._connection.app_name,
+            )
+
+    async def _cleanup_after_error(self, handle: SandboxHandle) -> None:
         try:
             await self.close(handle)
-        except Exception as exc:  # noqa: BLE001 - best effort; the create error is what matters
-            LOGGER.warning("modal sandbox %s cleanup after failed create raised: %s", handle.sandbox_id, exc)
+        except Exception as exc:  # noqa: BLE001 - preserve the original operation error
+            LOGGER.warning("modal sandbox %s cleanup after failure raised: %s", handle.sandbox_id, exc)
 
-    async def _verify_created_handle(self, handle: SandboxHandle, *, ready_timeout_s: float | None) -> None:
+    async def _verify_created_handle(
+        self, handle: SandboxHandle, *, ready_timeout_s: float | None, deadline: float | None = None
+    ) -> None:
         deadline_s = ready_timeout_s if ready_timeout_s is not None else self._probe.deadline_s
+        if deadline is None and deadline_s is not None:
+            deadline = asyncio.get_running_loop().time() + deadline_s
+        # Per-create state: concurrent creates must not overwrite each other's diagnostics.
+        detail = ["no probe attempt completed"]
         try:
-            async with asyncio.timeout(deadline_s):
-                await self._run_readiness_probe(handle, ready_timeout_s=ready_timeout_s)
+            async with asyncio.timeout_at(deadline):
+                await self._run_readiness_probe(handle, deadline_s=deadline_s, detail=detail)
         except TimeoutError as exc:
             raise ModalCreateVerificationError(
-                f"modal sandbox {handle.sandbox_id!r} did not pass readiness probe within {deadline_s}s"
+                f"modal sandbox {handle.sandbox_id!r} did not pass readiness probe within {deadline_s}s: {detail[0]}"
             ) from exc
 
-    async def _run_readiness_probe(self, handle: SandboxHandle, *, ready_timeout_s: float | None) -> None:
-        """Poll the exec probe until it passes ``stable_count`` times or the deadline elapses."""
+    async def _run_readiness_probe(
+        self, handle: SandboxHandle, *, deadline_s: float | None, detail: list[str]
+    ) -> None:
+        """Poll until stable success; the caller owns the single overall deadline."""
         probe = self._probe
         if probe.command is None:
             return
-        deadline_s = ready_timeout_s if ready_timeout_s is not None else probe.deadline_s
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + deadline_s if deadline_s is not None else None
         consecutive = 0
-        last_detail = "no probe attempt completed"
         while True:
             try:
                 result = await self.exec(handle, probe.command, timeout_s=probe.timeout_s)
+            except (ValueError, TypeError):
+                raise
             except Exception as exc:  # noqa: BLE001 - container may not be attachable yet
                 result = SandboxExecResult(stdout=None, stderr=str(exc), return_code=-1, error_type="probe_exec")
             passed = result.return_code == 0 and (
                 probe.expected_stdout is None or probe.expected_stdout in (result.stdout or "")
+            )
+            detail[0] = (
+                f"return_code={result.return_code}, stdout={(result.stdout or '').strip()!r}, "
+                f"stderr={(result.stderr or '').strip()!r}"
             )
             if passed:
                 consecutive += 1
@@ -716,18 +763,13 @@ class ModalProvider:
                     return
             else:
                 consecutive = 0
-                last_detail = f"return_code={result.return_code}, stderr={(result.stderr or '').strip()!r}"
-                if deadline is None:
+                if deadline_s is None:
                     raise ModalCreateVerificationError(
-                        f"modal sandbox {handle.sandbox_id!r} failed readiness probe: {last_detail}"
+                        f"modal sandbox {handle.sandbox_id!r} failed readiness probe: {detail[0]}"
                     )
-            if deadline is not None and loop.time() >= deadline:
-                raise ModalCreateVerificationError(
-                    f"modal sandbox {handle.sandbox_id!r} did not pass readiness probe within {deadline_s:g}s: "
-                    f"{last_detail}"
-                )
-            if probe.stable_delay_s > 0:
-                await asyncio.sleep(probe.stable_delay_s)
+            # Yield even for zero delay so a stream of immediate failures cannot
+            # starve the deadline or caller cancellation.
+            await asyncio.sleep(probe.stable_delay_s)
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         """Descriptor for :meth:`connect` in another process (``ConnectableProvider``)."""
@@ -781,12 +823,12 @@ class ModalProvider:
         if raw is None:
             return
         sandbox = raw.sandbox if isinstance(raw, _ModalSandbox) else raw
-        try:
-            async with asyncio.timeout(self._operations.close_timeout_s):
+        async with asyncio.timeout(self._operations.close_timeout_s):
+            try:
                 await self._with_retries(lambda: sandbox.terminate.aio(wait=True), operation="terminate")
-        except types["not_found"] + types["sandbox_gone"]:
-            LOGGER.debug("modal sandbox %s already gone on close", handle.sandbox_id)
-        await sandbox.detach.aio()
+            except types["not_found"] + types["sandbox_gone"]:
+                LOGGER.debug("modal sandbox %s already gone on close", handle.sandbox_id)
+            await sandbox.detach.aio()
         handle.raw = None
 
     async def aclose(self) -> None:
@@ -826,35 +868,61 @@ class ModalProvider:
         if modal_timeout is not None:
             kwargs["timeout"] = modal_timeout
 
+        # Modal validates the total argv length before dispatch. Report the
+        # provider limit through Gym's exec result contract, without an SDK error.
+        if sum(len(arg) for arg in argv) > 65536:
+            return SandboxExecResult(
+                stdout="",
+                stderr="Modal exec argv exceeds 65,536 characters; upload a script and execute its path",
+                return_code=125,
+                error_type="sandbox",
+            )
+
+        output = [bytearray(), bytearray()]
+
+        async def collect(stream: Any, buffer: bytearray) -> None:
+            async for chunk in stream:
+                buffer.extend(chunk.encode("utf-8") if isinstance(chunk, str) else chunk)
+
+        error_type = None
+        error_detail = None
         try:
             process = await sandbox.exec.aio(*argv, **kwargs)
+            # The provider has no stdin input parameter. Send EOF so commands
+            # such as cat/read do not wait until their exec deadline.
+            process.stdin.write_eof()
             tasks = [
                 asyncio.create_task(coro)
-                for coro in (process.stdout.read.aio(), process.stderr.read.aio(), process.wait.aio())
+                for coro in (
+                    collect(process.stdout, output[0]),
+                    collect(process.stderr, output[1]),
+                    process.wait.aio(),
+                    process.stdin.drain.aio(),
+                )
             ]
             try:
-                stdout, stderr, return_code = await asyncio.gather(*tasks)
+                _, _, return_code, _ = await asyncio.gather(*tasks)
             finally:
                 for task in tasks:
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
         except asyncio.CancelledError:
-            # Modal has no public kill method for an individual exec process.
-            # A cancelled command must not mutate a subsequent evaluation step.
-            await asyncio.shield(self.close(handle))
+            # No public per-exec kill API. Cleanup must not replace cancellation,
+            # including when asyncio.timeout() relies on it to raise TimeoutError.
+            await asyncio.shield(self._cleanup_after_error(handle))
             raise
         except types["exec_timeout"] as exc:
-            raise TimeoutError(f"modal command timed out after {effective_timeout}s: {exc}") from exc
-        except types["sandbox_gone"] as exc:
-            # The sandbox itself expired or was killed mid-command: no process exit code exists.
-            return SandboxExecResult(stdout=None, stderr=str(exc), return_code=-1, error_type="sandbox_terminated")
+            return_code, error_type, error_detail = 125, "timeout", str(exc)
+        except types["exec_sandbox"] + types["sandbox_gone"] as exc:
+            return_code, error_type, error_detail = 125, "sandbox", str(exc)
 
         if return_code == _MODAL_EXEC_SENTINEL_RC:
-            raise TimeoutError(f"modal command timed out after {effective_timeout}s")
-        stdout = stdout.decode("utf-8", "replace") if isinstance(stdout, bytes) else stdout
-        stderr = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else stderr
-        return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=int(return_code))
+            return_code, error_type = 125, "timeout"
+        stdout, stderr = (bytes(part).decode("utf-8", "replace") for part in output)
+        if error_detail:
+            stderr = f"{stderr}\n{error_detail}" if stderr else error_detail
+        return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=int(return_code), error_type=error_type)
 
     # -------------------------------------------------------------------- files
 
@@ -865,7 +933,7 @@ class ModalProvider:
         except (TimeoutError, asyncio.CancelledError):
             # The SDK currently cannot kill an individual interrupted file writer.
             # Discard this sandbox so it cannot keep modifying a later evaluation.
-            await asyncio.shield(self.close(handle))
+            await asyncio.shield(self._cleanup_after_error(handle))
             raise
 
     async def write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
