@@ -8,6 +8,12 @@ symbol ``TaskData``: either a Pydantic ``BaseModel`` subclass or a type (e.g. an
 A self-contained agent (one that declares datasets but no ``resources_server`` reference) ships
 the same module under ``responses_api_agents/<implementation>/`` and owns its rows' schema; an
 agent WITH a reference uses that resources server's schema instead.
+An environment server ships the same module under ``environment_servers/<implementation>/`` to
+declare the task fields it reads itself. Rows are validated against the environment server they
+route to, composed with the bound resources server's schema: each schema validates the fields it
+declares plus the fields neither declares. Single-agent environment servers declare
+``responses_create_params``, one agent's request to one model, through ``SingleAgentTaskData``.
+Rows routed by agent rather than by taskset are single-agent run requests and use it too.
 It describes the task-owned fields of that server's dataset rows, written FLAT in the planned
 end-state shape: the fields as they will appear inside the unified ``task_data`` row key after
 the row-format migration. Framework-owned keys (see ``RESERVED_ROW_KEYS``) are never part of
@@ -45,9 +51,9 @@ import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Union, get_args
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from nemo_gym.episode_types import is_materialized_task_row
 
@@ -56,18 +62,45 @@ TASK_DATA_MODULE_NAME = "task_data"
 TASK_DATA_EXPORT_NAME = "TaskData"
 
 # Framework-owned top-level row keys. Everything else in a row is task-owned and is the subject of
-# the server's TaskData schema. (The row-format migration will extend this set with reserved keys such as
+# the environment server's and resources server's TaskData schemas. ``responses_create_params`` is
+# not one of them: it is a task field of single-agent environment servers (``SingleAgentTaskData``).
+# (The row-format migration will extend this set with reserved keys such as
 # ``task_id``/``subset_for_metrics``/``provenance``; until then some servers legitimately use those
 # names as task fields, so they stay task-owned here.)
 RESERVED_ROW_KEYS = frozenset(
     {
-        "responses_create_params",
         "agent_ref",
         "task_source",
         "_ng_task_index",
         "_ng_rollout_index",
     }
 )
+
+
+class SingleAgentResponsesCreateParams(BaseModel):
+    """The part of a Responses API request that a dataset row supplies.
+
+    ``input`` may be missing from a source row whose dataset declares a ``prompt_config``, which
+    fills it during collation. The environment server validates the full request at runtime; this
+    keeps schemas free of server dependencies.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    input: Optional[Union[str, List[Any]]] = None
+
+
+class SingleAgentTaskData(BaseModel):
+    """Task fields that every single-agent environment server reads: one agent's request to one model.
+
+    The bound resources server's ``TaskData`` declares the remaining fields.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    responses_create_params: SingleAgentResponsesCreateParams = Field(
+        json_schema_extra={"consumed_by": ["prompt"]},
+    )
 
 
 class TaskDataSchemaError(Exception):
@@ -197,9 +230,8 @@ class TaskDataValidationReport:
         return "\n".join(parts)
 
 
-def legacy_metadata_fields(adapter: TypeAdapter) -> frozenset:
-    """Schema fields annotated ``legacy_location: verifier_metadata`` (today's wire reads them there)."""
-    from typing import get_args
+def _schema_models(adapter: TypeAdapter) -> List[type[BaseModel]]:
+    """The models a schema is built from: the model itself, or each member of a union."""
 
     def models_of(tp, out):
         if isinstance(tp, type) and issubclass(tp, BaseModel):
@@ -209,8 +241,24 @@ def legacy_metadata_fields(adapter: TypeAdapter) -> frozenset:
             models_of(arg, out)
         return out
 
+    return models_of(getattr(adapter, "_type", None), [])
+
+
+def declared_fields(adapter: TypeAdapter) -> frozenset:
+    """The field names, and their aliases, that any model of a schema declares."""
     names = set()
-    for model in models_of(getattr(adapter, "_type", None), []):
+    for model in _schema_models(adapter):
+        for field_name, info in model.model_fields.items():
+            names.add(field_name)
+            if isinstance(info.alias, str):
+                names.add(info.alias)
+    return frozenset(names)
+
+
+def legacy_metadata_fields(adapter: TypeAdapter) -> frozenset:
+    """Schema fields annotated ``legacy_location: verifier_metadata`` (today's wire reads them there)."""
+    names = set()
+    for model in _schema_models(adapter):
         for field_name, info in model.model_fields.items():
             extra = info.json_schema_extra
             if isinstance(extra, dict) and extra.get("legacy_location") == LEGACY_METADATA_KEY:
@@ -218,16 +266,69 @@ def legacy_metadata_fields(adapter: TypeAdapter) -> frozenset:
     return frozenset(names)
 
 
-class TaskDataValidator:
-    """Validates dataset rows against a server's ``TaskData`` schema, accumulating a report."""
+SINGLE_AGENT_TASK_DATA = TypeAdapter(SingleAgentTaskData)
 
-    def __init__(self, server_name: str, adapter: TypeAdapter, dataset_fpath: str):
+
+class TaskDataValidator:
+    """Validates dataset rows against an environment server's and a resources server's ``TaskData``.
+
+    ``environment_adapter`` is the schema of the environment server the rows route to, such as
+    ``SINGLE_AGENT_TASK_DATA`` for rows routed by agent. Each schema validates the fields it
+    declares plus the fields neither declares, so a resources schema with ``extra="forbid"`` does not
+    see the environment server's fields. Undeclared fields are reported against the resources server's
+    schema. Either adapter may be ``None`` when its server ships no schema. The environment schema does
+    not validate materialized rows (see ``validate_row``).
+    """
+
+    def __init__(
+        self,
+        server_name: str,
+        adapter: Optional[TypeAdapter],
+        dataset_fpath: str,
+        *,
+        environment_adapter: Optional[TypeAdapter] = None,
+    ):
         self._adapter = adapter
-        self._legacy_fields = legacy_metadata_fields(adapter)
+        self._environment_adapter = environment_adapter
+        self._fields = declared_fields(adapter) if adapter is not None else frozenset()
+        self._environment_fields = (
+            declared_fields(environment_adapter) if environment_adapter is not None else frozenset()
+        )
+        self._legacy_fields = legacy_metadata_fields(adapter) if adapter is not None else frozenset()
         self.report = TaskDataValidationReport(server_name=server_name, dataset_fpath=dataset_fpath)
+
+    def _validate_fields(self, subject: Dict[str, Any], *, environment_applies: bool) -> tuple[List[str], set]:
+        """Validate one row's task fields against each schema; return its errors and undeclared fields."""
+        errors: List[str] = []
+        undeclared: set = set()
+        # The environment server's fields stay out of the resources schema's subject either way, so
+        # they are never reported as fields the resources server does not declare.
+        environment_adapter = self._environment_adapter if environment_applies else None
+        for adapter, own, other, reports_unknown in (
+            (environment_adapter, self._environment_fields, self._fields, False),
+            (self._adapter, self._fields, self._environment_fields, True),
+        ):
+            if adapter is None:
+                continue
+            fields = {key: value for key, value in subject.items() if key in own or key not in other}
+            try:
+                validated = adapter.validate_python(fields)
+            except Exception as e:
+                errors.append(str(e).strip().replace("\n", "; "))
+                continue
+            # Pydantic returns the concrete model (the selected union member for union schemas), and
+            # with extra="allow" it stores undeclared inputs on __pydantic_extra__ — so unknown-field
+            # reporting works uniformly for plain models and discriminated unions.
+            if reports_unknown and isinstance(validated, BaseModel):
+                undeclared = set(getattr(validated, "__pydantic_extra__", None) or {})
+        return errors, undeclared
 
     def validate_row(self, row_index: int, row: Dict[str, Any]) -> None:
         self.report.rows += 1
+        # A materialized row already names its taskset, and the environment server that taskset routes
+        # to validates its input at dispatch. The environment schema does not validate it here, so such a
+        # row in a dataset routed by agent is not required to be a single-agent run request.
+        environment_applies = not is_materialized_task_row(row)
         # New materialized tasks keep the flat source fields; historical single-agent
         # tasks use task_input.task_data. Normalize both through the existing schema path.
         task_input = row.get("task_input")
@@ -270,27 +371,31 @@ class TaskDataValidator:
         subject, conflicts = normalize_task_fields(row)
         for key in conflicts:
             self.report.conflicting_keys[key] = self.report.conflicting_keys.get(key, 0) + 1
-        try:
-            validated = self._adapter.validate_python(subject)
-        except Exception as e:
+        errors, undeclared = self._validate_fields(subject, environment_applies=environment_applies)
+        if errors:
             self.report.error_rows += 1
             if len(self.report.errors) < TaskDataValidationReport.MAX_RECORDED_ERRORS:
-                first_line = str(e).strip().replace("\n", "; ")
-                self.report.errors.append(f"{row_index}: {first_line[:400]}")
+                self.report.errors.append(f"{row_index}: {'; '.join(error[:400] for error in errors)}")
             return
-        # Pydantic returns the concrete model (the selected union member for union schemas), and
-        # with extra="allow" it stores undeclared inputs on __pydantic_extra__ — so unknown-field
-        # reporting works uniformly for plain models and discriminated unions.
-        if isinstance(validated, BaseModel):
-            for key in getattr(validated, "__pydantic_extra__", None) or {}:
-                self.report.unknown_keys[key] = self.report.unknown_keys.get(key, 0) + 1
+        for key in undeclared:
+            self.report.unknown_keys[key] = self.report.unknown_keys.get(key, 0) + 1
 
 
 def validate_jsonl_rows(
-    server_name: str, adapter: TypeAdapter, dataset_fpath: str, lines: Iterable[str]
+    server_name: str,
+    adapter: Optional[TypeAdapter],
+    dataset_fpath: str,
+    lines: Iterable[str],
+    *,
+    environment_adapter: Optional[TypeAdapter] = None,
 ) -> TaskDataValidationReport:
     """Validate an iterable of JSONL lines against one schema; entry point for whole-file validation."""
-    validator = TaskDataValidator(server_name=server_name, adapter=adapter, dataset_fpath=dataset_fpath)
+    validator = TaskDataValidator(
+        server_name=server_name,
+        adapter=adapter,
+        dataset_fpath=dataset_fpath,
+        environment_adapter=environment_adapter,
+    )
     for i, line in enumerate(lines):
         line = line.strip()
         if not line:

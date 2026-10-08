@@ -1208,10 +1208,13 @@ class TestNativeTasksetBenchmark:
     @pytest.fixture
     def multi_agent_config(self, config):
         config.user = {"responses_api_agents": {"impl": {"entrypoint": "app.py"}}}
-        server = config.environment.environment_servers.single_agent_turn
+        # A conversation server's own implementation: collation selects the task schema by implementation,
+        # and single_agent_turn's schema requires one agent's responses_create_params.
+        server = config.environment.environment_servers.pop("single_agent_turn")
         del server["agent_server"]
         server.user_agent = {"type": "responses_api_agents", "name": "user"}
         server.assistant_agent = {"type": "responses_api_agents", "name": "agent"}
+        config.environment.environment_servers.conversation = server
         return config
 
     def test_multi_agent_route_resolves_without_a_pin(self, multi_agent_config):
@@ -1219,7 +1222,7 @@ class TestNativeTasksetBenchmark:
 
         # The server fronts two agents and names no agent_server, so no single agent is reported.
         assert resolve_dataset_agent(multi_agent_config, "resources", taskset="swe:test") is None
-        multi_agent_config.environment.environment_servers.single_agent_turn.agent_server = {
+        multi_agent_config.environment.environment_servers.conversation.agent_server = {
             "type": "responses_api_agents",
             "name": "agent",
         }
@@ -1245,7 +1248,7 @@ class TestNativeTasksetBenchmark:
         from nemo_gym.config_types import ConfigError
         from nemo_gym.global_config import resolve_dataset_agent
 
-        multi_agent_config.environment.environment_servers.single_agent_turn.user_agent.name = "resources"
+        multi_agent_config.environment.environment_servers.conversation.user_agent.name = "resources"
         with pytest.raises(ConfigError, match="references 'resources', which is not an agent"):
             resolve_dataset_agent(multi_agent_config, "resources", taskset="swe:test")
 

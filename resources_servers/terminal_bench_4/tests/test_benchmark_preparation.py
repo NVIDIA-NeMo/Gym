@@ -8,14 +8,19 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_4 import prepare as preparation
-from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+from nemo_gym.task_data import SINGLE_AGENT_TASK_DATA, TaskDataValidator, load_task_data_schema
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
 
 
 def task_validator() -> TaskDataValidator:
-    return TaskDataValidator("terminal_bench_4", load_task_data_schema(SERVER_DIR), "test.jsonl")
+    return TaskDataValidator(
+        "terminal_bench_4",
+        load_task_data_schema(SERVER_DIR),
+        "test.jsonl",
+        environment_adapter=SINGLE_AGENT_TASK_DATA,
+    )
 
 
 def test_prepared_names_match_pinned_manifest(tmp_path, monkeypatch):
