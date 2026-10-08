@@ -22,6 +22,7 @@ from environment_servers.nemo_user_sim.episode_contracts import (
     UserSimEpisodeResponse,
     UserSimEpisodeResult,
 )
+from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
@@ -526,6 +527,8 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
                     ),
                 ),
                 cookies=bridge.resources_cookies,
+                # The resources cleanup closes the session, so the Resources Server keeps tracking it until then.
+                headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
             )
             await raise_for_status(verify_http_response)
             verification = UserSimVerification.model_validate(await get_response_json(verify_http_response))
