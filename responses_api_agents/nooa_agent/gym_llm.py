@@ -46,6 +46,7 @@ class GymModelClient(Protocol):
         url_path: str,
         json: NeMoGymResponseCreateParamsNonStreaming,
         cookies: dict[str, str],
+        headers: dict[str, str],
     ) -> aiohttp.ClientResponse: ...
 
 
@@ -319,6 +320,7 @@ class GymResponsesLLM(UnifiedLLM):
                 url_path=self._model_url_path,
                 json=body,
                 cookies=self._cookies,
+                headers={"x-session-id": call.invocation_id} if call.invocation_id is not None else {},
             )
             try:
                 await raise_for_status(http_response)
