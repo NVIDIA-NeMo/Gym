@@ -67,14 +67,17 @@ from nemo_gym.openai_utils import (
 logger = logging.getLogger(__name__)
 
 # Chat tool messages carry text only; with `drop_unrepresentable_request_fields` an image a tool
-# returned becomes this text instead of failing the conversion.
-_IMAGE_OUTPUT_PLACEHOLDER = "[image omitted: this model receives text only]"
+# returned becomes this text instead of failing the conversion. The wording is neutral on purpose:
+# it replaces part of the prompt, and it must not teach the model anything about its own inputs.
+_IMAGE_OUTPUT_PLACEHOLDER = "[image omitted from tool output]"
 
-# Responses request fields that carry no instruction to the model: they select what the provider
-# reports back or how it labels an item, and a Chat Completions backend answers the request
-# faithfully without them. With `drop_unrepresentable_request_fields` these are removed from the
-# request rather than refused.
-_REPORTING_ONLY_REASONING_FIELDS = ("summary", "context")
+# Responses reasoning fields that only select what the provider reports back (a reasoning
+# summary, under its current and its deprecated name), so a Chat Completions backend answers the
+# request faithfully without them. With `drop_unrepresentable_request_fields` these are removed
+# from the request rather than refused. `reasoning.context` is not among them: it tells the
+# provider which earlier reasoning items to render back to the model, which the conversion cannot
+# honor (it renders every item and leaves the rest to the chat template), so it stays refused.
+_REPORTING_ONLY_REASONING_FIELDS = ("summary", "generate_summary")
 
 
 def _message_content_to_text(content: Any) -> str:
@@ -232,10 +235,13 @@ class ResponsesConverter(BaseModel):
 
         A Responses field with no Chat Completions representation raises ``NotImplementedError``,
         so the caller can route the request to a server that serves Responses natively. With
-        ``drop_unrepresentable_request_fields`` the subset of those fields that only selects what
-        the provider reports back, rather than what the model generates, is removed from the
-        request instead and the conversion proceeds: ``include``, ``reasoning.summary``,
-        ``reasoning.context``, a message ``phase``, and an image part in a tool's output.
+        ``drop_unrepresentable_request_fields`` the reporting-only fields are removed from the
+        request instead and the conversion proceeds: a non-empty ``include`` (every value; an
+        empty one is already treated as absent), ``reasoning.summary`` and
+        ``reasoning.generate_summary``, and a message ``phase``. An image part in a tool's output
+        becomes the text placeholder ``_IMAGE_OUTPUT_PLACEHOLDER``, which does replace that part
+        of the prompt. Every other unrepresentable field, ``reasoning.context`` included, is still
+        refused.
         """
         responses_create_params = responses_create_params.model_dump(exclude_none=True, exclude_unset=True)
         if responses_create_params.get("include") == []:
@@ -356,8 +362,9 @@ class ResponsesConverter(BaseModel):
 
         reasoning = responses_create_params.pop("reasoning", None)
         if reasoning is not None:
-            # `summary` and `context` select how the provider presents and carries reasoning on the
-            # response object; a chat completion carries only the effort.
+            # A chat completion carries only the effort. The summary fields select what the provider
+            # reports back and are dropped when configured; `context` is an instruction about the
+            # prompt and is refused like every other unrepresentable field.
             representable_fields = {"effort"}
             if drop_unrepresentable_request_fields:
                 representable_fields.update(_REPORTING_ONLY_REASONING_FIELDS)
@@ -477,7 +484,9 @@ class ResponsesConverter(BaseModel):
                     f"{', '.join(repr(part_type) for part_type in unsupported_types)}"
                 )
             if any(part["type"] == "input_image" for part in output):
-                logger.warning(
+                # Debug, like the other drops: the conversion re-converts the whole transcript on
+                # every later turn, so one returned image would otherwise warn on every turn after it.
+                logger.debug(
                     "Rendering the image output of call %r as a text placeholder: chat tool messages carry text only.",
                     m["call_id"],
                 )

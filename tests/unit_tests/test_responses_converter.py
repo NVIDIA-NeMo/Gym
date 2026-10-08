@@ -15,6 +15,7 @@
 """Unit tests for the shared Responses API <-> Chat Completions converter."""
 
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -535,10 +536,12 @@ def test_responses_to_chat_completion_rejects_unrepresentable_function_output(
 
 
 def test_responses_to_chat_completion_renders_a_function_output_image_as_a_placeholder(
-    converter: ResponsesConverter,
+    converter: ResponsesConverter, caplog
 ):
-    # With the switch on, an image a tool returned becomes a text placeholder in the tool message,
-    # so the conversion succeeds and the surrounding text parts keep their positions.
+    # With the switch on, an image a tool returned becomes a neutral text placeholder in the tool
+    # message, so the conversion succeeds and the text parts around it keep their positions. The
+    # drop is logged at debug like the other drops: the whole transcript is re-converted on every
+    # later turn, so a warning would repeat for the rest of the rollout.
     responses_params = NeMoGymResponseCreateParamsNonStreaming(
         input=[
             {
@@ -547,21 +550,27 @@ def test_responses_to_chat_completion_renders_a_function_output_image_as_a_place
                 "output": [
                     {"type": "input_text", "text": "Rendered the plot."},
                     {"type": "input_image", "image_url": "data:image/png;base64,AAAA", "detail": "auto"},
+                    {"type": "input_text", "text": "The axes are labeled."},
                 ],
             }
         ]
     )
 
-    params = converter.responses_to_chat_completion_create_params(
-        responses_params, drop_unrepresentable_request_fields=True
-    )
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.responses_converter"):
+        params = converter.responses_to_chat_completion_create_params(
+            responses_params, drop_unrepresentable_request_fields=True
+        )
 
     (tool_message,) = params.messages
     assert tool_message["role"] == "tool"
     assert tool_message["tool_call_id"] == "call_1"
-    assert tool_message["content"][0] == {"type": "text", "text": "Rendered the plot."}
-    assert tool_message["content"][1]["type"] == "text"
-    assert "image omitted" in tool_message["content"][1]["text"]
+    assert tool_message["content"] == [
+        {"type": "text", "text": "Rendered the plot."},
+        {"type": "text", "text": "[image omitted from tool output]"},
+        {"type": "text", "text": "The axes are labeled."},
+    ]
+    image_records = [r for r in caplog.records if "text placeholder" in r.getMessage()]
+    assert [r.levelno for r in image_records] == [logging.DEBUG]
 
 
 def test_responses_to_chat_completion_still_rejects_other_function_output_parts_when_dropping(
@@ -1875,14 +1884,16 @@ def test_downconverting_drops_include_when_configured(converter: ResponsesConver
     "reasoning",
     [
         {"effort": "high", "summary": "auto"},
-        {"effort": "high", "summary": "auto", "context": "all_turns"},
+        {"effort": "high", "generate_summary": "auto"},
+        {"effort": "high", "summary": "detailed", "generate_summary": "concise"},
     ],
 )
 def test_downconverting_drops_reporting_only_reasoning_fields_when_configured(
     converter: ResponsesConverter, reasoning: dict
 ):
-    # `summary` and `context` select how the provider presents and carries reasoning on the response
-    # object. The effort is the only reasoning field a chat completion carries, and it still travels.
+    # The summary fields, under the current and the deprecated name, select what the provider
+    # reports back. The effort is the only reasoning field a chat completion carries, and it still
+    # travels.
     params = NeMoGymResponseCreateParamsNonStreaming(input="hi", reasoning=reasoning)
 
     converted = converter.responses_to_chat_completion_create_params(params, drop_unrepresentable_request_fields=True)
@@ -1891,11 +1902,14 @@ def test_downconverting_drops_reporting_only_reasoning_fields_when_configured(
     assert converted.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
 
 
-def test_downconverting_still_rejects_other_reasoning_fields_when_configured(converter: ResponsesConverter):
-    """The switch covers `summary` and `context`; every other reasoning field is still refused."""
-    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", reasoning={"generate_summary": "auto"})
+@pytest.mark.parametrize("context", ["auto", "current_turn", "all_turns"])
+def test_downconverting_still_rejects_a_reasoning_context_when_configured(converter: ResponsesConverter, context: str):
+    """`reasoning.context` tells the provider which earlier reasoning items to render back to the
+    model. The conversion renders every item and leaves the rest to the chat template, so it honors
+    no value of the field and refuses it even with the switch on."""
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", reasoning={"effort": "high", "context": context})
 
-    with pytest.raises(NotImplementedError, match="generate_summary"):
+    with pytest.raises(NotImplementedError, match="context"):
         converter.responses_to_chat_completion_create_params(params, drop_unrepresentable_request_fields=True)
 
 
