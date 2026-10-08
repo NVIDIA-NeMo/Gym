@@ -308,6 +308,22 @@ class TestBuildOpenclawConfig:
         cfg = agent._build_openclaw_config({"tools": {"deny": ["message", "gateway"]}})
         assert cfg["tools"]["deny"] == ["message", "gateway"]
 
+    def test_terminal_only_tool_policy_preserved_with_headless_deny(self) -> None:
+        agent = _make_agent(
+            openclaw_config={
+                "tools": {
+                    "profile": "minimal",
+                    "alsoAllow": ["exec"],
+                    "deny": ["session_status"],
+                }
+            }
+        )
+        cfg = agent._build_openclaw_config({})
+
+        assert cfg["tools"]["profile"] == "minimal"
+        assert cfg["tools"]["alsoAllow"] == ["exec"]
+        assert cfg["tools"]["deny"] == ["session_status", "message"]
+
     def test_user_openclaw_config_merged(self) -> None:
         agent = _make_agent(
             openclaw_config={"models": {"providers": {"nvinf": {"baseUrl": "https://x/v1"}}}, "extra": {"k": "v"}}

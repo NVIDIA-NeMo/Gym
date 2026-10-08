@@ -1,6 +1,6 @@
 # Multi-harness training handoff
 
-Last updated: 2026-10-08 13:58 PDT
+Last updated: 2026-10-08 14:03 PDT
 
 This file is the short operational handoff for resuming the NeMo Gym + NeMo
 RL multi-harness work on another cluster. The longer design, code map, test
@@ -55,11 +55,11 @@ Do not treat `mask_sample=false` as success in this run. The Gym metadata had
 no timeout or sandbox error, but the output was only OpenClaw's local context
 overflow message and contained no policy tokens.
 
-## First change on the new cluster
+## Implemented OpenClaw fix awaiting rollout validation
 
 In
 `responses_api_agents/anyterminal_agent/configs/anyterminal_openclaw.yaml`,
-replace the `coding` profile with a terminal-only policy:
+the branch now replaces the `coding` profile with a terminal-only policy:
 
 ```yaml
 openclaw_config:
@@ -74,10 +74,10 @@ openclaw_config:
       - session_status
 ```
 
-This should leave only OpenClaw's `exec` tool after Gym adds its required
-headless `message` deny. It is the proposed fix, not yet runtime validated.
-Add assertions for the resolved AnyTerminal config and OpenClaw's final merged
-config, then run:
+This leaves only OpenClaw's `exec` tool after Gym adds its required headless
+`message` deny. It is implemented and config-unit-tested, but not yet runtime
+validated. The resolved AnyTerminal config and OpenClaw's final merged config
+are covered by:
 
 ```bash
 uv run pytest -q tests/unit_tests/test_anyterminal_multi_harness.py
@@ -85,8 +85,8 @@ uv run pytest -q responses_api_agents/openclaw_agent/tests/test_app.py
 git diff --check
 ```
 
-Commit and push that fix to Gym PR #4082 before rerunning. The RL recipe
-already advertises a 15,872-token OpenClaw context at head `85c79975`.
+These focused tests passed 57/57 on the source cluster. The RL recipe already
+advertises a 15,872-token OpenClaw context at head `85c79975`.
 
 ## Environment and inputs
 
@@ -155,9 +155,8 @@ gradient norm.
 - `2172269`: 8-node Super sync, still pending for priority at handoff.
 - `2172270`: 16-node Super async, still pending for priority at handoff.
 
-The pending jobs launch from mutable worktrees and do not contain the proposed
-OpenClaw fix. Do not let them consume GPUs without deliberately updating or
-replacing them.
+The pending jobs launch from mutable worktrees. Verify they resolve the pushed
+terminal-only OpenClaw config before allowing their results to count.
 
 Useful source paths:
 
