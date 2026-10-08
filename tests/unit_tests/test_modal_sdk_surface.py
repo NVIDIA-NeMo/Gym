@@ -88,6 +88,7 @@ def test_process_and_file_async_surface_exists():
 
     assert hasattr(ContainerProcess.wait, "aio")
     assert hasattr(StreamReader.read, "aio")
+    assert callable(StreamReader.__aiter__)
     assert hasattr(StreamWriter.drain, "aio")
     # write / write_eof are sync on the writer (buffered until drain).
     assert callable(StreamWriter.write) and callable(StreamWriter.write_eof)
@@ -99,6 +100,8 @@ def test_process_and_file_async_surface_exists():
 def test_exception_classes_the_provider_classifies_exist():
     names = {
         "NotFoundError",
+        "ConflictError",
+        "ClientClosed",
         "AuthError",
         "InvalidError",
         "PermissionDeniedError",

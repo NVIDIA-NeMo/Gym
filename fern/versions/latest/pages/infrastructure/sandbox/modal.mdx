@@ -80,7 +80,7 @@ profile or workspace default. `NEMO_GYM_MODAL_APP` selects the App that owns the
 | `image` | Required OCI image reference. Pin a digest for reproducible runs. |
 | `entrypoint` | Overrides the image command; omitted values use a POSIX keepalive. |
 | `ttl_s` | Hard lifetime, positive and no more than 24 hours. |
-| `ready_timeout_s` | Overall provider readiness deadline. |
+| `ready_timeout_s` | Budget for App lookup, allocation, and readiness; cleanup has its own bound. |
 | `workdir` / `env` | Passed to Modal at creation and used by NeMo Gym commands. |
 | `files` | Uploaded after readiness and before `start()` returns. |
 | `metadata` | Modal tags; at most ten tags after all defaults and overrides are merged. |
@@ -95,28 +95,50 @@ Per-sandbox `provider_options` support `gpu`, `cloud`, `region`, `secrets`, `vol
 
 ## Reliability
 
-Create and exec requests are submitted once. Ambiguous retries could allocate a duplicate
-sandbox or execute a side-effecting command twice. Recognized transient failures are retried
-only for idempotent control-plane operations such as reconnecting, resolving a tunnel, and
-terminating a sandbox.
+The provider does not add retries to create or exec requests: a new request could allocate a
+second sandbox or repeat a side effect. The Modal SDK may retry transient create failures
+internally using the same request idempotency key. Provider retries are limited to recognized
+transient failures on idempotent control-plane operations such as reconnecting, resolving
+tunnels, and cleanup.
 
-The default readiness command validates that exec works before NeMo Gym uploads task files.
-`ready_timeout_s` bounds the whole probe, including stalled output. Failed or cancelled
-readiness terminates the allocated sandbox before propagating the error. The configured TTL is
-a remote backstop rather than a replacement for `stop()` or a context manager.
+`ready_timeout_s` covers App lookup, image preparation/pull, scheduling, and the readiness probe.
+It overrides `probe.deadline_s` (180 seconds by default). `probe.command: null` disables only
+the exec probe. A failed probe reports the last completed attempt's stdout, stderr, and return
+code. Invalid exec configuration fails immediately instead of being polled.
 
-Exec output is decoded with UTF-8 replacement. Modal timeout sentinels and
-`ExecTimeoutError` become `TimeoutError`; signal exits retain normal process return codes.
-Because Modal does not expose a public way to kill only one exec process, cancelling exec
-closes the sandbox to prevent delayed mutations from crossing evaluation steps.
+Failed or cancelled creation attempts cleanup before returning. Cleanup can extend the readiness
+deadline: each close attempt is bounded by `operations.close_timeout_s` (60 seconds by default).
+When allocation is still in flight, the provider allows that same cleanup budget to obtain its
+id and terminate it. If no id arrives in time, it cancels the local request and logs the App name;
+a remote allocation may still exist and its TTL is the final cleanup backstop. The TTL also
+protects against the client process being killed; it does not replace normal `stop()` calls.
+
+Command deadlines return `SandboxExecResult(error_type="timeout", return_code=125)`. A sandbox
+that disappears, rejects exec, or loses its client returns `error_type="sandbox"` with code 125.
+Both retain captured stdout and stderr. Ordinary nonzero and signal exits remain process
+results. Output is decoded with UTF-8 replacement. Exec closes and drains stdin immediately,
+so commands that read stdin receive EOF.
+
+Modal limits the combined exec argv to 65,536 characters, including the shell wrapper and any
+user rewrite. An oversized command returns a sandbox error before dispatch; upload a script
+and execute its path for large heredocs or generated programs.
+
+<Warning>
+Modal has no public per-exec kill API. **Client-side cancellation destroys the sandbox**, including
+cancellation from `asyncio.wait_for` or `asyncio.timeout`. A verifier cannot then download logs
+or other diagnostics from that sandbox. Use exec's `timeout_s` when the caller needs to retain
+the sandbox and its files after a command deadline. The provider retains this cleanup policy to
+prevent cancelled commands from mutating later evaluation steps.
+</Warning>
 
 File operations use Modal's streaming filesystem API. A cancelled or timed-out transfer also
 closes the sandbox. Missing remote files become `FileNotFoundError`; other SDK filesystem errors
-are preserved.
+are preserved. Cleanup failures are logged without replacing the original cancellation or
+transfer timeout.
 
-`close()` waits for remote termination, detaches the SDK connection, and clears the handle only
-after confirmed cleanup. Serialized handles reconnect by Modal sandbox ID through NeMo Gym's
-`ConnectableProvider` capability.
+`close()` waits for remote termination and detaches the SDK connection within its cleanup
+budget. The handle is retained if cleanup fails so it can be retried. Serialized handles
+reconnect through `modal.Sandbox.from_id`.
 
 ## Security and Networking
 
@@ -128,3 +150,14 @@ evaluated workload actually needs.
 `create.port_mode: encrypted` terminates TLS at Modal and returns an HTTPS endpoint. `h2`
 selects Modal's HTTP/2 tunnel. `unencrypted` exposes a public raw TCP socket represented as an
 `http://` endpoint.
+
+Commands with `user=None`, `user="root"`, or `user=0` use the container's default root user and
+need no `su` binary. Non-root users require `exec.allow_user_rewrite: true`, a named account, and
+`su` plus `/bin/sh` in the image; non-root numeric UIDs are unsupported. The full configured
+`exec.shell` argv is preserved, including login-shell flags such as `["/bin/bash", "-lc"]`.
+
+Registry images must target `linux/amd64`. `image_secret` supports static
+`REGISTRY_USERNAME` / `REGISTRY_PASSWORD` credentials. Private Amazon ECR and Google Artifact
+Registry authentication require Modal's dedicated image constructors, which this provider's
+`Image.from_registry` path does not expose; mirror those images to a registry with supported
+static credentials before using them here.

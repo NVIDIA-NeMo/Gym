@@ -67,7 +67,7 @@ sandbox:
       command: "printf ok"
       expected_stdout: "ok"
       timeout_s: 30.0
-      # Overall budget for the probe to pass; SandboxSpec.ready_timeout_s
+      # Budget for App lookup, allocation and probing; SandboxSpec.ready_timeout_s
       # overrides it per sandbox.
       deadline_s: 180.0
       stable_count: 1
@@ -80,8 +80,8 @@ sandbox:
       # exec receives a shell string; this shell runs it. Use ["/bin/bash", "-lc"]
       # for images where a login shell is needed to pick up PATH.
       shell: ["/bin/sh", "-c"]
-      # Modal has no native per-exec user. A `user` is honoured only when
-      # allow_user_rewrite is true, by wrapping the command in `su -s SHELL USER -c`.
+      # Root (null, "root", or 0) needs no rewrite. Other named users require
+      # allow_user_rewrite and su; the complete configured shell argv is preserved.
       user: null
       allow_user_rewrite: false
 
@@ -93,7 +93,7 @@ sandbox:
     operations:
       # Retries for transient transport/5xx failures. Deterministic errors
       # (auth, not found, invalid, rate-limited, timeouts) are not retried.
-      # Sandbox creation is never retried: it is not idempotent.
+      # The provider adds no create/exec retries; the SDK owns request idempotency.
       retries: 2
       retry_delay_s: 0.5
       retry_max_delay_s: 8.0

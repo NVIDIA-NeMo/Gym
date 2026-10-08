@@ -77,6 +77,9 @@ class FakeStream:
     def _read(self):
         return self._data
 
+    async def __aiter__(self):
+        yield await self.read.aio()
+
 
 class FakeStdin:
     def __init__(self):
@@ -159,7 +162,6 @@ class FakeSandbox:
         self.create_kwargs = kwargs
         self.exec_calls: list[tuple[tuple[str, ...], dict[str, Any]]] = []
         self.files: dict[str, bytes] = {}
-        self.mkdirs: list[tuple[str, bool]] = []
         self.filesystem = FakeFilesystem(self)
         self.detached = 0
         self.terminate_wait = None
@@ -169,11 +171,9 @@ class FakeSandbox:
         self.poll_exc: BaseException | None = None
         self.terminate_exc: BaseException | None = None
         self.tunnel_map: dict[int, Any] = {}
-        self.too_large_exc: BaseException | None = None
         self.exec_script = exec_script or {}
         self.last_process: FakeProcess | None = None
         self.exec = _Aio(self._exec)
-        self.mkdir = _Aio(self._mkdir)
         self.poll = _Aio(self._poll)
         self.terminate = _Aio(self._terminate)
         self.tunnels = _Aio(self._tunnels)
@@ -196,19 +196,10 @@ class FakeSandbox:
         # Default: a probe-friendly success that echoes printf.
         if "printf ok" in command:
             proc = FakeProcess(stdout="ok")
-        elif argv[:1] == ("cat",):
-            path = argv[1]
-            if path not in self.files:
-                proc = FakeProcess(stdout=b"", stderr=b"cat: No such file or directory", returncode=1)
-            else:
-                proc = FakeProcess(stdout=self.files[path], stderr=b"", returncode=0)
         else:
             proc = FakeProcess(stdout="", stderr="", returncode=0)
         self.last_process = proc
         return proc
-
-    def _mkdir(self, path, parents=False):
-        self.mkdirs.append((path, parents))
 
     def _poll(self):
         if self.poll_exc is not None:
@@ -240,25 +231,7 @@ def _build_fake_modal(*, exec_script=None, create_exc=None):
     created: list[FakeSandbox] = []
     by_id: dict[str, FakeSandbox] = {}
 
-    exc = types.SimpleNamespace()
-    for name in (
-        "Error",
-        "NotFoundError",
-        "AuthError",
-        "InvalidError",
-        "PermissionDeniedError",
-        "ResourceExhaustedError",
-        "ExecTimeoutError",
-        "SandboxTimeoutError",
-        "SandboxTerminatedError",
-        "SandboxFilesystemError",
-        "SandboxFilesystemFileTooLargeError",
-        "SandboxFilesystemNotFoundError",
-        "ConnectionError",
-        "InternalError",
-        "ServiceError",
-    ):
-        setattr(exc, name, type(name, (Exception,), {}))
+    exc = pytest.importorskip("modal").exception
 
     class Sandbox:
         @staticmethod
@@ -506,13 +479,19 @@ class TestCreate:
             await _provider(create={"strict_resources": True}).create(_spec(resources={"disk_gib": 50}))
 
     async def test_create_failure_is_wrapped_and_never_retried(self, fake_modal):
-        modal, created = fake_modal()
-        boom = modal.exception.ServiceError("region full")
-        modal, created = fake_modal(create_exc=boom)
+        modal, _ = fake_modal()
+        calls = 0
+
+        async def failing_create(*entrypoint, **kwargs):
+            nonlocal calls
+            calls += 1
+            raise modal.exception.ServiceError("region full")
+
+        modal.Sandbox.create = _Aio(failing_create)
         provider = _provider(operations={"retries": 3})
         with pytest.raises(ModalCreateError, match="region full"):
             await provider.create(_spec())
-        assert created == []
+        assert calls == 1
 
     async def test_failed_probe_terminates_sandbox_and_raises_verification_error(self, fake_modal):
         _, created = fake_modal(exec_script={"printf ok": FakeProcess(stdout="", stderr="not yet", returncode=1)})
@@ -593,28 +572,44 @@ class TestExec:
         result = await provider.exec(handle, "false")
         assert result.return_code == 3 and result.stderr == "bad"
 
-    async def test_exec_timeout_error_becomes_timeout_error(self, fake_modal):
+    async def test_exec_timeout_error_returns_partial_output(self, fake_modal):
         provider, handle, sb, modal = await self._started(fake_modal)
-        sb.exec_script = {"sleep": FakeProcess(raise_on_wait=modal.exception.ExecTimeoutError("deadline"))}
-        with pytest.raises(TimeoutError, match="timed out after 1s"):
-            await provider.exec(handle, "sleep 5", timeout_s=1)
+        sb.exec_script = {
+            "sleep": FakeProcess(
+                stdout=b"partial stdout",
+                stderr=b"partial stderr",
+                raise_on_wait=modal.exception.ExecTimeoutError("deadline"),
+            )
+        }
+        result = await provider.exec(handle, "sleep 5", timeout_s=1)
+        assert result.error_type == "timeout" and result.return_code == 125
+        assert result.stdout == "partial stdout" and "partial stderr" in result.stderr
 
-    async def test_minus_one_after_deadline_is_a_timeout_but_early_minus_one_is_unexpected_exit(self, fake_modal):
+    @pytest.mark.parametrize("wait_delay", [0, 0.01])
+    async def test_minus_one_is_always_a_timeout_result(self, fake_modal, wait_delay):
         provider, handle, sb, _ = await self._started(fake_modal)
-        # Modal reports -1 instead of raising on timeout; elapsed ~= deadline -> TimeoutError.
-        sb.exec_script = {"slow": FakeProcess(returncode=-1, wait_delay=1.0)}
-        with pytest.raises(TimeoutError):
-            await provider.exec(handle, "slow", timeout_s=1)
-        # The pinned SDK sentinel is a timeout regardless of observed client time.
-        sb.exec_script = {"weird": FakeProcess(returncode=-1)}
-        with pytest.raises(TimeoutError):
-            await provider.exec(handle, "weird", timeout_s=30)
+        sb.exec_script = {"slow": FakeProcess(stdout=b"partial", returncode=-1, wait_delay=wait_delay)}
+        result = await provider.exec(handle, "slow", timeout_s=30)
+        assert result.error_type == "timeout" and result.return_code == 125
+        assert result.stdout == "partial"
 
-    async def test_sandbox_terminated_mid_command_is_reported_without_exit_code(self, fake_modal):
+    @pytest.mark.parametrize("error", ["NotFoundError", "ConflictError", "ClientClosed", "InvalidError"])
+    @pytest.mark.parametrize("stage", ["dispatch", "wait"])
+    async def test_sandbox_exec_failure_is_reported_as_standard_result(self, fake_modal, error, stage):
         provider, handle, sb, modal = await self._started(fake_modal)
-        sb.exec_script = {"work": FakeProcess(raise_on_wait=modal.exception.SandboxTerminatedError("gone"))}
+        failure = getattr(modal.exception, error)("gone")
+        sb.exec_script = {
+            "work": failure
+            if stage == "dispatch"
+            else FakeProcess(
+                stdout=b"partial",
+                raise_on_wait=failure,
+            )
+        }
         result = await provider.exec(handle, "work")
-        assert result.error_type == "sandbox_terminated" and result.return_code == -1
+        assert result.error_type == "sandbox" and result.return_code == 125
+        assert "gone" in result.stderr
+        assert result.stdout == ("" if stage == "dispatch" else "partial")
 
     async def test_user_requires_opt_in_rewrite(self, fake_modal):
         provider, handle, sb, _ = await self._started(fake_modal)
@@ -622,7 +617,7 @@ class TestExec:
             await provider.exec(handle, "id", user="agent")
         provider2, handle2, sb2, _ = await self._started(fake_modal, exec={"allow_user_rewrite": True})
         await provider2.exec(handle2, "id -u", user="agent")
-        assert sb2.exec_calls[-1][0] == ("su", "-s", "/bin/sh", "-c", "id -u", "--", "agent")
+        assert sb2.exec_calls[-1][0] == ("su", "-s", "/bin/sh", "-c", "/bin/sh -c 'id -u'", "--", "agent")
 
     async def test_relative_cwd_is_rejected_like_modal_would(self, fake_modal):
         provider, handle, _, _ = await self._started(fake_modal)
