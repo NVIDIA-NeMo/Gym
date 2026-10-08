@@ -58,7 +58,7 @@ class GDPValTask(TaskStrategy):
         container_path = getattr(config, "gdpval_container_path", None)
 
         # GDPval MUST run inside the Apptainer sandbox built from
-        # resources_servers/gdpval/containers/gdpval.def. The sandbox carries the heavy dependency set
+        # resources_servers/gdpval/containers/Dockerfile. The sandbox carries the heavy dependency set
         # the task prompt advertises (TeX Live, the full data/ML/document/audio
         # stack, ...). We deliberately do NOT install these into the
         # evaluation/agent container — that would bloat the eval image by many
@@ -69,7 +69,7 @@ class GDPValTask(TaskStrategy):
         if not container_path:
             raise RuntimeError(
                 "GDPval requires the Apptainer sandbox: set `gdpval_container_path` to the "
-                ".sif built from resources_servers/gdpval/containers/gdpval.def. "
+                ".sif built from resources_servers/gdpval/containers/Dockerfile. "
                 "The local (non-sandbox) backend is rejected because the heavy sandbox "
                 "dependencies are not — and must not be — installed in the evaluation container."
             )
@@ -77,7 +77,7 @@ class GDPValTask(TaskStrategy):
         if not os.path.exists(container_path):
             raise RuntimeError(
                 f"GDPval Apptainer container not found at {container_path}. Build the .sif from "
-                "resources_servers/gdpval/containers/gdpval.def. Refusing to fall back "
+                "resources_servers/gdpval/containers/Dockerfile. Refusing to fall back "
                 "to the local backend, which lacks the sandbox dependencies."
             )
 

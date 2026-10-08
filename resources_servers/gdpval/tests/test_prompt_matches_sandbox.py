@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The GDPval prompt must describe the sandbox gdpval.def actually builds.
+"""The GDPval prompt must describe the sandbox the Dockerfile actually builds.
 
 The expensive failure is a prompt that advertises a package the sif does not
 carry: the model plans around it and only finds out mid-trajectory. These tests

@@ -1,0 +1,335 @@
+# syntax=docker/dockerfile:1
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GDPval-AA v2 sandbox.
+#
+# Aligned to the environment Artificial Analysis publishes for GDPval-AA v2:
+#   https://artificialanalysis.ai/methodology/intelligence-benchmarking#gdpval-aa
+#
+# Two snapshots of that page are vendored next to this file and are the source
+# of truth for the dependency set:
+#   gdpval_aa_v2_python_requirements.txt  419 pinned Python packages
+#   gdpval_aa_v2_apt_closure.txt          762 pinned apt packages
+#
+# Build with this directory as the context so the COPY paths resolve:
+#   docker build -t gdpval-sandbox resources_servers/gdpval/containers
+#
+# Alignment decisions, and where we deliberately differ:
+#
+#   * Base image is Debian 13 (trixie), not bookworm. The published apt closure
+#     is pinned to trixie (`+deb13uN` revisions, t64 library names), so a
+#     bookworm base produced systematically older libreoffice/ffmpeg/chromium
+#     than the environment the reference scores came from.
+#
+#   * The interpreter is Debian's python3.13, not the one in the docker
+#     python:3.13 image. The closure pins python3.13=3.13.5, and the docker
+#     image ships a later patch release (3.13.15), so basing on it silently ran
+#     the eval on a different interpreter than the published sandbox. Building
+#     on plain debian:trixie is what makes `python3 --version` read 3.13.5.
+#
+#   * Python packages are installed from the published pin file verbatim rather
+#     than resolved from loose top-level names. The published list is a full
+#     `pip freeze`, so pinning it reproduces the reference sandbox instead of
+#     drifting to whatever the resolver picks on build day.
+#
+#   * Still deliberately NO PyTorch. GDPval-AA v2 does not ship torch,
+#     torchvision, torchaudio, keras, jax, dlib or mtcnn — verified absent from
+#     the 419-package snapshot. (The GDPval-AA v1-era prompt advertised them;
+#     a prompt for this image must not.)
+#
+#   * We install a compiler toolchain; the published closure does not carry one
+#     (it has gcc-14-base and exactly one -dev package). The reference sandbox
+#     is a runtime closure that builds no wheels. We keep build-essential so a
+#     pin without a cp313 wheel for this platform can still build, which makes
+#     this image a superset, never a subset, of the reference.
+#
+#   * espeak-ng is installed although the closure omits it. The closure pins
+#     pyttsx3, which cannot speak without an espeak backend.
+#
+#   * The font set is installed explicitly rather than left to come in as a
+#     recommends of libreoffice. Building with --no-install-recommends dropped
+#     fonts-crosextra-{caladea,carlito} and the Noto families that the closure
+#     carries; Carlito and Caladea are the metric-compatible substitutes for
+#     Calibri and Cambria, so without them LibreOffice reflows every Office
+#     document written in the Microsoft defaults, and CJK text renders as tofu.
+#
+# ARCHITECTURE. x86_64 installs the published manifest in full and is the
+# faithful build; it is the architecture the reference sandbox runs on. arm64
+# builds drop exactly the pins listed in gdpval_aa_v2_arm64_exclusions.txt,
+# which publish x86_64 wheels and no sdist, so there is nothing to build from.
+# The exclusion list is closed and checked: any OTHER pin failing to install
+# aborts the build rather than producing a quietly thinner sandbox.
+
+FROM debian:trixie
+
+LABEL org.opencontainers.image.authors="NVIDIA NeMo-Gym" \
+      org.opencontainers.image.description="GDPval-AA v2 sandbox (Debian trixie, pinned AA dependency set)" \
+      ai.nvidia.gdpval.aa-methodology-version="GDPval-AA v2" \
+      ai.nvidia.gdpval.aa-snapshot-date="2026-09-11"
+
+ENV HOME=/root \
+    PATH=/usr/local/bin:$PATH \
+    DEBIAN_FRONTEND=noninteractive
+
+COPY gdpval_aa_v2_python_requirements.txt /opt/gdpval/aa_v2_python_requirements.txt
+COPY gdpval_aa_v2_apt_closure.txt /opt/gdpval/aa_v2_apt_closure.txt
+COPY gdpval_aa_v2_arm64_exclusions.txt /opt/gdpval/aa_v2_arm64_exclusions.txt
+COPY verify_gdpval_sandbox.py /opt/gdpval/verify_gdpval_sandbox.py
+
+# Top-level packages only. The published 762-entry list is a transitive
+# closure, so most of it arrives as dependencies of the names below;
+# verify_gdpval_sandbox.py verifies the result against that closure rather
+# than this list being kept in sync by hand.
+#
+# ``set -ex`` aborts on the first failure, and the ``command -v`` checks
+# below fail loud if a binary we expect did not actually install.
+RUN <<'EOF'
+set -ex
+apt-get update
+apt-get install -y --no-install-recommends \
+    ca-certificates \
+    python3.13 \
+    python3.13-dev \
+    python3-pip \
+    python3-venv \
+    python-is-python3 \
+    git \
+    build-essential \
+    gcc \
+    g++ \
+    cmake \
+    swig \
+    pkg-config \
+    make \
+    coreutils \
+    libpango1.0-dev \
+    libcairo2-dev \
+    libgdk-pixbuf-2.0-dev \
+    libreoffice-core \
+    libreoffice-writer \
+    libreoffice-calc \
+    libreoffice-impress \
+    libreoffice-draw \
+    libreoffice-math \
+    fonts-dejavu-core \
+    fonts-liberation \
+    fonts-crosextra-caladea \
+    fonts-crosextra-carlito \
+    fonts-noto-core \
+    fonts-noto-extra \
+    fonts-noto-mono \
+    fonts-noto-cjk \
+    fonts-noto-color-emoji \
+    fonts-firacode \
+    fontconfig \
+    locales \
+    miller \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-osd \
+    pandoc \
+    poppler-utils \
+    ghostscript \
+    ffmpeg \
+    graphviz \
+    imagemagick \
+    chromium \
+    jq \
+    yq \
+    texlive-latex-base \
+    texlive-latex-recommended \
+    texlive-latex-extra \
+    texlive-fonts-recommended \
+    texlive-fonts-extra \
+    texlive-xetex \
+    texlive-luatex \
+    texlive-pictures \
+    texlive-science \
+    texlive-plain-generic \
+    texlive-pstricks \
+    texlive-lang-greek \
+    latexmk \
+    biber \
+    default-jre-headless \
+    gdal-bin \
+    libgdal-dev \
+    proj-bin \
+    libproj-dev \
+    libgeos-dev \
+    libgl1 \
+    libglib2.0-0t64 \
+    libsndfile1 \
+    libopenblas0 \
+    libopenblas0-pthread \
+    espeak-ng \
+    libzbar0t64 \
+    x11-utils \
+    xdg-utils \
+    unzip \
+    curl \
+    wget
+rm -rf /var/lib/apt/lists/*
+
+command -v libreoffice
+command -v soffice
+command -v tesseract
+command -v pandoc
+command -v pdftotext
+command -v gs
+command -v ffmpeg
+command -v dot
+command -v convert
+command -v pdflatex
+command -v xelatex
+command -v lualatex
+command -v latexmk
+command -v biber
+command -v java
+command -v gdalinfo
+command -v jq
+command -v yq
+command -v mlr
+command -v fc-match
+# Carlito and Caladea are the metric-compatible stand-ins for Calibri and
+# Cambria. Without them LibreOffice silently reflows every Office document
+# that uses the Microsoft defaults, so page counts and layout drift.
+fc-match Calibri | grep -qi carlito
+fc-match Cambria | grep -qi caladea
+# Any CJK glyph coverage at all; without it CJK text renders as tofu.
+fc-list :lang=ja | grep -qi noto
+command -v git
+command -v unzip
+command -v timeout
+command -v python3
+command -v python
+# The published closure pins python3.13=3.13.5. Fail the build rather than
+# ship an eval that runs on a different interpreter than the reference.
+python3 -c 'import sys; v=sys.version_info; assert (v.major,v.minor,v.micro)==(3,13,5), sys.version; print("[gdpval sandbox] interpreter", sys.version.split()[0])'
+command -v chromium || command -v chromium-browser
+# Style files from the curated TeX Live set (texlive-pictures / -science /
+# -pstricks) must resolve, else figure/equation-heavy docs fail at runtime.
+kpsewhich tikz.sty
+kpsewhich siunitx.sty
+kpsewhich pst-plot.sty
+EOF
+
+# Debian marks its interpreter externally managed (PEP 668). We are building
+# a single-purpose image whose entire point is this dependency set, so
+# installing into the system interpreter is correct here; there is no other
+# Python on the image to protect.
+# Deliberately NOT upgrading pip. Debian installs pip without a RECORD
+# file, so `pip install --upgrade pip` fails at the uninstall step with
+# `uninstall-no-record-file` and takes the whole build down. Debian's pip
+# resolves the pinned manifest fine, and pinning the resolver to whatever
+# trixie ships is one less thing drifting between builds.
+# --ignore-installed is load-bearing, not defensive. Several pins are also
+# shipped as dpkg-managed python3-* packages pulled in by gdal-bin and yq
+# (tomlkit, xmltodict, yaml, numpy, argcomplete). Those have no RECORD
+# file, so pip cannot uninstall them to put its own version on top and
+# aborts the whole install with uninstall-no-record-file. Installing over
+# them puts the pinned copy in /usr/local/lib/python3/dist-packages, which
+# Debian places ahead of /usr/lib/python3/dist-packages on sys.path, so the
+# pinned version is the one that imports. The published closure has the
+# same overlap (python3-numpy 2.2.4 alongside the numpy 2.4.4 pin), so this
+# reproduces the reference layout rather than working around it.
+RUN <<'EOF'
+set -ex
+PIP="python3 -m pip install --no-cache-dir --break-system-packages --ignore-installed"
+python3 -m pip --version
+
+# Build the effective pin list for this architecture. x86_64 gets the
+# published manifest verbatim; arm64 drops only the closed exclusion list.
+ARCH="$(dpkg --print-architecture)"
+REQ=/opt/gdpval/aa_v2_python_requirements.txt
+EFFECTIVE=/opt/gdpval/effective_requirements.txt
+EXCLUDED=/opt/gdpval/excluded_requirements.txt
+: > "$EXCLUDED"
+if [ "$ARCH" = "arm64" ]; then
+    grep -E '^[A-Za-z0-9]' /opt/gdpval/aa_v2_arm64_exclusions.txt \
+        | sed 's/==.*//' | sort -u > /tmp/excl_names
+    # Match on the distribution name only, so a refreshed manifest with a
+    # bumped version still drops the right package.
+    grep -E '^[A-Za-z0-9]' "$REQ" | while IFS= read -r pin; do
+        name="${pin%%==*}"
+        if grep -qxF "$name" /tmp/excl_names; then
+            echo "$pin" >> "$EXCLUDED"
+        else
+            echo "$pin"
+        fi
+    done > "$EFFECTIVE"
+    echo "[gdpval sandbox] arm64: excluded $(wc -l < "$EXCLUDED") pins with no aarch64 distribution"
+    cat "$EXCLUDED"
+else
+    grep -E '^[A-Za-z0-9]' "$REQ" > "$EFFECTIVE"
+fi
+echo "[gdpval sandbox] installing $(wc -l < "$EFFECTIVE") pins on $ARCH"
+
+# This MUST fully succeed: a pin that will not install means this image is not
+# the advertised sandbox, and shipping it anyway would silently invalidate
+# every rollout run in it.
+$PIP -r "$EFFECTIVE"
+EOF
+
+# Fail loud if the pinned install did not land what the prompt advertises.
+# Import names differ from distribution names, hence the explicit mapping.
+RUN python - <<'PYCHECK'
+import importlib
+
+mods = [
+    "numpy", "pandas", "polars", "scipy", "matplotlib", "plotly", "bokeh",
+    "plotnine", "seaborn", "statsmodels", "sklearn", "xgboost", "catboost",
+    "lightgbm", "shap", "nltk", "gensim", "spacy", "textblob",
+    "docx", "pptx", "openpyxl", "xlrd", "fitz", "pdfplumber", "reportlab",
+    "weasyprint", "fpdf", "pypdf", "pdfminer", "markitdown", "mammoth",
+    "PIL", "cv2", "playwright", "pytesseract", "qrcode", "pyzbar",
+    "librosa", "soundfile", "pydub", "moviepy", "av", "mutagen",
+    "graphviz", "pydot", "networkx", "svgwrite", "cairosvg", "trimesh",
+    "shapely", "fiona", "geopandas", "rasterio", "folium",
+    "sympy", "pymc", "h5py", "tables", "rdkit", "Bio",
+    "cryptography", "requests", "httpx", "aiohttp", "fastapi", "gradio",
+    "jupyterlab", "notebook", "pytest", "onnxruntime", "magika",
+]
+missing = []
+for m in mods:
+    try:
+        importlib.import_module(m)
+    except Exception as exc:  # noqa: BLE001
+        missing.append(f"{m}: {exc}")
+if missing:
+    raise SystemExit("[gdpval sandbox] missing/broken AA python deps:\n  " + "\n  ".join(missing))
+print(f"[gdpval sandbox] AA python import smoke check OK ({len(mods)} modules)")
+PYCHECK
+
+# Every pin must be present at exactly the published version. pip resolves
+# a consistent set, but a later pin can quietly downgrade an earlier one;
+# this is the check that catches that.
+RUN python - <<'PYPINS'
+import re
+from importlib.metadata import PackageNotFoundError, version
+
+wrong, absent = [], []
+with open("/opt/gdpval/effective_requirements.txt", encoding="utf-8") as fh:
+    pins = [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
+for pin in pins:
+    name, want = pin.split("==", 1)
+    try:
+        got = version(name)
+    except PackageNotFoundError:
+        absent.append(name)
+        continue
+    if got != want:
+        wrong.append(f"{name}: want {want}, got {got}")
+if absent or wrong:
+    raise SystemExit(
+        "[gdpval sandbox] pinned install did not match the AA v2 manifest\n"
+        f"  absent ({len(absent)}): {', '.join(sorted(absent))}\n"
+        f"  wrong version ({len(wrong)}): {'; '.join(sorted(wrong))}"
+    )
+print(f"[gdpval sandbox] all {len(pins)} AA v2 pins present at the published versions")
+PYPINS
+
+RUN mkdir -p /workspace
+
+WORKDIR /root
+CMD ["/bin/bash"]

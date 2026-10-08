@@ -7,11 +7,11 @@
 # Artificial Analysis publishes this as "the full pinned transitive closure
 # resolved inside the Debian trixie base image, so most entries are
 # dependencies of the packages we install directly". It is therefore a
-# VERIFICATION TARGET, not an install list: the Dockerfile installs a curated set of
+# VERIFICATION TARGET, not an install list: gdpval.def installs a curated set of
 # top-level packages and `verify_gdpval_sandbox.py` checks the resulting image
 # against this closure.
 #
-# Two published properties shaped the Dockerfile:
+# Two published properties drove the gdpval.def rewrite:
 #   * Debian 13 (trixie) pins, e.g. `+deb13u4` — hence the trixie base image and
 #     the t64 library names (libglib2.0-0t64, libzbar0t64, libgeos-c1t64).
 #   * It is a RUNTIME closure: it carries no compilers and exactly one -dev

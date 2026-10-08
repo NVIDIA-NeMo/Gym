@@ -37,7 +37,7 @@ def sandbox_path(path: str) -> str:
 
 
 class GDPValSandboxConfig(SandboxConfig):
-    # An OCI image built from containers/gdpval.def; see README.md.
+    # An OCI image built from containers/Dockerfile; see README.md.
     image: Optional[str] = None
 
 
@@ -53,7 +53,7 @@ async def start_task_sandbox(
     if not sandbox_config.image:
         raise ValueError(
             "Set sandbox_config.image (or GDPVAL_SANDBOX_IMAGE) to an OCI image built from "
-            "resources_servers/gdpval/containers/gdpval.def"
+            "resources_servers/gdpval/containers/Dockerfile"
         )
     global_config_dict = get_global_config_dict()
     spec = sandbox_config.spec(
