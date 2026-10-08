@@ -63,7 +63,11 @@ configuration is unchanged.
   omits both output-limit fields from Gym-provider chat-completion requests so vLLM
   can calculate the available budget. Server-side defaults may still cap output.
 - `auto_compaction`: Pi automatic compaction, including overflow recovery (default true);
-  the benchmark preset disables it so history is preserved until the context is full.
+  the AnyTerminal preset enables it with a reserve below the policy model's context limit.
+- `compaction_reserve_tokens`: optional Pi `compaction.reserveTokens` override. Set this below
+  the model context window so Pi compacts before the serving backend rejects the next turn.
+- `compaction_keep_recent_tokens`: optional Pi `compaction.keepRecentTokens` override controlling
+  how much recent context remains verbatim after compaction.
 - `env`: extra env vars for the subprocess (e.g. provider API keys)
 - `workspace_root`: where per-request HOMEs are created and deleted
 - `repo_dir`: optional environment-owned task directory where Pi runs; it is preserved after cleanup

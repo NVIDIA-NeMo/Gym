@@ -201,6 +201,8 @@ async def test_run_stages_private_mcp_config_and_cleans_workspace(tmp_path, with
         mcp_servers=servers if with_mcp else {},
         output_token_policy="remaining_context" if remaining_context else "fixed",
         auto_compaction=not remaining_context,
+        compaction_reserve_tokens=4096,
+        compaction_keep_recent_tokens=6144,
         bash_timeout=bash_timeout,
     )
     homes = []
@@ -210,7 +212,11 @@ async def test_run_stages_private_mcp_config_and_cleans_workspace(tmp_path, with
         homes.append(home)
         assert "private-token" not in " ".join(cmd)
         assert json.loads((home / ".pi" / "agent" / "settings.json").read_text()) == {
-            "compaction": {"enabled": not remaining_context}
+            "compaction": {
+                "enabled": not remaining_context,
+                "reserveTokens": 4096,
+                "keepRecentTokens": 6144,
+            }
         }
         extensions = [Path(cmd[i + 1]).name for i, arg in enumerate(cmd) if arg == "--extension"]
         assert ("remaining-context.mjs" in extensions) is remaining_context

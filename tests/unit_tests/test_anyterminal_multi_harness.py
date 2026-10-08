@@ -56,6 +56,13 @@ def test_profile_composes_all_four_terminal_harnesses_with_one_dataset_owner() -
     assert openclaw_tools.profile == "minimal"
     assert list(openclaw_tools.alsoAllow) == ["exec"]
     assert list(openclaw_tools.deny) == ["session_status"]
+    pi_config = config.anyterminal_pi.responses_api_agents.anyterminal_agent.agent_kwargs
+    assert pi_config.context_window == 15872
+    assert pi_config.max_output_tokens == 4096
+    assert pi_config.output_token_policy == "remaining_context"
+    assert pi_config.auto_compaction is True
+    assert pi_config.compaction_reserve_tokens == 4096
+    assert pi_config.compaction_keep_recent_tokens == 4096
 
     dataset_owners = []
     for instance_name, block in config.items():
