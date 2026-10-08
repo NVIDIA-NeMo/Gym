@@ -28,6 +28,8 @@ Harness instruction items (``system`` / ``developer``) count by position only:
 harnesses regenerate them per request with volatile fields (OpenCode's system
 prompt carries today's date), and hashing their content poisoned every rollout
 that crossed a UTC day boundary. Version 3 of the digest skips their content.
+The model server presents Responses ``instructions`` and Anthropic ``system``
+as a ``system`` item, so the three dialects share this rule.
 
 Chat, Responses, and Anthropic shapes normalize to the same hash input.
 The hash layout is tagged and length-delimited.
