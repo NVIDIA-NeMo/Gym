@@ -284,12 +284,30 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     _mcp_token_serializer: Any = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
+        app = self.create_resources_app()
+        self.register_protocol_routes(app)
+        return app
+
+    def create_resources_app(self) -> FastAPI:
+        """Build the app with what every resources server shares, whatever its episode protocol.
+
+        That is the session and rollout middleware, the checkpoint participant,
+        ``/aggregate_metrics`` and ``/reverify_mode``.
+        A server with another protocol, such as Gymnasium's ``/reset`` and ``/step``,
+        overrides ``register_protocol_routes`` instead of building its own app.
+        """
         app = FastAPI()
 
         self.setup_session_middleware(app)
         app.add_middleware(RolloutContextMiddleware)
         self.setup_resources_checkpoint(app)
 
+        app.post("/aggregate_metrics")(self.aggregate_metrics)
+        app.get("/reverify_mode")(self.get_reverify_mode)
+        return app
+
+    def register_protocol_routes(self, app: FastAPI) -> None:
+        """Register the episode routes ``/seed_session``, ``/close_session`` and ``/verify``."""
         app.post("/seed_session")(self.seed_session)
         app.post("/close_session")(self.close_resources_session)
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
@@ -299,10 +317,6 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 static_attributes={"nemo.gym.server.name": self.config.name},
             )
         )
-        app.post("/aggregate_metrics")(self.aggregate_metrics)
-        app.get("/reverify_mode")(self.get_reverify_mode)
-
-        return app
 
     def setup_resources_checkpoint(self, app: FastAPI) -> None:
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
