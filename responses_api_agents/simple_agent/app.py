@@ -211,6 +211,55 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             resources_cookies=state.resources_cookies,
         )
 
+    async def _execute_tool_call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        tool_access: DirectHTTPToolAccess | None,
+        resources_server_cookies: Any,
+        in_session: bool,
+        session_key: str | None,
+    ) -> tuple[str, int, Any]:
+        """Run one tool call; return its model-visible output, an HTTP-style status, and the resources cookies.
+
+        Tools run on the resources server. An agent that runs some tools itself, for example inside a sandbox it
+        owns per session, overrides this and falls back to ``super()`` for the rest. ``session_key`` names the
+        checkpoint session the call belongs to, or is ``None`` outside one.
+        """
+        # Resource-server errors are valid model-visible tool outputs.
+        if tool_access is not None:
+            api_response = await http_request(
+                method="POST",
+                url=f"{str(tool_access.base_url).rstrip('/')}/{name}",
+                json=arguments,
+                cookies=resources_server_cookies,
+                headers=dict(tool_access.headers),
+                _internal=True,
+            )
+        else:
+            if in_session:
+                # An Environment Server episode reaches Resources only through its grants; the
+                # configured resources_server has no session for this episode.
+                raise RuntimeError(
+                    f"Model called tool {name!r}, but this agent session has no direct HTTP tool access"
+                )
+            if self.config.resources_server is None:
+                raise RuntimeError(
+                    "Simple Agent received a tool call without direct HTTP tool access "
+                    "or a legacy resources_server configuration"
+                )
+            api_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path=f"/{name}",
+                json=arguments,
+                cookies=resources_server_cookies,
+            )
+        tool_output = (await api_response.content.read()).decode()
+        cookies = dict(resources_server_cookies or {})
+        cookies.update(_cookies(api_response))
+        return tool_output, api_response.status, cookies
+
     async def _create_episode(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
@@ -225,6 +274,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
         activation: Activation | None = None,
+        session_key: str | None = None,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         tool_records: list[TrajectoryToolCall] = []
         model_calls: list[ModelCallRef] = []
@@ -411,42 +461,18 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         error_type = type(e).__name__
                         tool_status = "failed"
                 else:
-                    # Resource-server errors are valid model-visible tool outputs.
-                    if tool_access is not None:
-                        api_response = await http_request(
-                            method="POST",
-                            url=f"{str(tool_access.base_url).rstrip('/')}/{output_function_call.name}",
-                            json=parsed_arguments,
-                            cookies=resources_server_cookies,
-                            headers=dict(tool_access.headers),
-                            _internal=True,
-                        )
-                    else:
-                        if in_session:
-                            # An Environment Server episode reaches Resources only through its grants; the
-                            # configured resources_server has no session for this episode.
-                            raise RuntimeError(
-                                f"Model called tool {output_function_call.name!r}, but this agent session has no "
-                                "direct HTTP tool access"
-                            )
-                        if self.config.resources_server is None:
-                            raise RuntimeError(
-                                "Simple Agent received a tool call without direct HTTP tool access "
-                                "or a legacy resources_server configuration"
-                            )
-                        api_response = await self.server_client.post(
-                            server_name=self.config.resources_server.name,
-                            url_path=f"/{output_function_call.name}",
-                            json=parsed_arguments,
-                            cookies=resources_server_cookies,
-                        )
-                    tool_output = (await api_response.content.read()).decode()
-                    resources_server_cookies = dict(resources_server_cookies or {})
-                    resources_server_cookies.update(_cookies(api_response))
+                    tool_output, status, resources_server_cookies = await self._execute_tool_call(
+                        output_function_call.name,
+                        parsed_arguments,
+                        tool_access=tool_access,
+                        resources_server_cookies=resources_server_cookies,
+                        in_session=in_session,
+                        session_key=session_key,
+                    )
                     if collect_trajectory:
-                        completed = 200 <= api_response.status < 400
+                        completed = 200 <= status < 400
                         tool_status = "completed" if completed else "failed"
-                        error_type = None if completed else f"http_{api_response.status}"
+                        error_type = None if completed else f"http_{status}"
 
                 if collect_trajectory:
                     tool_records.append(
@@ -520,7 +546,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 "Simple Agent execute_tools=false is supported only for agent-session requests; "
                 "seed an agent session before calling /v1/responses"
             )
-        async with self._activation(state, rollout_id) as activation:
+        session_key = self._checkpoint_session_key(state, rollout_id)
+        async with self._activation(state, rollout_id, session_key) as activation:
             invocation_id = "root"
             if state is not None:
                 # A session spans several activations, and its observations keep one invocation per activation.
@@ -541,6 +568,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 rollout_id=rollout_id or "unscoped",
                 collect_trajectory=collect_trajectory,
                 activation=activation,
+                session_key=session_key,
             )
         if state is not None:
             state.resources_cookies = dict(resources_server_cookies or {})
@@ -578,25 +606,28 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 return response
             await activation.park()
 
+    def _checkpoint_session_key(self, state: SimpleAgentSessionState | None, capture_key: str | None) -> str | None:
+        """The checkpoint session this call belongs to: the agent session, or the legacy /run that opened one.
+
+        A direct /v1/responses call outside both has no /run to continue, so it is not checkpointed and gets ``None``.
+        """
+        if state is not None:
+            return state.request.agent_session_id
+        participant = self.checkpoint_participant
+        if participant is None or capture_key is None:
+            return None
+        session_key = f"{_LEGACY_SESSION_PREFIX}{EpisodeId.from_capture_key(capture_key).rollout_id}"
+        return session_key if participant.has_session(session_key) else None
+
     @asynccontextmanager
     async def _activation(
-        self, state: SimpleAgentSessionState | None, capture_key: str | None
+        self, state: SimpleAgentSessionState | None, capture_key: str | None, session_key: str | None
     ) -> AsyncIterator[Activation | None]:
         participant = self.checkpoint_participant
-        if participant is None:
+        if participant is None or session_key is None:
             yield None
             return
-        if state is not None:
-            session_key, episode_id = state.request.agent_session_id, state.request.episode_id
-        elif capture_key is not None and participant.has_session(
-            session_key := f"{_LEGACY_SESSION_PREFIX}{EpisodeId.from_capture_key(capture_key).rollout_id}"
-        ):
-            # Only a legacy /run opens this session. A direct /v1/responses call has no /run to
-            # continue, so it is not checkpointed and leaves nothing behind.
-            episode_id = EpisodeId.from_capture_key(capture_key)
-        else:
-            yield None
-            return
+        episode_id = state.request.episode_id if state is not None else EpisodeId.from_capture_key(capture_key)
         async with participant.activation(session_key, episode_id) as activation:
             yield activation
 
