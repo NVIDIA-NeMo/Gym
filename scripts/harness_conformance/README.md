@@ -25,6 +25,9 @@ Download the `harness-conformance-*` artifacts for test/setup logs and probe evi
 The reporter only uses artifacts from the current run attempt; rerun all jobs to
 refresh results for all selected harnesses.
 
+After publishing the result, **Publish P0 check** also fails if P0 fails or any
+probe job fails or is cancelled, making the result visible in the workflow job list.
+
 To enforce P0 before merging, add the fixed **Harness conformance P0** check name to
 the repository's required checks. Until configured, it remains optional. It is
 independent of the existing `Nemo_CICD_Test` gate. This workflow does not regenerate

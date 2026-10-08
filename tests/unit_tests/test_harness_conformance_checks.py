@@ -87,7 +87,13 @@ def test_missing_invalid_or_stale_evidence_never_passes(tmp_path, evidence):
 
 @pytest.mark.parametrize("download_failure", [False, True])
 @pytest.mark.parametrize("listing_failure", [False, True])
-def test_publisher_downloads_current_attempt_and_posts_check(tmp_path, monkeypatch, download_failure, listing_failure):
+@pytest.mark.parametrize(
+    "probe_exit_code,probe_job_result",
+    [(0, "success"), (1, "success"), (2, "failure"), (0, "failure"), (0, "cancelled"), (0, "skipped")],
+)
+def test_publisher_downloads_current_attempt_and_posts_check(
+    tmp_path, monkeypatch, download_failure, listing_failure, probe_exit_code, probe_job_result
+):
     env = {
         "GITHUB_REPOSITORY": "example/Gym",
         "GITHUB_RUN_ID": "123",
@@ -96,6 +102,7 @@ def test_publisher_downloads_current_attempt_and_posts_check(tmp_path, monkeypat
         "GITHUB_SERVER_URL": "https://github.com",
         "RUNNER_TEMP": str(tmp_path),
         "SELECTED_HARNESSES": '["pi"]',
+        "PROBE_JOB_RESULT": probe_job_result,
         "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md"),
     }
     for key, value in env.items():
@@ -105,7 +112,7 @@ def test_publisher_downloads_current_attempt_and_posts_check(tmp_path, monkeypat
     def run(args, **kwargs):
         if args[:3] == ["gh", "run", "download"]:
             assert args[3:9] == ["123", "--repo", "example/Gym", "--name", "harness-conformance-pi-123-2", "--dir"]
-            write_probe_result(Path(args[9]).parent, "pi", 0)
+            write_probe_result(Path(args[9]).parent, "pi", probe_exit_code)
             if download_failure:
                 raise subprocess.CalledProcessError(1, args)
         else:
@@ -120,10 +127,11 @@ def test_publisher_downloads_current_attempt_and_posts_check(tmp_path, monkeypat
         return "harness-conformance-pi-123-2\t456\n"
 
     monkeypatch.setattr(checks.subprocess, "check_output", artifact_listing)
-    checks.main()
+    failed_conformance = download_failure or probe_exit_code != 0
+    assert checks.main() == int(failed_conformance or probe_job_result not in ("success", "skipped"))
     assert len(posted) == 1
     assert posted[0]["head_sha"] == "tested-sha"
-    assert posted[0]["conclusion"] == ("failure" if download_failure else "success")
+    assert posted[0]["conclusion"] == ("failure" if failed_conformance else "success")
     assert posted[0]["details_url"] == "https://github.com/example/Gym/actions/runs/123/attempts/2"
     assert posted[0]["external_id"] == "harness-conformance-p0-123-2"
     if not listing_failure:

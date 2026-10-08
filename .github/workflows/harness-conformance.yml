@@ -143,4 +143,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SELECTED_HARNESSES: ${{ needs.select.outputs.harnesses }}
+          PROBE_JOB_RESULT: ${{ needs.probe.result }}
         run: python3 -m scripts.harness_conformance.checks

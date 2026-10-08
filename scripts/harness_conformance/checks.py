@@ -86,7 +86,7 @@ def p0_check(
     }
 
 
-def main() -> None:
+def main() -> int:
     # No adapter imports or runtime installation: only this reporting job has checks:write.
     repo = os.environ["GITHUB_REPOSITORY"]
     run_id = os.environ["GITHUB_RUN_ID"]
@@ -153,7 +153,7 @@ def main() -> None:
     output["summary"] += f" [Local setup instructions]({setup_url})."
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as handle:
         handle.write(f"## Harness conformance P0\n\n{output['title']}\n\n{output['summary']}\n")
-    # A failed P0 conclusion is a check result, not a failure to publish it.
+    # Publish the detailed check before making the workflow job reflect its result.
     subprocess.run(
         ["gh", "api", "--method", "POST", f"repos/{repo}/check-runs", "--input", "-"],
         input=json.dumps(payload),
@@ -161,7 +161,15 @@ def main() -> None:
         check=True,
         stdout=subprocess.DEVNULL,
     )
+    probe_result = os.environ.get("PROBE_JOB_RESULT", "success")
+    if payload["conclusion"] != "success" or probe_result not in ("success", "skipped"):
+        print(
+            f"::error title=Harness conformance P0::{output['title']}. "
+            f"Probe jobs: {probe_result}. See the job summary for failures, rerun commands, and artifact links."
+        )
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
