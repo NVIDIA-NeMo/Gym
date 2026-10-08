@@ -118,6 +118,19 @@ class TestExtractInstruction:
 
 
 class TestParsePiEvents:
+    def test_inline_reasoning_is_separate_from_solution(self) -> None:
+        solution = "```python\nprint(42)\n```"
+        line = _msg_end(
+            "assistant",
+            [{"type": "text", "text": f"<think>Check the result.</think>{solution}"}],
+            usage={"input": 100, "output": 20},
+        )
+        items, usage = parse_pi_events(line)
+        assert [item.type for item in items] == ["reasoning", "message"]
+        assert items[0].summary[0].text == "Check the result."
+        assert items[1].content[0].text == solution
+        assert usage == {"input_tokens": 100, "output_tokens": 20}
+
     def test_empty(self) -> None:
         items, usage = parse_pi_events("")
         assert items == []

@@ -6,12 +6,12 @@
 import json
 import runpy
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
 from nemo_gym.harness_capabilities import cli
-from nemo_gym.harness_capabilities.reader import hydrate_record
 from tests.unit_tests.harness_capabilities.synthetic import evidence_record
 
 
@@ -95,7 +95,7 @@ def test_ambiguous_directory_requires_explicit_file(record, tmp_path):
 
 @pytest.mark.parametrize("sidecar_state", ["complete", "missing", "incomplete", "extra_call"])
 def test_sidecars_validate_but_do_not_repair_missing_jsonl_payloads(record, tmp_path, monkeypatch, sidecar_state):
-    full = hydrate_record(record)
+    full = deepcopy(record)
     capture_dir = tmp_path / "model-calls"
     capture_dir.mkdir()
     capture_file = capture_dir / "0-0.capture.jsonl"
@@ -151,7 +151,7 @@ def test_reports_do_not_include_payload_values(record, tmp_path, capsys):
     secret = "PRIVATE-PAYLOAD-MARKER"
     call = record["ng_trajectory"]["model_calls"][0]
     call["request"]["input"] = secret
-    call["response"]["usage"]["total_tokens"] = secret
+    call["token_stats"]["total_tokens"] = secret
     path = tmp_path / "rollouts.jsonl"
     path.write_text(json.dumps(record) + "\n")
     assert cli.run_inspection(bundle=path, output=tmp_path / "reports") == 1

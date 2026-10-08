@@ -64,6 +64,7 @@ nemo_user_sim_resources:
       verified: false
       description: Materialized-row validation and verification for Environment-owned UserSim.
       usersim_revision: a5f676bf6dc5a73914c8a0860f97c10dd2c214ee  # pragma: allowlist secret
+      nemotron_personas_version: "0.0.2"
       datasets:
         - name: example
           type: example
