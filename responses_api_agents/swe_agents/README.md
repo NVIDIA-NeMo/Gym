@@ -702,7 +702,7 @@ The enroot/apptainer sandbox this runs under has no cgroup support (v1 + fakeroo
 
 ## Debug / profiling
 
-Set `debug=true` to wrap the agent run in a `Profiler` (callgrind output), then auto-render `.dot` and `.png` graphs via `gprof2dot` + `pydot` after the run. The graph rendering needs `gprof2dot`, which Gym does not install by default (`uv pip install --no-config gprof2dot` in the agent venv); without it the run still completes and the graph step is skipped with a logged error. Profiling output lands under `<persistent_dir>/profiling/`. Apptainer also exports `NG_PROFILING_DIR` into the agent container so the OpenHands fork can dump matching profiles.
+Set `debug=true` to wrap the agent run in a `Profiler` (callgrind output), then auto-render `.dot` and `.png` graphs via `gprof2dot` + `pydot` after the run. Profiling output lands under `<persistent_dir>/profiling/`. Apptainer also exports `NG_PROFILING_DIR` into the agent container so the OpenHands fork can dump matching profiles.
 
 Set `openhands_should_log=true` to flip OpenHands to `LOG_LEVEL=DEBUG`, `LOG_TO_FILE=true`, and write per-event logs. Otherwise the wrapper aggressively quiets OpenHands (`LOG_LEVEL=CRITICAL`, all `DEBUG_*` flags off).
 
