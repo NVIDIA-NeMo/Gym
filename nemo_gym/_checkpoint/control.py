@@ -39,7 +39,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractAsyncContextManager, AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -320,11 +320,21 @@ class CheckpointParticipant(ABC):
         # The control plane clears them when the checkpoint resumes.
         self.carried_restarts: set[str] = set()
         self._changed = asyncio.Condition()
+        # With several workers, each worker's participant also reports its changes to the coordinator.
+        self.on_change: Optional[Callable[[], Awaitable[None]]] = None
+        # With several workers, takes a restored record from the coordinator by the key ``claim_key`` gives it.
+        # The coordinator leases the record to this worker until the block it opens ends; a failure gives it back.
+        self.claim_restored: Optional[Callable[[str], AbstractAsyncContextManager[Optional[dict[str, Any]]]]] = None
+        # With several workers, told of each session this participant freed outside a request, such as by a retire,
+        # so the session's routing claim ends too.
+        self.on_session_freed: Optional[Callable[[str], None]] = None
 
     async def notify(self) -> None:
         """Wake a prepare that waits for this participant to become ready."""
         async with self._changed:
             self._changed.notify_all()
+        if self.on_change is not None:
+            await self.on_change()
 
     async def wait_changed(self, timeout: float) -> None:
         async with self._changed:
@@ -389,6 +399,13 @@ class CheckpointParticipant(ABC):
         """Refuse these attempts from now on, before a retire stops them. Override to tell other processes as well."""
         self.retired.mark(episode_ids)
 
+    def fence_retired(self, episode_ids: list[EpisodeId]) -> None:
+        """Refuse what these attempts already hold here, as they are marked retired; the default holds nothing apart.
+
+        With several workers, each worker's participant fences as the coordinator's marks reach it,
+        so a retire that never reaches the worker still leaves those attempts refused.
+        """
+
     def check_forget(self, rollout_ids: list[str]) -> None:
         """Raise if forgetting ``rollout_ids`` now would make retired state live again; ``forget`` checks first.
 
@@ -435,6 +452,45 @@ class CheckpointParticipant(ABC):
 
     def status_extra(self) -> dict[str, Any]:
         return {}
+
+    async def refresh_status(self) -> None:
+        """Gather what ``status_extra`` and ``status_report`` report from other processes, before a status request."""
+
+    def status_report(self) -> PrepareReport:
+        """The readiness a status request reports."""
+        return self.readiness()
+
+    @staticmethod
+    def record_identity(record: CheckpointRecord) -> Optional[str]:
+        """The state ``record`` holds, of which a commit must export at most one copy; None if no copy can exist.
+
+        With several workers, a restored session can be seeded again on another worker,
+        and both workers then export it.
+        """
+        return None
+
+    def unclaimed_sessions(self) -> list[str]:
+        """The identities of restored state no request has used yet, as ``record_identity`` names them.
+
+        With several workers, the coordinator compares them with every worker's records,
+        and frees a restored copy another worker's live copy replaces with ``delete_unclaimed_session``.
+        """
+        raise NotImplementedError(f"the {self.kind} participant does not report its unclaimed restored state")
+
+    async def delete_unclaimed_session(self, identity: str) -> None:
+        """Free the restored state named by ``identity`` if no request has used it, refusing nothing later."""
+        raise NotImplementedError(f"the {self.kind} participant does not delete unclaimed restored state")
+
+    @staticmethod
+    def claim_key(record: CheckpointRecord) -> Optional[str]:
+        """The key a replacement claims ``record`` by, for state that lives inside one request.
+
+        With several workers,
+        the coordinator holds such a record until the worker that receives the replacement claims it.
+        Records of state that spans requests return None:
+        they are installed on the worker their session's requests are routed to.
+        """
+        return None
 
 
 def next_attempt(episode_id: EpisodeId) -> EpisodeId:
@@ -497,7 +553,7 @@ class ParticipantControlPlane:
             "lease_expires_at": self._lease_expires_at,
             # Rollouts retired and not yet forgotten: each refuses its retired attempts until ``forget``.
             "retired_rollouts": len(self.participant.retired),
-            "report": self.participant.readiness().model_dump(),
+            "report": self.participant.status_report().model_dump(),
             **self.participant.status_extra(),
         }
 
@@ -1125,6 +1181,7 @@ async def dispatch_control(
     A route passes the request it already validated; a message from another process passes the request as JSON.
     """
     if operation == "status":
+        await controller.participant.refresh_status()
         return controller.status()
     expected = _OPERATION_REQUESTS[operation]
     request = body if isinstance(body, expected) else expected.model_validate(body)

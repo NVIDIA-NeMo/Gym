@@ -28,6 +28,9 @@ one whose end no route reveals, such as a terminal ``/step``, reports it through
 A server declares how its sessions checkpoint:
 
 - ``stateless``: sessions hold nothing a continuation needs.
+  A checkpoint still records which sessions are live, without state,
+  so with several workers a restore places them on a worker that their cookies then reach,
+  and frees them like any other session.
 - ``exported``: the server exports and restores each session's state through ``ResourcesSessionHooks``.
 - ``restart_only``: the default.
   Nothing of the server is in a checkpoint: its requests never hold up prepare,
@@ -397,7 +400,13 @@ class ResourcesParticipant(CheckpointParticipant):
             # The session stays tracked until its state is freed, so a retire cut short leaves it for a retry.
             # Every mode: a late request of a retired session is refused, so nothing else would free it.
             await self.hooks.retire_session_state(session_id)
-            self.ended(session_id)
+            self._freed(session_id)
+
+    def _freed(self, session_id: str) -> None:
+        """Stop tracking a session whose state was freed outside a request, which no route ends."""
+        self.ended(session_id)
+        if self.on_session_freed is not None:
+            self.on_session_freed(session_id)
 
     def is_open(self, session_id: str) -> bool:
         """Whether ``session_id`` is a live session of an attempt that has not been retired.
@@ -408,6 +417,21 @@ class ResourcesParticipant(CheckpointParticipant):
         MCP exposure uses it while checkpointing is on to revoke a session's token once the session is closed.
         """
         return session_id in self._sessions and session_id not in self._retired_session_rollouts
+
+    @staticmethod
+    def record_identity(record: CheckpointRecord) -> Optional[str]:
+        return record.session_id
+
+    def unclaimed_sessions(self) -> list[str]:
+        """Restored sessions no request has used yet."""
+        return sorted(self._restored_pending)
+
+    async def delete_unclaimed_session(self, session_id: str) -> None:
+        """Free a restored session no request has used, without refusing anything later."""
+        if session_id in self._restored_pending:
+            if self.mode == "exported":
+                await self.hooks.retire_session_state(session_id)
+            self._freed(session_id)
 
     async def delete_restored(self, episode_id: EpisodeId) -> None:
         """Free the restored sessions of ``episode_id`` that no request has used, without refusing anything later:
@@ -420,7 +444,7 @@ class ResourcesParticipant(CheckpointParticipant):
         ]:
             if self.mode == "exported":
                 await self.hooks.retire_session_state(session_id)
-            self.ended(session_id)
+            self._freed(session_id)
 
     def check_forget(self, rollout_ids: list[str]) -> None:
         # A seed of a retired attempt still in flight would bind its session as live once the mark is gone.
@@ -469,7 +493,7 @@ class ResourcesParticipant(CheckpointParticipant):
             self.inflight -= 1
 
     async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
-        if self.mode != "exported":
+        if self.mode == "restart_only":
             return []
         # Only sessions within the commit's scope:
         # another participant may report one of these episodes as a restart,
@@ -482,6 +506,12 @@ class ResourcesParticipant(CheckpointParticipant):
             for session_id, episode_id in self._checkpointed_sessions()
             if (scope is None or episode_id in scope) and session_id not in carried
         ]
+        if self.mode == "stateless":
+            # No state, only which sessions continue, so a restore places them where their requests are routed.
+            return [
+                ResourcesSessionRecord(session_id=session_id, episode_id=episode_id, state=None)
+                for session_id, episode_id in sessions
+            ]
         states = await self.hooks.export_session_states([session_id for session_id, _ in sessions])
         records = []
         for session_id, episode_id in sessions:
@@ -489,7 +519,7 @@ class ResourcesParticipant(CheckpointParticipant):
                 # The server already dropped this session, for example when a failed verification cleaned it up.
                 # There is nothing to continue, so stop tracking it rather than fail the commit.
                 LOGGER.warning("resources session %s of %s is gone; not exported", session_id, episode_id.capture_key)
-                self.ended(session_id)
+                self._freed(session_id)
                 continue
             state = states[session_id]
             records.append(ResourcesSessionRecord(session_id=session_id, episode_id=episode_id, state=state))
@@ -508,9 +538,9 @@ class ResourcesParticipant(CheckpointParticipant):
     async def install(self, records: list[CheckpointRecord], scope: list[EpisodeId]) -> None:
         if self._sessions or self.inflight:
             raise ControlError("resources restore requires a process that has not served sessions")
-        if records and self.mode != "exported":
-            raise ControlError(f"a {self.mode} resources server cannot restore session state")
-        if records:
+        if records and self.mode == "restart_only":
+            raise ControlError("a restart_only resources server cannot restore session state")
+        if records and self.mode == "exported":
             await self.hooks.restore_session_states({record.session_id: record.state for record in records})
         for record in records:
             self._bind(record.session_id, next_attempt(record.episode_id))

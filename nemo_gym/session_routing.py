@@ -64,6 +64,13 @@ A claim ends once its session's last record on the claimant is gone:
 The claims of a worker that exited stay until the server exits, so its sessions keep getting a 410.
 The whole directory goes with the server's runtime directory when the server exits.
 With one worker there is no private socket and no claim.
+
+A request without a session ID that belongs to one worker, such as an agent's call to itself within one ``/run``,
+names that worker in the ``x-ng-session-owner`` header, and is forwarded there, or gets a 410 if that worker is gone.
+
+A partial-rollout checkpoint restore installs each restored session on one live worker,
+which rewrites the session's claim to name itself (see ``SessionClaims.rewrite``).
+A cookie or MCP token from before the restore names only the session ID, so its requests reach the new holder.
 """
 
 import asyncio
@@ -76,7 +83,7 @@ import os
 import re
 from base64 import b64decode
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any, Optional, Protocol
@@ -111,6 +118,12 @@ SESSION_ID_SCOPE_KEY = "nemo_gym.session_id"
 #: a new ID, or one a cookie names whose claim ended.
 #: The session middleware calls it once the handler has used the session.
 SESSION_CLAIM_SCOPE_KEY = "nemo_gym.claim_session"
+#: App state key with the lifespans, each called with the app, that a worker enters once its private socket listens,
+#: before it serves any request, and leaves before the socket closes.
+#: A checkpoint coordinator's link is one: the coordinator may place restored sessions on the worker once it joins.
+ROUTED_LIFESPANS_STATE = "nemo_gym_routed_lifespans"
+#: Header naming the worker a request without a session belongs to.
+SESSION_OWNER_HEADER = "x-ng-session-owner"
 #: Scope key marking a request that arrived over a worker's private socket.
 _FORWARDED_SCOPE_KEY = "nemo_gym.session_forwarded"
 
@@ -259,6 +272,26 @@ class SessionClaims:
                 return claimant
             # The claimant released it between the two calls: claim it again.
 
+    def rewrite(self, session_id: str) -> None:
+        """Claim the ID for this worker whoever claims it now, for a session a checkpoint restore installs here.
+
+        The claim file is replaced by one rename, so a reader finds either the old claimant or this one.
+        A live worker that claimed the ID before must ``disown`` it, since a worker trusts its own claims first.
+        """
+        path = self._path(session_id)
+        temporary = f"{path}.{self.routing_id}.tmp"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, self.routing_id.encode("ascii"))
+        finally:
+            os.close(fd)
+        os.replace(temporary, path)
+        self._mine.add(session_id)
+
+    def disown(self, session_id: str) -> None:
+        """Stop holding the ID here, and leave its claim file to the worker a checkpoint restore moved it to."""
+        self._mine.discard(session_id)
+
     def mine(self, session_id: str) -> bool:
         return session_id in self._mine
 
@@ -279,8 +312,12 @@ class SessionClaims:
         if session_id not in self._mine or session_id in self._serving or self.holds(session_id):
             return
         self._mine.discard(session_id)
+        path = self._path(session_id)
+        # A restore may have rewritten the claim for another worker before this worker disowned it.
+        if self.claimant(session_id) != self.routing_id:
+            return
         try:
-            os.unlink(self._path(session_id))
+            os.unlink(path)
         except FileNotFoundError:
             pass
 
@@ -372,6 +409,14 @@ class ResourcesSessionLifetimes:
         """End a session this worker claims, from a route that ends a session under another name."""
         if session_id in self._until:
             self._expire_after_window(session_id)
+
+    def opened(self, session_id: str) -> None:
+        """Open a session a checkpoint restore installed on this worker, as a successful seed would."""
+        self._until[session_id] = math.inf
+
+    def forget(self, session_id: str) -> None:
+        """Drop a session whose install a failed restore undid, so its claim can be released at once."""
+        self._until.pop(session_id, None)
 
     def _expire_after_window(self, session_id: str) -> None:
         until = monotonic() + self.window_seconds
@@ -525,6 +570,11 @@ class SessionRoutingMiddleware:
         forwarded = bool(scope.get(_FORWARDED_SCOPE_KEY))
         starts = self.lifetimes is not None and self.lifetimes.starts(scope["path"])
         if session_id is None:
+            owner = _valid_routing_id(HTTPConnection(scope).headers.get(SESSION_OWNER_HEADER))
+            if owner is not None and owner != self.routing_id and not forwarded:
+                # A request that belongs to one worker without a session, such as an agent's call to itself.
+                await self._forward(owner, scope, receive, send, body=body)
+                return
             if not self.kind.cookie_session:
                 await self.app(scope, receive, send)
                 return
@@ -868,7 +918,10 @@ def install_session_routing(
             async with serve_private_socket(application, worker_socket_path(socket_dir, routing_id)):
                 sweeper = asyncio.create_task(_sweep_claims(claims, lifetimes, sweep_seconds))
                 try:
-                    yield state
+                    async with AsyncExitStack() as routed:
+                        for lifespan in getattr(application.state, ROUTED_LIFESPANS_STATE, ()):
+                            await routed.enter_async_context(lifespan(application))
+                        yield state
                 finally:
                     sweeper.cancel()
                     await asyncio.gather(sweeper, return_exceptions=True)
