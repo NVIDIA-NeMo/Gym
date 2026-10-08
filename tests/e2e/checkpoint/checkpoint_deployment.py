@@ -223,6 +223,8 @@ class Deployment:
             "cache_dir": str(self.work_dir / "cache"),
             "head_server": {"host": "127.0.0.1", "port": free_port()},
             "checkpoint": {"enabled": True, "control_auth_token": TOKEN},
+            # Log every request with its status, not only errors, so a failure can be traced in the logs.
+            "uvicorn_logging_show_200_ok": True,
         }
         if token_capture:
             config["token_id_capture"] = {
@@ -340,6 +342,10 @@ class Deployment:
             )
             add("environment", "environment_servers/legacy_agent", environment)
         return config
+
+    def configure(self, name: str, **fields: Any) -> None:
+        """Change fields of one server's config, such as its ``num_workers``, for its next start."""
+        next(iter(next(iter(self.config[name].values())).values())).update(fields)
 
     def set_server_workers(self, count: int) -> None:
         """Change the worker count of the environment, agent, and resources servers for their next start."""
@@ -491,6 +497,13 @@ class Deployment:
         url = f"http://127.0.0.1:{self.backend_port}{path}"
         response = requests.post(url, json=body, timeout=10) if body is not None else requests.get(url, timeout=10)
         return response.json()
+
+    def log_tails(self, lines: int = 60) -> str:
+        """The last lines of every server's log, for a failure message."""
+        tails = []
+        for path in sorted(self.log_dir.glob("*.log")):
+            tails.append(f"--- {path.name}\n" + "\n".join(path.read_text(errors="replace").splitlines()[-lines:]))
+        return "\n".join(tails)
 
     def backend_calls(self) -> list[dict]:
         return self.backend("/_ctl/calls")
