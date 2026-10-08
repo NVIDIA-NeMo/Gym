@@ -75,8 +75,9 @@ tools are rejected; Codex supplies its own tools. The task sandbox supplies isol
 `sandbox_mode` must be `danger-full-access`. No Codex CLI is required on the agent-server host.
 
 The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine with Python 3.8+.
-It installs missing bootstrap prerequisites using apt-get or apk when running as root;
-otherwise the image must provide them. The pinned Node 22.19.0 build has no arm64 musl binary.
+POSIX sh installs missing Python and Bash using apt-get or apk when running as root,
+before invoking the Bash runtime installer; otherwise the image must provide them.
+The pinned Node 22.19.0 build has no arm64 musl binary.
 Older Alpine images use a checksum-verified private C++ library for Node. Runtime files live
 under `/tmp/nemo-gym-codex-node-*`, and session HOME/cache/config live under
 `/tmp/nemo-gym-codex-sessions/*`. Task Python, Node, libraries, and PATH are preserved.

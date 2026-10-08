@@ -88,17 +88,21 @@ for value in sys.argv[2:]:
     if workdir == owned or workdir in owned.parents or owned in workdir.parents:
         raise ValueError("Codex task workdir and adapter paths must be disjoint after resolving symlinks")
 """
-    # Validation and the worker need Python even when the task itself does not.
+    # The task may provide neither the Python worker runtime nor the Bash installer runtime.
+    # This bootstrap must remain POSIX sh so Alpine can install Bash before using it.
     bootstrap = """set -eu
-if ! command -v python3 >/dev/null 2>&1; then
-    [ "$(id -u)" = 0 ] || { echo 'Native Codex requires Python 3: preinstall it or use a root image.' >&2; exit 1; }
+set --
+command -v python3 >/dev/null 2>&1 || set -- "$@" python3
+command -v bash >/dev/null 2>&1 || set -- "$@" bash
+if [ "$#" -gt 0 ]; then
+    [ "$(id -u)" = 0 ] || { echo "Native Codex requires $*: preinstall these tools or use a root image." >&2; exit 1; }
     if command -v apk >/dev/null 2>&1; then
-        apk add --no-cache python3
+        apk add --no-cache "$@"
     elif command -v apt-get >/dev/null 2>&1; then
         apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
     else
-        echo 'Native Codex requires Python 3: preinstall it (automatic installation requires apt-get or apk).' >&2
+        echo "Native Codex requires $*: preinstall these tools (automatic installation requires apt-get or apk)." >&2
         exit 1
     fi
 fi

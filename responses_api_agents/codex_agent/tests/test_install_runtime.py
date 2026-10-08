@@ -368,7 +368,7 @@ def test_python_bootstrap_failure_stops_before_runtime_setup(
     assert not (root / "download.log").exists()
     assert not (root / "runtime").exists()
     if missing != "install_failure":
-        assert "preinstall it" in result.stderr
+        assert "preinstall" in result.stderr
         assert not (root / "packages.log").exists()
 
 
