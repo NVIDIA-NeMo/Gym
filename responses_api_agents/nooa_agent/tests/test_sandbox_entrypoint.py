@@ -72,8 +72,10 @@ async def test_model_route_applied_once_and_cookie_jar_forwarded(monkeypatch) ->
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["success", "transient", "fatal", "cancelled"])
-async def test_child_preserves_evidence_and_classifies_outcome(monkeypatch, outcome: str) -> None:
+@pytest.mark.parametrize("limit", [None, 3])
+async def test_child_preserves_evidence_and_classifies_outcome(monkeypatch, outcome: str, limit: int | None) -> None:
     p = payload()
+    p.max_policy_calls = limit
     result = run_result()
 
     async def run(request):
@@ -89,8 +91,10 @@ async def test_child_preserves_evidence_and_classifies_outcome(monkeypatch, outc
             raise NOOARunFailure(cause, result) from cause
         return result
 
-    monkeypatch.setattr(entrypoint, "InProcessNOOARunner", MagicMock(return_value=MagicMock(run=run)))
+    runner_factory = MagicMock(return_value=MagicMock(run=run))
+    monkeypatch.setattr(entrypoint, "InProcessNOOARunner", runner_factory)
     artifact = await entrypoint.execute(p)
+    assert runner_factory.call_args.kwargs["max_policy_calls"] == limit
     assert artifact.observations.gaps[0].code == "test"
     assert artifact.model_cookies == {"model": "new"}
     assert artifact.resource_cookies == {"resource": "new"}
@@ -103,6 +107,17 @@ async def test_child_preserves_evidence_and_classifies_outcome(monkeypatch, outc
         assert artifact.error.kind == outcome
         assert artifact.termination_reason == ("cancelled" if outcome == "cancelled" else "infrastructure_error")
     assert entrypoint.SandboxResult.model_validate_json(artifact.model_dump_json()).response == artifact.response
+
+
+def test_launch_policy_call_limit_is_optional_and_survives_json() -> None:
+    data = payload().model_dump(mode="json")
+    data.pop("max_policy_calls")
+    p = entrypoint.SandboxInput.model_validate(data)
+    assert p.max_policy_calls is None
+    assert entrypoint.SandboxInput.model_validate_json(p.model_dump_json()).max_policy_calls is None
+    for invalid in (0, -1):
+        with pytest.raises(ValidationError, match="max_policy_calls"):
+            entrypoint.SandboxInput.model_validate(data | {"max_policy_calls": invalid})
 
 
 @pytest.mark.asyncio

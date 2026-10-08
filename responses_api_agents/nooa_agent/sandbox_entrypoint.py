@@ -32,7 +32,7 @@ class SandboxInput(BaseModel):
     request: NOOARunRequest
     model_base_url: AnyHttpUrl
     model_server_name: str
-    max_policy_calls: int = Field(gt=0)
+    max_policy_calls: int | None = Field(default=None, gt=0)
 
 
 class RunnerError(BaseModel):
