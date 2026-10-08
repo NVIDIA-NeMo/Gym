@@ -502,9 +502,17 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         params: AnySweInstanceConfig,
         *,
         files: Optional[Dict[str, str]] = None,
+        grading: bool = False,
     ) -> SandboxSpec:
         config = dict(params.sandbox_spec)
         provider_options = dict(config.pop("provider_options", {}))
+        grading_options = config.pop("grading_provider_options", None)
+        if grading:
+            # Fresh grading boxes keep their egress (rebench JVM tests download deps) unless grading_provider_options says
+            # otherwise; a network_policy in provider_options locks only the agent box.
+            if grading_options is None:
+                grading_options = {k: v for k, v in provider_options.items() if k != "network_policy"}
+            provider_options = dict(grading_options)
         metadata = {
             **params.sandbox_default_metadata,
             **config.pop("metadata", {}),
@@ -598,7 +606,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         eval_script = (
             'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n' + self._apply_patch_script() + test_spec.eval_script
         )
-        spec = self._sandbox_spec(params, files={"/tmp/anyswe_eval.sh": eval_script})
+        spec = self._sandbox_spec(params, grading=True, files={"/tmp/anyswe_eval.sh": eval_script})
         sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
         try:
             await sandbox.start()
@@ -640,7 +648,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 "else echo 'R2E eval script not found'; exit 127; fi"
             )
         script = 'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n' + self._apply_patch_script() + str(eval_script)
-        spec = self._sandbox_spec(params, files={"/tmp/anyswe_eval.sh": script})
+        spec = self._sandbox_spec(params, grading=True, files={"/tmp/anyswe_eval.sh": script})
         sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
         try:
             await sandbox.start()
@@ -683,6 +691,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         )
         spec = self._sandbox_spec(
             params,
+            grading=True,
             files={
                 "/root/test_patch.diff": instance["test_patch"],
                 "/tmp/anyswe_eval.sh": script + "\n",
