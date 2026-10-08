@@ -642,7 +642,7 @@ async def _run_stirrup_agent(
         # image by many GB. Refuse rather than run tasks in a crippled env.
         raise RuntimeError(
             "GDPval requires the Apptainer sandbox but no exec provider was configured; "
-            "set `gdpval_container_path` to a .sif built from resources_servers/gdpval/containers/gdpval.def. The "
+            "set `gdpval_container_path` to a .sif built from resources_servers/gdpval/containers/Dockerfile. The "
             "local backend is rejected because the sandbox dependencies are not installed "
             "in the evaluation container."
         )

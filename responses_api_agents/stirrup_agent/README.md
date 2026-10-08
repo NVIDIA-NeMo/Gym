@@ -392,17 +392,14 @@ Some GDPVal tasks ask the model to install packages or run untrusted code. By de
 agent uses a local sandbox; setting `gdpval_container_path` to an Apptainer `.sif` routes
 all `code_exec` calls through a persistent container.
 
-Build the supplied container definition. Build **from the `resources_servers/gdpval/containers/`
-directory**: the definition stages the vendored GDPval-AA v2 manifests via
-`%files`, and apptainer resolves those paths relative to the directory the
-build runs in, so a build started from the repository root cannot find them.
+Build the image from `resources_servers/gdpval/containers/Dockerfile`, then convert it to a `.sif`:
 
 ```bash
-cd resources_servers/gdpval/containers
-apptainer build gdpval.sif gdpval.def
+docker build -t gdpval-sandbox resources_servers/gdpval/containers
+apptainer build gdpval.sif docker-daemon://gdpval-sandbox:latest
 ```
 
-The definition builds on x86_64 and arm64. x86_64 installs the published pin
+The Dockerfile builds on x86_64 and arm64. x86_64 installs the published pin
 set in full and matches the reference sandbox. arm64 drops only the pins listed
 in `gdpval_aa_v2_arm64_exclusions.txt`, which ship x86_64 wheels and no source
 distribution; any other pin that fails to install aborts the build rather than

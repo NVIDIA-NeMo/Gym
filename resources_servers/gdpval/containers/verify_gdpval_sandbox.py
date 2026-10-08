@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Verify that a built GDPval sif really is the GDPval-AA v2 sandbox.
+"""Verify that a built GDPval image really is the GDPval-AA v2 sandbox.
 
 Runs INSIDE the container:
 
-    apptainer exec --writable-tmpfs gdpval.sif \
-        python /opt/gdpval/verify_gdpval_sandbox.py
+    docker run --rm gdpval-sandbox python /opt/gdpval/verify_gdpval_sandbox.py
 
-A green ``gdpval.def`` build only proves the build steps exited 0. This checks
+A green image build only proves the build steps exited 0. This checks
 the finished image against the two vendored Artificial Analysis snapshots and
 then actually exercises the toolchain, because the failure mode that costs a
 whole eval run is a tool that is present but cannot produce a file.
@@ -121,7 +120,7 @@ def _read_pins(path: Path) -> list[str]:
 def check_pins(rep: Report) -> None:
     header("pins: published Python manifest")
     if not PY_MANIFEST.exists():
-        rep.fail("pins", f"{PY_MANIFEST} missing — image was not built from the aligned gdpval.def")
+        rep.fail("pins", f"{PY_MANIFEST} missing — image was not built from the aligned Dockerfile")
         return
     published = _read_pins(PY_MANIFEST)
 

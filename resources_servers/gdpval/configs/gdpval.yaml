@@ -18,7 +18,7 @@ gdpval_resources_server:
       # Names a top-level provider block such as nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml.
       sandbox_provider: sandbox
       sandbox_config:
-        # An OCI image built from containers/gdpval.def; see resources_servers/gdpval/README.md.
+        # An OCI image built from containers/Dockerfile; see resources_servers/gdpval/README.md.
         image: ${oc.env:GDPVAL_SANDBOX_IMAGE,null}
         # Without a TTL the OpenSandbox SDK expires a sandbox 10 minutes after creation.
         ttl_s: 21600
