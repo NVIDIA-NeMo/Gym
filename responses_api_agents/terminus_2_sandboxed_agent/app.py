@@ -27,10 +27,9 @@ from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
-    AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
-    AgentSeedSessionResponse,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
@@ -102,8 +101,6 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     remote_tmux_binary_path: Optional[str]
 
 
-_AGENT_SESSION_ID_KEY = "agent_session_id"
-
 # Model HTTP statuses that mean the endpoint is down, unauthorized or saturated, not that the model
 # produced a bad answer. Anything else (for example a 400 for a malformed prompt) stays a harness error.
 _MODEL_INFRASTRUCTURE_STATUSES = frozenset({401, 403, 408, 425, 429})
@@ -137,10 +134,9 @@ def _is_model_infrastructure_error(exc: BaseException) -> bool:
 
 
 @dataclass
-class Terminus2SessionState:
+class Terminus2SessionState(AgentSessionState):
     """A sandbox borrowed from a resources server for one episode."""
 
-    request: AgentSeedSessionRequest
     sandbox: AsyncSandbox
     workdir: str | None
 
@@ -532,61 +528,30 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._session_sandboxes: dict[str, AsyncSandbox] = {}
-        # Episode sessions seeded by an environment server; the sandbox belongs to the resources server.
-        self._agent_sessions: dict[str, Terminus2SessionState] = {}
-        self._agent_session_locks: dict[str, asyncio.Lock] = {}
-        self._closed_agent_session_ids: set[str] = set()
 
         if not self.config.debug:
             harbor_logger.setLevel(logging.WARNING)
 
-    async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> Terminus2SessionState:
         """Borrow the resources server's sandbox for this episode."""
-        if self.config.num_workers not in (None, 1):
-            # Session state lives in this process; another worker would answer the next request with a 404.
-            raise HTTPException(500, "Episode sessions require num_workers=1 for terminus_2_sandboxed_agent")
-        agent_session_id = body.agent_session_id
-        request.session[_AGENT_SESSION_ID_KEY] = agent_session_id
-        lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
-        async with lock:
-            if agent_session_id in self._closed_agent_session_ids:
-                raise HTTPException(409, f"Agent session is already closed: {agent_session_id}")
-            state = self._agent_sessions.get(agent_session_id)
-            if state is not None:
-                if (state.request.episode_id, state.request.task_id) != (body.episode_id, body.task_id):
-                    raise HTTPException(409, "agent_session_id is already bound to another episode or task")
-                return AgentSeedSessionResponse(agent_session_id=agent_session_id)
-            if body.sandbox_access is None:
-                raise HTTPException(422, "Terminus 2 needs sandbox_access from the resources server")
-            connection = body.sandbox_access.connection
-            if not isinstance(connection, DirectSandboxConnection):
-                raise HTTPException(422, "Terminus 2 supports only direct sandbox connections")
-            provider = create_provider(
-                resolve_provider_config(connection.provider_config_ref, get_global_config_dict())
-            )
-            try:
-                sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
-            except BaseException:
-                await provider.aclose()
-                raise
-            self._agent_sessions[agent_session_id] = Terminus2SessionState(
-                request=body, sandbox=sandbox, workdir=body.sandbox_access.workdir
-            )
-            return AgentSeedSessionResponse(agent_session_id=agent_session_id)
+        if body.sandbox_access is None:
+            raise HTTPException(422, "Terminus 2 needs sandbox_access from the resources server")
+        connection = body.sandbox_access.connection
+        if not isinstance(connection, DirectSandboxConnection):
+            raise HTTPException(422, "Terminus 2 supports only direct sandbox connections")
+        provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
+        try:
+            sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+        except BaseException:
+            await provider.aclose()
+            raise
+        return Terminus2SessionState(request=body, sandbox=sandbox, workdir=body.sandbox_access.workdir)
 
-    async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
-        agent_session_id = body.agent_session_id
-        lock = self._agent_session_locks.setdefault(agent_session_id, asyncio.Lock())
-        async with lock:
-            state = self._agent_sessions.get(agent_session_id)
-            if state is not None:
-                if state.request.episode_id != body.episode_id:
-                    raise HTTPException(409, "episode_id does not match the seeded agent session")
-                del self._agent_sessions[agent_session_id]
-                await state.sandbox.disconnect()
-            self._closed_agent_session_ids.add(agent_session_id)
-            request.session.pop(_AGENT_SESSION_ID_KEY, None)
-            return AgentCloseSessionResponse(agent_session_id=agent_session_id)
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, Terminus2SessionState):
+            raise TypeError("Expected a Terminus 2 session state")
+        await state.sandbox.disconnect()
+        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
 
     async def _connect_sandbox(self, sandbox_id: str) -> AsyncSandbox:
         provider = create_provider(resolve_provider_config(self.config.sandbox_provider, get_global_config_dict()))
@@ -815,11 +780,11 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         return response, metrics
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
-        agent_session_id = request.session.get(_AGENT_SESSION_ID_KEY)
+        agent_session_id = self._agent_session_id_from_request(request)
         if agent_session_id is not None:
-            state = self._agent_sessions.get(agent_session_id)
-            if state is None:
-                raise HTTPException(404, f"Unknown agent_session_id: {agent_session_id}")
+            state = self._require_agent_session(agent_session_id)
+            if not isinstance(state, Terminus2SessionState):
+                raise TypeError("Expected a Terminus 2 session state")
             response, _ = await self._execute(request, body, state.sandbox)
             return response
         session_key = request.session[SESSION_ID_KEY]

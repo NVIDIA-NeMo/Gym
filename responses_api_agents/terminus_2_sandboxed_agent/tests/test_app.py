@@ -420,7 +420,7 @@ class TestNativeSessions:
         assert response.status_code == 200, response.text
         connect.assert_awaited_once()
         assert connect.await_args.args[0] == {"sandbox_id": "sb-1"}
-        assert agent._agent_sessions["ag-1"].workdir == "/app"
+        assert agent._session_records["ag-1"].state.workdir == "/app"
         # Idempotent re-seed, and a different episode cannot take the id.
         assert client.post("/v1/agent_sessions", json=_seed_body()).status_code == 200
         assert connect.await_count == 1
@@ -432,8 +432,9 @@ class TestNativeSessions:
         config = _native_config()
         config.num_workers = 4
         agent = Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
-        response = TestClient(agent.setup_webserver()).post("/v1/agent_sessions", json=_seed_body())
-        assert response.status_code == 500 and "num_workers=1" in response.json()["detail"]
+        # The base agent refuses multi-worker sessions before any Terminus state exists.
+        with pytest.raises(ValueError, match="num_workers=1"):
+            TestClient(agent.setup_webserver()).post("/v1/agent_sessions", json=_seed_body())
 
     def test_seed_requires_sandbox_access(self, monkeypatch):
         _, client, _, _ = self._client(monkeypatch)
