@@ -107,6 +107,8 @@ class TestSanity:
         assert cfg.sandbox_mode == "danger-full-access"
         assert cfg.cwd is None
         assert cfg.extra_config == {}
+        assert cfg.features == {"multi_agent": False, "code_mode": False}
+        assert cfg.ephemeral is True
 
     @pytest.mark.parametrize("field", ["model_context_window", "model_auto_compact_token_limit"])
     @pytest.mark.parametrize("value", [0, -1, True, 1.5, "40960"])
@@ -179,6 +181,13 @@ class TestBuildCommand:
         # instruction is the final positional after the `--` separator
         assert cmd[-2:] == ["--", "do the thing"]
 
+    def test_session_persistence_is_opt_in(self) -> None:
+        # Without --ephemeral Codex keeps session state, which its goal tools need.
+        cmd = _make_agent(ephemeral=False)._build_command("do the thing", "/work/dir")
+        assert cmd[:4] == ["codex", "exec", "--json", "--skip-git-repo-check"]
+        assert "--ephemeral" not in cmd
+        assert cmd[-2:] == ["--", "do the thing"]
+
 
 class TestBuildConfig:
     def test_base_config_isolated_and_pinned_to_gym_provider(self) -> None:
@@ -209,6 +218,16 @@ class TestBuildConfig:
         assert config["developer_instructions"] == "be terse"
         assert config["model_providers"]["gym"]["stream_idle_timeout_ms"] == 42
 
+    def test_provider_retries_are_codex_defaults_unless_set(self) -> None:
+        provider = _make_agent()._build_config("http://x/v1")["model_providers"]["gym"]
+        assert "request_max_retries" not in provider and "stream_max_retries" not in provider
+        agent = _make_agent(request_max_retries=0, stream_max_retries=12, stream_idle_timeout_ms=90_000_000)
+        provider = agent._build_config("http://x/v1")["model_providers"]["gym"]
+        assert (provider["request_max_retries"], provider["stream_max_retries"]) == (0, 12)
+        assert provider["stream_idle_timeout_ms"] == 90_000_000
+        with pytest.raises(ValidationError, match="request_max_retries"):
+            _make_agent(request_max_retries=-1)
+
     def test_model_server_without_model_pins_placeholder(self) -> None:
         # With a model server and no explicit model, config pins a placeholder to avoid Codex's
         # model-family code-mode gating, and the effective name is reported consistently.
@@ -237,6 +256,20 @@ class TestBuildConfig:
         assert config["features"] == {"multi_agent": False, "code_mode": False, "web_search": True}
         assert config["model_verbosity"] == "low"
         assert config["mcp_servers"] == {"static": {"command": "server"}}
+
+    @pytest.mark.parametrize(
+        "features, expected",
+        [
+            # null leaves a feature at the CLI default, so no [features] table is written at all.
+            ({"multi_agent": None, "code_mode": None}, None),
+            ({"multi_agent": None, "code_mode": False}, {"code_mode": False}),
+            ({"multi_agent": True, "goals": True}, {"multi_agent": True, "goals": True}),
+        ],
+    )
+    def test_features_replace_the_base_table(self, features: dict, expected: dict | None) -> None:
+        config = _make_agent(features=features)._build_config("http://x/v1")
+        assert config.get("features") == expected
+        assert ("[features]" in toml_dumps(config)) is (expected is not None)
 
     def test_rollout_mcp_servers_win_name_collisions(self) -> None:
         agent = _make_agent(extra_config={"mcp_servers": {"weather": {"command": "stale"}}})
@@ -725,6 +758,10 @@ class TestRolloutCorrelation:
         base_url = self._run_and_capture_base_url(agent, tmp_path, rollout_id="task3-roll1")
         # Codex appends /responses -> server strips /ng-rollout/<id> and keys capture by it.
         assert base_url == "http://model-server:9000/ng-rollout/task3-roll1/v1"
+        # Without --ephemeral there is no flag to drop for the correlated rollout.
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        agent.config.ephemeral = False
+        assert self._run_and_capture_base_url(agent, tmp_path, rollout_id="task3-roll2").endswith("task3-roll2/v1")
 
         # Direct endpoint (no model server): never prefixed -- it has no stripping middleware,
         # so a prefix would 404 every /v1/responses call.
@@ -968,6 +1005,9 @@ class TestConfigYaml:
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 32
         assert inner["sandbox_mode"] == "danger-full-access"
+        # The YAML spells out the model defaults, so overrides merge into them.
+        assert inner["features"] == _config().features
+        assert inner["ephemeral"] is _config().ephemeral
 
 
 @pytest.mark.parametrize("budget,expected", [(None, 1800), ("12.5", 12.5), ("3600", 1800), ("invalid", 1800)])

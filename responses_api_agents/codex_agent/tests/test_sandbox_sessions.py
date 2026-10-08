@@ -323,6 +323,45 @@ def test_sandbox_custom_model_context_budget_reaches_sandbox_config(setup) -> No
     assert agent.config.extra_config == {}
 
 
+def test_codex_provider_retries_and_idle_timeout_reach_sandbox_config(setup) -> None:
+    # extra_config is refused in sandbox sessions, so these provider settings have fields of their own.
+    agent, sandbox = setup
+    agent.config = CodexAgentConfig(
+        **(
+            agent.config.model_dump()
+            | {"request_max_retries": 8, "stream_max_retries": 10, "stream_idle_timeout_ms": 90_000_000}
+        )
+    )
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})
+        assert result.status_code == 200, result.text
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    provider = config["model_providers"]["gym"]
+    assert (provider["request_max_retries"], provider["stream_max_retries"]) == (8, 10)
+    assert provider["stream_idle_timeout_ms"] == 90_000_000
+
+
+def test_codex_cli_default_features_and_session_state_reach_the_sandbox_launch(setup) -> None:
+    # A passthrough model server can relay every tool shape, so a sandbox launch can match a plain
+    # `codex exec`: no [features] overrides and no --ephemeral (Codex's goal tools need session state).
+    agent, sandbox = setup
+    agent.config.features = {"multi_agent": None, "code_mode": None}
+    agent.config.ephemeral = False
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})
+        assert result.status_code == 200, result.text
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    assert "features" not in config
+    assert config["model_providers"]["gym"]["base_url"] == "http://model.example:9000/ng-rollout/codex-smoke-a2/v1"
+    assert "--ephemeral" not in payload["command"]
+    assert payload["command"][-2:] == ["--", "-"]
+
+
 def test_direct_run_without_resources_rejected_before_execution(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
@@ -1979,3 +2018,44 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
+
+
+def test_reasoning_effort_requires_an_explicit_opt_in(setup) -> None:
+    agent, sandbox = setup
+    agent.config.reasoning_effort = "max"
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert response.status_code == 422
+    assert "model_server_forwards_reasoning_effort" in response.json()["detail"]
+    sandbox.exec.assert_not_awaited()
+
+
+def test_opted_in_reasoning_effort_reaches_the_sandbox_config(setup) -> None:
+    agent, sandbox = setup
+    agent.config.reasoning_effort = "max"
+    agent.config.model_server_forwards_reasoning_effort = True
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})
+        assert result.status_code == 200, result.text
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        assert config["model_reasoning_effort"] == "max"
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+
+
+@pytest.mark.parametrize("inherit", [False, True])
+def test_sandbox_environment_inheritance_is_opt_in(setup, inherit) -> None:
+    agent, sandbox = setup
+    agent.config.inherit_sandbox_environment = inherit
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})
+        assert result.status_code == 200, result.text
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    assert payload["inherit_env"] is inherit
+    # HOME and the XDG directories come from the sandbox either way; only CODEX_HOME is private.
+    assert payload["env"] == {
+        "CODEX_HOME": f"{sandbox.directory}/home/.codex",
+        "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
+    }

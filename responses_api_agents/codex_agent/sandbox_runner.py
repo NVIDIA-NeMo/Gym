@@ -29,26 +29,30 @@ def run(params: dict) -> int:
         stderr = stack.enter_context((directory / "stderr.log").open("wb"))
         stdin = stack.enter_context((directory / "prompt.txt").open("rb"))
         events = stack.enter_context((directory / "events.jsonl").open("w"))
+        # By default Codex gets the sandbox's PATH, locale, HOME and XDG directories;
+        # inherit_env passes the task's whole environment, as a harness started in the container sees it.
+        inherited = (
+            dict(os.environ)
+            if params.get("inherit_env")
+            else {
+                key: os.environ[key]
+                for key in (
+                    "PATH",
+                    "LANG",
+                    "LC_ALL",
+                    "HOME",
+                    "XDG_CONFIG_HOME",
+                    "XDG_DATA_HOME",
+                    "XDG_CACHE_HOME",
+                    "XDG_STATE_HOME",
+                )
+                if key in os.environ
+            }
+        )
         process = subprocess.Popen(
             params["command"],
             cwd=params["cwd"],
-            env={
-                **{
-                    key: os.environ[key]
-                    for key in (
-                        "PATH",
-                        "LANG",
-                        "LC_ALL",
-                        "HOME",
-                        "XDG_CONFIG_HOME",
-                        "XDG_DATA_HOME",
-                        "XDG_CACHE_HOME",
-                        "XDG_STATE_HOME",
-                    )
-                    if key in os.environ
-                },
-                **params["env"],
-            },
+            env={**inherited, **params["env"]},
             stdin=stdin,
             stdout=subprocess.PIPE,
             stderr=stderr,

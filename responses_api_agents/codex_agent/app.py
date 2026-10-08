@@ -412,6 +412,17 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     timeout: int = Field(default=600, gt=0)
     system_prompt: Optional[str] = None
     reasoning_effort: Optional[str] = None
+    # Sandbox sessions reject reasoning_effort because most Gym model servers cannot guarantee
+    # it reaches the backend. Set true only when the operator has checked that the configured
+    # model server forwards Codex's `reasoning` field unchanged to a backend that honors it, and
+    # confirm it in captured model calls.
+    model_server_forwards_reasoning_effort: bool = False
+    # Sandbox sessions start Codex with only PATH, LANG, LC_ALL, HOME and the XDG directories
+    # from the sandbox. Set true to give Codex (and so its shell tools) the sandbox's full
+    # environment, as a harness launched directly in the task container sees it, keeping only
+    # CODEX_HOME private. Use only when the sandbox environment is the task's own (remote
+    # providers), not a local provider that inherits the agent host's environment.
+    inherit_sandbox_environment: bool = False
     # Required: every config pins an explicit npm version so auto-install is reproducible and cannot
     # silently drift as new Codex releases land. Version bumps are then explicit, tested changes.
     codex_version: str
@@ -421,9 +432,23 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # Provider stream idle timeout. Gym model servers emit the synthesized SSE only once the full
     # response is computed, so the idle budget must cover an entire generation; None -> timeout * 1000.
     stream_idle_timeout_ms: Optional[int] = None
+    # The provider's request_max_retries (resends of a request that fails before its stream starts)
+    # and stream_max_retries (reconnects after a stream drops). None leaves Codex's own defaults.
+    # Unlike extra_config, these also apply to sandbox sessions.
+    request_max_retries: Optional[int] = Field(default=None, ge=0, strict=True)
+    stream_max_retries: Optional[int] = Field(default=None, ge=0, strict=True)
     # Extra config.toml content deep-merged over the generated base config (mcp_servers, features,
     # tools, model_verbosity, ...). Per-rollout Gym MCP entries take precedence on name collisions.
     extra_config: dict[str, Any] = Field(default_factory=dict)
+    # The base config's [features] table. The defaults turn off tool shapes a Gym model server's
+    # typed Responses path cannot express (see _build_config). A null entry is left out, so the CLI
+    # applies its own default; that is how a launch with no Gym config (such as Harbor's) runs. Unlike
+    # extra_config, this also applies to sandbox sessions.
+    features: dict[str, Optional[bool]] = Field(default_factory=lambda: {"multi_agent": False, "code_mode": False})
+    # Pass `--ephemeral`, so Codex keeps no session state. Codex then omits the tools that need it,
+    # its goal tools (create_goal, get_goal, update_goal); false offers them, as launches without
+    # the flag do.
+    ephemeral: bool = True
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
@@ -518,9 +543,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 422,
                 "Codex in the task sandbox uses its sandbox workdir and Gym routing; cwd, extra_config, and openai_base_url overrides are unsupported",
             )
-        if self.config.reasoning_effort is not None:
+        if self.config.reasoning_effort is not None and not self.config.model_server_forwards_reasoning_effort:
             raise HTTPException(
-                422, "Codex in the task sandbox cannot guarantee reasoning_effort for custom Gym models"
+                422,
+                "Codex in the task sandbox cannot guarantee reasoning_effort for custom Gym models; set "
+                "model_server_forwards_reasoning_effort after checking that the model server forwards it",
             )
         if self.config.sandbox_mode != "danger-full-access":
             raise HTTPException(422, "Codex in the task sandbox requires danger-full-access inside the task sandbox")
@@ -700,6 +727,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 # Gym receives the calls; never copy the direct OpenAI credential into this path.
                 "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
             },
+            "inherit_env": self.config.inherit_sandbox_environment,
         }
         raw = ""
         failure = None
@@ -963,6 +991,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
         (server-side web search, multi-agent). ``extra_config`` is deep-merged on top; the
         per-rollout Gym MCP entries are applied last so they win name collisions.
         """
+        # By default multi_agent and code_mode are off: they add tool shapes (namespace fan-out,
+        # custom JS-exec tools) that models served through Gym's typed Responses path cannot
+        # execute or express. A model server that relays requests unchanged can carry them (``features``).
+        features = {name: enabled for name, enabled in self.config.features.items() if enabled is not None}
         config: dict[str, Any] = {
             "model_provider": "gym",
             "approval_policy": "never",
@@ -971,9 +1003,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "check_for_update_on_startup": False,
             "analytics": {"enabled": False},
             "history": {"persistence": "none"},
-            # multi_agent and code_mode add tool shapes (namespace fan-out, custom JS-exec tools)
-            # that models served through a Gym model server cannot execute or express.
-            "features": {"multi_agent": False, "code_mode": False},
+            **({"features": features} if features else {}),
             "model_providers": {
                 "gym": {
                     "name": "gym",
@@ -984,6 +1014,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     "env_key": "OPENAI_API_KEY",
                     "wire_api": "responses",
                     "stream_idle_timeout_ms": self.config.stream_idle_timeout_ms or self.config.timeout * 1000,
+                    **{
+                        name: getattr(self.config, name)
+                        for name in ("request_max_retries", "stream_max_retries")
+                        if getattr(self.config, name) is not None
+                    },
                 }
             },
         }
@@ -1027,17 +1062,18 @@ class CodexAgent(SimpleResponsesAPIAgent):
     def _build_command(self, instruction: str, cwd: str) -> list[str]:
         """Construct the ``codex exec`` argv.
 
-        ``--json`` emits machine-readable JSONL events; ``--ephemeral`` skips session persistence
-        unless `_run_codex` needs temporary native evidence for a correlated rollout.
-        ``--skip-git-repo-check`` allows running in the per-rollout scratch dir. Sandboxing and
-        approvals are pinned in the generated config.toml (``approval_policy = "never"``), not argv.
-        The ``--`` separator keeps prompts from being parsed as flags or subcommands.
+        ``--json`` emits machine-readable JSONL events; ``--ephemeral`` (unless ``ephemeral`` is
+        false) skips session persistence, and `_run_codex` drops it when it needs temporary native
+        evidence for a correlated rollout. ``--skip-git-repo-check`` allows running in the
+        per-rollout scratch dir. Sandboxing and approvals are pinned in the generated config.toml
+        (``approval_policy = "never"``), not argv. The ``--`` separator keeps prompts from being
+        parsed as flags or subcommands.
         """
         return [
             "codex",
             "exec",
             "--json",
-            "--ephemeral",
+            *(["--ephemeral"] if self.config.ephemeral else []),
             "--skip-git-repo-check",
             "--cd",
             cwd,
@@ -1099,7 +1135,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             }
 
             command = self._build_command(instruction, cwd)
-            if rollout_id is not None:
+            if rollout_id is not None and "--ephemeral" in command:
                 command.remove("--ephemeral")
             proc = await asyncio.create_subprocess_exec(
                 *command,

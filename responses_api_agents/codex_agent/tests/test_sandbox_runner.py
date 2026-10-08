@@ -20,7 +20,7 @@ from responses_api_agents.codex_agent import sandbox_runner
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision is required")
 
 
-def launch(tmp_path, code, timeout=3, python=sys.executable):
+def launch(tmp_path, code, timeout=3, python=sys.executable, **request_fields):
     request = {
         "directory": str(tmp_path),
         "command": [python, "-c", code],
@@ -29,6 +29,7 @@ def launch(tmp_path, code, timeout=3, python=sys.executable):
         "timeout": timeout,
         "cleanup_timeout": 2,
         "prompt": "task input",
+        **request_fields,
     }
     path = tmp_path / "input.json"
     path.write_text(json.dumps(request))
@@ -181,6 +182,24 @@ def test_runtime_environment_does_not_inherit_provider_credentials(tmp_path, mon
     assert result(tmp_path, process)["cleanup_confirmed"]
     _, event = json.loads((tmp_path / "events.jsonl").read_text())
     assert event == {"SANDBOX_PROVIDER_API_KEY": None, **task_environment}
+
+
+def test_inherited_environment_is_opt_in_and_keeps_explicit_values(tmp_path, monkeypatch):
+    monkeypatch.setenv("TASK_VARIABLE", "from-task-image")
+    monkeypatch.setenv("HOME", "/root")
+    code = (
+        "import os,json; print(json.dumps({key: os.environ.get(key) "
+        "for key in ('TASK_VARIABLE', 'HOME', 'CODEX_HOME', 'PATH')}))"
+    )
+    process = launch(tmp_path, code, inherit_env=True, env={"CODEX_HOME": "/tmp/session/.codex"})
+    assert result(tmp_path, process)["cleanup_confirmed"]
+    _, event = json.loads((tmp_path / "events.jsonl").read_text())
+    assert event == {
+        "TASK_VARIABLE": "from-task-image",
+        "HOME": "/root",
+        "CODEX_HOME": "/tmp/session/.codex",
+        "PATH": os.environ["PATH"],
+    }
 
 
 def test_lost_spawn_handle_requires_sandbox_teardown(tmp_path):
