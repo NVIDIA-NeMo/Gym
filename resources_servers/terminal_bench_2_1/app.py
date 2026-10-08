@@ -300,6 +300,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         start_time = time()
         try:
             await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
+            # Test scripts write rewards here even if their test runner fails to start.
+            setup_result = await eval_sandbox.exec("mkdir -p /logs/verifier", timeout_s=self.config.evaluation_timeout)
+            if setup_result.return_code != 0:
+                raise RuntimeError(f"Failed to prepare TerminalBench verifier output directory: {setup_result}")
             eval_result = await eval_sandbox.exec(
                 "bash /tests/test.sh",
                 timeout_s=self.config.evaluation_timeout,

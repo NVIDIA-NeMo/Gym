@@ -24,6 +24,7 @@ from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
 from functools import partial
+from importlib import import_module
 from ipaddress import ip_network
 from os import environ, getenv
 from pathlib import Path
@@ -64,6 +65,7 @@ from nemo_gym.config_types import (
     TOKEN_CAPTURE_PATH_SEGMENT,
     BaseRunServerInstanceConfig,
     BaseServerConfig,
+    HeadServerUnreachableError,
 )
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
@@ -726,6 +728,28 @@ class ServerClient(BaseModel):
     # Resolved base URLs, cached by server name.
     _server_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
 
+    def assistant_message_header(self, model_server_name: str) -> bytes | None:
+        """Read the optional header property of harnesses using this model server.
+
+        The property lives on the harness package so model workers need not import
+        an agent's app or install its runtime dependencies.
+        """
+        headers = set()
+        for instance in self.global_config_dict.values():
+            if not isinstance(instance, (dict, DictConfig)):
+                continue
+            for harness, config in instance.get("responses_api_agents", {}).items():
+                model = config.get("model_server") or {}
+                if model.get("name") != model_server_name or model.get("type") != "responses_api_models":
+                    continue
+                package = import_module(f"responses_api_agents.{harness}")
+                header = getattr(package, "_assistant_message_header", None)
+                if header is not None:
+                    headers.add(header.lower())
+        if len(headers) > 1:
+            raise ValueError(f"Harnesses using model server {model_server_name!r} declare different assistant headers")
+        return next(iter(headers), None)
+
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
         global_config_dict = get_global_config_dict()
@@ -756,8 +780,16 @@ class ServerClient(BaseModel):
                 f"{head_server_url}/global_config_dict_yaml",
             )
         except ConnectionError as e:
-            raise ValueError(
-                f"Could not connect to the head server at {head_server_url}. Perhaps you are not running a server or your head server is on a different port?"
+            # requests' ConnectionError also covers proxy and name-resolution failures; keep the real reason
+            # (with its traceback) for --verbose, since the ConfigError below is printed without its cause.
+            logger.debug(
+                "Could not fetch the global config from the head server at %s", head_server_url, exc_info=True
+            )
+            # A ConfigError so the CLI prints just this message (no traceback); the cause stays chained.
+            raise HeadServerUnreachableError(
+                f"Could not connect to the head server at {head_server_url}. Is the head server running? "
+                "Start it with: `gym env start`. If it is already running on a different host or port, pass "
+                "`++head_server.host=<host>` / `++head_server.port=<port>` so this command can find it."
             ) from e
 
         global_config_dict_yaml = response.content.decode()

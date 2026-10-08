@@ -49,6 +49,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.rollout_observability import (
     AgentEpisode,
     AgentInvocation,
@@ -102,13 +103,11 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
             output_tokens += int(usage.get("output") or 0)
             texts = [b["text"] for b in content if isinstance(b, dict) and (b.get("text") or "").strip()]
             if texts:
-                output_items.append(
-                    NeMoGymResponseOutputMessage(
-                        id=f"msg-{len(output_items)}",
-                        content=[NeMoGymResponseOutputText(type="output_text", text="\n".join(texts), annotations=[])],
-                        role="assistant",
-                        status="completed",
-                        type="message",
+                # Match the other adapters: reasoning belongs in reasoning items,
+                # not in the final text consumed by benchmark verifiers.
+                output_items.extend(
+                    ResponsesConverter(return_token_id_information=False).postprocess_assistant_message_dict(
+                        {"role": "assistant", "content": "\n".join(texts)}
                     )
                 )
             for block in content:
@@ -178,6 +177,7 @@ def _build_pi_observations(
     conversation: list[Any],
     *,
     transcript_available: bool = True,
+    capture_correlated: bool = False,
 ) -> AgentObservationBundle:
     def gap(code: str, detail: Optional[str] = None) -> ObservationGap:
         return ObservationGap(code=code, invocation_id=invocation_id, detail=detail)
@@ -316,7 +316,7 @@ def _build_pi_observations(
             if outcome == "unknown":
                 gaps.append(gap("compaction_outcome_unavailable"))
             compaction_start = None
-    if not model_calls or model_call_join_missing:
+    if not capture_correlated and (not model_calls or model_call_join_missing):
         gaps.append(gap("model_call_ownership_unavailable"))
     if invocation_status == "unknown":
         gaps.append(gap("invocation_outcome_unavailable"))
@@ -520,6 +520,10 @@ class PiAgent(SimpleResponsesAPIAgent):
                 }
             ],
         }
+        if rollout_id is not None:
+            # Response IDs do not exist for HTTP errors; correlate every retry
+            # with the same invocation used by _build_pi_observations.
+            providers["nemo"]["headers"] = {"x-session-id": rollout_id}
         return config
 
     async def _run_pi(
@@ -685,6 +689,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                     self.config.model_server,
                     [*conversation_input, *observed_output_items],
                     transcript_available=bool(observed_output_items),
+                    capture_correlated=rollout_id is not None and self.config.model_server is not None,
                 )
             except Exception:
                 LOG.exception("failed to build Pi observations")
