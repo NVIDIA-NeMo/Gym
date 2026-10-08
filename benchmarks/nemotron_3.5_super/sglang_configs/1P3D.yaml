@@ -154,8 +154,8 @@ benchmark:
 
 roles:
   prefill:
-    nodes: 2
-    workers: 2
+    nodes: 1
+    workers: 1
     gpus: 4
     env:
       CUDA_VISIBLE_DEVICES: 0,1,2,3
@@ -224,8 +224,8 @@ roles:
       weight-loader-drop-cache-after-load: true
       log-level-http: warning
   decode:
-    nodes: 2
-    workers: 2
+    nodes: 3
+    workers: 3
     gpus: 4
     env:
       CUDA_VISIBLE_DEVICES: 0,1,2,3
