@@ -20,6 +20,14 @@ anyterminal_pi:
         timeout: 3600
         bash_timeout: 300
         pi_version: 0.80.2
+        # Match the 16,384-token training backend while reserving enough room
+        # for both normal turns and Pi's model-generated compaction summary.
+        context_window: 15872
+        max_output_tokens: 4096
+        output_token_policy: remaining_context
+        auto_compaction: true
+        compaction_reserve_tokens: 4096
+        compaction_keep_recent_tokens: 4096
         system_prompt: Inspect and edit the current task workspace, run relevant checks, and leave the requested solution applied.
         models_config: {}
 

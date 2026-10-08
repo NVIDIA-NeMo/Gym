@@ -444,6 +444,8 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     max_output_tokens: int = 131072
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
     auto_compaction: bool = True
+    compaction_reserve_tokens: Optional[int] = Field(default=None, gt=0)
+    compaction_keep_recent_tokens: Optional[int] = Field(default=None, gt=0)
     pi_version: Optional[str] = None
     mcp_servers: dict[str, PiMCPServerConfig] = Field(default_factory=dict)
 
@@ -550,8 +552,13 @@ class PiAgent(SimpleResponsesAPIAgent):
         models_config = self._build_models_config(rollout_id)
         if models_config:
             (home / ".pi" / "agent" / "models.json").write_text(json.dumps(models_config, indent=2))
+        compaction_settings: dict[str, bool | int] = {"enabled": self.config.auto_compaction}
+        if self.config.compaction_reserve_tokens is not None:
+            compaction_settings["reserveTokens"] = self.config.compaction_reserve_tokens
+        if self.config.compaction_keep_recent_tokens is not None:
+            compaction_settings["keepRecentTokens"] = self.config.compaction_keep_recent_tokens
         (home / ".pi" / "agent" / "settings.json").write_text(
-            json.dumps({"compaction": {"enabled": self.config.auto_compaction}})
+            json.dumps({"compaction": compaction_settings})
         )
         env = self._env(home)
 
