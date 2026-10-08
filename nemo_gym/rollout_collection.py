@@ -19,6 +19,7 @@ import glob as glob_module
 import json
 import logging
 import os
+import signal
 import tempfile
 import time
 import warnings
@@ -1184,6 +1185,45 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
 NG_ELAPSED_KEY = "elapsed_seconds"
 
 
+_NO_SIGTERM_HOOK = object()
+
+
+def _print_timing_summary_on_sigterm(tracker: "DispatchLatencyTracker") -> Any:
+    """Print the timing summary when Slurm's time limit sends SIGTERM, then terminate as before.
+
+    Python's default SIGTERM action exits without unwinding, so the summary in the collection's
+    ``finally`` never prints on a time-limit kill. Returns the previous handler for
+    ``_restore_sigterm``, or ``_NO_SIGTERM_HOOK`` when no hook could be installed.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def _on_sigterm() -> None:
+            try:
+                print(tracker.summary(), flush=True)
+            finally:
+                loop.remove_signal_handler(signal.SIGTERM)
+                signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
+                os.kill(os.getpid(), signal.SIGTERM)
+
+        loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+        return previous
+    except (NotImplementedError, RuntimeError, ValueError):
+        # Not the main thread, or no signal support: keep the default behaviour.
+        return _NO_SIGTERM_HOOK
+
+
+def _restore_sigterm(previous: Any) -> None:
+    if previous is _NO_SIGTERM_HOOK:
+        return
+    try:
+        asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
+    except (NotImplementedError, RuntimeError, ValueError):
+        pass
+
+
 class DispatchLatencyTracker:
     """Per-task latency observed by the dispatcher, and the drain margin from it.
 
@@ -1200,6 +1240,7 @@ class DispatchLatencyTracker:
         total: Optional[int] = None,
         start_report_within_s: Optional[float] = None,
         start_report_min_fraction: float = 0.99,
+        all_started_within_s: Optional[float] = None,
         long_rollout_s: Optional[float] = None,
         long_rollout_max_fraction: float = 0.05,
         timed_out_max_fraction: float = 0.01,
@@ -1211,6 +1252,10 @@ class DispatchLatencyTracker:
         self._total = total
         self._start_report_within_s = start_report_within_s
         self._start_report_min_fraction = start_report_min_fraction
+        # When every rollout is expected to have started; defaults to the start window.
+        self._all_started_within_s = (
+            all_started_within_s if all_started_within_s is not None else start_report_within_s
+        )
         self._long_rollout_s = long_rollout_s
         self._long_rollout_max_fraction = long_rollout_max_fraction
         self._timed_out_max_fraction = timed_out_max_fraction
@@ -1255,11 +1300,19 @@ class DispatchLatencyTracker:
         window_min = (self._start_report_within_s or 0) / 60
         if fraction is None:
             return f"Start coverage: no rollouts started within {window_min:.0f} min."
-        level = "WARNING" if fraction < self._start_report_min_fraction else "OK"
-        when = "so far" if live else "in total"
+        started = len(self._start_offsets)
+        all_started = self._total is None or started >= self._total
+        window_open = (
+            not live and not all_started and time.monotonic() - self._t0 <= (self._start_report_within_s or 0)
+        )
+        if window_open:
+            level = "PENDING"
+        else:
+            level = "WARNING" if fraction < self._start_report_min_fraction else "OK"
+        when = "in total" if all_started else "so far"
         return (
             f"[{level}] Start coverage: {fraction:.1%} of rollouts started within {window_min:.0f} min "
-            f"({len(self._start_offsets)} dispatched {when}); expected >= {self._start_report_min_fraction:.0%}."
+            f"({started} dispatched {when}); expected >= {self._start_report_min_fraction:.0%}."
         )
 
     def timing_summary(self) -> str:
@@ -1275,24 +1328,25 @@ class DispatchLatencyTracker:
             elapsed = time.monotonic() - self._t0
             started = len(self._start_offsets)
             all_started = self._total is None or started >= self._total
+            all_by_min = self._all_started_within_s / 60
             if all_started:
                 started_by = max(self._start_offsets) / 60
                 rows.append(
                     (
                         "all rollouts started by",
                         f"{started_by:.1f} min",
-                        f"<= {window_min:.0f} min",
-                        started_by <= window_min,
+                        f"<= {all_by_min:.0f} min",
+                        started_by <= all_by_min,
                     )
                 )
             else:
-                # Not every rollout has started yet: report how many have, and judge it only once the window is over.
+                # Not every rollout has started yet: report how many have, and judge it only once the deadline is over.
                 rows.append(
                     (
                         "rollouts started so far",
                         f"{started}/{self._total}",
-                        f"all by {window_min:.0f} min",
-                        elapsed <= self._start_report_within_s,
+                        f"all by {all_by_min:.0f} min",
+                        elapsed <= self._all_started_within_s,
                     )
                 )
             fraction = self._started_within() or 0.0
@@ -1792,6 +1846,14 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         ge=0,
         le=1,
         description="Share of rollouts expected to have started within dispatch_start_report_within_s; below it the report is a WARNING.",
+    )
+    dispatch_all_started_within_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Seconds into collection by which every rollout is expected to have started; the timing "
+            "summary warns when the last start is later. Defaults to dispatch_start_report_within_s."
+        ),
     )
     long_rollout_s: Optional[float] = Field(
         default=None,
@@ -2906,10 +2968,12 @@ class RolloutCollectionHelper(BaseModel):
         persisted_count = len(persisted_success_keys)
         collection_succeeded = False
         timing_heartbeat: Optional[asyncio.Task] = None
+        sigterm_previous: Any = _NO_SIGTERM_HOOK
         latency_tracker = DispatchLatencyTracker(
             total=len(input_rows),
             start_report_within_s=config.dispatch_start_report_within_s,
             start_report_min_fraction=config.dispatch_start_report_min_fraction,
+            all_started_within_s=config.dispatch_all_started_within_s,
             long_rollout_s=config.long_rollout_s,
             long_rollout_max_fraction=config.long_rollout_max_fraction,
             timed_out_max_fraction=config.timed_out_max_fraction,
@@ -2955,6 +3019,7 @@ class RolloutCollectionHelper(BaseModel):
                 config.dispatch_start_report_within_s is not None or config.long_rollout_s is not None
             ):
                 timing_heartbeat = asyncio.create_task(_timing_heartbeat())
+                sigterm_previous = _print_timing_summary_on_sigterm(latency_tracker)
 
             completion_iterator = self._run_examples_with_metadata(
                 input_rows,
@@ -3231,6 +3296,7 @@ class RolloutCollectionHelper(BaseModel):
         finally:
             if timing_heartbeat is not None:
                 timing_heartbeat.cancel()
+            _restore_sigterm(sigterm_previous)
             # Printed here, not after the block, so a run that dies mid-way still reports its timing.
             print(latency_tracker.summary())
             try:
