@@ -95,11 +95,11 @@ import statistics
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, ClassVar, Dict, List, Optional, Union
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -110,7 +110,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSessionCheckpointer, SandboxSpec, create_provider
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -664,6 +664,10 @@ def compute_reward(
 class LitmusAgentResourcesServer(SimpleResourcesServer):
     ray_enabled = False
     config: LitmusAgentConfig
+    # A partial-rollout checkpoint carries each session's cell history and its sandbox, which the
+    # SandboxSessionCheckpointer pauses into a snapshot at commit and rebuilds from it after a crash. Without a
+    # sandbox provider the server is a pure verifier whose sessions carry nothing.
+    checkpoint_mode: ClassVar[str] = "exported"
 
     # Per-instance sandbox state. _session_locks serializes calls within a
     # session (so cell history stays consistent); _registry_lock guards lookup
@@ -671,6 +675,9 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
     _sessions: Dict[str, _SandboxSession] = PrivateAttr(default_factory=dict)
     _session_locks: Dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
     _registry_lock: Optional[asyncio.Lock] = PrivateAttr(default=None)
+    # The sessions' sandboxes, for checkpoints. Its own provider instance serves restores; each sandbox keeps
+    # the provider it was created with.
+    _sandboxes: Optional[SandboxSessionCheckpointer] = PrivateAttr(default=None)
 
     # -- tool serving -------------------------------------------------------
 
@@ -745,10 +752,18 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         async with lock:
             session = self._sessions.get(session_id)
             if session is None:
-                sandbox = await AsyncSandbox(self.config.sandbox_provider, self._build_sandbox_spec()).start()
+                checkpointer = self._checkpointer()
+                spec = self._build_sandbox_spec()
+                sandbox = await AsyncSandbox(self.config.sandbox_provider, spec).start()
+                checkpointer.add(session_id, sandbox, spec)
                 session = _SandboxSession(sandbox=sandbox)
                 self._sessions[session_id] = session
         return session, lock
+
+    def _checkpointer(self) -> SandboxSessionCheckpointer:
+        if self._sandboxes is None:
+            self._sandboxes = SandboxSessionCheckpointer(create_provider(self.config.sandbox_provider))
+        return self._sandboxes
 
     async def execute_code(self, request: Request) -> PlainTextResponse:
         """Run a code cell in the session's sandbox and return its output.
@@ -766,7 +781,9 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
 
         session, lock = await self._acquire_session(session_id)
         async with lock:
-            result = await session.sandbox.exec(
+            # A checkpoint may have left the sandbox paused; the first call after it resumes it.
+            sandbox = await self._checkpointer().ensure_running(session_id)
+            result = await sandbox.exec(
                 f"python3 {_CODE_EXEC_DRIVER_PATH}",
                 env={_CELLS_ENV_VAR: _encode_cells([*session.cells, code])},
                 timeout_s=self.config.code_exec_timeout_s,
@@ -780,19 +797,67 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)
         return PlainTextResponse(_truncate_output(output, self.config.code_exec_max_output_chars))
 
-    async def _cleanup_session(self, session_id: Optional[str]) -> None:
+    async def _cleanup_session(self, session_id: Optional[str], *, strict: bool = False) -> None:
+        """Stop a session's sandbox and forget the session.
+
+        Best effort by default, as at the end of a rollout. ``strict`` propagates a failed stop and keeps the
+        session, so a checkpoint retire that was cut short can stop it again.
+        """
         if not session_id:
             return
         if self._registry_lock is None:
             self._registry_lock = asyncio.Lock()
         async with self._registry_lock:
-            session = self._sessions.pop(session_id, None)
-            self._session_locks.pop(session_id, None)
-        if session is not None:
+            session = self._sessions.get(session_id)
+        if session is not None and self._sandboxes is not None:
             try:
-                await session.sandbox.stop()
+                await self._sandboxes.stop(session_id)
             except Exception:
-                pass
+                if strict:
+                    raise
+        async with self._registry_lock:
+            self._sessions.pop(session_id, None)
+            self._session_locks.pop(session_id, None)
+
+    # -- partial-rollout checkpoints ------------------------------------------
+
+    async def export_session_states(self, session_ids: List[str]) -> dict[str, JsonValue]:
+        """Each session's cell history and its sandbox's checkpoint state; sandbox-less sessions carry nothing."""
+        with_sandbox = [session_id for session_id in session_ids if session_id in self._sessions]
+        sandboxes = await self._checkpointer().export(with_sandbox) if with_sandbox else {}
+        states: dict[str, JsonValue] = {}
+        for session_id in session_ids:
+            session = self._sessions.get(session_id)
+            if session is None:
+                states[session_id] = {"cells": [], "sandbox": None}
+            elif session_id in sandboxes:
+                states[session_id] = {"cells": list(session.cells), "sandbox": sandboxes[session_id]}
+            # Otherwise the sandbox is already gone: leave the session out, and the participant drops it.
+        return states
+
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        parsed: dict[str, dict] = {}
+        for session_id, state in states.items():
+            cells = state.get("cells") if isinstance(state, dict) else None
+            if not isinstance(cells, list) or not all(isinstance(cell, str) for cell in cells):
+                raise ValueError(f"invalid litmus session state for {session_id!r}: {state!r}")
+            parsed[session_id] = state
+        with_sandbox = {session_id: state["sandbox"] for session_id, state in parsed.items() if state.get("sandbox")}
+        if with_sandbox:
+            if not self.config.sandbox_provider:
+                raise ValueError("the checkpoint holds sandboxes but this server has no sandbox_provider")
+            # Validates every sandbox state, then rebuilds all of them or none.
+            await self._checkpointer().restore(with_sandbox)
+        if self._registry_lock is None:
+            self._registry_lock = asyncio.Lock()
+        async with self._registry_lock:
+            for session_id in with_sandbox:
+                sandbox = self._sandboxes.get(session_id)
+                self._sessions[session_id] = _SandboxSession(sandbox=sandbox, cells=list(parsed[session_id]["cells"]))
+                self._session_locks.setdefault(session_id, asyncio.Lock())
+
+    async def retire_session_state(self, session_id: str) -> None:
+        await self._cleanup_session(session_id, strict=True)
 
     async def _shutdown_all_sessions(self) -> None:
         for session_id in list(self._sessions):

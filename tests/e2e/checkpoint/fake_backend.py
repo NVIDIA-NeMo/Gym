@@ -10,7 +10,8 @@ a final answer. The default script is one ``get_weather`` call.
 
 Control routes:
 
-- ``POST /_ctl/hold {"after_calls": n}``: every call after the first ``n`` waits until released.
+- ``POST /_ctl/hold {"after_calls": n, "release_held": false}``: every call after the first ``n`` waits until
+  released; ``release_held`` moves the hold, releasing the calls held so far once the new threshold applies.
 - ``POST /_ctl/release``: release held calls, and stop gating.
 - ``POST /_ctl/gate``: from now on every call waits until a step releases it.
 - ``POST /_ctl/step {"calls": n}``: release the ``n`` longest-waiting gated calls; returns how many were released.
@@ -79,8 +80,13 @@ async def models() -> dict:
 
 @app.post("/_ctl/hold")
 async def hold(body: dict) -> dict:
+    """Hold every call after the first ``after_calls``; with ``release_held`` also release the calls held so far,
+    after the new threshold is in place, so a later call is held without a window in which none is."""
+    previous = STATE["released"]
     STATE["hold_after"] = body["after_calls"]
     STATE["released"] = asyncio.Event()
+    if body.get("release_held"):
+        previous.set()
     return {"ok": True}
 
 

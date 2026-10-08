@@ -81,6 +81,13 @@ def free_port() -> int:
     raise RuntimeError("every test port has been handed out")
 
 
+def _pythonpath() -> str:
+    """The repository first, then whatever the environment already had, so a server imports this checkout's
+    packages even where another Gym checkout is installed."""
+    inherited = os.environ.get("PYTHONPATH", "")
+    return os.pathsep.join([str(REPO), inherited]) if inherited else str(REPO)
+
+
 def _server(server_type: str, implementation: str, **config: Any) -> dict:
     return {server_type: {implementation: {"entrypoint": "app.py", "host": "127.0.0.1", **config}}}
 
@@ -98,6 +105,8 @@ class Deployment:
     - ``legacy``: the legacy ``/run`` relay over Simple Agent and the weather resources server.
     - ``counter``: the legacy relay over Simple Agent and the stateful counter resources server.
     - ``slow``: ``single_agent_turn`` over Simple Agent and a resources server whose verify blocks.
+    - ``sandbox``: the legacy relay over Simple Agent and a resources server whose sessions each own a sandbox
+      in the fake sandbox backend, which outlives a Gym crash like the inference backend does.
 
     With ``inference_url``, the policy model serves from that endpoint and the fake backend's control
     routes are unavailable. ``policy_workers`` sets the policy model server's uvicorn workers, and
@@ -127,6 +136,7 @@ class Deployment:
         self.slow_verify_log = work_dir / "slow_verify.log"
         self.slow_verify_log.write_text("")
         self.backend_port = free_port()
+        self.sandbox_port = free_port()
         # An external OpenAI-compatible endpoint (a real vLLM server) replaces the fake backend.
         self.inference_url = inference_url or f"http://127.0.0.1:{self.backend_port}/v1"
         self.model_name = model_name
@@ -204,6 +214,16 @@ class Deployment:
                 expose_tools_over_mcp=self.resources_mcp,
             )
             add("resources", "resources_servers/example_session_state_mgmt", resources)
+        elif self.topology == "sandbox":
+            resources = _server(
+                "resources_servers",
+                "example_session_state_mgmt",
+                domain="agent",
+                verified=False,
+                description="sandbox notes",
+                sandbox_backend_url=f"http://127.0.0.1:{self.sandbox_port}",
+            )
+            add("resources", str(HERE / "sandbox_notes_server"), resources)
         elif self.topology == "slow":
             resources = _server(
                 "resources_servers",
@@ -287,11 +307,20 @@ class Deployment:
         log = open(self.log_dir / "backend.log", "a")
         self.procs["backend"] = subprocess.Popen(
             [sys.executable, str(HERE / "fake_backend.py"), str(self.backend_port)],
-            env=os.environ | {"PYTHONPATH": str(REPO)},
+            env=os.environ | {"PYTHONPATH": _pythonpath()},
             stdout=log,
             stderr=subprocess.STDOUT,
         )
         self._wait_healthy("backend", f"http://127.0.0.1:{self.backend_port}/v1/models")
+        if self.topology == "sandbox":
+            log = open(self.log_dir / "sandbox_backend.log", "a")
+            self.procs["sandbox_backend"] = subprocess.Popen(
+                [sys.executable, str(HERE / "fake_sandbox_backend.py"), str(self.sandbox_port)],
+                env=os.environ | {"PYTHONPATH": _pythonpath()},
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+            self._wait_healthy("sandbox_backend", f"http://127.0.0.1:{self.sandbox_port}/health")
 
     def start_gym(self) -> None:
         for name in self.dirs:
@@ -311,10 +340,11 @@ class Deployment:
 
     def stop(self) -> None:
         self.crash_gym()
-        backend = self.procs.pop("backend", None)
-        if backend is not None:
-            backend.kill()
-            backend.wait()
+        for name in ("backend", "sandbox_backend"):
+            backend = self.procs.pop(name, None)
+            if backend is not None:
+                backend.kill()
+                backend.wait()
 
     def _start(self, name: str) -> None:
         env = os.environ | {
@@ -325,7 +355,7 @@ class Deployment:
             "SLOW_VERIFY_FLAG": str(self.slow_verify_flag),
             "SLOW_VERIFY_LOG": str(self.slow_verify_log),
             "SLOW_VERIFY_MODE": self.slow_verify_mode,
-            "PYTHONPATH": str(REPO),
+            "PYTHONPATH": _pythonpath(),
         }
         log = open(self.log_dir / f"{name}.log", "a")
         self.procs[name] = subprocess.Popen(
@@ -372,6 +402,10 @@ class Deployment:
 
     def backend_calls(self) -> list[dict]:
         return self.backend("/_ctl/calls")
+
+    def sandbox_state(self) -> dict:
+        """Every sandbox and snapshot in the fake sandbox backend."""
+        return requests.get(f"http://127.0.0.1:{self.sandbox_port}/_ctl/state", timeout=10).json()
 
     def verifications(self) -> int:
         return self.slow_verify_log.read_text().count("verify")
@@ -427,6 +461,42 @@ def counter_row(rollout_id: str, attempt: int = 0) -> dict:
         },
         "initial_count": 3,
         "expected_count": 6,
+        "_ng_rollout_id": rollout_id,
+        "_ng_attempt_index": attempt,
+    }
+
+
+NOTES_TOOL = {
+    "type": "function",
+    "name": "append_note",
+    "description": "",
+    "parameters": {
+        "type": "object",
+        "properties": {"line": {"type": "string", "description": ""}},
+        "required": ["line"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+NOTES_SCRIPT = {
+    "tool_calls": [
+        {"name": "append_note", "arguments": {"line": "one"}},
+        {"name": "append_note", "arguments": {"line": "two"}},
+    ]
+}
+NOTES_SCRIPT_THREE = {
+    "tool_calls": [*NOTES_SCRIPT["tool_calls"], {"name": "append_note", "arguments": {"line": "three"}}]
+}
+
+
+def notes_row(rollout_id: str, attempt: int = 0, expected: tuple[str, ...] = ("one", "two")) -> dict:
+    """A legacy ``/run`` row that appends notes inside the session's sandbox; verify expects exactly ``expected``."""
+    return {
+        "responses_create_params": {
+            "input": [{"role": "user", "content": "take notes"}],
+            "tools": [NOTES_TOOL],
+        },
+        "expected_notes": list(expected),
         "_ng_rollout_id": rollout_id,
         "_ng_attempt_index": attempt,
     }
