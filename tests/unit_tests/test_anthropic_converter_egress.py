@@ -188,6 +188,25 @@ class TestAnthropicConverter:
         assert response.usage.total_tokens == 30
         assert response.usage.input_tokens_details.cached_tokens == 3
 
+    def test_anthropic_to_responses_preserves_unknown_usage_details(self) -> None:
+        response = AnthropicConverter().anthropic_to_responses(
+            anthropic_response={
+                "id": "msg_123",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-20250514",
+                "content": [{"type": "text", "text": "Hello."}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+            },
+            request_body=NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+            model="claude-sonnet-4-20250514",
+        )
+
+        assert response.usage is not None
+        assert response.usage.input_tokens_details.cached_tokens is None
+        assert response.usage.output_tokens_details.reasoning_tokens is None
+
     def test_anthropic_to_responses_maps_stop_reasons_to_incomplete_details(self) -> None:
         converter = AnthropicConverter()
         request_body = NeMoGymResponseCreateParamsNonStreaming(input="hello")

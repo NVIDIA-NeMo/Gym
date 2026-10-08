@@ -16,16 +16,23 @@
 These exercise runner generation, image resolution, and configuration.
 """
 
+import asyncio
 import base64
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+from nemo_gym.openai_utils import NeMoGymResponse
+from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
 from responses_api_agents.anyswe_agent.app import (
     AnySweAgent,
     AnySweAgentConfig,
+    AnySweRunRequest,
+    SWEBenchMetrics,
     _classify_agent_error,
     _dataset_family,
+    _model_url_for_rollout,
     _r2e_resolved,
     _safe_config_json,
     _should_mask_sample,
@@ -60,13 +67,35 @@ class TestAgentRunner:
         compile(source, "<runner>", "exec")
         assert 'os.environ["NGSWE_AGENT_MODULE"]' in source
         assert '["git", "add", "-A"]' in source
-        assert '["git", "diff", "--no-color", "--cached", "HEAD"]' in source
+        assert '["git", "diff", "--no-color", "--cached", baseline_tree]' in source
 
-    def test_patch_extraction_includes_untracked_files(self) -> None:
-        source = self._source()
-        assert '["git", "add", "-A"]' in source
-        assert '["git", "diff", "--no-color", "--cached", "HEAD"]' in source
-        assert "patch.diff" in source
+    def test_patch_extraction_excludes_image_dirt_and_includes_agent_files(self, tmp_path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        (repo / "agent-edited.txt").write_text("committed\n")
+        (repo / "image-dirty.txt").write_text("committed\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "initial"], cwd=repo, check=True)
+
+        (repo / "agent-edited.txt").write_text("image baseline\n")
+        (repo / "image-dirty.txt").write_text("pre-existing task image change\n")
+        (repo / "image-untracked.txt").write_text("pre-existing untracked file\n")
+        index_path = tmp_path / "baseline.index"
+        baseline_tree = _snapshot_repo(repo, index_path)
+
+        (repo / "agent-edited.txt").write_text("agent change\n")
+        (repo / "agent-new.txt").write_text("new from agent\n")
+        patch_text = _extract_patch(repo, index_path, baseline_tree)
+
+        assert "agent-edited.txt" in patch_text
+        assert "agent change" in patch_text
+        assert "agent-new.txt" in patch_text
+        assert "new from agent" in patch_text
+        assert "image-dirty.txt" not in patch_text
+        assert "image-untracked.txt" not in patch_text
 
     def test_sampling_is_forwarded(self) -> None:
         source = self._source()
@@ -78,6 +107,21 @@ class TestAgentRunner:
 
 
 class TestSandboxAPI:
+    def test_run_request_preserves_rollout_indices(self) -> None:
+        request = AnySweRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": [], "model": "model"},
+                "_ng_task_index": 3,
+                "_ng_rollout_index": 1,
+            }
+        )
+        assert getattr(request, "_ng_task_index") == 3
+        assert getattr(request, "_ng_rollout_index") == 1
+
+    def test_model_url_carries_rollout_correlation(self) -> None:
+        assert _model_url_for_rollout("http://model-host:8000", "3-1") == "http://model-host:8000/ng-rollout/3-1"
+        assert _model_url_for_rollout("http://model-host:8000", None) == "http://model-host:8000"
+
     def test_default_provider_is_named_sandbox(self) -> None:
         config = AnySweAgentConfig(
             host="0.0.0.0",
@@ -179,10 +223,17 @@ class TestSandboxAPI:
         class Params:
             def model_dump_json(self) -> str:
                 return json.dumps(
-                    {"sandbox_provider": {"opensandbox": {"api_key": "secret"}}}  # pragma: allowlist secret
+                    {
+                        "sandbox_provider": {"opensandbox": {"api_key": "secret"}},  # pragma: allowlist secret
+                        "agent_runtime_source": "https://example.test/runtime?token=secret",
+                        "agent_deps_url": "https://example.test/runtime?token=secret",
+                    }
                 )
 
-        assert json.loads(_safe_config_json(Params()))["sandbox_provider"]["opensandbox"]["api_key"] == "***"
+        result = json.loads(_safe_config_json(Params()))
+        assert result["sandbox_provider"]["opensandbox"]["api_key"] == "***"
+        assert "agent_runtime_source" not in result
+        assert "agent_deps_url" not in result
 
 
 class TestSetupScriptsExist:
@@ -190,10 +241,16 @@ class TestSetupScriptsExist:
         scripts = Path(__file__).parent.parent / "setup_scripts"
         assert (scripts / "hermes_agent_deps.sh").exists()
         assert (scripts / "claude_code_agent_deps.sh").exists()
+        assert (scripts / "cline_agent_deps.sh").exists()
         assert (scripts / "opencode_agent_deps.sh").exists()
         assert (scripts / "openclaw_agent_deps.sh").exists()
         assert (scripts / "pi_agent_deps.sh").exists()
         assert (scripts / "_portable_python.sh").exists()
+
+    def test_portable_python_meets_project_minimum(self) -> None:
+        script = (Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh").read_text()
+        assert 'PYTHON_VERSION="${PYTHON_VERSION:-3.13.14}"' in script
+        assert 'PBS_RELEASE="${PBS_RELEASE:-20260805}"' in script
 
 
 class TestExampleData:
@@ -208,3 +265,65 @@ class TestExampleData:
         for row in rows:
             assert "metadata" in row["responses_create_params"]
             assert "instance_id" in row["responses_create_params"]["metadata"]
+
+
+class TestRunReportsMaskSample:
+    """`/run` must build a serializable response and carry the masking decision."""
+
+    def _agent(self, *, mask_sample: bool) -> AnySweAgent:
+        metrics = SWEBenchMetrics(resolved=True, mask_sample=mask_sample)
+        instance_config = {
+            "problem_info": {"instance_id": "astropy__astropy-12907"},
+            "body": {"input": "fix it"},
+            "persistent_dir": "/tmp/anyswe",
+            "metrics_fpath": "/tmp/anyswe/metrics.json",
+            "container": "swebench/sweb.eval.x86_64.astropy__astropy-12907",
+            "run_session_id": "run-1",
+            "base_results_dir": "/tmp/anyswe/results",
+            "model_server_url": "http://localhost:9000",
+            "resolved_sandbox_provider": {"opensandbox": {}},
+            "sandbox_config": {},
+            "sandbox_default_metadata": {},
+            **_config().model_dump(mode="json"),
+        }
+        response = NeMoGymResponse.model_construct(
+            id="resp-1",
+            output=[],
+            tools=[],
+            metadata={
+                "metrics": metrics.model_dump_json(),
+                "instance_config": json.dumps(instance_config),
+                "input": json.dumps("fix it"),
+            },
+        )
+
+        class _StubbedAgent(AnySweAgent):
+            async def _responses(self, *args, **kwargs):
+                return response
+
+            def rollout_id_from_run(self, body):
+                return None
+
+        agent = _StubbedAgent.__new__(_StubbedAgent)
+        object.__setattr__(agent, "__dict__", {"_sem": asyncio.Semaphore(1)})
+        object.__setattr__(agent, "__pydantic_fields_set__", set())
+        object.__setattr__(agent, "__pydantic_extra__", None)
+        object.__setattr__(agent, "__pydantic_private__", {})
+        return agent
+
+    def _body(self) -> AnySweRunRequest:
+        return AnySweRunRequest(responses_create_params={"input": "fix it"})
+
+    def test_a_masked_run_serializes_and_reports_the_flag_once(self) -> None:
+        dumped = asyncio.run(self._agent(mask_sample=True).run(self._body())).model_dump()
+
+        assert dumped["mask_sample"] is True
+        assert dumped["reward"] == 1.0
+        # The compatibility location keeps reporting the same decision.
+        assert dumped["instance_config"]["mask_sample"] is True
+
+    def test_an_unmasked_run_is_not_implicitly_masked(self) -> None:
+        dumped = asyncio.run(self._agent(mask_sample=False).run(self._body())).model_dump()
+
+        assert dumped["mask_sample"] is False
+        assert dumped["instance_config"]["mask_sample"] is False

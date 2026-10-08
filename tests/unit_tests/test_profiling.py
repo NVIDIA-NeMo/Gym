@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import builtins
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 from pydantic import ValidationError
@@ -27,6 +29,7 @@ class TestProfiling:
         monkeypatch.setattr(nemo_gym.profiling, "graph_from_dot_file", MagicMock(return_value=(MagicMock(),)))
 
         monkeypatch.setattr(Profiler, "_check_for_dot_installation", MagicMock())
+        monkeypatch.setattr(nemo_gym.profiling, "_require_gprof2dot", MagicMock(return_value=MagicMock()))
 
         profiler = Profiler(name="test_name", base_profile_dir=tmp_path / "profile")
         profiler.start()
@@ -35,3 +38,25 @@ class TestProfiling:
     def test_profiler_errors_on_invalid_name(self, tmp_path: Path) -> None:
         with raises(ValidationError, match="Spaces are not allowed"):
             Profiler(name="test name", base_profile_dir=tmp_path / "profile")
+
+    def test_profiler_reports_missing_gprof2dot(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        real_import = builtins.__import__
+
+        def fake_import(
+            name: str,
+            globals_: dict[str, Any] | None = None,
+            locals_: dict[str, Any] | None = None,
+            fromlist: tuple[str, ...] = (),
+            level: int = 0,
+        ) -> Any:
+            if name == "gprof2dot":
+                raise ModuleNotFoundError(name)
+            return real_import(name, globals_, locals_, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        profiler = Profiler(name="test_name", base_profile_dir=tmp_path / "profile")
+        with raises(ModuleNotFoundError, match=r"uv pip install --no-config gprof2dot"):
+            profiler.dump()
+
+        assert not profiler.base_profile_dir.exists()

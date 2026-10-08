@@ -62,4 +62,4 @@ repos:
         language: python
         entry: python scripts/update_env_list.py
         additional_dependencies: [pyyaml]
-        files: ^README\.md$|^resources_servers/.*/configs/.*\.yaml$|^responses_api_agents/.*/configs/.*\.yaml$
+        files: ^README\.md$|^benchmarks/.*/config\.yaml$|^resources_servers/.*/configs/.*\.yaml$|^responses_api_agents/.*/configs/.*\.yaml$

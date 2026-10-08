@@ -384,6 +384,30 @@ class TestBuildSegaleActorClass:
         assert py_exec.endswith("bin/python3.12")
         assert (mirror_root / "cpython-3.12.12-linux-x86_64-gnu" / "bin" / "python3.12").exists()
 
+    def test_default_paths_use_configured_gym_cache_dir(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        import segale_actor as sa_module
+
+        fake_python = self._fake_venv(tmp_path)
+        cache_dir = tmp_path / "gym_cache"
+
+        monkeypatch.setattr(sys, "executable", str(fake_python))
+        monkeypatch.setattr(sa_module, "maybe_get_global_config_dict", lambda: {"cache_dir": str(cache_dir)})
+        monkeypatch.delenv("LONGMT_EVAL_PY_CACHE", raising=False)
+        monkeypatch.delenv("LASER_HOME", raising=False)
+        monkeypatch.delenv("ERSATZ", raising=False)
+        monkeypatch.delenv("LONGMT_COMET_CACHE", raising=False)
+
+        captured = {}
+        monkeypatch.setattr(sa_module, "ray", MagicMock(remote=self._stub_ray_remote(captured)))
+
+        sa_module._build_segale_actor_class()
+
+        runtime_env = captured["decorator_kwargs"]["runtime_env"]
+        assert runtime_env["py_executable"].startswith(str(cache_dir / "longmt-python"))
+        assert runtime_env["env_vars"]["LASER_HOME"] == str(cache_dir / "longmt-laser")
+        assert runtime_env["env_vars"]["ERSATZ"] == str(cache_dir / "longmt-ersatz")
+        assert runtime_env["env_vars"]["LONGMT_COMET_CACHE"] == str(cache_dir / "longmt-comet")
+
     def test_extra_gpu_sets_noset_cuda_env_var(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """use_extra_gpu=True must set RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES."""
         import segale_actor as sa_module
@@ -802,6 +826,24 @@ class TestDownloadCometModel:
         assert calls[0][0].endswith(".tmp")
         assert calls[1] == (str(dest), True)
         assert not list(dest.parent.glob("*.tmp"))
+
+    def test_default_path_uses_configured_gym_cache_dir(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        import segale_actor
+
+        comet = pytest.importorskip("comet")
+        calls: list = []
+        monkeypatch.setattr(comet, "download_model", self._fake_download_model(calls))
+        monkeypatch.setattr(
+            segale_actor,
+            "maybe_get_global_config_dict",
+            lambda: {"cache_dir": str(tmp_path / "gym_cache")},
+        )
+        monkeypatch.delenv("LONGMT_COMET_CACHE", raising=False)
+
+        ckpt = segale_actor._download_comet_model("model")
+
+        dest = tmp_path / "gym_cache" / "longmt-comet" / "model"
+        assert ckpt == str(dest / "checkpoints" / "model.ckpt")
 
     def test_idempotent_second_call_only_resolves(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         import segale_actor

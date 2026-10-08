@@ -14,6 +14,7 @@ The wrapper supports two agent harnesses, selected by the `agent_framework` conf
 ## Table of Contents
 
 - [Architecture at a glance](#architecture-at-a-glance)
+- [Artifact locations and cleanup](#artifact-locations-and-cleanup)
 - [Agent flow per instance](#agent-flow-per-instance)
 - [Supported datasets and harnesses](#supported-datasets-and-harnesses)
 - [OpenHands integration](#openhands-integration)
@@ -69,6 +70,22 @@ Two Apptainer containers are launched concurrently per instance:
 The two containers are launched at the same time so the eval container's spin-up cost (often tens of seconds for SWE-bench's harness) is hidden behind the agent's run time. The eval container blocks on `until [ -f <predictions> ]; do sleep 5; done` until the agent finishes.
 
 Concurrency across instances is bounded by `concurrency` (default 256) via an asyncio semaphore on the server, and Ray's `SPREAD` scheduling distributes per-instance workers across the cluster.
+
+---
+
+## Artifact locations and cleanup
+
+This server keeps three kinds of state, anchored differently (see the global `results_dir` / `cache_dir` keys in the [configuration reference](https://docs.nvidia.com/nemo/gym/latest/reference/configuration)):
+
+| State | Location | Lifecycle |
+|-------|----------|-----------|
+| Packaged read-only assets (setup scripts, prompts, configs) | next to the code (`responses_api_agents/swe_agents/`) | ships with the install |
+| Setup trees (harness clones, venvs, toolchains; multi-GB) | `<cache_dir>/swe_agents/swe_*_setup` | reused across runs; safe to delete when no run is active |
+| Per-run results | `<results_dir>/swebench_results_<run_session_id>` | one per server process per run; never deleted automatically |
+
+Per-instance work is scheduled across the cluster (Ray `SPREAD`), and the generated agent/eval commands embed the setup-tree and results paths as host paths executed from **other nodes**. Both roots must therefore resolve to the same content at the same path on every node that runs rollout workers: a shared filesystem, or trees pre-staged identically per node (e.g. baked into the container image). A `cache_dir` populated only on the head node breaks remote rollouts.
+
+Two compatibility notes: setup trees pre-staged next to the package (the layout before `cache_dir` existed, e.g. baked into container images at build time) are used only while `cache_dir` is left at its default — explicitly configuring `cache_dir` opts out, and removing the pre-staged trees migrates a default-config deployment. And OpenHands resolves `agent_framework_commit` to a full commit SHA against the configured repository at startup (`git ls-remote` for branches/`HEAD`; full 40-hex SHAs pass through), then keys its cache tree by repository identity plus that SHA (`swe_openhands_setup/<repo>-<hash>/<sha>`), so runs configured with different refs or forks never reset each other's checkout; old per-SHA trees are not garbage-collected — prune them when disk fills.
 
 ---
 
@@ -392,7 +409,7 @@ The full schema lives in `SWEBenchWrapperConfig` (and the per-override `AgentPro
 | `apptainer_memory_limit_mb`        | `65536` (64 GiB)                                  | Cumulative tree-RSS limit enforced by the gym-side memory watchdog (no cgroups in the enroot sandbox — see [Memory watchdog](#memory-watchdog-oom-handling)). `<= 0` disables it. |
 | `memory_watchdog_enabled`          | `true`                                            | Enable the RSS memory watchdog for the agent and eval containers.       |
 | `memory_watchdog_poll_interval_s`  | `1.0`                                             | Watchdog poll interval (seconds); bounds worst-case RSS overshoot of a fast allocator. |
-| `command_exec_timeout`             | `300`                                             | OpenHands per-command timeout inside the agent container.               |
+| `command_exec_timeout`             | `300`                                             | OpenHands per-command timeout inside the agent container. Exported as both `COMMAND_EXEC_TIMEOUT` (caps explicit per-action timeouts) and `SANDBOX_TIMEOUT` (default for actions without one; requires an OpenHands checkout whose eval sandbox config reads `SANDBOX_TIMEOUT`). |
 | `concurrency`                      | `256`                                             | Server-side asyncio semaphore for concurrent instances.                 |
 | `dataset_path`                     | `null`                                            | Optional default dataset JSONL.                                         |
 | `verify_golden_patch`              | `false`                                           | Skip the agent and eval the dataset's own golden patch. Supported for `swe-bench-ext` and the SWE-bench / SWE-bench_Multilingual families. See [Golden-patch validation](#golden-patch-validation). |
@@ -500,7 +517,7 @@ gym eval run --no-serve \
 `gym eval run` defaults to a concurrency of 100; tune to your hardware. View the results with:
 
 ```bash
-ng_viewer +jsonl_fpath=swebench-verified.openhands.qwen3-30b-coder.jsonl
+jq -C . swebench-verified.openhands.qwen3-30b-coder.jsonl | less -R
 ```
 
 ---

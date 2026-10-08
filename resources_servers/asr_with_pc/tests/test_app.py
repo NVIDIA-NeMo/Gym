@@ -9,6 +9,9 @@ Each test fixes the model output and the reference transcript and asserts the
 WER values against numeric expectations computed offline (jiwer 3.x).
 """
 
+import base64
+import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,12 +31,15 @@ from resources_servers.asr_with_pc.app import (
     preprocess_asr_text,
     split_tokens,
 )
+from resources_servers.asr_with_pc.generate_example_data import SAMPLE_TRANSCRIPTS, make_example
 
 
 MINIMAL_RESPONSES_CREATE_PARAMS = {
     "input": [{"role": "user", "content": "test"}],
     "parallel_tool_calls": True,
 }
+
+EXAMPLE_DATA_PATH = Path(__file__).resolve().parents[1] / "data" / "example.jsonl"
 
 
 def _make_server(task_type: str = "ASR-PC") -> ASRWithPCResourcesServer:
@@ -68,6 +74,25 @@ def _make_verify_request(assistant_text: str, expected_answer: str) -> ASRWithPC
         response=_make_response(assistant_text),
         expected_answer=expected_answer,
     )
+
+
+def test_example_data_matches_generator_and_uses_vllm_audio_data_sidechannel() -> None:
+    with EXAMPLE_DATA_PATH.open() as f:
+        rows = [json.loads(line) for line in f if line.strip()]
+
+    generated_rows = [
+        make_example(sample_id=f"example-{i:02d}", expected_answer=transcript)
+        for i, transcript in enumerate(SAMPLE_TRANSCRIPTS)
+    ]
+    assert rows == generated_rows
+
+    for row in rows:
+        metadata = row["responses_create_params"]["metadata"]
+        assert set(metadata) == {"audio_data"}
+
+        prefix = "data:audio/wav;base64,"
+        assert metadata["audio_data"].startswith(prefix)
+        assert base64.b64decode(metadata["audio_data"][len(prefix) :]).startswith(b"RIFF")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

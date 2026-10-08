@@ -36,6 +36,14 @@ make docs-check
 
 **`make docs-login` is load-bearing.** Skip it and `fern docs md generate` returns `HTTP 403: User does not belong to organization` — the CLI's `fern login` flow alone is *not* enough; Fern requires that you sign in to the dashboard first so your account record exists in Fern's user DB.
 
+### External contributors
+
+You do **not** need Fern `nvidia` org membership to contribute documentation. Edit MDX under `fern/versions/latest/pages/` (update [`fern/versions/main.yml`](./versions/main.yml) only when a new page is not auto-discovered), open a PR, and use CI (`fern check` + the automatic preview comment), which authenticates with the repository `DOCS_FERN_TOKEN`.
+
+Fern `nvidia` org membership is only needed for local library autodoc generation (`make docs` / `fern docs md generate`) when you hit that 403. To request access, [open a GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) with a title like `Fern nvidia org access request` (label `community-request` if available). Maintainers triage the request.
+
+**NVIDIA employees:** if you have NVIDIA Slack, you can also ask in `#fern`. Slack is not required for external contributors.
+
 ### Fern CLI + docs reference
 
 | Resource | Link |
@@ -173,13 +181,12 @@ See [`../.agents/skills/nemo-gym-docs/SKILL.md`](../.agents/skills/nemo-gym-docs
 | Workflow | Trigger | Purpose |
 |---|---|---|
 | `fern-docs-ci.yml` | `push: pull-request/[0-9]+` (FW-CI mirror) | `fern check` on PRs |
-| `fern-docs-preview-build.yml` | `pull_request` | Untrusted half: collect `fern/` artifact (no secrets) |
-| `fern-docs-preview-comment.yml` | `workflow_run` after build | Trusted half: build preview with `DOCS_FERN_TOKEN`, post 🌿 comment |
+| `fern-docs-preview.yml` | `push: pull-request/[0-9]+` (approved mirror) | Verify current PR/head, publish with fixed trusted tooling, and comment the verified preview URL |
 | `publish-fern-docs.yml` | push to `main` (`fern/**`), `docs/v*` tag, or manual | Publish to docs.nvidia.com/nemo/gym |
 
 Required org secret: **`DOCS_FERN_TOKEN`** (issued via `fern token` on a privileged dashboard account).
 
-PRs that touch `fern/**` get an automatic preview URL posted as a 🌿 comment.
+Approved PR mirrors that touch `fern/**` get an automatic preview URL posted as a 🌿 comment.
 
 ## Commits
 

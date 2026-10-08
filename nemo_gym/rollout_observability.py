@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Small shared contract for observations exposed by Agent integrations."""
+"""Shared contracts for rollout observations and trajectories."""
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Literal, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -35,6 +36,63 @@ class ModelCallRef(ObservationModel):
         if not self.model_call_id and not (self.model_ref is not None and self.response_id):
             raise ValueError("model_call_id or both model_ref and response_id are required")
         return self
+
+
+class TrajectoryTokenStats(ObservationModel):
+    prompt_tokens: Optional[int] = Field(default=None, ge=0)
+    completion_tokens: Optional[int] = Field(default=None, ge=0)
+    reasoning_tokens: Optional[int] = Field(default=None, ge=0)
+    total_tokens: Optional[int] = Field(default=None, ge=0)
+    cached_tokens: Optional[int] = Field(default=None, ge=0)
+
+
+class TrajectoryResponseMetadata(ObservationModel):
+    response_id: Optional[str] = None
+    model_ref: Optional[ModelServerRef] = None
+    model: Optional[str] = None
+    dialect: Optional[str] = None
+    status_code: Optional[int] = None
+    response_status: Optional[str] = None
+    finish_reason: Optional[str] = None
+    upstream_attempted: Optional[bool] = None
+    response_source: Optional[Literal["upstream", "local"]] = None
+    upstream_status_code: Optional[int] = None
+    local_response_reason: Optional[str] = None
+    error_category: Optional[str] = None
+    latency_ttft_ms: Optional[float] = Field(default=None, ge=0)
+
+
+class TrajectoryModelCall(ObservationModel):
+    model_call_id: Optional[str] = None
+    client_session_id: Optional[str] = None
+    client_assistant_message_id: Optional[str] = None
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    duration_ms: Optional[float] = Field(default=None, ge=0)
+    request: Optional[Any] = None
+    response: Optional[Any] = None
+    response_metadata: TrajectoryResponseMetadata = Field(default_factory=TrajectoryResponseMetadata)
+    token_stats: TrajectoryTokenStats = Field(default_factory=TrajectoryTokenStats)
+
+
+class TrajectoryTurn(ObservationModel):
+    invocation_id: str
+    source_message_id: Optional[str] = Field(
+        default=None, description="Persisted assistant-message ID in the harness."
+    )
+    source_model_ref: Optional[ModelServerRef] = Field(
+        default=None, description="Configured model server for matching the source message to captured calls."
+    )
+    task_id: str
+    rollout_id: str
+    turn_no: int = Field(ge=1, description="Turn number within this invocation.")
+    timestamp: float
+    question: Optional[Any] = None
+    answer: Optional[Any] = None
+    reasoning_content: Optional[Any] = None
+    resolved: Optional[bool] = None
+    step_count: int = Field(ge=0, description="Producer-reported cumulative step count within this invocation.")
+    model_calls: list[ModelCallRef] = Field(default_factory=list)
 
 
 class AgentInvocation(ObservationModel):
@@ -81,6 +139,12 @@ class ToolCallObservation(ObservationModel):
         return self
 
 
+class TrajectoryToolCall(ToolCallObservation):
+    """Tool observation enriched with the model-visible output in a trajectory record."""
+
+    output: Optional[Any] = None
+
+
 class SandboxObservation(ObservationModel):
     """Outcome and lifetime resource usage reported by a sandbox-owning harness."""
 
@@ -110,6 +174,10 @@ class ContextCompactionObservation(ObservationModel):
 
     kind: Literal["context_compaction"] = "context_compaction"
     invocation_id: str
+    source_message_ids: list[str] = Field(
+        default_factory=list, description="Persisted assistant-message IDs explicitly associated with this compaction."
+    )
+    source_model_ref: Optional[ModelServerRef] = None
     observed_at: Optional[float] = None
     trigger: Optional[str] = None
     tokens_before: Optional[int] = Field(
@@ -191,6 +259,122 @@ class AgentObservationBundle(ObservationModel):
         return self
 
 
+class TrajectoryRecord(ObservationModel):
+    schema_version: Literal["1.0"] = "1.0"
+    task_id: str
+    rollout_id: str
+    invocations: list[AgentInvocation] = Field(default_factory=list)
+    turns: list[TrajectoryTurn] = Field(default_factory=list)
+    model_calls: list[TrajectoryModelCall] = Field(default_factory=list)
+    tool_calls: list[TrajectoryToolCall] = Field(default_factory=list)
+    gaps: list[ObservationGap] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> "TrajectoryRecord":
+        invocation_ids = [invocation.invocation_id for invocation in self.invocations]
+        if len(invocation_ids) != len(set(invocation_ids)):
+            raise ValueError("invocation_id must be unique within a trajectory")
+        model_call_ids = [call.model_call_id for call in self.model_calls if call.model_call_id]
+        if len(model_call_ids) != len(set(model_call_ids)):
+            raise ValueError("model_call_id must be unique within a trajectory")
+        keys: set[tuple[str, int]] = set()
+        for turn in self.turns:
+            if turn.task_id != self.task_id or turn.rollout_id != self.rollout_id:
+                raise ValueError("turn identity must match the trajectory")
+            key = (turn.invocation_id, turn.turn_no)
+            if key in keys:
+                raise ValueError("turn number must be unique within an invocation")
+            keys.add(key)
+        return self
+
+
+def join_assistant_message_calls(
+    bundle: AgentObservationBundle,
+    trajectory: TrajectoryRecord | None,
+    calls: list["ModelCallRecord"],
+) -> tuple[AgentObservationBundle, TrajectoryRecord | None]:
+    """Join persisted messages to HTTP attempts using session, message and model-server IDs.
+
+    Run after invocation ownership resolution. Summary attempts belong to compactions;
+    calls without a saved message (for example title generation) stay invocation-owned.
+    Producers declare source_message_id(s), source_model_ref and invocation IDs.
+    Source labels are not dispatch keys. No content or timing fallback is used.
+    """
+    result = bundle.model_copy(
+        update={
+            "records": [
+                record.model_copy(update={"model_calls": list(record.model_calls)})
+                if isinstance(record, ContextCompactionObservation)
+                else record
+                for record in bundle.records
+            ],
+            "gaps": [gap for gap in bundle.gaps if not gap.code.startswith("assistant_message_call_")],
+        }
+    )
+    projected = (
+        trajectory.model_copy(
+            update={
+                "turns": [turn.model_copy(update={"model_calls": list(turn.model_calls)}) for turn in trajectory.turns]
+            }
+        )
+        if trajectory is not None
+        else None
+    )
+    targets: dict[tuple[str, str], list[TrajectoryTurn | ContextCompactionObservation]] = defaultdict(list)
+    for turn in projected.turns if projected is not None else []:
+        if turn.source_message_id:
+            targets[(turn.invocation_id, turn.source_message_id)].append(turn)
+    for compaction in result.records:
+        if isinstance(compaction, ContextCompactionObservation):
+            for message_id in set(compaction.source_message_ids):
+                targets[(compaction.invocation_id, message_id)].append(compaction)
+
+    call_counts = Counter(call.model_call_id for call in calls if call.model_call_id)
+    owners: dict[str, set[str]] = defaultdict(set)
+    for invocation in result.records:
+        if isinstance(invocation, AgentInvocation):
+            for ref in invocation.model_calls:
+                if ref.model_call_id:
+                    owners[ref.model_call_id].add(invocation.invocation_id)
+
+    # Recompute these links on repeated finalization, including newly ambiguous evidence.
+    attributed_ids = {call.model_call_id for call in calls if call.client_assistant_message_id and call.model_call_id}
+    for candidates in targets.values():
+        for target in candidates:
+            target.model_calls = [ref for ref in target.model_calls if ref.model_call_id not in attributed_ids]
+
+    for call in calls:
+        if not call.client_assistant_message_id:
+            continue
+        candidates = targets.get((call.client_session_id or "", call.client_assistant_message_id), [])
+        candidates = [target for target in candidates if target.source_model_ref in (None, call.model_ref)]
+        code = None
+        if len(candidates) != 1:
+            code = "ambiguous" if candidates else "unmatched"
+        elif candidates[0].source_model_ref is None or call.model_ref is None:
+            code = "scope_unavailable"
+        elif not call.model_call_id:
+            code = "identity_unavailable"
+        elif call_counts[call.model_call_id] != 1:
+            code = "ambiguous"
+        elif owners[call.model_call_id] != {call.client_session_id}:
+            code = "ownership_conflict"
+        if code is not None:
+            result.gaps.append(
+                ObservationGap(
+                    code=f"assistant_message_call_{code}",
+                    invocation_id=call.client_session_id,
+                    detail=f"{call.client_assistant_message_id}:{call.model_call_id}",
+                )
+            )
+            continue
+        candidates[0].model_calls.append(
+            ModelCallRef(model_call_id=call.model_call_id, model_ref=call.model_ref, response_id=call.response_id)
+        )
+    result.gaps = list({(gap.code, gap.invocation_id, gap.detail): gap for gap in result.gaps}.values())
+    return result, projected
+
+
 def join_model_call_observations(
     bundle: AgentObservationBundle,
     calls: Iterable[ModelCallRecord],
@@ -199,12 +383,55 @@ def join_model_call_observations(
 
     result = bundle.model_copy()
     result.records = [
-        record.model_copy() if isinstance(record, (AgentInvocation, ContextCompactionObservation)) else record
+        record.model_copy(update={"model_calls": list(record.model_calls)})
+        if isinstance(record, AgentInvocation)
+        else record.model_copy()
+        if isinstance(record, ContextCompactionObservation)
+        else record
         for record in bundle.records
     ]
     invocations = [record for record in result.records if isinstance(record, AgentInvocation)]
     compactions = [record for record in result.records if isinstance(record, ContextCompactionObservation)]
     captured = list(calls)
+
+    invocations_by_id = {invocation.invocation_id: invocation for invocation in invocations}
+    reference_keys = {
+        invocation.invocation_id: {
+            (
+                reference.model_call_id,
+                (reference.model_ref.type, reference.model_ref.name) if reference.model_ref is not None else None,
+                reference.response_id,
+            )
+            for reference in invocation.model_calls
+        }
+        for invocation in invocations
+    }
+    for call in captured:
+        if not call.client_session_id or not call.model_call_id:
+            continue
+        invocation = invocations_by_id.get(call.client_session_id)
+        if invocation is None:
+            continue
+        model_ref_key = (call.model_ref.type, call.model_ref.name) if call.model_ref is not None else None
+        matching_keys = {
+            (call.model_call_id, None, None),
+            (call.model_call_id, model_ref_key, None),
+            (call.model_call_id, None, call.response_id),
+            (call.model_call_id, model_ref_key, call.response_id),
+        }
+        if model_ref_key is not None and call.response_id is not None:
+            matching_keys.add((None, model_ref_key, call.response_id))
+        invocation_keys = reference_keys[invocation.invocation_id]
+        if matching_keys & invocation_keys:
+            continue
+        reference = ModelCallRef(
+            model_call_id=call.model_call_id,
+            model_ref=call.model_ref,
+            response_id=call.response_id,
+        )
+        invocation.model_calls.append(reference)
+        invocation_keys.add((reference.model_call_id, model_ref_key, reference.response_id))
+
     by_call_id: dict[str, list[ModelCallRecord]] = {}
     by_response: dict[tuple[str, str, str], list[ModelCallRecord]] = {}
     for call in captured:

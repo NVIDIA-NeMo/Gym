@@ -6,6 +6,9 @@ SWE-bench Multilingual, and R2E-Gym.
 
 ## Run
 
+First complete [OpenSandbox access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#setup)
+for sandbox credentials, endpoint configuration, and resource limits.
+
 Create `env.yaml` for the policy model:
 
 ```yaml
@@ -46,8 +49,8 @@ task image through its `image` field or `container_formatter`.
 
 ## Agents
 
-The included configurations run Hermes Agent, Claude Code, Pi, OpenClaw, or OpenCode with
-the same sandbox and grading path. Configure another Gym agent with:
+The included configurations run Hermes Agent, Claude Code, Cline, Pi, OpenClaw, or OpenCode
+with the same sandbox and grading path. Configure another Gym agent with:
 
 ```yaml
 agent_server_module: responses_api_agents.hermes_agent.app

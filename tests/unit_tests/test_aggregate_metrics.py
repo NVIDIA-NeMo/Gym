@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import warnings
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,13 +24,21 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
+from nemo_gym.metrics_config import ACROSS_REPEATS_MARKER
 from nemo_gym.reward_profile import (
+    RewardProfiler,
     add_avg_sample_std_dev,
     compute_aggregate_metrics,
     compute_pass_majority_metrics,
+    compute_perf_summary,
     compute_subset_metrics,
     highest_k_metrics,
+    is_repeat_aggregatable_metric,
 )
 from nemo_gym.server_utils import ServerClient
 
@@ -135,7 +144,9 @@ class TestAggregateMetricsRoute:
 class TestComputeMetricsHook:
     @pytest.mark.asyncio
     async def test_compute_metrics_receives_grouped_responses(self) -> None:
-        """compute_metrics receives all verify responses grouped by task."""
+        """compute_metrics receives the full run once, grouped by task."""
+
+        group_sizes = []
 
         class _MathServer(SimpleResourcesServer):
             async def verify(self, body):
@@ -144,7 +155,7 @@ class TestComputeMetricsHook:
             def compute_metrics(self, tasks):
                 # tasks[i] is a list of rollout dicts for task i
                 assert len(tasks) == 3
-                assert all(len(rollouts) == 4 for rollouts in tasks)
+                group_sizes.append(tuple(len(rollouts) for rollouts in tasks))
 
                 # Compute pass@k: fraction of tasks where any rollout got reward=1
                 pass_at_k = sum(1 for rollouts in tasks if any(r["reward"] >= 1.0 for r in rollouts)) / len(tasks)
@@ -176,6 +187,11 @@ class TestComputeMetricsHook:
         assert result.agent_metrics["pass@k"] == pytest.approx(2.0 / 3.0)
         assert "pass@k" in result.key_metrics
         assert "pass@1_avg_of_k" in result.key_metrics
+        assert group_sizes == [(4, 4, 4)]
+        assert all("mean/reward" in repeat for repeat in result.repeat_level_metrics)
+        assert all("pass@k" not in repeat for repeat in result.repeat_level_metrics)
+        assert "mean_across_repeats/mean/reward" in result.agent_metrics
+        assert "mean_across_repeats/pass@k" not in result.agent_metrics
 
     @pytest.mark.asyncio
     async def test_compute_metrics_sees_custom_verify_fields(self) -> None:
@@ -203,6 +219,156 @@ class TestComputeMetricsHook:
         result = await server.aggregate_metrics(body)
 
         assert result.agent_metrics["custom_metric"] == 42.0
+
+    @pytest.mark.asyncio
+    async def test_custom_metric_is_recomputed_and_summarized_by_repeat_when_opted_in(self) -> None:
+        class _CustomServer(SimpleResourcesServer):
+            async def verify(self, body):
+                pass
+
+            def compute_metrics(self, tasks):
+                values = [row["custom_score"] for task in tasks for row in task]
+                return {"custom_score": sum(values) / len(values)}
+
+            def compute_repeat_metrics(self, tasks):
+                return self.compute_metrics(tasks)
+
+        config = BaseResourcesServerConfig(host="127.0.0.1", port=12345, entrypoint="app.py", name="test_server")
+        server = _CustomServer(config=config, server_client=MagicMock(spec=ServerClient))
+        responses = [
+            {
+                TASK_INDEX_KEY_NAME: task_idx,
+                ROLLOUT_INDEX_KEY_NAME: rollout_idx,
+                "reward": 0.0,
+                "custom_score": float(rollout_idx + task_idx),
+            }
+            for task_idx in range(2)
+            for rollout_idx in range(3)
+        ]
+
+        result = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses))
+
+        assert [entry["custom_score"] for entry in result.repeat_level_metrics] == pytest.approx([0.5, 1.5, 2.5])
+        assert result.agent_metrics["custom_score"] == pytest.approx(1.5)
+        assert result.agent_metrics["mean_across_repeats/custom_score"] == pytest.approx(1.5)
+        assert result.agent_metrics["median_across_repeats/custom_score"] == pytest.approx(1.5)
+        assert result.agent_metrics["std_across_repeats/custom_score"] == pytest.approx(1.0)
+        assert result.agent_metrics["se_across_repeats/custom_score"] == pytest.approx(1 / 3**0.5)
+        assert "ci_low_95_across_repeats/custom_score" in result.agent_metrics
+        assert "ci_high_95_across_repeats/custom_score" in result.agent_metrics
+
+    def test_key_metrics_are_selected_before_repeat_calls_mutate_hook_state(self) -> None:
+        selected_names = []
+        events = []
+
+        def compute_metrics(tasks):
+            selected_names[:] = ["full_metric"]
+            events.append("compute_full")
+            return {"full_metric": 1.0, "repeat_metric": 2.0}
+
+        def compute_repeat_metrics(tasks):
+            selected_names[:] = ["repeat_metric"]
+            events.append("compute_repeat")
+            return {"full_metric": 1.0, "repeat_metric": 2.0}
+
+        def get_key_metrics(agent_metrics):
+            events.append("get_key_metrics")
+            return {name: agent_metrics[name] for name in selected_names}
+
+        result = compute_aggregate_metrics(
+            _make_verify_responses(tasks=2, rollouts_per_task=2),
+            compute_metrics_fn=compute_metrics,
+            get_key_metrics_fn=get_key_metrics,
+            compute_repeat_metrics_fn=compute_repeat_metrics,
+        )
+
+        assert result.key_metrics == {"full_metric": 1.0}
+        assert events == ["compute_full", "get_key_metrics", "compute_repeat", "compute_repeat"]
+
+    def test_repeat_metrics_are_opt_in_and_positional_callbacks_remain_supported(self) -> None:
+        calls = []
+
+        def compute_metrics(tasks):
+            calls.append(tuple(len(task) for task in tasks))
+            return {"mean/reward": 11.0}
+
+        result = compute_aggregate_metrics(
+            _make_verify_responses(tasks=2, rollouts_per_task=2),
+            compute_metrics,
+            lambda metrics: {"mean/reward": metrics["mean/reward"]},
+        )
+
+        assert calls == [(2, 2)]
+        assert result.agent_metrics["mean/reward"] == 11.0
+        assert result.key_metrics == {"mean/reward": 11.0}
+        assert [repeat["mean/reward"] for repeat in result.repeat_level_metrics] == [0.5, 0.5]
+        assert result.agent_metrics["mean_across_repeats/mean/reward"] == 0.5
+
+    def test_repeat_only_hook_runs_without_full_run_hook(self) -> None:
+        def compute_repeat_metrics(tasks):
+            return {"repeat_only": float(tasks[0][0][ROLLOUT_INDEX_KEY_NAME])}
+
+        result = compute_aggregate_metrics(
+            _make_verify_responses(tasks=2, rollouts_per_task=2),
+            compute_repeat_metrics_fn=compute_repeat_metrics,
+        )
+
+        assert [repeat["repeat_only"] for repeat in result.repeat_level_metrics] == [0.0, 1.0]
+        assert result.agent_metrics["mean_across_repeats/repeat_only"] == 0.5
+
+    @pytest.mark.parametrize(("full_value", "repeat_value"), [(None, 99.0), (99.0, None)])
+    def test_custom_suppression_removes_generic_repeat_values_and_stale_aggregates(
+        self, full_value, repeat_value
+    ) -> None:
+        def compute_metrics(tasks):
+            return {"mean/reward": full_value}
+
+        def compute_repeat_metrics(tasks):
+            return {"mean/reward": repeat_value}
+
+        result = compute_aggregate_metrics(
+            _make_verify_responses(tasks=2, rollouts_per_task=2),
+            compute_metrics_fn=compute_metrics,
+            compute_repeat_metrics_fn=compute_repeat_metrics,
+        )
+
+        assert all("mean/reward" not in repeat for repeat in result.repeat_level_metrics)
+        assert not any(ACROSS_REPEATS_MARKER in name and name.endswith("mean/reward") for name in result.agent_metrics)
+        if full_value is None:
+            assert result.agent_metrics["mean/reward"] is None
+        else:
+            assert result.agent_metrics["mean/reward"] == full_value
+
+    def test_a_rejected_repeat_fails_aggregation(self) -> None:
+        def compute_metrics(tasks):
+            return {"mean/reward": 11.0}
+
+        def compute_repeat_metrics(tasks):
+            rollout_idx = tasks[0][0][ROLLOUT_INDEX_KEY_NAME]
+            if rollout_idx == 0:
+                raise ValueError("repeat is not independently scoreable")
+            return {"mean/reward": 11.0}
+
+        with pytest.raises(ValueError, match="repeat is not independently scoreable"):
+            compute_aggregate_metrics(
+                _make_verify_responses(tasks=2, rollouts_per_task=2, reward_fn=lambda _task, _repeat: 4.0),
+                compute_metrics_fn=compute_metrics,
+                compute_repeat_metrics_fn=compute_repeat_metrics,
+            )
+
+    def test_missing_custom_repeat_does_not_publish_partial_aggregate(self) -> None:
+        def compute_repeat_metrics(tasks):
+            if tasks[0][0][ROLLOUT_INDEX_KEY_NAME] == 0:
+                return {"mean/reward": 11.0}
+            return {}
+
+        result = compute_aggregate_metrics(
+            _make_verify_responses(tasks=2, rollouts_per_task=2),
+            compute_repeat_metrics_fn=compute_repeat_metrics,
+        )
+
+        assert all("mean/reward" not in repeat for repeat in result.repeat_level_metrics)
+        assert "mean_across_repeats/mean/reward" not in result.agent_metrics
 
 
 class TestComputePassMajorityMetrics:
@@ -454,6 +620,353 @@ class TestComputeSubsetMetrics:
         m = compute_subset_metrics(tasks, "nonexistent")
         assert m == {}
 
+    def test_a_first_rollout_without_the_field_keeps_its_task_in_the_subset(self) -> None:
+        """A row counted as zero for a rollout that never ran can come first and lack verifier fields."""
+        tasks = [[{"reward": 0.0}, {"reward": 1.0, "difficulty": "easy"}]]
+        m = compute_subset_metrics(tasks, "difficulty")
+        assert m["easy/pass@1/accuracy"] == 50.0
+
+
+class TestRepeatMetricEligibility:
+    def test_statistics_produced_by_gym_benchmarks_are_excluded(self) -> None:
+        assert not is_repeat_aggregatable_metric("max/reward")
+        assert not is_repeat_aggregatable_metric("sem/reward")
+        assert not is_repeat_aggregatable_metric("ci_low_95/reward")
+        assert not is_repeat_aggregatable_metric("response_tokens/median")
+        assert not is_repeat_aggregatable_metric("response_tokens/p5")
+        assert not is_repeat_aggregatable_metric("response_tokens/p25")
+        assert not is_repeat_aggregatable_metric("response_tokens/p75")
+        assert not is_repeat_aggregatable_metric("response_tokens/p95")
+        assert not is_repeat_aggregatable_metric("tok/ci_low_95")
+        assert not is_repeat_aggregatable_metric("tok/ci_high_95")
+        assert not is_repeat_aggregatable_metric("arena_elo/ci_lower")
+        assert not is_repeat_aggregatable_metric("x_ci_lower")
+        assert not is_repeat_aggregatable_metric("x_ci_upper")
+        assert not is_repeat_aggregatable_metric("win_rate_ci95_upper")
+        assert not is_repeat_aggregatable_metric("pass@1/accuracy/std_err_across_runs")
+        assert not is_repeat_aggregatable_metric(ROLLOUT_INDEX_KEY_NAME)
+        assert not is_repeat_aggregatable_metric("_ng_attempt_index")
+        assert not is_repeat_aggregatable_metric("mean/_ng_attempt_index")
+        assert is_repeat_aggregatable_metric("mean/sample_count")
+        assert not is_repeat_aggregatable_metric("sample_count")
+        assert not is_repeat_aggregatable_metric("missing_count")
+        assert not is_repeat_aggregatable_metric("token_usage_version")
+        assert not is_repeat_aggregatable_metric(f"mean{ACROSS_REPEATS_MARKER}reward")
+
+    def test_point_estimates_produced_by_gym_benchmarks_are_included(self) -> None:
+        assert is_repeat_aggregatable_metric("subtask_accuracy")
+        assert is_repeat_aggregatable_metric("telecom/reward")
+        assert is_repeat_aggregatable_metric("mean/reward")
+        assert is_repeat_aggregatable_metric("response_tokens/mean")
+        assert is_repeat_aggregatable_metric("max_token_reached_rate")
+
+    def test_statistics_do_not_get_cross_repeat_aggregates(self) -> None:
+        excluded = (
+            "response_tokens/p5",
+            "response_tokens/p25",
+            "response_tokens/p75",
+            "response_tokens/p95",
+            "tok/ci_low_95",
+            "x_ci_upper",
+        )
+        repeats = [
+            {AGENT_REF_KEY_NAME: {"name": "agent"}, "mean/reward": reward, **dict.fromkeys(excluded, reward)}
+            for reward in (0.2, 0.8)
+        ]
+
+        [aggregate] = RewardProfiler()._aggregate_repeat_level_metrics(repeats)
+
+        assert aggregate["mean_across_repeats/mean/reward"] == pytest.approx(0.5)
+        for name in excluded:
+            assert f"mean_across_repeats/{name}" not in aggregate
+
+
+class TestRepeatLevelMetrics:
+    def test_num_repeats_in_agent_metrics(self) -> None:
+        responses = _make_verify_responses(tasks=4, rollouts_per_task=3)
+        result = compute_aggregate_metrics(responses)
+        assert result.agent_metrics["num_repeats"] == 3
+
+    def test_absent_for_single_repeat(self) -> None:
+        responses = _make_verify_responses(tasks=4, rollouts_per_task=1)
+        result = compute_aggregate_metrics(responses)
+        assert result.agent_metrics["num_repeats"] == 1
+        assert result.repeat_level_metrics == []
+
+    def test_present_for_multi_repeat(self) -> None:
+        responses = _make_verify_responses(tasks=4, rollouts_per_task=3)
+        result = compute_aggregate_metrics(responses)
+        assert len(result.repeat_level_metrics) == 3
+
+    def test_repeat_entry_structure(self) -> None:
+        responses = _make_verify_responses(tasks=4, rollouts_per_task=2)
+        result = compute_aggregate_metrics(responses)
+        for i, entry in enumerate(result.repeat_level_metrics):
+            assert entry[ROLLOUT_INDEX_KEY_NAME] == i
+            assert entry["sample_count"] == 4
+            assert entry["missing_count"] == 0
+            for stat in ("mean", "median", "std", "sem", "ci_low_95", "ci_high_95", "min", "max", "p25", "p75"):
+                assert f"{stat}/reward" in entry, f"{stat}/reward missing from repeat entry"
+
+    def test_known_values(self) -> None:
+        """Spot-check mean and std for a controlled 2-repeat case."""
+        # repeat 0 rewards: task 0→0, 1→1, 2→0, 3→1  ⟹ mean=0.5, std≈0.577
+        responses = [
+            {TASK_INDEX_KEY_NAME: t, ROLLOUT_INDEX_KEY_NAME: r, "reward": float((t + r) % 2)}
+            for t in range(4)
+            for r in range(2)
+        ]
+        result = compute_aggregate_metrics(responses)
+        assert len(result.repeat_level_metrics) == 2
+        r0 = next(e for e in result.repeat_level_metrics if e[ROLLOUT_INDEX_KEY_NAME] == 0)
+        assert r0["mean/reward"] == pytest.approx(0.5)
+        assert r0["std/reward"] == pytest.approx((1 / 3) ** 0.5, rel=1e-3)
+        assert r0["sample_count"] == 4
+
+    def test_repeat_descriptive_stats_are_not_aggregated_as_point_estimates(self) -> None:
+        responses = _make_verify_responses(
+            tasks=4,
+            rollouts_per_task=3,
+            reward_fn=lambda task_idx, rollout_idx: float(task_idx + rollout_idx),
+        )
+        result = compute_aggregate_metrics(responses)
+
+        # Each repeat describes its task-level reward distribution. SEM and its CI are
+        # companions of that repeat's mean/reward point estimate, not additional estimands.
+        for entry in result.repeat_level_metrics:
+            assert "mean/reward" in entry
+            assert "sem/reward" in entry
+            assert "ci_low_95/reward" in entry
+            assert "ci_high_95/reward" in entry
+
+        assert "mean_across_repeats/mean/reward" in result.agent_metrics
+        for stat in ("median", "std", "sem", "min", "max", "p25", "p75", "ci_low_95", "ci_high_95"):
+            assert f"mean_across_repeats/{stat}/reward" not in result.agent_metrics
+
+    def test_ci_narrower_with_more_samples(self) -> None:
+        """Wider sample set → narrower CI (same reward variance)."""
+        small = _make_verify_responses(tasks=3, rollouts_per_task=2)
+        large = _make_verify_responses(tasks=20, rollouts_per_task=2)
+
+        def ci_width(metrics):
+            return metrics[0]["ci_high_95/reward"] - metrics[0]["ci_low_95/reward"]
+
+        assert ci_width(compute_aggregate_metrics(small).repeat_level_metrics) > ci_width(
+            compute_aggregate_metrics(large).repeat_level_metrics
+        )
+
+    def test_missing_count(self) -> None:
+        """Tasks absent for a rollout_index are reflected in missing_count."""
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.5},
+        ]
+        result = compute_aggregate_metrics(responses)
+        assert len(result.repeat_level_metrics) == 2
+        by_idx = {e[ROLLOUT_INDEX_KEY_NAME]: e for e in result.repeat_level_metrics}
+        assert by_idx[0]["sample_count"] == 2
+        assert by_idx[0]["missing_count"] == 0
+        assert by_idx[1]["sample_count"] == 1
+        assert by_idx[1]["missing_count"] == 1
+
+    def test_no_ci_with_one_sample(self) -> None:
+        """With only 1 task per repeat, sem is 0.0 (degenerate) and CI is not emitted."""
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.5},
+        ]
+        result = compute_aggregate_metrics(responses)
+        for entry in result.repeat_level_metrics:
+            assert entry["sem/reward"] == pytest.approx(0.0)
+            assert "ci_low_95/reward" not in entry
+            assert "ci_high_95/reward" not in entry
+
+
+class TestMissingRolloutWarning:
+    """When some repeats are missing tasks, repeat_level_metrics stats are computed from
+    unequal sample sizes -- RewardProfiler should warn rather than silently produce
+    metrics that look comparable but aren't.
+    """
+
+    def test_warns_when_a_repeat_is_missing_tasks(self) -> None:
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.5},
+            # task 1, rollout 1 is missing.
+        ]
+        with pytest.warns(UserWarning, match="missing_count"):
+            result = compute_aggregate_metrics(responses)
+
+        by_idx = {e[ROLLOUT_INDEX_KEY_NAME]: e for e in result.repeat_level_metrics}
+        assert by_idx[1]["missing_count"] == 1
+
+    def test_no_warning_when_all_repeats_complete(self) -> None:
+        responses = [
+            {TASK_INDEX_KEY_NAME: t, ROLLOUT_INDEX_KEY_NAME: r, "reward": float(t + r)}
+            for t in range(3)
+            for r in range(2)
+        ]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = compute_aggregate_metrics(responses)
+
+        assert not any("missing_count" in str(w.message) for w in caught)
+        assert all(entry["missing_count"] == 0 for entry in result.repeat_level_metrics)
+
+    def test_no_warning_for_single_repeat(self) -> None:
+        """A single rollout_index never produces repeat_level_metrics at all, so there's
+        nothing to warn about even though every task is trivially "complete" for it.
+        """
+        responses = _make_verify_responses(tasks=4, rollouts_per_task=1)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = compute_aggregate_metrics(responses)
+
+        assert not any("missing_count" in str(w.message) for w in caught)
+        assert result.repeat_level_metrics == []
+
+
+class TestConfidenceIntervalZeroSem:
+    """When sem is exactly 0 (every value in the sample is identical), scipy's t.interval
+    returns NaN due to an internal ±inf * 0, rather than the mathematically-correct degenerate
+    interval. RewardProfiler._confidence_interval should special-case this to (mean, mean)
+    and warn, rather than silently serializing the CI as null.
+    """
+
+    def test_collapses_to_mean_and_warns(self) -> None:
+        with pytest.warns(UserWarning, match="Standard error is 0"):
+            ci = RewardProfiler()._confidence_interval(mean=0.5, sem=0.0, n=4)
+
+        assert ci == (0.5, 0.5)
+
+    def test_no_warning_for_nonzero_sem(self) -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ci = RewardProfiler()._confidence_interval(mean=0.5, sem=0.1, n=4)
+
+        assert ci is not None
+        assert not any("Standard error is 0" in str(w.message) for w in caught)
+
+    def test_n_le_1_returns_none_without_warning(self) -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ci = RewardProfiler()._confidence_interval(mean=0.5, sem=0.0, n=1)
+
+        assert ci is None
+        assert not any("Standard error is 0" in str(w.message) for w in caught)
+
+    def test_end_to_end_identical_per_repeat_means_yield_point_ci(self) -> None:
+        """Reproduces the exact case from production: 2 repeats whose per-task rewards differ
+        but whose per-repeat means happen to be identical (both 0.5) -> se_across_repeats/mean/reward == 0.0,
+        so the cross-repeat CI should collapse to a point instead of being null.
+        """
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0},
+        ]
+        with pytest.warns(UserWarning, match="Standard error is 0"):
+            result = compute_aggregate_metrics(responses)
+
+        assert result.agent_metrics["se_across_repeats/mean/reward"] == pytest.approx(0.0)
+        assert result.agent_metrics["ci_low_95_across_repeats/mean/reward"] == pytest.approx(0.5)
+        assert result.agent_metrics["ci_high_95_across_repeats/mean/reward"] == pytest.approx(0.5)
+
+
+class TestAggregateRepeatLevelMetrics:
+    """Unit tests for RewardProfiler._aggregate_repeat_level_metrics, which collapses the
+    per-repeat estimates in repeat_level_metrics (one row per rollout_index) down to a single
+    mean/median/se per agent -- how consistent the repeat-level estimates are with each other.
+    """
+
+    def test_empty_input(self) -> None:
+        assert RewardProfiler()._aggregate_repeat_level_metrics([]) == []
+
+    def test_single_repeat_metric_is_degenerate(self) -> None:
+        """A single repeat has nothing to vary across, so se is 0 and mean == median == the value."""
+        repeat_level_metrics = [
+            {AGENT_REF_KEY_NAME: {"name": "agent"}, ROLLOUT_INDEX_KEY_NAME: 0, "mean/reward": 0.75},
+        ]
+        result = RewardProfiler()._aggregate_repeat_level_metrics(repeat_level_metrics)
+
+        assert len(result) == 1
+        assert result[0][AGENT_REF_KEY_NAME] == {"name": "agent"}
+        assert result[0]["mean_across_repeats/mean/reward"] == pytest.approx(0.75)
+        assert result[0]["median_across_repeats/mean/reward"] == pytest.approx(0.75)
+        assert result[0]["se_across_repeats/mean/reward"] == pytest.approx(0.0)
+        assert result[0]["std_across_repeats/mean/reward"] == pytest.approx(0.0)
+        assert result[0]["min_across_repeats/mean/reward"] == pytest.approx(0.75)
+        assert result[0]["max_across_repeats/mean/reward"] == pytest.approx(0.75)
+
+    def test_known_values_across_repeats(self) -> None:
+        """3 repeats with per-repeat means 1, 2, 3 -> mean=2, median=2, se=std([1,2,3])/sqrt(3)."""
+        repeat_level_metrics = [
+            {AGENT_REF_KEY_NAME: {"name": "agent"}, ROLLOUT_INDEX_KEY_NAME: i, "mean/reward": float(i + 1)}
+            for i in range(3)
+        ]
+        result = RewardProfiler()._aggregate_repeat_level_metrics(repeat_level_metrics)
+
+        assert len(result) == 1
+        entry = result[0]
+        assert entry["mean_across_repeats/mean/reward"] == pytest.approx(2.0)
+        assert entry["median_across_repeats/mean/reward"] == pytest.approx(2.0)
+        assert entry["se_across_repeats/mean/reward"] == pytest.approx(1.0 / (3**0.5))
+        assert entry["std_across_repeats/mean/reward"] == pytest.approx(1.0)
+        assert entry["min_across_repeats/mean/reward"] == pytest.approx(1.0)
+        assert entry["max_across_repeats/mean/reward"] == pytest.approx(3.0)
+
+    def test_skewed_repeats_median_differs_from_mean(self) -> None:
+        """An outlier repeat pulls the mean away from the median, demonstrating both are useful."""
+        repeat_level_metrics = [
+            {AGENT_REF_KEY_NAME: {"name": "agent"}, ROLLOUT_INDEX_KEY_NAME: 0, "mean/reward": 0.0},
+            {AGENT_REF_KEY_NAME: {"name": "agent"}, ROLLOUT_INDEX_KEY_NAME: 1, "mean/reward": 0.0},
+            {AGENT_REF_KEY_NAME: {"name": "agent"}, ROLLOUT_INDEX_KEY_NAME: 2, "mean/reward": 9.0},
+        ]
+        result = RewardProfiler()._aggregate_repeat_level_metrics(repeat_level_metrics)
+
+        entry = result[0]
+        assert entry["median_across_repeats/mean/reward"] == pytest.approx(0.0)
+        assert entry["mean_across_repeats/mean/reward"] == pytest.approx(3.0)
+        assert entry["mean_across_repeats/mean/reward"] != entry["median_across_repeats/mean/reward"]
+
+    def test_per_agent_grouping(self) -> None:
+        """Repeats from different agents are aggregated independently, not pooled together."""
+        repeat_level_metrics = [
+            {AGENT_REF_KEY_NAME: {"name": "agent_a"}, ROLLOUT_INDEX_KEY_NAME: 0, "mean/reward": 0.0},
+            {AGENT_REF_KEY_NAME: {"name": "agent_a"}, ROLLOUT_INDEX_KEY_NAME: 1, "mean/reward": 2.0},
+            {AGENT_REF_KEY_NAME: {"name": "agent_b"}, ROLLOUT_INDEX_KEY_NAME: 0, "mean/reward": 10.0},
+            {AGENT_REF_KEY_NAME: {"name": "agent_b"}, ROLLOUT_INDEX_KEY_NAME: 1, "mean/reward": 10.0},
+        ]
+        result = RewardProfiler()._aggregate_repeat_level_metrics(repeat_level_metrics)
+
+        by_agent = {entry[AGENT_REF_KEY_NAME]["name"]: entry for entry in result}
+        assert set(by_agent) == {"agent_a", "agent_b"}
+        assert by_agent["agent_a"]["mean_across_repeats/mean/reward"] == pytest.approx(1.0)
+        assert by_agent["agent_a"]["se_across_repeats/mean/reward"] > 0
+        assert by_agent["agent_b"]["mean_across_repeats/mean/reward"] == pytest.approx(10.0)
+        assert by_agent["agent_b"]["se_across_repeats/mean/reward"] == pytest.approx(0.0)
+
+    def test_merged_into_agent_level_metrics_via_compute_aggregate_metrics(self) -> None:
+        """End-to-end: the aggregated repeat-level stats land in the public agent_metrics dict,
+        without disturbing the original (non-repeat-aggregated) agent_metrics keys.
+        """
+        # 4 tasks x 3 repeats; each repeat has a different, internally-constant reward so the
+        # per-repeat "mean/reward" values are exactly 0.0, 1.0, 2.0.
+        responses = [
+            {TASK_INDEX_KEY_NAME: t, ROLLOUT_INDEX_KEY_NAME: r, "reward": float(r)} for t in range(4) for r in range(3)
+        ]
+        result = compute_aggregate_metrics(responses)
+
+        # Original per-rollout agent-level stat is untouched.
+        assert result.agent_metrics["mean/reward"] == pytest.approx(1.0)
+        # Cross-repeat aggregate of the per-repeat means [0, 1, 2].
+        assert result.agent_metrics["mean_across_repeats/mean/reward"] == pytest.approx(1.0)
+        assert result.agent_metrics["median_across_repeats/mean/reward"] == pytest.approx(1.0)
+        assert result.agent_metrics["se_across_repeats/mean/reward"] == pytest.approx(1.0 / (3**0.5))
+
 
 class TestAddAvgSampleStdDev:
     def test_adds_stats(self) -> None:
@@ -474,3 +987,225 @@ class TestAddAvgSampleStdDev:
         before = dict(metrics)
         add_avg_sample_std_dev(metrics, all_score_dicts, score_names, max_k)
         assert metrics == before
+
+
+class TestComputePerfSummary:
+    def test_zero_total_rollouts_returns_none(self) -> None:
+        assert compute_perf_summary([], total_rollouts=0) is None
+
+    def test_zero_total_rollouts_returns_none_even_with_inconsistent_ng_perf_records(self) -> None:
+        # A caller could in principle pass ng_perf_records inconsistent with total_rollouts
+        # (never happens via compute_aggregate_metrics, which derives both from the same
+        # verify_responses list) -- this must return None rather than divide by zero.
+        assert compute_perf_summary([{"num_turns": 1}], total_rollouts=0) is None
+
+    def test_no_ng_perf_returns_none_even_with_nonzero_rollouts(self) -> None:
+        # No rollout in this batch carried ng_perf (observability off for the whole run, or on
+        # but nothing was collected) so perf_summary stays absent.
+        assert compute_perf_summary([], total_rollouts=10) is None
+
+    def test_overall_observability_coverage_counts_ng_perf_bearing_rollouts(self) -> None:
+        # 3 of 10 rollouts in this batch carried ng_perf at all.
+        ng_perf_records = [{"num_turns": 1}, {"num_turns": 1}, {"num_turns": 1}]
+
+        summary = compute_perf_summary(ng_perf_records, total_rollouts=10)
+
+        assert summary["overall_observability_coverage"] == 0.3
+
+    def test_token_observability_coverage_denominated_by_all_rollouts(self) -> None:
+        # Of 4 total rollouts: one has ng_perf with token data (coverage > 0), one has ng_perf
+        # but zero resolved token data, two have no ng_perf at all. Only the first counts.
+        ng_perf_records = [
+            {"num_turns": 1, "token_observability_coverage": 1.0},
+            {"num_turns": 1, "token_observability_coverage": 0.0},
+        ]
+
+        summary = compute_perf_summary(ng_perf_records, total_rollouts=4)
+
+        assert summary["token_observability_coverage"] == 0.25
+
+    def test_percentiles_and_means_over_five_rollouts(self) -> None:
+        # total_latency_ms = 100, 200, 300, 400, 500 -> exact quartile/percentile boundaries at
+        # this size make the expected linear-interpolation values easy to hand-verify.
+        ng_perf_records = [{"total_latency_ms": ms, "num_turns": 1} for ms in (100, 200, 300, 400, 500)]
+
+        summary = compute_perf_summary(ng_perf_records, total_rollouts=len(ng_perf_records))
+
+        assert summary["total_latency_mean_ms"] == 300.0
+        assert summary["total_latency_p50_ms"] == 300.0
+        assert summary["total_latency_p90_ms"] == 460.0
+        assert summary["total_latency_p99_ms"] == 496.0
+
+    def test_single_rollout_std_is_zero_not_nan(self) -> None:
+        summary = compute_perf_summary([{"num_turns": 4}], total_rollouts=1)
+
+        assert summary["mean_num_turns"] == 4.0
+        assert summary["std_num_turns"] == 0.0
+        assert summary["min_num_turns"] == 4.0
+        assert summary["max_num_turns"] == 4.0
+        assert summary["p90_num_turns"] == 4.0
+
+    def test_token_totals_and_means(self) -> None:
+        ng_perf_records = [
+            {"prompt_tokens": 100, "completion_tokens": 20, "num_turns": 2},
+            {"prompt_tokens": 300, "completion_tokens": 60, "num_turns": 4},
+        ]
+
+        summary = compute_perf_summary(ng_perf_records, total_rollouts=len(ng_perf_records))
+
+        assert summary["total_prompt_tokens"] == 400
+        assert summary["mean_prompt_tokens"] == 200.0
+        assert summary["median_prompt_tokens"] == 200.0
+        assert summary["total_completion_tokens"] == 80
+        assert summary["mean_completion_tokens"] == 40.0
+        # tokens_per_turn is a per-rollout ratio, averaged after division: 20/2=10, 60/4=15.
+        assert summary["mean_tokens_per_turn"] == 12.5
+        assert summary["median_tokens_per_turn"] == 12.5
+
+    def test_field_absent_when_no_rollout_reports_it(self) -> None:
+        # No rollout reports cached_prompt_tokens or reasoning_tokens (e.g. the provider never
+        # surfaces cache usage) -- those stats must be missing, not present as 0 or None.
+        ng_perf_records = [{"prompt_tokens": 100, "completion_tokens": 20, "num_turns": 2}]
+
+        summary = compute_perf_summary(ng_perf_records, total_rollouts=len(ng_perf_records))
+
+        for absent_key in (
+            "mean_cached_prompt_tokens",
+            "total_cached_prompt_tokens",
+            "mean_reasoning_tokens",
+            "total_latency_mean_ms",
+        ):
+            assert absent_key not in summary
+
+    def test_tokens_per_turn_skips_zero_turn_rollouts(self) -> None:
+        # A rollout with num_turns == 0 would divide by zero; it must be excluded from the ratio
+        # rather than raising or being silently treated as some default.
+        ng_perf_records = [
+            {"completion_tokens": 10, "num_turns": 0},
+            {"completion_tokens": 20, "num_turns": 2},
+        ]
+
+        summary = compute_perf_summary(ng_perf_records, total_rollouts=len(ng_perf_records))
+
+        assert summary["mean_tokens_per_turn"] == 10.0
+
+    def test_mixed_presence_only_averages_over_reporting_rollouts(self) -> None:
+        # Rollout 2 never reports cached_prompt_tokens -- the mean must be computed over the
+        # rollouts that did report it (just rollout 1's value), not treat the missing one as 0.
+        ng_perf_records = [
+            {"cached_prompt_tokens": 40, "num_turns": 1},
+            {"num_turns": 1},
+        ]
+
+        summary = compute_perf_summary(ng_perf_records, total_rollouts=len(ng_perf_records))
+
+        assert summary["mean_cached_prompt_tokens"] == 40.0
+        assert summary["total_cached_prompt_tokens"] == 40
+
+
+class TestPerfSummaryInAggregateMetrics:
+    def test_absent_when_no_rollout_carries_ng_perf(self) -> None:
+        # No rollout in this batch carried ng_perf -- observability off for the whole run, or on
+        # but nothing was collected, are indistinguishable here. Either way perf_summary stays
+        # absent rather than present with a 0.0 coverage.
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {}},
+        ]
+
+        result = compute_aggregate_metrics(responses)
+
+        assert result.perf_summary is None
+
+    def test_present_when_a_rollout_carries_ng_perf(self) -> None:
+        responses = [
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 1.0,
+                "response": {},
+                "ng_perf": {"num_turns": 3, "prompt_tokens": 90, "total_latency_ms": 1000.0},
+            },
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "response": {}},
+        ]
+
+        result = compute_aggregate_metrics(responses)
+
+        assert result.perf_summary is not None
+        assert result.perf_summary["mean_num_turns"] == 3.0
+        assert result.perf_summary["total_prompt_tokens"] == 90
+        assert result.perf_summary["total_latency_mean_ms"] == 1000.0
+        # 1 of 2 rollouts carried ng_perf at all; that one doesn't itself set
+        # token_observability_coverage (hand-built dict), so it doesn't count as token-covered.
+        assert result.perf_summary["overall_observability_coverage"] == 0.5
+        assert result.perf_summary["token_observability_coverage"] == 0.0
+
+
+class TestMaskedSamplesAreNotScored:
+    """A masked sample is a completed rollout whose reward is not a valid measurement."""
+
+    def _vr(self, task, rollout, reward, mask=False):
+        return {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: rollout,
+            "reward": reward,
+            "mask_sample": mask,
+        }
+
+    def test_a_masked_zero_does_not_halve_the_score(self) -> None:
+        result = compute_aggregate_metrics([self._vr(0, 0, 1.0), self._vr(0, 1, 0.0, mask=True)])
+
+        assert result.key_metrics["mean/reward"] == 1.0
+        assert result.key_metrics["coverage/measured_rollouts"] == 1
+        assert result.key_metrics["coverage/masked_rollouts"] == 1
+
+    def test_the_flag_is_not_published_as_a_quality_metric(self) -> None:
+        result = compute_aggregate_metrics([self._vr(0, 0, 1.0), self._vr(0, 1, 0.0, mask=True)])
+
+        assert not [key for key in result.agent_metrics if key.endswith("/mask_sample")]
+
+    def test_a_run_that_masks_nothing_is_unchanged(self) -> None:
+        """No masking means no new keys, so an existing dashboard reads what it read before."""
+        plain = compute_aggregate_metrics(_make_verify_responses(2, 2))
+        flagged = compute_aggregate_metrics([{**vr, "mask_sample": False} for vr in _make_verify_responses(2, 2)])
+
+        assert flagged.key_metrics == plain.key_metrics
+        assert not [key for key in flagged.key_metrics if key.startswith("coverage/")]
+
+    def test_a_fully_masked_run_reports_coverage_instead_of_a_zero(self) -> None:
+        result = compute_aggregate_metrics([self._vr(0, 0, 0.0, mask=True), self._vr(1, 0, 0.0, mask=True)])
+
+        assert "mean/reward" not in result.key_metrics
+        assert result.key_metrics["coverage/measured_rollouts"] == 0
+        assert result.key_metrics["coverage/fully_masked_tasks"] == 2
+
+    def test_a_fully_masked_task_is_counted_but_not_scored(self) -> None:
+        result = compute_aggregate_metrics(
+            [self._vr(0, 0, 1.0), self._vr(1, 0, 0.0, mask=True), self._vr(1, 1, 0.0, mask=True)]
+        )
+
+        assert result.key_metrics["mean/reward"] == 1.0
+        assert result.key_metrics["coverage/measured_tasks"] == 1
+        assert result.key_metrics["coverage/fully_masked_tasks"] == 1
+        # The scored task keeps its own index rather than inheriting the masked one's.
+        assert [group[TASK_INDEX_KEY_NAME] for group in result.group_level_metrics] == [0]
+
+    def test_custom_metrics_see_only_the_scored_samples(self) -> None:
+        seen = {}
+
+        def _compute_metrics(tasks):
+            seen["rollouts"] = sum(len(task) for task in tasks)
+            return {}
+
+        compute_aggregate_metrics(
+            [self._vr(0, 0, 1.0), self._vr(0, 1, 0.0, mask=True)],
+            compute_metrics_fn=_compute_metrics,
+        )
+
+        assert seen["rollouts"] == 1
+
+    def test_a_fully_masked_run_still_reports_observability_coverage(self) -> None:
+        """A masked sample still executed, so it still counts for perf coverage."""
+        result = compute_aggregate_metrics([{**self._vr(0, 0, 0.0, mask=True), "ng_perf": {"num_turns": 3}}])
+
+        assert result.perf_summary is not None
+        assert result.perf_summary["overall_observability_coverage"] == 1.0

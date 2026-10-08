@@ -30,7 +30,7 @@ from nemo_gym.cli.main import main as gym_main
 LEGACY = {
     "run": ["env", "start"],
     "test": ["env", "test"],
-    "test_all": ["env", "test"],
+    "test_all": ["env", "test", "--all"],
     "dev_test": ["dev", "test"],
     "init_resources_server": ["env", "init"],
     "list_benchmarks": ["list", "benchmarks"],

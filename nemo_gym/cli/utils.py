@@ -20,7 +20,12 @@ from typing import Dict, Iterable, Optional
 
 def did_you_mean(value: str, candidates: Iterable[str]) -> str:
     """A ` Did you mean \\`X\\`?` fragment for the closest candidate to `value`, or `""` if none is close enough."""
-    matches = difflib.get_close_matches(value, list(candidates), n=1)
+    # Exclude the exact input so it is not suggested as its own correction.
+    matches = difflib.get_close_matches(
+        value,
+        [candidate for candidate in candidates if candidate != value],
+        n=1,
+    )
     return f" Did you mean `{matches[0]}`?" if matches else ""
 
 
@@ -116,22 +121,22 @@ def fuzzy_matches(query: str, *fields: str) -> bool:
 
 
 def print_rich_table(table) -> None:
-    """Print a Rich table without the 80-col truncation Rich applies when stdout is piped.
+    """Print a Rich table without truncating cells when standard output is piped.
 
-    On a TTY, Rich sizes the console to the terminal. When stdout is redirected (e.g.
-    `gym list benchmarks | cat`), Rich falls back to an 80-column console and truncates cells
-    with an ellipsis, silently losing data. We measure the table's natural width and render at
-    that width so piped output is lossless, while leaving interactive terminal output unchanged.
+    Rich normally renders redirected output with an 80-column console.
+    `FORCE_COLOR` can also make Rich report a pipe as a terminal.
+    Use the stream's actual TTY status so redirected output preserves every cell.
     """
 
     from rich.console import Console
 
     console = Console()
-    if not console.is_terminal:
-        # Rich clamps `measure()` to the measuring console's own width so we need to
-        # measure against an unbounded console to get the table's true natural width
-        natural_width = Console(width=10**6).measure(table).maximum
-        console = Console(width=natural_width)
+    if not console.file.isatty():
+        # Rich clamps measurements to the console width.
+        # An explicit height prevents TERM=dumb from replacing the requested width with 80.
+        height = console.height
+        natural_width = Console(width=10**6, height=height).measure(table).maximum
+        console = Console(width=natural_width, height=height)
     console.print(table)
 
 

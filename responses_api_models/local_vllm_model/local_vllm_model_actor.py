@@ -24,6 +24,18 @@ import ray
 from ray.util.placement_group import PlacementGroup
 
 
+def _get_local_dp_ranks(placement_groups: list[PlacementGroup]) -> list[int]:
+    """Return each engine's rank among engines whose first worker shares a node."""
+    node_engine_counts: dict[str, int] = {}
+    local_dp_ranks = []
+    for placement_group in placement_groups:
+        placement_group_data = ray.util.placement_group_table(placement_group)
+        worker_node_id = placement_group_data["bundles_to_node_id"][0]
+        local_dp_ranks.append(node_engine_counts.get(worker_node_id, 0))
+        node_engine_counts[worker_node_id] = local_dp_ranks[-1] + 1
+    return local_dp_ranks
+
+
 def _vllm_asyncio_task(server_args: Namespace):
     from vllm.entrypoints.openai.api_server import run_server
 
@@ -221,7 +233,6 @@ class LocalVLLMModelActor:
             START Use our initial placement group
             """
             placement_groups: list[PlacementGroup] = [head_node_placement_group]
-            local_dp_ranks: list[int] = [0]
             """
             END Use our initial placement group
             """
@@ -332,7 +343,11 @@ class LocalVLLMModelActor:
                 )
 
                 placement_groups.append(pg)
-                local_dp_ranks.append(0)
+
+            # vLLM 0.25.1 uses the node-local DP rank to select a disjoint TCPStore port window.
+            # Wait for placement so the rank reflects the node hosting each engine's first worker.
+            ray.get([placement_group.ready() for placement_group in placement_groups])
+            local_dp_ranks = _get_local_dp_ranks(placement_groups)
 
             if len(placement_groups) < dp_size:
                 raise ValueError(

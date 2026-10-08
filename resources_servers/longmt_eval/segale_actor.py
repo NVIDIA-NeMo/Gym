@@ -22,11 +22,21 @@ from typing import Dict, List, Optional
 
 import ray
 
+from nemo_gym import CACHE_DIR
+from nemo_gym.global_config import CACHE_DIR_KEY_NAME, maybe_get_global_config_dict
+
 
 LOG = logging.getLogger(__name__)
 
 
-def _mirror_python(cache_env_var: str, default_cache: str) -> Path:
+def _cache_dir() -> Path:
+    """Return the configured Gym cache directory without triggering a config parse."""
+    global_config_dict = maybe_get_global_config_dict()
+    configured = global_config_dict.get(CACHE_DIR_KEY_NAME) if global_config_dict is not None else None
+    return Path(configured) if configured else CACHE_DIR
+
+
+def _mirror_python(cache_env_var: str, default_cache: str | Path) -> Path:
     """Mirror the venv's uv Python install to a shared-FS path for Ray workers.
 
     Identical strategy to wmt_translation/app.py: uv ships python-build-
@@ -103,7 +113,7 @@ def _download_comet_model(comet_model: str) -> str:
     """Fetch a COMET checkpoint once and return its path; its non-HF URL fallback isn't race-safe."""
     from comet import download_model
 
-    cache_root = os.environ.get("LONGMT_COMET_CACHE", "/opt/Gym/.cache/longmt-comet")
+    cache_root = os.environ.get("LONGMT_COMET_CACHE", str(_cache_dir() / "longmt-comet"))
     dest = os.path.join(cache_root, comet_model.replace("/", "__"))
     _download_once(dest, lambda tmp: download_model(comet_model, saving_directory=tmp))
     # Files are present now; resolve the checkpoint path locally, no network.
@@ -127,9 +137,10 @@ def _build_segale_actor_class(actors_per_gpu: int = 1, use_extra_gpu: bool = Fal
         Use this when the gym joins the vLLM Ray cluster and a separate node has
         been registered with `ray start --resources='{"extra_gpu": N}'`.
     """
+    cache_dir = _cache_dir()
     mirrored_bin = _mirror_python(
         "LONGMT_EVAL_PY_CACHE",
-        "/opt/Gym/.cache/longmt-python",
+        cache_dir / "longmt-python",
     )
 
     venv_dir = Path(sys.executable).parent.parent
@@ -151,8 +162,9 @@ def _build_segale_actor_class(actors_per_gpu: int = 1, use_extra_gpu: bool = Fal
     for key in ("HF_HOME", "HF_HUB_OFFLINE", "HF_HUB_CACHE", "TRANSFORMERS_CACHE"):
         if os.environ.get(key):
             env_vars[key] = os.environ[key]
-    env_vars["LASER_HOME"] = os.environ.get("LASER_HOME", "/opt/Gym/.cache/longmt-laser")
-    env_vars["ERSATZ"] = os.environ.get("ERSATZ", "/opt/Gym/.cache/longmt-ersatz")
+    env_vars["LASER_HOME"] = os.environ.get("LASER_HOME", str(cache_dir / "longmt-laser"))
+    env_vars["ERSATZ"] = os.environ.get("ERSATZ", str(cache_dir / "longmt-ersatz"))
+    env_vars["LONGMT_COMET_CACHE"] = os.environ.get("LONGMT_COMET_CACHE", str(cache_dir / "longmt-comet"))
 
     gpu_fraction = 1 / actors_per_gpu
     if use_extra_gpu:

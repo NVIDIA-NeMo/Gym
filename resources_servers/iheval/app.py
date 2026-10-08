@@ -82,6 +82,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
+# Pre-import packages that nltk pulls in during its init so they are already in
+# sys.modules before nltk's inisec.py finder is installed. nltk>=3.9 blocks any
+# import originating from nltk if the module path falls inside the process CWD —
+# which happens in CI where the server venv lives inside the repo root.
+import defusedxml.ElementTree  # noqa: F401
+import regex  # noqa: F401
 from fastapi import FastAPI
 from pydantic import ConfigDict
 
@@ -708,6 +714,7 @@ class IHEvalVerifyResponse(BaseVerifyResponse):
 
 
 class IHEvalResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: IHEvalResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

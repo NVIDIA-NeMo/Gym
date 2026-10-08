@@ -16,21 +16,34 @@ from __future__ import annotations
 
 import math
 import re
+import statistics
+import warnings
 from collections import Counter, defaultdict
+from numbers import Real
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import orjson
 from pandas import DataFrame, Series, notna
 from pandas.core.groupby.generic import DataFrameGroupBy
 from pydantic import Field
-from wandb import Histogram
+from scipy import stats
+
+
+if TYPE_CHECKING:
+    from wandb import Histogram
 
 from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    rollout_run_key,
+    rollout_run_labels,
+)
+from nemo_gym.metrics_config import ACROSS_REPEATS_MARKER, PassMajorityStat, Stat
+from nemo_gym.metrics_config import (
+    is_primary_metric as is_repeat_aggregatable_metric,
 )
 
 
@@ -97,8 +110,15 @@ class RewardProfiler:
         results_by_key = self._index_by_rollout_key(results, "result")
         matched_keys = rows_by_key.keys() & results_by_key.keys()
 
-        expected_by_task = Counter(task_idx for task_idx, _ in rows_by_key)
-        completed_by_task = Counter(task_idx for task_idx, _ in matched_keys)
+        # Fan-out dispatches the same task to several agents, and those copies share a task index.
+        # Count completion per (task, agent) so one agent's missing rollouts don't hide behind
+        # another's completed ones. Without fan-out each task has one agent and this reduces to
+        # the plain per-task count.
+        def _group_of(key: Tuple[int, int]) -> Tuple[int, Optional[str]]:
+            return key[0], rollout_run_key(rows_by_key[key])
+
+        expected_by_task = Counter(_group_of(key) for key in rows_by_key)
+        completed_by_task = Counter(_group_of(key) for key in matched_keys)
 
         complete_input_rows = 0
         partial_input_rows = 0
@@ -149,7 +169,7 @@ class RewardProfiler:
                 rollout_info[k] = v
 
         for k, v in result.items():
-            if k in {TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, "reward", "response"}:
+            if k.startswith("_") or k in {"reward", "response"}:
                 continue
             if isinstance(v, bool):
                 rollout_info[k] = int(v)
@@ -158,16 +178,39 @@ class RewardProfiler:
 
         return rollout_info
 
-    def histogram(self, data: Series) -> Optional[Histogram]:
+    def histogram(self, data: Series) -> Optional["Histogram"]:
         # W&B doesn't accept empty histograms
         data = data.dropna()
         if data.empty:
             return
 
+        # wandb is an optional extra (`nemo-gym[wandb]`). This stat is always dropped by
+        # prepare_for_serialization before it reaches any JSON output or exporter (it exists
+        # only for a wandb-native run that reads group_level_metrics/agent_metrics directly),
+        # so skipping it when wandb isn't installed changes nothing observable.
+        try:
+            from wandb import Histogram
+        except ImportError:
+            # warnings.warn's default filter shows this once per (module, lineno), so it
+            # doesn't spam once per column per describe_dataframe call.
+            warnings.warn(
+                "wandb is not installed, so the histogram/* stats are being skipped. "
+                "Install with: pip install nemo-gym[wandb]",
+                stacklevel=2,
+            )
+            return None
+
         return Histogram(data)
 
     def describe_dataframe(self, df: DataFrame) -> DataFrame:
-        stat_index = ["mean", "max", "min", "median", "std", "histogram"]
+        stat_index = [
+            Stat.MEAN,
+            Stat.MAX,
+            Stat.MIN,
+            Stat.MEDIAN,
+            Stat.STD,
+            Stat.HISTOGRAM,
+        ]
         d: List[Series] = [
             df.mean(),
             df.max(),
@@ -175,7 +218,7 @@ class RewardProfiler:
             df.median(),
             df.std(),
             df.apply(self.histogram, axis=0),
-        ]
+        ]  # type: ignore
 
         # Std is nore interpretable using 0 rather than NaN for no std
         if d[4].isna().all():
@@ -199,60 +242,232 @@ class RewardProfiler:
             {k: v for k, v in group_metrics.items() if v is not None and notna(v)} for group_metrics in grouped_metrics
         ]
 
+    def _confidence_interval(
+        self, mean: float, sem: float, n: int, confidence: float = 0.95
+    ) -> Optional[Tuple[float, float]]:
+        """Return (ci_low, ci_high) t-interval at the given confidence level, or None when n <= 1."""
+        if n <= 1:
+            return None
+        if sem == 0:
+            warnings.warn(
+                f"Standard error is 0 (all {n} values are identical) -- confidence interval "
+                "collapses to a single point rather than being computed.",
+                stacklevel=2,
+            )
+            return mean, mean
+        ci_low, ci_high = stats.t.interval(confidence, df=n - 1, loc=mean, scale=sem)
+        return float(ci_low), float(ci_high)
+
+    def _compute_repeat_level_metrics(self, df: DataFrame) -> List[Dict[str, Any]]:
+        """Per-agent, per-rollout-index summary stats across all tasks.
+
+        Only produced for agents that have more than one rollout index — agents with a
+        single rollout contribute nothing to a repeat-level comparison and are skipped.
+        If no agent qualifies, returns an empty list.
+        """
+        numeric_cols = df.select_dtypes(include="number").columns.difference(
+            [TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME]
+        )
+
+        rollout_counts_by_agent = df.groupby("agent_name")[ROLLOUT_INDEX_KEY_NAME].nunique()
+        multi_rollout_agents = set(rollout_counts_by_agent[rollout_counts_by_agent > 1].index)
+        if not multi_rollout_agents:
+            return []
+
+        df = df[df["agent_name"].isin(multi_rollout_agents)]
+        total_tasks_by_agent = df.groupby("agent_name")[TASK_INDEX_KEY_NAME].nunique()
+
+        repeat_metrics = []
+        for (agent_name, rollout_idx), group in df.groupby(["agent_name", ROLLOUT_INDEX_KEY_NAME]):
+            present_tasks = int(group[TASK_INDEX_KEY_NAME].nunique())
+            total_tasks = int(total_tasks_by_agent[agent_name])
+            entry: Dict[str, Any] = {
+                AGENT_REF_KEY_NAME: {"name": agent_name},
+                ROLLOUT_INDEX_KEY_NAME: int(rollout_idx),
+                "sample_count": present_tasks,
+                "missing_count": total_tasks - present_tasks,
+            }
+            for col in numeric_cols:
+                col_data = group[col].dropna()
+                n = len(col_data)
+                if n == 0:
+                    continue
+                mean = float(col_data.mean())
+                std = float(col_data.std(ddof=1)) if n > 1 else 0.0
+                sem = std / n**0.5
+                entry.update(
+                    {
+                        f"{Stat.MEAN.prefix}{col}": mean,
+                        f"{Stat.MEDIAN.prefix}{col}": float(col_data.median()),
+                        f"{Stat.STD.prefix}{col}": std,
+                        f"{Stat.SEM.prefix}{col}": sem,
+                        f"{Stat.MIN.prefix}{col}": float(col_data.min()),
+                        f"{Stat.MAX.prefix}{col}": float(col_data.max()),
+                        f"{Stat.P25.prefix}{col}": float(col_data.quantile(0.25)),
+                        f"{Stat.P75.prefix}{col}": float(col_data.quantile(0.75)),
+                    }
+                )
+                if ci := self._confidence_interval(mean, sem, n):
+                    entry[f"{Stat.CI_LOW_95.prefix}{col}"], entry[f"{Stat.CI_HIGH_95.prefix}{col}"] = ci
+            repeat_metrics.append(entry)
+
+        incomplete_repeats = [entry for entry in repeat_metrics if entry["missing_count"] > 0]
+        if incomplete_repeats:
+            warnings.warn(
+                f"{len(incomplete_repeats)} repeat(s) are missing rollouts for some tasks "
+                f"(e.g. agent={incomplete_repeats[0][AGENT_REF_KEY_NAME]['name']!r}, "
+                f"{ROLLOUT_INDEX_KEY_NAME}={incomplete_repeats[0][ROLLOUT_INDEX_KEY_NAME]}, "
+                f"missing_count={incomplete_repeats[0]['missing_count']}). "
+                "repeat_level_metrics statistics were computed from unequal sample sizes across "
+                "repeats and may not be directly comparable, and agent_level_metrics may be biased "
+                "toward whichever tasks happened to complete. Consider obtaining the missing rollouts "
+                "before drawing conclusions from these metrics.",
+                stacklevel=2,
+            )
+
+        return repeat_metrics
+
+    def _aggregate_repeat_level_metrics(
+        self,
+        repeat_level_metrics: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Aggregate per-repeat estimates (e.g. mean/reward) across repeats, per agent.
+
+        Treats each repeat's stat as one observation and reports the statistics across
+        repeats. Existing summaries and uncertainty estimates are retained in the input
+        rows but excluded here to avoid calculating statistics over statistics.
+        """
+        if not repeat_level_metrics:
+            return []
+
+        df = DataFrame.from_records(repeat_level_metrics)
+        df["agent_name"] = df[AGENT_REF_KEY_NAME].apply(lambda ref: ref["name"])
+        numeric_cols = [
+            col for col in df.select_dtypes(include="number").columns if is_repeat_aggregatable_metric(col)
+        ]
+
+        aggregated_metrics = []
+        for agent_name, group in df.groupby("agent_name"):
+            entry: Dict[str, Any] = {AGENT_REF_KEY_NAME: {"name": agent_name}}
+            for col in numeric_cols:
+                col_data = group[col].dropna()
+                n = len(col_data)
+                if n == 0:
+                    continue
+                mean = float(col_data.mean())
+                std = float(col_data.std(ddof=1)) if n > 1 else 0.0
+                se = std / n**0.5
+                entry[f"{Stat.MEAN.across_repeats_prefix}{col}"] = mean
+                entry[f"{Stat.MEDIAN.across_repeats_prefix}{col}"] = float(col_data.median())
+                entry[f"{Stat.STD.across_repeats_prefix}{col}"] = std
+                entry[f"{Stat.MIN.across_repeats_prefix}{col}"] = float(col_data.min())
+                entry[f"{Stat.MAX.across_repeats_prefix}{col}"] = float(col_data.max())
+                entry[f"{Stat.SE.across_repeats_prefix}{col}"] = se
+                if ci := self._confidence_interval(mean, se, n):
+                    (
+                        entry[f"{Stat.CI_LOW_95.across_repeats_prefix}{col}"],
+                        entry[f"{Stat.CI_HIGH_95.across_repeats_prefix}{col}"],
+                    ) = ci
+            aggregated_metrics.append(entry)
+        return aggregated_metrics
+
+    def _append_repeat_level_aggregates_to_agent_level_metrics(
+        self, agent_level_metrics: List[Dict[str, Any]], repeat_level_metrics: List[Dict[str, Any]]
+    ) -> None:
+        repeat_level_aggregates_by_agent = {
+            entry[AGENT_REF_KEY_NAME]["name"]: entry
+            for entry in self._aggregate_repeat_level_metrics(repeat_level_metrics)
+        }
+        for agent_metrics in agent_level_metrics:
+            aggregate = repeat_level_aggregates_by_agent.get(agent_metrics[AGENT_REF_KEY_NAME]["name"])
+            if aggregate is not None:
+                agent_metrics.update({k: v for k, v in aggregate.items() if k != AGENT_REF_KEY_NAME})
+
     def profile_from_data(
         self,
         rows: List[Dict[str, Any]],
         results: List[Dict[str, Any]],
         allow_partial_rollouts: bool = False,
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
         aligned_rows_and_results = self.align_rows_and_results(
             rows, results, allow_partial_rollouts=allow_partial_rollouts
         )
 
+        # Under fan-out the same task index appears once per agent. Profile those copies as
+        # separate groups — one per (task, agent) — so each harness keeps its own reward/length
+        # stats. Runs where every task has a single agent keep the plain per-task grouping and
+        # byte-identical output.
+        # Tolerate rows without an agent_ref exactly as before: only matched rows ever required
+        # one, so the detection must not introduce a new failure on unmatched (partial) rows.
+        # Group by what ran each rollout, named the way aggregate metrics name it. Each label names
+        # exactly one Environment Server, so two servers that front one agent stay separate.
+        labels = rollout_run_labels(rows)
+
+        def _agent_name(row: Dict[str, Any]) -> Optional[str]:
+            return labels.get(rollout_run_key(row))
+
+        per_agent = len({(row[TASK_INDEX_KEY_NAME], _agent_name(row)) for row in rows}) > len(
+            {row[TASK_INDEX_KEY_NAME] for row in rows}
+        )
+
+        def _group_key(row: Dict[str, Any]) -> Any:
+            if per_agent:
+                return row[TASK_INDEX_KEY_NAME], _agent_name(row)
+            return row[TASK_INDEX_KEY_NAME]
+
         filtered_results: List[Dict] = []
-        task_idx_to_row: Dict[int, Dict] = dict()
-        task_idx_to_rollout_infos: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-        expected_rollouts_by_task = Counter(row[TASK_INDEX_KEY_NAME] for row in rows)
+        task_idx_to_row: Dict[Any, Dict] = dict()
+        task_idx_to_rollout_infos: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
+        expected_rollouts_by_task = Counter(_group_key(row) for row in rows)
         for row, result in aligned_rows_and_results:
             task_idx, rollout_idx = _rollout_key(row)
-            task_idx_to_rollout_infos[task_idx].append(self.rollout_info_from_result(result))
+            task_idx_to_rollout_infos[_group_key(row)].append(self.rollout_info_from_result(result))
 
             # Add additional helpful information
-            result = result | (result["response"].get("usage") or {})
+            result = result | ((result.get("response") or {}).get("usage") or {})
 
             # agent_name is a temporary column used for aggregations below
             numeric_result = {
-                "agent_name": row["agent_ref"]["name"],
+                "agent_name": _agent_name(row),
                 TASK_INDEX_KEY_NAME: task_idx,
                 ROLLOUT_INDEX_KEY_NAME: rollout_idx,
             }
             for k, v in result.items():
+                if k.startswith("_"):
+                    continue
                 if isinstance(v, bool):
                     numeric_result[k] = int(v)
                 elif isinstance(v, (int, float)):
                     numeric_result[k] = v
 
             filtered_results.append(numeric_result)
-            task_idx_to_row.setdefault(task_idx, row)
+            task_idx_to_row.setdefault(_group_key(row), row)
 
         if not filtered_results:
-            return [], []
+            return [], [], []
 
         df = DataFrame.from_records(filtered_results)
 
-        group_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, "agent_name"]).groupby(TASK_INDEX_KEY_NAME)
+        if per_agent:
+            group_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME]).groupby([TASK_INDEX_KEY_NAME, "agent_name"])
+        else:
+            group_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, "agent_name"]).groupby(TASK_INDEX_KEY_NAME)
         group_level_metrics = self.calculate_metrics_single_df(group_level_df)
         for group_metrics in group_level_metrics:
-            task_idx = group_metrics[TASK_INDEX_KEY_NAME]
-            row = task_idx_to_row[task_idx]
+            if per_agent:
+                group_metrics[AGENT_REF_KEY_NAME] = {"name": group_metrics.pop("agent_name")}
+                group_key = (group_metrics[TASK_INDEX_KEY_NAME], group_metrics[AGENT_REF_KEY_NAME]["name"])
+            else:
+                group_key = group_metrics[TASK_INDEX_KEY_NAME]
+            row = task_idx_to_row[group_key]
 
             row = row.copy()
             row.pop(TASK_INDEX_KEY_NAME)
             row.pop(ROLLOUT_INDEX_KEY_NAME)
 
             group_metrics["sample"] = row
-            num_rollouts = len(task_idx_to_rollout_infos[task_idx])
-            expected_num_rollouts = expected_rollouts_by_task[task_idx]
+            num_rollouts = len(task_idx_to_rollout_infos[group_key])
+            expected_num_rollouts = expected_rollouts_by_task[group_key]
             group_metrics["num_rollouts"] = num_rollouts
             group_metrics["expected_num_rollouts"] = expected_num_rollouts
             group_metrics["missing_num_rollouts"] = expected_num_rollouts - num_rollouts
@@ -260,7 +475,7 @@ class RewardProfiler:
                 100.0 if expected_num_rollouts == 0 else 100.0 * num_rollouts / expected_num_rollouts
             )
             group_metrics["rollout_infos"] = sorted(
-                task_idx_to_rollout_infos[task_idx],
+                task_idx_to_rollout_infos[group_key],
                 key=lambda r: r[ROLLOUT_INDEX_KEY_NAME],
             )
 
@@ -269,7 +484,10 @@ class RewardProfiler:
         for agent_metrics in agent_level_metrics:
             agent_metrics[AGENT_REF_KEY_NAME] = {"name": agent_metrics.pop("agent_name")}
 
-        return group_level_metrics, agent_level_metrics
+        repeat_level_metrics = self._compute_repeat_level_metrics(df)
+        self._append_repeat_level_aggregates_to_agent_level_metrics(agent_level_metrics, repeat_level_metrics)
+
+        return group_level_metrics, agent_level_metrics, repeat_level_metrics
 
     def prepare_for_serialization(self, metrics: List[Dict]) -> List[Dict]:
         """
@@ -279,7 +497,7 @@ class RewardProfiler:
         for row in metrics:
             row = row.copy()
             for key in list(row):
-                if key.startswith("histogram"):
+                if key.startswith(Stat.HISTOGRAM):
                     row.pop(key)
 
             results.append(row)
@@ -290,8 +508,9 @@ class RewardProfiler:
         self,
         group_level_metrics: List[Dict[str, Any]],
         agent_level_metrics: List[Dict[str, Any]],
+        repeat_level_metrics: List[Dict[str, Any]],
         base_output_fpath: Path,
-    ) -> Tuple[Path, Path]:
+    ) -> Tuple[Path, Path, Path]:
         reward_profiling_fpath = base_output_fpath.with_stem(base_output_fpath.stem + "_reward_profiling").with_suffix(
             ".jsonl"
         )
@@ -304,7 +523,12 @@ class RewardProfiler:
         )
         agent_level_metrics_fpath.write_bytes(orjson.dumps(self.prepare_for_serialization(agent_level_metrics)))
 
-        return reward_profiling_fpath, agent_level_metrics_fpath
+        repeat_level_metrics_fpath = base_output_fpath.with_stem(
+            base_output_fpath.stem + "_repeat_level_metrics"
+        ).with_suffix(".json")
+        repeat_level_metrics_fpath.write_bytes(orjson.dumps(self.prepare_for_serialization(repeat_level_metrics)))
+
+        return reward_profiling_fpath, agent_level_metrics_fpath, repeat_level_metrics_fpath
 
 
 def compute_pass_majority_metrics(
@@ -447,8 +671,8 @@ def compute_pass_majority_metrics(
                     variance = sum((x - mean_val) ** 2 for x in run_averages) / (len(run_averages) - 1)
                     std_dev = math.sqrt(variance)
                     std_err = std_dev / math.sqrt(len(run_averages))
-                    metrics[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = std_dev
-                    metrics[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = std_err
+                    metrics[f"pass@1[avg-of-{k}]/{name}{PassMajorityStat.STD_DEV_ACROSS_RUNS.suffix}"] = std_dev
+                    metrics[f"pass@1[avg-of-{k}]/{name}{PassMajorityStat.STD_ERR_ACROSS_RUNS.suffix}"] = std_err
 
     return metrics, all_score_dicts, score_names, max_k
 
@@ -479,7 +703,9 @@ def add_avg_sample_std_dev(
                     task_var = sum((v - task_mean) ** 2 for v in vals) / (len(vals) - 1)
                     sample_std_devs.append(math.sqrt(task_var))
             if sample_std_devs:
-                metrics[f"pass@1[avg-of-{k}]/{name}/avg_sample_std_dev"] = sum(sample_std_devs) / len(sample_std_devs)
+                metrics[f"pass@1[avg-of-{k}]/{name}{PassMajorityStat.AVG_SAMPLE_STD_DEV.suffix}"] = sum(
+                    sample_std_devs
+                ) / len(sample_std_devs)
 
 
 def compute_subset_metrics(
@@ -501,7 +727,9 @@ def compute_subset_metrics(
     """
     subsets: Dict[str, List[List[Dict[str, Any]]]] = {}
     for task_rollouts in tasks:
-        value = task_rollouts[0].get(subset_key) if task_rollouts else None
+        # The first rollout that has it: a row counted as zero for a rollout that never ran can
+        # come first in its task and lack the fields its verifier would have computed.
+        value = next((rollout[subset_key] for rollout in task_rollouts if rollout.get(subset_key)), None)
         if value:
             subsets.setdefault(value, []).append(task_rollouts)
 
@@ -547,7 +775,11 @@ def highest_k_metrics(
         highest_k_metrics(am, "pass@1[avg-of-{k}]", exclude_names=["no_answer"])
         # → {"pass@1[avg-of-32]/accuracy": 94.5, "pass@1[avg-of-32]/symbolic_accuracy": 93.2}
     """
-    stat_suffixes = {"std_dev_across_runs", "std_err_across_runs", "avg_sample_std_dev"}
+    stat_suffixes = {
+        PassMajorityStat.STD_DEV_ACROSS_RUNS,
+        PassMajorityStat.STD_ERR_ACROSS_RUNS,
+        PassMajorityStat.AVG_SAMPLE_STD_DEV,
+    }
 
     # Build regex from pattern: "pass@{k}" → r"^pass@(\d+)/(.+)$"
     escaped = re.escape(pattern).replace(r"\{k\}", r"(\d+)")
@@ -581,7 +813,7 @@ def highest_k_metrics(
 
 
 class AggregateMetricsMixin:
-    """Mixin providing compute_metrics/get_key_metrics hooks and the aggregate_metrics endpoint.
+    """Mixin providing full-run, per-repeat, and key-metric aggregation hooks.
 
     Inherited by both SimpleResourcesServer and SimpleResponsesAPIAgent so that
     benchmark-specific metric logic can live on either server type.
@@ -592,7 +824,8 @@ class AggregateMetricsMixin:
 
         Receives verify responses grouped by task: tasks[i] is a list of rollout
         dicts for task i. Each dict has at minimum reward, plus any custom fields
-        from the verify response (e.g. symbolic_correct, judgement-gen-base).
+        from the verify response (e.g. symbolic_correct, judgement-gen-base). This
+        hook is called once for the full dataset.
 
         Use for metrics that need the full dataset at once:
         - Confidence intervals (ArenaMetrics)
@@ -604,12 +837,136 @@ class AggregateMetricsMixin:
         """
         return {}
 
+    def compute_repeat_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Override to compute custom metrics independently for one repeat.
+
+        Returned names replace matching generic repeat metrics. A metric is summarized
+        only when it is finite for every scored repeat and its full-run value, if any, is finite.
+        """
+        return {}
+
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         """Override to select headline metrics for this benchmark.
 
         Default: all mean/* entries from agent_metrics.
         """
-        return {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        return {k: v for k, v in agent_metrics.items() if k.startswith(Stat.MEAN.prefix)}
+
+
+# The field name on `BaseVerifyResponse`. Kept as a literal so this module does not have
+# to import the server module it is imported by.
+MASK_SAMPLE_FIELD = "mask_sample"
+
+
+def _partition_on_mask(
+    verify_responses: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split into the samples whose reward is a valid measurement, and the rest."""
+    scored, masked = [], []
+    for vr in verify_responses:
+        (masked if vr.get(MASK_SAMPLE_FIELD) else scored).append(vr)
+    return scored, masked
+
+
+def _rollout_key(row: Dict[str, Any]) -> Tuple[Any, Any]:
+    return row.get(TASK_INDEX_KEY_NAME, 0), row.get(ROLLOUT_INDEX_KEY_NAME, 0)
+
+
+def select_measured(
+    rows: List[Dict[str, Any]],
+    results: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    """Narrow a rollout set to what quality metrics may be computed from.
+
+    Both the aggregation path and ``gym eval profile`` go through here, so the same saved
+    rollouts produce the same quality numbers whichever view you look at.
+
+    Three things happen. Masked samples leave the quality set, because their reward is not
+    a measurement of the evaluated system. The flag itself is stripped from what remains:
+    it is a flag, not a measurement, and the profiler would otherwise coerce it to an int
+    and publish `mean/mask_sample` alongside real metrics. And the input rows of exactly
+    those masked results are dropped with them, so the two stay aligned -- a masked rollout
+    is absent from the quality set but was never missing from the collection, and must not
+    be reported as an incomplete run or require ``allow_partial_rollouts`` to profile.
+
+    Only the masked pairs are removed, never "keep what was scored": a row whose result is
+    genuinely missing has to survive into the quality set so alignment still reports the
+    collection as partial. This function narrows what is measured; it does not decide
+    whether the collection was complete, and callers that enforce completeness must
+    validate the original rows and results before calling it.
+
+    Masked rows are returned rather than discarded: completion and coverage accounting
+    still has to see them.
+    """
+    scored, masked = _partition_on_mask(results)
+    coverage = _coverage_metrics(results, scored, masked)
+    measured_results = [{k: v for k, v in vr.items() if k != MASK_SAMPLE_FIELD} for vr in scored]
+
+    if not masked:
+        return rows, measured_results, masked, coverage
+
+    masked_keys = {_rollout_key(vr) for vr in masked}
+    measured_rows = [row for row in rows if _rollout_key(row) not in masked_keys]
+    return measured_rows, measured_results, masked, coverage
+
+
+def coverage_by_agent(
+    rows: List[Dict[str, Any]],
+    results: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Coverage for each agent, computed from that agent's own records.
+
+    A run-wide coverage block copied onto every agent tells each of them how much *the run*
+    masked, which reads as that agent's own loss. An agent that masked nothing would carry
+    another agent's count.
+
+    Agents are keyed by name; an agent whose every result was masked still gets an entry,
+    so a caller can keep reporting it after the quality metrics drop it.
+    """
+    agent_of_key = {
+        _rollout_key(row): (row.get("agent_ref") or {}).get("name")
+        for row in rows
+        if (row.get("agent_ref") or {}).get("name") is not None
+    }
+
+    per_agent: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for vr in results:
+        name = agent_of_key.get(_rollout_key(vr))
+        if name is not None:
+            per_agent[name].append(vr)
+
+    coverage: Dict[str, Dict[str, Any]] = {}
+    for name, records in per_agent.items():
+        scored, masked = _partition_on_mask(records)
+        agent_coverage = _coverage_metrics(records, scored, masked)
+        if agent_coverage:
+            coverage[name] = agent_coverage
+    return coverage
+
+
+def _coverage_metrics(
+    all_responses: List[Dict[str, Any]],
+    scored: List[Dict[str, Any]],
+    masked: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """How much of the run the quality metrics above were actually computed from.
+
+    Empty when nothing was masked, so a run that reports no masking publishes exactly the
+    keys it published before.
+    """
+    if not masked:
+        return {}
+    tasks_total = {vr.get(TASK_INDEX_KEY_NAME, 0) for vr in all_responses}
+    tasks_measured = {vr.get(TASK_INDEX_KEY_NAME, 0) for vr in scored}
+    return {
+        # Deliberately not `coverage/scored`: collection already exports that for how many
+        # rollouts reached the score at all (#2883). These say how many of those the score
+        # was actually computed from, which is smaller as soon as an environment masks.
+        "coverage/measured_rollouts": len(scored),
+        "coverage/masked_rollouts": len(masked),
+        "coverage/measured_tasks": len(tasks_measured),
+        "coverage/fully_masked_tasks": len(tasks_total - tasks_measured),
+    }
 
 
 def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
@@ -620,10 +977,161 @@ def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str
     return [groups[k] for k in sorted(groups)]
 
 
+def _stat(values: List[float], stat: str) -> float:
+    if stat == Stat.MEAN:
+        return statistics.fmean(values)
+    if stat == Stat.MEDIAN:
+        return statistics.median(values)
+    if stat == "total":
+        return sum(values)
+    if stat == Stat.STD:
+        return statistics.pstdev(values)
+    if stat == Stat.MIN:
+        return min(values)
+    if stat == Stat.MAX:
+        return max(values)
+    if stat.startswith("p"):
+        # Series.quantile() default (linear interpolation) matches numpy.percentile's default
+        # and, unlike statistics.quantiles, handles a single-value series with no special-casing.
+        return float(Series(values).quantile(int(stat[1:]) / 100))
+    raise ValueError(f"Unknown stat {stat!r}")
+
+
+# Per-rollout ng_perf token fields, each summarized with the same mean/median/total stats
+# (simpler than RFC R3's literal per-field list, which asymmetrically omits median/total for
+# some fields). Result keys are f"{stat}_{field}" except total_latency_ms, which uses
+# total_latency_{stat}_ms -- see the dedicated block in compute_perf_summary.
+_PERF_SUMMARY_TOKEN_FIELDS: Tuple[str, ...] = (
+    "prompt_tokens",
+    "cached_prompt_tokens",
+    "completion_tokens",
+    "reasoning_tokens",
+)
+_PERF_SUMMARY_TOKEN_STATS: Tuple[str, ...] = (Stat.MEAN, Stat.MEDIAN, "total")
+_PERF_SUMMARY_NUM_TURNS_STATS: Tuple[str, ...] = (
+    Stat.MEAN,
+    Stat.MEDIAN,
+    Stat.STD,
+    Stat.MIN,
+    "p90",
+    Stat.MAX,
+)
+_PERF_SUMMARY_LATENCY_STATS: Tuple[str, ...] = ("p50", "p90", "p99", Stat.MEAN)
+
+
+def compute_perf_summary(ng_perf_records: List[Dict[str, Any]], total_rollouts: int) -> Optional[Dict[str, Any]]:
+    """Aggregate per-rollout ``ng_perf`` dicts into the ``perf_summary`` block (RFC R3).
+
+    ``total_rollouts`` is the full rollout count for this batch, including rollouts that never
+    produced ``ng_perf`` at all -- the denominator for ``overall_observability_coverage`` and
+    ``token_observability_coverage``.
+
+    Returns ``None`` when there are no rollouts at all, or when none of them carried ``ng_perf``
+    (observability off for the whole run, or on but nothing was collected) -- perf_summary is
+    absent rather than present with a 0.0 coverage either way; a coverage value, when present, is
+    always > 0. Every other stat is included only when at least one rollout reported the
+    underlying field (a provider that never reports cache usage yields no
+    ``mean_cached_prompt_tokens``, for example).
+    """
+    if total_rollouts <= 0 or not ng_perf_records:
+        return None
+
+    def _values(key: str) -> List[float]:
+        return [record[key] for record in ng_perf_records if isinstance(record.get(key), (int, float))]
+
+    summary: Dict[str, Any] = {
+        "overall_observability_coverage": len(ng_perf_records) / total_rollouts,
+        "token_observability_coverage": sum(
+            1
+            for record in ng_perf_records
+            if isinstance(record.get("token_observability_coverage"), (int, float))
+            and record["token_observability_coverage"] > 0
+        )
+        / total_rollouts,
+    }
+
+    for field in _PERF_SUMMARY_TOKEN_FIELDS:
+        values = _values(field)
+        if not values:
+            continue
+        for stat in _PERF_SUMMARY_TOKEN_STATS:
+            summary[f"{stat}_{field}"] = _stat(values, stat)
+
+    num_turns_values = _values("num_turns")
+    if num_turns_values:
+        for stat in _PERF_SUMMARY_NUM_TURNS_STATS:
+            summary[f"{stat}_num_turns"] = _stat(num_turns_values, stat)
+
+    # Per-rollout ratio, then distribution of that ratio across rollouts.
+    tokens_per_turn = [
+        record["completion_tokens"] / record["num_turns"]
+        for record in ng_perf_records
+        if isinstance(record.get("completion_tokens"), (int, float))
+        and isinstance(record.get("num_turns"), (int, float))
+        and record["num_turns"] > 0
+    ]
+    if tokens_per_turn:
+        summary["mean_tokens_per_turn"] = _stat(tokens_per_turn, Stat.MEAN)
+        summary["median_tokens_per_turn"] = _stat(tokens_per_turn, Stat.MEDIAN)
+
+    latency_values = _values("total_latency_ms")
+    if latency_values:
+        for stat in _PERF_SUMMARY_LATENCY_STATS:
+            summary[f"total_latency_{stat}_ms"] = _stat(latency_values, stat)
+
+    return summary
+
+
+def _is_finite_number(value: Any) -> bool:
+    return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def _add_custom_repeat_metrics(
+    profiler: RewardProfiler,
+    verify_responses: List[Dict[str, Any]],
+    repeat_level_metrics: List[Dict[str, Any]],
+    agent_metrics: Dict[str, Any],
+    custom_metrics: Dict[str, Any],
+    compute_repeat_metrics_fn: Any,
+) -> None:
+    """Recompute benchmark metrics per repeat, replacing generic collisions and their aggregates."""
+    if not repeat_level_metrics or compute_repeat_metrics_fn is None:
+        return
+
+    responses_by_repeat: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for response in verify_responses:
+        responses_by_repeat[response.get(ROLLOUT_INDEX_KEY_NAME, 0)].append(response)
+
+    repeat_custom_metrics = [
+        compute_repeat_metrics_fn(_group_by_task(responses_by_repeat[row[ROLLOUT_INDEX_KEY_NAME]]))
+        for row in repeat_level_metrics
+    ]
+    metric_names = {name for metrics in repeat_custom_metrics for name in metrics}
+    if not metric_names:
+        return
+    for name in metric_names:
+        values = [metrics.get(name) for metrics in repeat_custom_metrics]
+        for row in repeat_level_metrics:
+            row.pop(name, None)
+        if (name not in custom_metrics or _is_finite_number(custom_metrics[name])) and all(
+            _is_finite_number(value) for value in values
+        ):
+            for row, value in zip(repeat_level_metrics, values):
+                row[name] = float(value)
+
+    for name in list(agent_metrics):
+        if ACROSS_REPEATS_MARKER in name and name.split(ACROSS_REPEATS_MARKER, 1)[1] in metric_names:
+            agent_metrics.pop(name)
+
+    for aggregate in profiler._aggregate_repeat_level_metrics(repeat_level_metrics):
+        agent_metrics.update({name: value for name, value in aggregate.items() if name != AGENT_REF_KEY_NAME})
+
+
 def compute_aggregate_metrics(
     verify_responses: List[Dict[str, Any]],
     compute_metrics_fn=None,
     get_key_metrics_fn=None,
+    compute_repeat_metrics_fn=None,
 ) -> AggregateMetrics:
     """Shared aggregation logic for /aggregate_metrics.
 
@@ -631,29 +1139,48 @@ def compute_aggregate_metrics(
     for both group-level (per-task) and agent-level metrics.
 
     Optionally accepts custom functions for benchmark-specific customization:
-      - compute_metrics_fn: receives ALL verify responses grouped by task
-        (List[List[Dict]]) for metrics that need the full dataset (e.g. confidence
-        intervals, cross-task statistics, pass@k). Returned dict is merged into agent_metrics.
+      - compute_metrics_fn: receives all verify responses grouped by task. Its returned
+        dict is merged into agent_metrics.
       - get_key_metrics_fn: select headline metrics from agent_metrics
+      - compute_repeat_metrics_fn: receives one repeat grouped by task. Its returned
+        metrics are summarized across repeats.
     """
     if not verify_responses:
         return AggregateMetrics()
 
+    # A masked sample is a completed rollout whose reward is not a valid measurement of
+    # the evaluated system. Averaging it in would publish a quality score the run never
+    # measured, so quality metrics are computed from the scored subset only. The masked
+    # rows stay in `verify_responses` and are reported as coverage below.
+    scored, masked = _partition_on_mask(verify_responses)
+    coverage = _coverage_metrics(verify_responses, scored, masked)
+
+    # Observability coverage is measured over every rollout that ran, masked or not: a
+    # masked sample still executed and still reported its own latency.
+    perf_summary = compute_perf_summary(
+        [vr["ng_perf"] for vr in verify_responses if isinstance(vr.get("ng_perf"), dict)],
+        total_rollouts=len(verify_responses),
+    )
+
+    if not scored:
+        # Every rollout was masked. Publishing means over an empty set would invent a
+        # zero; report what happened instead.
+        return AggregateMetrics(agent_metrics=dict(coverage), key_metrics=dict(coverage), perf_summary=perf_summary)
+
     rp = RewardProfiler()
 
-    rows = []
-    results = []
-    for vr in verify_responses:
-        rows.append(
-            {
-                TASK_INDEX_KEY_NAME: vr.get(TASK_INDEX_KEY_NAME, 0),
-                ROLLOUT_INDEX_KEY_NAME: vr.get(ROLLOUT_INDEX_KEY_NAME, 0),
-                "agent_ref": {"name": "agent"},
-            }
-        )
-        results.append(vr if "response" in vr else {**vr, "response": {}})
+    synthetic_rows = [
+        {
+            TASK_INDEX_KEY_NAME: vr.get(TASK_INDEX_KEY_NAME, 0),
+            ROLLOUT_INDEX_KEY_NAME: vr.get(ROLLOUT_INDEX_KEY_NAME, 0),
+            "agent_ref": {"name": "agent"},
+        }
+        for vr in verify_responses
+    ]
+    filled = [vr if "response" in vr else {**vr, "response": {}} for vr in verify_responses]
+    rows, results, _, _ = select_measured(synthetic_rows, filled)
 
-    group_level_metrics, agent_level_metrics = rp.profile_from_data(rows, results)
+    group_level_metrics, agent_level_metrics, repeat_level_metrics = rp.profile_from_data(rows, results)
 
     # Flatten agent_level_metrics (one entry since we use a single agent name)
     agent_metrics: Dict[str, Any] = {}
@@ -665,15 +1192,17 @@ def compute_aggregate_metrics(
     serialized_group = rp.prepare_for_serialization(group_level_metrics)
 
     # Keep task index explicit in aggregate metrics for downstream per-task joins.
-    sorted_task_indices = sorted({vr.get(TASK_INDEX_KEY_NAME, 0) for vr in verify_responses})
+    sorted_task_indices = sorted({vr.get(TASK_INDEX_KEY_NAME, 0) for vr in scored})
     for group, task_idx in zip(serialized_group, sorted_task_indices):
         group[TASK_INDEX_KEY_NAME] = task_idx
 
     serialized_agent = rp.prepare_for_serialization([agent_metrics])[0] if agent_metrics else {}
+    serialized_agent.update(coverage)
 
     # Custom metrics computed from all raw verify responses grouped by task
+    custom: Dict[str, Any] = {}
     if compute_metrics_fn:
-        tasks = _group_by_task(verify_responses)
+        tasks = _group_by_task(scored)
         custom = compute_metrics_fn(tasks)
 
         # Merge per_task_metrics into group_level_metrics (keyed by task_index)
@@ -690,15 +1219,42 @@ def compute_aggregate_metrics(
 
         serialized_agent.update(custom)
 
+    serialized_agent["num_repeats"] = len({vr.get(ROLLOUT_INDEX_KEY_NAME, 0) for vr in verify_responses})
+
+    # Select headline metrics from the full-run estimates.
     if get_key_metrics_fn:
         key_metrics = get_key_metrics_fn(serialized_agent)
     else:
-        key_metrics = {k: v for k, v in serialized_agent.items() if k.startswith("mean/")}
+        key_metrics = {k: v for k, v in serialized_agent.items() if k.startswith(Stat.MEAN.prefix)}
+    # Stays out of the headline set unless something was actually masked, so a run that
+    # masks nothing publishes exactly the keys it published before.
+    key_metrics.update(coverage)
+
+    if (
+        compute_repeat_metrics_fn
+        and getattr(compute_repeat_metrics_fn, "__func__", None) is not AggregateMetricsMixin.compute_repeat_metrics
+    ):
+        _add_custom_repeat_metrics(
+            rp,
+            scored,
+            repeat_level_metrics,
+            serialized_agent,
+            custom,
+            compute_repeat_metrics_fn,
+        )
+
+    serialized_repeat_level_metrics = [
+        {k: v for k, v in entry.items() if k != AGENT_REF_KEY_NAME} for entry in repeat_level_metrics
+    ]
 
     return AggregateMetrics(
         group_level_metrics=serialized_group,
         agent_metrics=serialized_agent,
         key_metrics=key_metrics,
+        perf_summary=perf_summary,
+        # Repeat-level variability is a quality statistic, so it comes from the scored
+        # subset like the rest: `profile_from_data` above is already given only those.
+        repeat_level_metrics=serialized_repeat_level_metrics,
     )
 
 

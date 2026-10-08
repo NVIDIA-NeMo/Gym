@@ -86,9 +86,9 @@ class TestListModels:
             list_models()
         payload = json.loads(capsys.readouterr().out)
         expected = [
-            {"model": "my_model", "model_group": "my_model"},
-            {"model": "my_model/some_other_flavor", "model_group": "my_model"},
-            {"model": "another_model", "model_group": "another_model"},
+            {"name": "my_model", "model": "my_model", "model_group": "my_model"},
+            {"name": "my_model/some_other_flavor", "model": "my_model/some_other_flavor", "model_group": "my_model"},
+            {"name": "another_model", "model": "another_model", "model_group": "another_model"},
         ]
         assert len(payload) == len(expected)
         for row in expected:
@@ -106,7 +106,7 @@ class TestListModels:
         out = capsys.readouterr().out
         assert "The my_model model" in out
         assert f"config: {_MODELS['my_model'].config_path.resolve()}" in out
-        assert "Usage example:" not in out  # thin view
+        assert "Usage example:" in out
 
     def test_inspect_model_by_flavor_token(self, capsys) -> None:
         # A `<model>/<flavor>` token inspects that flavor's config.

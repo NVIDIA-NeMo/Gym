@@ -20,3 +20,5 @@ scipy
 joblib
 langdetect
 sacrebleu[ja,ko]>=2.4
+# spacy: segale pins spacy==3.8.4 which has no cp313 wheels; longmt_eval
+# is currently incompatible with Python 3.13 until SEGALE updates its dep.

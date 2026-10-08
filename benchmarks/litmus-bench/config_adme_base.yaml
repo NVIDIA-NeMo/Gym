@@ -1,0 +1,21 @@
+# Shared pieces of the ADME Tier-5 sub10 evaluation, scored by the reusable
+# litmus_agent verifier. Companion to config.yaml; data comes from
+# prepare_adme_tier5.py.
+#
+# Chained by one config_adme_<subset>.yaml per subset. They are kept separate
+# because `gym eval run +split=benchmark` collates every benchmark dataset in the
+# global config into one file and applies `limit` to the collated result, so
+# exposing all three subsets at once would let one crowd out the others.
+config_paths:
+  - resources_servers/litmus_agent/configs/litmus_agent.yaml
+
+# A practical baseline for hosted frontier models. Override per run if needed.
+responses_create_params:
+  max_output_tokens: 8192
+
+# Keep the generic environment isolated from this fixed benchmark configuration.
+adme_tier5_resources_server:
+  _inherit_from: litmus_agent
+  resources_servers:
+    litmus_agent:
+      verified: false

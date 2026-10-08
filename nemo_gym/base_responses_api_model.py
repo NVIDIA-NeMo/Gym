@@ -35,19 +35,21 @@ import os
 import re
 import time
 from abc import abstractmethod
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, AsyncIterator, ClassVar, Iterable, Literal, Mapping, NotRequired, Optional, TypedDict
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
+from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -55,29 +57,178 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.responses_streaming import (
+    NamespaceMap,
+    restore_namespace_tool_calls,
     sanitize_streaming_responses_body,
     synthesize_responses_failure_sse,
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.rollout_observability import (
+    AgentObservationBundle,
+    ObservationGap,
+    TrajectoryRecord,
+    join_assistant_message_calls,
+    join_model_call_observations,
+)
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
     SimpleServer,
 )
+from nemo_gym.telemetry.endpoints import traced_endpoint
+from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.token_id_capture import (
+    CaptureContext,
+    capture_tokens,
+    current_capture_context,
+    installed_lineage_store,
+    installed_token_sink,
+    register_call_intent,
+    reset_token_sink,
+    resolve_parent,
+    set_token_sink,
+)
+
+# The store factory needs Gym's server stack.
+# The leaf package does not re-export it.
+from nemo_gym.token_id_capture.config import NonGeneratingRequest, token_id_capture_config
+from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
+from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
+from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
+from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.token_id_capture.store import make_token_store
 
 
 logger = logging.getLogger(__name__)
+
+_CHAT_KEEPALIVE_SECONDS = 15.0
+_SSE_KEEPALIVE = b": keep-alive\n\n"
 
 
 # Stateless; shared by every model server's default /v1/messages handler.
 _ANTHROPIC_CONVERTER = AnthropicConverter()
 
 
+class ModelExecutionOutcome(TypedDict):
+    error_category: NotRequired[str]
+    upstream_attempted: bool
+    response_source: Literal["upstream", "local"] | None
+    upstream_status_code: int | None
+    local_response_reason: str | None
+
+
+def start_model_execution(request: Request, *, upstream_attempted: bool) -> ModelExecutionOutcome:
+    """Keep adapter-owned execution facts separate from the served response and capture settings."""
+    outcome = ModelExecutionOutcome(
+        upstream_attempted=upstream_attempted,
+        response_source=None,
+        upstream_status_code=None,
+        local_response_reason=None,
+    )
+    request.state.nemo_gym_model_execution = outcome
+    return outcome
+
+
+def _request_messages(body: Any) -> list[dict]:
+    """Return the conversation carried by any supported dialect.
+
+    Lineage uses model-authored turns to identify the parent call.
+    Chat and Anthropic use ``messages``.
+    Responses uses ``input``.
+    The request envelope is prepended as a pseudo-turn because it also shapes the prompt.
+    """
+    if body is None:
+        return []
+    getter = body.get if isinstance(body, dict) else lambda key, default=None: getattr(body, key, default)
+    messages = getter("messages", None)
+    if isinstance(messages, list):
+        turns = [m if isinstance(m, dict) else m.model_dump() for m in messages if m is not None]
+    else:
+        items = getter("input", None)
+        turns = (
+            [i if isinstance(i, dict) else i.model_dump() for i in items if i is not None]
+            if isinstance(items, list)
+            else []
+        )
+    return _request_envelope(getter) + turns
+
+
+# This role cannot collide with a dialect role.
+# It is not assistant-authored and does not affect the lookup fingerprint.
+_ENVELOPE_ROLE = "_ng_request_envelope"
+
+
+def _request_envelope(getter: Any) -> list[dict]:
+    """Return prompt-shaping request fields that are not turns.
+
+    Instructions and tools can be siblings of the message list.
+    The chat template renders both into the prompt.
+    Including them prevents prefix reuse across different request envelopes.
+    """
+    instructions = getter("instructions", None)
+    tools = getter("tools", None)
+    if not instructions and not tools:
+        return []
+    envelope = {"instructions": _plain(instructions), "tools": _plain(tools)}
+    return [{"role": _ENVELOPE_ROLE, "content": json.dumps(envelope, sort_keys=True, default=str)}]
+
+
+def _plain(value: Any) -> Any:
+    """Reduce a request field to plain data so equal schemas serialize equally.
+
+    Handlers can expose tools as dictionaries or Pydantic models.
+    Normalization keeps an unchanged schema stable across handlers.
+    """
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    return value
+
+
+def _orjson_dispatch_response(content: Any) -> Any:
+    """Serialize a completed non-streaming model response with orjson.
+
+    FastAPI serializes a bare dictionary or Pydantic model with ``jsonable_encoder``.
+    That function recursively visits every token ID and log probability before standard-library ``json.dumps`` runs.
+
+    Convert Pydantic models to JSON-compatible values before encoding the result.
+    Return the encoded bytes as a ``Response`` so FastAPI does not encode them again.
+    Preserve ``Response`` objects created by model-server overrides.
+    """
+    if isinstance(content, Response):
+        return content
+    if isinstance(content, BaseModel):
+        content = content.model_dump(mode="json", by_alias=True)
+    return Response(content=orjson.dumps(content), media_type="application/json")
+
+
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
-    pass
+    # Exact successful routes whose responses cannot contain policy-generated content.
+    token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
+    drop_hosted_tools: bool = Field(
+        default=False,
+        description=(
+            "Drop every tool type other than ``function`` and ``custom`` from a streaming Responses "
+            "request instead of passing it to the backend. That covers the provider-hosted tools (web "
+            "search, file search, code interpreter, image generation, computer use, remote MCP), which a "
+            "backend that serves none of them cannot honor, and also client-executed built-in types such "
+            "as ``local_shell``. Off by default, which passes every valid tool spec through."
+        ),
+    )
+    drop_custom_tools: bool = Field(
+        default=False,
+        description=(
+            "Drop Responses ``custom`` (free-form) tools from streaming requests instead of converting "
+            "them. A backend that expresses function tools only (a vLLM chat route, for example) answers "
+            "a request carrying one with 422, and the client retries the whole request. Off by default "
+            "so a backend with free-form tool support keeps them."
+        ),
+    )
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -85,22 +236,62 @@ class BaseResponsesAPIModel(BaseServer):
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    # Subclasses can declare successful metadata or health routes here.
+    # Unknown successful routes fail closed during training-token capture.
+    non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
+
+    async def _finalize_served_response(self, response: Any) -> None:
+        """Finalize capture after conversion to the response returned to the client."""
+
+    async def _stream_served_response(self, response: Any, events: Iterable[str | bytes]) -> StreamingResponse:
+        """Serialize buffered SSE before committing externally staged capture."""
+        context = current_capture_context()
+        if context is not None and context.external_staging:
+            # SSE generators serialize lazily. Finish that work before recording success.
+            events = [event.encode("utf-8") if isinstance(event, str) else event for event in events]
+            await self._finalize_served_response(response)
+        return StreamingResponse(
+            iter(events),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        install_model_call_capture(app, capture_config, model_server_name=self.config.name)
+        install_model_call_capture(
+            app,
+            capture_config,
+            model_server_name=self.config.name,
+            assistant_message_header=self.server_client.assistant_message_header(self.config.name),
+            global_config_dict=self.server_client.global_config_dict,
+            num_workers=self.config.num_workers,
+            non_generating_requests=self.non_generating_model_routes
+            | frozenset(
+                (request.method, request.path) for request in self.config.token_id_capture_non_generating_requests
+            ),
+        )
 
-        app.post("/v1/chat/completions")(self.chat_completions_dispatch)
+        model_attributes = {"nemo.gym.server.name": self.config.name}
+        app.post("/v1/chat/completions")(
+            traced_endpoint(
+                GymSpanGroup.MODEL_CALL, "gym.model.chat_completions", self.chat_completions_dispatch, model_attributes
+            )
+        )
 
-        app.post("/v1/responses")(self.responses_dispatch)
+        app.post("/v1/responses")(
+            traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.responses", self.responses_dispatch, model_attributes)
+        )
 
         # Every Gym model server speaks the Anthropic Messages API by default, mapping
         # Messages <-> Responses around its own responses() implementation. This lets blackbox
         # harnesses that require an Anthropic endpoint (e.g. the Claude Code CLI) target any
         # model server directly.
-        app.post("/v1/messages")(self.messages)
+        app.post("/v1/messages")(
+            traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.messages", self.messages, model_attributes)
+        )
 
         return app
 
@@ -126,21 +317,43 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         delegated to the same ``responses()``, and the complete response is re-emitted as a
         synthesized Responses SSE event stream. A ``responses()`` failure on this path is turned
         into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
-        still fails eagerly, before the stream is committed).
+        and an ``HTTPException`` raised by ``responses()`` still fail eagerly with their status, before
+        the stream is committed).
         """
         if not body.get("stream"):
             params = _validate_responses_params(body)
-            return await self._invoke_responses(request, params)
+            response = await self._invoke_responses(request, params)
+            dispatched = _orjson_dispatch_response(response)
+            await self._finalize_served_response(response)
+            return dispatched
 
-        cleaned, ns_map = sanitize_streaming_responses_body(body)
+        cleaned, ns_map = sanitize_streaming_responses_body(
+            body,
+            drop_custom_tools=self.config.drop_custom_tools,
+            drop_hosted_tools=self.config.drop_hosted_tools,
+        )
         try:
             params = validate_streaming_responses_params(cleaned)
         except ValidationError as exc:
             raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
 
+        return await self._stream_responses(request, params, ns_map)
+
+    async def _stream_responses(
+        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, ns_map: NamespaceMap
+    ) -> StreamingResponse:
+        """Serve the same converted response to capture and Responses SSE clients."""
         try:
             response = await self._invoke_responses(request, params)
-            response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
+            response_json = (
+                response.model_dump(mode="json", by_alias=True) if isinstance(response, BaseModel) else dict(response)
+            )
+            response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
+            return await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
+        except HTTPException:
+            # A status the server chose to return, such as a propagated provider error, is raised
+            # before the stream is committed, so the client receives it like a validation error.
+            raise
         except Exception as exc:
             # The streaming contract is already the response's shape, so a backend failure must be a
             # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.
@@ -149,10 +362,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 synthesize_responses_failure_sse(str(exc)),
                 media_type="text/event-stream",
             )
-        return StreamingResponse(
-            synthesize_responses_sse(response_json, ns_map),
-            media_type="text/event-stream",
-        )
 
     async def chat_completions_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/chat/completions`` entrypoint shared by every Gym model server.
@@ -165,8 +374,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         sanitized onto that same strict model (drop ``stream``/``stream_options``; see
         ``nemo_gym.chat_streaming``), validated identically, delegated to the same
         ``chat_completions()``, and the complete response is buffered and re-emitted as a
-        synthesized ``chat.completion.chunk`` SSE stream. This is buffer-then-replay, not
-        token-by-token streaming.
+        synthesized ``chat.completion.chunk`` SSE stream. Keepalive comments maintain the
+        connection while the backend computes; model output is still buffer-then-replay.
 
         Only a genuine boolean ``stream: true`` takes the streaming path; any other value
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
@@ -174,15 +383,71 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
-            return await self._invoke_chat_completions(request, params)
+            response = await self._invoke_chat_completions(request, params)
+            dispatched = _orjson_dispatch_response(response)
+            await self._finalize_served_response(response)
+            return dispatched
 
         cleaned, include_usage = sanitize_streaming_chat_body(body)
         params = _validate_chat_params(cleaned)
-        completion = await self._invoke_chat_completions(request, params)
-        completion_json = completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
+
+        async def completed_stream(completion: Any) -> StreamingResponse:
+            completion_json = (
+                completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
+            )
+            return await self._stream_served_response(
+                completion_json,
+                synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
+            )
+
+        pending = asyncio.create_task(self._invoke_chat_completions(request, params))
+        try:
+            # StreamingResponse commits HTTP headers before iterating its body.
+            # Wait here so fast backend failures retain normal HTTP error handling.
+            done, _ = await asyncio.wait({pending}, timeout=_CHAT_KEEPALIVE_SECONDS)
+            if done:
+                return await completed_stream(await pending)
+        except BaseException:
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+            raise
+
+        async def events() -> AsyncIterator[str | bytes]:
+            try:
+                # A long silent request can outlive the network's idle timeout even
+                # when both the client and backend allow hours for generation.
+                yield _SSE_KEEPALIVE
+                while not pending.done():
+                    done, _ = await asyncio.wait({pending}, timeout=_CHAT_KEEPALIVE_SECONDS)
+                    if not done:
+                        yield _SSE_KEEPALIVE
+                try:
+                    completion = await pending
+                except Exception as exc:
+                    logger.exception("chat_completions() failed after streaming headers were sent")
+                    status = getattr(exc, "status_code", None) or getattr(exc, "status", None) or 500
+                    error = {
+                        "message": f"HTTP {status}: {exc.detail if isinstance(exc, HTTPException) else 'Model request failed'}",
+                        "type": "server_error" if status >= 500 else "invalid_request_error",
+                        "code": status,
+                    }
+                    yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
+                    return
+                # Capture finalization and serialization failures must propagate:
+                # treating them as backend SSE errors would hide an invalid capture.
+                response = await completed_stream(completion)
+                async for event in response.body_iterator:
+                    yield event
+            finally:
+                if not pending.done():
+                    pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+
         return StreamingResponse(
-            synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
+            events(),
             media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     async def _invoke_chat_completions(
@@ -191,9 +456,23 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # chat_completions() signatures vary across servers: some take a leading `request`, some
         # only `body`. Dispatch on whichever this server declares so the shared dispatch works for
         # all of them.
+        # Resolve the parent from the received request before dispatch.
+        # Exact prefix supply and capture share this decision.
+        if current_capture_context() is not None:
+            request_messages = _request_messages(params)
+            await resolve_parent(request_messages)
+            await register_call_intent()
+        else:
+            request_messages = None
         if "request" in inspect.signature(self.chat_completions).parameters:
-            return await self.chat_completions(request=request, body=params)
-        return await self.chat_completions(body=params)
+            completion = await self.chat_completions(request=request, body=params)
+        else:
+            completion = await self.chat_completions(body=params)
+        await capture_tokens(
+            completion,
+            request_messages=request_messages,
+        )
+        return completion
 
     async def messages(self, request: Request, body: dict = Body()):
         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
@@ -209,11 +488,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         model_name = body.get("model") or response.model
         anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
         if body.get("stream"):
-            return StreamingResponse(
+            return await self._stream_served_response(
+                anthropic_response,
                 _ANTHROPIC_CONVERTER.anthropic_response_to_sse(anthropic_response),
-                media_type="text/event-stream",
             )
-        return anthropic_response
+        dispatched = _orjson_dispatch_response(anthropic_response)
+        await self._finalize_served_response(anthropic_response)
+        return dispatched
 
     async def _invoke_responses(
         self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming
@@ -221,9 +502,26 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # responses() signatures vary across servers: some take a leading `request`, some only
         # `body`. Dispatch on whichever this server declares so the default messages() works for
         # all of them.
+        # Resolve the parent from the received request before dispatch.
+        # Exact prefix supply and capture share this decision.
+        if current_capture_context() is not None:
+            request_messages = _request_messages(params)
+            await resolve_parent(request_messages)
+            await register_call_intent()
+        else:
+            request_messages = None
         if "request" in inspect.signature(self.responses).parameters:
-            return await self.responses(request=request, body=params)
-        return await self.responses(body=params)
+            response = await self.responses(request=request, body=params)
+        else:
+            response = await self.responses(body=params)
+        # Capture before streaming dispatch wraps the response.
+        # Anthropic mapping drops the token fields.
+        # The assembled response still carries them here for every dialect.
+        await capture_tokens(
+            response,
+            request_messages=request_messages,
+        )
+        return response
 
 
 def _validate_responses_params(body: dict) -> NeMoGymResponseCreateParamsNonStreaming:
@@ -371,6 +669,21 @@ def _token_count(value: Any) -> Optional[int]:
     return value if type(value) is int and value >= 0 else None
 
 
+def _usage_detail_token(
+    usage: Mapping[str, Any], detail_groups: tuple[str, ...], field_names: tuple[str, ...]
+) -> Optional[int]:
+    """Return the first valid token count across equivalent provider detail shapes."""
+    for group_name in detail_groups:
+        details = usage.get(group_name)
+        if not isinstance(details, Mapping):
+            continue
+        for field_name in field_names:
+            value = _token_count(details.get(field_name))
+            if value is not None:
+                return value
+    return None
+
+
 def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
     """Normalize token totals across Responses, Chat Completions, and Anthropic Messages usage.
 
@@ -402,20 +715,22 @@ def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
     cache_read = _token_count(usage.get("cache_read_input_tokens"))
     cache_creation = _token_count(usage.get("cache_creation_input_tokens"))
     if cache_read is not None or cache_creation is not None:
-        # A fully-cached response can omit input_tokens; use a 0 base so the folded prompt size is
-        # preserved rather than dropped to null. (Top-level cache_* keys are Anthropic-only, so the
-        # OpenAI/Responses path -- nested prompt_tokens_details.cached_tokens -- never enters here.)
-        tokens_in = (tokens_in or 0) + (cache_read or 0) + (cache_creation or 0)
+        cache_total = (cache_read or 0) + (cache_creation or 0)
+        # Zero cache fields alone do not establish a missing prompt count.
+        if tokens_in is not None or cache_total > 0:
+            tokens_in = (tokens_in or 0) + cache_total
     tokens_total = _token_count(usage.get("total_tokens"))
     if tokens_total is None and tokens_in is not None and tokens_out is not None:
         tokens_total = tokens_in + tokens_out
-    details = usage.get("output_tokens_details") or usage.get("completion_tokens_details") or {}
-    if not isinstance(details, Mapping):
-        details = {}
+    tokens_reasoning = _usage_detail_token(
+        usage, ("output_tokens_details", "completion_tokens_details"), ("reasoning_tokens",)
+    )
+    if tokens_reasoning is None:
+        tokens_reasoning = _token_count(usage.get("reasoning_output_tokens"))
     return {
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
-        "tokens_reasoning": _token_count(details.get("reasoning_tokens")),
+        "tokens_reasoning": tokens_reasoning,
         "tokens_total": tokens_total,
         "cache_creation_tokens": cache_creation,
     }
@@ -425,12 +740,15 @@ def _cache_signal(usage: Any) -> tuple[Optional[bool], Optional[int]]:
     """Cache hit/miss + cached-token count, from usage cache fields (OpenAI / Anthropic)."""
     if not isinstance(usage, Mapping):
         return None, None
-    details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
-    if not isinstance(details, Mapping):
-        details = {}
-    cached = _token_count(details.get("cached_tokens"))
+    cached = _usage_detail_token(
+        usage,
+        ("prompt_tokens_details", "input_tokens_details"),
+        ("cached_tokens", "cached_input_tokens"),
+    )
     if cached is None:
         cached = _token_count(usage.get("cache_read_input_tokens"))  # Anthropic
+    if cached is None:
+        cached = _token_count(usage.get("cached_input_tokens"))
     if cached is None:
         return None, None
     return cached > 0, cached
@@ -516,6 +834,14 @@ class ModelCallRecord(BaseModel):
     # Unique server-generated identity for each persisted call.
     model_call_id: Optional[str] = None
     response_id: Optional[str] = None
+    client_session_id: Optional[str] = Field(
+        default=None,
+        description="Client-declared correlation identifier; evidence only, not a security boundary.",
+    )
+    client_assistant_message_id: Optional[str] = Field(
+        default=None,
+        description="Persisted client assistant-message ID; retries may share it, model_call_id remains per attempt.",
+    )
 
     # Durable append order, not a causal or semantic order for concurrent calls.
     call_index: int
@@ -523,7 +849,12 @@ class ModelCallRecord(BaseModel):
     model: Optional[str] = None
     dialect: Optional[str] = None
     status_code: Optional[int] = None
+    response_status: Optional[str] = None
     finish_reason: Optional[str] = None
+    upstream_attempted: Optional[bool] = None
+    response_source: Optional[Literal["upstream", "local"]] = None
+    upstream_status_code: Optional[int] = None
+    local_response_reason: Optional[str] = None
 
     # Wall-clock bounds around the downstream ASGI invocation, as UTC Unix timestamps. These are
     # for external trace correlation; durations use the monotonic latency fields below.
@@ -592,12 +923,25 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
     return ModelCallRecord(
         model_call_id=exchange.get("model_call_id"),
         response_id=response.get("id") if isinstance(response.get("id"), str) else None,
+        client_session_id=(
+            exchange.get("client_session_id") if isinstance(exchange.get("client_session_id"), str) else None
+        ),
+        client_assistant_message_id=(
+            exchange.get("client_assistant_message_id")
+            if isinstance(exchange.get("client_assistant_message_id"), str)
+            else None
+        ),
         call_index=call_index,
         model_ref=exchange.get("model_ref"),
         model=model if isinstance(model, str) else None,
         dialect=exchange.get("dialect"),
         status_code=exchange.get("status_code"),
+        response_status=response.get("status") if isinstance(response.get("status"), str) else None,
         finish_reason=finish_reason,
+        upstream_attempted=exchange.get("upstream_attempted"),
+        response_source=exchange.get("response_source"),
+        upstream_status_code=exchange.get("upstream_status_code"),
+        local_response_reason=exchange.get("local_response_reason"),
         started_at=exchange.get("started_at"),
         completed_at=exchange.get("completed_at"),
         request=raw_request if isinstance(raw_request, dict) else None,
@@ -646,6 +990,7 @@ def aggregate_model_call_records(calls: list[ModelCallRecord]) -> dict[str, Any]
         "tokens_out": _sum("tokens_out"),
         "tokens_reasoning": _sum("tokens_reasoning"),
         "tokens_total": _sum("tokens_total"),
+        "cached_tokens": _sum("cached_tokens"),
         "latency_total_ms": _sum("latency_total_ms"),
         "num_calls": len(calls),
     }
@@ -665,6 +1010,10 @@ _OBSERVED_PATHS = {
     "/v1/messages": "messages",
 }
 
+# A client may declare its persisted session ID for exact correlation with an AgentInvocation.
+# It is correlation evidence, not authentication; absence is fail-safe.
+_CLIENT_SESSION_HEADER = b"x-session-id"
+
 _TERMINAL_SSE_LINES: dict[str, dict[bytes, str]] = {
     "responses": {
         b"event: response.completed": "complete",
@@ -682,6 +1031,48 @@ def _headers_content_type(headers: list) -> bytes:
         if key.lower() == b"content-type":
             return value
     return b""
+
+
+def _unique_request_header(headers: list, name: bytes) -> Optional[str]:
+    values = {value.decode("latin-1") for key, value in headers if key.lower() == name and value}
+    return values.pop() if len(values) == 1 else None
+
+
+def _preserve_capture_prefix_on_redirect(
+    message: dict[str, Any],
+    *,
+    capture_prefix: str,
+    request_headers: list[tuple[bytes, bytes]],
+) -> dict[str, Any]:
+    """Keep rollout correlation on root-relative and same-origin redirects."""
+    status = int(message.get("status") or 0)
+    if not 300 <= status < 400:
+        return message
+
+    request_host = next(
+        (value.decode("latin-1") for key, value in request_headers if key.lower() == b"host"),
+        "",
+    )
+    headers = list(message.get("headers") or [])
+    changed = False
+    for index, (key, value) in enumerate(headers):
+        if key.lower() != b"location":
+            continue
+        location = value.decode("latin-1")
+        parts = urlsplit(location)
+        if parts.netloc and parts.netloc != request_host:
+            continue
+        if not parts.path.startswith("/") or parts.path.startswith(f"{capture_prefix}/"):
+            continue
+        headers[index] = (
+            key,
+            urlunsplit(parts._replace(path=f"{capture_prefix}{parts.path}")).encode("latin-1"),
+        )
+        changed = True
+
+    if not changed:
+        return message
+    return {**message, "headers": headers}
 
 
 def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str]:
@@ -710,7 +1101,11 @@ def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str
 
 # Consumer side of the URL-prefix protocol: strip /ng-rollout/<id> before routing, key capture by
 # <id>. The constant + producer (apply_rollout_prefix) are in server_utils.
-_ROLLOUT_PATH_RE = re.compile(rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>[^/]+)(?P<rest>/.*)$")
+_ROLLOUT_PATH_RE = re.compile(
+    rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>[^/]+)"
+    rf"(?:/(?P<token_capture>{re.escape(TOKEN_CAPTURE_PATH_SEGMENT)}))?"
+    rf"(?P<rest>/.*)$"
+)
 
 
 def make_capture_store(config: ModelCallCaptureConfig) -> Optional[CaptureStore]:
@@ -745,6 +1140,8 @@ def _classify_status(status_code: int) -> Optional[str]:
 
 def _classify_exception(exc: BaseException) -> str:
     """Normalized error_category for an exception raised while calling the model."""
+    if isinstance(exc, asyncio.CancelledError):
+        return "cancelled"
     if isinstance(exc, asyncio.TimeoutError):
         return "timeout"
     name = type(exc).__name__.lower()
@@ -852,6 +1249,7 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     """Rebuild a Chat Completions response from streamed chunks."""
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
+    refusal_parts: list[str] = []
     tool_calls: dict[int, dict[str, Any]] = {}
     usage: Optional[dict[str, Any]] = None
     model: Optional[str] = None
@@ -873,6 +1271,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
             role = delta.get("role") or role
             if delta.get("content"):
                 content_parts.append(delta["content"])
+            if delta.get("refusal"):
+                refusal_parts.append(delta["refusal"])
             reasoning = delta.get("reasoning_content") or delta.get("reasoning")
             if reasoning:
                 reasoning_parts.append(reasoning)
@@ -894,6 +1294,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     message: dict[str, Any] = {"role": role, "content": "".join(content_parts) or None}
     if reasoning_parts:
         message["reasoning_content"] = "".join(reasoning_parts)
+    if refusal_parts:
+        message["refusal"] = "".join(refusal_parts)
     if tool_calls:
         message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
     result: dict[str, Any] = {
@@ -939,6 +1341,8 @@ def _record(
     model_server_name: Optional[str],
     request_bytes: bytes,
     *,
+    client_session_id: Optional[str] = None,
+    client_assistant_message_id: Optional[str] = None,
     rollout_id: str,
     model_call_id: str,
     started_at: float,
@@ -949,6 +1353,7 @@ def _record(
     latency_ms: float,
     ttft_ms: Optional[float] = None,
     response_raw: Optional[str] = None,
+    execution: Optional[ModelExecutionOutcome] = None,
 ) -> None:
     """Append one exchange (success or failure). Best-effort: never raises."""
     request_body = None
@@ -977,6 +1382,14 @@ def _record(
             "request": request_body,
             "response": response_body,
         }
+        if client_session_id is not None:
+            exchange["client_session_id"] = client_session_id
+        if execution is not None:
+            exchange.update(execution)
+            if execution["local_response_reason"] == "context_length_exceeded":
+                exchange["error_category"] = "context_length_exceeded"
+        if client_assistant_message_id is not None:
+            exchange["client_assistant_message_id"] = client_assistant_message_id
         if request_raw is not None:
             exchange["request_raw"] = request_raw
         if response_raw is not None:
@@ -990,6 +1403,38 @@ def _record(
             logger.warning("Could not mark rollout %s capture as incomplete.", rollout_id, exc_info=True)
 
 
+async def _fail_uncommitted_external_call(context: CaptureContext | None) -> None:
+    """Record a failure when an admitted worker call returns without commit coordinates."""
+    if (
+        context is None
+        or not context.external_staging
+        or context.capture_admission is None
+        or context.committed
+        or context.lineage_store is None
+    ):
+        return
+    ledger = context.lineage_store
+    if not isinstance(ledger, CaptureLedger):
+        logger.error(
+            "Cannot poison uncommitted call %s for rollout %s: the lineage resolver is not a CaptureLedger.",
+            context.model_call_id,
+            context.rollout_id,
+        )
+        return
+    try:
+        await ledger.record_failure(
+            context.rollout_id,
+            context.model_call_id,
+            UNCOMMITTED_CALL_REASON,
+        )
+    except Exception:
+        logger.exception(
+            "Could not poison uncommitted call %s for rollout %s.",
+            context.model_call_id,
+            context.rollout_id,
+        )
+
+
 class _CaptureMiddleware:
     """Pure-ASGI per-rollout capture.
 
@@ -999,14 +1444,48 @@ class _CaptureMiddleware:
     downstream unchanged, so it composes with streaming (SSE) responses -- it never consumes or rewraps
     the stream. SSE chunks are forwarded immediately except for the terminal event, which is released
     after the capture is durable. Every chunk is also buffered for post-hoc reassembly, so a very long
-    stream is held in memory until it completes. When ``store`` is None (capture disabled) it strips the
-    prefix and forwards only.
+    stream is held in memory until it completes. When ``store`` is None it avoids buffering evaluation
+    records, while still persisting external capture failures before terminal events are forwarded.
     """
 
-    def __init__(self, app: Any, *, store: Optional[CaptureStore], model_server_name: Optional[str]) -> None:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        store: CaptureStore | None,
+        model_server_name: str | None,
+        token_store: Any = None,
+        configured_sink: Any = None,
+        lineage_store: LineageResolver | None = None,
+        delta_records: bool = False,
+        external_staging: bool = False,
+        token_capture_enabled: bool = False,
+        assistant_message_header: bytes | None = None,
+        non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
+    ) -> None:
         self._app = app
         self._store = store
         self._model_server_name = model_server_name
+        self._assistant_message_header: bytes | None = (
+            assistant_message_header.lower() if assistant_message_header else None
+        )
+        # This store records training tokens for correlated training-capture calls.
+        self._token_store = token_store
+        # Built from token_id_capture.sink, once, in this process.
+        self._configured_sink = configured_sink
+        self._lineage_store: LineageResolver | None = lineage_store
+        self._delta_records = delta_records
+        # A framework inference worker owns record staging; the lineage store
+        # doubles as the per-rollout capture ledger.
+        self._external_staging = external_staging
+        self._capture_ledger: CaptureLedger | None = (
+            lineage_store if external_staging and isinstance(lineage_store, CaptureLedger) else None
+        )
+        # Capture may have no destination in this process.
+        # A framework may stage records from its inference worker.
+        # This process still resolves the capture identity.
+        self._token_capture_enabled = token_capture_enabled
+        self._non_generating_requests = non_generating_requests
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -1015,30 +1494,148 @@ class _CaptureMiddleware:
 
         path = scope.get("path", "")
         rollout_from_path: Optional[str] = None
+        token_capture_requested = False
+        capture_prefix = ""
         prefix_match = _ROLLOUT_PATH_RE.match(path)
         if prefix_match:
             rollout_from_path = prefix_match.group("rollout_id")
+            token_capture_requested = prefix_match.group("token_capture") is not None
+            capture_prefix = path[: prefix_match.start("rest")]
             path = prefix_match.group("rest")
             scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
 
-        # Capture disabled: the prefix is already stripped (routing preserved), so just forward.
-        if self._store is None:
-            await self._app(scope, receive, send)
-            return
-
-        # Only explicitly correlated model calls are captured. An unprefixed call is forwarded
-        # unchanged rather than being mixed with unrelated calls under a shared fallback key.
-        if rollout_from_path is None:
-            await self._app(scope, receive, send)
-            return
-
+        method = str(scope.get("method") or "").upper()
         dialect = _OBSERVED_PATHS.get(path)
-        if dialect is None:
-            await self._app(scope, receive, send)  # not observed (or a stripped non-/v1 path)
+        known_non_generating = (method, path) in self._non_generating_requests
+
+        # State is shared with the handler even through middleware scope copies.
+        request_state = scope.setdefault("state", {})
+
+        # Forward when no active store needs this correlated endpoint.
+        # The prefix is already stripped.
+        # An unprefixed call is forwarded rather than mixed with unrelated calls under a shared key.
+        # Prefer the configured sink.
+        # Then use the installed sink.
+        # Finally use the file store.
+        # Configured sinks are built in each server process.
+        # Launcher-installed sinks do not reach spawned workers.
+        # Installed sinks are resolved for each request.
+        token_sink = self._configured_sink or installed_token_sink() or self._token_store
+        capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
+        if token_capture_requested and dialect is None and token_sink is not None:
+            marked_incomplete = False
+            response_started = False
+
+            async def _mark_unobserved_incomplete(reason: str) -> None:
+                nonlocal marked_incomplete
+                if marked_incomplete:
+                    return
+                marked_incomplete = True
+                try:
+                    await token_sink.mark_incomplete(rollout_from_path, "")
+                    logger.warning(
+                        f"Marked rollout {rollout_from_path} incomplete because unclassified model request "
+                        f"{method} {path} {reason}. Declare the exact request on the model server only if its "
+                        "response cannot contain policy-generated content."
+                    )
+                except Exception:
+                    logger.warning(
+                        f"Could not mark rollout {rollout_from_path} incomplete for unobserved path {path}.",
+                        exc_info=True,
+                    )
+
+            async def _send_unobserved(message: dict[str, Any]) -> None:
+                nonlocal response_started
+                if message.get("type") == "http.response.start":
+                    response_started = True
+                    status = int(message.get("status") or 0)
+                    safe_without_capture = status in {404, 405}
+                    if not known_non_generating and not safe_without_capture:
+                        await _mark_unobserved_incomplete(f"returned HTTP {status}")
+                    message = _preserve_capture_prefix_on_redirect(
+                        message,
+                        capture_prefix=capture_prefix,
+                        request_headers=list(scope.get("headers") or []),
+                    )
+                await send(message)
+
+            try:
+                await self._app(scope, receive, _send_unobserved)
+            except asyncio.CancelledError:
+                if not known_non_generating and not response_started:
+                    await _mark_unobserved_incomplete("was cancelled before starting a response")
+                raise
+            except Exception:
+                if not known_non_generating and not response_started:
+                    await _mark_unobserved_incomplete("failed before starting a response")
+                raise
+            if not known_non_generating and not response_started:
+                await _mark_unobserved_incomplete("completed without starting a response")
+            return
+        if (self._store is None and not capture_wanted) or rollout_from_path is None or dialect is None:
+            # Publish the id to this handler's current_rollout_id() even on the plain
+            # forward path -- this is the common case for a model server with capture
+            # disabled, and the id is already known here from the prefix above.
+            with rollout_context(rollout_from_path):
+                await self._app(scope, receive, send)
             return
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
+        client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
+        client_assistant_message_id = (
+            _unique_request_header(scope.get("headers") or [], self._assistant_message_header)
+            if self._assistant_message_header is not None
+            else None
+        )
+
+        # Give the model server a token sink keyed to this call.
+        # The sink records token ids from the complete response.
+        # Middleware cannot recover token ids from SSE.
+        # The context exists even without a local destination.
+        # External staging uses the identity resolved here.
+        sink_token = None
+        capture_context = None
+        if capture_wanted:
+            capture_context = CaptureContext(
+                rollout_id=rollout_id,
+                model_call_id=model_call_id,
+                token_sink=token_sink,
+                lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
+                delta_records=self._delta_records,
+                external_staging=self._external_staging,
+                admitted_at=time.time(),
+            )
+            sink_token = set_token_sink(capture_context)
+
+        # Training-only capture has no evaluation record.
+        # Persist capture failure before forwarding a terminal event or finishing a JSON response.
+        if self._store is None:
+            streaming = False
+            sse_event_buffer = bytearray()
+
+            async def _send_training_only(message: dict[str, Any]) -> None:
+                nonlocal streaming
+                if message.get("type") == "http.response.start":
+                    streaming = _headers_content_type(message.get("headers") or []).startswith(b"text/event-stream")
+                elif message.get("type") == "http.response.body":
+                    terminal = None
+                    if streaming:
+                        sse_event_buffer.extend(message.get("body", b"") or b"")
+                        terminal = _consume_terminal_sse_event(sse_event_buffer, dialect)
+                    if terminal is not None or not message.get("more_body", False):
+                        await _fail_uncommitted_external_call(capture_context)
+                await send(message)
+
+            try:
+                with rollout_context(rollout_id):
+                    await self._app(scope, receive, _send_training_only)
+            finally:
+                await _fail_uncommitted_external_call(capture_context)
+                if sink_token is not None:
+                    reset_token_sink(sink_token)
+            return
+
         request_body = bytearray()
 
         async def _receive() -> dict[str, Any]:
@@ -1069,7 +1666,7 @@ class _CaptureMiddleware:
                 state["streaming"] = content_type.startswith(b"text/event-stream")
             elif message_type == "http.response.body":
                 chunk = message.get("body", b"") or b""
-                if chunk and state["ttft_ms"] is None:
+                if chunk and chunk != _SSE_KEEPALIVE and state["ttft_ms"] is None:
                     state["ttft_ms"] = (time.perf_counter() - start) * 1000.0
                 state["body"].extend(chunk)  # buffered for both shapes; SSE is reassembled below
                 if state["streaming"] and chunk and not defer_response:
@@ -1088,8 +1685,9 @@ class _CaptureMiddleware:
                 await send(message)
 
         try:
-            await self._app(scope, _receive, _send)
-        except Exception as exc:
+            with rollout_context(rollout_id):
+                await self._app(scope, _receive, _send)
+        except (Exception, asyncio.CancelledError) as exc:
             completed_at = time.time()
             exception_status, exception_body = _exception_http_details(exc)
             upstream_status = state["status"] or exception_status
@@ -1104,6 +1702,8 @@ class _CaptureMiddleware:
                     dialect,
                     self._model_server_name,
                     bytes(request_body),
+                    client_session_id=client_session_id,
+                    client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
                     model_call_id=model_call_id,
                     started_at=started_at,
@@ -1114,12 +1714,19 @@ class _CaptureMiddleware:
                     latency_ms=(time.perf_counter() - start) * 1000.0,
                     ttft_ms=state["ttft_ms"],
                     response_raw=upstream_body.decode("utf-8", errors="replace") if upstream_body else None,
+                    execution=request_state.get("nemo_gym_model_execution"),
                 )
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
             finally:
+                await _fail_uncommitted_external_call(capture_context)
                 await _flush_deferred_response()
             raise
+        finally:
+            # The sink is only needed while the model server produces the response.
+            await _fail_uncommitted_external_call(capture_context)
+            if sink_token is not None:
+                reset_token_sink(sink_token)
 
         completed_at = time.time()
         latency_ms = (time.perf_counter() - start) * 1000.0
@@ -1166,6 +1773,8 @@ class _CaptureMiddleware:
                 dialect,
                 model_server_name,
                 request_bytes,
+                client_session_id=client_session_id,
+                client_assistant_message_id=client_assistant_message_id,
                 rollout_id=rollout_id,
                 model_call_id=model_call_id,
                 started_at=started_at,
@@ -1176,10 +1785,17 @@ class _CaptureMiddleware:
                 latency_ms=latency_ms,
                 ttft_ms=ttft_ms,
                 response_raw=response_raw,
+                execution=request_state.get("nemo_gym_model_execution"),
             )
 
         try:
-            await asyncio.to_thread(_parse_and_record)
+            # Shielded: cancellation here strands the queued write and the row is
+            # lost silently -- no log line, no incomplete marker. The error path
+            # above already treats CancelledError as recoverable; match it.
+            await asyncio.shield(asyncio.to_thread(_parse_and_record))
+        except asyncio.CancelledError:
+            logger.warning("Model-call capture finalization was cancelled; the write continues detached.")
+            raise
         except Exception:
             logger.warning("Model-call capture finalization failed.", exc_info=True)
         finally:
@@ -1187,21 +1803,104 @@ class _CaptureMiddleware:
 
 
 def install_model_call_capture(
-    app: Any, config: ModelCallCaptureConfig, *, model_server_name: Optional[str] = None
+    app: Any,
+    config: ModelCallCaptureConfig,
+    *,
+    model_server_name: str | None = None,
+    assistant_message_header: bytes | None = None,
+    global_config_dict: Any = None,
+    num_workers: int | None = None,
+    non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
 ) -> None:
     """Install model-call capture middleware.
 
-    Always installed so the ``/ng-rollout/<id>`` correlation prefix is stripped before routing
-    regardless of whether capture is enabled (otherwise a default ``gym eval`` would 404 on every
-    prefixed model call). When capture is enabled the middleware additionally records each observed
-    call's request + response into a rollout-keyed CaptureStore while forwarding bytes downstream
-    unchanged (non-terminal SSE chunks are forwarded as they arrive; the terminal event follows the
-    durable capture write).
+    Always strip ``/ng-rollout/<id>/...`` before routing.
+    Evaluation capture records requests and responses for that path.
+    Non-terminal SSE chunks continue immediately.
+    The terminal event follows the durable evaluation write.
+    Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
+    That path provides a request-scoped token sink.
+    The model server records token ids from its complete response.
+    Consumers access records through ``TokenSource.freeze``.
     """
+    capture_settings = token_id_capture_config(global_config_dict) if global_config_dict is not None else None
+    token_store = make_token_store(global_config_dict) if global_config_dict is not None else None
+    # Build this sink at app startup.
+    # Each uvicorn worker constructs its own sink.
+    # Spawned workers do not inherit a launcher-installed sink.
+    configured_sink = capture_settings.build_sink() if capture_settings is not None else None
+    configured_lineage = capture_settings.build_lineage_store() if capture_settings is not None else None
+    lineage_store = configured_lineage or installed_lineage_store()
+    default_lineage = None
+    if lineage_store is None and token_store is not None:
+        default_lineage = FileLineageStore(token_store.root)
+        lineage_store = default_lineage
+    if capture_settings is not None and capture_settings.enabled and (num_workers or 1) > 1:
+        if lineage_store is None or not lineage_store.is_process_shared():
+            raise ValueError(
+                "token_id_capture with num_workers > 1 requires a process-shared lineage resolver "
+                "over the same backend used by the token sink"
+            )
+    external_staging = capture_settings is not None and capture_settings.token_id_capture.external_staging
+    if external_staging:
+        if lineage_store is None:
+            raise ValueError(
+                "token_id_capture.external_staging requires a lineage resolver that implements CaptureLedger"
+            )
+        if isinstance(lineage_store, InMemoryLineageStore):
+            # The in-memory index evicts rollouts under memory bounds, which is
+            # acceptable for a resolution cache but not for a completeness
+            # ledger. External staging requires a non-evicting store.
+            raise ValueError(
+                "token_id_capture.external_staging requires a non-evicting lineage store "
+                "(e.g. FileLineageStore); InMemoryLineageStore cannot serve as the capture ledger"
+            )
+        if not isinstance(lineage_store, CaptureLedger):
+            raise ValueError(
+                "token_id_capture.external_staging requires the lineage store to implement "
+                "the CaptureLedger protocol (record, record_failure, manifest, has_rows)"
+            )
+        capture_ledger: CaptureLedger = lineage_store
+        install_rollout_control_routes(
+            app,
+            capture_ledger,
+            auth_token=capture_settings.token_id_capture.resolve_control_auth_token(),
+        )
+
+    owned_endpoints = [
+        endpoint
+        for endpoint in (configured_sink, token_store, configured_lineage, default_lineage)
+        if endpoint is not None
+    ]
+
+    async def _close_capture_endpoints() -> None:
+        for endpoint in owned_endpoints:
+            await endpoint.close()
+
+    if owned_endpoints:
+        original_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def _capture_lifespan(application):
+            try:
+                async with original_lifespan(application) as state:
+                    yield state
+            finally:
+                await _close_capture_endpoints()
+
+        app.router.lifespan_context = _capture_lifespan
     app.add_middleware(
         _CaptureMiddleware,
         store=make_capture_store(config),
+        assistant_message_header=assistant_message_header,
         model_server_name=model_server_name,
+        token_store=token_store,
+        configured_sink=configured_sink,
+        lineage_store=lineage_store,
+        delta_records=(capture_settings.token_id_capture.delta_records if capture_settings is not None else False),
+        external_staging=external_staging,
+        token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
+        non_generating_requests=non_generating_requests,
     )
 
 
@@ -1215,6 +1914,11 @@ def model_call_capture_dirs_from_config(global_config_dict: Any) -> list[Path]:
         return []
     assert config.model_call_capture_dir is not None  # enforced by ModelCallCaptureConfig
     return [config.model_call_capture_dir]
+
+
+def observability_enabled_from_config(global_config_dict: Any) -> bool:
+    """Return the run-wide ``observability_enabled`` flag directly, without going through capture dirs."""
+    return ModelCallCaptureConfig.model_validate(global_config_dict).observability_enabled
 
 
 def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureStore]:
@@ -1302,6 +2006,23 @@ def merge_model_call_capture_into_record(
                     )
                     bundle.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
             bundle = join_model_call_observations(bundle, calls)
+            if any(call.client_assistant_message_id for call in calls):
+                try:
+                    raw_trajectory = record.get("ng_trajectory")
+                    trajectory = (
+                        TrajectoryRecord.model_validate(raw_trajectory) if raw_trajectory is not None else None
+                    )
+                    if trajectory is not None and trajectory.rollout_id != rollout_id:
+                        bundle.gaps.append(ObservationGap(code="assistant_message_call_rollout_mismatch"))
+                    else:
+                        bundle, trajectory = join_assistant_message_calls(bundle, trajectory, calls)
+                        if trajectory is not None:
+                            record["ng_trajectory"] = trajectory.model_dump(mode="json")
+                except Exception:
+                    logger.warning(
+                        "Could not associate assistant message calls for rollout %s.", rollout_id, exc_info=True
+                    )
+                    bundle.gaps.append(ObservationGap(code="assistant_message_call_join_failed"))
             record["ng_agent_observations"] = bundle.model_dump(mode="json")
         except Exception:
             logger.warning("Could not join agent observations for rollout %s.", rollout_id, exc_info=True)

@@ -1,0 +1,5 @@
+# mini's CLI imports prompt-toolkit, which requires wcwidth.
+wcwidth>=0.2.13
+
+# terminal_bench_4 (imported by this agent's tests) needs pathspec, which Gym otherwise never installs.
+pathspec

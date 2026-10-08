@@ -12,10 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from http.cookiejar import CookieJar
 from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
-from httpx import Cookies
 
 from nemo_gym.server_utils import ServerClient
 from resources_servers.example_session_state_mgmt.app import (
@@ -35,13 +35,13 @@ class TestApp:
         server = StatefulCounterResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
         app = server.setup_webserver()
-        client = TestClient(app)
 
-        class StatelessCookies(Cookies):
-            def extract_cookies(self, response):
+        class StatelessCookieJar(CookieJar):
+            def extract_cookies(self, response: object, request: object) -> None:
+                # Sessions must come from explicit request cookies, not earlier responses.
                 pass
 
-        client._cookies = StatelessCookies(client._cookies)
+        client = TestClient(app, cookies=StatelessCookieJar())
 
         # Check that we are at 0
         response = client.post("/get_counter_value")

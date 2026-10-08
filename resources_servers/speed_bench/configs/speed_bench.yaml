@@ -1,6 +1,7 @@
 speed_bench_resources_server:
   resources_servers:
     speed_bench:
+      allowed_agents: [speed_bench_agent]
       entrypoint: app.py
       domain: other
       verified: false
@@ -26,3 +27,11 @@ speed_bench_simple_agent:
         jsonl_fpath: resources_servers/speed_bench/data/example.jsonl
         num_repeats: 1
         license: NVIDIA Evaluation Dataset License Agreement
+
+speed_bench_simple_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: speed_bench_simple_agent

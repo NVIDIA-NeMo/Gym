@@ -55,6 +55,15 @@ class TestLegacyDeprecation:
 
         assert "deprecated" in capsys.readouterr().err
 
+    def test_test_all_alias_still_reaches_the_all_servers_run(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        captured: dict = {}
+        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: captured.update(target=target))
+        monkeypatch.setattr(sys, "argv", ["ng_test_all", "+num_shards=4"])
+
+        legacy.main()
+
+        assert captured["target"] == "nemo_gym.cli.env:test_all"
+
     def test_legacy_mapping_is_populated(self) -> None:
         # Guard so the parametrized test below can't pass vacuously if LEGACY is emptied.
         assert len(legacy.LEGACY) > 1

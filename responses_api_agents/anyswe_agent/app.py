@@ -37,6 +37,7 @@ from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.server_utils import apply_rollout_prefix
 
 
 class SWEBenchMetrics(BaseModel):
@@ -53,10 +54,18 @@ class SWEBenchMetrics(BaseModel):
     agent_run_time: Optional[float] = None
 
 
+class AnySweRunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
+
+
 def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
     existing = {k: v for k, v in json.loads(metrics_fpath.read_text()).items() if v is not None}
     update = {k: v for k, v in update_dict.items() if v is not None}
     metrics_fpath.write_text(json.dumps(existing | update))
+
+
+def _model_url_for_rollout(model_url: str, rollout_id: Optional[str]) -> str:
+    return apply_rollout_prefix(model_url, rollout_id) if model_url and rollout_id else model_url
 
 
 def _safe_config_json(params: "AnySweInstanceConfig", indent: Optional[int] = None) -> str:
@@ -74,8 +83,10 @@ def _safe_config_json(params: "AnySweInstanceConfig", indent: Optional[int] = No
             return [redact(v) for v in value]
         return value
 
-    d = redact(json.loads(params.model_dump_json()))
-    return json.dumps(d, indent=indent)
+    d = json.loads(params.model_dump_json())
+    d.pop("agent_runtime_source", None)
+    d.pop("agent_deps_url", None)
+    return json.dumps(redact(d), indent=indent)
 
 
 def _classify_agent_error(error: str) -> Optional[str]:
@@ -154,8 +165,8 @@ class AnySweServerConfig(BaseModel):
     run_session_id: str
     base_results_dir: Path
     model_server_url: str
-    agent_deps_archive: Optional[Path]
-    agent_deps_url: Optional[str]
+    agent_deps_archive: Optional[Path] = None
+    agent_deps_url: Optional[str] = None
     resolved_sandbox_provider: Dict[str, Any]
     sandbox_default_metadata: Dict[str, Any]
 
@@ -175,6 +186,11 @@ class AnySweInstanceConfig(AnySweAgentConfig, AnySweServerConfig):
 
 class AnySweVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     instance_config: Dict[str, Any]
+
+    # `SWEBenchMetrics` declares `mask_sample` too, to parse the metrics file where the key
+    # may be absent, and it wins the MRO. Restate the contract field so a consumer reading
+    # this response's schema sees the contract's type, default and description.
+    mask_sample: bool = BaseVerifyResponse.model_fields["mask_sample"]
 
 
 class GymAgentHarnessProcessor(BaseModel):
@@ -234,6 +250,8 @@ class GymAgentHarnessProcessor(BaseModel):
 
 class AnySweAgent(SimpleResponsesAPIAgent):
     """Runs a Gym agent in each task container."""
+
+    ray_enabled = False
 
     config: AnySweAgentConfig
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -474,8 +492,19 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             if params.agent_deps_archive is not None:
                 await sandbox.upload(params.agent_deps_archive, "/sandbox/anyswe_agent_deps.tar.gz")
             elif params.agent_deps_url is not None:
+                runtime_url = shlex.quote(params.agent_deps_url)
+                python_fetch = shlex.quote(
+                    "import urllib.request; "
+                    f"urllib.request.urlretrieve({params.agent_deps_url!r}, '/sandbox/anyswe_agent_deps.tar.gz')"
+                )
                 fetched = await sandbox.exec(
-                    f"curl -fsSL -o /sandbox/anyswe_agent_deps.tar.gz {shlex.quote(params.agent_deps_url)}",
+                    "if command -v curl >/dev/null 2>&1; then "
+                    f"curl -fsSL -o /sandbox/anyswe_agent_deps.tar.gz {runtime_url}; "
+                    "elif command -v wget >/dev/null 2>&1; then "
+                    f"wget -qO /sandbox/anyswe_agent_deps.tar.gz {runtime_url}; "
+                    "elif command -v python3 >/dev/null 2>&1; then "
+                    f"python3 -c {python_fetch}; "
+                    "else echo 'runtime download requires curl, wget, or python3' >&2; exit 127; fi",
                     timeout_s=600,
                     user="root",
                 )
@@ -613,16 +642,21 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             },
         )
 
-    def _setup_params(self, body: NeMoGymResponseCreateParamsNonStreaming) -> AnySweInstanceConfig:
+    def _setup_params(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: Optional[str] = None
+    ) -> AnySweInstanceConfig:
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
         instance_id = problem_info.get("instance_id", "unknown")
         persistent_dir = self._server.base_results_dir / (
             f"{instance_id}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
         )
         persistent_dir.mkdir(parents=True, exist_ok=True)
+        server_config = self._server.model_dump()
+        if not self.config.sandbox_model_base_url:
+            server_config["model_server_url"] = _model_url_for_rollout(server_config["model_server_url"], rollout_id)
         params = AnySweInstanceConfig(
             **self.config.model_dump(),
-            **self._server.model_dump(),
+            **server_config,
             problem_info=problem_info,
             body=body,
             persistent_dir=persistent_dir,
@@ -633,8 +667,10 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         GymAgentHarnessProcessor(config=params).write_runner()
         return params
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        params = self._setup_params(body)
+    async def _responses(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: Optional[str] = None
+    ) -> NeMoGymResponse:
+        params = self._setup_params(body, rollout_id)
         (params.persistent_dir / "params.json").write_text(_safe_config_json(params, indent=2))
         try:
             return await self._run_agent_in_sandbox(params)
@@ -644,20 +680,32 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             print(f"[{params.instance_id}] exception: see {traceback_path}", flush=True)
             raise
 
-    async def run(self, body: BaseRunRequest) -> AnySweVerifyResponse:
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        return await self._responses(body)
+
+    async def run(self, body: AnySweRunRequest) -> AnySweVerifyResponse:
         async with self._sem:
-            response = await self.responses(body.responses_create_params)
+            response = await self._responses(body.responses_create_params, self.rollout_id_from_run(body))
 
             meta, response.metadata = response.metadata, None
             metrics = SWEBenchMetrics.model_validate_json(meta["metrics"])
+
+            instance_config = AnySweInstanceConfig.model_validate_json(meta["instance_config"])
+
+            # `_should_mask_sample` writes the decision to the metrics file, so the metrics
+            # are the one source. Mirror it onto the compatibility `instance_config` field,
+            # which keeps its default here, and pass it once at the top level.
+            mask_sample = bool(metrics.mask_sample)
+            instance_config.mask_sample = mask_sample
 
             return AnySweVerifyResponse(
                 responses_create_params=body.responses_create_params.model_dump()
                 | {"input": json.loads(meta["input"]), "tools": [t.model_dump() for t in (response.tools or [])]},
                 response=response,
                 reward=1.0 if metrics.resolved else 0.0,
-                **metrics.model_dump(),
-                instance_config=AnySweInstanceConfig.model_validate_json(meta["instance_config"]).model_dump(),
+                mask_sample=mask_sample,
+                **metrics.model_dump(exclude={"mask_sample"}),
+                instance_config=instance_config.model_dump(),
             )
 
 

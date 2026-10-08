@@ -1,15 +1,87 @@
 config_paths:
 - benchmarks/gpqa/config.yaml
 - benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml
+- benchmarks/tau2/configs/tau2.yaml
+- benchmarks/aalcr/config.yaml
+- benchmarks/scicode/config.yaml
+- benchmarks/omniscience/config.yaml
+- benchmarks/nemotron_3.5_super/benchmark_configs/hle_no_tools.yaml
+- benchmarks/swebench/verified/opencode.yaml
+- benchmarks/swebench/multilingual/opencode.yaml
+- benchmarks/deepswe/opencode.yaml
+- benchmarks/terminal_bench_2_1/terminus_2.yaml
+- benchmarks/swebench/pro/opencode.yaml
 - responses_api_models/vllm_model/configs/vllm_model.yaml
-- env.yaml
+- benchmarks/nemotron_3.5_super/sandbox_utils.yaml
+- benchmarks/nemotron_3.5_super/shared_model_endpoints.yaml
+
+########################################
+# START Secrets
+# The following secrets identified with `dummy` must be filled in via env.yaml at runtime
+########################################
+
+nv_inference_api_key: dummy  # pragma: allowlist secret
+
+# Used in SWE Verified
+sandbox:
+  opensandbox:
+    connection:
+      domain: dummy
+      api_key: dummy  # pragma: allowlist secret
+
+# Create your own key https://artificialanalysis.ai/login -> "API Access" -> "Your API keys"
+# Each key has its own rate limit for Crit PT benchmarks.
+critpt_benchmark_resources_server:
+  resources_servers:
+    critpt:
+      allowed_agents: [critpt_agent]
+      api_key: dummy  # pragma: allowlist secret
+
+########################################
+# END Secrets
+########################################
+
+########################################
+# START Nvidia-specific configs
+########################################
 
 policy_base_url: dummy
 policy_api_key: dummy  # pragma: allowlist secret
 policy_model_name: dummy
 
-# The following secrets must be filled in via env.yaml at runtime
-gpt-5_4-mini-2026-03-17:
+# Keep the reference request limit separate from the shared model connection.
+genrm_model:
   responses_api_models:
     openai_model:
-      openai_api_key: dummy  # pragma: allowlist secret
+      max_concurrent_requests: 16
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      num_workers: 16
+
+# TODO @bxyu-nvidia: Remove these overrides to turn on various benchmarks after we do batched eval studies. This is a placeholder for container build.
+swebench_verified_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets: []
+swebench_multilingual_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets: []
+deepswe_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets: []
+terminal_bench_2_1_terminus_2_sandboxed_agent:
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      datasets: []
+swebench_pro_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets: []
+
+########################################
+# END Nvidia-specific configs.
+########################################

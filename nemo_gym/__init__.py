@@ -161,3 +161,81 @@ from nemo_gym.package_info import (
     __shortversion__,
     __version__,
 )
+
+
+# Public API surface for downstream environment, agent, and model authors.
+#
+# Symbols are resolved lazily via PEP 562.
+# Importing ``nemo_gym`` does not eagerly pull in FastAPI, pydantic, OpenAI, or the server stack.
+# Keep this surface focused on common extension points and boundary types.
+# Specialized implementation types remain available from their defining modules.
+#
+# Maps each public name to its defining submodule. Existing deep import paths continue to work.
+_LAZY_EXPORTS: dict[str, str] = {
+    # Resources server extension points and contracts
+    "BaseResourcesServerConfig": "base_resources_server",
+    "SimpleResourcesServer": "base_resources_server",
+    "BaseRunRequest": "base_resources_server",
+    "BaseVerifyRequest": "base_resources_server",
+    "BaseVerifyResponse": "base_resources_server",
+    "BaseMultiRewardVerifyResponse": "base_resources_server",
+    "BaseSeedSessionRequest": "base_resources_server",
+    "BaseSeedSessionResponse": "base_resources_server",
+    "ReverifyMode": "base_resources_server",
+    # Agent and model extension points
+    "BaseResponsesAPIAgentConfig": "base_responses_api_agent",
+    "SimpleResponsesAPIAgent": "base_responses_api_agent",
+    "BaseResponsesAPIModelConfig": "base_responses_api_model",
+    "SimpleResponsesAPIModel": "base_responses_api_model",
+    # Common server-client utilities
+    "ServerClient": "server_utils",
+    "raise_for_status": "server_utils",
+    "get_response_json": "server_utils",
+    "SESSION_ID_KEY": "server_utils",
+    # Author-facing config and metrics types
+    "BaseServerConfig": "config_types",
+    "BaseRunServerInstanceConfig": "config_types",
+    "Domain": "config_types",
+    "AggregateMetrics": "config_types",
+    "AggregateMetricsRequest": "config_types",
+    "ModelServerRef": "config_types",
+    # High-level OpenAI-compatible client and API boundary types
+    "NeMoGymAsyncOpenAI": "openai_utils",
+    "NeMoGymResponse": "openai_utils",
+    "NeMoGymResponseCreateParamsNonStreaming": "openai_utils",
+    "NeMoGymChatCompletion": "openai_utils",
+    "NeMoGymChatCompletionCreateParamsNonStreaming": "openai_utils",
+}
+
+# Eagerly-defined names (path constants + package metadata) that live directly in this module.
+_EAGER_PUBLIC: tuple[str, ...] = (
+    "ROOT_DIR",
+    "PARENT_DIR",
+    "WORKING_DIR",
+    "CACHE_DIR",
+    "RESULTS_DIR",
+    "__version__",
+    "__package_name__",
+)
+
+__all__ = sorted({*_EAGER_PUBLIC, *_LAZY_EXPORTS})
+
+
+def __getattr__(name: str):
+    # PEP 562 calls module-level __getattr__ only for names that are absent from the module globals.
+    # Eager symbols and resolved lazy symbols never reach this function.
+    module_name = _LAZY_EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    import importlib
+
+    module = importlib.import_module(f"{__name__}.{module_name}")
+    value = getattr(module, name)
+    # Cache on the package so subsequent lookups skip __getattr__ entirely.
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *_LAZY_EXPORTS})

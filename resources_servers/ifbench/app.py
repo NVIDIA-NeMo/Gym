@@ -16,6 +16,12 @@ import asyncio
 import logging
 from typing import List, Literal
 
+# Pre-import packages that nltk pulls in during its init so they are already in
+# sys.modules before nltk's inisec.py finder is installed. nltk>=3.9 blocks any
+# import originating from nltk if the module path falls inside the process CWD —
+# which happens in CI where the server venv lives inside the repo root.
+import defusedxml.ElementTree  # noqa: F401
+import regex  # noqa: F401
 from fastapi import FastAPI
 
 from nemo_gym.base_resources_server import (
@@ -87,6 +93,7 @@ def _loose_response_variants(response: str) -> List[str]:
 
 
 class IFBenchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: IFBenchResourcesServerConfig
 
     def __init__(self, **kwargs):

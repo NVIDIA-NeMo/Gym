@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Build the IHEval Gym dataset in **Chat-Completions** shape, straight from the
+"""Build the IHEval Gym dataset in **Responses API** shape, straight from the
 upstream ``ytyz1307zzh/IHEval`` raw ``input_data.json`` files.
 
 Writes:
@@ -20,6 +20,9 @@ Writes:
 * ``data/test.jsonl``          — all rows across all tasks.
 * ``data/test_conflict.jsonl`` — only the ``conflict/*`` setting rows.
 * ``data/example.jsonl``       — a small mixed sample for smoke testing (committed).
+
+With ``--chat-completions``, each of those gets a ``*_chat.jsonl`` twin holding
+the same tasks with the request in Chat Completions shape (see below).
 
 Why a conflict-only dataset
 ---------------------------
@@ -35,27 +38,49 @@ mean, not the task-macro average of upstream ``average_final_score.py`` — that
 exact number still comes from the gym-native ``compute_metrics`` path over the
 full ``test.jsonl``.)
 
-Why Chat-Completions shape
---------------------------
-IHEval uses ``simple_agent``, which passes ``responses_create_params.input``
-and ``responses_create_params.tools`` directly to the model's
-``/chat/completions`` endpoint without Responses→Chat conversion. The dataset
-must already be Chat-Completions-shaped, or the tool-use rows fail validation
-("tools.0.function: Field required").
+Responses API shape
+-------------------
+Rows are Responses-API-native, like every other Gym resources server.
+``simple_agent`` POSTs them to ``/v1/responses`` on the model server, which
+runs ``ResponsesConverter`` to reach ``/chat/completions``, so the chat shape
+is reconstructed downstream rather than stored.
 
-This reproduces the upstream benchmark's own request builder exactly, so the
-prompt the model sees is byte-for-byte what upstream IHEval sends:
+* ``input`` — pre-canned tool turns are ``function_call`` /
+  ``function_call_output`` items paired by ``call_id`` (not ``assistant`` with
+  ``tool_calls`` + ``role: "tool"``).
+* ``tools`` — the flat ``FunctionToolParam`` form: ``name``, ``description``,
+  ``parameters`` and ``strict`` at the top level.
+  ``NeMoGymResponseCreateParamsNonStreaming.tools`` is typed ``List[ToolParam]``
+  and rejects the nested ``{"type": "function", "function": {...}}`` form with a
+  422 ("tools.0.FunctionToolParam.name: Field required") before the request ever
+  reaches the model server.
+
+The ``--chat-completions`` variant
+----------------------------------
+Not every harness that runs this dataset speaks the Responses API. Some read a
+row and forward its ``input`` and ``tools`` straight to ``/chat/completions``,
+which rejects the Responses shapes above.
+
+``--chat-completions`` emits ``*_chat.jsonl`` twins for those callers: the same
+tasks with ``input`` and ``tools`` pre-translated to the Chat Completions shape.
+Only the request shape differs — the scoring fields are untouched, so both files
+score the same rows the same way, and both put the same prompt in front of the
+model.
+
+This is a shape change only — the translation back to chat is lossless, so the
+prompt the model ultimately sees is still byte-for-byte what upstream IHEval
+sends, and the request builder below stays a faithful port:
 
 * message assembly  → ``src/model/run_model.py::main`` (vLLM backend branch):
   optional ``conversation_history`` (alternating user/assistant), then the
   ``user`` instruction, with ``system`` inserted at position 0.
-* tool turn         → ``src/utils/call_api.py::tool_call_openai``: the OpenAI
-  chat tool ``definition`` plus an ``assistant`` message carrying ``tool_calls``
-  and a ``role: "tool"`` result (``arguments`` JSON-encoded, ``name`` kept).
+* tool turn         → ``src/utils/call_api.py::tool_call_openai``: the tool
+  ``definition`` plus the pre-canned call and its result (``arguments``
+  JSON-encoded), re-expressed as Responses items.
 
-The assembled chat ``messages`` go into ``responses_create_params.input`` and
-the tool ``definition`` into ``responses_create_params.tools`` (both already the
-shape vLLM chat accepts). Routing/gold fields ride at the ROW TOP LEVEL
+The assembled ``messages`` go into ``responses_create_params.input`` and the
+tool ``definition`` into ``responses_create_params.tools``. Routing/gold fields
+ride at the ROW TOP LEVEL
 (``task``, ``domain``, ``setting``, ``instruction``, ``answer``);
 ``answer`` is JSON-encoded and ``verify()`` JSON-decodes it (see app.py
 ``_decode_answer``).
@@ -64,11 +89,13 @@ Usage::
 
     python resources_servers/iheval/prepare_iheval.py
     python resources_servers/iheval/prepare_iheval.py --example-only
+    python resources_servers/iheval/prepare_iheval.py --chat-completions
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import io
 import json
 import logging
@@ -174,59 +201,64 @@ def _iter_rows(root: Path, domain: str, task: str) -> List[Dict[str, Any]]:
 def _tool_call_openai(tool: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
     """Port of ``src/utils/call_api.py::tool_call_openai``.
 
-    Returns the OpenAI-chat ``definition`` list plus the pre-canned ``assistant``
-    tool-call message and the ``role: "tool"`` result message.
+    Returns the ``tools`` ``definition`` list plus the pre-canned tool call and
+    tool result, both as Responses API typed input items.
     """
     raw_definition = tool["definition"]
     raw_tool_call = tool["call"]
     raw_tool_return = tool["return"]
 
+    # Responses API flat shape (``ToolParam``/``FunctionToolParam``): ``name``, ``description``
+    # and ``parameters`` sit at the top level and ``strict`` must be present, because
+    # ``NeMoGymResponseCreateParamsNonStreaming.tools`` is typed ``List[ToolParam]``. The nested
+    # Chat Completions shape (``{"type": "function", "function": {...}}``) is rejected with a 422
+    # before the request reaches the model server.
     definition = [
         {
             "type": "function",
-            "function": {
-                "name": raw_definition["name"],
-                "description": raw_definition["description"],
-                "parameters": {
-                    "type": "object",
-                    "properties": raw_definition["parameters"],
-                    "required": list(raw_definition["parameters"].keys()),
-                },
+            "name": raw_definition["name"],
+            "description": raw_definition["description"],
+            "parameters": {
+                "type": "object",
+                "properties": raw_definition["parameters"],
+                "required": list(raw_definition["parameters"].keys()),
             },
+            "strict": None,
         }
     ]
 
+    # Responses API typed input items, matching the rest of the Gym benchmarks.
+    # Upstream's chat shape (``assistant`` with ``tool_calls`` + ``role: "tool"``)
+    # is reconstructed downstream by ``ResponsesConverter``.
+    #
+    # The result is keyed off the *call's* id rather than ``raw_tool_return["id"]``
+    # so the pair can never drift apart. Upstream ships them identical for all
+    # 2520 tool rows, so this changes no emitted value.
+    call_id = raw_tool_call["id"]
+
     tool_call = {
-        "role": "assistant",
-        "tool_calls": [
-            {
-                "id": raw_tool_call["id"],
-                "type": "function",
-                "function": {
-                    "name": raw_tool_call["name"],
-                    "arguments": json.dumps(raw_tool_call["arguments"]),
-                },
-            }
-        ],
+        "type": "function_call",
+        "call_id": call_id,
+        "name": raw_tool_call["name"],
+        "arguments": json.dumps(raw_tool_call["arguments"]),
     }
 
     tool_return = {
-        "role": "tool",
-        "tool_call_id": raw_tool_return["id"],
-        "name": raw_tool_return["name"],
-        "content": raw_tool_return["content"],
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": raw_tool_return["content"],
     }
 
     return definition, tool_call, tool_return
 
 
 def _build_messages(example: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[List[Dict[str, Any]]]]:
-    """Assemble chat ``messages`` (+ optional ``tools``) exactly like upstream.
+    """Assemble the ``input`` items (+ optional ``tools``) exactly like upstream.
 
     Mirrors ``run_model.py::main`` (message assembly) followed by
     ``call_api.py::call_openai`` (tool turn extension + system insertion). Net
-    order: ``[system?, <history?>, user(instruction), assistant(tool_call)?,
-    tool(result)?]``.
+    order: ``[system?, <history?>, user(instruction), function_call?,
+    function_call_output?]``.
     """
     messages: List[Dict[str, Any]] = []
 
@@ -281,6 +313,74 @@ def _to_task(row: Dict[str, Any], domain: str, task: str) -> Dict[str, Any]:
     }
 
 
+def _nest_tool(tool: Dict[str, Any]) -> Dict[str, Any]:
+    """Flat ``FunctionToolParam`` -> the nested Chat Completions tool form.
+
+    ``strict`` is dropped rather than carried into ``function``: it is always
+    ``None`` here (upstream IHEval defines no strict-mode tools) and a null
+    ``strict`` is rejected on the chat endpoint.
+    """
+    assert tool["type"] == "function", f"unexpected tool type {tool['type']!r}"
+    function = {"name": tool["name"], "description": tool["description"], "parameters": tool["parameters"]}
+    return {"type": "function", "function": copy.deepcopy(function)}
+
+
+def _chat_input(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Responses typed items -> Chat Completions messages (upstream's shape).
+
+    The tool result keeps the ``name`` of the tool it answers. A
+    ``function_call_output`` item has no such field, so it is recovered from the
+    matching call rather than left off — upstream IHEval sends it.
+    """
+    messages: List[Dict[str, Any]] = []
+    names: Dict[str, str] = {}
+    for item in items:
+        item_type = item.get("type")
+        if item_type == "function_call":
+            names[item["call_id"]] = item["name"]
+            # No ``content`` key at all, matching upstream: an assistant turn that
+            # only calls a tool carries no text.
+            messages.append(
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": item["call_id"],
+                            "type": "function",
+                            "function": {"name": item["name"], "arguments": item["arguments"]},
+                        }
+                    ],
+                }
+            )
+        elif item_type == "function_call_output":
+            messages.append(
+                {
+                    "role": "tool",
+                    "content": item["output"],
+                    "tool_call_id": item["call_id"],
+                    "name": names[item["call_id"]],
+                }
+            )
+        else:
+            messages.append(copy.deepcopy(item))
+    return messages
+
+
+def _to_chat_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy of ``row`` with the request re-expressed in the Chat Completions shape.
+
+    For callers that forward ``input`` and ``tools`` to ``/chat/completions``
+    unchanged. Scoring fields are copied through untouched, so the row still
+    verifies identically.
+    """
+    chat_row = copy.deepcopy(row)
+    params = chat_row["responses_create_params"]
+    params["input"] = _chat_input(params["input"])
+    if params.get("tools") is not None:
+        params["tools"] = [_nest_tool(t) for t in params["tools"]]
+    return chat_row
+
+
 def _setting_category(setting: str) -> str:
     """``conflict/foo`` -> ``conflict`` (aligned / conflict / reference)."""
     return setting.split("/", 1)[0] if setting else "unknown"
@@ -297,6 +397,11 @@ def _write_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--example-only", action="store_true", help="Only (re)write data/example.jsonl.")
+    parser.add_argument(
+        "--chat-completions",
+        action="store_true",
+        help="Also write *_chat.jsonl twins whose request is in Chat Completions shape.",
+    )
     args = parser.parse_args(argv)
 
     root = _repo_root()
@@ -313,13 +418,18 @@ def main(argv: Optional[List[str]] = None) -> None:
             example_rows.append(t)
         print(f"IHEval: {domain}/{task}: {len(tasks)} rows")
 
-    _write_jsonl(_DATA_DIR / "example.jsonl", example_rows)
+    # Conflict-only subset: per-row mean_reward over this file is the
+    # average conflict score (see module docstring).
+    conflict_rows = [t for t in all_rows if _setting_category(t["setting"]) == "conflict"]
+
+    outputs = [("example", example_rows)]
     if not args.example_only:
-        _write_jsonl(_DATA_DIR / "test.jsonl", all_rows)
-        # Conflict-only subset: per-row mean_reward over this file is the
-        # average conflict score (see module docstring).
-        conflict_rows = [t for t in all_rows if _setting_category(t["setting"]) == "conflict"]
-        _write_jsonl(_DATA_DIR / "test_conflict.jsonl", conflict_rows)
+        outputs += [("test", all_rows), ("test_conflict", conflict_rows)]
+
+    for stem, rows in outputs:
+        _write_jsonl(_DATA_DIR / f"{stem}.jsonl", rows)
+        if args.chat_completions:
+            _write_jsonl(_DATA_DIR / f"{stem}_chat.jsonl", [_to_chat_row(r) for r in rows])
     print(f"IHEval: {n_tool_rows} rows carry a tool turn")
 
 
