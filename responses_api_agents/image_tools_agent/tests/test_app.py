@@ -231,3 +231,69 @@ async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
     assert output[1]["role"] == "user"
     assert output[2]["role"] == "assistant"
     assert server_client_post.await_count == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capture", [False, True])
+async def test_image_tools_agent_model_calls_ride_the_capture_path(tmp_path: Path, capture: bool) -> None:
+    """With token capture, the tool loop's policy calls must ride the rollout's capture path."""
+    image_path = tmp_path / "source.png"
+    Image.new("RGB", (64, 48), color=(1, 2, 3)).save(image_path)
+    config = ImageToolsAgentConfig(
+        host="localhost",
+        port=10001,
+        entrypoint="app.py",
+        name="image_tools_simple_agent",
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        resource_servers_by_agent={
+            "string_match_simple_agent": ResourcesServerRef(type="resources_servers", name="string_match")
+        },
+        crop_dir=str(tmp_path / "crops"),
+        crop_format="jpeg",
+        crop_min_pixels=262144,
+        crop_max_pixels=1048576,
+        tool_success_reward=0.02,
+        tool_success_reward_cap=0.05,
+    )
+    model_paths = []
+
+    async def _post(*, server_name: str, url_path: str, **kwargs: Any):
+        if url_path == "/seed_session":
+            return _FakeClientResponse({})
+        if server_name == "policy_model":
+            model_paths.append(url_path)
+            return _FakeClientResponse(
+                _assistant_response(
+                    response_id="final", text="The answer is car.", prompt_token_ids=[1, 2], generation_token_ids=[3]
+                )
+            )
+        if url_path == "/verify":
+            return _FakeClientResponse(_base_verify_response(kwargs["json"], reward=1.0))
+        raise AssertionError(f"Unexpected call: {server_name} {url_path}")
+
+    server_client = MagicMock(spec=ServerClient)
+    server_client.post = AsyncMock(side_effect=_post)
+    server_client.global_config_dict = {"token_id_capture": {"enabled": True, "all_agents": True}} if capture else {}
+    agent = ImageToolsAgent(config=config, server_client=server_client)
+    body = ImageToolsAgentRunRequest.model_validate(
+        {
+            "image_tools_base_agent_ref": {"type": "responses_api_agents", "name": "string_match_simple_agent"},
+            "responses_create_params": {
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "What object is shown?"},
+                            {"type": "input_image", "image_url": str(image_path), "detail": "auto"},
+                        ],
+                    }
+                ]
+            },
+            "_ng_task_index": 4,
+            "_ng_rollout_index": 1,
+        }
+    )
+
+    await agent.run(SimpleNamespace(cookies={}), body)
+
+    assert model_paths == ["/ng-rollout/4-1/training-token-capture/v1/responses" if capture else "/v1/responses"]

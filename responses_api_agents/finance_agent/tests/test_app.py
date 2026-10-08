@@ -939,3 +939,44 @@ class TestRun:
         result = await agent.run(req, body)
         assert result.reward == 0.0
         assert result.response.id == "error"
+
+
+_TOKEN_CAPTURE_CONFIG = {"token_id_capture": {"enabled": True, "all_agents": True}}
+_CAPTURE_PATH = "/ng-rollout/4-1/training-token-capture/v1/responses"
+
+
+class TestTokenCapturePaths:
+    """With token capture, every policy call must ride the rollout's capture path."""
+
+    @pytest.mark.parametrize("capture", [False, True])
+    def test_responses_forwards_the_inbound_capture_path(self, capture: bool) -> None:
+        agent, client = _make_agent_and_client(_make_config(max_steps=3, continue_if_not_tool_call=False))
+        agent.server_client.global_config_dict = _TOKEN_CAPTURE_CONFIG if capture else {}
+        agent.server_client.post.return_value = _dotjson_mock(_text_response("Hello!"))
+
+        res = client.post(_CAPTURE_PATH if capture else "/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        assert agent.server_client.post.call_count == 1
+        assert agent.server_client.post.call_args.kwargs["url_path"] == (_CAPTURE_PATH if capture else "/v1/responses")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("capture", [False, True])
+    async def test_run_dispatches_on_the_capture_path(self, capture: bool) -> None:
+        agent, _ = _make_agent_and_client()
+        agent.server_client.global_config_dict = _TOKEN_CAPTURE_CONFIG if capture else {}
+        agent.server_client.post = AsyncMock(return_value=_dotjson_mock(_text_response("Hello!")))
+        body = FinanceAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": [{"role": "user", "content": "test"}]},
+                "_ng_task_index": 4,
+                "_ng_rollout_index": 1,
+            }
+        )
+        req = MagicMock()
+        req.cookies = {}
+
+        await agent.run(req, body)
+
+        paths = [call.kwargs["url_path"] for call in agent.server_client.post.await_args_list]
+        assert paths[:2] == ["/seed_session", _CAPTURE_PATH if capture else "/v1/responses"]

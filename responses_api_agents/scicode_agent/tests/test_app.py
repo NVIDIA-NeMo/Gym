@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import statistics
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -586,3 +587,48 @@ class TestTokenAccounting:
         old_row = {"reward": 0.0, "response": {"usage": _usage(200)}}
         with pytest.raises(ValueError, match="different token accounting versions"):
             _aggregate([row, old_row])
+
+
+_TOKEN_CAPTURE_CONFIG = {"token_id_capture": {"enabled": True, "all_agents": True}}
+_CAPTURE_PATH = "/ng-rollout/4-1/training-token-capture/v1/responses"
+
+
+class _CaptureRequest:
+    """An inbound call on rollout 4-1's training-token-capture path."""
+
+    cookies: dict = {}
+    path_params = {"rollout_id": "4-1"}
+    url = SimpleNamespace(path=_CAPTURE_PATH)
+
+
+class TestTokenCapturePaths:
+    """With token capture, every policy call must ride the rollout's capture path."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("capture", [False, True])
+    async def test_run_and_responses_use_the_rollout_capture_path(self, capture):
+        agent = _agent()
+        agent.server_client.global_config_dict = _TOKEN_CAPTURE_CONFIG if capture else {}
+        expected = _CAPTURE_PATH if capture else "/v1/responses"
+        paths = []
+
+        def _post(server_name, url_path, json, cookies):
+            paths.append(url_path)
+            if url_path.endswith("/v1/responses"):
+                return _Resp(_model_json("x = 1"))
+            return _Resp({"reward": 1.0})
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        body = ScicodeAgentRunRequest.model_validate(
+            _run_request(problem_id="1", n_steps=1).model_dump() | {"_ng_task_index": 4, "_ng_rollout_index": 1}
+        )
+        with patch.object(app, "raise_for_status", AsyncMock()):
+            await agent.run(_FakeRequest(), body)
+            await agent.responses(
+                _CaptureRequest() if capture else _FakeRequest(),
+                Response(),
+                NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            )
+
+        # run() dispatches the sub-step to itself, then verifies; responses() calls the model.
+        assert paths == [expected, "/verify", expected]
