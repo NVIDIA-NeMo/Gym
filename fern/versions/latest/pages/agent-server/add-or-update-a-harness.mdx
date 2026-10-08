@@ -290,7 +290,7 @@ python scripts/run_harness_conformance.py \
     --harness pi --output results/pi-conformance
 ```
 
-The runner uses scripted model replies and real local tools, then runs the evidence checker automatically. Review `conformance_report.md`, fix missing or inconsistent evidence, and rerun. The P0 gate requires all applicable TE-1–TE-7 plus TE-8 or TE-9 per rollout.
+The runner uses scripted model replies and real local tools, then runs the evidence checker automatically. Review `conformance_report.md`, fix missing or inconsistent evidence, and rerun. The P0 gate requires every applicable individual P0 check to pass, including ownership and call-to-step attribution; TE labels group results rather than granting exemptions.
 
 Also check saved rollouts from each target sandbox pairing:
 
