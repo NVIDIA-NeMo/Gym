@@ -533,9 +533,13 @@ SEPARATE_IN_TASK_IMAGE_TOML = TASK_TOML.replace("[verifier]\n", '[verifier]\nenv
 
 
 class TestOverlay:
-    def overlay_server(self, tmp_path, monkeypatch, *, dockerfile=OVERLAY_DOCKERFILE, toml=TASK_TOML, sandbox=None):
+    def overlay_server(
+        self, tmp_path, monkeypatch, *, dockerfile=OVERLAY_DOCKERFILE, toml=TASK_TOML, sandbox=None, image_config=None
+    ):
         sandbox = sandbox or OverlaySandbox()
-        server, task, _, created = make_server(tmp_path, monkeypatch, sandbox, dockerfile=dockerfile)
+        server, task, _, created = make_server(
+            tmp_path, monkeypatch, sandbox, dockerfile=dockerfile, image_config=image_config
+        )
         (task.path / "task.toml").write_text(toml)
         task = load_task(task.path)
         server.config.tasksets["ds"].tasks["hello"] = task.digest
@@ -614,14 +618,16 @@ class TestOverlay:
             "user": "agent",
             "cwd": "/app",
         }
-        # Lines before `USER agent` run as root (explicitly, since the task's user is non-root); after it, as agent.
-        assert [c["user"] for c in (first, second, third)] == ["root", "root", "agent"]
+        # Lines before `USER agent` run as root, which is the image's own default user, so without an override
+        # (every provider supports the plain exec path); after it, as agent.
+        assert task.sandbox_user is None
+        assert [c["user"] for c in (first, second, third)] == [None, None, "agent"]
         assert all(c["cwd"] == "/" and c["env"] is None for c in (first, second, third))
         commands = [c["command"] for c in sandbox.execs]
         # /app is made as root when the first RUN after `WORKDIR /app` comes up, once, then only entered.
         assert commands[:4] == [first["command"], "mkdir -p /app", second["command"], third["command"]]
         assert first["command"] == f"unset MSG; export PATH={IMAGE_PATH}; cd / || exit 1; {first['seen']['command']}"
-        assert sandbox.execs[1]["user"] == "root" and commands.count("mkdir -p /app") == 1
+        assert sandbox.execs[1]["user"] is None and commands.count("mkdir -p /app") == 1
         # The overlay shares the task's build budget: the first line sees all of it, later ones what is left.
         assert first["timeout_s"] == pytest.approx(task.config.environment.build_timeout_sec, abs=1)
         assert second["timeout_s"] <= first["timeout_s"] and third["timeout_s"] <= second["timeout_s"]
@@ -660,7 +666,7 @@ class TestOverlay:
         assert prepare["command"] == (
             "test -d /home/agent/work || (mkdir -p /home/agent/work && chown agent /home/agent/work)"
         )
-        assert prepare["user"] == "root"
+        assert prepare["user"] is None  # the image's default user is root already
         assert sandbox.dirs["/home/agent/work"] == "agent" and sandbox.dirs["/home/agent"] == "root"
         assert run["seen"] == {
             "command": "touch made",
@@ -679,11 +685,56 @@ class TestOverlay:
 
         assert response.status_code == 200, response.text
         lookup, prepare, first, second = sandbox.execs[:4]
-        assert lookup["command"] == "getent passwd 1000 | cut -d: -f1" and lookup["user"] == "root"
+        assert lookup["command"] == "getent passwd 1000 | cut -d: -f1" and lookup["user"] is None
         # The name serves the directory's owner and both lines; the lookup happens once.
-        assert prepare["command"].endswith("chown agent /home/agent/work)") and prepare["user"] == "root"
+        assert prepare["command"].endswith("chown agent /home/agent/work)") and prepare["user"] is None
         assert [c["seen"]["user"] for c in (first, second)] == ["agent", "agent"]
         assert sum("getent" in c["command"] for c in sandbox.execs) == 1
+
+    def test_root_steps_on_a_non_root_image_override_the_image_user(self, tmp_path, monkeypatch):
+        # jupyter/base-notebook style: the image runs as jovyan, the Dockerfile switches to root and stays there.
+        # The sandbox's default exec user is the image's, so every root step needs the override, including the
+        # WORKDIR directory and the agent's workdir, both made by root.
+        sandbox = OverlaySandbox(image_user="jovyan")
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path,
+            monkeypatch,
+            dockerfile="FROM img\nUSER root\nWORKDIR /opt/tools\nRUN apt-get install -y gcc\n",
+            sandbox=sandbox,
+            image_config={"Env": [f"PATH={IMAGE_PATH}"], "User": "jovyan"},
+        )
+        assert task.user == "root" and task.sandbox_user == "jovyan"
+
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+
+        assert response.status_code == 200, response.text
+        # The overlay's WORKDIR step and the agent workdir preparation both create it, as root.
+        assert [c["user"] for c in sandbox.execs if "mkdir -p /opt/tools" in c["command"]] == ["root", "root"]
+        run = sandbox.run("apt-get install")
+        assert run["user"] == "root" and run["seen"]["user"] == "root" and run["seen"]["cwd"] == "/opt/tools"
+        assert sandbox.dirs["/opt/tools"] == "root"
+
+    def test_steps_on_a_non_root_image_without_a_user_line_run_as_the_image_user(self, tmp_path, monkeypatch):
+        sandbox = OverlaySandbox(image_user="jovyan")
+        server, task, sandbox, _ = self.overlay_server(
+            tmp_path,
+            monkeypatch,
+            dockerfile="FROM img\nWORKDIR /home/jovyan/work\nRUN touch made\n",
+            sandbox=sandbox,
+            image_config={"Env": [f"PATH={IMAGE_PATH}"], "User": "jovyan"},
+        )
+        assert task.user == "jovyan" and task.sandbox_user == "jovyan"
+        sandbox.dirs["/home/jovyan"] = "jovyan"
+
+        response = TestClient(server.setup_webserver()).post("/seed_session", json=seed_body(task))
+
+        assert response.status_code == 200, response.text
+        prepare, run = sandbox.execs[:2]
+        # The directory is still made as root (with the override) and handed to the image user; the line runs
+        # as that user with no override, as it would in a build.
+        assert prepare["user"] == "root" and prepare["command"].endswith("chown jovyan /home/jovyan/work)")
+        assert run["user"] == "jovyan" and run["seen"]["user"] == "jovyan"
+        assert sandbox.dirs["/home/jovyan/work"] == "jovyan"
 
     def test_unknown_numeric_user_is_a_clear_task_error(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = self.overlay_server(
@@ -922,10 +973,15 @@ class TestVerify:
                     return SandboxExecResult(stdout="", stderr="chmod: Permission denied", return_code=1)
                 return result
 
+        # The recorded base image runs as `app`, as the NonRootSandbox models.
         server, task, sandbox, _ = make_server(
-            tmp_path, monkeypatch, NonRootSandbox(), dockerfile="FROM ubuntu:24.04\nWORKDIR /app\nUSER app"
+            tmp_path,
+            monkeypatch,
+            NonRootSandbox(),
+            dockerfile="FROM ubuntu:24.04\nWORKDIR /app\nUSER app",
+            image_config={"Env": [f"PATH={IMAGE_PATH}"], "User": "app"},
         )
-        assert task.user == "app"
+        assert task.user == "app" and task.sandbox_user == "app"
         client = TestClient(server.setup_webserver())
         assert client.post("/seed_session", json=seed_body(task)).status_code == 200
 

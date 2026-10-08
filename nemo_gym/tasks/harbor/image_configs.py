@@ -28,10 +28,12 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
+from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
+from nemo_gym.tasks.harbor.models import HarborTaskConfig
 from nemo_gym.tasks.harbor.task import IMAGE_CONFIGS_FILE, TASK_FILE, HarborTask, dockerfile_base_image, is_task_folder
 
 
@@ -245,25 +247,37 @@ def compose_image_references(task: HarborTask) -> list[str]:
     return list(dict.fromkeys(references))
 
 
-def dockerfile_base_images(folder: Path) -> dict[str, list[str]]:
+def dockerfile_base_images(folder: Path, *, select: Callable[[str], bool] | None = None) -> dict[str, list[str]]:
     """The base image of every task Dockerfile the loader resolves under ``folder``, with the tasks using it.
 
-    ``folder`` is a task folder or a folder of task folders, as ``discover_tasks`` reads it. Tasks
-    whose ``task.toml`` does not parse are left for the loader to report.
+    ``folder`` is a task folder or a folder of task folders, as ``discover_tasks`` reads it; with
+    ``select``, only the tasks whose folder name it accepts count. The image a task declares is the
+    effective one, exactly as ``load_task`` sees it: ``task.toml`` after the dataset's ``[gym]``
+    overrides, with the deprecated ``image`` alias resolved. A per-task ``docker_image`` override
+    thus turns a Dockerfile with ``RUN`` lines into a prebuilt image whose ``FROM`` is never
+    resolved, so there is nothing to record for it. Tasks whose ``task.toml`` does not load, and a
+    dataset whose ``dataset.toml`` does not load (which fails every task), are left for the loader
+    to report.
     """
-    folder = Path(folder)
-    children = [folder] if is_task_folder(folder) else sorted(child for child in folder.iterdir() if child.is_dir())
+    # Resolved like load_task does: overrides are keyed by the task folder's name and dataset.toml
+    # sits beside the task folders.
+    folder = Path(folder).resolve()
+    single = is_task_folder(folder)
+    children = [folder] if single else sorted(child for child in folder.iterdir() if child.is_dir())
+    try:
+        dataset = read_dataset_config(folder.parent if single else folder)
+    except ValueError:
+        return {}
     images: dict[str, list[str]] = {}
     for child in children:
-        if not is_task_folder(child):
+        if not is_task_folder(child) or (select is not None and not select(child.name)):
             continue
         try:
-            data = tomllib.loads((child / TASK_FILE).read_text())
-        except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+            config = HarborTaskConfig.model_validate(tomllib.loads((child / TASK_FILE).read_text()))
+            config = apply_dataset_config(config, child.name, dataset)
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError):
             continue
-        environment = data.get("environment") if isinstance(data.get("environment"), dict) else {}
-        declared = environment.get("docker_image")
-        image = dockerfile_base_image(child, declared if isinstance(declared, str) and declared else None)
+        image = dockerfile_base_image(child, config.environment.docker_image or None)
         if image is not None:
             images.setdefault(image, []).append(child.name)
     return images
@@ -315,11 +329,17 @@ def record_compose_images(
     return record_image_configs(references, folder, client=client, what="Compose image")
 
 
-def record_base_images(folder: Path, *, client: RegistryClient | None = None) -> Path | None:
+def record_base_images(
+    folder: Path, *, client: RegistryClient | None = None, select: Callable[[str], bool] | None = None
+) -> Path | None:
     """Record the base image of every Dockerfile under ``folder`` next to the task folders, before they load.
 
-    Returns the file's path, or ``None`` when no task has a Dockerfile the loader resolves.
+    ``select`` limits the scan to the tasks whose folder name it accepts (see
+    :func:`dockerfile_base_images`). Returns the file's path, or ``None`` when no task has a
+    Dockerfile the loader resolves.
     """
-    folder = Path(folder)
+    folder = Path(folder).resolve()
     parent = folder.parent if is_task_folder(folder) else folder
-    return record_image_configs(dockerfile_base_images(folder), parent, client=client, what="base image")
+    return record_image_configs(
+        dockerfile_base_images(folder, select=select), parent, client=client, what="base image"
+    )

@@ -249,9 +249,10 @@ async def _exec_as_root_user(
 ):
     """Run ``command`` as root.
 
-    ``configured_user`` is the user the sandbox runs commands as by default (the image's
-    ``USER`` or ``[agent].user``). Only a non-root default needs the ``user="root"``
-    override; root images keep the plain exec path every provider supports.
+    ``configured_user`` is the user the sandbox runs commands as by default: the OCI ``User``
+    of the image the sandbox started from (``HarborTask.sandbox_user``), which is not the
+    Dockerfile's final ``USER`` or ``[agent].user``. Only a non-root default needs the
+    ``user="root"`` override; root images keep the plain exec path every provider supports.
     """
     user = None if _is_root(configured_user) else "root"
     return await sandbox.exec(command, cwd=cwd, timeout_s=timeout_s, user=user)
@@ -539,7 +540,7 @@ class HarborResourcesServer(SimpleResourcesServer):
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise HarborOverlayError(f"{label} not run: [environment].build_timeout_sec={budget} is used up")
-            result = await _exec_as_root_user(sandbox, command, configured_user=task.user, timeout_s=remaining)
+            result = await _exec_as_root_user(sandbox, command, configured_user=task.sandbox_user, timeout_s=remaining)
             _check_overlay_result(result, label, what, budget)
             return result
 
@@ -565,7 +566,9 @@ class HarborResourcesServer(SimpleResourcesServer):
                 raise HarborOverlayError(f"{label} not run: [environment].build_timeout_sec={budget} is used up")
             command = overlay_shell_command(step, task.env)
             if _is_root(user):
-                result = await _exec_as_root_user(sandbox, command, configured_user=task.user, timeout_s=remaining)
+                result = await _exec_as_root_user(
+                    sandbox, command, configured_user=task.sandbox_user, timeout_s=remaining
+                )
             else:
                 result = await sandbox.exec(command, cwd="/", timeout_s=remaining, user=user)
             _check_overlay_result(result, label, None, budget)
@@ -646,7 +649,7 @@ class HarborResourcesServer(SimpleResourcesServer):
         commands = [f"mkdir -p {shlex.quote(workdir)}"]
         if not _is_root(task.user) and workdir != "/":
             commands.append(f"chown {shlex.quote(task.user)} {shlex.quote(workdir)}")
-        result = await _exec_as_root_user(sandbox, " && ".join(commands), configured_user=task.user)
+        result = await _exec_as_root_user(sandbox, " && ".join(commands), configured_user=task.sandbox_user)
         if result.return_code != 0:
             raise RuntimeError(f"Could not prepare {workdir}: {result.stderr or result.stdout}")
         # Harbor mounts /logs into the agent's container; tasks may write to /logs/artifacts during the
@@ -877,7 +880,7 @@ class HarborResourcesServer(SimpleResourcesServer):
                         f"chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
                     ]
                 ),
-                configured_user=task.user,
+                configured_user=task.sandbox_user,
             )
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")

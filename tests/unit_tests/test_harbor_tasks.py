@@ -235,6 +235,42 @@ class TestDockerfileDetection:
         # Only the single-quoted and escaped values keep a `$`, and theirs is a literal character, not a reference.
         assert [key for key, value in image.env.items() if "$" in value] == ["LIT", "ESC", "UNQ", "LEGACY"]
 
+    def test_pairs_of_one_env_line_see_the_environment_before_the_line(self):
+        # Docker's reference example: `ENV abc=bye def=$abc` gives def the previous abc; the next line sees the new one.
+        image = dockerfile("FROM img\nENV abc=bye def=$abc\nENV ghi=$abc\nRUN env\n", Env=["abc=hello"])
+        assert image.env == {"abc": "bye", "def": "hello", "ghi": "bye"}
+        assert image.runs[0].env["def"] == "hello"
+
+    def test_legacy_env_splits_on_any_run_of_blanks(self):
+        # A tab (or several blanks) between the key and the value is what docker build accepts; the value keeps
+        # its interior blanks.
+        image = dockerfile("FROM img\nENV APP_HOME\t/srv/app\nWORKDIR $APP_HOME\n", Env=[f"PATH={IMAGE_PATH}"])
+        assert image.env == {"APP_HOME": "/srv/app"} and image.workdir == "/srv/app"
+        assert dockerfile("FROM img\nENV K  \t  v1  v2\n").env == {"K": "v1  v2"}
+        with pytest.raises(DockerfileNeedsBuild, match="ENV ONLYKEY must have two arguments"):
+            parse_dockerfile("FROM img\nENV ONLYKEY\n")
+
+    def test_env_modifier_defaults_expand(self):
+        image = dockerfile(
+            "FROM img\nENV A=${B:-${PATH}} C=${B:-$PATH} D=${PATH:+${PATH}:/x} E=${B-${PATH}} F=${B:-${C:-${PATH}}}\n",
+            Env=["PATH=/bin"],
+        )
+        assert image.env == {"A": "/bin", "C": "/bin", "D": "/bin:/x", "E": "/bin", "F": "/bin"}
+        assert not [key for key, value in image.env.items() if "$" in value]
+
+    def test_run_step_sees_expanded_modifier_default(self):
+        image = dockerfile(
+            "FROM img\nENV JAVA_HOME=${JAVA_HOME:-${DEFAULT_JAVA}}\nRUN $JAVA_HOME/bin/java -version\n",
+            Env=["PATH=/bin", "DEFAULT_JAVA=/opt/jdk"],
+        )
+        assert image.env["JAVA_HOME"] == "/opt/jdk"
+        assert image.runs[0].env["JAVA_HOME"] == "/opt/jdk"
+        assert not any("$" in value for value in image.runs[0].env.values())
+
+    def test_unterminated_modifier_needs_build(self):
+        with pytest.raises(DockerfileNeedsBuild, match="unsupported variable expansion"):
+            dockerfile("FROM img\nENV A=${B:-${PATH}\n", Env=["PATH=/bin"])
+
     def test_image_without_path_gets_dockers_default(self):
         assert dockerfile("FROM scratch\nENV PATH=/x:$PATH\n").env == {"PATH": f"/x:{DEFAULT_PATH}"}
 
@@ -254,10 +290,12 @@ class TestDockerfileDetection:
 
     def test_without_the_image_configuration_only_self_contained_files_resolve(self):
         # Nothing refers to the base image: the result does not depend on it.
-        base = base_image_only("FROM img\nENV A=1 B=$A\nWORKDIR /app\nUSER me\n")
+        base = base_image_only("FROM img\nENV A=1\nENV B=$A\nWORKDIR /app\nUSER me\n")
         assert base is not None and base.env == {"A": "1", "B": "1"} and base.workdir == "/app"
         for text, fragment in [
             ("FROM img\nENV PATH=/x:$PATH\n", "`$PATH` refers to the base image"),
+            # `$A` on the same line as `A=1` is the base image's A, not the new one.
+            ("FROM img\nENV A=1 B=$A\n", "`$A` refers to the base image"),
             ("FROM img\nWORKDIR src\n", "WORKDIR src is relative to the base image"),
             ("FROM img\nRUN true\n", "RUN lines run with the base image"),
         ]:
@@ -510,6 +548,35 @@ class TestLoadTask:
         write_image_config(tmp_path, "img", Env=["PATH=/bin"], WorkingDir="/srv", User="svc")
         task = load_task(folder)
         assert (task.workdir, task.user, task.env) == ("/srv", "svc", {"PATH": "/x:/bin"})
+
+    def test_sandbox_user_is_the_recorded_base_image_user(self, tmp_path):
+        # The sandbox starts from the base image, so its default user is the image's, whatever the Dockerfile
+        # or [agent].user make the task's user.
+        folder = write_task(tmp_path / "t", dockerfile="FROM img\nUSER root\nRUN true\n")
+        write_image_config(tmp_path, "img", Env=["PATH=/bin"], User="jovyan")
+        task = load_task(folder)
+        assert task.user == "root" and task.sandbox_user == "jovyan"
+        toml = HELLO_TOML.replace(
+            "timeout_sec = 120.0\n\n[environment]", 'timeout_sec = 120.0\nuser = "agent"\n\n[environment]'
+        )
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM img\nRUN true\n", toml=toml))
+        assert task.user == "agent" and task.sandbox_user == "jovyan"
+        # An image that records no User runs as root.
+        write_image_config(tmp_path, "rootimg", Env=["PATH=/bin"])
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM rootimg\nUSER agent\nRUN true\n"))
+        assert task.user == "agent" and task.sandbox_user is None
+        # Without a recorded base image (a self-contained pull-mode Dockerfile, a prebuilt image), the task's
+        # user stands in.
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM unknown\nUSER me\n"))
+        assert task.user == "me" and task.sandbox_user == "me"
+        toml = HELLO_TOML.replace("cpus = 1", 'docker_image = "org/task:1"\ncpus = 1')
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM unknown\nRUN true\nUSER built\n", toml=toml))
+        assert task.user is None and task.sandbox_user is None
+        toml = toml.replace(
+            "timeout_sec = 120.0\n\n[environment]", 'timeout_sec = 120.0\nuser = "agent"\n\n[environment]'
+        )
+        task = load_task(write_task(tmp_path / "t", dockerfile="FROM unknown\nRUN true\n", toml=toml))
+        assert task.user == "agent" and task.sandbox_user == "agent"
 
     def test_pull_mode_task_has_no_overlay(self, tmp_path):
         assert load_task(write_task(tmp_path / "t")).overlay == ()
@@ -1246,6 +1313,42 @@ class TestCli:
         assert "base image 'debian:bookworm-slim'" in message and "task(s) b" in message
         assert "registry returned HTTP 404" in message
         assert not (tmp_path / "out").exists()
+
+    @pytest.mark.parametrize(
+        "kw,reason",
+        [({"only": ["a"]}, "not in --only-tasks"), ({"exclude": ["z"]}, "excluded by --exclude-tasks 'z'")],
+    )
+    def test_prepare_does_not_fetch_the_base_image_of_a_left_out_task(self, tmp_path, capsys, kw, reason):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        write_task(folder / "z", dockerfile="FROM internal.registry/base:dev\nRUN true\n")
+        FakeRegistryClient.missing.add("internal.registry/base:dev")
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", **kw)
+        assert [t.task_id for t in prepared.tasks] == ["a"]
+        # The left-out task did not load (its base image is not recorded) but is left out, not reported broken.
+        assert prepared.skipped == {}
+        assert FakeRegistryClient.resolved == ["ubuntu:24.04"]
+        assert f"Skipping z: {reason}" in capsys.readouterr().out
+
+    def test_prepare_single_task_folder_left_out_by_only_still_says_no_runnable_task(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "z", dockerfile="FROM ubuntu:24.04\nRUN true\n")
+        with pytest.raises(ValueError, match="No runnable task"):
+            prepare_target(str(folder / "z"), output_root=tmp_path / "out", only=["a"])
+        assert FakeRegistryClient.resolved == ["ubuntu:24.04"]
+
+    def test_prepare_does_not_fetch_the_base_image_a_dataset_override_replaces(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        write_task(folder / "t", dockerfile="FROM internal.registry/base:dev\nRUN make\n")
+        (folder / "dataset.toml").write_text('[gym.tasks."t".environment]\ndocker_image = "ghcr.io/org/t:prebuilt"\n')
+        FakeRegistryClient.missing.add("internal.registry/base:dev")
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        assert [(t.task_id, t.image, t.overlay) for t in prepared.tasks] == [
+            ("a", "ubuntu:24.04", ()),
+            ("t", "ghcr.io/org/t:prebuilt", ()),
+        ]
+        assert FakeRegistryClient.resolved == ["ubuntu:24.04"]
 
     def test_prepare_skips_tasks_that_do_not_load(self, tmp_path, caplog):
         folder = tmp_path / "ds"

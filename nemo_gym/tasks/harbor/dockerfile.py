@@ -42,6 +42,8 @@ from typing import Any
 # Docker's PATH for a base image whose configuration records none (``system.DefaultPathEnvUnix``).
 DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Docker's blank run (its `reWhitespace`), which separates the key from the value of a legacy `ENV KEY value`.
+_BLANKS = re.compile(r"[ \t\v\f\r]+")
 # A continuation: a backslash, optionally followed by blanks, at the end of the line.
 _CONTINUATION = re.compile(r"\\[ \t]*$")
 # A shell word that opens a Dockerfile heredoc (``<<EOF``, ``<<-EOF``, ``<<'EOF'``, ``<<"EOF"``), as
@@ -252,25 +254,42 @@ class _Expander:
                 return "$", index + 1
             return self._lookup(match.group()) or "", index + 1 + match.end()
         match = _NAME.match(rest, 1)
-        close = rest.find("}")
+        close = _closing_brace(rest)
         if match is None or close < 0:
             raise DockerfileNeedsBuild(f"unsupported variable expansion {word!r}")
         name = match.group()
         modifier = rest[match.end() : close]
         value = self._lookup(name)
+        # The default or alternative is a word of its own and may hold `${...}` itself; it is expanded like one.
         if modifier == "":
             expanded = value or ""
         elif modifier.startswith(":-") or modifier.startswith("-"):
             default = modifier[2:] if modifier.startswith(":-") else modifier[1:]
             unset = value is None or (modifier.startswith(":-") and value == "")
-            expanded = default if unset else value
+            expanded = self.expand(default) if unset else value
         elif modifier.startswith(":+") or modifier.startswith("+"):
             alternative = modifier[2:] if modifier.startswith(":+") else modifier[1:]
             is_set = value is not None and (not modifier.startswith(":+") or value != "")
-            expanded = alternative if is_set else ""
+            expanded = self.expand(alternative) if is_set else ""
         else:
             raise DockerfileNeedsBuild(f"unsupported variable expansion {word!r}")
         return expanded, index + 2 + close
+
+
+def _closing_brace(text: str) -> int:
+    """Index of the ``}`` closing the ``{`` that opens ``text``, skipping nested ``${...}``; -1 when unterminated."""
+    depth, index = 1, 1
+    while index < len(text):
+        if text.startswith("${", index):
+            depth += 1
+            index += 2
+            continue
+        if text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return -1
 
 
 def _env_pairs(arguments: str) -> list[tuple[str, str]]:
@@ -279,9 +298,12 @@ def _env_pairs(arguments: str) -> list[tuple[str, str]]:
     if not words:
         raise DockerfileNeedsBuild("ENV with no arguments")
     if "=" not in words[0]:
-        # Legacy form: `ENV KEY value with spaces`
-        key, _, value = arguments.partition(" ")
-        return [(key, value.strip())]
+        # Legacy form: `ENV KEY value with spaces`. Docker splits on the first run of blanks (any kind) and
+        # keeps the rest of the line as the value; a lone key is an error.
+        parts = _BLANKS.split(arguments, maxsplit=1)
+        if len(parts) < 2:
+            raise DockerfileNeedsBuild(f"ENV {arguments} must have two arguments")
+        return [(parts[0], parts[1])]
     pairs: list[tuple[str, str]] = []
     for word in words:
         key, separator, value = word.partition("=")
@@ -397,8 +419,10 @@ def resolve_dockerfile(dockerfile: Dockerfile, base: BaseImageConfig | None = No
                 )
             runs.append(OverlayRun(command=arguments, workdir=workdir or "/", env=dict(env), user=user))
         elif instruction == "ENV":
-            for key, raw in _env_pairs(arguments):
-                value = expander.expand(raw)
+            # Docker expands every pair of one ENV line against the environment before the line, so
+            # `ENV A=x B=$A` gives B the previous A; only the next instruction sees the new values.
+            resolved = [(key, expander.expand(raw)) for key, raw in _env_pairs(arguments)]
+            for key, value in resolved:
                 env[key] = value
                 declared[key] = value
         elif instruction == "WORKDIR":

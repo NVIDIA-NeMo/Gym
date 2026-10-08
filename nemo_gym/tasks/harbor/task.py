@@ -57,6 +57,12 @@ class HarborTask:
     ``overlay`` is Gym-derived data, not a Harbor field: the Dockerfile's ``RUN`` lines
     (with the ``WORKDIR``, ``ENV`` and ``USER`` in effect for each) that the server runs
     in the pulled base image at seed. Empty for a prebuilt image or a pull-mode Dockerfile.
+
+    ``sandbox_user`` is the user the sandbox runs commands as when no user is asked for: the
+    image the sandbox starts from is the Dockerfile's base image, so it is that image's recorded
+    ``User`` (``None`` is root), not the Dockerfile's final ``USER`` or ``[agent].user``. When the
+    base image's configuration is not known (a prebuilt image, or a Dockerfile resolved without
+    it), the task's ``user`` stands in for it.
     """
 
     path: Path
@@ -69,6 +75,7 @@ class HarborTask:
     env: dict[str, str]
     user: str | None
     overlay: tuple[OverlayRun, ...] = ()
+    sandbox_user: str | None = None
 
     @property
     def needs_sandbox(self) -> bool:
@@ -185,6 +192,8 @@ def load_task(path: Path) -> HarborTask:
     env = dict(environment.env)
     user: str | None = None
     overlay: tuple[OverlayRun, ...] = ()
+    base_known = False
+    base_user: str | None = None
     dockerfile = path / DOCKERFILE
     if dockerfile.is_file():
         try:
@@ -201,6 +210,8 @@ def load_task(path: Path) -> HarborTask:
             # pull-mode Dockerfile contributes settings next to a declared image.
             record = read_image_configs(path.parent).get(parsed.image)
             base = BaseImageConfig.from_record(record) if record is not None else None
+            base_known = base is not None
+            base_user = base.user if base is not None else None
             try:
                 resolved = resolve_dockerfile(parsed, base)
             except ImageConfigRequired as exc:
@@ -230,6 +241,7 @@ def load_task(path: Path) -> HarborTask:
         env=env,
         user=user,
         overlay=overlay,
+        sandbox_user=base_user if base_known else user,
     )
 
 

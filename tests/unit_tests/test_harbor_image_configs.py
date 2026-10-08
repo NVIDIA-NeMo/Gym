@@ -351,6 +351,36 @@ class TestDockerfileBaseImages:
         task = write_task(tmp_path, "one", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n")
         assert dockerfile_base_images(task) == {"redis:7-alpine": ["one"]}
 
+    def test_a_dataset_toml_docker_image_override_makes_the_dockerfile_prebuilt(self, tmp_path):
+        (tmp_path / "dataset.toml").write_text(
+            '[gym.tasks."t".environment]\ndocker_image = "ghcr.io/org/t:prebuilt"\n'
+            '[gym.tasks."pull".environment]\ndocker_image = "ghcr.io/org/pull:img"\n'
+        )
+        # The override declares a prebuilt image, so the Dockerfile's RUN lines are already applied and the
+        # loader never resolves its FROM: no base image to record, whether the scan starts at the dataset
+        # or at the task folder (whose dataset.toml sits beside it).
+        write_task(tmp_path, "t", image=None, dockerfile="FROM localbuild/base:dev\nRUN make\n")
+        # A pull-mode Dockerfile next to an overridden image still contributes its ENV, so its base is recorded.
+        write_task(tmp_path, "pull", image=None, dockerfile="FROM redis:7\nENV A=1\n")
+        assert dockerfile_base_images(tmp_path) == {"redis:7": ["pull"]}
+        assert dockerfile_base_images(tmp_path / "t") == {}
+
+    def test_the_deprecated_image_alias_counts_as_the_declared_image(self, tmp_path):
+        task = write_task(tmp_path, "t", image=None, dockerfile="FROM localbuild/base:dev\nRUN make\n")
+        (task / "task.toml").write_text('schema_version = "1.4"\n\n[environment]\nimage = "ghcr.io/org/t:prebuilt"\n')
+        assert dockerfile_base_images(tmp_path) == {}
+
+    def test_select_limits_the_scan_to_the_chosen_tasks(self, tmp_path):
+        write_task(tmp_path, "a", image=None, dockerfile="FROM ubuntu:24.04\nRUN true\n")
+        write_task(tmp_path, "z", image=None, dockerfile="FROM internal.registry/base:dev\nRUN true\n")
+        assert dockerfile_base_images(tmp_path, select=lambda task_id: task_id == "a") == {"ubuntu:24.04": ["a"]}
+
+    def test_a_broken_dataset_toml_records_nothing(self, tmp_path):
+        # Every task fails to load with the dataset.toml error, which the loader reports; no image is fetched for it.
+        write_task(tmp_path, "a", image=None, dockerfile="FROM ubuntu:24.04\nRUN true\n")
+        (tmp_path / "dataset.toml").write_text("not = [toml")
+        assert dockerfile_base_images(tmp_path) == {}
+
 
 class TestRecordBaseImages:
     def test_records_next_to_the_task_folders_with_the_image_environment(self, tmp_path, registry):
@@ -369,6 +399,22 @@ class TestRecordBaseImages:
         write_task(tmp_path, "plain")
         assert record_base_images(tmp_path, client=FakeClient()) is None
         assert not (tmp_path / "compose-images.json").exists()
+
+    def test_a_prebuilt_override_does_not_touch_the_registry(self, tmp_path):
+        (tmp_path / "dataset.toml").write_text(
+            '[gym.tasks."t".environment]\ndocker_image = "ghcr.io/org/t:prebuilt"\n'
+        )
+        write_task(tmp_path, "t", image=None, dockerfile="FROM localbuild/base:dev\nRUN make\n")
+
+        class FailingClient(RegistryClient):
+            def image_config(self, reference):
+                raise ImageConfigError(f"{reference}: registry returned HTTP 404")
+
+        assert record_base_images(tmp_path, client=FailingClient()) is None
+        assert not (tmp_path / "compose-images.json").exists()
+        # The loader agrees: the task runs the prebuilt image with no overlay.
+        (task,) = discover_tasks(tmp_path)
+        assert task.image == "ghcr.io/org/t:prebuilt" and task.overlay == ()
 
     def test_an_unresolvable_base_image_names_the_image_the_tasks_and_the_registry_answer(self, tmp_path, registry):
         write_task(tmp_path, "a", image=None, dockerfile="FROM redis:missing\nRUN true\n")

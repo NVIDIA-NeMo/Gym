@@ -28,7 +28,7 @@ from nemo_gym.path_utils import failures_path_for
 from nemo_gym.tasks.harbor.hub import datasets_dir, fetch_ref, is_hub_ref
 from nemo_gym.tasks.harbor.image_configs import record_base_images, record_compose_images
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
-from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, discover_tasks
+from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, discover_tasks, is_task_folder
 
 
 logger = logging.getLogger(__name__)
@@ -121,17 +121,28 @@ def prepare_target(
     else:
         folder = Path(target).expanduser().resolve()
     taskset = folder.name
+    exclude = exclude or []
+
+    def selected(task_id: str) -> bool:
+        return selection_reason(task_id, exclude, only) is None
+
     # Dockerfile ENV, WORKDIR and USER resolve from the base image's configuration, so it is recorded
-    # before the tasks load; a base image the registry cannot resolve stops the preparation here.
-    images = record_base_images(folder)
+    # before the tasks load; a base image the registry cannot resolve stops the preparation here. Only
+    # the selected tasks' images are recorded, so an image a left-out task uses cannot stop it. A target
+    # that is itself a task folder always loads (discover_tasks raises for it); selection applies after.
+    images = record_base_images(folder, select=None if is_task_folder(folder) else selected)
     if images is not None:
         print(f"Base image configurations recorded in {images}")
     errors: dict[str, HarborTaskError] = {}
     loaded = discover_tasks(folder, skipped=errors)
+    tasks, skipped = select_tasks(loaded, exclude, only)
+    # A left-out task that did not load (its base image was not recorded) is left out, not reported as broken.
+    for task_id in [task_id for task_id in errors if not selected(task_id)]:
+        skipped.append((task_id, selection_reason(task_id, exclude, only)))
+        del errors[task_id]
     for task_id, error in errors.items():
         logger.warning("Skipping task %s: %s", task_id, error)
-    tasks, skipped = select_tasks(loaded, exclude or [], only)
-    for task_id, reason in skipped:
+    for task_id, reason in sorted(skipped):
         print(f"Skipping {task_id}: {reason}")
     if not tasks:
         raise ValueError(f"No runnable task left in {folder}")
@@ -166,14 +177,22 @@ def select_tasks(
     kept: list[HarborTask] = []
     skipped: list[tuple[str, str]] = []
     for task in tasks:
-        pattern = next((p for p in exclude if fnmatch.fnmatchcase(task.task_id, p)), None)
-        if only and not any(fnmatch.fnmatchcase(task.task_id, p) for p in only):
-            skipped.append((task.task_id, "not in --only-tasks"))
-        elif pattern is not None:
-            skipped.append((task.task_id, f"excluded by --exclude-tasks {pattern!r}"))
-        else:
+        reason = selection_reason(task.task_id, exclude, only)
+        if reason is None:
             kept.append(task)
+        else:
+            skipped.append((task.task_id, reason))
     return kept, skipped
+
+
+def selection_reason(task_id: str, exclude: list[str], only: list[str] | None = None) -> str | None:
+    """Why ``--only-tasks``/``--exclude-tasks`` leave ``task_id`` out, or ``None`` when they keep it."""
+    if only and not any(fnmatch.fnmatchcase(task_id, pattern) for pattern in only):
+        return "not in --only-tasks"
+    pattern = next((pattern for pattern in exclude if fnmatch.fnmatchcase(task_id, pattern)), None)
+    if pattern is not None:
+        return f"excluded by --exclude-tasks {pattern!r}"
+    return None
 
 
 def _patterns(args: argparse.Namespace, name: str) -> list[str]:
