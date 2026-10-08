@@ -83,6 +83,10 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
 # Server
 # ----------------------------
 class CompCodingResourcesServer(SimpleResourcesServer):
+    # Each verification runs its candidate code on its own: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = True
     config: CompCodingResourcesServerConfig
 
