@@ -254,9 +254,10 @@ class TestRunHelperShutdownReap:
     def test_server_under_the_bash_wrapper_is_stopped_too(self) -> None:
         import psutil
 
-        # Same shape as `run_command`: a `bash -c` chain whose last command is the server, so bash can't exec it.
+        # A `bash -c` wrapper with the server as its child, as with `run_command`. The trailing `exit` keeps bash from
+        # exec-ing the server in place (newer bash does that for the last command of a chain), so bash stays the parent.
         wrapper = Popen(
-            f"true && {sys.executable} -c 'import time; time.sleep(300)'", shell=True, executable="/bin/bash"
+            f"{sys.executable} -c 'import time; time.sleep(300)'; exit $?", shell=True, executable="/bin/bash"
         )
         deadline = time.monotonic() + 10
         while not psutil.Process(wrapper.pid).children() and time.monotonic() < deadline:
