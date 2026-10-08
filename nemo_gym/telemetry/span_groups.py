@@ -93,7 +93,14 @@ class GymSpanGroup:
     SANDBOX = "sandbox"
     """Sandbox provider create/exec/delete spans."""
 
-    ALL_GROUPS: Final[frozenset] = frozenset([JOB, SERVER, HTTP_CLIENT, ROLLOUT, VERIFY, AGENT, MODEL_CALL, SANDBOX])
+    CHECKPOINT = "checkpoint"
+    """Partial-rollout checkpoint spans: each participant's control operations (prepare, commit, restore,
+    resume, retire) with their export, write, read, and install steps, and the controller's coordination
+    calls. Enable it with ``default,checkpoint``; the checkpoint metrics are recorded either way."""
+
+    ALL_GROUPS: Final[frozenset] = frozenset(
+        [JOB, SERVER, HTTP_CLIENT, ROLLOUT, VERIFY, AGENT, MODEL_CALL, SANDBOX, CHECKPOINT]
+    )
 
     #: The groups that make one rollout appear as one trace across Gym's server
     #: processes. Every preset is a superset of this.

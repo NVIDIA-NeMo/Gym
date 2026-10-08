@@ -53,6 +53,7 @@ from pydantic import BaseModel, Field
 
 from nemo_gym._checkpoint import coordination
 from nemo_gym._checkpoint.settings import checkpoint_settings
+from nemo_gym._checkpoint.telemetry import CHECKPOINT_ID, checkpoint_span
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.server_utils import ServerClient
 
@@ -229,43 +230,18 @@ class CollectionCheckpointer:
             await self._retire_unretired()
             deadline = time.time() + self.timeout_s
             self._dispatching.clear()
-            published: Optional[Path] = None
             participants: Optional[coordination.Participants] = None
-            try:
-                participants = await self._discover()
-                clock = time.monotonic()
-                prepared = await coordination.prepare(participants, checkpoint_id, deadline_ts=deadline)
-                if not prepared.prepared:
-                    LOGGER.warning("checkpoint %s did not prepare in time: %s", checkpoint_id, prepared.blockers())
-                else:
-                    in_flight = [
-                        EpisodeId(rollout_id=key, attempt=value)
-                        for key, value in {**self._restored, **self._in_flight}.items()
-                    ]
-                    episodes = prepared.continued(in_flight)
-                    kept = set(episodes)
-                    continued = [ContinuedRow(rollout_id=e.rollout_id, attempt=e.attempt) for e in episodes]
-                    restarted = [
-                        ContinuedRow(rollout_id=e.rollout_id, attempt=e.attempt) for e in in_flight if e not in kept
-                    ]
-                    target = self.checkpoint_dir / checkpoint_id
-                    await coordination.commit(participants, checkpoint_id, str(target), episodes, deadline_ts=deadline)
-                    manifest = CollectionManifest(
-                        checkpoint_id=checkpoint_id,
-                        run_id=self.run_id,
-                        created_at=time.time(),
-                        continued=continued,
-                        restarted=restarted,
+            with checkpoint_span("gym.checkpoint.collection.checkpoint", **{CHECKPOINT_ID: checkpoint_id}) as span:
+                span.set(in_flight=len(self._in_flight), stop=stop)
+                try:
+                    participants = await self._discover()
+                    published = await self._commit(participants, checkpoint_id, deadline)
+                except Exception:
+                    published = None
+                    LOGGER.exception(
+                        "checkpoint %s failed; the run continues from its previous checkpoint", checkpoint_id
                     )
-                    await asyncio.to_thread(self._publish, target, manifest)
-                    published = target
-                    print(
-                        f"Checkpoint {checkpoint_id} published: {len(continued)} in-flight rows continue and "
-                        f"{len(restarted)} restart, in {time.monotonic() - clock:.1f}s",
-                        flush=True,
-                    )
-            except Exception:
-                LOGGER.exception("checkpoint %s failed; the run continues from its previous checkpoint", checkpoint_id)
+                span.set(published=published is not None)
             if stop:
                 self.stopped = True
                 return published
@@ -275,6 +251,43 @@ class CollectionCheckpointer:
                     await coordination.resume(participants, checkpoint_id, deadline_ts=time.time() + self.timeout_s)
             self._dispatching.set()
             return published
+
+    async def _commit(
+        self, participants: coordination.Participants, checkpoint_id: str, deadline: float
+    ) -> Optional[Path]:
+        """Prepare and commit the rows in flight, then publish; ``None`` if prepare missed its deadline."""
+        clock = time.monotonic()
+        prepared = await coordination.prepare(participants, checkpoint_id, deadline_ts=deadline)
+        if not prepared.prepared:
+            LOGGER.warning("checkpoint %s did not prepare in time: %s", checkpoint_id, prepared.blockers())
+            return None
+        in_flight = [
+            EpisodeId(rollout_id=key, attempt=value) for key, value in {**self._restored, **self._in_flight}.items()
+        ]
+        episodes = prepared.continued(in_flight)
+        kept = set(episodes)
+        continued = [ContinuedRow(rollout_id=episode.rollout_id, attempt=episode.attempt) for episode in episodes]
+        restarted = [
+            ContinuedRow(rollout_id=episode.rollout_id, attempt=episode.attempt)
+            for episode in in_flight
+            if episode not in kept
+        ]
+        target = self.checkpoint_dir / checkpoint_id
+        await coordination.commit(participants, checkpoint_id, str(target), episodes, deadline_ts=deadline)
+        manifest = CollectionManifest(
+            checkpoint_id=checkpoint_id,
+            run_id=self.run_id,
+            created_at=time.time(),
+            continued=continued,
+            restarted=restarted,
+        )
+        await asyncio.to_thread(self._publish, target, manifest)
+        print(
+            f"Checkpoint {checkpoint_id} published: {len(continued)} in-flight rows continue and {len(restarted)} "
+            f"restart, in {time.monotonic() - clock:.1f}s",
+            flush=True,
+        )
+        return target
 
     def _publish(self, target: Path, manifest: CollectionManifest) -> None:
         """Write the manifest, then point LATEST at the checkpoint, then drop checkpoints two behind it.
@@ -382,6 +395,16 @@ class CollectionCheckpointer:
         carried = {episode.rollout_id: episode.attempt for episode in fenced}
         carried |= {row.rollout_id: row.attempt + 1 for row in continued}
         await asyncio.to_thread(self._start_log, carried)
+        if not fenced and not continued:
+            return result
+        names = {CHECKPOINT_ID: target.name} if target is not None else {}
+        with checkpoint_span("gym.checkpoint.collection.restore", **names) as span:
+            span.set(rows=len(continued), restarts=len(fenced))
+            return await self._restore(target, continued, fenced, result)
+
+    async def _restore(
+        self, target: Optional[Path], continued: list[ContinuedRow], fenced: list[EpisodeId], result: dict[str, int]
+    ) -> dict[str, int]:
         if fenced:
             # A harness of the previous run, such as a blackbox agent's sandbox, may have outlived the crash:
             # retire its attempt everywhere before the row starts over, so nothing it still sends reaches the rerun.
