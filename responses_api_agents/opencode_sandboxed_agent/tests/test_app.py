@@ -830,7 +830,9 @@ class TestOpenCodeSandboxedAgent:
             if url_path == "/seed_session":
                 return Response({"sandbox_handle": "seed-sandbox"})
             assert url_path == "/verify"
-            assert (tmp_path / "results/session-1/generation.json").is_file()
+            export_path = tmp_path / "results/session-1/export.json"
+            assert export_path.is_file()
+            assert json["response"]["output"]
             return Response(
                 json
                 | {
@@ -1149,8 +1151,8 @@ class TestBenchmarkLifecycle:
         sandbox.stop.assert_awaited_once()
 
 
-@mark.parametrize("failure", ["command", "download", "empty"])
-async def test_export_failure_propagates_instead_of_scoring_zero(tmp_path, monkeypatch, failure):
+@mark.parametrize("failure", ["exception", "command", "download", "empty"])
+async def test_export_failure_returns_empty_failed_response(tmp_path, failure):
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)
     config.execution_failure_reward_zero = True
@@ -1160,12 +1162,15 @@ async def test_export_failure_propagates_instead_of_scoring_zero(tmp_path, monke
         side_effect=[
             SimpleNamespace(stdout="Shell: bash\nOpenCode run finished", stderr="", return_code=0, error_type=None),
             SimpleNamespace(stdout='[{"id":"session"}]', stderr="", return_code=0, error_type=None),
-            SimpleNamespace(stdout="", stderr="", return_code=1 if failure == "command" else 0, error_type=None),
+            OSError("export unavailable")
+            if failure == "exception"
+            else SimpleNamespace(stdout="", stderr="", return_code=1 if failure == "command" else 0, error_type=None),
         ]
     )
 
     async def download(remote, local):
         if failure == "download":
+            local.write_text('{"messages":[')
             raise OSError("export unavailable")
         local.write_text("{}")
 
@@ -1179,9 +1184,18 @@ async def test_export_failure_propagates_instead_of_scoring_zero(tmp_path, monke
     (tmp_path / "session").mkdir()
     (tmp_path / "session" / "export.json").write_text('{"messages":[{"info":{"role":"assistant"}}]}')
     body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
-    with raises((RuntimeError, OSError)):
-        await server.responses(request, body)
-    assert server._sandbox_id_to_run_result == {}
+    response = await server.responses(request, body)
+    assert response.output == []
+    assert response.usage is None
+    assert response.incomplete_details is None
+    run_result = server._sandbox_id_to_run_result["session"]
+    assert run_result["opencode_failed"] is True
+    assert run_result["opencode_export_found"] is False
+    assert run_result["opencode_results_fpath"] == ""
+    if failure != "empty":
+        assert not (tmp_path / "session" / "export.json").exists()
+    if failure in ("exception", "command"):
+        sandbox.download.assert_not_awaited()
 
 
 async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
@@ -1280,10 +1294,11 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
     server._start_sandbox = AsyncMock(return_value=sandbox)
     server._create_opencode_config = AsyncMock(return_value={})
     monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app_module, "_read_opencode_child_messages", lambda *args: [])
     monkeypatch.setattr(
         app_module,
         "parse_opencode_observations",
-        lambda *args: AgentObservationBundle(
+        lambda *args, **kwargs: AgentObservationBundle(
             source="opencode", records=[AgentInvocation(invocation_id="rollout", status="completed")]
         ),
     )
@@ -1309,10 +1324,10 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
     if collect_observations:
         invocation = next(r for r in result.ng_agent_observations.records if isinstance(r, AgentInvocation))
         assert invocation.status == ("incomplete" if limited else "completed")
-    receipt = json.loads((tmp_path / "trial" / "generation.json").read_text())
-    assert receipt["execution"]["opencode_failed"] is limited
-    assert receipt["response"]["output"]
-    assert receipt["response"]["status"] == result.response.status
+        assert "observation_capture_failed" not in {gap.code for gap in result.ng_agent_observations.gaps}
+    export_path = tmp_path / "trial" / "export.json"
+    assert Path(result.opencode_results_fpath) == export_path
+    assert json.loads(export_path.read_text()) == export
     sandbox.stop.assert_awaited_once()
 
 

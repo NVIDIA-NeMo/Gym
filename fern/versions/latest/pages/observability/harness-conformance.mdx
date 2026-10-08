@@ -80,9 +80,19 @@ Identical inputs and checker versions reuse the same report directory.
 - **Semantic:** references resolve to unambiguous saved targets.
 - **Behavioral:** harness behavior and saved evidence match the controlled test's
   model, tool and verifier observations.
+- **Health:** each rollout health result matches its scenario's expected
+  `healthy`, `unhealthy` or `unobserved` outcome. A pass means the expected outcome
+  occurred, not necessarily that the rollout was healthy.
 
 The standalone inspector runs schema and semantic checks; the conformance runner
-also runs behavioral checks.
+also runs behavioral and health checks.
+
+Health checks are generated from Gym's registered rollout checks and are all P0.
+The runner calls the same top-level health engine as `gym eval health-check` once
+on the saved rollout and failure files, retaining its reports under `health/`.
+Each scenario's `health_expectations` overrides the default `healthy` expectation;
+unknown check IDs are configuration errors. New registered rollout checks default
+to `healthy`. Task-level checks requiring repeated executions are outside this suite.
 
 Each check reports `pass` (✓), `fail` (✗: requirement not demonstrated), or
 `not_applicable` (—: excluded by the check's applicability condition).
