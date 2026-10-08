@@ -635,6 +635,25 @@ class TestApp:
             second_not_equal_item,
         )
 
+    @mark.parametrize("first_verdict", ["[[ A=B ]]", "[[ A = B ]]", "[[\nA=B\n]]"])
+    async def test_whitespace_equal_requires_reverse_judgement(self, config, first_verdict):
+        server_mock = MagicMock(spec=ServerClient)
+        response_mock = AsyncMock()
+        post_mock = MagicMock(read=response_mock)
+        server_mock.post = AsyncMock(return_value=post_mock)
+        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
+        first_item = self._create_response_output_message(first_verdict)
+        second_item = self._create_response_output_message("[[ A != B ]]")
+        response_mock.side_effect = [
+            json.dumps(self._create_response("first", first_item)),
+            json.dumps(self._create_response("second", second_item)),
+        ]
+        reward, evaluations = await resources_server._verify_answer_with_judge("question", "4", "5")
+        assert reward == 0.0
+        assert len(evaluations) == 2
+        assert server_mock.post.await_count == 2
+        assert evaluations[0].response.output[-1].content[-1].text == first_verdict
+
     async def _generate_and_check_judge_evaluation(
         self,
         resources_server: LibraryJudgeMathResourcesServer,
@@ -763,6 +782,10 @@ class TestApp:
             ("[[A=B]] Wait, different. Final: [[A!=B]]", "[[A=B]]", 0.0, 1),
             ("[[A=B]]", "[[A=B]] Final: [[A!=B]]", 0.0, 2),
             ("[[A=B]]", "[[A!=B]] Final: [[A=B]]", 1.0, 2),
+            ("[[A!=B]] Final: [[ A = B ]]", "[[ A = B ]]", 1.0, 2),
+            ("[[A=B]] Final: [[ A != B ]]", "[[A=B]]", 0.0, 1),
+            ("[[ A = B ]]", "[[A=B]] Final: [[ A != B ]]", 0.0, 2),
+            ("[[ A = B ]]", "[[A!=B]] Final: [[\nA = B\n]]", 1.0, 2),
             ("[[A=B]] [[A=B]]", "[[A=B]]", 1.0, 2),
             ("[[A!=B]] [[A!=B]]", "[[A=B]]", 0.0, 1),
             ("No verdict", "[[A=B]]", 0.0, 1),

@@ -71,6 +71,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
 from nemo_gym.registry import (
     EnvironmentCatalogEntry,
     RegistryError,
@@ -119,10 +120,15 @@ _ENDPOINT_POLL_INTERVAL_SEC: float = 3.0
 
 # What a probe found. The distinction that matters is whether waiting could change the answer: a
 # name that does not resolve will not start resolving, while a refused connection may be a server
-# that is still coming up.
+# that is still coming up, and so may a gateway status from a proxy or load balancer in front of it.
 _ENDPOINT_ANSWERING = "answering"
 _ENDPOINT_REFUSED = "refused"
+_ENDPOINT_STARTING = "starting"
 _ENDPOINT_UNRESOLVABLE = "unresolvable"
+
+# A proxy or load balancer answers these while nothing healthy is behind it yet, for example in
+# front of vLLM replicas that are still loading weights, so they mean "not yet" rather than "here".
+_ENDPOINT_STARTING_STATUS_CODES = frozenset({502, 503, 504})
 
 
 def _collect_model_endpoints(global_config_dict: DictConfig) -> List[Tuple[str, str]]:
@@ -177,8 +183,9 @@ def _endpoint_probe_url(base_url: str) -> str:
     """What to GET to find out whether `base_url` is being served.
 
     `GET /v1/models` is part of the OpenAI API, so most endpoints behind a `/v1` base URL answer it,
-    but nothing here depends on that: any HTTP response counts as answering, so an endpoint without
-    it replies 404 and still passes. URLs that do not end in `/v1` are probed at their root.
+    but nothing here depends on that: any HTTP response other than a gateway status counts as
+    answering, so an endpoint without it replies 404 and still passes. URLs that do not end in `/v1`
+    are probed at their root.
     """
     trimmed = base_url.rstrip("/")
     return f"{trimmed}/models" if trimmed.endswith("/v1") else trimmed
@@ -204,12 +211,22 @@ def _probe_endpoint(base_url: str, timeout_seconds: float = _ENDPOINT_PROBE_TIME
     """Whether anything answers at `base_url`, and if not, whether waiting could help.
 
     Answering is the bar, not healthy: a 401 or 404 means something is there, and requiring a 200
-    would reject endpoints that need auth. A completed TLS handshake counts too, even against a
-    certificate this process does not trust, which is why `SSLError` is checked before
-    `ConnectionError` it inherits from.
+    would reject endpoints that need auth. The exception is 502, 503 and 504, which a proxy or load
+    balancer returns while the server behind it is still starting; those are waited on like a
+    refused connection. A completed TLS handshake counts too, even against a certificate this
+    process does not trust, which is why `SSLError` is checked before `ConnectionError` it inherits
+    from.
+
+    The probe connects directly, ignoring `HTTP_PROXY` and the like, because model requests go
+    through Gym's aiohttp client, which ignores them too. Through a proxy, an endpoint the proxy
+    cannot reach would come back as 502 or 504 and be waited on until the timeout.
     """
     try:
-        requests.get(_endpoint_probe_url(base_url), timeout=timeout_seconds)
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(_endpoint_probe_url(base_url), timeout=timeout_seconds)
+        if response.status_code in _ENDPOINT_STARTING_STATUS_CODES:
+            return _ENDPOINT_STARTING
         return _ENDPOINT_ANSWERING
     except requests.exceptions.SSLError:
         return _ENDPOINT_ANSWERING
@@ -230,9 +247,9 @@ def _wait_for_model_endpoints(
 ) -> List[Tuple[str, str]]:
     """Wait for every endpoint to answer. Returns the ones that never did.
 
-    Unresolvable names are reported once and not waited on. Refused connections are waited on,
-    because an inference server can take minutes to load weights and someone who starts thirty
-    seconds early should not have to start over.
+    Unresolvable names are reported once and not waited on. Refused connections and gateway
+    statuses are waited on, because an inference server can take minutes to load weights and
+    someone who starts thirty seconds early should not have to start over.
     """
     if timeout_seconds <= 0 or not endpoints:
         return []
@@ -249,7 +266,7 @@ def _wait_for_model_endpoints(
             print(
                 f"Model endpoint {url} ({key}) does not resolve. Waiting cannot fix a hostname, so it is not retried."
             )
-        elif result == _ENDPOINT_REFUSED:
+        elif result in (_ENDPOINT_REFUSED, _ENDPOINT_STARTING):
             waiting.append((key, url))
     if not waiting:
         return []
@@ -424,6 +441,7 @@ class RunHelper:  # pragma: no cover
     _memory_profiler: MemoryProfiler | None
     _memory_profiling_config: MemoryProfilingConfig
     _telemetry_metrics_enabled: bool
+    _h2_ping_sidecar: H2PingSidecarManager | None
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         """Start the head server and every configured server, and wait until all of them are ready.
@@ -434,6 +452,7 @@ class RunHelper:  # pragma: no cover
         """
         self._processes = dict()
         self._head_server = None
+        self._h2_ping_sidecar = None
         try:
             self._start(global_config_dict_parser_config)
         except BaseException:
@@ -462,6 +481,12 @@ class RunHelper:  # pragma: no cover
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
         initialize_ray()
+
+        # Start the HTTP/2 PING sidecar (if `sidecar.enabled`) and point model URLs at it. This
+        # must come before the config is serialized below, which is how every server learns its URLs.
+        # A dry run only builds venvs and talks to no model, so it starts nothing.
+        if not global_config_dict[DRY_RUN_KEY_NAME]:
+            self._h2_ping_sidecar = start_h2_ping_sidecar(global_config_dict)
 
         # Assume Nemo Gym Run is for a single agent.
         config_dict_yaml_str = OmegaConf.to_yaml(global_config_dict)
@@ -598,6 +623,9 @@ class RunHelper:  # pragma: no cover
     def poll(self) -> None:
         if not self._head_server_thread.is_alive():
             raise RuntimeError("Head server finished unexpectedly!")
+
+        if self._h2_ping_sidecar is not None:
+            self._h2_ping_sidecar.check()
 
         for process_name, process in self._processes.items():
             if process.poll() is not None:
@@ -743,6 +771,14 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
             )
         self._processes = dict()
 
+        # After the servers, so requests they were still finishing can drain through it. It gets its
+        # own, longer grace period (`sidecar.shutdown_grace`).
+        h2_ping_sidecar = getattr(self, "_h2_ping_sidecar", None)
+        if h2_ping_sidecar is not None:
+            print("Stopping h2-ping-sidecar...")
+            h2_ping_sidecar.stop()
+            self._h2_ping_sidecar = None
+
         # None before the head server starts and after an earlier shutdown.
         if self._head_server is not None:
             self._head_server.should_exit = True
@@ -791,11 +827,12 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
             f"""{len(unreachable)} model endpoint(s) never answered within {timeout_seconds:.0f}s:
 {listed}
 
-Nothing accepted a connection there. The server was never started, is still starting up, or the URL
-in your config does not match where it is listening.
+Nothing accepted a connection there, or only a proxy or load balancer answered with 502, 503 or 504.
+The server was never started, is still starting up, or the URL in your config does not match where
+it is listening.
   - Check the config key named beside each URL. Verify with `curl -i <base_url>/models` for a
     `/v1` endpoint, or `curl -i <base_url>` otherwise.
-  - Any response, including 401 or 404, means something is listening.
+  - Any other response, including 401 or 404, means something is listening.
   - Raise `{MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}` to wait longer, or set it to 0 to skip this check."""
         )
 
