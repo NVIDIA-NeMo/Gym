@@ -215,9 +215,15 @@ def _probe_endpoint(base_url: str, timeout_seconds: float = _ENDPOINT_PROBE_TIME
     refused connection. A completed TLS handshake counts too, even against a certificate this
     process does not trust, which is why `SSLError` is checked before `ConnectionError` it inherits
     from.
+
+    The probe connects directly, ignoring `HTTP_PROXY` and the like, because model requests go
+    through Gym's aiohttp client, which ignores them too. Through a proxy, an endpoint the proxy
+    cannot reach would come back as 502 or 504 and be waited on until the timeout.
     """
     try:
-        response = requests.get(_endpoint_probe_url(base_url), timeout=timeout_seconds)
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(_endpoint_probe_url(base_url), timeout=timeout_seconds)
         if response.status_code in _ENDPOINT_STARTING_STATUS_CODES:
             return _ENDPOINT_STARTING
         return _ENDPOINT_ANSWERING
