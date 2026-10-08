@@ -162,3 +162,41 @@ class TestPartialStart:
         table = t.timing_summary()
         assert "3/100" in table and "(window open)" not in table
         assert table.count("WARNING") == 2
+
+
+class TestAllStartedDeadline:
+    def test_separate_all_started_deadline(self):
+        t = DispatchLatencyTracker(total=2, start_report_within_s=1800, all_started_within_s=2700)
+        t.record_start(t._t0 + 60)
+        t.record_start(t._t0 + 2400)  # 40 min: past the 30 min window, inside the 45 min deadline
+        table = t.timing_summary()
+        assert "all rollouts started by" in table and "<= 45 min" in table
+        line = next(x for x in table.splitlines() if "all rollouts started by" in x)
+        assert "WARNING" not in line
+
+    def test_partial_start_reports_the_all_started_deadline(self):
+        t = DispatchLatencyTracker(total=100, start_report_within_s=1800, all_started_within_s=2700)
+        t._t0 -= 3600
+        t.record_start(t._t0 + 10)
+        line = next(x for x in t.timing_summary().splitlines() if "started so far" in x)
+        assert "all by 45 min" in line and "WARNING" in line
+
+
+class TestSigtermHook:
+    async def test_hook_installs_and_restores(self):
+        import asyncio
+        import signal
+
+        from nemo_gym.rollout_collection import (
+            _NO_SIGTERM_HOOK,
+            _print_timing_summary_on_sigterm,
+            _restore_sigterm,
+        )
+
+        before = signal.getsignal(signal.SIGTERM)
+        previous = _print_timing_summary_on_sigterm(DispatchLatencyTracker())
+        assert previous is not _NO_SIGTERM_HOOK
+        assert asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM) is True
+        asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, lambda: None)
+        _restore_sigterm(previous)
+        assert signal.getsignal(signal.SIGTERM) == before
