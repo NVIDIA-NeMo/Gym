@@ -25,7 +25,7 @@ import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict, deque
 from collections.abc import Mapping
-from contextlib import ExitStack, nullcontext
+from contextlib import AsyncExitStack, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from difflib import get_close_matches
@@ -83,6 +83,7 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
+from nemo_gym.inference_metrics import InferenceMetricsConfig, collect_inference_metrics
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, materialized_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
@@ -969,6 +970,7 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
 
 
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
+    inference_metrics: InferenceMetricsConfig = Field(default_factory=InferenceMetricsConfig)
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     batch_manifest_fpath: Optional[str] = Field(
         default=None,
@@ -2715,7 +2717,7 @@ class RolloutCollectionHelper(BaseModel):
 
         exporters_enabled = bool(get_exporters())
         upload_spool_fpath = output_fpath.with_suffix(output_fpath.suffix + ".upload.tmp")
-        resource_stack = ExitStack()
+        resource_stack = AsyncExitStack()
         completion_iterator = None
         upload_spool = None
         failure_counts: Counter = Counter()
@@ -2755,6 +2757,7 @@ class RolloutCollectionHelper(BaseModel):
                             if line.strip():
                                 upload_spool.write(orjson.dumps(_rollout_for_export(orjson.loads(line))) + b"\n")
 
+            await resource_stack.enter_async_context(collect_inference_metrics(config.inference_metrics))
             completion_iterator = self._run_examples_with_metadata(
                 input_rows,
                 semaphore=semaphore,
@@ -2996,7 +2999,11 @@ class RolloutCollectionHelper(BaseModel):
                                 )
                             )
 
-                        export_metrics(step_metrics, step=int(current_pct))
+                        if config.inference_metrics.enabled:
+                            step_metrics["progress/completion_pct"] = current_pct
+                            export_metrics(step_metrics)
+                        else:
+                            export_metrics(step_metrics, step=int(current_pct))
 
             counted = _failure_rows_counted_as_zero(
                 [failures_fpath], config.count_failure_classes_as_zero, persisted_success_keys
@@ -3033,7 +3040,7 @@ class RolloutCollectionHelper(BaseModel):
                     await completion_iterator.aclose()
             finally:
                 try:
-                    resource_stack.close()
+                    await resource_stack.aclose()
                 finally:
                     if upload_spool is not None and not collection_succeeded:
                         upload_spool_fpath.unlink(missing_ok=True)

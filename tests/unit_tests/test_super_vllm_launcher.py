@@ -209,7 +209,7 @@ VLLM_COMMON_ARGS=(--common-test 'value with spaces')
 VLLM_PREFILL_ARGS=(--prefill-test producer)
 VLLM_DECODE_ARGS=(--decode-test consumer)
 vllm() {
-    printf '%s\0' "$VLLM_NIXL_SIDE_CHANNEL_HOST" "$VLLM_NIXL_SIDE_CHANNEL_PORT" "$@"
+    printf '%s\0' "${VLLM_NIXL_SIDE_CHANNEL_HOST:-}" "${VLLM_NIXL_SIDE_CHANNEL_PORT:-}" "$@"
     touch "$TEST_STATE_DIR/service-ready"
     if [[ "$TEST_COUPLED_HEAD" == 1 ]]; then
         while true; do "$TEST_SLEEP" 0.01; done
@@ -353,6 +353,7 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
         exit_status: int = 7,
         visible_gpus: str = "GPU-d,GPU-b,GPU-a,GPU-c",
         shutdown_signal: str = "",
+        profile: bool = False,
     ) -> tuple[int, str, str, dict[str, list[str]]]:
         """Execute generated commands with mock services, recording argv and GPU assignments."""
         with TemporaryDirectory(prefix="gym-tp1-") as directory:
@@ -379,6 +380,9 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
                 "TEST_EXIT_ROLE": exit_role,
                 "TEST_EXIT_STATUS": str(exit_status),
                 "TEST_SHUTDOWN_SIGNAL": shutdown_signal,
+                "PROFILE_PREFILL": str(int(profile)),
+                "PREFILL_PROFILE_DELAY_SECONDS": "0",
+                "PREFILL_PROFILE_DIR": str(root / "profiles"),
             }
             _, command, _, submissions = self.capture_submission(env=env)
             self.assertIn(f"--nodes={env['NUM_NODES']}", submissions[0])
@@ -406,6 +410,16 @@ vllm() {
 vllm-router() {
     printf '%s\0' "$@" > "$TEST_STATE_DIR/router.args"
     run_service router
+}
+nsys() {
+    printf '%s\0' "$@" > "$TEST_STATE_DIR/profile-$CUDA_VISIBLE_DEVICES.args"
+    while [[ ! -f "$TEST_STATE_DIR/profile-$CUDA_VISIBLE_DEVICES-started" ]]; do "$TEST_SLEEP" 0.01; done
+    while [[ "$1" != vllm ]]; do shift; done
+    "$@"
+}
+curl() {
+    printf '%s\0' "${*: -1}" >> "$TEST_STATE_DIR/trigger-$CUDA_VISIBLE_DEVICES.args"
+    if [[ "${*: -1}" == */start_profile ]]; then touch "$TEST_STATE_DIR/profile-$CUDA_VISIBLE_DEVICES-started"; fi
 }
 hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
 sleep() { "$TEST_SLEEP" 0.01; }
@@ -490,6 +504,34 @@ sleep() { "$TEST_SLEEP" 0.01; }
                 self.assertIn("require at least four visible GPUs", stderr)
                 self.assertEqual(recorded, {})
 
+    def test_tp1_profiling_uses_each_prefill_port_and_cleans_up(self) -> None:
+        for mode, rank in (("pd", 0), ("pd", 1), ("aggregated", 0)):
+            with self.subTest(mode=mode, rank=rank):
+                status, stdout, stderr, recorded = self.run_tp1_services(mode=mode, rank=rank, profile=True)
+                self.assertEqual(status, 7, stderr)
+                for index, gpu in enumerate(("GPU-d", "GPU-b", "GPU-a", "GPU-c")):
+                    should_profile = mode == "pd" and rank == 0
+                    self.assertEqual(f"profile-{gpu}" in recorded, should_profile)
+                    self.assertEqual(f"trigger-{gpu}" in recorded, should_profile)
+                    if should_profile:
+                        port = 8001 + index
+                        self.assertEqual(
+                            recorded[f"trigger-{gpu}"],
+                            [f"http://node0:{port}/health", f"http://node0:{port}/start_profile"],
+                        )
+                        args = recorded[f"profile-{gpu}"]
+                        output = args[args.index("--output") + 1]
+                        self.assertTrue(output.endswith(f"/prefill-12345-node0-port{port}-%p"))
+                    if gpu != "GPU-b":
+                        self.assertIn(f"engine-{gpu}-stopped", stdout)
+
+    def test_tp1_profile_shutdown_stops_servers(self) -> None:
+        status, stdout, stderr, _ = self.run_tp1_services(mode="pd", profile=True, shutdown_signal="TERM")
+        self.assertEqual(status, 143, stderr)
+        for gpu in ("GPU-d", "GPU-b", "GPU-a", "GPU-c"):
+            self.assertIn(f"engine-{gpu}-stopped", stdout)
+        self.assertIn("router-stopped", stdout)
+
     def test_tp1_metrics_include_every_engine(self) -> None:
         for mode in ("aggregated", "pd"):
             with self.subTest(mode=mode):
@@ -559,6 +601,235 @@ sleep() { "$TEST_SLEEP" 0.01; }
         status, stdout, stderr = self.run_shell(setup + inspect, *expected)
         self.assertEqual(status, 0, stderr)
         self.assertEqual(dict(zip(expected, stdout.removesuffix("\0").split("\0"), strict=True)), expected)
+
+    def test_prefill_profile_wraps_only_prefill_workers(self) -> None:
+        recipe = str(SCRIPT.parent / "vllm_configs/nemotron_3.5_super_mtp_mooncake.sh")
+        # Record the actual Nsight invocation, then pass through to the serving stub.
+        profiler_stub = r"""
+nsys() {
+    printf '%s\0' "$VLLM_WORKER_MULTIPROC_METHOD" "$@" > "$TEST_NSYS_ARGS"
+    while [[ "$1" != vllm ]]; do shift; done
+    "$@"
+}
+"""
+        capture = Path(self.workdir) / "nsys_args"
+        profile_dir = Path(self.workdir) / "profile with spaces"
+        for mode in ("independent", "coupled", "aggregated"):
+            for enabled in ("0", "1"):
+                env = {
+                    "VLLM_CONFIG": recipe,
+                    "VLLM_MODE": "aggregated" if mode == "aggregated" else "pd",
+                    "VLLM_PD_DEPLOYMENT_MODE": "coupled" if mode == "coupled" else "independent",
+                    "PROFILE_PREFILL": enabled,
+                    "PREFILL_PROFILE_STEPS": "7",
+                    "PREFILL_PROFILE_DELAY_SECONDS": "manual",
+                    "PREFILL_PROFILE_DIR": str(profile_dir),
+                    "TEST_NSYS_ARGS": str(capture),
+                }
+                _, command = self.generate_commands(env=env)
+                for rank in (0, 1, 4, 5):
+                    with self.subTest(mode=mode, enabled=enabled, rank=rank):
+                        capture.unlink(missing_ok=True)
+                        _, _, args, _ = self.serving_arguments(
+                            profiler_stub + command,
+                            rank=rank,
+                            coupled_head=mode == "coupled" and rank == 0,
+                            env=env,
+                        )
+                        should_profile = enabled == "1" and rank < 4 and mode != "aggregated"
+                        self.assertEqual(capture.exists(), should_profile)
+                        self.assertEqual("--profiler-config" in args, should_profile)
+                        if should_profile:
+                            profiler_args = capture.read_text().removesuffix("\0").split("\0")
+                            self.assertEqual(profiler_args[:2], ["spawn", "profile"])
+                            self.assertIn("--capture-range=cudaProfilerApi", profiler_args)
+                            self.assertIn("--capture-range-end=stop", profiler_args)
+                            self.assertIn("--cuda-graph-trace=node", profiler_args)
+                            for flag in (
+                                "--trace=cuda,nvtx,osrt,nccl,cublas,cublas-verbose",
+                                "--nccl-trace=all",
+                                "--pytorch=functions-trace-shapes",
+                                "--sample=process-tree",
+                                "--cudabacktrace=all",
+                                "--python-backtrace=cuda",
+                                "--python-sampling=true",
+                            ):
+                                self.assertIn(flag, profiler_args)
+                            output = profiler_args[profiler_args.index("--output") + 1]
+                            self.assertEqual(output, str(profile_dir / f"prefill-12345-node{rank}-port8001-%p"))
+                            self.assertTrue(profile_dir.is_dir())
+                            config = json.loads(args[args.index("--profiler-config") + 1])
+                            self.assertEqual(config, {"profiler": "cuda", "max_iterations": 7})
+
+    def test_prefill_profile_automatically_waits_for_health_and_warmup(self) -> None:
+        _, command = self.generate_commands()
+        setup = command.split('\nmooncake_pid=""', 1)[0]
+        stubs = r"""
+hostname() { echo node1; }
+curl() {
+    if [[ "${*: -1}" == http://node1:8001/health ]]; then
+        echo health
+        if [[ ! -f ready ]]; then touch ready; return 22; fi
+    else
+        [[ "${*: -3}" == '-X POST http://node1:8001/start_profile' ]] || return 99
+        echo post
+        return "${TEST_POST_STATUS:-0}"
+    fi >> events
+}
+sleep() { echo sleep >> events; SECONDS=$((SECONDS + 1)); }
+"""
+        for post_status in ("0", "22"):
+            with self.subTest(post_status=post_status):
+                for name in ("ready", "events"):
+                    (Path(self.workdir) / name).unlink(missing_ok=True)
+                status, _, stderr = self.run_shell(
+                    stubs + setup + "\nprofile_delay=2\nprofile_port=8001\nsteps=20\ntrigger_prefill_profile\n",
+                    env={"TEST_POST_STATUS": post_status},
+                )
+                self.assertEqual(status, 0 if post_status == "0" else 1, stderr)
+                self.assertEqual(
+                    (Path(self.workdir) / "events").read_text().splitlines(),
+                    ["health", "sleep", "health", "sleep", "sleep", "post"],
+                )
+                self.assertIn("capture started" if post_status == "0" else "Could not start", stderr)
+
+    def test_prefill_profile_autotrigger_only_runs_on_api_workers(self) -> None:
+        _, command = self.generate_commands()
+        setup = command.split('\nmooncake_pid=""', 1)[0]
+        stubs = r"""
+nsys() {
+    if [[ " $* " == *' --headless '* || "$PREFILL_PROFILE_DELAY_SECONDS" == manual ]]; then return; fi
+    while [[ ! -f posted ]]; do "$TEST_SLEEP" 0.01; done
+}
+curl() {
+    echo "${*: -1}" >> urls
+    if [[ "${*: -1}" == */start_profile ]]; then touch posted; fi
+}
+"""
+        for delay, headless in (("0", False), ("0", True), ("manual", False)):
+            with self.subTest(delay=delay, headless=headless):
+                for name in ("posted", "urls"):
+                    (Path(self.workdir) / name).unlink(missing_ok=True)
+                status, _, stderr = self.run_shell(
+                    stubs + setup + '\nserve_prefill 8001 /test/model "$@"\n',
+                    *(["--headless"] if headless else []),
+                    env={"PROFILE_PREFILL": "1", "PREFILL_PROFILE_DELAY_SECONDS": delay},
+                )
+                self.assertEqual(status, 0, stderr)
+                urls = Path(self.workdir) / "urls"
+                self.assertEqual(urls.exists(), delay == "0" and not headless)
+                if urls.exists():
+                    self.assertEqual(
+                        [url.rsplit("/", 1)[1] for url in urls.read_text().splitlines()], ["health", "start_profile"]
+                    )
+
+    def test_prefill_profile_rejects_invalid_steps_or_missing_nsys(self) -> None:
+        _, command = self.generate_commands()
+        setup = command.split('\nmooncake_pid=""', 1)[0]
+        # Hide nsys regardless of what is installed on the test host.
+        stubs = r"""
+command() { if [[ "$*" == '-v nsys' ]]; then return 1; else builtin command "$@"; fi; }
+id() { echo 1000; }
+vllm() { echo 'unexpected server launch'; }
+"""
+        for steps, expected in (
+            ("0", "must be a positive integer"),
+            ("-1", "must be a positive integer"),
+            ("1.5", "must be a positive integer"),
+            ("abc", "must be a positive integer"),
+            ("20", "Installing Nsight Systems requires root"),
+        ):
+            with self.subTest(steps=steps):
+                status, stdout, stderr = self.run_shell(
+                    stubs + setup + "\nserve_prefill 8001 /test/model\n",
+                    env={"PROFILE_PREFILL": "1", "PREFILL_PROFILE_STEPS": steps},
+                )
+                self.assertNotEqual(status, 0)
+                self.assertNotIn("unexpected server launch", stdout)
+                self.assertIn(expected, stderr)
+
+    def test_prefill_profile_installs_nsys_for_container_architecture(self) -> None:
+        _, command = self.generate_commands()
+        setup = command.split('\nmooncake_pid=""', 1)[0]
+        # Stub every system mutation: installation must never touch the test host.
+        stubs = r"""
+command() {
+    if [[ "$*" == '-v nsys' ]]; then [[ -f installed ]]; else builtin command "$@"; fi
+}
+source() {
+    if [[ "$1" == /etc/os-release ]]; then ID=ubuntu; VERSION_ID=24.04; else builtin source "$@"; fi
+}
+id() { echo 0; }
+dpkg() { echo "$TEST_ARCH"; }
+apt-get() {
+    echo "$*" >> apt_calls
+    if [[ "$TEST_FAILURE" == apt ]]; then return 42; fi
+    if [[ " $* " == *' nsight-systems-cli '* && "$TEST_FAILURE" != missing ]]; then touch installed; fi
+}
+mkdir() { [[ "$*" == '-p /usr/share/keyrings' ]]; }
+wget() { echo public-key; }
+gpg() { cat > key; [[ "$TEST_FAILURE" != key ]]; }
+tee() { cat > repository; }
+nsys() { echo "$*" >> nsys_calls; }
+"""
+        for arch, failure in (
+            ("arm64", "none"),
+            ("amd64", "none"),
+            ("arm64", "apt"),
+            ("arm64", "key"),
+            ("arm64", "missing"),
+        ):
+            with self.subTest(arch=arch, failure=failure):
+                for name in ("installed", "apt_calls", "repository", "key", "nsys_calls"):
+                    (Path(self.workdir) / name).unlink(missing_ok=True)
+                status, _, stderr = self.run_shell(
+                    stubs + setup + "\nensure_nsys\nensure_nsys\n",
+                    env={"TEST_ARCH": arch, "TEST_FAILURE": failure},
+                )
+                apt_calls = (Path(self.workdir) / "apt_calls").read_text().splitlines()
+                if failure == "none":
+                    self.assertEqual(status, 0, stderr)
+                    self.assertEqual(
+                        apt_calls,
+                        [
+                            "update",
+                            "install -y --no-install-recommends wget gnupg ca-certificates",
+                            "update",
+                            "install -y --no-install-recommends nsight-systems-cli curl",
+                        ],
+                    )
+                    self.assertEqual(
+                        (Path(self.workdir) / "repository").read_text(),
+                        "deb [signed-by=/usr/share/keyrings/nvidia-devtools-keyring.gpg] "
+                        f"https://developer.download.nvidia.com/devtools/repos/ubuntu2404/{arch}/ /\n",
+                    )
+                    self.assertEqual((Path(self.workdir) / "nsys_calls").read_text(), "--version\n")
+                else:
+                    self.assertNotEqual(status, 0)
+                    self.assertFalse((Path(self.workdir) / "nsys_calls").exists())
+                    self.assertIn("installation completed" if failure == "missing" else "installation failed", stderr)
+                    self.assertEqual(len(apt_calls), {"apt": 1, "key": 2, "missing": 4}[failure])
+
+    def test_prefill_profile_cancels_pending_trigger_when_server_exits(self) -> None:
+        _, command = self.generate_commands()
+        setup = command.split('\nmooncake_pid=""', 1)[0]
+        stubs = r"""
+nsys() {
+    while [[ ! -f trigger_started ]]; do "$TEST_SLEEP" 0.01; done
+    return 17
+}
+trigger_prefill_profile() {
+    trap 'touch trigger_stopped; exit 0' TERM
+    touch trigger_started
+    while true; do "$TEST_SLEEP" 0.01; done
+}
+"""
+        status, _, stderr = self.run_shell(
+            setup + stubs + "\nserve_prefill 8001 /test/model\n",
+            env={"PROFILE_PREFILL": "1"},
+        )
+        self.assertEqual(status, 17, stderr)
+        self.assertTrue((Path(self.workdir) / "trigger_stopped").exists())
 
     def test_api_server_count_is_removed_only_from_headless_ranks(self):
         with TemporaryDirectory(prefix="gym-headless-args-") as directory:

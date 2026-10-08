@@ -2,6 +2,15 @@
 
 NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-5}"
 
+# Optional detailed Nsight Systems capture on PD prefill nodes only.
+# PROFILE_PREFILL=1 auto-installs nsys if needed in root Ubuntu containers.
+# After /health is ready, wait PREFILL_PROFILE_DELAY_SECONDS, then capture
+# PREFILL_PROFILE_STEPS worker steps. Set the delay to manual to POST /start_profile yourself.
+# Reports go to ${SLURM_SUBMIT_DIR}/results/nsys; override with PREFILL_PROFILE_DIR.
+PROFILE_PREFILL="${PROFILE_PREFILL:-0}"
+PREFILL_PROFILE_STEPS="${PREFILL_PROFILE_STEPS:-20}"
+PREFILL_PROFILE_DELAY_SECONDS="${PREFILL_PROFILE_DELAY_SECONDS:-300}"
+
 GYM_MODEL_PARAMS=(
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"

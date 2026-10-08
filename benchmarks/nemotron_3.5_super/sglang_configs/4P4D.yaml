@@ -47,7 +47,7 @@ frontend:
     pool-max-idle-per-host: 0
     pool-idle-timeout-secs: 2
     health-check-interval-secs: 5
-    log-level: info
+    log-level: error
     dp-aware: false
     prefill-policy: cache_aware
     decode-policy: cache_aware
@@ -57,7 +57,7 @@ frontend:
 container_mounts:
   "$GYM_REPO": /opt/Gym
 
-# Gym collects inference metrics from each SGLang engine; SRT also collects engine telemetry.
+# SRT collects telemetry; Gym also exports worker metrics during rollout collection.
 observability:
   enabled: true
 
@@ -154,7 +154,6 @@ roles:
       UCX_CUDA_IPC_ENABLE_MNNVL: y
       NCCL_MNNVL_ENABLE: '1'
       NCCL_CUMEM_ENABLE: '1'
-      UCX_PROTO_INFO: y
       UCX_LOG_LEVEL: error
       SGLANG_DISABLE_USAGE_REPORT: '1'
       HF_HOME: /tmp/nemotron35-hf
@@ -219,7 +218,6 @@ roles:
       UCX_CUDA_IPC_ENABLE_MNNVL: y
       NCCL_MNNVL_ENABLE: '1'
       NCCL_CUMEM_ENABLE: '1'
-      UCX_PROTO_INFO: y
       UCX_LOG_LEVEL: error
       SGLANG_DISABLE_USAGE_REPORT: '1'
       HF_HOME: /tmp/nemotron35-hf

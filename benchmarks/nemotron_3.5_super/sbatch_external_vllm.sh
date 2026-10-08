@@ -2,6 +2,14 @@
 
 set -euo pipefail
 
+# Prefill profiling (set here via environment or in VLLM_CONFIG):
+# PROFILE_PREFILL=1 captures 20 worker steps, 300 seconds after API readiness.
+# PREFILL_PROFILE_STEPS, PREFILL_PROFILE_DELAY_SECONDS (or manual), and
+# PREFILL_PROFILE_DIR (default: results/nsys under SLURM_SUBMIT_DIR) override this.
+# Detailed tracing adds overhead; use separate runs for throughput measurements.
+# API-triggered captures exclude startup/graph construction. For those call sites,
+# enable cuBLAS logging before launch or collect a separate startup trace.
+
 # Input arguments and validation
 # PD (default): NUM_PREFILL_NODES=<P> NUM_DECODE_NODES=<D>
 # Aggregated: VLLM_MODE=aggregated NUM_NODES=<replicas> (defaults to one)
@@ -234,19 +242,165 @@ fi
 this_node_hostname=\$(hostname)
 read -r -a nodes <<< "\$ALL_NODES"
 
+# The model config can opt prefill into a short, API-triggered GPU trace.
+# Keep profiler setup here so decode, evaluation, and aggregated workers are unaffected.
+profiler_pid=""
+trigger_pid=""
+cleanup_prefill_profile() {
+    if [[ -n "\$trigger_pid" ]]; then
+        kill "\$trigger_pid" 2>/dev/null || true
+        wait "\$trigger_pid" 2>/dev/null || true
+        trigger_pid=""
+    fi
+    if [[ -n "\$profiler_pid" ]]; then
+        kill "\$profiler_pid" 2>/dev/null || true
+        wait "\$profiler_pid" 2>/dev/null || true
+        profiler_pid=""
+    fi
+}
+
+trigger_prefill_profile() {
+    local url="http://\$this_node_hostname:\$profile_port"
+    local deadline=\$(( SECONDS + 1200 ))
+    until curl --noproxy '*' --silent --fail --max-time 5 "\$url/health" >/dev/null; do
+        if (( SECONDS >= deadline )); then
+            echo "WARNING: Timed out waiting for \$url/health; no prefill profile captured." >&2
+            return 1
+        fi
+        sleep 1
+    done
+    echo "Prefill profiling: \$url ready; capturing in \$profile_delay seconds." >&2
+    # Short sleeps let teardown cancel the trigger without leaving a long-lived sleep process.
+    deadline=\$(( SECONDS + 10#\$profile_delay ))
+    while (( SECONDS < deadline )); do sleep 1; done
+    if curl --noproxy '*' --silent --show-error --fail --max-time 120 \
+        -X POST "\$url/start_profile" >/dev/null; then
+        echo "Prefill profiling: capture started on \$url (worker-step limit: \$steps)." >&2
+    else
+        echo "WARNING: Could not start prefill profile on \$url; serving continues." >&2
+        return 1
+    fi
+}
+
+ensure_nsys() {
+    if command -v nsys >/dev/null 2>&1; then return; fi
+    if [[ \$(id -u) != 0 ]] || ! command -v apt-get >/dev/null 2>&1; then
+        echo "ERROR: Installing Nsight Systems requires root inside an Ubuntu container; otherwise preinstall nsys in the image." >&2
+        return 1
+    fi
+    local ID="" VERSION_ID="" arch
+    source /etc/os-release
+    if [[ "\$ID" != ubuntu ]]; then
+        echo "ERROR: Automatic Nsight Systems installation supports Ubuntu; preinstall nsys for \$ID." >&2
+        return 1
+    fi
+    arch=\$(dpkg --print-architecture)
+    if [[ "\$arch" != arm64 && "\$arch" != amd64 ]]; then
+        echo "ERROR: Unsupported Nsight Systems architecture: \$arch." >&2
+        return 1
+    fi
+    echo "Prefill profiling: installing Nsight Systems CLI for Ubuntu \$VERSION_ID / \$arch." >&2
+    # NVIDIA's devtools repository provides both the Arm SBSA and x86 CLI.
+    # Install only in this worker's container; existing nsys installations are reused.
+    if ! (
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update &&
+        apt-get install -y --no-install-recommends wget gnupg ca-certificates &&
+        mkdir -p /usr/share/keyrings &&
+        wget -qO- --timeout=30 --tries=3 \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub \
+            | gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-devtools-keyring.gpg &&
+        printf '%s\\n' "deb [signed-by=/usr/share/keyrings/nvidia-devtools-keyring.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu\${VERSION_ID//./}/\$arch/ /" \
+            | tee /etc/apt/sources.list.d/nvidia-devtools.list >/dev/null &&
+        apt-get update &&
+        apt-get install -y --no-install-recommends nsight-systems-cli curl
+    ); then
+        echo "ERROR: Nsight Systems installation failed; check container write permissions and access to the Ubuntu/NVIDIA package repositories." >&2
+        return 1
+    fi
+    hash -r
+    if ! command -v nsys >/dev/null 2>&1; then
+        echo "ERROR: Nsight Systems installation completed but nsys is still missing from PATH." >&2
+        return 1
+    fi
+    nsys --version
+}
+
+serve_prefill() {
+    local profile_port=\$1
+    shift
+    if [[ "\${PROFILE_PREFILL:-0}" != 1 ]]; then
+        vllm serve "\$@"
+        return
+    fi
+    local steps="\${PREFILL_PROFILE_STEPS:-20}"
+    if [[ ! "\$steps" =~ ^[1-9][0-9]*\$ ]]; then
+        echo "ERROR: PREFILL_PROFILE_STEPS must be a positive integer." >&2
+        return 1
+    fi
+    local profile_delay="\${PREFILL_PROFILE_DELAY_SECONDS:-300}"
+    if [[ "\$profile_delay" != manual && ! "\$profile_delay" =~ ^[0-9]+\$ ]]; then
+        echo "ERROR: PREFILL_PROFILE_DELAY_SECONDS must be a nonnegative integer or manual." >&2
+        return 1
+    fi
+    local api_worker=1 arg
+    for arg in "\$@"; do
+        if [[ "\$arg" == --headless ]]; then api_worker=0; fi
+    done
+    ensure_nsys || return 1
+    if [[ "\$profile_delay" != manual ]] && (( api_worker )) && ! command -v curl >/dev/null 2>&1; then
+        echo "ERROR: Automatic prefill profiling requires curl in the vLLM container." >&2
+        return 1
+    fi
+    local profile_dir="\${PREFILL_PROFILE_DIR:-\${SLURM_SUBMIT_DIR:-\$PWD}/results/nsys}"
+    mkdir -p "\$profile_dir"
+    # Background coupled heads and TP1 engines own their profiler/trigger.
+    # The parent shell owns router and Mooncake cleanup.
+    if (( BASH_SUBSHELL > 0 )); then
+        trap cleanup_prefill_profile EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+    fi
+    # Trace graph nodes and child TP workers. 'stop' ends collection without
+    # shutting down the serving process; this captures one window per launch.
+    VLLM_WORKER_MULTIPROC_METHOD=spawn nsys profile \
+        --trace=cuda,nvtx,osrt,nccl,cublas,cublas-verbose \
+        --nccl-trace=all --pytorch=functions-trace-shapes \
+        --sample=process-tree --cpuctxsw=none \
+        --cudabacktrace=all --python-backtrace=cuda --python-sampling=true \
+        --trace-fork-before-exec=true --cuda-graph-trace=node \
+        --capture-range=cudaProfilerApi --capture-range-end=stop \
+        --output "\$profile_dir/prefill-\$SLURM_JOB_ID-\$this_node_hostname-port\$profile_port-%p" \
+        vllm serve "\$@" \
+        --profiler-config "{\"profiler\":\"cuda\",\"max_iterations\":\$steps}" &
+    profiler_pid=\$!
+    # Coupled headless ranks are profiled through their tier's API head.
+    if [[ "\$profile_delay" != manual ]] && (( api_worker )); then
+        trigger_prefill_profile &
+        trigger_pid=\$!
+    fi
+    local status=0
+    wait "\$profiler_pid" || status=\$?
+    profiler_pid=""
+    cleanup_prefill_profile
+    return "\$status"
+}
+
 mooncake_pid=""
-cleanup_mooncake() {
+cleanup_worker_services() {
+    cleanup_prefill_profile
     if [[ -n "\$mooncake_pid" ]]; then
         kill "\$mooncake_pid" 2>/dev/null || true
         wait "\$mooncake_pid" 2>/dev/null || true
     fi
 }
 
+# Cover setup failures and headless workers before serving-mode traps take over.
+trap cleanup_worker_services EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if (( ENABLE_MOONCAKE )); then
-    # Cover setup failures before the serving-mode cleanup traps take over.
-    trap cleanup_mooncake EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
     export MOONCAKE_CONFIG_PATH="\${MOONCAKE_CONFIG_PATH:-/tmp/mooncake-\$SLURM_JOB_ID/config.json}"
     mkdir -p "\$(dirname "\$MOONCAKE_CONFIG_PATH")"
     cat > "\$MOONCAKE_CONFIG_PATH" <<MOONCAKE_CONFIG
@@ -335,7 +489,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         # prefill ranks run headless so expert parallelism spans the tier.
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+        serve_prefill $WORKER_SERVER_PORT "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
             --host \$this_node_hostname \
             --port $WORKER_SERVER_PORT \
             --data-parallel-size $NUM_PREFILL_NODES \
@@ -351,7 +505,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             # Signal both local services without delaying failure propagation;
             # the enclosing srun tears down the remaining distributed workers.
             kill "\${coupled_pids[@]}" 2>/dev/null || true
-            cleanup_mooncake
+            cleanup_worker_services
             exit "\$status"
         }
         trap cleanup_coupled_head EXIT
@@ -394,7 +548,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         set_headless_args "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}"
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${headless_args[@]}" \
+        serve_prefill $WORKER_SERVER_PORT "$MODEL" --served-model-name "$MODEL_NAME" "\${headless_args[@]}" \
             --headless \
             --data-parallel-size $NUM_PREFILL_NODES \
             --data-parallel-start-rank \$SLURM_PROCID \
@@ -440,7 +594,7 @@ else
         if (( \${#worker_pids[@]} )); then
             wait "\${worker_pids[@]}" 2>/dev/null || true
         fi
-        cleanup_mooncake
+        cleanup_worker_services
         exit "\$status"
     }
     trap cleanup_vllm EXIT
@@ -451,7 +605,7 @@ else
         local nixl_base_port=\$1
         shift
         local arg skip_value engine_index worker_port service_pid failed_status
-        local -a visible_gpus tp1_args service_pids
+        local -a visible_gpus tp1_args service_pids serve_command
         # Respect the allocation's GPU order, including UUID-based masks.
         IFS=',' read -r -a visible_gpus <<< "\${CUDA_VISIBLE_DEVICES-0,1,2,3}"
         if (( \${#visible_gpus[@]} < 4 )); then
@@ -478,13 +632,22 @@ else
         done
         tp1_args+=(--tensor-parallel-size 1 --pipeline-parallel-size 1
             --data-parallel-size 1 --data-parallel-size-local 1 --api-server-count 1)
+        # Install once before concurrent engines can race on the package manager.
+        if [[ "$VLLM_MODE" == pd && "\${PROFILE_PREFILL:-0}" == 1 ]] && \
+            (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+            ensure_nsys || return 1
+        fi
         for (( engine_index = 0; engine_index < 4; engine_index++ )); do
             worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
+            serve_command=(vllm serve)
+            if [[ "$VLLM_MODE" == pd ]] && (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+                serve_command=(serve_prefill "\$worker_port")
+            fi
             echo "Starting TP1 engine \$engine_index on GPU \${visible_gpus[engine_index]}, port \$worker_port"
             CUDA_VISIBLE_DEVICES="\${visible_gpus[engine_index]}" \
             VLLM_NIXL_SIDE_CHANNEL_HOST="\$this_node_hostname" \
             VLLM_NIXL_SIDE_CHANNEL_PORT=\$(( nixl_base_port + engine_index )) \
-            vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${tp1_args[@]}" \
+            "\${serve_command[@]}" "$MODEL" --served-model-name "$MODEL_NAME" "\${tp1_args[@]}" \
                 --host "\$this_node_hostname" --port "\$worker_port" &
             worker_pids+=("\$!")
         done
@@ -604,7 +767,7 @@ else
         # Prefill
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+        serve_prefill $WORKER_SERVER_PORT "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
             --host \$this_node_hostname \
             --port $WORKER_SERVER_PORT
     else
