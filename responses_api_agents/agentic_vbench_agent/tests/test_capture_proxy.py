@@ -7,7 +7,14 @@ import aiohttp
 import pytest
 from aiohttp import web
 
-from nemo_gym.token_id_capture.completion import completion_items, output_item_fingerprint
+import pytest
+
+# Gym's completion fingerprint helpers ship with the framework-owned capture route
+# (Gym PR #3368); branches without it still run the proxy tests that do not compare
+# fingerprints.
+_completion = pytest.importorskip("nemo_gym.token_id_capture.completion", reason="framework-owned capture helpers not on this Gym")
+completion_items = _completion.completion_items
+output_item_fingerprint = _completion.output_item_fingerprint
 from responses_api_agents.agentic_vbench_agent.capture_proxy import (
     classify_agent,
     CaptureProxy,
@@ -236,3 +243,34 @@ def test_classify_agent_recognizes_untagged_compaction_requests() -> None:
     # The header still wins when OpenCode sends one.
     assert classify_agent("title", fresh) == "title"
     assert classify_agent("build", task) == "build"
+
+
+def test_step_cap_request_detection_and_local_completion() -> None:
+    from responses_api_agents.agentic_vbench_agent.capture_proxy import (
+        STEP_CAP_AGENT,
+        is_step_cap_request,
+        step_cap_completion,
+    )
+
+    tools = [{"type": "function", "function": {"name": "bash", "parameters": {}}}]
+    cap = {
+        "model": "policy",
+        "tools": tools,
+        "messages": [
+            {"role": "user", "content": "Assemble the video"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "done"},
+            {"role": "assistant", "content": "CRITICAL - MAXIMUM STEPS REACHED\n\nThe maximum number of steps allowed for this task has been reached."},
+        ],
+    }
+    ordinary = {"model": "policy", "tools": tools, "messages": cap["messages"][:3]}
+    assert is_step_cap_request(cap)
+    assert not is_step_cap_request(ordinary)
+    # A served assistant turn that merely mentions the phrase mid-way is not the cap.
+    assert not is_step_cap_request({"messages": [{"role": "assistant", "content": "Note: CRITICAL - MAXIMUM STEPS REACHED is what OpenCode says"}][:0] + [{"role": "user", "content": "x"}]})
+    completion = step_cap_completion("policy")
+    assert completion["choices"][0]["finish_reason"] == "stop" and completion["model"] == "policy"
+    # The local reply is an ignored side call, never training data.
+    records = [{"turn": 0, "agent": STEP_CAP_AGENT, "status": 200, "response": completion}]
+    items, stats = capture_output(records)
+    assert items == [] and stats.ignored_calls == 1

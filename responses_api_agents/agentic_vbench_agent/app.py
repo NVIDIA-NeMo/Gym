@@ -88,6 +88,9 @@ class AgenticVBenchConfig(BaseResponsesAPIAgentConfig):
     opencode_compaction_prune: bool | None = None
     # Drop OpenCode's session-title model call (a side generation outside the task).
     opencode_disable_title: bool = False
+    # Answer OpenCode's step-cap turn in the proxy (required for ordinary token
+    # capture: the turn replays an assistant message OpenCode wrote itself).
+    local_step_cap_reply: bool = False
     # Under token capture, also return compaction summary generations so NeMo-RL
     # trains them in their own rewritten context.
     train_compaction_summaries: bool = True
@@ -273,7 +276,12 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 # OpenCode in the task container reaches the proxy; the proxy forwards to
                 # the rollout-prefixed policy route and records every served completion.
                 proxy = await self._ensure_proxy(endpoint)
-                agent_endpoint = proxy.register(key[:16], endpoint.removesuffix("/v1"), record_dir)
+                agent_endpoint = proxy.register(
+                    key[:16],
+                    endpoint.removesuffix("/v1"),
+                    record_dir,
+                    local_step_cap_reply=self.config.local_step_cap_reply,
+                )
             command = [
                 self._harbor_python,
                 str(Path(__file__).with_name("harbor_runner.py")),

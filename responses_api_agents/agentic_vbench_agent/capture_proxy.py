@@ -30,6 +30,7 @@ import json
 import re
 import socket
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,7 +47,11 @@ COMPACTION_AGENT = "compaction"
 # Side calls whose generations are not part of the task trajectory. Title
 # generation is disabled in the OpenCode config for training, but a stray call
 # must still not be presented as accepted history.
-IGNORED_AGENTS = frozenset({"title", "summary"})
+IGNORED_AGENTS = frozenset({"title", "summary", STEP_CAP_AGENT := "step_cap"})
+# OpenCode 1.14.39 session/prompt.ts: once the agent's step budget is spent it
+# appends this assistant message to the history and asks for a text-only reply.
+STEP_CAP_PROMPT_PREFIX = "CRITICAL - MAXIMUM STEPS REACHED"
+STEP_CAP_REPLY = "Maximum steps reached for this session; no further tool calls can be made."
 # OpenCode 1.14.39 session/compaction.ts: the user turn of a compaction request.
 COMPACTION_PROMPT_PREFIXES = (
     "Create a new anchored summary from the conversation history above.",
@@ -89,6 +94,7 @@ def local_ip_toward(host: str, port: int = 80) -> str:
 class EpisodeRoute:
     upstream: str
     record_dir: Path
+    local_step_cap_reply: bool = False
     turn: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -120,12 +126,24 @@ class CaptureProxy:
         if self._runner is not None:
             await self._runner.cleanup()
 
-    def register(self, episode: str, upstream: str, record_dir: Path) -> str:
-        """Route ``/avb/<episode>/...`` to ``upstream`` (a root URL without ``/v1``)."""
+    def register(
+        self, episode: str, upstream: str, record_dir: Path, *, local_step_cap_reply: bool = False
+    ) -> str:
+        """Route ``/avb/<episode>/...`` to ``upstream`` (a root URL without ``/v1``).
+
+        ``local_step_cap_reply`` answers OpenCode's step-cap turn here instead of
+        serving it: that request replays the history plus an assistant message
+        OpenCode wrote itself, which ordinary (non framework-owned) token capture
+        cannot attach to a served completion, so the ledger would poison the call
+        and mask the whole rollout. The reply is never training data (the agent
+        drops it as an ignored side call) and the verifier scores files, not text.
+        """
         if episode in self._routes:
             raise ValueError(f"Episode already registered: {episode}")
         record_dir.mkdir(parents=True, exist_ok=True)
-        self._routes[episode] = EpisodeRoute(upstream=upstream.rstrip("/"), record_dir=record_dir)
+        self._routes[episode] = EpisodeRoute(
+            upstream=upstream.rstrip("/"), record_dir=record_dir, local_step_cap_reply=local_step_cap_reply
+        )
         return f"http://{self.advertise_host}:{self.port}/avb/{episode}/v1"
 
     def unregister(self, episode: str) -> None:
@@ -169,6 +187,29 @@ class CaptureProxy:
             body, include_usage = sanitize_streaming_chat_body(body)
         agent = classify_agent(request.headers.get(AGENT_HEADER), body)
         started = time.time()
+        if route.local_step_cap_reply and is_step_cap_request(body):
+            async with route.lock:
+                turn = route.turn
+                route.turn += 1
+                completion = step_cap_completion(body.get("model"))
+                record = {
+                    "turn": turn,
+                    "agent": STEP_CAP_AGENT,
+                    "session": request.headers.get("x-opencode-session"),
+                    "streamed": streamed,
+                    "status": 200,
+                    "local": True,
+                    "elapsed_seconds": round(time.time() - started, 3),
+                    "request": {**body, "messages": redact_images(body.get("messages"))},
+                    "response": completion,
+                }
+                (route.record_dir / f"{turn:04d}.json").write_text(json.dumps(record))
+            if streamed:
+                events = "".join(synthesize_chat_completion_sse(completion, include_usage=include_usage))
+                return web.Response(
+                    body=events.encode(), content_type="text/event-stream", headers={"Cache-Control": "no-cache"}
+                )
+            return web.Response(body=json.dumps(completion).encode(), content_type="application/json")
         # OpenCode is sequential within a session; the lock also keeps a stray
         # overlapping side call from racing the ledger's sequential admission.
         async with route.lock:
@@ -232,6 +273,36 @@ def classify_agent(header_agent: str | None, body: dict) -> str | None:
                 return COMPACTION_AGENT
             return None
     return None
+
+
+def is_step_cap_request(body: dict) -> bool:
+    """True for OpenCode's text-only turn after its step budget is spent."""
+    messages = body.get("messages") or []
+    last = messages[-1] if messages else None
+    return (
+        isinstance(last, dict)
+        and last.get("role") == "assistant"
+        and not last.get("tool_calls")
+        and _message_text(last).lstrip().startswith(STEP_CAP_PROMPT_PREFIX)
+    )
+
+
+def step_cap_completion(model: str | None) -> dict:
+    """A minimal Chat completion answering the step-cap turn without the policy."""
+    return {
+        "id": f"local-step-cap-{uuid.uuid4().hex[:16]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model or "policy",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": STEP_CAP_REPLY},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
 
 
 def load_records(record_dir: Path) -> list[dict]:

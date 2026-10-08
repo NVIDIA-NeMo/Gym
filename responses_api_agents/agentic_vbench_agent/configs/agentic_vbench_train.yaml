@@ -35,6 +35,10 @@ agentic_vbench_agent:
       opencode_compaction_auto: ${oc.env:AGENTIC_VBENCH_COMPACTION_AUTO,null}
       opencode_compaction_prune: ${oc.env:AGENTIC_VBENCH_COMPACTION_PRUNE,null}
       opencode_disable_title: ${oc.env:AGENTIC_VBENCH_DISABLE_TITLE,true}
+      # Answer OpenCode's step-cap turn in the proxy instead of serving it. Off by
+      # default here: the framework-owned route roots that turn as its own segment.
+      # Required (true) when token capture is the ordinary kind.
+      local_step_cap_reply: ${oc.env:AGENTIC_VBENCH_LOCAL_STEP_CAP_REPLY,false}
       train_compaction_summaries: ${oc.env:AGENTIC_VBENCH_TRAIN_COMPACTION_SUMMARIES,true}
       capture_proxy_host: ${oc.env:AGENTIC_VBENCH_CAPTURE_PROXY_HOST,null}
       datasets:
