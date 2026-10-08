@@ -526,10 +526,29 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             observations = AgentObservationBundle.model_validate(raw_observations)
             gaps.extend(observations.gaps)
             observed_invocations = [record for record in observations.records if isinstance(record, AgentInvocation)]
-            producer_invocation_ids = {record.invocation_id for record in invocations}
-            invocations.extend(
-                record for record in observed_invocations if record.invocation_id not in producer_invocation_ids
-            )
+            producer_invocations = {record.invocation_id: record for record in invocations}
+            for observed in observed_invocations:
+                producer = producer_invocations.get(observed.invocation_id)
+                if producer is None:
+                    invocations.append(observed)
+                    continue
+                # Capture joining enriches observations after the producer's trajectory was saved.
+                # Keep its conversation while retaining canonical references to every attempt.
+                call_ids = {ref.model_call_id for ref in observed.model_calls if ref.model_call_id is not None}
+                response_keys = {
+                    (ref.model_ref.type, ref.model_ref.name, ref.response_id)
+                    for ref in observed.model_calls
+                    if ref.model_ref is not None and ref.response_id is not None
+                }
+                producer.model_calls = observed.model_calls + [
+                    ref
+                    for ref in producer.model_calls
+                    if ref.model_call_id not in call_ids
+                    and (
+                        ref.model_ref is None
+                        or (ref.model_ref.type, ref.model_ref.name, ref.response_id) not in response_keys
+                    )
+                ]
             observed_tools = [record for record in observations.records if isinstance(record, ToolCallObservation)]
             if observed_tools:
                 outputs = {
@@ -1999,12 +2018,14 @@ class RolloutCollectionHelper(BaseModel):
 
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)
-                # No rollout happened, so there is nothing to capture, tokenize or average.
+                # Infrastructure failures do not participate in tokenization or scoring.
+                # They can still carry partial agent evidence and captured model attempts.
                 no_result = failure_class in _NO_RESULT_FAILURE_CLASSES
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off). Never alters the harness output/reward already in `result`.
-                if capture_dirs and not no_result:
+                has_agent_evidence = "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result
+                if capture_dirs and (not no_result or has_agent_evidence):
                     merge_model_call_capture_into_record(
                         result,
                         capture_dirs,
