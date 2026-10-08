@@ -317,17 +317,29 @@ class CheckpointParticipant(ABC):
     async def restored_pending(self) -> list[EpisodeId]:
         """Restored episodes whose replacement has not started here yet, as the attempts that continue them.
 
-        A commit retires the ones its scope leaves out: the controller no longer continues them, and nothing
+        A commit deletes the ones its scope leaves out: the controller no longer continues them, and nothing
         else would free their restored state.
         """
         return []
+
+    async def delete_restored(self, episode_id: EpisodeId) -> None:
+        """Free the restored state of ``episode_id``, a replacement attempt that never started here and that the
+        controller no longer continues.
+
+        Unlike a retire, it must leave nothing that refuses the attempt later, such as a capture-ledger fence: the
+        controller may still start the rollout over as that attempt. The default retires it, which is enough for a
+        participant whose retire refuses nothing beyond the retire itself.
+        """
+        await self.retire(episode_id)
 
     async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         """Export for a commit. Override to keep slow I/O off the event loop; the default is synchronous."""
         return self.export_records(episode_ids)
 
-    async def install(self, records: list[CheckpointRecord]) -> None:
-        """Install for a restore. Override to keep slow I/O off the event loop; the default is synchronous."""
+    async def install(self, records: list[CheckpointRecord], scope: list[EpisodeId]) -> None:
+        """Install for a restore. ``scope`` is every episode the restore continues, including ones this participant
+        has no record of, so a participant that keeps files per episode can clear theirs too. Override to keep slow
+        I/O off the event loop; the default is synchronous."""
         self.restore_records(records)
 
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
@@ -374,6 +386,8 @@ class ParticipantControlPlane:
         # The last restore's install. It can outlive the restore's deadline, as a thread does, and a retire must not
         # free restored state before the install that brings it finishes.
         self._install: Optional[asyncio.Task] = None
+        # Reopens admission once an install that outlived its failed restore has finished.
+        self._reopening: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
 
     def status(self) -> dict[str, Any]:
@@ -514,23 +528,43 @@ class ParticipantControlPlane:
         for episode_id in episode_ids:
             await self.participant.retire(episode_id)
 
+    def _reopen_after_failed_restore(self, install: asyncio.Task) -> None:
+        self._reopening = asyncio.ensure_future(self._open_after_failed_restore(install))
+
+    async def _open_after_failed_restore(self, install: Optional[asyncio.Task] = None) -> None:
+        if install is not None:
+            async with self._lock:
+                # A retried restore that succeeded meanwhile, or the next one under way, owns admission now.
+                if (
+                    self.phase != CheckpointPhase.IDLE
+                    or self.checkpoint_id is not None
+                    or self._install is not install
+                ):
+                    return
+                await self._open_after_failed_restore()
+            return
+        try:
+            await self.participant.open_admission()
+        except Exception:
+            LOGGER.exception("reopening admission after a failed restore failed")
+
     async def _installed(self) -> None:
         """Wait for an install still running after its restore's deadline; its outcome was already reported."""
         if self._install is not None and not self._install.done():
             await asyncio.wait([self._install])
 
-    async def _retire_unscoped(self, episode_ids: Optional[list[EpisodeId]]) -> None:
-        """Retire restored episodes the commit's scope leaves out: the scope is everything the controller continues.
+    async def _delete_unscoped(self, episode_ids: Optional[list[EpisodeId]]) -> None:
+        """Delete restored state the commit's scope leaves out: the scope is everything the controller continues.
 
-        Their attempts are not marked retired: a replacement that never started here cannot send a late request,
-        and the controller may still start the rollout over as that attempt.
+        Their attempts are not refused: a replacement that never started here cannot send a late request, and the
+        controller may still start the rollout over as that attempt.
         """
         if episode_ids is None:
             return
         scope = set(episode_ids)
         for episode_id in await self.participant.restored_pending():
             if episode_id not in scope:
-                await self.participant.retire(episode_id)
+                await self.participant.delete_restored(episode_id)
 
     async def commit(self, request: CommitRequest) -> dict[str, Any]:
         async with self._lock:
@@ -551,7 +585,7 @@ class ParticipantControlPlane:
             records = write.records
             # Restored state outside the scope was not exported, so a retry after a failure here returns the same
             # manifest.
-            await _within(request, self._retire_unscoped(request.episode_ids))
+            await _within(request, self._delete_unscoped(request.episode_ids))
             self.phase = CheckpointPhase.COMMITTED
             result = {
                 "phase": self.phase.value,
@@ -611,17 +645,19 @@ class ParticipantControlPlane:
             await _within(request, self._installed())
             try:
                 await self.participant.close_admission(request)
-                self._install = asyncio.ensure_future(self.participant.install(records))
+                self._install = asyncio.ensure_future(self.participant.install(records, request.episode_ids))
                 # A restore that fails after this retires what the install brings: the retire waits for it.
                 self._install.add_done_callback(lambda done: done.cancelled() or done.exception())
                 await _within(request, asyncio.shield(self._install))
             except BaseException:
                 # Closing can fail part way, for example on one of several workers; nothing else would reopen the
-                # rest, because the phase is still idle.
-                try:
-                    await self.participant.open_admission()
-                except Exception:
-                    LOGGER.exception("reopening admission after a failed restore of %s failed", request.checkpoint_id)
+                # rest, because the phase is still idle. An install that outlived the deadline is still changing
+                # state, so admission reopens only once it has finished.
+                if self._install is not None and not self._install.done():
+                    install = self._install
+                    install.add_done_callback(lambda _: self._reopen_after_failed_restore(install))
+                else:
+                    await self._open_after_failed_restore()
                 raise
             self.checkpoint_id = request.checkpoint_id
             self.phase = CheckpointPhase.RESTORED

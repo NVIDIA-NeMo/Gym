@@ -1096,7 +1096,7 @@ async def test_a_retire_after_a_restore_that_ran_out_of_time_waits_for_its_insta
     release = threading.Event()
 
     class SlowInstall(FakeParticipant):
-        async def install(self, records) -> None:
+        async def install(self, records, scope) -> None:
             # Like the model ledger import: a thread the restore's deadline cannot stop.
             await asyncio.to_thread(release.wait, 5)
             self.restore_records(records)
@@ -1119,3 +1119,83 @@ async def test_a_retire_after_a_restore_that_ran_out_of_time_waits_for_its_insta
 
     assert restore.json()["error"]["code"] == "deadline_exceeded"
     assert retired.status_code == 200 and participant.executions == {}
+
+
+async def test_admission_reopens_only_once_an_install_that_outlived_its_restore_has_finished(tmp_path: Path) -> None:
+    write_participant_state(
+        tmp_path,
+        kind="fake",
+        instance="fake-1",
+        checkpoint_id="c1",
+        records=[{"episode_id": {"rollout_id": "r"}, "value": 1}],
+    )
+    release = threading.Event()
+
+    class SlowInstall(FakeParticipant):
+        async def install(self, records, scope) -> None:
+            await asyncio.to_thread(release.wait, 5)
+            self.restore_records(records)
+
+    participant = SlowInstall()
+    async with make_client(participant) as client:
+        restore = await client.post(
+            "/ng-control/v1/checkpoint/restore",
+            json=body("r1", timeout=0.1, checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r"}]),
+        )
+        # The install is still changing state: nothing may be admitted against it yet.
+        closed_while_installing = not participant.accepting
+        release.set()
+        for _ in range(100):
+            if participant.accepting:
+                break
+            await asyncio.sleep(0.01)
+
+    assert restore.json()["error"]["code"] == "deadline_exceeded"
+    assert closed_while_installing and participant.accepting
+
+
+async def test_install_is_given_every_episode_the_restore_continues(tmp_path: Path) -> None:
+    write_participant_state(
+        tmp_path,
+        kind="fake",
+        instance="fake-1",
+        checkpoint_id="c1",
+        records=[{"episode_id": {"rollout_id": "r"}, "value": 1}],
+    )
+    seen: list = []
+
+    class Recording(FakeParticipant):
+        async def install(self, records, scope) -> None:
+            seen.append(sorted(episode_id.capture_key for episode_id in scope))
+            self.restore_records(records)
+
+    async with make_client(Recording()) as client:
+        await client.post(
+            "/ng-control/v1/checkpoint/restore",
+            json=body("r1", checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r"}, {"rollout_id": "e"}]),
+        )
+
+    # "e" has no record here, but a participant that keeps files per episode must still clear its own.
+    assert seen == [["e", "r"]]
+
+
+async def test_a_commit_deletes_unscoped_restored_state_without_retiring_it(tmp_path: Path) -> None:
+    deleted: list[str] = []
+
+    class Deleting(FakeParticipant):
+        async def delete_restored(self, episode_id: EpisodeId) -> None:
+            deleted.append(episode_id.capture_key)
+            await super().delete_restored(episode_id)
+
+        async def retire(self, episode_id: EpisodeId) -> None:
+            deleted.append(f"retired {episode_id.capture_key}")
+            await super().retire(episode_id)
+
+    participant = Deleting()
+    participant.executions["r-a1"] = {"parked": True, "value": 1, "restored": True}
+    async with make_client(participant) as client:
+        await client.post("/ng-control/v1/checkpoint/prepare", json=body())
+        await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path), episode_ids=[]))
+
+    # The default delete_restored retires; a participant whose retire fences overrides it.
+    assert deleted == ["r-a1", "retired r-a1"]
