@@ -1552,6 +1552,7 @@ async def test_independent_configs_route_prepared_rows_through_environment_run(s
             self.status = status
             self.ok = status < 400
             self.cookies = SimpleCookie(cookies or {})
+            self.headers = {}
             self.payload = payload
 
         async def read(self):
