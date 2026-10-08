@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException
@@ -42,8 +42,12 @@ def install_rollout_control_routes(
     lineage_store: CaptureLedger,
     *,
     auth_token: str,
+    refuse_removal: Callable[[], str | None] | None = None,
 ) -> None:
-    """Install the bearer-protected manifest, retire, and delete routes."""
+    """Install the bearer-protected manifest, retire, and delete routes.
+
+    ``refuse_removal`` returns a reason to refuse retire and delete for now, with 409; the caller retries later.
+    """
     if not auth_token:
         raise ValueError("rollout control routes require a non-empty auth token")
     expected = f"Bearer {auth_token}"
@@ -55,6 +59,11 @@ def install_rollout_control_routes(
                 status_code=401,
                 detail="missing or invalid control-plane bearer token",
             )
+
+    def check_removal() -> None:
+        reason = refuse_removal() if refuse_removal is not None else None
+        if reason is not None:
+            raise HTTPException(status_code=409, detail=reason)
 
     @router.get("/rollouts/{rollout_id}/manifest")
     async def rollout_manifest(
@@ -76,6 +85,7 @@ def install_rollout_control_routes(
         authorization: str | None = Header(default=None),
     ) -> RolloutRemovalPayload:
         check_auth(authorization)
+        check_removal()
         try:
             return await lineage_store.retire(body.rollout_ids)
         except ValueError as error:
@@ -87,6 +97,7 @@ def install_rollout_control_routes(
         authorization: str | None = Header(default=None),
     ) -> RolloutRemovalPayload:
         check_auth(authorization)
+        check_removal()
         try:
             return await lineage_store.delete(body.rollout_ids)
         except ValueError as error:

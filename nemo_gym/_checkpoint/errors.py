@@ -60,6 +60,13 @@ class RolloutIdRequiredError(ControlError):
     code = "rollout_id_required"
 
 
+class InvalidRolloutIdError(ControlError):
+    """A request whose rollout path prefix is not a valid rollout id and attempt."""
+
+    status_code = 400
+    code = "invalid_rollout_id"
+
+
 class UnauthorizedError(ControlError):
     status_code = 401
     code = "unauthorized"

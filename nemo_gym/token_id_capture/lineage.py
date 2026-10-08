@@ -45,13 +45,14 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import orjson
 
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.token_id_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
@@ -213,6 +214,8 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     output_fingerprint=row.get("output_fingerprint") or None,
                     continuation_fingerprint=row.get("continuation_fingerprint") or None,
                     fingerprint_version=int(row.get("fingerprint_version") or 0),
+                    # Set on rows a checkpoint restore carried over from an earlier attempt.
+                    capture_key=row.get("capture_key"),
                 )
             )
     manifest = RolloutManifest(rollout_id=rollout_id, records=records, failures=failures)
@@ -775,6 +778,18 @@ class IncrementalLineageStore:
             self._materialized_tokens = 0
 
 
+_LEDGER_SUFFIX = ".lineage.jsonl"
+# Every per-attempt capture file but the lock, which every process touching the key must keep sharing.
+_CAPTURE_FILE_SUFFIXES = (
+    _LEDGER_SUFFIX,
+    ".lineage.retired",
+    ".tokens.jsonl",
+    ".tokens.state.json",
+    ".tokens.intents",
+    ".tokens.incomplete",
+)
+
+
 class FileLineageStore(IncrementalLineageStore):
     """Resolve lineage from the token JSONL committed by ``TokenCaptureStore``.
 
@@ -851,7 +866,7 @@ class FileLineageStore(IncrementalLineageStore):
     def _ledger_path(self, rollout_id: str) -> Path:
         from nemo_gym.token_id_capture.store import validate_rollout_id
 
-        return self._ledger_root / f"{validate_rollout_id(rollout_id)}.lineage.jsonl"
+        return self._ledger_root / f"{validate_rollout_id(rollout_id)}{_LEDGER_SUFFIX}"
 
     def _retired_path(self, rollout_id: str) -> Path:
         # Present while the rollout is retired: its writes are discarded. ``delete`` removes it.
@@ -1089,3 +1104,76 @@ class FileLineageStore(IncrementalLineageStore):
         if changed or (unretire and rollout_ids):
             self._fsync_ledger_root()
         return {"removed": removed, "absent": absent}
+
+    def export_rows(self, rollout_id: str) -> list[dict]:
+        """Return every ledger row of ``rollout_id`` in commit order, for a checkpoint."""
+        with self._locked(rollout_id):
+            return list(self._read(rollout_id))
+
+    def import_rows(self, rollout_id: str, rows: list[dict]) -> None:
+        """Install checkpointed rows as the complete ledger of ``rollout_id``; see ``import_rows_many``."""
+        self.import_rows_many({rollout_id: rows})
+
+    def import_rows_many(self, ledgers: Mapping[str, list[dict]]) -> None:
+        """Install several rollouts' ledgers from a checkpoint, then sync the directory once.
+
+        Restore runs on a freshly started model server, so capture files already present for a target attempt,
+        or for a later attempt of the same rollout,
+        belong to executions that died after an earlier restore of the checkpoint.
+        They are deleted first, retire fences included:
+        a stale ledger would mix a dead execution's calls into the replacement's lineage,
+        and a fence would silently discard the replacement's rows once the episode reached that attempt again.
+
+        The ledgers are not synced one by one: the checkpoint they come from is the durable copy,
+        and a crash during or after the import only means importing again.
+        A later append to a ledger syncs its file.
+        """
+        present = {entry.name for entry in os.scandir(self._ledger_root)} if self._ledger_root.exists() else set()
+        # Parsed once, so finding each restored rollout's later attempts costs a lookup, not a scan of the root.
+        attempts = _attempts_by_rollout(present)
+        stale = sorted({key for rollout_id in ledgers for key in [rollout_id, *_later_attempts(rollout_id, attempts)]})
+        if stale:
+            self._remove(stale, unretire=True)
+            self._store.delete_now(stale)
+            with self._cache_guard:
+                for key in stale:
+                    self._cache.pop(key, None)
+                    materialized = self._materialized.pop(key, None)
+                    if materialized is not None:
+                        self._materialized_tokens -= len(materialized[1])
+        for rollout_id, rows in ledgers.items():
+            with self._locked(rollout_id):
+                path = self._ledger_path(rollout_id)
+                payload = b"".join(
+                    json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows
+                )
+                temporary = path.with_name(f".{path.name}.import")
+                with temporary.open("wb") as handle:
+                    handle.write(payload)
+                os.replace(temporary, path)
+                self._ledger_cache_pop(rollout_id)
+        if ledgers:
+            self._fsync_ledger_root()
+
+
+def _attempts_by_rollout(names: set[str]) -> dict[str, set[EpisodeId]]:
+    """The episode attempts with capture files among ``names``, grouped by rollout."""
+    attempts: dict[str, set[EpisodeId]] = {}
+    for name in names:
+        suffix = next((suffix for suffix in _CAPTURE_FILE_SUFFIXES if name.endswith(suffix)), None)
+        if suffix is None:
+            continue
+        try:
+            episode = EpisodeId.from_capture_key(name.removesuffix(suffix))
+        except ValueError:
+            continue
+        attempts.setdefault(episode.rollout_id, set()).add(episode)
+    return attempts
+
+
+def _later_attempts(capture_key: str, attempts: dict[str, set[EpisodeId]]) -> list[str]:
+    """Capture keys with files of the same rollout as ``capture_key`` and a later attempt."""
+    episode = EpisodeId.from_capture_key(capture_key)
+    return sorted(
+        other.capture_key for other in attempts.get(episode.rollout_id, ()) if other.attempt > episode.attempt
+    )
