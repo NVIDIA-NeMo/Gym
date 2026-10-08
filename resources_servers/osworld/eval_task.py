@@ -37,11 +37,16 @@ Contract (stdout): exactly one line ``__NEMO_GYM_OSWORLD__ {"ok": bool, "score":
 """
 
 import argparse
+import hashlib
+import importlib.util
 import json
 import os
 import sys
 import time
 import traceback
+from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 
 SENTINEL = "__NEMO_GYM_OSWORLD__"
@@ -50,12 +55,72 @@ VNC_PORT = 8006
 VLC_PORT = 8080
 
 
+def _load_evaluator_module(
+    path: Path, *, package: ModuleType, role: str, task_id: str
+) -> None:
+    digest = hashlib.sha256(str(path).encode()).hexdigest()[:16]
+    module_name = f"{package.__name__}._rlvr_{digest}"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {role} evaluator module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    exported = 0
+    for name, value in vars(module).items():
+        if callable(value) and getattr(value, "__module__", None) == module_name:
+            setattr(package, name, value)
+            exported += 1
+    if exported == 0:
+        raise ImportError(f"{task_id}: {path} exports no evaluator functions")
+
+
+def _register_rlvr_evaluators(task_config: dict[str, Any]) -> None:
+    """Load this task's frozen custom getters/metrics into desktop_env."""
+    root_value = os.environ.get("OSWORLD_RLVR_SNAPSHOT", "").strip()
+    if not root_value:
+        return
+    task_id = task_config.get("id")
+    if not isinstance(task_id, str) or not task_id:
+        raise ValueError("RLVR task has no non-empty id")
+    root = Path(root_value).resolve()
+    task_root = (root / "tmp_funcs" / task_id).resolve()
+    if not task_root.is_relative_to(root):
+        raise ValueError(f"frozen evaluator path escapes snapshot: {task_root}")
+    if not task_root.is_dir():
+        # Most OSWorld tasks use only built-in getters and metrics.
+        return
+
+    from desktop_env.evaluators import getters, metrics
+
+    loaded = 0
+    for role, package in (("getters", getters), ("metrics", metrics)):
+        role_root = task_root / role
+        paths = sorted(
+            path
+            for path in role_root.glob("*.py")
+            if path.name != "__init__.py"
+        )
+        for path in paths:
+            _load_evaluator_module(
+                path, package=package, role=role, task_id=task_id
+            )
+            loaded += 1
+    if loaded == 0:
+        raise FileNotFoundError(f"{task_id}: frozen evaluator modules not found")
+
+
 def _emit(ok: bool, score: float | None = None, error: str | None = None) -> None:
     sys.stdout.write(f"{SENTINEL} {json.dumps({'ok': ok, 'score': score, 'error': error})}\n")
     sys.stdout.flush()
 
 
-def _configure_remote_addressing(control_url: str, proxied: bool, headers: dict[str, str]) -> None:
+def _configure_remote_addressing(
+    control_url: str,
+    proxied: bool,
+    headers: dict[str, str],
+    service_endpoints: dict[str, dict[str, Any]] | None = None,
+) -> None:
     """Point the fork's remote provider at this task's sandbox (before importing desktop_env)."""
     control_url = control_url.rstrip("/")
     if not proxied:
@@ -68,6 +133,22 @@ def _configure_remote_addressing(control_url: str, proxied: bool, headers: dict[
         return
 
     from resources_servers.osworld.local_forwarder import start_forwarder
+
+    if service_endpoints:
+        local_ports: dict[int, int] = {}
+        for port in (5000, 9222, 8080):
+            route = service_endpoints.get(str(port))
+            if not isinstance(route, dict) or not route.get("endpoint"):
+                raise ValueError(f"proxied service endpoint map is missing port {port}")
+            _, local_ports[port] = start_forwarder(
+                str(route["endpoint"]),
+                dict(route.get("headers") or {}),
+            )
+        os.environ["OSWORLD_CONTROL_SERVER_URL"] = f"http://127.0.0.1:{local_ports[5000]}"
+        os.environ["OSWORLD_REMOTE_ADDR"] = (
+            f"127.0.0.1:{local_ports[5000]}:{local_ports[9222]}:{VNC_PORT}:{local_ports[8080]}"
+        )
+        return
 
     # http://<domain>/sandboxes/<id>/proxy/5000 -> proxy root, then one forwarder per port.
     if not control_url.endswith("/5000"):
@@ -90,6 +171,11 @@ def main() -> int:
     parser.add_argument("--control-url", required=True, help="Guest :5000 control base URL")
     parser.add_argument("--proxied", action="store_true", help="control-url goes through a path-based proxy")
     parser.add_argument("--headers-json", default="{}", help="Route headers required by the proxy")
+    parser.add_argument("--headers-file", help="Mode-0600 JSON file containing proxy route headers")
+    parser.add_argument(
+        "--service-endpoints-file",
+        help="Mode-0600 JSON map of guest port to endpoint and route headers",
+    )
     parser.add_argument("--cache", required=True, help="Setup download cache dir")
     parser.add_argument("--action-history", default="[]", help="JSON list; evaluate phase only")
     parser.add_argument("--screen-w", type=int, default=1920)
@@ -100,7 +186,15 @@ def main() -> int:
     try:
         with open(args.config) as f:
             task_config = json.load(f)
-        headers = json.loads(args.headers_json) or {}
+        if args.headers_file:
+            with open(args.headers_file) as f:
+                headers = json.load(f) or {}
+        else:
+            headers = json.loads(args.headers_json) or {}
+        service_endpoints = None
+        if args.service_endpoints_file:
+            with open(args.service_endpoints_file) as f:
+                service_endpoints = json.load(f) or {}
         action_history = json.loads(args.action_history)
         if not isinstance(action_history, list):
             action_history = []
@@ -109,11 +203,17 @@ def main() -> int:
         return 0
 
     try:
-        _configure_remote_addressing(args.control_url, args.proxied, headers)
+        _configure_remote_addressing(
+            args.control_url,
+            args.proxied,
+            headers,
+            service_endpoints,
+        )
         os.makedirs(args.cache, exist_ok=True)
 
         from desktop_env.desktop_env import DesktopEnv
 
+        _register_rlvr_evaluators(task_config)
         env = DesktopEnv(
             provider_name="remote",
             action_space="pyautogui",

@@ -179,6 +179,13 @@ def _load_openshell_provider() -> ProviderClass:
     return OpenShellProvider
 
 
+def _load_agentenv_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.agentenv import AgentEnvProvider
+
+    return AgentEnvProvider
+
+
+_BUILTIN_PROVIDER_LOADERS["agentenv"] = _load_agentenv_provider
 _BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
 _BUILTIN_PROVIDER_LOADERS["daytona"] = _load_daytona_provider
 _BUILTIN_PROVIDER_LOADERS["docker"] = _load_docker_provider

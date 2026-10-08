@@ -30,6 +30,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxEndpoint,
+    SupportsSandboxFork,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
 )
@@ -57,6 +58,7 @@ __all__ = [
     "SandboxSpec",
     "SandboxStatus",
     "SupportsSandboxEndpoint",
+    "SupportsSandboxFork",
     "SupportsSandboxPty",
     "SupportsSandboxPtyAttach",
     "create_provider",

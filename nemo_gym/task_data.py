@@ -64,6 +64,9 @@ RESERVED_ROW_KEYS = frozenset(
         "task_source",
         "_ng_task_index",
         "_ng_rollout_index",
+        "_ng_group_id",
+        "_ng_group_attempt",
+        "_ng_active_generation_indices",
     }
 )
 

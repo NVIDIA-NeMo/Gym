@@ -16,11 +16,13 @@
 
 Per rollout (session), this server:
 
-1. ``/seed_session`` — allocates an OSWorld desktop VM from an OpenSandbox KVM pool via
-   ``AsyncSandbox`` (SDK placeholder image plus ``poolRef``), resolves the guest ``:5000``
+1. ``/seed_session`` — allocates an OSWorld desktop VM through ``AsyncSandbox``
+   (OpenSandbox KVM pool or AgentEnv snapshot), resolves the guest ``:5000``
    control endpoint via ``AsyncSandbox.endpoint(5000)``, waits for the desktop to render, and runs
    the task's setup with the OFFICIAL harness semantics — a ``eval_task.py --phase setup``
    subprocess that imports the pinned ``osworld`` fork and calls ``DesktopEnv.reset``.
+   With AgentEnv fork oversampling, setup runs once and the active generation
+   siblings are cloned from that exact initialized state.
 2. Exposes the two agent-facing tools: ``/screenshot`` (pixel observation) and ``/execute``
    (shell / python command in the guest — the OSWorld action modality).
 3. ``/verify`` — scores with the COMPLETE upstream evaluator (``eval_task.py --phase
@@ -213,6 +215,10 @@ class OSWorldResourcesServerConfig(BaseResourcesServerConfig):
     # Reference parity: the runner sleeps 10s between the agent's last action and
     # env.evaluate() (lib_run_single "Wait for the environment to settle").
     pre_verify_settle_s: float = 10.0
+    # AgentEnv oversampling: initialize one task, then fork the active logical
+    # owners from that exact state. This does not create extra trajectories.
+    fork_oversampling: bool = False
+    fork_claim_timeout_s: float = 7200.0
 
 
 class OSWorldSeedSessionRequest(BaseSeedSessionRequest):
@@ -271,6 +277,14 @@ class _HTTPResult:
         return 200 <= self.status < 300
 
 
+@dataclass
+class _ForkGroup:
+    active_indices: tuple[int, ...]
+    preparation: asyncio.Task[Dict[int, dict]]
+    states: Optional[Dict[int, dict]] = None
+    expiry: Optional[asyncio.Task[None]] = None
+
+
 class OSWorldResourcesServer(SimpleResourcesServer):
     config: OSWorldResourcesServerConfig
     # Per-session state: session_id -> {"sandbox": AsyncSandbox, "sandbox_id", "control_url",
@@ -278,6 +292,8 @@ class OSWorldResourcesServer(SimpleResourcesServer):
     session_id_to_sandbox: Dict[str, dict] = Field(default_factory=dict)
     _provider_config: Optional[Dict[str, Any]] = PrivateAttr(default=None)
     _provider_metadata: Optional[Dict[str, str]] = PrivateAttr(default=None)
+    _fork_groups: Dict[str, _ForkGroup] = PrivateAttr(default_factory=dict)
+    _fork_groups_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -305,7 +321,14 @@ class OSWorldResourcesServer(SimpleResourcesServer):
         return self._provider_config, self._provider_metadata or {}
 
     def _sandbox_spec(self) -> SandboxSpec:
-        provider_metadata = self._resolved_provider()[1]
+        provider_config, provider_metadata = self._resolved_provider()
+        provider_name = next(iter(provider_config))
+        if provider_name == "agentenv":
+            return SandboxSpec(
+                ttl_s=self.config.sandbox_ttl_s,
+                ports=(5000, 9222, 8080),
+                metadata={**provider_metadata, "purpose": "osworld"},
+            )
         return SandboxSpec(
             image=self.config.sandbox_image,
             ttl_s=self.config.sandbox_ttl_s,
@@ -314,26 +337,41 @@ class OSWorldResourcesServer(SimpleResourcesServer):
             provider_options={"extensions": {"poolRef": self.config.pool_ref}},
         )
 
+    async def _sandbox_state(self, sandbox: AsyncSandbox) -> dict:
+        """Resolve the service routes needed by the guest API and evaluator."""
+        provider_name = sandbox._require_handle().provider_name
+        ports = (5000, 9222, 8080) if provider_name == "agentenv" else (5000,)
+        endpoints = {port: await sandbox.endpoint(port) for port in ports}
+        control = endpoints[5000]
+        path = urlsplit(control.endpoint).path.rstrip("/")
+        proxied = provider_name == "agentenv" or "/proxy/" in path or path.endswith("/proxy")
+        state = {
+            "sandbox": sandbox,
+            "sandbox_id": sandbox._require_handle().sandbox_id,
+            "control_url": control.endpoint.rstrip("/"),
+            "headers": dict(control.headers),
+            "proxied": proxied,
+        }
+        if len(endpoints) > 1:
+            state["service_endpoints"] = {
+                str(port): {
+                    "endpoint": endpoint.endpoint.rstrip("/"),
+                    "headers": dict(endpoint.headers),
+                }
+                for port, endpoint in endpoints.items()
+            }
+        return state
+
     async def _allocate_sandbox(self) -> dict:
         """Allocate one pool VM through the SDK and resolve its guest :5000 endpoint."""
         provider_config, _ = self._resolved_provider()
         sandbox = AsyncSandbox(provider_config, self._sandbox_spec())
         await sandbox.start()
         try:
-            endpoint = await sandbox.endpoint(5000)
+            return await self._sandbox_state(sandbox)
         except Exception:
             await self._release({"sandbox": sandbox, "sandbox_id": "?"})
             raise
-        return {
-            "sandbox": sandbox,
-            "sandbox_id": sandbox._require_handle().sandbox_id,
-            "control_url": endpoint.endpoint.rstrip("/"),
-            "headers": dict(endpoint.headers),
-            # The v2 SDK intentionally exposes only a provider-neutral URL and
-            # headers. A path-routed endpoint needs local port forwarders;
-            # direct host:port endpoints do not.
-            "proxied": "/proxy/" in urlsplit(endpoint.endpoint).path,
-        }
 
     async def _release(self, sandbox_state: dict) -> None:
         try:
@@ -517,6 +555,18 @@ class OSWorldResourcesServer(SimpleResourcesServer):
         fd, cfg_path = tempfile.mkstemp(suffix=".json", prefix=f"osw_{phase}_")
         with os.fdopen(fd, "w") as f:
             json.dump(task_config, f)
+        headers_fd, headers_path = tempfile.mkstemp(suffix=".json", prefix="osw_headers_")
+        os.chmod(headers_path, 0o600)
+        with os.fdopen(headers_fd, "w") as f:
+            json.dump(sandbox_state.get("headers") or {}, f)
+        service_endpoints_path: Optional[str] = None
+        if sandbox_state.get("service_endpoints"):
+            service_fd, service_endpoints_path = tempfile.mkstemp(
+                suffix=".json", prefix="osw_service_endpoints_"
+            )
+            os.chmod(service_endpoints_path, 0o600)
+            with os.fdopen(service_fd, "w") as f:
+                json.dump(sandbox_state["service_endpoints"], f)
         try:
             cmd = [
                 sys.executable,
@@ -527,8 +577,8 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                 cfg_path,
                 "--control-url",
                 sandbox_state["control_url"],
-                "--headers-json",
-                json.dumps(sandbox_state.get("headers") or {}),
+                "--headers-file",
+                headers_path,
                 "--cache",
                 self.config.cache_dir,
                 "--action-history",
@@ -540,6 +590,13 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                 "--client-password",
                 self.config.client_password,
             ]
+            if service_endpoints_path is not None:
+                cmd.extend(
+                    [
+                        "--service-endpoints-file",
+                        service_endpoints_path,
+                    ]
+                )
             if sandbox_state.get("proxied"):
                 cmd.append("--proxied")
             proc = await asyncio.create_subprocess_exec(
@@ -584,6 +641,15 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                 os.unlink(cfg_path)
             except OSError:
                 pass
+            try:
+                os.unlink(headers_path)
+            except OSError:
+                pass
+            if service_endpoints_path is not None:
+                try:
+                    os.unlink(service_endpoints_path)
+                except OSError:
+                    pass
 
     # ---------------------------------------------------------------------------------
     # Session helpers
@@ -598,17 +664,8 @@ class OSWorldResourcesServer(SimpleResourcesServer):
             )
         return sandbox_state
 
-    # ---------------------------------------------------------------------------------
-    # Endpoints
-    # ---------------------------------------------------------------------------------
-
-    async def seed_session(self, request: Request, body: OSWorldSeedSessionRequest) -> OSWorldSeedSessionResponse:
-        session_id = request.session[SESSION_ID_KEY]
-        verifier_metadata = body.verifier_metadata or {}
-
-        # Retry with a FRESH sandbox on boot/setup failure. Under concurrency, an individual VM
-        # occasionally fails to boot within the window; without retry that single 500 propagates
-        # through gym's rollout TaskGroup and can crash the entire run.
+    async def _initialize_sandbox(self, verifier_metadata: Dict[str, Any]) -> dict:
+        """Allocate and initialize one task, retrying fresh infrastructure."""
         last_err: Optional[Exception] = None
         attempts = max(1, self.config.alloc_retries)
         for attempt in range(attempts):
@@ -616,9 +673,8 @@ class OSWorldResourcesServer(SimpleResourcesServer):
             try:
                 sandbox_state = await self._allocate_sandbox()
                 logger.info(
-                    "Allocated OSWorld sandbox %s for session %s (attempt %d/%d)",
+                    "Allocated OSWorld sandbox %s (attempt %d/%d)",
                     sandbox_state["sandbox_id"],
-                    session_id,
                     attempt + 1,
                     attempts,
                 )
@@ -626,48 +682,162 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                 sandbox_state["screen"] = await self._guest_screen_size(sandbox_state)
                 if verifier_metadata:
                     setup = await self._run_task_phase(
-                        "setup", verifier_metadata, sandbox_state, timeout_s=self.config.setup_timeout_s
+                        "setup",
+                        verifier_metadata,
+                        sandbox_state,
+                        timeout_s=self.config.setup_timeout_s,
                     )
                     if not setup.get("ok"):
-                        # Boot problems / transient proxy failures land here too — retry fresh.
-                        # On the final attempt, proceed anyway (a partially-set-up task runs and
-                        # typically scores 0, which keeps the batch moving) — mirroring the
-                        # reference stack, where only *transient* setup errors are requeued.
                         if attempt + 1 < attempts:
                             raise RuntimeError(f"task setup failed: {setup.get('error')!r}")
                         logger.warning(
                             "Task setup failed on the final attempt (%r); proceeding un-set-up",
                             setup.get("error"),
                         )
-                # Fit the office window first (tabs/status bar on-screen; effective on the
-                # setup-opened window — see _MAXIMIZE_OFFICE_SCRIPT), THEN settle: the settle
-                # both mirrors the reference runner's 10s reset->first-obs pause (document
-                # canvas paint) and absorbs any move-triggered repaint before the first
-                # screenshot.
                 if self.config.maximize_office_windows:
                     await self._maximize_office_windows(sandbox_state)
                 if self.config.post_setup_settle_s > 0:
                     await asyncio.sleep(self.config.post_setup_settle_s)
-            except Exception as e:  # noqa: BLE001 - boot/setup can fail transiently; retry fresh
+                return sandbox_state
+            except Exception as e:  # noqa: BLE001 - boot/setup can fail transiently
                 last_err = e
-                # _allocate_sandbox releases its own partially-created object.
                 if sandbox_state is not None:
                     await self._release(sandbox_state)
                 logger.warning(
-                    "seed_session attempt %d/%d failed (%r); retrying with a fresh sandbox",
+                    "OSWorld initialization attempt %d/%d failed (%r); retrying fresh",
                     attempt + 1,
                     attempts,
                     e,
                 )
-                continue
-
-            assert sandbox_state is not None
-            self.session_id_to_sandbox[session_id] = sandbox_state
-            return OSWorldSeedSessionResponse(
-                sandbox_id=sandbox_state["sandbox_id"], screen=sandbox_state.get("screen")
-            )
-
         raise RuntimeError(f"seed_session failed after {attempts} attempts: {last_err!r}")
+
+    async def _prepare_fork_group(
+        self,
+        verifier_metadata: Dict[str, Any],
+        active_indices: tuple[int, ...],
+    ) -> Dict[int, dict]:
+        """Initialize once and fork every other active logical owner."""
+        parent = await self._initialize_sandbox(verifier_metadata)
+        states = [parent]
+        try:
+            if len(active_indices) > 1:
+                children = await parent["sandbox"].fork(
+                    len(active_indices) - 1,
+                    ttl_s=self.config.sandbox_ttl_s,
+                )
+                for child in children:
+                    state = await self._sandbox_state(child)
+                    state["screen"] = dict(parent.get("screen") or {})
+                    # A fork is expected to be immediately runnable, but verify
+                    # the control service before handing it to a rollout.
+                    platform = await self._guest_request(state, "GET", "/platform")
+                    if platform.status != 200:
+                        raise RuntimeError(
+                            f"forked OSWorld sandbox {state['sandbox_id']} returned "
+                            f"{platform.status} from /platform"
+                        )
+                    states.append(state)
+        except Exception:
+            await asyncio.gather(*(self._release(state) for state in states), return_exceptions=True)
+            raise
+        return dict(zip(active_indices, states, strict=True))
+
+    async def _expire_fork_group(self, key: str, group: _ForkGroup) -> None:
+        await asyncio.sleep(self.config.fork_claim_timeout_s)
+        async with self._fork_groups_lock:
+            if self._fork_groups.get(key) is not group:
+                return
+            self._fork_groups.pop(key, None)
+            unclaimed = list((group.states or {}).values())
+            group.states = {}
+        if unclaimed:
+            logger.warning("Releasing %d unclaimed AgentEnv forks for group %s", len(unclaimed), key)
+            await asyncio.gather(*(self._release(state) for state in unclaimed), return_exceptions=True)
+
+    async def _claim_forked_sandbox(
+        self,
+        body: OSWorldSeedSessionRequest,
+        verifier_metadata: Dict[str, Any],
+    ) -> dict:
+        extras = body.model_extra or {}
+        group_id = extras.get("_ng_group_id")
+        group_attempt = extras.get("_ng_group_attempt", 0)
+        rollout_index = extras.get("_ng_rollout_index")
+        raw_indices = extras.get("_ng_active_generation_indices")
+        if not isinstance(group_id, str) or not group_id:
+            raise ValueError("fork oversampling requires _ng_group_id")
+        if not isinstance(group_attempt, int) or isinstance(group_attempt, bool) or group_attempt < 0:
+            raise ValueError("fork oversampling requires a non-negative _ng_group_attempt")
+        if not isinstance(rollout_index, int) or isinstance(rollout_index, bool) or rollout_index < 0:
+            raise ValueError("fork oversampling requires a non-negative _ng_rollout_index")
+        if (
+            not isinstance(raw_indices, list)
+            or not raw_indices
+            or any(not isinstance(index, int) or isinstance(index, bool) or index < 0 for index in raw_indices)
+        ):
+            raise ValueError("fork oversampling requires _ng_active_generation_indices")
+        active_indices = tuple(sorted(set(raw_indices)))
+        if len(active_indices) != len(raw_indices) or rollout_index not in active_indices:
+            raise ValueError("fork oversampling generation indices must be unique and contain this rollout")
+
+        task_id = str(verifier_metadata.get("id") or "unknown")
+        key = f"{group_id}:{group_attempt}:{task_id}"
+        async with self._fork_groups_lock:
+            group = self._fork_groups.get(key)
+            if group is None:
+                preparation = asyncio.create_task(
+                    self._prepare_fork_group(verifier_metadata, active_indices)
+                )
+                group = _ForkGroup(active_indices=active_indices, preparation=preparation)
+                self._fork_groups[key] = group
+            elif group.active_indices != active_indices:
+                raise ValueError(f"fork oversampling group {key} changed its active generation set")
+
+        try:
+            prepared = await asyncio.shield(group.preparation)
+        except Exception:
+            async with self._fork_groups_lock:
+                if self._fork_groups.get(key) is group:
+                    self._fork_groups.pop(key, None)
+            raise
+
+        async with self._fork_groups_lock:
+            if group.states is None:
+                group.states = dict(prepared)
+            sandbox_state = group.states.pop(rollout_index, None)
+            if sandbox_state is None:
+                raise RuntimeError(
+                    f"fork oversampling generation {rollout_index} was already claimed for group {key}"
+                )
+            if group.states:
+                if group.expiry is None:
+                    group.expiry = asyncio.create_task(self._expire_fork_group(key, group))
+            else:
+                self._fork_groups.pop(key, None)
+                if group.expiry is not None:
+                    group.expiry.cancel()
+        return sandbox_state
+
+    # ---------------------------------------------------------------------------------
+    # Endpoints
+    # ---------------------------------------------------------------------------------
+
+    async def seed_session(self, request: Request, body: OSWorldSeedSessionRequest) -> OSWorldSeedSessionResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        verifier_metadata = body.verifier_metadata or {}
+        provider_name = next(iter(self._resolved_provider()[0]))
+        if self.config.fork_oversampling and provider_name == "agentenv":
+            sandbox_state = await self._claim_forked_sandbox(body, verifier_metadata)
+        else:
+            sandbox_state = await self._initialize_sandbox(verifier_metadata)
+        previous = self.session_id_to_sandbox.pop(session_id, None)
+        if previous is not None:
+            await self._release(previous)
+        self.session_id_to_sandbox[session_id] = sandbox_state
+        logger.info("Assigned OSWorld sandbox %s to session %s", sandbox_state["sandbox_id"], session_id)
+        return OSWorldSeedSessionResponse(
+            sandbox_id=sandbox_state["sandbox_id"], screen=sandbox_state.get("screen")
+        )
 
     async def screenshot(self, request: Request) -> ScreenshotResponse:
         sandbox_state = self._get_session_sandbox(request)

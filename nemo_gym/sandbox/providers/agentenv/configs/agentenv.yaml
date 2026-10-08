@@ -1,0 +1,20 @@
+# AgentEnv provider for snapshot-backed OSWorld sandboxes.
+sandbox:
+  default_metadata:
+    sandbox-api: agentenv
+  agentenv:
+    connection:
+      endpoint: ${oc.env:AGENTENV_ENDPOINT}
+      api_key: ${oc.env:AGENTENV_API_KEY}
+      tls_ca: ${oc.env:AGENTENV_TLS_CA,null}
+      request_timeout_s: 300
+    create:
+      template: ${oc.env:AGENTENV_TEMPLATE,osworld-slim-pixel-parity-20261001}
+      timeout_s: ${oc.decode:${oc.env:OSWORLD_SANDBOX_TTL_S,7200}}
+
+# Initialize each task once, then fork one sandbox for every active generation
+# so all logical owners start from exactly the same task state.
+osworld_resources_server:
+  resources_servers:
+    osworld:
+      fork_oversampling: true

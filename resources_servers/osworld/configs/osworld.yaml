@@ -4,7 +4,7 @@ osworld_resources_server:
       entrypoint: app.py
       domain: agent
       verified: false
-      description: OSWorld computer-use benchmark on OpenSandbox KVM desktop VMs (nemo_gym.sandbox SDK)
+      description: OSWorld computer-use benchmark on sandboxed desktop VMs (nemo_gym.sandbox SDK)
       # Sandbox provider block name, resolved from the merged global config. Compose with
       # nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml (which binds `sandbox`).
       sandbox_provider: sandbox

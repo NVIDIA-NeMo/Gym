@@ -256,6 +256,25 @@ class SupportsSandboxEndpoint(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxFork(Protocol):
+    """Optional capability for cloning an initialized sandbox.
+
+    Each child carries its own provider instance so closing one child cannot
+    close connection resources still needed by its siblings.
+    """
+
+    async def fork(
+        self,
+        handle: SandboxHandle,
+        count: int,
+        *,
+        ttl_s: int | float | None = None,
+    ) -> list[tuple["SandboxProvider", SandboxHandle]]:
+        """Create ``count`` children from ``handle``'s current state."""
+        ...
+
+
+@runtime_checkable
 class SandboxPtySession(Protocol):
     """One live interactive terminal. Async context manager; exit closes it."""
 

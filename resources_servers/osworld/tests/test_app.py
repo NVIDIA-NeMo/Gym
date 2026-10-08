@@ -20,6 +20,7 @@ exercised without a cluster. The setup/evaluate subprocess seam is covered separ
 with a stub script. A live end-to-end test is guarded by ``OPENSANDBOX_DOMAIN``.
 """
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -42,7 +43,11 @@ from nemo_gym.sandbox import (
     register_provider,
 )
 from nemo_gym.server_utils import ServerClient
-from resources_servers.osworld.app import OSWorldResourcesServer, OSWorldResourcesServerConfig
+from resources_servers.osworld.app import (
+    OSWorldResourcesServer,
+    OSWorldResourcesServerConfig,
+    OSWorldSeedSessionRequest,
+)
 
 
 # --------------------------------------------------------------------------------------
@@ -440,6 +445,88 @@ class TestApp:
         assert FakeOSWorldProvider.closed_ids == ["sbx-1"]
 
 
+class TestAgentEnvForkOversampling:
+    async def test_group_initializes_once_and_claims_each_active_generation(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = OSWorldResourcesServer(
+            config=_make_config(fork_oversampling=True),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        preparations = 0
+
+        async def prepare(_metadata: Dict[str, Any], indices: tuple[int, ...]) -> Dict[int, dict]:
+            nonlocal preparations
+            preparations += 1
+            await asyncio.sleep(0)
+            return {index: {"sandbox_id": f"fork-{index}"} for index in indices}
+
+        monkeypatch.setattr(server, "_prepare_fork_group", prepare)
+
+        def body(index: int) -> OSWorldSeedSessionRequest:
+            return OSWorldSeedSessionRequest.model_validate(
+                {
+                    "verifier_metadata": {"id": "task-1"},
+                    "_ng_group_id": "group-1",
+                    "_ng_group_attempt": 0,
+                    "_ng_rollout_index": index,
+                    "_ng_active_generation_indices": [1, 3, 7],
+                }
+            )
+
+        states = await asyncio.gather(
+            *(server._claim_forked_sandbox(body(index), {"id": "task-1"}) for index in (1, 3, 7))
+        )
+
+        assert preparations == 1
+        assert [state["sandbox_id"] for state in states] == ["fork-1", "fork-3", "fork-7"]
+        assert server._fork_groups == {}
+
+    async def test_prepare_group_forks_after_single_initialized_parent(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = OSWorldResourcesServer(config=_make_config(), server_client=MagicMock(spec=ServerClient))
+
+        class Child:
+            def __init__(self, sandbox_id: str):
+                self.sandbox_id = sandbox_id
+
+        class Parent:
+            async def fork(self, count: int, *, ttl_s: int) -> List[Child]:
+                assert count == 2
+                assert ttl_s == server.config.sandbox_ttl_s
+                return [Child("child-1"), Child("child-2")]
+
+        parent_state = {
+            "sandbox": Parent(),
+            "sandbox_id": "parent",
+            "screen": {"width": 1920, "height": 1080},
+        }
+        initialized = 0
+
+        async def initialize(_metadata: Dict[str, Any]) -> dict:
+            nonlocal initialized
+            initialized += 1
+            return parent_state
+
+        async def child_state(child: Child) -> dict:
+            return {"sandbox": child, "sandbox_id": child.sandbox_id}
+
+        async def platform(_state: dict, _method: str, _path: str, **_kwargs: Any) -> app_module._HTTPResult:
+            return app_module._HTTPResult(status=200, content=b"Linux")
+
+        monkeypatch.setattr(server, "_initialize_sandbox", initialize)
+        monkeypatch.setattr(server, "_sandbox_state", child_state)
+        monkeypatch.setattr(server, "_guest_request", platform)
+
+        states = await server._prepare_fork_group({"id": "task-1"}, (1, 3, 7))
+
+        assert initialized == 1
+        assert list(states) == [1, 3, 7]
+        assert [state["sandbox_id"] for state in states.values()] == ["parent", "child-1", "child-2"]
+        assert all(state["screen"] == {"width": 1920, "height": 1080} for state in states.values())
+
+
 def _minimal_response(text: str) -> dict:
     return {
         "id": "resp_test",
@@ -518,6 +605,39 @@ class TestEvalTaskAddressing:
         monkeypatch.delenv("OSWORLD_REMOTE_ADDR", raising=False)
         with pytest.raises(ValueError, match="must end with /5000"):
             eval_task._configure_remote_addressing("http://osb.test/sandboxes/s1/proxy/9999", True, {})
+
+    def test_agentenv_service_endpoint_map_routes_each_port(self, monkeypatch: MonkeyPatch) -> None:
+        from resources_servers.osworld import eval_task
+        from resources_servers.osworld import local_forwarder
+
+        calls: List[tuple[str, Dict[str, str]]] = []
+
+        def fake_start(endpoint: str, headers: Dict[str, str]):
+            calls.append((endpoint, headers))
+            return object(), 10000 + len(calls)
+
+        monkeypatch.setattr(local_forwarder, "start_forwarder", fake_start)
+        routes = {
+            str(port): {
+                "endpoint": "https://agentenv.example",
+                "headers": {
+                    "E2b-Sandbox-Id": "sandbox-1",
+                    "E2b-Sandbox-Port": str(port),
+                },
+            }
+            for port in (5000, 9222, 8080)
+        }
+
+        eval_task._configure_remote_addressing(
+            "https://agentenv.example",
+            True,
+            {},
+            routes,
+        )
+
+        assert [headers["E2b-Sandbox-Port"] for _, headers in calls] == ["5000", "9222", "8080"]
+        assert os.environ["OSWORLD_CONTROL_SERVER_URL"] == "http://127.0.0.1:10001"
+        assert os.environ["OSWORLD_REMOTE_ADDR"] == "127.0.0.1:10001:10002:8006:10003"
 
 
 class TestLocalForwarder:

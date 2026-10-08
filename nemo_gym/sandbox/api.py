@@ -36,6 +36,7 @@ from nemo_gym.sandbox.providers import (
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxEndpoint,
+    SupportsSandboxFork,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
     create_provider,
@@ -517,6 +518,31 @@ class AsyncSandbox:
         if not isinstance(resolved, SandboxEndpoint):
             raise TypeError(f"Sandbox provider endpoint() must return SandboxEndpoint, got {type(resolved).__name__}")
         return resolved
+
+    async def fork(
+        self,
+        count: int,
+        *,
+        ttl_s: int | float | None = None,
+    ) -> list["AsyncSandbox"]:
+        """Clone this sandbox's current state into independent child sandboxes."""
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise ValueError(f"Sandbox fork count must be a positive integer, got {count!r}")
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxFork):
+            provider_name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support fork")
+        children = await provider.fork(self._require_handle(), count, ttl_s=ttl_s)
+        if len(children) != count:
+            raise RuntimeError(f"Sandbox provider fork() returned {len(children)} children; expected {count}")
+
+        sandboxes: list[AsyncSandbox] = []
+        for child_provider, child_handle in children:
+            child = AsyncSandbox(child_provider, self._spec)
+            child._handle = child_handle
+            child._stopped = False
+            sandboxes.append(child)
+        return sandboxes
 
     async def stop(self) -> None:
         if self._closed:

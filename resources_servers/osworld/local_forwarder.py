@@ -25,8 +25,10 @@ short-lived ``eval_task.py`` subprocess next to the synchronous upstream harness
 inside the async server process.
 """
 
+import os
 import re
 import socket
+import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -60,6 +62,7 @@ def start_forwarder(
     proxy_host = split.hostname or "127.0.0.1"
     proxy_port = split.port or (443 if split.scheme == "https" else 80)
     proxy_path_prefix = split.path.rstrip("/")
+    ca_bundle = os.environ.get("NEMO_GYM_PROXY_CA_BUNDLE") or None
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -72,6 +75,11 @@ def start_forwarder(
             the client's Upgrade handshake against the proxied path. The OpenSandbox proxy
             carries Upgrade end-to-end (probe-verified), so a byte pump suffices."""
             upstream = socket.create_connection((proxy_host, proxy_port), timeout=30)
+            if split.scheme == "https":
+                context = ssl.create_default_context()
+                if ca_bundle:
+                    context.load_verify_locations(cafile=ca_bundle)
+                upstream = context.wrap_socket(upstream, server_hostname=proxy_host)
             lines = [f"GET {proxy_path_prefix}{self.path} HTTP/1.1", f"Host: {proxy_host}"]
             client_keys = {key.lower() for key in self.headers.keys()}
             for key, value in self.headers.items():
@@ -124,7 +132,12 @@ def start_forwarder(
                     headers[key] = value
             try:
                 upstream = requests.request(
-                    self.command, base + self.path, data=body, headers=headers, timeout=timeout_s
+                    self.command,
+                    base + self.path,
+                    data=body,
+                    headers=headers,
+                    timeout=timeout_s,
+                    verify=ca_bundle or True,
                 )
             except Exception as e:  # noqa: BLE001 - surface transport failures as 502 to the caller
                 message = str(e).encode()
