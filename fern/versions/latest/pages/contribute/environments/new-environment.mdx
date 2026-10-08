@@ -15,19 +15,43 @@ For a guide to building your first resources server, refer to [Single Step Envir
 
 </Tip>
 
-## Onboarding Commands
+## Overview
 
-Search the local catalog before creating a workload. The onboarding journey then uses four commands to scaffold, validate, test, and publish it:
+Onboarding can be done in the following order:
+
+1. **Search and scaffold:** confirm no equivalent environment exists, then run `gym env init` to create the manifest, Gym config, and resources server.
+2. **Implement:** replace the `verify()` stub and sample data with your task logic.
+3. **Validate and test:** check the manifest and verifier fixture with `gym env validate` and `gym env test`.
+4. **Smoke rollout:** for behavior-changing work, run one episode with a model and inspect agent and verifier behavior.
+5. **Publish and submit:** run `gym env publish` (local readiness check), then open a PR.
+
+## Onboarding Example: Hello World
+
+Use a [development checkout](/main/contribute/development-setup), activate its environment, and run commands from the repository root:
 
 ```bash
 gym search "task description"
 gym env init --environment my_eval --profile custom-gym-verifier
 gym env validate my_eval
 gym env test my_eval
-gym env publish my_eval
 ```
 
-`gym env init --environment` writes the manifest, Gym config, README, and sample data under `environments/my_eval/`, and scaffolds a full resources server skeleton under `resources_servers/my_eval/`. Implement the resources server before running `validate`. Names that create Python components must be lowercase Python identifiers. Benchmarks also receive source data, a prompt, and a `prepare()` function. A new scorer adds a resources server and verifier fixture. Non-default templates expose the selected extension point but initially delegate to existing Gym behavior; replace their generated TODO before review. An external-loop scaffold is an adapter starting point under the current runtime; document which responsibilities the framework owns and test the actual execution path.
+The scaffold creates `environments/my_eval/` (manifest, Gym config, README, and sample data) and `resources_servers/my_eval/` (resources server skeleton, configs, tests, and requirements). Implement `verify()` and replace the sample data before running `validate`.
+
+To try a model, [configure its endpoint](/main/model-server), then run the server and collect one episode in two terminals:
+
+```bash
+# Terminal 1 — start the server
+gym env start --environment my_eval --model-type openai_model
+
+# Terminal 2 — run one episode
+gym eval run --no-serve --environment my_eval \
+    --output results/my_eval_smoke.jsonl --limit 1
+```
+
+The scaffold is the starting point: implement `verify()`, replace the sample data, and complete the manifest's placeholder metadata before running `gym env publish`. The full onboarding sequence is in [Onboarding Workflow](#onboarding-workflow) below.
+
+Names that create Python components must be lowercase Python identifiers. Benchmarks also receive source data, a prompt, and a `prepare()` function. A new scorer adds a resources server and verifier fixture. Non-default templates expose the selected extension point but initially delegate to existing Gym behavior; replace their generated TODO before review. An external-loop scaffold is an adapter starting point under the current runtime; document which responsibilities the framework owns and test the actual execution path.
 
 To reuse a scorer that already exports the verifier-fixture contract, declare its reward contract instead of copying its implementation:
 
@@ -50,7 +74,7 @@ Run `gym eval prepare --benchmark NAME` before validating a benchmark whose prep
 Publication includes an `experimental` annotation only when the manifest's flag is `true`. CODEOWNERS updates, immutable version enforcement, capability checks, certificate-backed validation, and a hosted catalog index are not yet automated.
 </Note>
 
-## Contribution Workflow
+## Onboarding Workflow
 
 Contributing a manifest-backed environment or benchmark follows this sequence:
 
