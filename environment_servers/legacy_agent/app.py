@@ -83,6 +83,7 @@ class LegacyAgentEnvironmentServerConfig(BaseEnvironmentServerConfig):
 class LegacyAgentEnvironmentServer(BaseEnvironmentServer):
     """Relay `/run` to one agent server without reading either side's contract."""
 
+    ray_enabled = False
     config: LegacyAgentEnvironmentServerConfig
 
     def setup_webserver(self) -> FastAPI:
