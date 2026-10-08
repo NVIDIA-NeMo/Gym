@@ -541,3 +541,26 @@ async def test_resume_paused_resumes_what_a_checkpoint_paused_and_tolerates_fail
     assert ops(provider, "resume") == ["sb-1", "sb-2"]
     await (await checkpointer.ensure_running("s1")).exec("s1: two")
     assert provider.boxes["sb-1"]["state"] == "running" and provider.files("sb-1") == ["s1: one", "s1: two"]
+
+
+# -- borrowed access ------------------------------------------------------------------------------------------
+
+
+async def test_access_names_the_current_sandbox_and_resumes_it_first() -> None:
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, "s1")
+    states = await checkpointer.export(["s1"])
+
+    access = await checkpointer.access("s1", provider_config_ref="sandbox", workdir="/work")
+
+    assert access.connection.provider_config_ref == "sandbox" and access.workdir == "/work"
+    assert access.connection.descriptor["sandbox_id"] == "sb-1"
+    assert provider.boxes["sb-1"]["state"] == "running", "a borrower is about to use it"
+
+    # After a restore that forked the sandbox, the access names the fork: a borrower must ask again.
+    await (await checkpointer.ensure_running("s1")).exec("drift")
+    fresh = SandboxSessionCheckpointer(provider)
+    await fresh.restore(states)
+    refreshed = await fresh.access("s1", provider_config_ref="sandbox", workdir="/work")
+    assert refreshed.connection.descriptor["sandbox_id"] != "sb-1"
+    assert refreshed.connection.descriptor["sandbox_id"] == fresh.get("s1").handle.sandbox_id

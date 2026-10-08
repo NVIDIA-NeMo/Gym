@@ -22,6 +22,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.sandbox.checkpoint import SandboxCheckpointError, SandboxSessionCheckpointer
 from nemo_gym.sandbox.providers.base import SandboxSpec
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
@@ -71,6 +72,11 @@ class NotesServer(SimpleResourcesServer):
 
     async def resume_session_states(self, session_ids: list[str]) -> None:
         await self._sandboxes.resume_paused(session_ids)
+
+    async def current_sandbox_access(self, session_id: str) -> SandboxAccess | None:
+        if session_id not in self._sandboxes:
+            return None
+        return await self._sandboxes.access(session_id, provider_config_ref="sandbox", workdir="/work")
 
 
 def make_server(provider: FakeSnapshotProvider) -> tuple[NotesServer, httpx.AsyncClient]:
@@ -244,3 +250,35 @@ async def test_a_failed_eager_resume_does_not_fail_the_resume_and_the_next_call_
 
     assert resume.status_code == 200 and still_paused == "paused"
     assert after.status_code == 200 and provider.files("sb-1") == ["echo one >> notes", "echo two >> notes"]
+
+
+async def test_sandbox_access_follows_the_sandbox_across_a_restore(tmp_path: Path) -> None:
+    provider = FakeSnapshotProvider()
+    _, client = make_server(provider)
+    async with client:
+        unknown = await client.post("/sandbox_access")
+        await client.post("/ng-rollout/r-a1/seed_session", json=SEED)
+        before = (await client.post("/sandbox_access")).json()
+        await client.post("/append", json={"line": "one"})
+        await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
+        await client.post("/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path)), headers=AUTH)
+        await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
+        await client.post("/append", json={"line": "two"})  # the live sandbox moves on
+        cookies = dict(client.cookies)
+
+    _, fresh = make_server(provider)
+    async with fresh:
+        fresh.cookies.update(cookies)
+        await fresh.post(
+            "/ng-control/v1/checkpoint/restore",
+            json=control("r1", checkpoint_dir=str(tmp_path), episode_ids=SCOPE),
+            headers=AUTH,
+        )
+        await fresh.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
+        after = (await fresh.post("/sandbox_access")).json()
+
+    assert unknown.status_code == 404
+    assert before["connection"]["descriptor"]["sandbox_id"] == "sb-1" and before["workdir"] == "/work"
+    # The restore forked the sandbox, so a borrower that asks again is pointed at the fork.
+    assert after["connection"]["descriptor"]["sandbox_id"] != "sb-1"
+    assert provider.boxes[after["connection"]["descriptor"]["sandbox_id"]]["state"] == "running"

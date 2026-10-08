@@ -109,6 +109,9 @@ class Deployment:
       in the fake sandbox backend, which outlives a Gym crash like the inference backend does.
     - ``agent_sandbox``: ``single_agent_turn`` over an agent that owns a sandbox per session in the fake sandbox
       backend, and a stateless resources server that verifies what the agent read back from it.
+    - ``borrowed_sandbox``: ``single_agent_turn`` over the sandboxed notes resources server, which hands the
+      agent access to its sandbox, and an agent that runs its tools there and refreshes that access after a
+      restore (``borrower_refreshes_access`` turns the refresh off, as a negative control).
 
     With ``inference_url``, the policy model serves from that endpoint and the fake backend's control
     routes are unavailable. ``policy_workers`` sets the policy model server's uvicorn workers, and
@@ -128,6 +131,7 @@ class Deployment:
         policy_workers: int = 1,
         server_workers: int = 1,
         resources_mcp: bool = False,
+        borrower_refreshes_access: bool = True,
         extra_config: Optional[dict[str, Any]] = None,
     ) -> None:
         self.topology = topology
@@ -146,6 +150,7 @@ class Deployment:
         self.server_workers = server_workers
         # Expose the counter resources server's tools over MCP, as a CLI agent harness calls them.
         self.resources_mcp = resources_mcp
+        self.borrower_refreshes_access = borrower_refreshes_access
         self.external_inference = inference_url is not None
         self.procs: dict[str, subprocess.Popen] = {}
         self.dirs: dict[str, Path] = {}
@@ -172,6 +177,9 @@ class Deployment:
             # Log every request with its status, not only errors, so a failure can be traced in the logs.
             "uvicorn_logging_show_200_ok": True,
         }
+        if self.topology in ("sandbox", "agent_sandbox", "borrowed_sandbox"):
+            # The named sandbox block a borrower resolves a handed-out SandboxAccess through.
+            config["sandbox"] = {"fake_remote": {"base_url": f"http://127.0.0.1:{self.sandbox_port}"}}
         if token_capture:
             config["token_id_capture"] = {
                 "enabled": True,
@@ -216,7 +224,7 @@ class Deployment:
                 expose_tools_over_mcp=self.resources_mcp,
             )
             add("resources", "resources_servers/example_session_state_mgmt", resources)
-        elif self.topology == "sandbox":
+        elif self.topology in ("sandbox", "borrowed_sandbox"):
             resources = _server(
                 "resources_servers",
                 "example_session_state_mgmt",
@@ -255,6 +263,15 @@ class Deployment:
                 sandbox_backend_url=f"http://127.0.0.1:{self.sandbox_port}",
             )
             add("agent", str(HERE / "sandbox_notes_agent"), agent)
+        elif self.topology == "borrowed_sandbox":
+            agent = _server(
+                "responses_api_agents",
+                "simple_agent",
+                model_server=_ref("responses_api_models", "policy_model"),
+                resources_server=_ref("resources_servers", "resources"),
+                refresh_access_after_restore=self.borrower_refreshes_access,
+            )
+            add("agent", str(HERE / "sandbox_notes_borrower"), agent)
         else:
             agent = _server(
                 "responses_api_agents",
@@ -264,7 +281,7 @@ class Deployment:
             )
             add("agent", "responses_api_agents/simple_agent", agent)
 
-        if self.topology in ("native", "slow", "mixed", "agent_sandbox"):
+        if self.topology in ("native", "slow", "mixed", "agent_sandbox", "borrowed_sandbox"):
             environment = _server(
                 "environment_servers",
                 "single_agent_turn",
@@ -329,7 +346,7 @@ class Deployment:
             stderr=subprocess.STDOUT,
         )
         self._wait_healthy("backend", f"http://127.0.0.1:{self.backend_port}/v1/models")
-        if self.topology in ("sandbox", "agent_sandbox"):
+        if self.topology in ("sandbox", "agent_sandbox", "borrowed_sandbox"):
             log = open(self.log_dir / "sandbox_backend.log", "a")
             self.procs["sandbox_backend"] = subprocess.Popen(
                 [sys.executable, str(HERE / "fake_sandbox_backend.py"), str(self.sandbox_port)],
