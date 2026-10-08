@@ -52,10 +52,12 @@ sequenceDiagram
     E->>R: HTTP/JSON: POST /verify
     R-->>E: HTTP/JSON: reward and grading evidence
     E->>R: HTTP/JSON: POST /close_session
-    R->>S: Provider API/CLI: destroy sandbox
+    R->>S: Provider API/CLI: destroy task sandbox if still present
 ```
 
 Resources owns the sandbox. The agent borrows it. **Agent close must succeed before verification.**
+
+Resources may retire the task sandbox during verification. For example, SWE-Pro exports the patch, stops the task sandbox, and grades in a fresh sandbox; final Resources close releases any remaining resources.
 
 The `...` in agent and model routes represents Gym's rollout and optional token-capture prefix; preserve it when forwarding requests.
 
@@ -307,7 +309,7 @@ Record evidence conformance and sandbox lifecycle validation separately; the loc
 - Test host calls with no sandbox access or provider, borrowed episode sessions, explicitly configured agent-owned sessions, and rejection of episode seed without either. Assert that host calls do not create a sandbox and sandbox failures never invoke a host fallback. Test compatibility `/run` with and without a Resources binding.
 - Exercise cold installation, runtime reuse, failed/partial installation, and unsupported platforms. Include a binary harness in an image without Python, and require setup to provision or explicitly reject the missing supervisor interpreter. Claim offline or read-only mounted-runtime support only after testing those deployment paths.
 - Test setup failures, request mapping, unsupported controls, isolation, retries, cancellation, close races, and cleanup failures. Include supervisor upload failure or close during upload, interpreter/supervisor bootstrap failures before launch, cleanup before transport cancellation, artifact capture before teardown, capture failures, and malformed optional diagnostics. Use real Linux processes for detached-child cleanup.
-- Run a real model/task smoke with tools and verification. Confirm sandbox execution, agent close before verification, and owner cleanup afterward. Inspect failures, traces, artifacts, and grading coverage.
+- Run a real model/task smoke with tools and verification. Confirm sandbox execution, agent close before verification, and sandbox cleanup by its owner. Inspect failures, traces, artifacts, and grading coverage.
 - Demonstrate a second compatible pairing through composition alone. Record versions and unsupported combinations.
 - For upgrades, compare the same harness before/after with fixed model, tasks, prompts, sampling, limits, images, verifier, and concurrency. Compare scores and failures; different harnesses need not score identically.
 - Measure setup time, memory, process count, and close latency before scaling. Validate [training support](/main/tutorials/training-tutorials/external-agent-harnesses) separately from inference.
