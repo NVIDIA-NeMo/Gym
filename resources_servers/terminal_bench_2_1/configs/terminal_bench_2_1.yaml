@@ -7,6 +7,7 @@ terminal_bench_2_1_resources_server:          # instance name — how agents/CLI
       domain: other                     # task domain; change to the closest supported domain
       verified: false                   # set true once the benchmark has been baselined and reviewed
 
+      num_workers: 1
       evaluation_timeout: 1800
       is_verifying_golden_patch: false
 

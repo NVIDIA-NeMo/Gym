@@ -28,3 +28,12 @@ provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
 Native sessions are selected by the session cookie, regardless of `execution_mode`.
 That setting still controls unseeded local/legacy calls; `sandbox` rejects unseeded calls.
+
+## Terminal-Bench 2.1
+
+Use the [single-task recipe](../../benchmarks/terminal_bench_2_1/README.md#opencode-in-a-task-sandbox)
+to compose the independent TB Resources, OpenCode, EnvironmentServer and model
+configs. Resources owns the task sandbox and verifier; OpenCode borrows it through
+the same session contract as SWE-Pro. `single_agent_turn_legacy` adapts prepared
+flat rows to that lifecycle; it does not invoke the agent's legacy `/run` path.
+The EnvironmentServer closes the agent before grading, then closes Resources.
