@@ -438,19 +438,64 @@ class TestRunCodex:
             return SlowProc()
 
         async def fake_wait_for(coro, timeout):
-            coro.close()  # avoid un-awaited coroutine warning
+            coro.cancel()  # cancel the shield, leaving communication available for cleanup
             raise asyncio.TimeoutError
 
         with (
             patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
             patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
             patch("responses_api_agents.codex_agent.app.asyncio.wait_for", fake_wait_for),
+            patch("responses_api_agents.codex_agent.app.kill_process_tree", side_effect=lambda proc: proc.kill()),
         ):
             stdout, model = asyncio.run(agent._run_codex("hello"))
 
         assert stdout == ""
         assert killed["called"] is True
         assert model == "codex-default"
+
+    def test_cancellation_stops_process_before_cleanup(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        state = []
+
+        async def run() -> None:
+            communicating = asyncio.Event()
+            stopped = asyncio.Event()
+
+            class SlowProc:
+                returncode = None
+
+                def kill(self):
+                    state.append("kill")
+                    self.returncode = -9
+                    stopped.set()
+
+                async def communicate(self):
+                    state.append("communicate")
+                    communicating.set()
+                    await stopped.wait()
+                    state.append("stopped")
+                    return b"", b""
+
+            with (
+                patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
+                patch(
+                    "responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec",
+                    AsyncMock(return_value=SlowProc()),
+                ),
+                patch("responses_api_agents.codex_agent.app.kill_process_tree", side_effect=lambda proc: proc.kill()),
+                patch(
+                    "responses_api_agents.codex_agent.app.shutil.rmtree",
+                    side_effect=lambda *args, **kwargs: state.append("cleanup"),
+                ),
+            ):
+                task = asyncio.create_task(agent._run_codex("hello"))
+                await communicating.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+        asyncio.run(run())
+        assert state == ["communicate", "kill", "stopped", "cleanup", "cleanup"]
 
 
 class TestRolloutMCPServers:
