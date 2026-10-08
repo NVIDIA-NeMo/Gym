@@ -136,6 +136,7 @@ def test_prepare_downloads_data_and_preserves_output_on_validation_failure(recor
         "repo_id": module.SOURCE_ID,
         "filename": "test.parquet",
         "repo_type": "dataset",
+        "revision": "29557d8eaa22621b82f3af5557ab60babcf3feb5",
         "token": "test-token",
     }
     original = output.read_bytes()
@@ -148,36 +149,53 @@ def test_prepare_downloads_data_and_preserves_output_on_validation_failure(recor
     assert output.read_bytes() == original
 
 
-def test_config_changes_only_dataset_and_matches_manifest():
-    parser = GlobalConfigDictParser()
-    configs = []
-    for path in ("benchmarks/math-500/config.yaml", "benchmarks/indic/math_500/config.yaml"):
-        config = parser.parse(
-            GlobalConfigDictParserConfig(
-                initial_global_config_dict=OmegaConf.create(
-                    {
-                        "config_paths": ["responses_api_models/vllm_model/configs/vllm_model.yaml", path],
-                        "policy_base_url": "http://unused/v1",
-                        "policy_api_key": "dummy",
-                        "policy_model_name": "test",
-                    }
-                ),
-                skip_load_from_cli=True,
-                skip_load_from_dotenv=True,
-                offline=True,
-            )
+def _resolve_benchmarks(*names):
+    config = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.create(
+                {
+                    "config_paths": [
+                        "responses_api_models/vllm_model/configs/vllm_model.yaml",
+                        *(f"benchmarks/{name}/config.yaml" for name in names),
+                    ],
+                    "policy_base_url": "http://unused/v1",
+                    "policy_api_key": "dummy",
+                    "policy_model_name": "test",
+                }
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
         )
-        configs.append(OmegaConf.to_container(config, resolve=True))
-    english, indic = configs
-    agent = "math_500_math_with_judge_simple_agent"
-    original_agent = english[agent]["responses_api_agents"]["simple_agent"]
+    )
+    return OmegaConf.to_container(config, resolve=True)
+
+
+def test_config_reuses_math_pipeline_and_matches_manifest():
+    english = _resolve_benchmarks("math-500")
+    indic = _resolve_benchmarks("indic/math_500")
+    agent = "indic_math_500_math_with_judge_simple_agent"
+    original_agent = english["math_500_math_with_judge_simple_agent"]["responses_api_agents"]["simple_agent"]
     translated_agent = indic[agent]["responses_api_agents"]["simple_agent"]
+    assert "math_500_math_with_judge_simple_agent" not in indic
     assert original_agent["datasets"][0]["prompt_config"] == translated_agent["datasets"][0]["prompt_config"]
     assert original_agent["datasets"][0]["num_repeats"] == translated_agent["datasets"][0]["num_repeats"] == 1
+    assert translated_agent["resources_server"] == {
+        "type": "resources_servers",
+        "name": "indic_math_500_math_with_judge_resources_server",
+    }
     original_agent["datasets"] = translated_agent["datasets"]
-    english.pop("config_paths")
-    indic.pop("config_paths")
-    assert english == indic
+    original_agent["resources_server"] = translated_agent["resources_server"]
+    assert original_agent == translated_agent
+    original_verifier = english["math_500_math_with_judge_resources_server"]["resources_servers"]["math_with_judge"]
+    translated_verifier = indic["indic_math_500_math_with_judge_resources_server"]["resources_servers"][
+        "math_with_judge"
+    ]
+    assert translated_verifier["should_use_judge"] is False
+    assert translated_verifier["format_tolerant_answer_extraction"] is True
+    assert original_verifier == {
+        key: value for key, value in translated_verifier.items() if key != "format_tolerant_answer_extraction"
+    }
     benchmark = BenchmarkConfig.from_config_path(module.BENCHMARK_DIR / "config.yaml")
     assert benchmark.agent_name == agent
     manifest = load_manifest(module.BENCHMARK_DIR / "manifest.yaml")
@@ -186,6 +204,31 @@ def test_config_changes_only_dataset_and_matches_manifest():
     assert manifest.datasets[0].model_dump(exclude_none=True) == {
         key: value for key, value in translated_agent["datasets"][0].items() if key != "license"
     }
+
+
+@pytest.mark.parametrize("benchmarks", [("math-500", "indic/math_500"), ("indic/math_500", "math-500")])
+def test_english_and_indic_benchmarks_compose_in_both_orders(benchmarks):
+    combined = _resolve_benchmarks(*benchmarks)
+    agents = {
+        name: block["responses_api_agents"]["simple_agent"]
+        for name, block in combined.items()
+        if isinstance(block, dict) and "responses_api_agents" in block
+    }
+    assert set(agents) == {"math_500_math_with_judge_simple_agent", "indic_math_500_math_with_judge_simple_agent"}
+    assert {dataset["name"] for agent in agents.values() for dataset in agent["datasets"]} == {
+        "math-500",
+        "indic_math_500",
+    }
+    for benchmark, agent_name, dataset_name in (
+        ("math-500", "math_500_math_with_judge_simple_agent", "math-500"),
+        ("indic/math_500", "indic_math_500_math_with_judge_simple_agent", "indic_math_500"),
+    ):
+        standalone = _resolve_benchmarks(benchmark)
+        agent = agents[agent_name]
+        assert [dataset["name"] for dataset in agent["datasets"]] == [dataset_name]
+        assert combined[agent_name] == standalone[agent_name]
+        resource_name = agent["resources_server"]["name"]
+        assert combined[resource_name] == standalone[resource_name]
 
 
 def test_local_parquet_preparation_never_downloads(records, monkeypatch, tmp_path):
