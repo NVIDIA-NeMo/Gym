@@ -13,4 +13,4 @@ nooa_agent:
         invocation_adapter: responses_api_agents.nooa_agent.task_agent:invoke_solve_task
         init_kwargs: {}
         execution_mode: embedded
-      max_policy_calls: 8
+      max_policy_calls: null
