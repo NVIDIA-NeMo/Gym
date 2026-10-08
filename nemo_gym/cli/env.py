@@ -26,7 +26,7 @@ from subprocess import Popen, TimeoutExpired
 from tempfile import TemporaryDirectory
 from threading import Thread
 from time import monotonic, sleep, time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
 
 import requests
 import rich
@@ -86,6 +86,7 @@ from nemo_gym.server_utils import (
     ServerClient,
     ServerInstanceDisplayConfig,
     ServerStatus,
+    entrypoint_may_use_ray,
     initialize_ray,
 )
 from nemo_gym.telemetry.config import MemoryProfilingConfig
@@ -357,6 +358,47 @@ def _resolve_server_dir(rel_path: Path) -> Path:
     )
 
 
+class _ConfiguredServer(NamedTuple):
+    top_level_path: str
+    server_type: str
+    name: str
+    config: DictConfig
+    entrypoint_fpath: Path
+    dir_path: Path
+
+
+def _configured_servers(global_config_dict: DictConfig) -> Iterator[_ConfiguredServer]:
+    """Yield each server instance in the config that has an entrypoint to launch."""
+    top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
+
+    # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
+    for top_level_path in top_level_paths:
+        server_config_dict = global_config_dict[top_level_path]
+        if not isinstance(server_config_dict, DictConfig):
+            continue
+
+        first_key = list(server_config_dict)[0]
+        server_config_dict = server_config_dict[first_key]
+        if not isinstance(server_config_dict, DictConfig):
+            continue
+        second_key = list(server_config_dict)[0]
+        server_config_dict = server_config_dict[second_key]
+        if not isinstance(server_config_dict, DictConfig):
+            continue
+
+        if "entrypoint" not in server_config_dict:
+            continue
+
+        # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
+        entrypoint_fpath = Path(server_config_dict.entrypoint)
+        assert not entrypoint_fpath.is_absolute()
+
+        # Resolve cwd-first (a local server), else the install location for built-ins.
+        dir_path = _resolve_server_dir(Path(first_key, second_key))
+
+        yield _ConfiguredServer(top_level_path, first_key, second_key, server_config_dict, entrypoint_fpath, dir_path)
+
+
 def _server_launch_command(
     dir_path: Path,
     global_config_dict: DictConfig,
@@ -478,9 +520,21 @@ class RunHelper:  # pragma: no cover
         self._memory_profiling_config = memory_profiling_config_from_env(telemetry_config.memory_profiling)
         self._telemetry_metrics_enabled = is_telemetry_metrics_enabled()
 
-        # Initialize Ray cluster in the main process
-        # Note: This function will modify the global config dict - update `ray_head_node_address`
-        initialize_ray()
+        configured_servers = list(_configured_servers(global_config_dict))
+
+        # Start or join Ray only when a configured server may use it. Servers inherit the cluster address through
+        # the config dict below, so this has to happen before any of them are spawned.
+        # Note: initialize_ray modifies the global config dict - updates `ray_head_node_address`
+        ray_server_names = [
+            server.top_level_path
+            for server in configured_servers
+            if entrypoint_may_use_ray(server.dir_path / server.entrypoint_fpath)
+        ]
+        if ray_server_names:
+            print(f"Initializing Ray for servers that may use it: {', '.join(ray_server_names)}")
+            initialize_ray()
+        else:
+            print("No configured server uses Ray, so NeMo Gym is not starting or joining a Ray cluster")
 
         # Start the HTTP/2 PING sidecar (if `sidecar.enabled`) and point model URLs at it. This
         # must come before the config is serialized below, which is how every server learns its URLs.
@@ -494,37 +548,18 @@ class RunHelper:  # pragma: no cover
         # We always run the head server in this `run` command.
         self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
 
-        top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
-
         self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
 
         start_time = time()
 
-        # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
-        for top_level_path in top_level_paths:
-            server_config_dict = global_config_dict[top_level_path]
-            if not isinstance(server_config_dict, DictConfig):
-                continue
-
-            first_key = list(server_config_dict)[0]
-            server_config_dict = server_config_dict[first_key]
-            if not isinstance(server_config_dict, DictConfig):
-                continue
-            second_key = list(server_config_dict)[0]
-            server_config_dict = server_config_dict[second_key]
-            if not isinstance(server_config_dict, DictConfig):
-                continue
-
-            if "entrypoint" not in server_config_dict:
-                continue
-
-            # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
-            entrypoint_fpath = Path(server_config_dict.entrypoint)
-            assert not entrypoint_fpath.is_absolute()
-
-            # Resolve cwd-first (a local server), else the install location for built-ins.
-            dir_path = _resolve_server_dir(Path(first_key, second_key))
-
+        for (
+            top_level_path,
+            first_key,
+            second_key,
+            server_config_dict,
+            entrypoint_fpath,
+            dir_path,
+        ) in configured_servers:
             # Name the venv in the logs: the server runs that venv's interpreter (see _server_launch_command).
             print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
             command = _server_launch_command(dir_path, global_config_dict, top_level_path, entrypoint_fpath)

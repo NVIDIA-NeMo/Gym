@@ -572,8 +572,53 @@ class TestRunHelperH2PingSidecar:
         runner = RunHelper()
         runner.wait_for_dry_run_spinup = MagicMock()
         runner.start(MagicMock())
-
         start.assert_not_called()
+
+
+class TestRunHelperRayStartup:
+    """RunHelper.start starts or joins Ray only when a configured server may use it."""
+
+    @pytest.mark.parametrize(("ray_enabled", "expect_ray"), [(False, False), (True, True), (None, True)])
+    def test_ray_follows_configured_server_declarations(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, ray_enabled: bool | None, expect_ray: bool
+    ) -> None:
+        declaration = "" if ray_enabled is None else f"    ray_enabled = {ray_enabled}\n"
+        (tmp_path / "app.py").write_text(f"class Server:\n{declaration}    pass\nServer.run_webserver()\n")
+        cfg = OmegaConf.create(
+            {
+                "dry_run": True,
+                "verbose": False,
+                "uv_venv_dir": str(PARENT_DIR),
+                "test_server": {
+                    "resources_servers": {
+                        "dummy": {"entrypoint": "app.py", "domain": "other", "host": "127.0.0.1", "port": 8000}
+                    }
+                },
+            }
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **kwargs: cfg)
+        monkeypatch.setattr(nemo_gym.cli.env, "configure_telemetry_env", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "init_telemetry", MagicMock())
+        initialize_ray = MagicMock()
+        monkeypatch.setattr(nemo_gym.cli.env, "initialize_ray", initialize_ray)
+        monkeypatch.setattr(
+            nemo_gym.cli.env.HeadServer,
+            "run_webserver",
+            MagicMock(return_value=(MagicMock(), MagicMock(), MagicMock())),
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "_resolve_server_dir", lambda p: tmp_path)
+        monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *args: "echo setup")
+        mock_client = MagicMock()
+        mock_client.poll_for_status.return_value = "success"
+        monkeypatch.setattr(nemo_gym.cli.env, "ServerClient", MagicMock(return_value=mock_client))
+        run_command = MagicMock(return_value=MagicMock(pid=12345))
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", run_command)
+
+        runner = RunHelper()
+        runner.wait_for_dry_run_spinup = MagicMock()
+        runner.start(MagicMock())
+        assert initialize_ray.called is expect_ray
+        run_command.assert_called_once()
 
 
 class TestRunHelperServerReadiness:
