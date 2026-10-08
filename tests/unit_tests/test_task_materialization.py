@@ -316,6 +316,54 @@ def test_collation_rejects_misplaced_fields_before_materialization(tmp_path, tas
         TrainDataProcessor()._collate_samples_single_type("example", configs, task_data_validation="error")
 
 
+def _collate_taskset(tmp_path, rows, *, mode, datasets=1):
+    source = tmp_path / "source.jsonl"
+    source.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    declarations = [
+        {"name": f"d{i}", "type": "example", "jsonl_fpath": str(source), "taskset": "t", "num_repeats": 2}
+        for i in range(datasets)
+    ]
+    configs = GlobalConfigDictParser().filter_for_server_instance_configs(
+        OmegaConf.create(_resources_server("resources", declarations, implementation="external_custom"))
+    )
+    return TrainDataProcessor()._collate_samples_single_type("example", configs, task_data_validation=mode)
+
+
+def test_collation_warns_once_per_dataset_about_positional_task_ids(tmp_path):
+    with pytest.warns(UserWarning, match=r"2 rows of taskset 't' have no task_id, problem_id, instance_id") as caught:
+        _collate_taskset(tmp_path, [{"q": "a"}, {"q": "b"}, {"task_id": "c", "q": "c"}], mode="error")
+    assert len([w for w in caught if "positions in this collation" in str(w.message)]) == 1
+
+
+def test_collation_with_stable_task_ids_does_not_warn(tmp_path, recwarn):
+    (path,) = _collate_taskset(tmp_path, [{"task_id": "a"}, {"problem_id": "b"}], mode="error")
+    assert not [w for w in recwarn if "positions in this collation" in str(w.message)]
+    # Repeats of one source row share its ID and are not duplicates.
+    assert [json.loads(line)["task_id"]["task_id"] for line in path.read_text().splitlines()] == ["a", "a", "b", "b"]
+
+
+@pytest.mark.parametrize(
+    "rows, datasets",
+    [
+        ([{"task_id": "a", "q": 1}, {"task_id": "a", "q": 2}], 1),
+        # problem_id and task_id resolve to the same TaskId.
+        ([{"task_id": "a"}, {"problem_id": "a"}], 1),
+        # The same file declared twice under one taskset repeats every task.
+        ([{"task_id": "a"}], 2),
+    ],
+)
+def test_collation_rejects_duplicate_task_ids_in_error_mode(tmp_path, rows, datasets):
+    with pytest.raises(ValueError, match=r"1 task IDs name more than one task in their taskset: t/a \(.*line 0;"):
+        _collate_taskset(tmp_path, rows, mode="error", datasets=datasets)
+
+
+def test_collation_reports_duplicate_task_ids_in_warn_mode(tmp_path, capsys):
+    (path,) = _collate_taskset(tmp_path, [{"task_id": "a", "q": 1}, {"task_id": "a", "q": 2}], mode="warn")
+    assert "t/a" in capsys.readouterr().out
+    assert len(path.read_text().splitlines()) == 4
+    _collate_taskset(tmp_path, [{"task_id": "a", "q": 1}, {"task_id": "a", "q": 2}], mode="off")
+
+
 class CustomTaskInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     scenario: str

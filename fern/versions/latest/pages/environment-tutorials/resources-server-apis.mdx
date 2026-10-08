@@ -483,10 +483,17 @@ overrides, `num_repeats_add_seed`, and run-level `skills`. Set response paramete
 in the source row before collation; benchmark prompt configs still apply to input messages.
 
 The task's qualified ID is `<taskset>/<id>`. The ID is taken from `task_id`,
-`problem_id`, or `instance_id`, in that order. Without an explicit ID, an existing
+`problem_id`, or `instance_id`, in that order, and the field stays in `task_input`.
+Without an explicit ID, an existing
 `_ng_task_index` takes precedence; otherwise collation uses a zero-based source-row
 index across all datasets of the same type, before repeats. Adding or reordering
-other datasets in that collation can shift these positional IDs.
+other datasets in that collation can shift these positional IDs, so collation warns
+once for each dataset that uses them. Write a stable `task_id` in the preparation script instead.
+
+A task ID must name one task in its taskset. Collation reports IDs that appear on two
+source rows, including the same file declared twice under one taskset. Repeats of one
+row are not duplicates. The report fails collation when `task_data_validation` is
+`error`, the default for `gym dataset collate +mode=example_validation`, and is printed otherwise.
 
 These tasksets route to an Environment Server, not to an agent, so their datasets
 do not set `agent`. Benchmark discovery, `gym eval prepare`, and collation check the
