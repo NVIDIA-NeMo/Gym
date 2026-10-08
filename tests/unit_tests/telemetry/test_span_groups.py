@@ -34,6 +34,7 @@ GYM_GROUPS = {
     "agent",
     "model_call",
     "sandbox",
+    "checkpoint",
 }
 
 
@@ -75,7 +76,7 @@ def test_default_preset_is_coarse():
     """`default` is the run-level view: the spine plus job, and nothing per-request."""
     resolved = GymSpanGroup.resolve("default")
     assert resolved == {"job", "server", "http_client", "rollout"}
-    for fine_grained in ("verify", "agent", "model_call", "sandbox"):
+    for fine_grained in ("verify", "agent", "model_call", "sandbox", "checkpoint"):
         assert fine_grained not in resolved
 
 
@@ -103,7 +104,17 @@ def test_every_preset_group_has_a_call_site():
     training-oriented groups stay resolvable through `all` but are kept out of the
     curated presets.
     """
-    emitting_groups = {"job", "server", "http_client", "rollout", "verify", "agent", "model_call", "sandbox"}
+    emitting_groups = {
+        "job",
+        "server",
+        "http_client",
+        "rollout",
+        "verify",
+        "agent",
+        "model_call",
+        "sandbox",
+        "checkpoint",
+    }
     for preset in ("default", "per_rollout"):
         assert GymSpanGroup.resolve(preset) <= emitting_groups, (
             f"preset {preset!r} advertises groups with no call site: "
