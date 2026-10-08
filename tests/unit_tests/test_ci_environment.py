@@ -467,7 +467,7 @@ def test_notification_workflows_use_pinned_shared_summary_without_checkout() -> 
         assert notify_step["uses"] == expected_action, workflow_file
         assert notify_step["with"] == {
             "needs-json": "${{ toJSON(needs) }}",
-            "webhook": "${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}",
+            "webhook": "${{ secrets.SLACK_WEBHOOK }}",
         }
         assert notify["environment"] == "main"
         assert notify["permissions"] == {}
