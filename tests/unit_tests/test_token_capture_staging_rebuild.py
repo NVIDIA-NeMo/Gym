@@ -41,6 +41,7 @@ def _snapshot(
     prefix_token_ids: list[int] | None = None,
     chain_hash: str | None = None,
     cumulative_hash: str | None = None,
+    rollout_id: str = "rollout-1",
 ) -> StagedCallBaseSnapshot:
     """Build a snapshot whose chain digests extend ``parent`` unless overridden.
 
@@ -61,7 +62,7 @@ def _snapshot(
         schema_version=STAGING_SCHEMA_VERSION,
         digest_version=STAGING_DIGEST_VERSION,
         extras_digest_version=EXTRAS_DIGEST_VERSION,
-        rollout_id="rollout-1",
+        rollout_id=rollout_id,
         model_call_id=model_call_id,
         parent_call_id=parent_call_id,
         mode=mode,
@@ -77,7 +78,7 @@ def _snapshot(
         cumulative_hash=cumulative_hash,
     )
     return StagedCallBaseSnapshot(
-        rollout_id="rollout-1",
+        rollout_id=rollout_id,
         model_call_id=model_call_id,
         parent_call_id=parent_call_id,
         mode=mode,
@@ -95,8 +96,14 @@ def _snapshot(
     )
 
 
-def _manifest_row(snapshot: StagedCallBaseSnapshot, *, staging_key: str | None = None) -> CallRecord:
+def _manifest_row(
+    snapshot: StagedCallBaseSnapshot,
+    *,
+    staging_key: str | None = None,
+    capture_key: str | None = None,
+) -> CallRecord:
     return CallRecord(
+        capture_key=capture_key,
         model_call_id=snapshot.model_call_id,
         parent_call_id=snapshot.parent_call_id,
         prev_len=snapshot.prev_len,
@@ -411,3 +418,58 @@ def test_base_snapshot_validates_strictly_without_extras_bytes() -> None:
     # A tampered token column fails digest recomputation at construction.
     with pytest.raises(ValueError):
         StagedCallBaseSnapshot(**{**snapshot.model_dump(), "token_ids_delta": [99, 11]})
+
+
+def _restored_pair(capture_key: str | None) -> tuple[RolloutReceipt, list[StagedCallBaseSnapshot]]:
+    """A restored attempt whose root call was staged before the checkpoint, under attempt 0's key."""
+    root = _snapshot(
+        "root",
+        token_ids=[10, 11, 12],
+        masks=[0.0, 0.0, 1.0],
+        logprobs=[0.0, 0.0, -0.1],
+        rollout_id="rollout-1",
+    )
+    child = _snapshot(
+        "child",
+        parent_call_id="root",
+        prev_len=3,
+        token_ids=[20, 21],
+        masks=[0.0, 1.0],
+        logprobs=[0.0, -0.2],
+        parent=root,
+        rollout_id="rollout-1-a1",
+    )
+    receipt = RolloutReceipt(
+        rollout_id="rollout-1-a1",
+        terminal_model_call_id="child",
+        manifest=[_manifest_row(root, capture_key=capture_key), _manifest_row(child)],
+        terminal_selection="declared",
+    )
+    return receipt, [root, child]
+
+
+def test_restored_receipt_verifies_calls_staged_by_an_earlier_attempt() -> None:
+    receipt, snapshots = _restored_pair(capture_key="rollout-1")
+
+    row = verify_and_linearize(receipt, snapshots)
+
+    assert row.rollout_id == "rollout-1-a1"
+    assert row.token_ids == [10, 11, 12, 20, 21]
+
+
+def test_a_carried_over_call_without_its_capture_key_is_rejected() -> None:
+    receipt, snapshots = _restored_pair(capture_key=None)
+
+    with pytest.raises(ReceiptVerificationError) as raised:
+        verify_and_linearize(receipt, snapshots)
+    assert raised.value.code == "wrong_rollout"
+
+
+@pytest.mark.parametrize("capture_key", ["rollout-2", "rollout-1-a2"])
+def test_a_capture_key_outside_the_restore_lineage_is_rejected(capture_key: str) -> None:
+    """Only an earlier attempt of the same rollout may contribute calls to a receipt."""
+    receipt, snapshots = _restored_pair(capture_key=capture_key)
+
+    with pytest.raises(ReceiptVerificationError) as raised:
+        verify_and_linearize(receipt, snapshots)
+    assert raised.value.code == "foreign_capture_key"
