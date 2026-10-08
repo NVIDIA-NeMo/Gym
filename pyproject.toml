@@ -430,7 +430,7 @@ dev = [
 [dependency-groups]
 # Codec-bearing packages excluded from the shipped package and container.
 # Not published to PyPI. Versions are resolved and tracked in uv.lock.
-# docker/install_codec_deps.sh pins these explicitly to their uv.lock versions;
+# docker/install_excluded_deps.sh pins these explicitly to their uv.lock versions;
 # update the script when uv lock bumps them.
 codec = [
     "opencv-python-headless",
@@ -470,7 +470,7 @@ override-dependencies = [
     # that may incur MPEG-LA royalties. Servers that genuinely need these declare
     # them in their own overrides.txt (requirements.txt servers) or
     # [tool.uv] override-dependencies (pyproject.toml servers), which takes
-    # precedence. Reinstall for testing via docker/install_codec_deps.sh.
+    # precedence. Reinstall for testing via docker/install_excluded_deps.sh.
     "opencv-python-headless; sys_platform == 'never'",
     "pynvvideocodec; sys_platform == 'never'",
     "torchcodec; sys_platform == 'never'",
