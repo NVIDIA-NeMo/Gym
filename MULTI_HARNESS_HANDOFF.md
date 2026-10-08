@@ -1,6 +1,6 @@
 # NeMo multi-harness training: cross-cluster handoff
 
-Last reconciled: **2026-10-08 16:17 PDT**
+Last reconciled: **2026-10-08 16:48 PDT**
 
 This is the operational handoff for resuming the NeMo Gym + NeMo RL
 multi-harness work on another cluster. It records what is pushed, what has
@@ -28,10 +28,15 @@ exact acceptance gates. The longer design and code map are in
 - **End-to-end training validation is not complete.** Nano sync job `2178307`
   reached real rollouts and W&B before the current Pi and OpenClaw fixes. It
   then failed at step 0 while dispatching log probabilities for the shrunken
-  batch. It is diagnostic evidence, not a pass. A fresh Nano run is still
-  required after fixing the independent NeMo RL partial-batch packing bug.
+  batch. It is diagnostic evidence, not a pass. NeMo RL commit `58d1b148`
+  fixes the underlying finalizer/replay race; a fresh Nano run is still
+  required.
 - Do not report either PR as runtime-validated until Nano sync, Super 8-node
   sync, and Super 16-node async meet the gates below.
+- A fresh two-node interactive Nano validation is queued as Slurm job
+  `2179143` with W&B online at `adlr/multi-harness-RL`. At the reconciliation
+  time above it remained pending for `QOSGrpNodeLimit`; it has produced no
+  training evidence yet.
 
 The last completed diagnostic is Slurm job `2178116`, W&B run
 [`9uirholo`](https://wandb.ai/adlr/multi-harness-RL/runs/9uirholo). It used the
@@ -67,14 +72,15 @@ usage remained zero. OpenClaw emitted one local fallback message and one empty
 message, both with zero response usage; token capture also reported an
 `unresolved_parent`. This run cannot satisfy the training gate.
 
-After rejecting the bad OpenClaw sibling, NeMo RL rejected that entire 1/2
-group, reported the target step one group short, and closed the step early.
-Log-probability dispatch then entered the Megatron worker with a partial batch
-and failed with `AssertionError: end: 4 is greater than the shape of the
-tensor: 3 for key: input_ids`. The destination-cluster owner must either fix
-the underlying OpenClaw capture so the batch remains complete, or separately
-make the shrink path produce a batch compatible with the configured global
-batch. Do not hide this by lowering the training step count.
+After rejecting the bad OpenClaw sibling, NeMo RL reported the target step one
+group short and closed it early. The root cause of the later shape mismatch was
+an atomicity gap: the finalizer marked the low-validity group replay-ready
+before the controller applied `min_valid_fraction_per_group`. The train pump
+could claim the group in that window; cleanup then deleted its canonical rows,
+so packing planned four rows while TQ returned three. Commit `58d1b148` moves
+the validity gate into the same mutation cut as publication, ensuring rejected
+groups never become selectable. The focused race regression, Ruff, Ruff format,
+and targeted Pyrefly checks pass.
 
 The same run proved the old Pi defaults were unsafe for this backend. Pi
 advertised a 262,144-token context and fixed 131,072-token output budget while
@@ -91,7 +97,7 @@ Use branch `ehosseiniasl/multi-harness-training-routing` in both repositories.
 | Repository | Pull request | Minimum implementation commit |
 |---|---|---|
 | NeMo Gym | [NVIDIA-NeMo/Gym#4082](https://github.com/NVIDIA-NeMo/Gym/pull/4082) | `845f13a1e` |
-| NeMo RL | [NVIDIA-NeMo/RL#4521](https://github.com/NVIDIA-NeMo/RL/pull/4521) | `abe512a44f6cd2fc1a7c5620c7564759a5a182e7` |
+| NeMo RL | [NVIDIA-NeMo/RL#4521](https://github.com/NVIDIA-NeMo/RL/pull/4521) | `58d1b148f426dd194312a5155ae3f7be2ee1eb9b` |
 
 The Gym branch tip will be newer after committing this handoff refresh. Fetch
 the branch tip and use the hashes above only as minimum ancestry checks:
@@ -112,7 +118,7 @@ git remote add contributor https://github.com/ehosseiniasl/NeMo-RL.git
 git fetch contributor ehosseiniasl/multi-harness-training-routing
 git switch -c ehosseiniasl/multi-harness-training-routing \
   --track contributor/ehosseiniasl/multi-harness-training-routing
-git merge-base --is-ancestor abe512a44f6cd2fc1a7c5620c7564759a5a182e7 HEAD
+git merge-base --is-ancestor 58d1b148f426dd194312a5155ae3f7be2ee1eb9b HEAD
 ```
 
 After cloning, both ancestry commands must exit zero. Also run `git status
@@ -287,7 +293,10 @@ On the source login node, the RL pytest suite could not initialize its autouse
 Ray fixture because GCS was unavailable. That is an infrastructure limitation,
 not a passing test. The direct config-resolution assertions did pass for the
 Qwen, Nano, and Super recipes, including OpenClaw context `15872` and output
-limit `4096`. Re-run the real pytest on a compute node with working Ray.
+limit `4096`. For commit `58d1b148`, the focused atomic rejection regression
+passes without the parent Ray fixture; Ruff, Ruff format, `git diff --check`,
+and targeted Pyrefly pass with zero errors. Re-run the fixture-backed file on a
+compute node with working Ray.
 
 ## Implemented OpenClaw runtime and prompt fix
 
@@ -340,20 +349,17 @@ token.
 
 ## Validation order
 
-1. Fetch Gym commit `845f13a1e` or newer and RL commit `abe512a4` or newer,
+1. Fetch Gym commit `845f13a1e` or newer and RL commit `58d1b148` or newer,
    then rerun their focused tests.
-2. Fix and regression-test NeMo RL's stale sequence-packing metadata when a
-   rollout batch shrinks after a rejected group. Do not clamp invalid slice
-   bounds; packing metadata must be regenerated for the actual batch.
-3. Run the two-node synchronous Nano recipe:
+2. Run the two-node synchronous Nano recipe:
    `grpo_anyterminal_multi_harness_nemotron_nano_omni_sync_2n_debug_single_controller.yaml`.
-4. Let the four-row epoch finish naturally. Do not lower or otherwise use
+3. Let the four-row epoch finish naturally. Do not lower or otherwise use
    `grpo.max_num_steps` to truncate it.
-5. Check the full local artifacts and W&B tables, not just the process exit
+4. Check the full local artifacts and W&B tables, not just the process exit
    code or `mask_sample`.
-6. After Nano passes, run the requested Super checkpoint with the 8-node sync
+5. After Nano passes, run the requested Super checkpoint with the 8-node sync
    and 16-node async recipes. They may run in parallel after the Nano gate.
-7. Add the passing W&B links and score/TMPE/refit summary to both PRs.
+6. Add the passing W&B links and score/TMPE/refit summary to both PRs.
 
 The expected full-run shape is:
 
@@ -393,6 +399,7 @@ Do not accept a run unless all of these hold:
 
 | Slurm job | W&B | What it proves | Status |
 |---|---|---|---|
+| `2179143` | Created only after allocation starts | Fresh Nano run with Gym/OpenClaw/Pi fixes and RL commit `58d1b148`; intended to exercise all 32 rollouts and four optimizer steps. | Pending for `QOSGrpNodeLimit`; no evidence yet |
 | `2178307` | [`rm12vt5c`](https://wandb.ai/adlr/multi-harness-RL/runs/rm12vt5c) | Loaded 16 fan-out groups, completed initial refit, and ran the first 4-harness/2-sibling batch. Exposed Pi context/compaction, OpenClaw transcript/capture, and partial-batch log-probability failures. | Failed at step 0 after 16m47s |
 | `2178116` | [`9uirholo`](https://wandb.ai/adlr/multi-harness-RL/runs/9uirholo) | Terminal-only tools and 15,872/4,096 limits were active; OpenClaw still overflowed locally with zero usage. | Failed before step 0 |
 | earlier Nano | [`a5y7hxq2`](https://wandb.ai/adlr/multi-harness-RL/runs/a5y7hxq2) | Terminal-only config reached runtime; OpenClaw inherited an 8,192 output reserve and overflowed locally. | Diagnostic only |
@@ -444,8 +451,8 @@ of reusing these IDs.
    resolved runtime configuration.
 6. Verify the rebuilt OpenClaw `2026.6.35` bundle and plugin-disabled terminal
    profile are the versions used inside the training container.
-7. Fix and verify the RL shrink/partial-batch path does not enter Megatron with
-   a batch incompatible with the configured global batch.
+7. Verify RL commit `58d1b148` is active and rejected groups never appear in a
+   selected training batch.
 8. Run Nano sync and audit all 32 rollouts plus four optimizer steps.
 9. Run Super 8-node sync and Super 16-node async with the specified Super
    checkpoint.
@@ -456,5 +463,6 @@ of reusing these IDs.
 
 Until steps 8 and 9 pass, the correct project status is: **multi-harness fan-out
 implemented; Pi and OpenClaw runtime/config fixes committed and focused-tested;
-OpenClaw's exact standalone tool loop passes; the NeMo RL partial-batch packing
-fix plus Nano and Super training validation remain pending**.
+OpenClaw's exact standalone tool loop passes; the NeMo RL finalizer/replay race
+is fixed and regression-tested; Nano and Super training validation remain
+pending**.
