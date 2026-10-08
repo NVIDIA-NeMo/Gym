@@ -11,9 +11,10 @@ undeclared on the wire model, so today it is silently dropped at the verify boun
 Pydantic ``extra="ignore"``); it is declared here so tooling sees the column.
 """
 
+from pathlib import PurePosixPath
 from typing import Any, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TaskData(BaseModel):
@@ -84,3 +85,12 @@ class TaskData(BaseModel):
         ),
         json_schema_extra={"consumed_by": ["provenance"]},
     )
+
+    @field_validator("reference_files")
+    @classmethod
+    def _reject_paths_outside_the_target_directory(cls, paths: Optional[List[str]]) -> Optional[List[str]]:
+        # Each path is written under the sandbox working directory and the persisted task directory.
+        for path in paths or []:
+            if ".." in PurePosixPath(path).parts:
+                raise ValueError(f"Reference file path {path!r} leaves its target directory")
+        return paths

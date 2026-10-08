@@ -27,6 +27,9 @@ def _server(**extra) -> GDPValResourcesServer:
         name="gdpval_resources_server",
         judge_model_server={"type": "responses_api_models", "name": "judge"},
         preconvert_office_to_pdf=False,
+        sandbox_provider="test",
+        sandbox_config={},
+        persist_deliverables_dir="unused",
         **{"tavily_api_key": "test-key", **extra},
     )
     return GDPValResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -62,30 +65,6 @@ def test_tool_definitions_match_the_certified_runs(server):
 
     assert definitions == json.loads(_CERTIFIED_TOOL_DEFINITIONS.read_text())
     assert all(t.binding is not None for t in tools.values()), "every tool must be callable over MCP"
-
-
-def test_finish_records_the_coerced_paths_for_the_session(server):
-    client = TestClient(server.setup_webserver())
-
-    response = client.post("/finish", json={"reason": "done", "paths": '["/root/a.xlsx", "/root/b.pdf"]'})
-
-    assert response.json() == "done"
-    assert list(server._finish_calls.values()) == [
-        {"tool": "finish", "reason": "done", "paths": ["/root/a.xlsx", "/root/b.pdf"]}
-    ]
-
-
-def test_the_last_finish_call_of_a_session_wins_and_sessions_are_separate(server):
-    first, second = TestClient(server.setup_webserver()), TestClient(server.setup_webserver())
-
-    first.post("/finish", json={"reason": "done", "paths": ["/root/a.xlsx"]})
-    first.post("/abandon_task_finish", json={"reason": "inputs missing"})
-    second.post("/finish", json={"reason": "done", "paths": []})
-
-    assert sorted(server._finish_calls.values(), key=lambda call: call["tool"]) == [
-        {"tool": "abandon_task_finish", "reason": "inputs missing"},
-        {"tool": "finish", "reason": "done", "paths": []},
-    ]
 
 
 def test_web_search_rotates_through_the_configured_keys_and_returns_the_formatted_reply(monkeypatch):

@@ -24,6 +24,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 import nemo_gym.sandbox.providers.registry as provider_registry
 from nemo_gym.sandbox import (
@@ -46,6 +47,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.sandbox.api import _AsyncLoopRunner
+from nemo_gym.sandbox.config import SandboxConfig
 from nemo_gym.sandbox.utils import rewrite_image
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 
@@ -2038,3 +2040,40 @@ async def test_pty_exec_detach_requires_a_capable_session() -> None:
     with pytest.raises(NotImplementedError, match="detached execution"):
         await sandbox.pty.exec("make", session=_LiveShellSession(), detach=True)
     await sandbox.stop()
+
+
+def test_sandbox_config_builds_a_spec_with_provider_config_and_server_metadata() -> None:
+    config = SandboxConfig(
+        ttl_s=600,
+        ready_timeout_s=30,
+        resources={"cpu": 4, "memory_mib": 1024},
+        env={"A": "1"},
+        metadata={"suite": "config", "owner": "config"},
+        provider_options={"platform": {"arch": "arm64"}},
+    )
+    named = {
+        "sandbox": {"default_metadata": {"sandbox-api": "x", "suite": "provider", "owner": "provider"}, "local": {}}
+    }
+
+    spec = config.spec(
+        "sandbox",
+        image="img",
+        workdir="/root",
+        metadata={"owner": "call"},
+        files={"/root/a.txt": "a"},
+        named_configs=named,
+    )
+
+    assert (spec.image, spec.workdir, spec.ttl_s, spec.ready_timeout_s) == ("img", "/root", 600, 30)
+    assert (spec.env, spec.files) == ({"A": "1"}, {"/root/a.txt": "a"})
+    assert spec.metadata == {"sandbox-api": "x", "suite": "config", "owner": "call"}
+    assert (spec.resources.cpu, spec.resources.memory_mib) == (4.0, 1024)
+    assert spec.provider_options == {"platform": {"arch": "arm64"}}
+
+
+@pytest.mark.parametrize(
+    "fields", [{"ttl": 600}, {"resources": {"cores": 4}}], ids=["unknown key", "unknown resource"]
+)
+def test_sandbox_config_rejects_unknown_settings(fields: dict) -> None:
+    with pytest.raises(ValidationError):
+        SandboxConfig(**fields)
