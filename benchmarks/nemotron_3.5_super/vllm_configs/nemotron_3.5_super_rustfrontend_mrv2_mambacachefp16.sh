@@ -20,8 +20,9 @@ GYM_MODEL_PARAMS=(
 # Not used when the model has no Mamba layers.
 export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
-# @bxyu-nvidia: V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
-export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_V2_MODEL_RUNNER=1
+
+export VLLM_USE_RUST_FRONTEND=1
 
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 # @bxyu-nvidia: We set --prefix-match-unit 128 because the Mooncake store prefill lookup gets more expensive the smaller this number is
@@ -42,7 +43,10 @@ VLLM_COMMON_ARGS=(
     --no-disable-hybrid-kv-cache-manager
     --block-size 128
     --mamba-cache-mode align
-    --mamba-ssm-cache-dtype float32
+    --mamba-backend flashinfer
+    --mamba-ssm-cache-dtype float16
+    --enable-mamba-cache-stochastic-rounding
+    --mamba-cache-philox-rounds 5
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
     --skip-mm-profiling
