@@ -23,6 +23,7 @@ from typing import AsyncIterator
 from urllib.parse import urlencode
 
 from aiohttp import ClientTimeout
+from prometheus_client.openmetrics.parser import text_string_to_metric_families as openmetrics_to_metric_families
 from prometheus_client.parser import text_string_to_metric_families
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
@@ -94,12 +95,19 @@ class InferenceMetricsCollector:
         self.previous: dict[str, tuple[float, float]] = {}
         self.failed: set[str] = set()
 
-    def parse(self, replica: str, payload: str, sampled_at: float) -> dict[str, float]:
+    def parse(self, replica: str, payload: str, sampled_at: float, *, content_type: str = "") -> dict[str, float]:
         """Aggregate labeled series and derive reset-aware counter and histogram rates."""
         result = {}
         gauge_counts = {}
         incomplete_rates = set()
-        for family in text_string_to_metric_families(payload):
+        # OpenMetrics declares counters without the sample's `_total` suffix.
+        # The legacy parser classifies those samples as unknown and drops rates.
+        parser = (
+            openmetrics_to_metric_families
+            if content_type.split(";", 1)[0].strip().lower() == "application/openmetrics-text"
+            else text_string_to_metric_families
+        )
+        for family in parser(payload):
             if family.type not in {"gauge", "counter", "histogram"}:
                 continue
             for sample in family.samples:
@@ -186,8 +194,9 @@ class InferenceMetricsCollector:
                 async with response:
                     response.raise_for_status()
                     payload = await response.text()
+                    content_type = response.headers.get("Content-Type", "")
             sampled_at = monotonic()
-            metrics = self.parse(replica, payload, sampled_at)
+            metrics = self.parse(replica, payload, sampled_at, content_type=content_type)
             if not metrics:
                 raise ValueError("No matching gauge/counter/histogram samples in metrics response")
             export_metrics(metrics)

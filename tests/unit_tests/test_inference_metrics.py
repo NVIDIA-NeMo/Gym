@@ -149,12 +149,20 @@ async def test_mooncake_scraped_once_and_does_not_change_vllm_aggregates(monkeyp
     assert not any(key.startswith(("vllm/total/allocated", "mooncake/mean/")) for row in published for key in row)
 
 
-def test_counter_rates_reset_and_nonfinite():
+@pytest.mark.parametrize("openmetrics", [False, True])
+def test_counter_rates_reset_and_nonfinite(openmetrics):
     collector = InferenceMetricsCollector(config())
 
     def sample(value, now):
+        family_name = "vllm:generation_tokens" if openmetrics else "vllm:generation_tokens_total"
+        payload = f"# TYPE {family_name} counter\nvllm:generation_tokens_total {value}\n"
+        if openmetrics:
+            payload += "# EOF\n"
         return collector.parse(
-            "replica0", f"# TYPE vllm:generation_tokens_total counter\nvllm:generation_tokens_total {value}\n", now
+            "replica0",
+            payload,
+            now,
+            content_type="application/openmetrics-text; version=1.0.0; charset=utf-8" if openmetrics else "text/plain",
         )
 
     rate = "vllm/replica0/generation_tokens_per_second"
@@ -162,7 +170,63 @@ def test_counter_rates_reset_and_nonfinite():
     assert sample(160, 12)[rate] == 30
     assert rate not in sample(5, 14)
     assert sample(25, 16)[rate] == 10
-    assert sample("NaN", 17) == {}
+    if openmetrics:
+        # OpenMetrics rejects NaN counters at the parser level; scrape handles
+        # malformed responses through its existing failure/recovery path.
+        with pytest.raises(ValueError, match="Counter-like samples cannot be NaN"):
+            sample("NaN", 17)
+    else:
+        assert sample("NaN", 17) == {}
+
+
+async def test_mixed_frontend_http_counters_publish_total_generation_rate(monkeypatch):
+    """Rust OpenMetrics and Python Prometheus counters must share Gym metric names."""
+    app = web.Application()
+    scrapes = {"rust": 0, "python": 0}
+
+    async def serve(request):
+        replica = request.match_info["replica"]
+        index = scrapes[replica]
+        scrapes[replica] += 1
+        value = (100, 160)[index] if replica == "rust" else (200, 300)[index]
+        family = "vllm:generation_tokens" if replica == "rust" else "vllm:generation_tokens_total"
+        payload = f'# TYPE {family} counter\nvllm:generation_tokens_total{{model_name="test",engine="0"}} {value}\n'
+        if replica == "rust":
+            return web.Response(
+                text=payload + "# EOF\n",
+                headers={"Content-Type": "application/openmetrics-text; version=1.0.0; charset=utf-8"},
+            )
+        return web.Response(text=payload, content_type="text/plain")
+
+    app.router.add_get("/{replica}/metrics", serve)
+    stop = asyncio.Event()
+    published = {}
+
+    def publish(metrics):
+        published.update(metrics)
+        if "vllm/total/generation_tokens_per_second" in metrics:
+            stop.set()
+
+    sampled_times = iter([10, 10, 12, 12])
+    monkeypatch.setattr(metrics_module, "monotonic", lambda: next(sampled_times))
+    monkeypatch.setattr(metrics_module, "export_metrics", publish)
+    async with TestServer(app) as server, ClientSession() as session:
+        monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", session)
+        cfg = InferenceMetricsConfig(
+            enabled=True,
+            endpoints={replica: str(server.make_url(f"/{replica}/metrics")) for replica in scrapes},
+            interval_s=0.001,
+        )
+        collector = InferenceMetricsCollector(cfg)
+        await asyncio.wait_for(collector.run(stop), timeout=2)
+
+    assert not collector.failed
+    assert scrapes == {"rust": 2, "python": 2}
+    assert published["vllm/rust/generation_tokens_total"] == 160
+    assert published["vllm/rust/generation_tokens_per_second"] == 30
+    assert published["vllm/python/generation_tokens_per_second"] == 50
+    assert published["vllm/total/generation_tokens_per_second"] == 80
+    assert published["vllm/mean/generation_tokens_per_second"] == 40
 
 
 @pytest.mark.parametrize(
