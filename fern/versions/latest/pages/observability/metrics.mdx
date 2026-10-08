@@ -70,9 +70,9 @@ to the SDK one by one.
 
 - `nemo.gym.token_capture.operation`: what was timed. Operations at a protocol call site
   (`lineage.resolve`, `sink.begin_call`, `sink.put`, `ledger.record`, `ledger.record_failure`,
-  `stage.build_record`, `stage.sink`, `source.freeze`, `source.drop`) include time spent
+  `staging.build_record`, `staging_sink.stage`, `source.freeze`, `source.drop`) include time spent
   waiting for a worker thread. Gym's file stores also report their in-thread work
-  (`token_store.append`, `ledger_store.record`), so the difference is queueing.
+  (`sink.put.in_thread`, `ledger.record.in_thread`), so the difference is queueing.
   `file_lock.wait` is recorded only when acquiring a lock took at least 0.1 ms.
 - `nemo.gym.token_capture.implementation`: the class implementing the protocol at that call
   site, for example `TokenCaptureStore` or a training framework's own sink, so pluggable
@@ -86,8 +86,12 @@ to the SDK one by one.
 Dividing the duration sum by `gym.token_capture.operation.tokens_total` gives milliseconds per
 token, which separates a slower implementation from longer sequences. Digest calls per staged
 record show duplicated hashing; digest bytes per record show how much of a prefix is re-hashed.
-Outcome reasons come from a fixed set, and a reason a custom implementation invents is counted
-as `other`. An operation slower than 5 seconds also logs one warning per operation per minute.
+`gym.token_capture.outcome_total` counts these outcomes: `parent_root`, `parent_resolved`, and
+`parent_unresolved` (with the resolver's reason) for parent resolution; `poisoned` (with the ledger
+failure reason); `capture_failed` (`write` on the model server; `build`, `staging_sink_error`, or
+`staging_sink_rejected` on the inference worker); `late_write_dropped`; `marked_incomplete`;
+`retire_skipped` (`stale_snapshot`); and `lock_acquired` (`shared` or `exclusive`). Reasons come
+from a fixed set, and a reason a custom implementation invents is counted as `other`. An operation slower than 5 seconds also logs one warning per operation per minute.
 
 ### What `gym.verify.success_rate` Measures
 

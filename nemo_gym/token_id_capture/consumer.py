@@ -32,7 +32,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from nemo_gym.token_id_capture import metrics
+from nemo_gym.token_id_capture import capture_metrics
 from nemo_gym.token_id_capture.builder import (
     assert_prefix_contiguity,
     project_main_chain_response,
@@ -307,7 +307,7 @@ async def trajectories_from_source(
     places the uncaptured call off the scored path.
     """
     try:
-        with metrics.timed("source.freeze", component=source):
+        with capture_metrics.timed("source.freeze", component=source):
             snapshot = await source.freeze(rollout_id)
     except Exception as error:
         logger.warning("Could not freeze token capture for rollout %s.", rollout_id, exc_info=True)

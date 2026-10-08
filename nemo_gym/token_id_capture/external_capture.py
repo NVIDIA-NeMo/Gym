@@ -9,7 +9,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Protocol
 
-from nemo_gym.token_id_capture import metrics
+from nemo_gym.token_id_capture import capture_metrics
 from nemo_gym.token_id_capture.config import ExternalStagingBackend
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
 from nemo_gym.token_id_capture.protocols import CaptureLedger
@@ -287,7 +287,7 @@ class _BaseExternalCaptureHandler(ABC):
             request_items=list(context.request_items or []),
             response_items=response_items,
         )
-        with metrics.timed("ledger.record", component=ledger, tokens=record.cum_len):
+        with capture_metrics.timed("ledger.record", component=ledger, tokens=record.cum_len):
             await ledger.record(commit)
         mark_external_staging_committed(
             rollout_id=coords.rollout_id,

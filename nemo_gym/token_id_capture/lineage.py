@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
-from nemo_gym.token_id_capture import metrics
+from nemo_gym.token_id_capture import capture_metrics
 from nemo_gym.token_id_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
@@ -390,11 +390,11 @@ class LineageIndex:
         self._max_rollouts = max_rollouts
         self._max_tokens = max_tokens
         self._rollouts: dict[str, RolloutLineage] = {}
-        metrics.track_cache_owner(self)
+        capture_metrics.track_cache_owner(self)
 
     def cache_sizes(self) -> list[tuple[str, int]]:
         """Sizes for the token-capture cache metric, read at metric export, not per call."""
-        return [("index_rollouts", len(self._rollouts)), ("index_tokens", self.total_tokens)]
+        return [("lineage_index_rollouts", len(self._rollouts)), ("lineage_index_tokens", self.total_tokens)]
 
     def for_rollout(self, rollout_id: str) -> RolloutLineage:
         lineage = self._rollouts.get(rollout_id)
@@ -557,7 +557,7 @@ class IncrementalLineageStore:
         # Fixed lock striping bounds synchronization metadata.
         # Hash collisions only serialize unrelated rollouts.
         self._rollout_locks = tuple(threading.Lock() for _ in range(256))
-        metrics.track_cache_owner(self)
+        capture_metrics.track_cache_owner(self)
 
     def cache_sizes(self) -> list[tuple[str, int]]:
         """Sizes for the token-capture cache metric, read at metric export, not per call."""
@@ -902,9 +902,7 @@ class FileLineageStore(IncrementalLineageStore):
         await asyncio.to_thread(self._record, commit)
 
     def _record(self, commit: CaptureLedgerCommit) -> None:
-        with metrics.timed(
-            "ledger_store.record", implementation_name="FileLineageStore", tokens=commit.record.cum_len
-        ):
+        with capture_metrics.timed("ledger.record.in_thread", component=self, tokens=commit.record.cum_len):
             self._record_row(commit)
 
     def _record_row(self, commit: CaptureLedgerCommit) -> None:

@@ -34,7 +34,7 @@ import struct
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from nemo_gym.token_id_capture import metrics
+from nemo_gym.token_id_capture import capture_metrics
 
 
 STAGING_SCHEMA_VERSION = 2
@@ -97,7 +97,7 @@ def encode_token_ids(token_ids: Sequence[int]) -> bytes:
 def hash_token_ids(token_ids: Sequence[int]) -> str:
     """Hash one exact cumulative token prefix."""
     encoded = encode_token_ids(token_ids)
-    metrics.digest("cumulative", len(encoded))
+    capture_metrics.digest("cumulative", len(encoded))
     return hashlib.sha256(_TOKEN_DIGEST_DOMAIN + encoded).hexdigest()
 
 
@@ -123,7 +123,7 @@ def compute_chain_hash(parent_chain_hash: str | None, token_ids_delta: Sequence[
         _validate_digest(parent_chain_hash, field="parent_chain_hash")
         payload += b"\x01" + bytes.fromhex(parent_chain_hash)
     payload += encode_token_ids(token_ids_delta)
-    metrics.digest("chain", len(payload))
+    capture_metrics.digest("chain", len(payload))
     return hashlib.sha256(_CHAIN_DIGEST_DOMAIN + bytes(payload)).hexdigest()
 
 
@@ -191,7 +191,7 @@ def compute_extras_digest(extras: Mapping[str, Any] | None) -> str:
     else:
         raise TypeError(f"extras must be a mapping or None, got {type(extras).__name__}")
     payload = struct.pack(">B", EXTRAS_DIGEST_VERSION) + _encode_extra(normalized)
-    metrics.digest("extras", len(payload))
+    capture_metrics.digest("extras", len(payload))
     return hashlib.sha256(_EXTRAS_DIGEST_DOMAIN + payload).hexdigest()
 
 
@@ -266,7 +266,7 @@ def compute_staging_digest(
     payload.extend(bytes.fromhex(extras_digest))
     payload.extend(_encode_present_digest(chain_hash, field="chain_hash"))
     payload.extend(_encode_present_digest(cumulative_hash, field="cumulative_hash"))
-    metrics.digest("staging", len(payload))
+    capture_metrics.digest("staging", len(payload))
     return hashlib.sha256(_CALL_DIGEST_DOMAIN + bytes(payload)).hexdigest()
 
 

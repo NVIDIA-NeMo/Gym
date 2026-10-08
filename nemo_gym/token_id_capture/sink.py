@@ -33,7 +33,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from nemo_gym.token_id_capture import metrics
+from nemo_gym.token_id_capture import capture_metrics
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import stamp_continuation
 from nemo_gym.token_id_capture.protocols import (
@@ -145,7 +145,7 @@ _RESOLUTION_REASONS = frozenset(
 
 
 def _count_resolution(status_value: str, reason: str | None = None) -> None:
-    metrics.count(status_value, metrics.bounded_reason(reason, _RESOLUTION_REASONS))
+    capture_metrics.count(f"parent_{status_value}", capture_metrics.bounded_reason(reason, _RESOLUTION_REASONS))
     with _STATS_LOCK:
         _RESOLUTION_COUNTS[status_value] = _RESOLUTION_COUNTS.get(status_value, 0) + 1
         total = sum(_RESOLUTION_COUNTS.values())
@@ -238,7 +238,7 @@ async def resolve_parent(request_messages: list | None) -> None:
                     "and multi-call rollouts will be masked (allow_unresolved_continuations is set)."
                 )
         else:
-            with metrics.timed("lineage.resolve", component=context.lineage_store):
+            with capture_metrics.timed("lineage.resolve", component=context.lineage_store):
                 context.parent_resolution = await context.lineage_store.resolve(context.rollout_id, request_messages)
         _count_resolution(context.parent_resolution.status.value, context.parent_resolution.reason)
     except Exception as error:
@@ -318,8 +318,8 @@ async def resolve_parent(request_messages: list | None) -> None:
 
 async def record_ledger_failure(ledger: CaptureLedger, rollout_id: str, model_call_id: str, reason: str) -> None:
     """Record a failure row that poisons a call, and count it by reason."""
-    metrics.count("poisoned", reason)
-    with metrics.timed("ledger.record_failure", component=ledger):
+    capture_metrics.count("poisoned", reason)
+    with capture_metrics.timed("ledger.record_failure", component=ledger):
         await ledger.record_failure(rollout_id, model_call_id, reason)
 
 
@@ -338,7 +338,7 @@ async def register_call_intent() -> None:
     begin = getattr(context.token_sink, "begin_call", None)
     if begin is None:
         return
-    with metrics.timed("sink.begin_call", component=context.token_sink):
+    with capture_metrics.timed("sink.begin_call", component=context.token_sink):
         await begin(context.rollout_id, context.model_call_id)
 
 
@@ -478,11 +478,11 @@ async def commit_entry(
             cumulative=cumulative,
         )
         entry.parent_resolution_reason = resolution.reason or ""
-        with metrics.timed("sink.put", component=context.token_sink, tokens=entry.cum_len):
+        with capture_metrics.timed("sink.put", component=context.token_sink, tokens=entry.cum_len):
             await context.token_sink.put(entry)
         context.committed = True
     except TokenCaptureFrozenError:
-        metrics.count("late_write_dropped", "frozen")
+        capture_metrics.count("late_write_dropped", "frozen")
         # The rollout finished and its capture was frozen while this call was
         # still in flight (for example its harness was killed at a timeout
         # backstop). The freeze already judged completeness from the durable
@@ -506,7 +506,7 @@ async def _capture_failed(context: CaptureContext, stage: str) -> None:
     Mark the rollout so consumers can mask the sample.
     Call this only from an ``except`` block.
     """
-    metrics.count("capture_failed", stage)
+    capture_metrics.count("capture_failed", stage)
     with _STATS_LOCK:
         _CAPTURE_FAILURES[0] += 1
         failures = _CAPTURE_FAILURES[0]
@@ -560,7 +560,7 @@ async def _mark_incomplete(context: CaptureContext) -> None:
             context.rollout_id,
         )
         return
-    metrics.count("marked_incomplete")
+    capture_metrics.count("marked_incomplete")
     try:
         await mark(context.rollout_id, context.model_call_id)
     except Exception:

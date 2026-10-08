@@ -30,7 +30,7 @@ import pytest
 
 from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry import token_capture_metrics as recorders
-from nemo_gym.token_id_capture import metrics
+from nemo_gym.token_id_capture import capture_metrics
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.token_id_capture.protocols import LineageResolution
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
@@ -71,7 +71,7 @@ def collected(monkeypatch):
 
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
     recorders._reset_for_testing()
-    metrics._reset_for_testing()
+    capture_metrics._reset_for_testing()
 
     def collect() -> dict:
         data = reader.get_metrics_data()
@@ -86,7 +86,7 @@ def collected(monkeypatch):
     recorders.instruments()
     yield collect
     recorders._reset_for_testing()
-    metrics._reset_for_testing()
+    capture_metrics._reset_for_testing()
 
 
 def _durations(collected) -> dict[tuple[str, str, str, str], int]:
@@ -137,10 +137,10 @@ def test_staging_times_build_and_sink_and_counts_digest_work(collected):
     _complete(_RecordingSink())
 
     durations = _durations(collected)
-    assert durations[("stage.build_record", "", "lt_4k", "")] == 1
-    assert durations[("stage.sink", "_RecordingSink", "lt_4k", "")] == 1
+    assert durations[("staging.build_record", "", "lt_4k", "")] == 1
+    assert durations[("staging_sink.stage", "_RecordingSink", "lt_4k", "")] == 1
     tokens = {p.attributes[OPERATION]: p.value for p in collected()[recorders.OPERATION_TOKENS_INSTRUMENT]}
-    assert tokens["stage.build_record"] == 5
+    assert tokens["staging.build_record"] == 5
     calls = {p.attributes[recorders.DIGEST_ATTRIBUTE]: p.value for p in collected()[recorders.DIGEST_CALLS_INSTRUMENT]}
     # The record validator recomputes the staging digest the builder already computed: two per record.
     assert calls["staging"] == 2
@@ -153,8 +153,8 @@ def test_a_failing_sink_is_timed_as_an_error_and_counted(collected):
             raise RuntimeError("store is down")
 
     _complete(_Broken())
-    assert _durations(collected)[("stage.sink", "_Broken", "lt_4k", "error")] == 1
-    assert _outcomes(collected)[("stage_failed", "sink_error")] == 1
+    assert _durations(collected)[("staging_sink.stage", "_Broken", "lt_4k", "error")] == 1
+    assert _outcomes(collected)[("capture_failed", "staging_sink_error")] == 1
 
 
 def test_a_rejecting_sink_is_counted(collected):
@@ -163,7 +163,7 @@ def test_a_rejecting_sink_is_counted(collected):
             return StageResult(ok=False, error="full")
 
     _complete(_Rejecting())
-    assert _outcomes(collected)[("stage_failed", "sink_rejected")] == 1
+    assert _outcomes(collected)[("capture_failed", "staging_sink_rejected")] == 1
 
 
 @pytest.mark.asyncio
@@ -183,9 +183,9 @@ async def test_model_server_writes_are_timed_by_implementation(collected, tmp_pa
     assert durations[("lineage.resolve", "FileLineageStore", "", "")] == 1
     # The protocol call site and the store's own work: their difference is time spent waiting for a thread.
     assert durations[("sink.put", "TokenCaptureStore", "lt_4k", "")] == 1
-    assert durations[("token_store.append", "TokenCaptureStore", "lt_4k", "")] == 1
+    assert durations[("sink.put.in_thread", "TokenCaptureStore", "lt_4k", "")] == 1
     outcomes = _outcomes(collected)
-    assert outcomes[(ParentResolutionStatus.UNRESOLVED.value, "no_match")] == 1
+    assert outcomes[(f"parent_{ParentResolutionStatus.UNRESOLVED.value}", "no_match")] == 1
     assert outcomes[("lock_acquired", "exclusive")] >= 1
 
 
@@ -222,7 +222,7 @@ async def test_a_cancelled_operation_is_labelled_cancelled(collected):
 
 
 async def _timed_wait(awaitable) -> None:
-    with metrics.timed("sink.put", implementation_name="TokenCaptureStore"):
+    with capture_metrics.timed("sink.put", implementation_name="TokenCaptureStore"):
         await awaitable
 
 
@@ -241,7 +241,7 @@ async def test_unknown_resolver_reasons_are_counted_as_other(collected):
             await resolve_parent(SEEDED_HISTORY)
         finally:
             reset_token_sink(token)
-    assert _outcomes(collected)[(ParentResolutionStatus.UNRESOLVED.value, "other")] == 3
+    assert _outcomes(collected)[(f"parent_{ParentResolutionStatus.UNRESOLVED.value}", "other")] == 3
 
 
 @pytest.mark.asyncio
@@ -252,7 +252,7 @@ async def test_poisoned_calls_are_counted_by_reason(collected):
 
 
 def test_a_lock_wait_below_the_threshold_is_not_recorded(collected):
-    with metrics.timed("file_lock.wait", implementation_name="TokenCaptureStore", threshold_ms=10_000):
+    with capture_metrics.timed("file_lock.wait", implementation_name="TokenCaptureStore", threshold_ms=10_000):
         pass
     assert ("file_lock.wait", "TokenCaptureStore", "", "") not in _durations(collected)
 
@@ -267,7 +267,7 @@ async def test_cache_sizes_are_observed_at_export(collected, tmp_path):
 
 
 def test_duration_buckets_reach_five_minutes_and_size_classes_split_long_sequences(collected):
-    with metrics.timed("stage.build_record", tokens=200_000):
+    with capture_metrics.timed("staging.build_record", tokens=200_000):
         pass
     (point,) = collected()[recorders.OPERATION_DURATION_INSTRUMENT]
     assert point.explicit_bounds[-1] == 300_000
@@ -277,7 +277,7 @@ def test_duration_buckets_reach_five_minutes_and_size_classes_split_long_sequenc
 def test_attribute_sets_are_capped_per_instrument(collected, monkeypatch):
     monkeypatch.setattr(recorders, "MAX_ATTRIBUTE_SETS", 2)
     for index in range(5):
-        with metrics.timed(f"op-{index}"):
+        with capture_metrics.timed(f"op-{index}"):
             pass
     operations = {p.attributes[OPERATION] for p in collected()[recorders.OPERATION_DURATION_INSTRUMENT]}
     assert recorders.OVERFLOW_LABEL in operations
@@ -285,12 +285,12 @@ def test_attribute_sets_are_capped_per_instrument(collected, monkeypatch):
 
 
 def test_outcome_keys_are_capped_for_new_outcomes_as_well_as_new_reasons(collected, monkeypatch):
-    monkeypatch.setattr(metrics, "MAX_OUTCOME_KEYS", 2)
+    monkeypatch.setattr(capture_metrics, "MAX_OUTCOME_KEYS", 2)
     for index in range(5):
-        metrics.count(f"outcome-{index}", f"reason-{index}")
+        capture_metrics.count(f"outcome-{index}", f"reason-{index}")
     outcomes = _outcomes(collected)
     assert len(outcomes) <= 3
-    assert outcomes[(metrics.OTHER_REASON, metrics.OTHER_REASON)] == 3
+    assert outcomes[(capture_metrics.OTHER_REASON, capture_metrics.OTHER_REASON)] == 3
 
 
 def test_concurrent_counts_are_not_lost(collected, monkeypatch):
@@ -299,7 +299,9 @@ def test_concurrent_counts_are_not_lost(collected, monkeypatch):
     sys.setswitchinterval(1e-6)  # switch threads as often as possible to expose a race
     try:
         threads = [
-            threading.Thread(target=lambda: [metrics.count("lock_acquired", "exclusive") for _ in range(20_000)])
+            threading.Thread(
+                target=lambda: [capture_metrics.count("lock_acquired", "exclusive") for _ in range(20_000)]
+            )
             for _ in range(8)
         ]
         for thread in threads:
@@ -313,7 +315,7 @@ def test_concurrent_counts_are_not_lost(collected, monkeypatch):
 
 def test_implementation_labels_keep_no_reference_to_the_class(collected):
     cls = type("ShortLivedSink", (), {})
-    assert metrics.implementation(cls()) == "ShortLivedSink"
+    assert capture_metrics.implementation(cls()) == "ShortLivedSink"
     reference = weakref.ref(cls)
     del cls
     gc.collect()
@@ -330,29 +332,29 @@ def test_one_failing_cache_owner_does_not_hide_the_others(collected):
             return [("healthy_cache", 7)]
 
     broken, healthy = _Broken(), _Healthy()
-    metrics.track_cache_owner(broken)
-    metrics.track_cache_owner(healthy)
+    capture_metrics.track_cache_owner(broken)
+    capture_metrics.track_cache_owner(healthy)
     sizes = {p.attributes[recorders.CACHE_ATTRIBUTE]: p.value for p in collected()[recorders.CACHE_SIZE_INSTRUMENT]}
     assert sizes["healthy_cache"] == 7
 
 
 def test_a_slow_operation_logs_once_per_interval(collected, monkeypatch, caplog):
-    monkeypatch.setattr(metrics, "SLOW_OPERATION_MS", 0.0)
-    with caplog.at_level(logging.WARNING, logger=metrics.__name__):
+    monkeypatch.setattr(capture_metrics, "SLOW_OPERATION_MS", 0.0)
+    with caplog.at_level(logging.WARNING, logger=capture_metrics.__name__):
         for _ in range(3):
-            with metrics.timed("sink.put", implementation_name="TokenCaptureStore", tokens=10):
+            with capture_metrics.timed("sink.put", implementation_name="TokenCaptureStore", tokens=10):
                 pass
     assert sum("Slow token-capture operation sink.put" in r.getMessage() for r in caplog.records) == 1
 
 
 def test_nothing_is_recorded_without_an_exporting_handle(monkeypatch):
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", None)
-    metrics._reset_for_testing()
-    with metrics.timed("sink.put") as timer:
+    capture_metrics._reset_for_testing()
+    with capture_metrics.timed("sink.put") as timer:
         timer.tokens = 5
-    metrics.count("poisoned", "x")
-    metrics.digest("staging", 10)
-    assert metrics._Totals().outcomes() == [] and metrics._Totals().digests() == []
+    capture_metrics.count("poisoned", "x")
+    capture_metrics.digest("staging", 10)
+    assert capture_metrics._Totals().outcomes() == [] and capture_metrics._Totals().digests() == []
 
 
 def test_importing_capture_does_not_import_the_telemetry_stack():
@@ -380,7 +382,7 @@ def test_disabled_site_costs_about_an_empty_with_block(monkeypatch):
             pass
 
     def site():
-        with metrics.timed("sink.put"):
+        with capture_metrics.timed("sink.put"):
             pass
 
     empty_ns = min(timeit.repeat(empty, number=50_000, repeat=5)) / 50_000 * 1e9
