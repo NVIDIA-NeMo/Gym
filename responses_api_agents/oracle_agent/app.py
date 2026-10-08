@@ -13,7 +13,6 @@ A task without ``solution/solve.sh`` is not failed: the oracle returns a respons
 tagged ``oracle=unvalidated`` and does nothing in the sandbox.
 """
 
-import asyncio
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,10 +25,9 @@ from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
-    AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
-    AgentSeedSessionResponse,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
@@ -58,7 +56,6 @@ ORACLE_METADATA_KEY = "oracle"
 ORACLE_STATUS_SOLVED = "solved"
 ORACLE_STATUS_UNVALIDATED = "unvalidated"
 ORACLE_STATUS_FAILED = "failed"
-_SESSION_KEY = "oracle_agent_session_id"
 
 
 class OracleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -72,8 +69,7 @@ class OracleAgentConfig(BaseResponsesAPIAgentConfig):
 
 
 @dataclass
-class OracleSession:
-    request: AgentSeedSessionRequest
+class OracleSession(AgentSessionState):
     sandbox: AsyncSandbox
     workdir: str
 
@@ -86,9 +82,6 @@ class OracleAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
         if self.config.num_workers not in (None, 1):
             raise ValueError("Process-local oracle sessions require num_workers=1")
-        self._sessions: dict[str, OracleSession] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
-        self._closed: set[str] = set()
 
     # -- task lookup -----------------------------------------------------------------------
 
@@ -116,56 +109,34 @@ class OracleAgent(SimpleResponsesAPIAgent):
 
     # -- sessions --------------------------------------------------------------------------
 
-    async def seed_agent_session(self, request: Request, body: AgentSeedSessionRequest) -> AgentSeedSessionResponse:
-        session_id = body.agent_session_id
-        request.session[_SESSION_KEY] = session_id
-        lock = self._locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
-            if session_id in self._closed:
-                raise HTTPException(409, f"Agent session is already closed: {session_id}")
-            existing = self._sessions.get(session_id)
-            if existing is not None:
-                if (existing.request.episode_id, existing.request.task_id) != (body.episode_id, body.task_id):
-                    raise HTTPException(409, "agent_session_id is already bound to another episode or task")
-                return AgentSeedSessionResponse(agent_session_id=session_id)
-            if body.sandbox_access is None:
-                raise HTTPException(422, "The oracle agent needs sandbox_access from the resources server")
-            connection = body.sandbox_access.connection
-            if not isinstance(connection, DirectSandboxConnection):
-                raise HTTPException(422, "The oracle agent supports only direct sandbox connections")
-            provider = create_provider(
-                resolve_provider_config(connection.provider_config_ref, get_global_config_dict())
-            )
-            try:
-                sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
-            except BaseException:
-                await provider.aclose()
-                raise
-            self._sessions[session_id] = OracleSession(
-                request=body, sandbox=sandbox, workdir=body.sandbox_access.workdir
-            )
-            return AgentSeedSessionResponse(agent_session_id=session_id)
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OracleSession:
+        if body.sandbox_access is None:
+            raise HTTPException(422, "The oracle agent needs sandbox_access from the resources server")
+        connection = body.sandbox_access.connection
+        if not isinstance(connection, DirectSandboxConnection):
+            raise HTTPException(422, "The oracle agent supports only direct sandbox connections")
+        provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
+        try:
+            sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+        except BaseException:
+            await provider.aclose()
+            raise
+        return OracleSession(request=body, sandbox=sandbox, workdir=body.sandbox_access.workdir)
 
-    async def close_agent_session(self, request: Request, body: AgentCloseSessionRequest) -> AgentCloseSessionResponse:
-        session_id = body.agent_session_id
-        lock = self._locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
-            session = self._sessions.pop(session_id, None)
-            if session is not None:
-                if session.request.episode_id != body.episode_id:
-                    self._sessions[session_id] = session
-                    raise HTTPException(409, "episode_id does not match the seeded agent session")
-                await session.sandbox.disconnect()
-            self._closed.add(session_id)
-            request.session.pop(_SESSION_KEY, None)
-            return AgentCloseSessionResponse(agent_session_id=session_id)
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, OracleSession):
+            raise TypeError("Expected an oracle agent session state")
+        await state.sandbox.disconnect()
+        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
 
     def _session_for(self, request: Request) -> OracleSession:
-        session_id = request.session.get(_SESSION_KEY)
-        session = self._sessions.get(session_id) if session_id else None
-        if session is None:
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is None:
             raise HTTPException(404, "Unknown oracle agent session; seed it first")
-        return session
+        state = self._require_agent_session(session_id)
+        if not isinstance(state, OracleSession):
+            raise TypeError("Expected an oracle agent session state")
+        return state
 
     # -- the "turn" ------------------------------------------------------------------------
 
