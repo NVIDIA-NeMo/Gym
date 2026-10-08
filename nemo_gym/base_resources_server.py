@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     # module) and would pull the mcp SDK into agent/model processes that never need it.
     from nemo_gym.mcp_auto_exposure import MCPTool
 
-from nemo_gym._checkpoint.control import install_participant
+from nemo_gym._checkpoint.participant_workers import install_server_participant
 from nemo_gym._checkpoint.resources import (
     ResourcesCheckpointMiddleware,
     ResourcesCheckpointMode,
@@ -48,6 +48,7 @@ from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_met
 from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_episode_id
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.session_routing import SESSION_OWNER_KEY
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 
 
@@ -271,6 +272,7 @@ class ResourcesCloseSessionResponse(BaseModel):
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
+    routes_sessions_to_owner = True
     # How this server's sessions take part in partial-rollout checkpoints. "exported" servers implement the
     # ResourcesSessionHooks methods.
     # The default fails closed: its sessions' rollouts are restarts, which never hold up a checkpoint,
@@ -308,8 +310,6 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        if (self.config.num_workers or 1) != 1:
-            raise ValueError("resources checkpointing requires num_workers=1: sessions live in one process")
         if self.checkpoint_mode == "exported":
             # Hooks from an intermediate base class or a mixin count; only the stubs here do not.
             missing = [
@@ -321,9 +321,11 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 )
         participant = ResourcesParticipant(self, self.checkpoint_mode, verify_mode=self.checkpoint_verify)
         self._checkpoint = participant
-        install_participant(
+        install_server_participant(
             app,
             participant,
+            num_workers=self.config.num_workers or 1,
+            status=participant.status_extra(),
             auth_token=settings.control_auth_token,
             lease_grace_seconds=settings.lease_grace_seconds,
             instance_name=self.config.name,
@@ -359,7 +361,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         episode_id = current_episode_id()
         session_id = request.session.get(SESSION_ID_KEY)
         if episode_id is not None and session_id is not None:
-            self._checkpoint.seeded(session_id, episode_id)
+            self._checkpoint.seeded(session_id, episode_id, request.session.get(SESSION_OWNER_KEY))
 
     def checkpoint_session_ended(self, request: Request) -> None:
         """Report that the request's session ended; standard ``/close_session`` and ``/verify`` do this.

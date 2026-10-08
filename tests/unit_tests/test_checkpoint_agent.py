@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from nemo_gym._checkpoint.control import (
     RetireRequest,
 )
 from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
+from nemo_gym._checkpoint.participant_workers import COORDINATOR_SOCKET_ENV
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
@@ -385,7 +387,8 @@ async def test_restored_sessions_not_yet_claimed_survive_the_next_checkpoint(tmp
         assert legacy_run.continuation == {"next": "verify"}
 
 
-def test_checkpointing_refuses_several_workers_for_agents_without_session_hooks() -> None:
+def test_with_several_workers_the_main_process_coordinates_an_agent_without_session_hooks(monkeypatch) -> None:
+    monkeypatch.delenv(COORDINATOR_SOCKET_ENV, raising=False)
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
     agent = _UnsupportedAgent(
@@ -393,8 +396,16 @@ def test_checkpointing_refuses_several_workers_for_agents_without_session_hooks(
         server_client=client,
     )
 
-    with pytest.raises(ValueError, match="num_workers=1"):
-        agent.setup_webserver()
+    app = agent.setup_webserver()
+    coordinator = app.state.nemo_gym_checkpoint_coordinator
+    socket_path = os.environ[COORDINATOR_SOCKET_ENV]
+    os.unlink(socket_path)
+
+    # The main process serves no requests: its workers forward control calls to this coordinator.
+    assert coordinator.socket_path == socket_path
+    assert coordinator.participant.kind == "agent"
+    assert coordinator.participant.expected_workers == 2
+    assert not [route for route in app.routes if getattr(route, "path", "").startswith("/ng-control/")]
 
 
 async def test_a_session_woken_by_resume_stays_parked_if_a_new_checkpoint_closes_first() -> None:

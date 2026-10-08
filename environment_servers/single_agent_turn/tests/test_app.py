@@ -569,16 +569,6 @@ async def test_interrupted_activation_closes_agent_before_resources(
     assert not client.responses
 
 
-def test_checkpointing_refuses_more_than_one_worker() -> None:
-    environment_server, client = _environment_server()
-    client.global_config_dict["checkpoint"] = {"enabled": True, "control_auth_token": "t"}
-    config = environment_server.config.model_copy(update={"num_workers": 2})
-    server = SingleAgentTurnEnvironmentServer(config=config, server_client=client)
-
-    with pytest.raises(ValueError, match="num_workers=1"):
-        server.setup_webserver()
-
-
 @pytest.mark.parametrize("reported, expected", [({"x-ng-checkpoint-verify": "replay"}, "replay"), ({}, "wait")])
 async def test_verify_step_mode_comes_from_the_resources_seed_reply(reported: dict, expected: str) -> None:
     environment_server, client = _environment_server()

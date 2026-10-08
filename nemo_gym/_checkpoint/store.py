@@ -77,15 +77,17 @@ def write_participant_state(
     instance: str,
     checkpoint_id: str,
     records: Iterable[dict[str, Any]],
+    extra: Optional[dict[str, Any]] = None,
     stop: Optional[WriteStop] = None,
 ) -> dict[str, Any]:
-    """Write ``records`` and then the manifest that publishes them.
+    """Write ``records`` and then the manifest that publishes them, which also keeps the participant's ``extra``
+    fields.
 
     ``stop`` aborts the write before the next record and before publishing,
     so nothing is published once the checkpoint was resumed.
     """
     try:
-        return _write(checkpoint_dir, kind, instance, checkpoint_id, records, stop or WriteStop())
+        return _write(checkpoint_dir, kind, instance, checkpoint_id, records, extra or {}, stop or WriteStop())
     except OSError as error:
         raise CheckpointStateError(f"cannot write checkpoint state under {checkpoint_dir}: {error}") from error
 
@@ -96,6 +98,7 @@ def _write(
     instance: str,
     checkpoint_id: str,
     records: Iterable[dict[str, Any]],
+    extra: dict[str, Any],
     stop: WriteStop,
 ) -> dict[str, Any]:
     directory = participant_dir(checkpoint_dir, kind=kind, instance=instance)
@@ -122,6 +125,7 @@ def _write(
             "records_file": records_file,
             "records_sha256": digest.hexdigest(),
             "record_count": count,
+            **extra,
         }
         with stop.publishing(checkpoint_id):
             # Same name, same content: replacing a file another writer of the same records renamed changes nothing.
