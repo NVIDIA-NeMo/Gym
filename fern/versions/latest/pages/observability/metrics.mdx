@@ -37,6 +37,12 @@ would disagree the first time one dropped a sample.
 | `gym.host.memory.available` | Gauge | bytes | Host memory available without swapping. |
 | `gym.host.memory.total` | Gauge | bytes | Total host memory. |
 | `gym.host.memory.sampled_peak` | Gauge | bytes | Largest sampled host memory usage. |
+| `gym.token_capture.operation.duration_ms` | Histogram | ms | Duration of one training-token capture operation. See below. |
+| `gym.token_capture.operation.tokens_total` | Counter | tokens | Tokens of the records each capture operation handled. |
+| `gym.token_capture.outcome_total` | Observable counter | count | Capture decisions and failures, by outcome and reason. |
+| `gym.token_capture.digest.calls_total` | Observable counter | count | Hash computations done by token capture, by digest kind. |
+| `gym.token_capture.digest.bytes_total` | Observable counter | bytes | Bytes hashed by token capture, by digest kind. |
+| `gym.token_capture.cache.size` | Observable up-down counter | count | Current size of each in-process token-capture cache. |
 
 Rollout duration is recorded even when a rollout fails. A crashed rollout still consumed
 wall-clock time, and dropping those samples would bias the histogram toward the fast path.
@@ -52,6 +58,36 @@ Host usage is `total - available`, matching the memory the operating system cann
 Descendants remain attributed while they stay in the server's Linux process tree. Detached or reparented processes and remote Ray actors are not included.
 
 Compare these series with `http.server.active_requests` while increasing workload concurrency. Separate server processes export their HTTP metrics independently, so sum active requests by Gym server name when a server uses several Uvicorn workers.
+
+### Token-Capture Metrics
+
+Training-token capture runs on every captured model call, so these metrics are built to stay
+cheap: with no metrics exporter a capture site does almost nothing, and frequent events
+(outcomes, digests) are counted in process memory and read at each export rather than sent
+to the SDK one by one.
+
+`gym.token_capture.operation.duration_ms` carries:
+
+- `nemo.gym.token_capture.operation`: what was timed. Operations at a protocol call site
+  (`lineage.resolve`, `sink.begin_call`, `sink.put`, `ledger.record`, `ledger.record_failure`,
+  `stage.build_record`, `stage.sink`, `source.freeze`, `source.drop`) include time spent
+  waiting for a worker thread. Gym's file stores also report their in-thread work
+  (`token_store.append`, `ledger_store.record`), so the difference is queueing.
+  `file_lock.wait` is recorded only when acquiring a lock took at least 0.1 ms.
+- `nemo.gym.token_capture.implementation`: the class implementing the protocol at that call
+  site, for example `TokenCaptureStore` or a training framework's own sink, so pluggable
+  implementations are measured without changes to them.
+- `nemo.gym.token_capture.size_class`: the record's token count, bucketed as `lt_4k`, `lt_32k`,
+  `lt_128k` or `ge_128k`, so a percentile compares records of similar length. Absent for
+  operations without a record.
+- `nemo.gym.token_capture.error`: `error` or `cancelled`, present only when the operation did
+  not complete.
+
+Dividing the duration sum by `gym.token_capture.operation.tokens_total` gives milliseconds per
+token, which separates a slower implementation from longer sequences. Digest calls per staged
+record show duplicated hashing; digest bytes per record show how much of a prefix is re-hashed.
+Outcome reasons come from a fixed set, and a reason a custom implementation invents is counted
+as `other`. An operation slower than 5 seconds also logs one warning per operation per minute.
 
 ### What `gym.verify.success_rate` Measures
 

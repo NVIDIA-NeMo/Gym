@@ -40,6 +40,7 @@ from uuid import uuid4
 
 import orjson
 
+from nemo_gym.token_id_capture import metrics
 from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenCaptureSnapshot
 from nemo_gym.token_id_capture.records import TokenEntry
 
@@ -85,7 +86,10 @@ class TokenCaptureStore:
     @contextmanager
     def _locked(self, rollout_id: str, *, shared: bool = False):
         with self.lock_path_for(rollout_id).open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+            # Uncontended acquisitions take microseconds; only real waits are worth a histogram sample.
+            with metrics.timed("file_lock.wait", implementation_name="TokenCaptureStore", threshold_ms=0.1):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+            metrics.count("lock_acquired", "shared" if shared else "exclusive")
             try:
                 yield
             finally:
@@ -231,6 +235,10 @@ class TokenCaptureStore:
 
     def append(self, entry: TokenEntry) -> None:
         """Idempotently append one entry and fsync."""
+        with metrics.timed("token_store.append", implementation_name="TokenCaptureStore", tokens=entry.cum_len):
+            self._append(entry)
+
+    def _append(self, entry: TokenEntry) -> None:
         canonical = orjson.dumps(entry.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS)
         line = canonical + b"\n"
         digest = self._entry_digest(canonical)
