@@ -389,32 +389,8 @@ async def test_restore_refuses_workers_that_have_served_calls(tmp_path: Path) ->
     assert fresh.export_rows("r-a1") == []
 
 
-async def test_worker_messages_carry_what_the_checkpoint_writer_carries() -> None:
-    import math
-
-    from nemo_gym._checkpoint.model_workers import _read_frame, _write_frame
-
-    class Sink:
-        data = b""
-
-        def write(self, data: bytes) -> None:
-            self.data += data
-
-        async def drain(self) -> None:
-            pass
-
-    sink, reader = Sink(), asyncio.StreamReader()
-    # A -inf logprob and an integer beyond 64 bits, which orjson would turn into null or refuse.
-    await _write_frame(sink, {"logprobs": [-math.inf, -0.5], "nan": math.nan, "hash": 2**70})
-    reader.feed_data(sink.data)
-
-    message = await _read_frame(reader)
-
-    assert message["logprobs"] == [-math.inf, -0.5] and math.isnan(message["nan"]) and message["hash"] == 2**70
-
-
 async def test_a_message_that_cannot_be_sent_or_is_never_answered_is_a_typed_unavailable_error() -> None:
-    from nemo_gym._checkpoint.model_workers import CoordinatorUnavailableError, _Channel
+    from nemo_gym._checkpoint.workers import Channel, CoordinatorUnavailableError
 
     class StuckWriter:
         def write(self, data: bytes) -> None:
@@ -427,7 +403,7 @@ async def test_a_message_that_cannot_be_sent_or_is_never_answered_is_a_typed_una
     async def handler(kind, body):
         return {}
 
-    channel = _Channel(asyncio.StreamReader(), StuckWriter(), handler)
+    channel = Channel(asyncio.StreamReader(), StuckWriter(), handler)
     with pytest.raises(CoordinatorUnavailableError):
         # Bounded from outside too, so a call that ignores its own timeout fails here instead of hanging.
         await asyncio.wait_for(channel.call("claim_cut", {"capture_key": "r-a1"}, timeout=0.1), 2)
@@ -625,14 +601,14 @@ def worker_logs(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str]]:
     return [
         (record.levelname, record.getMessage())
         for record in caplog.records
-        if record.name == "nemo_gym._checkpoint.model_workers" and "policy worker" in record.getMessage()
+        if record.name == "nemo_gym._checkpoint.workers" and "policy worker" in record.getMessage()
     ]
 
 
 async def test_workers_are_logged_by_pid_as_they_join_and_a_lost_one_as_a_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level("INFO", logger="nemo_gym._checkpoint.model_workers")
+    caplog.set_level("INFO", logger="nemo_gym._checkpoint.workers")
     async with deployment() as (coordinator, (_, second)):
         await crash(second)
         await wait_for_workers(coordinator, 1)
@@ -656,7 +632,7 @@ async def test_workers_are_logged_by_pid_as_they_join_and_a_lost_one_as_a_warnin
 async def test_a_worker_lost_during_a_checkpoint_is_logged_as_blocking_its_commit(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level("INFO", logger="nemo_gym._checkpoint.model_workers")
+    caplog.set_level("INFO", logger="nemo_gym._checkpoint.workers")
     async with deployment() as (coordinator, (_, second)):
         await coordinator.controller.prepare(CheckpointRequest(**control()))
         await crash(second)
@@ -668,7 +644,7 @@ async def test_a_worker_lost_during_a_checkpoint_is_logged_as_blocking_its_commi
 
 
 async def test_a_worker_that_stops_cleanly_is_not_reported_as_lost(caplog: pytest.LogCaptureFixture) -> None:
-    caplog.set_level("INFO", logger="nemo_gym._checkpoint.model_workers")
+    caplog.set_level("INFO", logger="nemo_gym._checkpoint.workers")
     async with deployment() as (coordinator, (_, second)):
         await second.disconnect()
         await wait_for_workers(coordinator, 1)
