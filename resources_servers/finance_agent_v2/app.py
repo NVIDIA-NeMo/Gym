@@ -271,6 +271,10 @@ class FinanceAgentV2VerifyRequest(FinanceAgentV2RunRequest, BaseVerifyRequest):
     )
 
 
+class DiscardSessionResponse(BaseModel):
+    discarded: bool
+
+
 class RubricJudgement(BaseModel):
     """Per-criterion verdict plus everything needed to audit it.
 
@@ -611,12 +615,24 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             )
         return await super().seed_session(body)
 
+    async def discard_session(self, request: Request) -> DiscardSessionResponse:
+        """Release the per-session state that /verify would free, without scoring.
+
+        Agents call this instead of /verify when verification is skipped.
+        """
+        session_id = request.session.get(SESSION_ID_KEY)
+        discarded = self._data_storage.pop(session_id, None) is not None
+        self._session_start_times.pop(session_id, None)
+        return DiscardSessionResponse(discarded=discarded)
+
     # ------------------------------------------------------------------
     # Webserver wiring
     # ------------------------------------------------------------------
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
+        # Registered ahead of the /{tool_name} catch-all below so it is not treated as an unknown tool.
+        app.post("/discard_session")(self.discard_session)
         for tool_name in self._tools:
             app.post(f"/{tool_name}")(self._make_tool_handler(tool_name))
 

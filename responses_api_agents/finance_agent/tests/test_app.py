@@ -948,12 +948,17 @@ class TestRun:
         seed_mock = _dotjson_mock({})
         seed_mock.cookies = {"session": "seeded"}
         model_mock = _dotjson_mock(_text_response("Revenue was $100B."))
+        model_mock.cookies = {"session": "seeded"}
 
         async def route_post(**kwargs):
             if kwargs["url_path"] == "/seed_session":
                 return seed_mock
             if kwargs["url_path"] == "/v1/responses":
                 return model_mock
+            if kwargs["url_path"] == "/discard_session":
+                # The resources server frees the seeded session state only in /verify or /discard_session.
+                assert kwargs["cookies"] == {"session": "seeded"}
+                return _dotjson_mock({"discarded": True})
             raise AssertionError(f"unexpected call under skip_verification: {kwargs['url_path']}")
 
         agent.server_client.post = AsyncMock(side_effect=route_post)
@@ -969,7 +974,9 @@ class TestRun:
         assert payload["reward"] == 0.25
         assert payload["verification_skipped"] is True
         assert payload["response"]["id"] == "resp_1"
+        # /verify (and the judge behind it) never runs; the session is still released.
         assert [c.kwargs["url_path"] for c in agent.server_client.post.call_args_list] == [
             "/seed_session",
             "/v1/responses",
+            "/discard_session",
         ]

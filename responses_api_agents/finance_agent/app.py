@@ -530,6 +530,14 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         )
 
         if self.config.skip_verification:
+            # /verify is what frees the per-session state seeded above; release it without scoring.
+            discard_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/discard_session",
+                json={},
+                cookies=cookies,
+            )
+            await raise_for_status(discard_response)
             return FinanceAgentVerifyResponse.model_validate(
                 verify_request.model_dump()
                 | {"reward": float(self.config.skip_verification_reward), "verification_skipped": True}

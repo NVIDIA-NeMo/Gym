@@ -1149,6 +1149,10 @@ async def test_run_skip_verification_uses_configured_reward_without_verify() -> 
             return JsonResponseStub({}, cookies={"session_id": "session-1"})
         if kwargs["url_path"] == "/v1/responses":
             return JsonResponseStub(response_payload([assistant_message("msg_1", "Done.")]))
+        if kwargs["url_path"] == "/discard_session":
+            # Only /verify or /discard_session releases the seeded session on the resources server.
+            assert kwargs["cookies"] == {"session_id": "session-1"}
+            return JsonResponseStub({"discarded": True})
         raise AssertionError(f"Unexpected request under skip_verification: {kwargs['url_path']}")
 
     agent.server_client.post = AsyncMock(side_effect=route_post)
@@ -1162,10 +1166,11 @@ async def test_run_skip_verification_uses_configured_reward_without_verify() -> 
     assert result.result is None
     assert NG_FAILURE_CLASS_KEY not in result_payload
     assert result.instance_config == {"mask_sample": False}
-    # seed_session + rollout only: neither /verify nor /discard_session is called.
+    # /verify is never called; the seeded session is still released via /discard_session.
     assert [c.kwargs["url_path"] for c in agent.server_client.post.await_args_list] == [
         "/seed_session",
         "/v1/responses",
+        "/discard_session",
     ]
 
 

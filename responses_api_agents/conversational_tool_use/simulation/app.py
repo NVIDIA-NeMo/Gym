@@ -362,7 +362,7 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
                 }
             )
             if self.config.skip_verification:
-                session_needs_discard = False
+                # No /verify runs, so the finally block's /discard_session is what releases the seeded session.
                 return ConversationalToolUseAgentVerifyResponse.model_validate(
                     verify_request.model_dump()
                     | {"reward": float(self.config.skip_verification_reward), "verification_skipped": True}

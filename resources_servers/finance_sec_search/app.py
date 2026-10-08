@@ -239,6 +239,10 @@ def _coerce_stringified_collection(v: Any) -> Any:
     return v
 
 
+class DiscardSessionResponse(BaseModel):
+    discarded: bool
+
+
 class FinanceAgentSearchRequest(BaseModel):
     """Request model for SEC filing search."""
 
@@ -593,12 +597,24 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             )
         return await super().seed_session(body)
 
+    async def discard_session(self, request: Request) -> DiscardSessionResponse:
+        """Release the per-session state that /verify would free, without scoring.
+
+        Agents call this instead of /verify when verification is skipped.
+        """
+        session_id = request.session.get(SESSION_ID_KEY)
+        discarded = self._data_storage.pop(session_id, None) is not None
+        self._session_start_times.pop(session_id, None)
+        return DiscardSessionResponse(discarded=discarded)
+
     def setup_webserver(self) -> FastAPI:
         """Register API routes."""
         app = super().setup_webserver()
 
         self._load_tickers_or_fail()
 
+        # Registered ahead of the /{tool_name} catch-all below so it is not treated as an unknown tool.
+        app.post("/discard_session")(self.discard_session)
         app.post("/sec_filing_search")(self.sec_filing_search)
         app.post("/edgar_search")(self.edgar_search)
         app.post("/parse_html_page")(self.parse_html_page)
