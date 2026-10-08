@@ -316,6 +316,7 @@ class SWEBenchMetrics(BaseModel):
     agent_error_kind: Optional[str] = None
     agent_timed_out: Optional[bool] = None
     eval_timed_out: Optional[bool] = None
+    eval_launch_failed: bool = False
 
     # Memory watchdog signals
     oom_killed: Optional[bool] = None
@@ -2907,6 +2908,10 @@ class RunOpenHandsAgent(BaseModel):
             self._apply_watchdog_stats(metrics, eval_active_command, mode="eval")
             metrics.final_eval_time += time.time()
             metrics.patch_exists = True
+            # Every evaluator writes this fresh per-episode marker before
+            # running setup or model-dependent tests. If it never appeared,
+            # the evaluator failed to start and produced no valid reward.
+            metrics.eval_launch_failed = not self.config.final_eval_apptainer_spinup_timestamp_fpath.exists()
             # Detect wall-clock eval timeout: final_eval_time (elapsed since eval start)
             # reached or exceeded the configured swebench_tests_timeout.
             metrics.eval_timed_out = (
@@ -3090,7 +3095,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if key in provider_specific_fields:
                 final_assistant_message[key] = provider_specific_fields[key]
 
-        if final_assistant_message.get("content") or final_assistant_message.get("tool_calls"):
+        # Empty decoded output can still contain sampled tokens (for example, EOS).
+        if (
+            final_assistant_message.get("content")
+            or final_assistant_message.get("tool_calls")
+            or final_assistant_message.get("generation_token_ids")
+        ):
             messages.append(final_assistant_message)
 
         return messages, tools
@@ -3899,6 +3909,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # 3) Agent itself timed out (wall-clock) — mask regardless of resolved.
         # 4) Memory watchdog killed the agent container (OOM).
         # 5) Memory watchdog killed the eval container.
+        # 6) Evaluator failed before its startup marker; no reward was measured.
         persisted_metrics = SWEBenchMetrics.model_validate(update_and_read_metrics(params.metrics_fpath))
         agent_error_kind = persisted_metrics.agent_error_kind
         eval_timed_out = bool(persisted_metrics.eval_timed_out)
@@ -3908,6 +3919,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         if (
             agent_error_kind in ("max_iteration", "context_window")
             or eval_timed_out
+            or persisted_metrics.eval_launch_failed
             or agent_timed_out
             or oom_killed
             or eval_oom_killed

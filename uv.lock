@@ -2796,7 +2796,7 @@ requires-dist = [
     { name = "defusedxml", marker = "extra == 'dev'", specifier = ">=0.7.1" },
     { name = "devtools" },
     { name = "e2b", marker = "extra == 'sandbox'", specifier = ">=2.36.0,<3.0.0" },
-    { name = "fastapi" },
+    { name = "fastapi", specifier = "!=0.142.*" },
     { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.18" },
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "gitpython", marker = "extra == 'wandb'", specifier = ">=3.1.61" },

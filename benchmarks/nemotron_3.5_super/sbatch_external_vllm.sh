@@ -428,17 +428,17 @@ else
     worker_pids=()
 
     cleanup_vllm() {
-        local status=\$?
+        local status=\$? child_pid
+        local -a child_pids=()
         trap - EXIT INT TERM
-        if (( \${#worker_pids[@]} )); then
-            kill "\${worker_pids[@]}" 2>/dev/null || true
-        fi
-        if [[ -n "\$router_pid" ]]; then
-            kill "\$router_pid" 2>/dev/null || true
-            wait "\$router_pid" 2>/dev/null || true
-        fi
-        if (( \${#worker_pids[@]} )); then
-            wait "\${worker_pids[@]}" 2>/dev/null || true
+        # A signal can arrive after a child starts but before its PID is recorded.
+        # Bash's job table includes that child, as well as the router and Mooncake.
+        while IFS= read -r child_pid; do
+            child_pids+=("\$child_pid")
+        done < <(jobs -p)
+        if (( \${#child_pids[@]} )); then
+            kill "\${child_pids[@]}" 2>/dev/null || true
+            wait "\${child_pids[@]}" 2>/dev/null || true
         fi
         cleanup_mooncake
         exit "\$status"
