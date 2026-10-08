@@ -117,6 +117,7 @@ class ChemCoTBenchResourcesServer(SimpleResourcesServer):
             return ChemCoTBenchVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
+                mask_sample=True,
                 scoring_error="molopt_disabled",
                 failure_reason="Enable enable_molopt to score molecular optimization tasks",
             )
@@ -141,6 +142,7 @@ class ChemCoTBenchResourcesServer(SimpleResourcesServer):
             return ChemCoTBenchVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
+                mask_sample=True,
                 scoring_error="timeout",
                 failure_reason="ChemCoTBench upstream scoring timed out",
             )
@@ -148,6 +150,7 @@ class ChemCoTBenchResourcesServer(SimpleResourcesServer):
             return ChemCoTBenchVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
+                mask_sample=True,
                 scoring_error=error.code if isinstance(error, ScoringWorkerError) else "upstream_error",
                 failure_reason=str(error)[-2000:],
             )
@@ -155,6 +158,7 @@ class ChemCoTBenchResourcesServer(SimpleResourcesServer):
             return ChemCoTBenchVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
+                mask_sample=True,
                 scoring_error="invalid_result",
                 failure_reason=f"Invalid upstream scorer result: {type(error).__name__}",
             )

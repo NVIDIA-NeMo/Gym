@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.task_data import load_task_data_schema, validate_jsonl_rows
@@ -83,6 +84,7 @@ async def server(monkeypatch, tmp_path):
 async def test_empty_output(server, text):
     result = await server.verify(request(text))
     assert result.reward == 0 and result.parse_ok is False and result.scoring_error is None
+    assert not result.mask_sample
 
 
 async def test_subprocess_protocol(server, monkeypatch):
@@ -120,12 +122,40 @@ async def test_worker_failure(server, monkeypatch, failure, error):
     monkeypatch.setattr(server._pool, "score", AsyncMock(side_effect=failure))
     result = await server.verify(request("Answer: invalid"))
     assert result.reward == 0 and result.scoring_error == error and result.failure_reason
+    assert result.mask_sample
 
 
 async def test_invalid_worker_response(server, monkeypatch):
     monkeypatch.setattr(server._pool, "score", AsyncMock(return_value={"reward": "bad"}))
     result = await server.verify(request("Answer: invalid"))
     assert result.scoring_error == "invalid_result"
+    assert result.mask_sample and result.failure_reason
+
+
+async def test_disabled_optimization_is_masked(server):
+    body = request("Answer: CCCC")
+    body.verifier_metadata = TaskData(
+        id="synthetic", task_family="mol_opt", subtask="logp", upstream_record={"src": "CCO", "tgt": "CCCC"}
+    )
+    result = await server.verify(body)
+    assert result.reward == 0 and result.mask_sample
+    assert result.scoring_error == "molopt_disabled" and result.failure_reason
+
+
+async def test_aggregation_excludes_failures_but_keeps_wrong_answers(server, monkeypatch):
+    monkeypatch.setattr(
+        server._pool, "score", AsyncMock(side_effect=[{"reward": 1.0}, TimeoutError(), {"reward": 0.0}])
+    )
+    rows = []
+    for index in range(3):
+        result = await server.verify(request("Answer: CCO"))
+        rows.append(result.model_dump() | {"_ng_task_index": index, "_ng_rollout_index": 0})
+    assert not rows[0]["mask_sample"] and not rows[2]["mask_sample"]
+    for selected, expected_mean, measured in [(rows[:2], 1.0, 1), (rows, 0.5, 2)]:
+        metrics = (await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=selected))).agent_metrics
+        assert metrics["mean/reward"] == expected_mean
+        assert metrics["coverage/measured_rollouts"] == measured
+        assert metrics["coverage/masked_rollouts"] == 1
 
 
 async def test_cancellation_propagates(server, monkeypatch):
@@ -277,6 +307,7 @@ async def test_real_upstream_task_specific_predictions(subtask, reference, text,
         assert result.scoring_error is None, result.failure_reason
         assert result.predicted_answer == predicted
         assert result.reward == reward
+        assert not result.mask_sample
     finally:
         await server.close()
 
