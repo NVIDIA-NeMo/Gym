@@ -2072,7 +2072,7 @@ class OpenSandboxProvider:
         )
         headers = dict(endpoint.headers)
         api_key = self._resolve_api_key()
-        if api_key:
+        if self._connection.use_server_proxy and api_key:
             headers["OPEN-SANDBOX-API-KEY"] = api_key
         return f"{self._connection.protocol}://{endpoint.endpoint}", headers, request_timeout_s
 
