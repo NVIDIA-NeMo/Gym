@@ -92,6 +92,10 @@ On 2026-10-08 all 2,278 supported rows came back unresolved with an empty patch 
 pytest ran on the touched files in every sandbox; every FAIL_TO_PASS test failed on the base commit), so no
 row in `data/supported_instance_ids.txt` scores a pass without a fix.
 
+`data/example_rollouts.jsonl` holds the five tasks of `data/example.jsonl` graded through this same path with their
+golden patch (one row per task, `reward` 1.0), which is what the repository's data validation expects next to the
+example metrics.
+
 ## Running an agent
 
 ```bash
