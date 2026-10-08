@@ -65,4 +65,4 @@ jobs:
           BASE_SHA: ${{ fromJSON(steps.pr.outputs.pr-info).base.sha }}
           HEAD_SHA: ${{ github.sha }}
           GUARDWORDS_FILE: ${{ github.workspace }}/.guardwords/guardwords.yaml
-        run: python3 scripts/ci/check_private_references.py --patterns "$GUARDWORDS_FILE" --base "$BASE_SHA" --head "$HEAD_SHA"
+        run: python3 scripts/ci/check_guardwords.py --patterns "$GUARDWORDS_FILE" --base "$BASE_SHA" --head "$HEAD_SHA"
