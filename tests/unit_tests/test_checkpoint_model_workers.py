@@ -312,3 +312,88 @@ async def test_worker_messages_carry_what_the_checkpoint_writer_carries() -> Non
     message = await _read_frame(reader)
 
     assert message["logprobs"] == [-math.inf, -0.5] and math.isnan(message["nan"]) and message["hash"] == 2**70
+
+
+async def test_a_message_that_cannot_be_sent_or_is_never_answered_is_a_typed_unavailable_error() -> None:
+    from nemo_gym._checkpoint.model_workers import CoordinatorUnavailableError, _Channel
+
+    class StuckWriter:
+        def write(self, data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            # The socket buffer is full and the peer never reads.
+            await asyncio.Event().wait()
+
+    async def handler(kind, body):
+        return {}
+
+    channel = _Channel(asyncio.StreamReader(), StuckWriter(), handler)
+    started = time.monotonic()
+    with pytest.raises(CoordinatorUnavailableError):
+        # Bounded from outside too, so a call that ignores its own timeout fails here instead of hanging.
+        await asyncio.wait_for(channel.call("claim_cut", {"capture_key": "r-a1"}, timeout=0.1), 2)
+
+    # Bounded by the timeout, so a cut claim falls back to regenerating instead of failing the call.
+    assert time.monotonic() - started < 1
+
+
+async def test_restore_is_refused_after_a_worker_left_even_if_its_replacement_is_fresh(tmp_path: Path) -> None:
+    directory = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
+    socket_path = os.path.join(directory, "policy.sock")
+    coordinator = PolicyCoordinator(
+        FileLineageStore(tmp_path / "ledger"),
+        expected_workers=1,
+        instance_name="policy",
+        lease_grace_seconds=60,
+        socket_path=socket_path,
+    )
+    server = await coordinator.serve()
+    fresh = worker_link(socket_path)
+    try:
+        served = worker_link(socket_path)
+        await served.connect()
+        served.gate.enter("r")
+        # uvicorn replaces the worker that served calls with a fresh one.
+        await served.disconnect()
+        await asyncio.sleep(0.05)
+        await fresh.connect()
+        with pytest.raises(ControlError, match="has left"):
+            coordinator.participant._check_restorable()
+    finally:
+        await fresh.disconnect()
+        server.close()
+        await server.wait_closed()
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+async def test_a_restored_attempt_any_worker_started_is_no_longer_pending(tmp_path: Path) -> None:
+    async with deployment(2, ledger=FileLineageStore(tmp_path / "ledger")) as (coordinator, [first, second]):
+        participant = coordinator.participant
+        # A restore closes every worker, which report that they have served nothing, then installs.
+        await participant.close_admission(CheckpointRequest(**control("r1")))
+        await participant.install([], [EpisodeId(rollout_id="r"), EpisodeId(rollout_id="s")])
+        await participant.open_admission()
+        # The replacement of r starts on the second worker; s's replacement has not started anywhere.
+        second.gate.enter("r-a1")
+
+        pending = await participant.restored_pending()
+
+    assert [episode_id.capture_key for episode_id in pending] == ["s-a1"]
+
+
+async def test_a_reopen_does_not_make_a_started_restored_attempt_pending_again(tmp_path: Path) -> None:
+    async with deployment(2, ledger=FileLineageStore(tmp_path / "ledger")) as (coordinator, [first, second]):
+        participant = coordinator.participant
+        await participant.close_admission(CheckpointRequest(**control("r1")))
+        await participant.install([], [EpisodeId(rollout_id="r"), EpisodeId(rollout_id="s")])
+        await participant.open_admission()
+        # The replacement of r starts on the second worker.
+        second.gate.enter("r-a1")
+        # A checkpoint closes and is resumed without a commit, so nothing asked the workers in between.
+        await participant.close_admission(CheckpointRequest(**control("c1")))
+        await participant.open_admission()
+
+        pending = await participant.restored_pending()
+
+    assert [episode_id.capture_key for episode_id in pending] == ["s-a1"]

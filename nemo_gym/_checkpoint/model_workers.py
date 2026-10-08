@@ -40,6 +40,7 @@ from nemo_gym._checkpoint.control import (
     PrepareReport,
     RetiredAttempts,
     dispatch_control,
+    next_attempt,
 )
 from nemo_gym._checkpoint.errors import ControlError
 from nemo_gym._checkpoint.model import (
@@ -58,6 +59,7 @@ from nemo_gym._checkpoint.model import (
     retained_staging_keys,
     retire_ledgers,
     staging_keys_by_episode,
+    with_scope,
 )
 from nemo_gym.episode_types import EpisodeId
 
@@ -132,9 +134,13 @@ class _Channel:
         future = asyncio.get_running_loop().create_future()
         self._pending[message_id] = future
         try:
-            await self._send({"id": message_id, "kind": kind, "body": body})
+            # The send is bounded too: a stuck drain() must not hold a caller past its timeout.
             async with asyncio.timeout(timeout):
+                await self._send({"id": message_id, "kind": kind, "body": body})
                 return await future
+        except (TimeoutError, ConnectionError, RuntimeError) as error:
+            # Typed, so callers that fall back on a lost coordinator, such as a cut claim, do so here too.
+            raise CoordinatorUnavailableError(f"checkpoint message {kind!r} failed: {error!r}") from error
         finally:
             self._pending.pop(message_id, None)
 
@@ -241,7 +247,15 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
         self.request: Optional[CheckpointRequest] = None
         # A worker disconnected while admission was closed: its undelivered calls are unknown.
         self.lost_worker = False
+        # A worker left since this server started: what it served, and which restored attempts it started, are
+        # unknown, so restore is refused and no restored attempt counts as pending any more.
+        self.worker_left = False
         self.restored_cuts: dict[str, GenerationCutRecord] = {}
+        # Restored attempts, by capture key, that no worker had started as of the last check.
+        self.restored_targets: set[str] = set()
+        # Whether the next reopen gives the workers the targets of an install.
+        # Only an install adds targets; a later reopen must not give back one a worker has started since.
+        self.targets_installed = False
 
     # -- workers --------------------------------------------------------------------------------
 
@@ -253,13 +267,17 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
             "generation": self.generation,
             "request": self.request.model_dump(mode="json") if self.request is not None else None,
             "restored_keys": sorted(self.restored_cuts),
+            "restored_targets": sorted(self.restored_targets),
             # A worker that starts after a retire must refuse its late requests too.
             "retired": self.retired.marks(),
         }
 
     async def leave(self, worker_index: int) -> None:
-        if self.workers.pop(worker_index, None) is not None and not self.accepting:
-            self.lost_worker = True
+        if self.workers.pop(worker_index, None) is not None:
+            self.worker_left = True
+            self.restored_targets.clear()
+            if not self.accepting:
+                self.lost_worker = True
         await self.notify()
 
     async def receive_report(self, worker_index: int, generation: int, seq: int, report: GateReport) -> None:
@@ -316,9 +334,11 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
         for worker in self.workers.values():
             worker.report = None
         try:
+            targets = sorted(self.restored_targets) if self.targets_installed else None
+            self.targets_installed = False
             await self._broadcast(
                 "open",
-                {"restored_keys": sorted(self.restored_cuts)},
+                {"restored_keys": sorted(self.restored_cuts), "restored_targets": targets},
                 timeout=_MESSAGE_TIMEOUT_SECONDS,
             )
         except ControlError:
@@ -342,6 +362,7 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
     async def retire(self, episode_id: EpisodeId) -> None:
         for capture_key in [key for key in self.restored_cuts if covers(episode_id, key)]:
             del self.restored_cuts[capture_key]
+        self.restored_targets = {key for key in self.restored_targets if not covers(episode_id, key)}
         await self._broadcast(
             "retire", {"episode_id": episode_id.model_dump(mode="json")}, timeout=_MESSAGE_TIMEOUT_SECONDS
         )
@@ -372,19 +393,37 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
         )
 
     def restore_records(self, records: list[CheckpointRecord]) -> None:
-        self._check_restorable()
-        self.restored_cuts.update(import_model_records(self.ledger, records))
+        raise NotImplementedError("the policy participant restores through install(), which needs the restore scope")
 
-    async def install(self, records: list[CheckpointRecord]) -> None:
+    async def install(self, records: list[CheckpointRecord], scope: list[EpisodeId]) -> None:
         self._check_restorable()
-        self.restored_cuts.update(await asyncio.to_thread(import_model_records, self.ledger, records))
+        imported = await asyncio.to_thread(import_model_records, self.ledger, with_scope(records, scope, self.ledger))
+        self.restored_cuts.update(imported)
+        self.restored_targets = {next_attempt(episode_id).capture_key for episode_id in scope}
+        self.targets_installed = True
         # The restored attempts continue as the next attempt, so their own ledgers are no longer used.
-        await retire_ledgers(self.ledger, [record.episode_id for record in records])
+        await retire_ledgers(self.ledger, scope)
 
     async def restored_pending(self) -> list[EpisodeId]:
-        return [EpisodeId.from_capture_key(key) for key in self.restored_cuts]
+        if self.restored_targets:
+            # An attempt any worker started is no longer pending.
+            replies = await self._broadcast("restored_pending", {}, timeout=_MESSAGE_TIMEOUT_SECONDS)
+            for reply in replies.values():
+                self.restored_targets &= set(reply["targets"])
+        return [EpisodeId.from_capture_key(key) for key in sorted(self.restored_targets)]
+
+    async def delete_restored(self, episode_id: EpisodeId) -> None:
+        """Delete a restored attempt no worker started, without the fence a retire leaves: the controller may still
+        start the rollout over as this attempt."""
+        key = episode_id.capture_key
+        self.restored_targets.discard(key)
+        self.restored_cuts.pop(key, None)
+        if self.ledger is not None:
+            await self.ledger.delete([key])
 
     def _check_restorable(self) -> None:
+        if self.worker_left:
+            raise ControlError("model restore requires freshly started policy workers; a worker has left since start")
         if any(worker.report is None or worker.report.served for worker in self.workers.values()):
             raise ControlError("model restore requires freshly started policy workers; a worker has served calls")
 
@@ -573,6 +612,7 @@ class PolicyWorkerLink:
         self._reader_task.add_done_callback(self._connection_ended)
         state = await self.call("register", {"pid": os.getpid()})
         self.restored_cuts.keys = set(state["restored_keys"])
+        self.gate.restored_targets = set(state["restored_targets"])
         self.retired.update(state["retired"])
         if not state["accepting"]:
             # A checkpoint is open: close at once and report, like every other worker did.
@@ -618,8 +658,12 @@ class PolicyWorkerLink:
             return self._numbered_report()
         if kind == "open":
             self.restored_cuts.keys = set(body["restored_keys"])
+            if body["restored_targets"] is not None:
+                self.gate.restored_targets = set(body["restored_targets"])
             self.gate.open()
             return {}
+        if kind == "restored_pending":
+            return {"targets": sorted(self.gate.restored_targets)}
         if kind == "snapshot":
             return self.gate.snapshot().model_dump(mode="json")
         if kind == "mark":

@@ -1085,9 +1085,9 @@ class FileLineageStore(IncrementalLineageStore):
         during or after the import only means importing again. A later append to a ledger syncs its file.
         """
         present = {entry.name for entry in os.scandir(self._ledger_root)} if self._ledger_root.exists() else set()
-        stale = sorted(
-            {key for rollout_id in ledgers for key in [rollout_id, *self._later_attempts(rollout_id, present)]}
-        )
+        # Parsed once, so finding each restored rollout's later attempts costs a lookup, not a scan of the root.
+        attempts = _attempts_by_rollout(present)
+        stale = sorted({key for rollout_id in ledgers for key in [rollout_id, *_later_attempts(rollout_id, attempts)]})
         if stale:
             self._remove(stale, unretire=True)
             self._store.delete_now(stale)
@@ -1111,18 +1111,25 @@ class FileLineageStore(IncrementalLineageStore):
         if ledgers:
             self._fsync_ledger_root()
 
-    def _later_attempts(self, capture_key: str, present: set[str]) -> list[str]:
-        """Capture keys with files in ``present`` of the same rollout as ``capture_key`` and a later attempt."""
-        episode = EpisodeId.from_capture_key(capture_key)
-        later = set()
-        for name in present:
-            suffix = next((suffix for suffix in _CAPTURE_FILE_SUFFIXES if name.endswith(suffix)), None)
-            if suffix is None or not name.startswith(f"{episode.rollout_id}-a"):
-                continue
-            try:
-                candidate = EpisodeId.from_capture_key(name.removesuffix(suffix))
-            except ValueError:
-                continue
-            if candidate.rollout_id == episode.rollout_id and candidate.attempt > episode.attempt:
-                later.add(candidate.capture_key)
-        return sorted(later)
+
+def _attempts_by_rollout(names: set[str]) -> dict[str, set[EpisodeId]]:
+    """The episode attempts with capture files among ``names``, grouped by rollout."""
+    attempts: dict[str, set[EpisodeId]] = {}
+    for name in names:
+        suffix = next((suffix for suffix in _CAPTURE_FILE_SUFFIXES if name.endswith(suffix)), None)
+        if suffix is None:
+            continue
+        try:
+            episode = EpisodeId.from_capture_key(name.removesuffix(suffix))
+        except ValueError:
+            continue
+        attempts.setdefault(episode.rollout_id, set()).add(episode)
+    return attempts
+
+
+def _later_attempts(capture_key: str, attempts: dict[str, set[EpisodeId]]) -> list[str]:
+    """Capture keys with files of the same rollout as ``capture_key`` and a later attempt."""
+    episode = EpisodeId.from_capture_key(capture_key)
+    return sorted(
+        other.capture_key for other in attempts.get(episode.rollout_id, ()) if other.attempt > episode.attempt
+    )

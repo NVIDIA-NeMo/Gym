@@ -262,9 +262,9 @@ async def test_undelivered_call_is_cut_and_continued_by_the_reissued_call(tmp_pa
 
     restored_ledger = FileLineageStore(tmp_path / "after")
     restored = PolicyModelParticipant(restored_ledger, server_name="policy")
-    await ParticipantControlPlane(restored, instance_name="policy", lease_grace_seconds=60).restore(
-        _restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}])
-    )
+    restored_controller = ParticipantControlPlane(restored, instance_name="policy", lease_grace_seconds=60)
+    await restored_controller.restore(_restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
+    await restored_controller.resume(CheckpointRequest(**control("r1")))
     admission = CaptureAdmission(rollout_id="r-a1", model_call_id="c3", mode="text")
     other_request = CaptureContext(rollout_id="r-a1", model_call_id="c3", token_sink=None, request_items=[USER_3])
     reissued = CaptureContext(
@@ -274,10 +274,16 @@ async def test_undelivered_call_is_cut_and_continued_by_the_reissued_call(tmp_pa
     assert prepared["report"]["counts"] == {"inflight": 1, "held": 1, "cut": 1, "cut_failed": 0, "cut_skipped": 0}
     assert [inventory.active_prefixes[0].model_call_id for _, inventory in requests] == ["c2"]
     assert [row["model_call_id"] for row in restored_ledger.export_rows("r-a1")] == ["c1"]
-    assert restored.continue_restored_cut(other_request, admission).generation_cut is None
-    continued = restored.continue_restored_cut(reissued, admission).generation_cut
+    ticket = restored.gate.enter("r-a1")
+    hook = restored.gate.admission_hook(ticket)
+    assert hook(other_request, admission).generation_cut is None
+    continued = hook(reissued, admission).generation_cut
     assert (continued.source_model_call_id, continued.staging_keys) == ("c2", ("__generation_cut__/c2",))
-    assert restored.continue_restored_cut(reissued, admission).generation_cut is None
+    # The cut is kept until the call delivers its response, then freed.
+    await restored.gate.deliver_response(ticket)
+    await restored.gate.exit(ticket)
+    later = restored.gate.enter("r-a1")
+    assert restored.gate.admission_hook(later)(reissued, admission).generation_cut is None
 
 
 async def test_failed_cut_regenerates_instead_of_blocking(tmp_path: Path) -> None:
@@ -389,8 +395,8 @@ async def test_each_model_server_continues_only_its_own_restored_cut() -> None:
     )
 
     assert responses == [{"hook": True}, {"hook": True}]
-    assert second.continue_restored_cut(context, admission).generation_cut is None
-    assert first.continue_restored_cut(context, admission).generation_cut == continuation
+    assert second.gate.admission_hook(second.gate.enter("r"))(context, admission).generation_cut is None
+    assert first.gate.admission_hook(first.gate.enter("r"))(context, admission).generation_cut == continuation
 
 
 async def test_a_restored_cut_not_yet_reused_survives_the_next_checkpoint(tmp_path: Path) -> None:
@@ -758,3 +764,130 @@ def test_a_chain_of_restores_keeps_each_row_staged_under_its_own_attempt() -> No
         failure,
         {"model_call_id": "c2", "staging_key": "r-a1/c2", "capture_key": "r-a1"},
     ]
+
+
+def _restored_cut_checkpoint(directory: Path) -> None:
+    """A checkpoint of rollout r with one delivered call and an undelivered call that was cut."""
+    from nemo_gym._checkpoint.model import GenerationCutRecord, ModelRecord
+    from nemo_gym._checkpoint.store import write_participant_state
+
+    continuation = GenerationCutContinuation(
+        source_capture_key="r",
+        source_model_call_id="c2",
+        staging_keys=("__generation_cut__/c2",),
+        prefix_token_count=3,
+        prefix_digest="d" * 64,
+        effective_output_limit=10,
+    )
+    cut = GenerationCutRecord(model_call_id="c2", request_digest="e" * 64, continuation=continuation)
+    record = ModelRecord(episode_id=EpisodeId(rollout_id="r"), rows=[{"model_call_id": "c1"}], generation_cuts=[cut])
+    write_participant_state(
+        directory, kind="model", instance="policy", checkpoint_id="c0", records=[record.to_json_record()]
+    )
+
+
+async def test_a_commit_that_no_longer_names_a_started_replacement_leaves_its_ledger_alone(tmp_path: Path) -> None:
+    _restored_cut_checkpoint(tmp_path / "ckpt")
+    ledger, participant, controller = await _ledger_participant(tmp_path / "ledger")
+    await controller.restore(_restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
+    await controller.resume(CheckpointRequest(**control("r1")))
+    # The replacement starts; its re-issued call renders differently, so the restored cut is not used.
+    participant.gate.enter("r-a1")
+    ledger.import_rows_many({"r-a1": [{"model_call_id": "c1"}, {"model_call_id": "replacement-call"}]})
+
+    # The controller stops naming a restored rollout once it has dispatched it.
+    await controller.prepare(CheckpointRequest(**control("c2")))
+    await controller.commit(_commit_request("c2", tmp_path / "ckpt2", []))
+
+    assert [row["model_call_id"] for row in ledger.export_rows("r-a1")] == ["c1", "replacement-call"]
+    assert not (tmp_path / "ledger" / "r-a1.lineage.retired").exists()
+
+
+async def test_a_commit_deletes_a_restored_attempt_nothing_started_without_fencing_it(tmp_path: Path) -> None:
+    _restored_cut_checkpoint(tmp_path / "ckpt")
+    ledger, participant, controller = await _ledger_participant(tmp_path / "ledger")
+    await controller.restore(_restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
+    await controller.resume(CheckpointRequest(**control("r1")))
+
+    await controller.prepare(CheckpointRequest(**control("c2")))
+    await controller.commit(_commit_request("c2", tmp_path / "ckpt2", []))
+
+    # Gone, and not fenced: the controller may still start the rollout over as r-a1.
+    assert ledger.export_rows("r-a1") == [] and participant._restored_cuts == {}
+    assert not (tmp_path / "ledger" / "r-a1.lineage.retired").exists()
+    assert await participant.restored_pending() == []
+
+
+async def test_restoring_again_clears_a_dead_execution_of_an_in_scope_episode_without_a_record(tmp_path: Path) -> None:
+    ledger, participant, controller = await _ledger_participant(tmp_path / "before")
+    ledger.import_rows_many({"r": [{"model_call_id": "c1"}]})
+    await controller.prepare(CheckpointRequest(**control()))
+    # Episode e is continued but made no calls, so the model has no record of it.
+    await controller.commit(_commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}, {"rollout_id": "e"}]))
+
+    after = FileLineageStore(tmp_path / "after")
+    # What an earlier restore's replacement of e wrote before Gym crashed again.
+    after.import_rows_many({"e-a1": [{"model_call_id": "dead"}]})
+    restored = PolicyModelParticipant(after)
+    await ParticipantControlPlane(restored, instance_name="policy", lease_grace_seconds=60).restore(
+        _restore_request("r2", tmp_path / "ckpt", [{"rollout_id": "r"}, {"rollout_id": "e"}])
+    )
+
+    assert after.export_rows("e-a1") == []
+    assert [row["model_call_id"] for row in after.export_rows("r-a1")] == ["c1"]
+
+
+async def test_untagged_calls_neither_break_a_retire_nor_survive_as_untyped_errors() -> None:
+    participant = PolicyModelParticipant()
+    # An eval, a judge, or a health probe carries no rollout prefix.
+    untagged = participant.gate.enter("")
+    stopped = asyncio.Event()
+
+    async def tagged_call() -> None:
+        participant.gate.enter("r")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    task = asyncio.create_task(tagged_call())
+    await asyncio.sleep(0)
+    await participant.retire(EpisodeId(rollout_id="r"))
+
+    assert stopped.is_set() and task.cancelled() and untagged in participant.gate.tickets
+    for malformed in ("bad!id", "-a1"):
+        with pytest.raises(ControlError) as refused:
+            participant.gate.admit(malformed)
+        assert refused.value.status_code == 400 and refused.value.code == "invalid_rollout_id"
+
+
+async def test_a_ticket_leaving_is_reported_even_if_giving_back_its_cut_fails() -> None:
+    participant = PolicyModelParticipant()
+    reported = []
+
+    async def on_change() -> None:
+        reported.append(True)
+
+    async def failing_settle(ticket) -> None:
+        raise ControlError("coordinator unavailable")
+
+    participant.gate.on_change = on_change
+    participant.gate.restored_cuts.settle = failing_settle
+    ticket = participant.gate.enter("r")
+    with pytest.raises(ControlError):
+        await participant.gate.exit(ticket)
+
+    assert reported and ticket not in participant.gate.tickets
+
+
+async def test_a_hung_cut_leaves_the_rest_of_the_prepare_deadline_for_the_stages_after_it() -> None:
+    async def hung(backend: str, inventory: GenerationCutInventory) -> GenerationCutReceipt:
+        await asyncio.Event().wait()
+
+    participant = PolicyModelParticipant(server_name="policy", cut_requester=hung)
+    _held_call(participant, "r", "c1", [USER_1])
+    started = time.monotonic()
+    await participant.gate.close(CheckpointRequest(**{**control(), "deadline_ts": time.time() + 1.0}))
+
+    assert time.monotonic() - started < 0.7
+    assert participant.gate.report().cut_failed == 1

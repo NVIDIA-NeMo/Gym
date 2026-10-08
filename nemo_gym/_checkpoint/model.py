@@ -44,7 +44,7 @@ from nemo_gym._checkpoint.control import (
     RetiredAttempts,
     next_attempt,
 )
-from nemo_gym._checkpoint.errors import AdmissionClosedError
+from nemo_gym._checkpoint.errors import AdmissionClosedError, InvalidRolloutIdError
 from nemo_gym._checkpoint.generation_cut import (
     GENERATION_CUT_ROUTE,
     GenerationCutInventory,
@@ -182,11 +182,17 @@ class LocalRestoredCuts:
         record = self.records.get(capture_key)
         if record is None or record.request_digest != request_digest:
             return None
-        del self.records[capture_key]
+        # Kept until the call delivers its response: a call still undelivered at the next checkpoint, whose own cut
+        # fails, continues from this one again.
+        if ticket is not None:
+            ticket.claimed_cut, ticket.claimed_cut_used = record, True
         return record
 
     async def settle(self, ticket: "_Ticket") -> None:
-        return None
+        record, ticket.claimed_cut = ticket.claimed_cut, None
+        if record is not None and ticket.claimed_cut_used and ticket.response_started:
+            if self.records.get(ticket.capture_key) is record:
+                del self.records[ticket.capture_key]
 
 
 @dataclass(eq=False)
@@ -288,23 +294,34 @@ class PolicyGate:
         self.tickets: set[_Ticket] = set()
         # Restore expects a freshly started server: a ledger this process wrote may belong to a live episode.
         self.served = False
+        # Restored attempts no call has reached here yet, by capture key.
+        self.restored_targets: set[str] = set()
 
     def admit(self, capture_key: Optional[str]) -> None:
         if capture_key is not None:
-            self.retired.check(EpisodeId.from_capture_key(capture_key))
+            try:
+                episode_id = EpisodeId.from_capture_key(capture_key)
+            except ValueError as error:
+                raise InvalidRolloutIdError(f"{capture_key!r} is not a valid rollout id") from error
+            self.retired.check(episode_id)
         if not self.accepting:
             raise AdmissionClosedError("policy model admission is closed for a checkpoint")
 
     def enter(self, capture_key: str) -> _Ticket:
         ticket = _Ticket(gate=self, capture_key=capture_key, task=asyncio.current_task())
         self.served = True
+        # The attempt has started here: a commit that no longer names it must not delete its ledger.
+        self.restored_targets.discard(capture_key)
         self.tickets.add(ticket)
         return ticket
 
     async def exit(self, ticket: _Ticket) -> None:
         self.tickets.discard(ticket)
-        await self.restored_cuts.settle(ticket)
-        await self.on_change()
+        try:
+            await self.restored_cuts.settle(ticket)
+        finally:
+            # Reported even if giving back a claimed cut fails, or a coordinator keeps a stale report.
+            await self.on_change()
 
     async def deliver_response(self, ticket: _Ticket) -> None:
         """Let a response start, holding it until resume while a checkpoint is open."""
@@ -345,7 +362,9 @@ class PolicyGate:
         tasks = [
             ticket.task
             for ticket in list(self.tickets)
-            if covers(episode_id, ticket.capture_key)
+            # An untagged call (an eval, a judge, a health probe) belongs to no episode.
+            if ticket.capture_key
+            and covers(episode_id, ticket.capture_key)
             and ticket.task is not None
             and ticket.task is not asyncio.current_task()
         ]
@@ -406,7 +425,8 @@ class PolicyGate:
             checkpoint_id=request.checkpoint_id, server_name=self.server_name, active_prefixes=list(prefixes.values())
         )
         try:
-            async with asyncio.timeout(max(0.0, request.deadline_ts - time.time())):
+            # Half of what remains: a cut is optional, and the stages after this one need time too.
+            async with asyncio.timeout(max(0.0, request.deadline_ts - time.time()) / 2):
                 receipt = await self.cut_requester(backend, inventory)
             receipt.validate_for(inventory)
             acks = {ack.ticket_id: ack for ack in receipt.prefixes}
@@ -519,6 +539,20 @@ def ledger_removal_refusal(app: Any) -> Optional[str]:
     return None
 
 
+def with_scope(
+    records: list[CheckpointRecord], scope: list[EpisodeId], ledger: Optional[CheckpointableLedger]
+) -> list[ModelRecord]:
+    """``records`` plus an empty record for each in-scope episode without one, so the import also clears what dead
+    executions left for those episodes' next attempts."""
+    if ledger is None:
+        return list(records)
+    recorded = {record.episode_id for record in records}
+    return [
+        *records,
+        *(ModelRecord(episode_id=episode_id, rows=[]) for episode_id in scope if episode_id not in recorded),
+    ]
+
+
 def import_model_records(
     ledger: Optional[CheckpointableLedger], records: list[ModelRecord]
 ) -> dict[str, GenerationCutRecord]:
@@ -592,12 +626,6 @@ class PolicyModelParticipant(CheckpointParticipant):
     def _restored_cuts(self) -> dict[str, GenerationCutRecord]:
         return self._local_cuts.records
 
-    def continue_restored_cut(self, context: CaptureContext, admission: CaptureAdmission) -> CaptureAdmission:
-        """Attach a restored generation cut to the re-issued call it belongs to."""
-        digest = conversation_digest(list(context.request_items or []))
-        record = self._local_cuts.take(None, context.rollout_id, digest)
-        return admission if record is None else admission.model_copy(update={"generation_cut": record.continuation})
-
     async def close_admission(self, request: CheckpointRequest) -> None:
         await self.gate.close(request)
 
@@ -611,7 +639,17 @@ class PolicyModelParticipant(CheckpointParticipant):
         await self.gate.retire(episode_id)
         for capture_key in [key for key in self._restored_cuts if covers(episode_id, key)]:
             del self._restored_cuts[capture_key]
+        self.gate.restored_targets = {key for key in self.gate.restored_targets if not covers(episode_id, key)}
         await retire_ledgers(self.ledger, [episode_id])
+
+    async def delete_restored(self, episode_id: EpisodeId) -> None:
+        """Delete a restored attempt nothing started, without the fence a retire leaves: the controller may still
+        start the rollout over as this attempt."""
+        key = episode_id.capture_key
+        self.gate.restored_targets.discard(key)
+        self._restored_cuts.pop(key, None)
+        if self.ledger is not None:
+            await self.ledger.delete([key])
 
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         if self.ledger is None:
@@ -626,19 +664,20 @@ class PolicyModelParticipant(CheckpointParticipant):
         return await asyncio.to_thread(export_model_records, self.ledger, episode_ids, snapshots, restored)
 
     def restore_records(self, records: list[CheckpointRecord]) -> None:
-        if self.gate.served:
-            raise ControlError("model restore requires a freshly started model server; this one has served calls")
-        self._restored_cuts.update(import_model_records(self.ledger, records))
+        raise NotImplementedError("the policy participant restores through install(), which needs the restore scope")
 
-    async def install(self, records: list[CheckpointRecord]) -> None:
+    async def install(self, records: list[CheckpointRecord], scope: list[EpisodeId]) -> None:
         if self.gate.served:
             raise ControlError("model restore requires a freshly started model server; this one has served calls")
-        self._restored_cuts.update(await asyncio.to_thread(import_model_records, self.ledger, records))
+        self._restored_cuts.update(
+            await asyncio.to_thread(import_model_records, self.ledger, with_scope(records, scope, self.ledger))
+        )
+        self.gate.restored_targets = {next_attempt(episode_id).capture_key for episode_id in scope}
         # The restored attempts continue as the next attempt, so their own ledgers are no longer used.
-        await retire_ledgers(self.ledger, [record.episode_id for record in records])
+        await retire_ledgers(self.ledger, scope)
 
     async def restored_pending(self) -> list[EpisodeId]:
-        return [EpisodeId.from_capture_key(key) for key in self._restored_cuts]
+        return [EpisodeId.from_capture_key(key) for key in sorted(self.gate.restored_targets)]
 
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
         return {
