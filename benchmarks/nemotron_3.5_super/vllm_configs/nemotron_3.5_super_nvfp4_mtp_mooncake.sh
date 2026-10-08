@@ -35,7 +35,7 @@ VLLM_COMMON_ARGS=(
     --mamba-cache-philox-rounds 5
     --mamba-cache-mode align
     --prefix-match-unit 128
-    --enable-mamba-fine-grained-prefix-cache
+    --enable-mamba-shared-prefix-checkpoint
     --kernel-config '{"linear_backend_per_quant":{"fp8_w8a8":"torch"}}'
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel

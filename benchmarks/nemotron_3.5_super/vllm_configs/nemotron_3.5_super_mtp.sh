@@ -39,7 +39,7 @@ VLLM_COMMON_ARGS=(
     --data-parallel-size-local 1
     --tensor-parallel-size 4
     --api-server-count 1
-    --enable-mamba-fine-grained-prefix-cache
+    --enable-mamba-shared-prefix-checkpoint
     --prefix-match-unit 16
 )
 VLLM_PREFILL_ARGS=(
