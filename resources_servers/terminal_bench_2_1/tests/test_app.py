@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import subprocess
+from io import StringIO
 from pathlib import Path
 from shlex import quote
 from shutil import copyfile
@@ -348,14 +349,21 @@ class TestPatchedUpload:
         assert uploads["/tests/test.sh"] == "apt-get update && echo patched\n"
 
     @pytest.mark.parametrize("scripts", [{"test.sh": "echo no installs here\n"}, {"notes.txt": "apt-get update\n"}])
-    async def test_patch_matching_no_script_fails_naming_task_and_pattern(
-        self, tmp_path: Path, scripts: dict[str, str]
+    async def test_patch_matching_no_script_warns_naming_task_and_pattern_and_uploads_unchanged(
+        self, tmp_path: Path, scripts: dict[str, str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         for name, content in scripts.items():
             (tmp_path / name).write_text(content)
+        uploads: dict[str, str] = {}
+        warnings = StringIO()
+        monkeypatch.setattr(terminal_bench_app, "stderr", warnings)
 
-        with pytest.raises(ValueError, match=r"terminal-bench/example: patches matched no \.sh file.*apt-get update"):
-            await _server()._upload_folder(_recording_sandbox({}), tmp_path, "/tests", PATCHES, TASK)
+        await _server()._upload_folder(_recording_sandbox(uploads), tmp_path, "/tests", PATCHES, TASK)
+
+        assert uploads == {f"/tests/{name}": content for name, content in scripts.items()}
+        warning = warnings.getvalue()
+        assert "WARNING: terminal-bench/example: patches matched no .sh file" in warning
+        assert "apt-get update" in warning
 
     async def test_task_without_patches_uploads_unchanged(self, tmp_path: Path) -> None:
         (tmp_path / "test.sh").write_text("apt-get update\n")

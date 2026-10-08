@@ -276,8 +276,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if not local_dirpath.is_absolute():
             local_dirpath = PARENT_DIR / local_dirpath
 
-        # A patch may match any one script in the folder, but must match at least one: an exact-string
-        # patch that matches nothing means the task's scripts changed and the repair is silently not applied.
+        # A patch may match any one script in the folder. One that matches none means the task's scripts changed
+        # (the default benchmark clones upstream unpinned), so warn rather than fail: the stale repair is simply
+        # not applied. A unit test checks that every patch matches the pinned task scripts.
         unmatched = {old for old, _ in patches.get(task_name, [])}
         for file in glob("**", root_dir=str(local_dirpath), recursive=True):
             local_fpath = local_dirpath / file
@@ -292,9 +293,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 await sandbox.upload(local_path=new_local_fpath, remote_path=target_fpath)
 
         if unmatched:
-            raise ValueError(
-                f"{task_name}: patches matched no .sh file under {local_dirpath}; the task scripts may have "
-                f"changed. Unmatched: {sorted(unmatched)}"
+            print(
+                f"WARNING: {task_name}: patches matched no .sh file under {local_dirpath}; the task scripts may have "
+                f"changed, so these repairs were not applied. Unmatched: {sorted(unmatched)}",
+                file=stderr,
             )
 
     async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
