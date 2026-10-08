@@ -17,7 +17,8 @@ if [[ "${1:-}" == __inside_build ]]; then
     command -v python &>/dev/null || ln -sf "$(which python3)" /usr/local/bin/python
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y --no-install-recommends git ca-certificates 2>&1 | tail -5
+    apt-get install -y --no-install-recommends git ca-certificates curl build-essential pkg-config perl \
+        2>&1 | tail -5
     pip install uv 2>&1 | tail -3
 
     echo ""; echo ">>> vLLM @ ${VLLM_BRANCH}"
@@ -48,6 +49,38 @@ if [[ "${1:-}" == __inside_build ]]; then
     uv pip install --system . --prerelease=allow --torch-backend=auto \
         --index-strategy unsafe-best-match 2>&1
 
+    # VLLM_USE_PRECOMPILED also copies Rust artifacts from the wheel. Python-only
+    # launcher changes can still break their CLI/protocol, so rebuild Rust from
+    # this checkout AFTER installing the wheel (which would overwrite the build).
+    uv pip install --system 'setuptools>=77.0.3,<81' 'setuptools-scm>=9.2.0' 'setuptools-rust>=1.9.0' wheel
+    bash tools/build_rust.sh
+    installed_vllm_dir=$(cd / && python3 -c 'import vllm; from pathlib import Path; print(Path(vllm.__file__).parent)')
+    install -m 755 vllm/vllm-rs "${installed_vllm_dir}/vllm-rs"
+    for rust_extension in vllm/_rust_*.so; do
+        [[ -f "$rust_extension" ]] || continue
+        install -m 755 "$rust_extension" "${installed_vllm_dir}/"
+    done
+
+    # Check the installed executable, not a source-tree copy. This catches the
+    # --input-address vs --input-listener-fd failure before publishing an image.
+    python3 - "${installed_vllm_dir}" <<'PY'
+import ast
+import subprocess
+import sys
+from pathlib import Path
+
+package = Path(sys.argv[1])
+tree = ast.parse((package / "v1/utils.py").read_text())
+manager = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "RustFrontendProcessManager")
+flags = {node.value for node in ast.walk(manager)
+         if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("--")}
+help_text = subprocess.check_output([str(package / "vllm-rs"), "frontend", "--help"], text=True)
+missing = flags - set(help_text.split())
+if missing:
+    raise SystemExit(f"Installed Rust frontend does not support Python launcher flags: {sorted(missing)}")
+print("Rust frontend accepts the installed Python launcher's flags")
+PY
+
     echo ""; echo ">>> Verify"
     python3 -c 'import torch, vllm
 from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -75,6 +108,7 @@ build_script=super-vl-evals-v0271-thin
 base_image=${BASE_IMAGE}
 vllm=${VLLM_BRANCH} @ ${vllm_sha}
 vllm_precompiled_wheel=${VLLM_PRECOMPILED_WHEEL_COMMIT}
+vllm_rust_source=${vllm_sha}
 base_image_flashinfer_and_cubins=unchanged
 omitted=custom-flashinfer,custom-cubins,cubin-download,cubin-rebuild
 EOF

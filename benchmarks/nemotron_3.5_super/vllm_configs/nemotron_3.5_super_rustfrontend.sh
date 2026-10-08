@@ -23,6 +23,10 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 # @bxyu-nvidia: V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
 export VLLM_USE_V2_MODEL_RUNNER=0
 
+# Requires vllm-rs built from the same source as the installed Python vLLM.
+# custom_vllm_version.sh rebuilds it even when reusing precompiled CUDA kernels.
+# A matching binary mounted into the container can override the bundled one via
+# VLLM_RUST_FRONTEND_PATH=/path/to/vllm-rs.
 export VLLM_USE_RUST_FRONTEND=1
 
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
