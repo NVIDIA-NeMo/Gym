@@ -2786,7 +2786,7 @@ codec = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp", specifier = ">=3.14.3" },
+    { name = "aiohttp", specifier = ">=3.14.4" },
     { name = "anthropic", specifier = "<=0.109.2" },
     { name = "anyio", specifier = ">=4.15.1" },
     { name = "boto3", marker = "extra == 'sandbox'", specifier = ">=1.34" },
