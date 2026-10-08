@@ -361,3 +361,33 @@ def test_admission_timeout_reports_its_stage_before_running_the_episode() -> Non
     assert response.failure.failure_reason == "Episode admission timed out"
     assert response.failure.stage == "admission"
     assert response.failure.terminal is False
+
+
+@pytest.mark.parametrize("records_boundaries", [False, True])
+async def test_the_episodes_of_a_protocol_without_boundaries_are_restarts(records_boundaries: bool) -> None:
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant
+
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class _Blocking(_EnvironmentServer):
+        checkpoint_boundaries = records_boundaries
+
+        async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
+            started.set()
+            await release.wait()
+            return await super().run(request, cleanup)
+
+    config = _environment_server().config
+    server = _Blocking(config=config, server_client=MagicMock(spec=ServerClient))
+    participant = EnvironmentParticipant()
+    server._checkpoint = participant
+    running = asyncio.create_task(server.run_request(_request()))
+    await started.wait()
+
+    report = participant.readiness()
+    release.set()
+    await running
+
+    # A protocol that records no boundaries cannot continue an episode, so it never holds up a checkpoint.
+    assert report.restarts == ([] if records_boundaries else ["rollout-a1"])
+    assert report.blocker_count == (1 if records_boundaries else 0)
