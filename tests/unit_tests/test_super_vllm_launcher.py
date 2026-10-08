@@ -353,6 +353,7 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
         exit_status: int = 7,
         visible_gpus: str = "GPU-d,GPU-b,GPU-a,GPU-c",
         shutdown_signal: str = "",
+        shutdown_before_record: str = "",
     ) -> tuple[int, str, str, dict[str, list[str]]]:
         """Execute generated commands with mock services, recording argv and GPU assignments."""
         with TemporaryDirectory(prefix="gym-tp1-") as directory:
@@ -379,15 +380,38 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
                 "TEST_EXIT_ROLE": exit_role,
                 "TEST_EXIT_STATUS": str(exit_status),
                 "TEST_SHUTDOWN_SIGNAL": shutdown_signal,
+                "TEST_SHUTDOWN_BEFORE_RECORD": shutdown_before_record,
             }
             _, command, _, submissions = self.capture_submission(env=env)
             self.assertIn(f"--nodes={env['NUM_NODES']}", submissions[0])
+            if shutdown_before_record:
+                # Pause in the real fork/registration gap until the new child signals its parent.
+                assignment = "router_pid=$!" if shutdown_before_record == "router" else 'worker_pids+=("$!")'
+                condition = "true" if shutdown_before_record == "router" else "(( engine_index == 3 ))"
+                before_cleanup, services = command.split("cleanup_vllm() {", 1)
+                self.assertEqual(services.count(assignment), 1)
+                services = services.replace(
+                    assignment,
+                    f"if {condition}; then\n"
+                    '    touch "$TEST_STATE_DIR/registration-paused"\n'
+                    '    while true; do "$TEST_SLEEP" 0.01; done\n'
+                    f"fi\n{assignment}",
+                )
+                command = before_cleanup + "cleanup_vllm() {" + services
             stubs = r"""
 run_service() {
     local role=$1
     trap 'printf "%s-stopped\n" "$role"; exit 0' TERM
     touch "$TEST_STATE_DIR/$role-ready"
-    if [[ "$role" == "$TEST_EXIT_ROLE" ]]; then
+    if [[ "$role" == "$TEST_SHUTDOWN_BEFORE_RECORD" ]]; then
+        while [[ ! -f "$TEST_STATE_DIR/registration-paused" ]]; do "$TEST_SLEEP" 0.01; done
+        if [[ "$role" != router ]]; then
+            for gpu in GPU-d GPU-b GPU-a GPU-c; do
+                while [[ ! -f "$TEST_STATE_DIR/engine-$gpu-ready" ]]; do "$TEST_SLEEP" 0.01; done
+            done
+        fi
+        kill -s "$TEST_SHUTDOWN_SIGNAL" "$$"
+    elif [[ -z "$TEST_SHUTDOWN_BEFORE_RECORD" && "$role" == "$TEST_EXIT_ROLE" ]]; then
         for gpu in GPU-d GPU-b GPU-a GPU-c; do
             while [[ ! -f "$TEST_STATE_DIR/engine-$gpu-ready" ]]; do "$TEST_SLEEP" 0.01; done
         done
@@ -481,6 +505,18 @@ sleep() { "$TEST_SLEEP" 0.01; }
         self.assertEqual(status, 143, stderr)
         for service in recorded:
             self.assertIn(f"{service}-stopped", stdout)
+
+    def test_tp1_shutdown_before_recording_child_pid_stops_all_services(self) -> None:
+        for role in ("router", "engine-GPU-c"):
+            for signal_name, expected_status in (("INT", 130), ("TERM", 143)):
+                with self.subTest(role=role, signal=signal_name):
+                    status, stdout, stderr, recorded = self.run_tp1_services(
+                        mode="pd", shutdown_signal=signal_name, shutdown_before_record=role
+                    )
+                    self.assertEqual(status, expected_status, stderr)
+                    self.assertIn(role, recorded)
+                    for service in recorded:
+                        self.assertIn(f"{service}-stopped", stdout)
 
     def test_tp1_requires_four_visible_gpus(self) -> None:
         for visible in ("0,1", ""):
