@@ -2014,3 +2014,34 @@ def test_capture_uses_supplied_assistant_header_or_none(tmp_path, header):
     assert captured.client_assistant_message_id == ("persisted-reply" if header else None)
     [absent] = read_model_call_records(CaptureStore(tmp_path), "no-configured-header")
     assert absent.client_assistant_message_id is None
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [("/ng-rollout/r-route/v1/chat/completions", "r-route"), ("/v1/chat/completions", None)],
+)
+def test_rollout_id_stays_in_scope_after_the_prefix_strip(path, expected):
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import ROLLOUT_ID_SCOPE_KEY, _CaptureMiddleware
+
+    seen: list[dict] = []
+
+    async def app(scope, receive, send) -> None:
+        seen.append(scope)
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    async def send(_message: dict) -> None:
+        pass
+
+    asyncio.run(
+        _CaptureMiddleware(app, store=None, model_server_name="srv")(
+            {"type": "http", "method": "POST", "path": path, "raw_path": path.encode(), "headers": []}, receive, send
+        )
+    )
+
+    [scope] = seen
+    assert scope["path"] == "/v1/chat/completions"
+    assert scope.get(ROLLOUT_ID_SCOPE_KEY) == expected
