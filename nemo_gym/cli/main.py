@@ -446,6 +446,10 @@ def _asset_config_path(flag: str, value: str) -> str:
                 for child in (root / parent).iterdir()
                 if child.is_dir()
             ]
+            if server_name in candidates:
+                # The folder exists but has no YAML configs, so the problem is the missing config,
+                # not the name. Suggesting a different server here would point the user elsewhere.
+                candidates = []
 
         hint = did_you_mean(typo, candidates)
 
@@ -1000,6 +1004,20 @@ COMMANDS = {
         summary="Prepare benchmark data and dump it to disk.",
         flags=(CONFIG, BENCHMARK, SEARCH_DIR),
     ),
+    "eval plan": Command(
+        target="nemo_gym.cli.eval:plan_benchmark",
+        summary="Prepare one benchmark and write its task list (stable ids, digests) to a plan file.",
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            SEARCH_DIR,
+            _value_flag("out", "plan_output_fpath", "Plan file to write.", quote=True),
+            _comma_list_flag(
+                "task-ids", "plan_task_ids", "Only plan these task ids (comma-separated).", metavar="ID[,ID...]"
+            ),
+            _bool_flag("schema", "print_plan_schema", "Print the plan file's JSON Schema and exit."),
+        ),
+    ),
     "eval run": Command(
         target=_eval_run,
         summary="Collate data, start servers, and collect rollouts.",
@@ -1407,11 +1425,8 @@ def main() -> None:
     if unknown_flags:
         error_parser = getattr(args, "_parser", parser)
         known_options = [opt for action in error_parser._actions for opt in action.option_strings]
-        # A flag rejected for its position (not for being unknown) is still in known_options, so exclude it
-        # from its own candidate set — otherwise it matches itself and is suggested as its own correction.
         hints = "".join(
-            did_you_mean(name, [opt for opt in known_options if opt != name])
-            for name in (flag.split("=", 1)[0] for flag in unknown_flags)
+            did_you_mean(name, known_options) for name in (flag.split("=", 1)[0] for flag in unknown_flags)
         )
         error_parser.error(f"unrecognized arguments: {' '.join(unknown_flags)}{hints}")
 

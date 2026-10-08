@@ -339,6 +339,7 @@ class TestApp:
         #     json.dump(actual_response_dict, f, indent=4)
 
         def _clean(d):
+            d.pop("ng_agent_observations", None)
             d.pop("agent_steps", None)
             d.pop("max_agent_steps", None)
             d["config"].pop("max_agent_steps", None)

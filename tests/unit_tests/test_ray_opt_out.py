@@ -30,10 +30,10 @@ DIRECT_RAY_COMPONENTS = {
         "swe_agents",
     },
     "responses_api_models": {"local_vllm_model"},
+    "environment_servers": set(),
 }
 
 INHERITED_RAY_DECLARATIONS = {
-    ("resources_servers/gpqa_diamond/app.py", "GPQADiamondResourcesServer"): False,
     ("resources_servers/legal_agent_bench/harbor_bridge.py", "LegalAgentBenchHarborBridge"): True,
     ("responses_api_models/genrm_model/app.py", "GenRMModel"): True,
 }

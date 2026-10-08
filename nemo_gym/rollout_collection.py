@@ -58,11 +58,11 @@ from nemo_gym.config_types import (
     UploadRolloutsConfigMixin,
 )
 from nemo_gym.deliverables import is_deliverable
+from nemo_gym.episode_types import is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
-    AGENT_SERVER_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -76,6 +76,8 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
     dataset_agent_pins,
+    environment_server_agent_names,
+    environment_server_attributed_agent,
     get_global_config_dict,
     label_runs,
     pairing_override_enabled,
@@ -110,6 +112,7 @@ from nemo_gym.server_utils import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
+from nemo_gym.task_materialization import TASK_ID_FIELDS
 from nemo_gym.token_id_capture import (
     TokenCaptureStore,
     TokenIdCaptureConfig,
@@ -220,7 +223,7 @@ _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 
 
 def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, list[str]]:
-    """Map each agent name to the environment servers whose ``agent_server`` names it."""
+    """Map each agent name to the environment servers that front it."""
     servers_by_agent: dict[str, list[str]] = {}
     for name, instance in global_config_dict.items():
         if not isinstance(instance, DictConfig):
@@ -229,10 +232,10 @@ def _environment_servers_by_agent(global_config_dict: DictConfig) -> dict[str, l
         if not isinstance(servers, DictConfig):
             continue
         for server in servers.values():
-            reference = server.get(AGENT_SERVER_REF_KEY_NAME) if isinstance(server, DictConfig) else None
-            agent_name = reference.get("name") if isinstance(reference, DictConfig) else None
-            if agent_name is not None:
-                servers_by_agent.setdefault(str(agent_name), []).append(str(name))
+            if not isinstance(server, DictConfig):
+                continue
+            for agent_name in environment_server_agent_names(server):
+                servers_by_agent.setdefault(agent_name, []).append(str(name))
     return servers_by_agent
 
 
@@ -259,9 +262,10 @@ def _environment_server_for_agent(agent_name: str, servers_by_agent: Mapping[str
 
 
 def _materialized_taskset(row: Mapping[str, Any]) -> str | None:
-    task_id = row.get("task_id")
-    if not isinstance(task_id, Mapping) or "task_input" not in row:
+    if not is_materialized_task_row(row):
         return None
+    task_id = row.get("task_id")
+    assert isinstance(task_id, Mapping)
     taskset = task_id.get("taskset")
     return taskset if isinstance(taskset, str) and taskset else None
 
@@ -435,7 +439,7 @@ def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
 
 def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
     task_id = next(
-        (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
+        (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
         str(row[TASK_INDEX_KEY_NAME]),
     )
     rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
@@ -496,10 +500,10 @@ def _turns_from_model_calls(
     turn_counts: Counter = Counter()
     tool_counts: Counter = Counter()
     for call in model_calls:
-        if call.response is None:
-            # A call that returned nothing is not a model decision.
-            continue
         metadata = call.response_metadata
+        if call.response is None or (metadata.status_code is not None and metadata.status_code >= 400):
+            # HTTP error payloads are retained attempts, not model decisions.
+            continue
         invocation_id = invocation_by_call_id.get(call.model_call_id or "") or invocation_by_response_id.get(
             metadata.response_id or ""
         )
@@ -3448,9 +3452,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if not isinstance(environment_server_name, str):
             return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
         environment_group = global_config_dict[environment_server_name]["environment_servers"]
-        environment_config = next(iter(environment_group.values()))
-        agent_ref = environment_config.get("agent_server")
-        return agent_ref.get("name") if isinstance(agent_ref, DictConfig) else None
+        return environment_server_attributed_agent(next(iter(environment_group.values())))
 
     @classmethod
     def _stamp_environment_server_agent_refs(
@@ -3505,17 +3507,17 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 continue
             environment_group = global_config_dict[environment_server_name]["environment_servers"]
             environment_config = next(iter(environment_group.values()))
-            agent_ref = environment_config.get("agent_server")
             resources_ref = environment_config.get("resources_server")
-            configured_agent = agent_ref.get("name") if isinstance(agent_ref, DictConfig) else None
+            configured_agent = environment_server_attributed_agent(environment_config)
+            server_agents = environment_server_agent_names(environment_config)
             configured_resources = resources_ref.get("name") if isinstance(resources_ref, DictConfig) else None
 
             row_agent = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
             task_source = row.get(TASK_SOURCE_KEY_NAME)
-            if row_agent is not None and configured_agent is not None and row_agent != configured_agent:
+            if row_agent is not None and server_agents and row_agent not in server_agents:
                 raise ValueError(
-                    f"Row agent_ref {row_agent!r} does not match environment server "
-                    f"{environment_server_name!r} agent server {configured_agent!r}"
+                    f"Row agent_ref {row_agent!r} is not an agent of environment server "
+                    f"{environment_server_name!r}: {', '.join(repr(agent) for agent in server_agents)}"
                 )
             if task_source is not None and configured_resources is not None and task_source != configured_resources:
                 raise ValueError(

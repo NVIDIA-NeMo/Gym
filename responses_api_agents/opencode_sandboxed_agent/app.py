@@ -18,6 +18,7 @@ import json
 import sqlite3
 import sys
 from asyncio import Semaphore
+from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 from shlex import quote
@@ -29,7 +30,7 @@ from uuid import uuid4
 from anyio import CancelScope
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, FilePath
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -418,9 +419,10 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
     remote_opencode_musl_binary_path: Optional[str] = None
+    local_ripgrep_binary_path: FilePath | None = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
-    concurrency: int = Field(default=64, gt=0)
+    concurrency: Optional[int] = Field(default=None)
     preinstalled_opencode: bool = False
     execution_failure_reward_zero: bool = False
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
@@ -519,7 +521,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
 
-        self._sem = Semaphore(self.config.concurrency)
+        self._sem = Semaphore(self.config.concurrency) if self.config.concurrency else nullcontext()
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
@@ -694,8 +696,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             if not token_info:
                 continue
 
+            # OpenCode separates cache reads and writes from uncached input; Responses includes all three.
             usage = NeMoGymResponseUsage(
-                input_tokens=token_info["input"],
+                input_tokens=token_info["input"] + token_info["cache"]["read"] + token_info["cache"]["write"],
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=token_info["cache"]["read"]),
                 output_tokens=token_info["output"] + token_info["reasoning"],
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=token_info["reasoning"]),
@@ -838,6 +841,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             remote_data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
             xdg_home_str = f"XDG_DATA_HOME={remote_data_home}"
 
+        # OpenCode's glob/grep tools otherwise download rg inside the sandbox.
+        ripgrep_remote_path = None
+        ripgrep_install_str = ""
+        if self.config.local_ripgrep_binary_path is not None:
+            ripgrep_remote_path = f"/tmp/nemo-gym-ripgrep-{uuid4().hex}"
+            # Uploads may be root-owned: copy as the execution user; teardown removes the source.
+            ripgrep_install_str = (
+                '&& mkdir -p "$HOME/.opencode/bin" '
+                f'&& cp {quote(ripgrep_remote_path)} "$HOME/.opencode/bin/rg" '
+                '&& chmod 0755 "$HOME/.opencode/bin/rg" '
+                '&& "$HOME/.opencode/bin/rg" --version'
+            )
+
         # @bxyu-nvidia: Regarding `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000` below:
         # OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
         # and there is no way to set it to null.
@@ -846,6 +862,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         command = f"""
         echo "Shell: $SHELL" \
         && {install_str} \
+        {ripgrep_install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
@@ -856,6 +873,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         if self.config.debug:
             print("Starting OpenCode (runtime configuration omitted to protect credentials)", file=sys.stderr)
+
+        if ripgrep_remote_path is not None:
+            await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
 
         run_error_type = None
         try:
@@ -902,9 +922,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 timeout_s=self.config.sandbox_timeout,
             )
         except Exception:
-            raise RuntimeError("Failed to export OpenCode results") from None
-        if export_result.return_code != 0 or export_result.error_type:
-            raise RuntimeError("OpenCode export command failed")
+            export_result = None
+            print("Failed to export results", format_exc(), file=sys.stderr)
         if self.config.debug and export_result:
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
@@ -916,7 +935,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         results_dir.mkdir(parents=True, exist_ok=True)
         results_local_fpath = results_dir / export_fname
         results_local_fpath.unlink(missing_ok=True)
-        await sandbox.download(export_remote_fpath, results_local_fpath)
+        if export_result is not None and export_result.return_code == 0 and not export_result.error_type:
+            if self.config.debug:
+                print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
+            try:
+                await sandbox.download(export_remote_fpath, results_local_fpath)
+            except Exception:
+                results_local_fpath.unlink(missing_ok=True)
+                print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
+                print("Export stdout:\n", export_result.stdout, file=sys.stderr)
+                print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
         observations = None
         trajectory = (
@@ -994,11 +1022,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if results_local_fpath.exists():
             opencode_export = json.loads(results_local_fpath.read_text().strip() or "{}")
 
-        if not opencode_export:
-            raise RuntimeError("OpenCode export did not contain a transcript")
         output = []
         usage = None
         opencode_export_found = False
+        length_limited = False
         if opencode_export:
             opencode_export_found = True
             # Assume only one input message. May change with a system/developer message later on.
@@ -1007,24 +1034,26 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 [*self._opencode_export_to_usages(opencode_export), *child_usages]
             )
 
+            assistant_infos = [
+                message.get("info", {})
+                for message in opencode_export.get("messages", [])
+                if message.get("info", {}).get("role") == "assistant"
+            ]
+            length_limited = bool(assistant_infos and assistant_infos[-1].get("finish") == "length")
+            terminal_error = assistant_infos[-1].get("error") if assistant_infos else None
+            if terminal_error and not run_error_type:
+                run_error_type = (
+                    terminal_error.get("name", "OpenCodeError")
+                    if isinstance(terminal_error, dict)
+                    else "OpenCodeError"
+                )
+
         result_stdout = (result.stdout if result else "") or ""
         result_stderr = (result.stderr if result else "") or ""
         opencode_finished = False
         std_out_split = result_stdout.rsplit("Shell: ", maxsplit=1)
         if len(std_out_split) > 1:
             opencode_finished = "OpenCode run finished" in std_out_split[1]
-
-        assistant_infos = [
-            message.get("info", {})
-            for message in opencode_export.get("messages", [])
-            if message.get("info", {}).get("role") == "assistant"
-        ]
-        length_limited = bool(assistant_infos and assistant_infos[-1].get("finish") == "length")
-        terminal_error = assistant_infos[-1].get("error") if assistant_infos else None
-        if terminal_error and not run_error_type:
-            run_error_type = (
-                terminal_error.get("name", "OpenCodeError") if isinstance(terminal_error, dict) else "OpenCodeError"
-            )
 
         if collect_observations and observations is not None:
             agent_sandbox_observation = self._agent_sandbox_observation(
@@ -1081,13 +1110,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             status="incomplete" if length_limited else None,
             incomplete_details={"reason": "max_output_tokens"} if length_limited else None,
         )
-        receipt = {
-            "response": response.model_dump(mode="json"),
-            "execution": {key: value for key, value in run_result.items() if not key.startswith("_ng_")},
-        }
-        pending = results_dir / "generation.json.partial"
-        pending.write_text(json.dumps(receipt))
-        pending.replace(results_dir / "generation.json")
         return response
 
     async def run(
