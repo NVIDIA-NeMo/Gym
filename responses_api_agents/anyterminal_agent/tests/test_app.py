@@ -30,6 +30,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
@@ -156,6 +157,14 @@ class TestSetupScriptsExist:
         for agent in ("hermes_agent", "openclaw_agent", "opencode_agent", "pi_agent"):
             assert (PARENT_DIR / "responses_api_agents" / agent / "scripts" / f"{agent}_deps.sh").exists()
         assert (Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh").exists()
+
+    def test_openclaw_runtime_is_pinned_and_minimal(self) -> None:
+        config_path = Path(__file__).parent.parent / "configs" / "anyterminal_openclaw.yaml"
+        config = yaml.safe_load(config_path.read_text())
+        kwargs = config["anyterminal_openclaw"]["responses_api_agents"]["anyterminal_agent"]["agent_kwargs"]
+
+        assert kwargs["openclaw_version"] == "2026.6.35"
+        assert kwargs["openclaw_config"]["plugins"]["enabled"] is False
 
 
 def test_named_sandbox_provider_reference_is_accepted() -> None:
