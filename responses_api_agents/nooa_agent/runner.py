@@ -101,7 +101,7 @@ class EmbeddedNOOARunner:
         server_client: ServerClient,
         model_server_name: str,
         resources_server_name: str,
-        max_policy_calls: int,
+        max_policy_calls: int | None,
     ) -> None:
         if invocation.execution_mode == "sandboxed":
             raise NotImplementedError("NOOA sandboxed execution is not implemented")

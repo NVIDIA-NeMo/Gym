@@ -85,10 +85,18 @@ def test_agent_config_rejects_unknown_fields() -> None:
 
 
 def test_agent_config_names_policy_call_budget_explicitly() -> None:
+    assert agent_config().max_policy_calls is None
+    assert agent_config(max_policy_calls=None).max_policy_calls is None
     assert agent_config(max_policy_calls=6).max_policy_calls == 6
 
     with pytest.raises(ValidationError, match="max_steps"):
         agent_config(max_steps=6)
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_agent_config_rejects_nonpositive_policy_call_limits(limit: int) -> None:
+    with pytest.raises(ValidationError, match="max_policy_calls"):
+        agent_config(max_policy_calls=limit)
 
 
 def test_sandboxed_execution_mode_is_reserved_for_a_future_runner() -> None:

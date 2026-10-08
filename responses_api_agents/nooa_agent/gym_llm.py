@@ -71,7 +71,7 @@ class GymModelCall:
 class RolloutLLMState:
     """Gym-owned budget and exact model evidence shared by this rollout's clients."""
 
-    max_policy_calls: int
+    max_policy_calls: int | None
     fatal_error: Exception | None = None
     used: int = 0
     calls: list[GymModelCall] = field(default_factory=list)
@@ -79,7 +79,7 @@ class RolloutLLMState:
 
     def charge(self) -> None:
         # No await between check and increment: atomic for the async rollout task tree.
-        if self.used >= self.max_policy_calls:
+        if self.max_policy_calls is not None and self.used >= self.max_policy_calls:
             raise PolicyCallBudgetExceeded(f"NOOA policy call budget exhausted after {self.max_policy_calls} calls")
         self.used += 1
 

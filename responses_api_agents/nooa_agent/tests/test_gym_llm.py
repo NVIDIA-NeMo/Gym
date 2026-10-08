@@ -81,7 +81,7 @@ def model_response(*outputs: object, response_id: str = "resp-1") -> dict:
 
 
 def make_llm(
-    payload: dict, *, max_policy_calls: int = 2, sampling_overrides: dict | None = None
+    payload: dict, *, max_policy_calls: int | None = 2, sampling_overrides: dict | None = None
 ) -> tuple[GymResponsesLLM, MagicMock, RolloutLLMState]:
     server_client = MagicMock()
     server_client.post = AsyncMock(return_value=FakeHTTPResponse(payload))
@@ -328,6 +328,19 @@ async def test_enforces_total_policy_call_budget() -> None:
         await llm.acall([{"role": "user", "content": "second"}])
 
     client.post.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unlimited_policy_calls_preserve_request_accounting() -> None:
+    llm, client, state = make_llm(model_response(), max_policy_calls=None)
+    for _ in range(101):
+        await llm.acall([{"role": "user", "content": "continue"}])
+
+    assert client.post.await_count == 101
+    assert state.used == 101
+    assert len(state.calls) == 101
+    assert llm.calls == 101
+    assert state.fatal_error is None
 
 
 def test_rejects_synchronous_policy_calls() -> None:
