@@ -267,6 +267,8 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
     sandbox_model_base_url: Optional[str] = None
     agent_runtime_source: str = "baked"
+    # Bound on downloading an external runtime into the box; the default sandbox TTL includes it.
+    agent_runtime_fetch_timeout_s: int = 600
     # Where per-rollout artifacts go. Defaults to the agent source dir, which fills the Gym tree.
     results_dir: Optional[str] = None
     swebench_tests_timeout: int = 1800
@@ -523,7 +525,10 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             }
         return SandboxSpec(
             image=params.container,
-            ttl_s=config.pop("ttl_s", params.swebench_agent_timeout + params.swebench_tests_timeout + 600),
+            ttl_s=config.pop(
+                "ttl_s",
+                params.swebench_agent_timeout + params.swebench_tests_timeout + params.agent_runtime_fetch_timeout_s + 600,
+            ),
             ready_timeout_s=config.pop("ready_timeout_s", 1200),
             workdir=config.pop("workdir", _repo_dir(params.problem_info)),
             env=env,
@@ -742,7 +747,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                     "elif command -v python3 >/dev/null 2>&1; then "
                     f"python3 -c {python_fetch}; "
                     "else echo 'runtime download requires curl, wget, or python3' >&2; exit 127; fi",
-                    timeout_s=600,
+                    timeout_s=params.agent_runtime_fetch_timeout_s,
                     user="root",
                 )
                 if fetched.return_code != 0:
