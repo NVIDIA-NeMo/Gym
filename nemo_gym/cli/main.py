@@ -866,6 +866,7 @@ COMMANDS = {
         summary="Validate and collate the dataset.",
         flags=(
             CONFIG,
+            BENCHMARK,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
             SEARCH_DIR,

@@ -1253,6 +1253,18 @@ class TestAssetSelectors:
         }
         assert others == {"+mode=train_preparation"}
 
+    def test_collate_benchmark_selector(self, monkeypatch: MonkeyPatch) -> None:
+        # `dataset collate` accepts --benchmark like `eval prepare` and `eval run`, so a benchmark's data can be
+        # collated by name instead of an internal config path.
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["dataset", "collate", "--benchmark", "aime24", "--mode", "train_preparation", "--output-dir", "out"],
+        )
+        assert target == "nemo_gym.cli.dataset:prepare_data"
+        paths, others = _split_overrides(overrides)
+        assert paths == {str(WORKING_DIR / "benchmarks/aime24/config.yaml")}
+        assert others == {"+mode=train_preparation", "+output_dirpath=out"}
+
     def test_resource_server_flavor_syntax(self, monkeypatch: MonkeyPatch) -> None:
         # `<server>/<flavor>` picks a named config inside the server's configs/ dir; math_with_judge ships several
         # flavoured configs (see reference/faq.mdx, which pairs a math_with_judge dataset flavour for profiling).
