@@ -271,8 +271,6 @@ class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
     # reward in <split>_metrics.json (nested metrics.* records are not recursed).
     num_provider_429s: int = 0
     num_provider_other_retries: int = 0
-    # 1 when the agent stopped the rollout at its wall-clock limit; scored 0 without a judge call.
-    timed_out: int = 0
 
 
 # Task-local accumulator for provider retry counts. The client retry loops
@@ -1468,17 +1466,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         last_assistant_response = _last_assistant_text(body.response)
 
         judge_error = None
-        timed_out = bool(getattr(body.response, "timed_out", False))
-        if timed_out:
-            # The agent hit rollout_timeout_s before committing an answer: wrong by construction,
-            # and not worth a judge call.
-            judge_evaluation = JudgeEvaluation(
-                judge_response_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-                reasoning="Rollout stopped at its wall-clock limit before answering; scored 0 without the judge.",
-                extracted_final_answer="",
-                reward=0.0,
-            )
-        elif self.config.use_judge:
+        if self.config.use_judge:
             judge_evaluation, judge_error = await self._verify_answer_with_judge(
                 question, ground_truth, last_assistant_response
             )
@@ -1501,7 +1489,6 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             metrics=session_metrics,
             num_provider_429s=num_provider_429s,
             num_provider_other_retries=num_provider_other_retries,
-            timed_out=int(timed_out),
         )
 
         # terminal mode: clean up this session's disk workspace

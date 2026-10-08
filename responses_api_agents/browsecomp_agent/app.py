@@ -821,6 +821,19 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     )
                     continue
 
+                if response_json.get("timed_out"):
+                    # Past rollout_timeout_s: wrong by construction, so the judge is not called.
+                    last_verify_response = BrowsecompAgentVerifyResponse.model_validate(
+                        body.model_dump()
+                        | {
+                            "response": response_json,
+                            "reward": 0.0,
+                            "num_tool_calls": response_json.get("num_tool_calls", 0),
+                            "reset_count": response_json.get("reset_count", 0),
+                        }
+                    )
+                    break
+
                 verify_request = BrowsecompAgentVerifyRequest.model_validate(
                     body.model_dump() | {"response": response_json}
                 )
@@ -838,6 +851,11 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 )
                 break
 
+            if last_verify_response is not None:
+                # Every row carries timed_out, so its mean is the share of samples stopped by the limit.
+                last_verify_response = last_verify_response.model_copy(
+                    update={"timed_out": int(bool((last_response_json or {}).get("timed_out")))}
+                )
             reward = getattr(last_verify_response, "reward", None) if last_verify_response is not None else None
             outcome = "success" if (reward is not None and reward > 0) else "failure"
             print(f"[browsecomp][end][{qid}] outcome={outcome} reward={reward} attempts={attempt + 1}", flush=True)
@@ -884,6 +902,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     "response": last_response_json,
                     "reward": 0.0,
                     "agent_error": f"{type(e).__name__}: {str(e)[:300]}",
+                    "timed_out": 0,
                 }
                 | routing
             )
