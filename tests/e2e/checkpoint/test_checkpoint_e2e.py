@@ -24,13 +24,17 @@ import asyncio
 import collections
 import json
 import os
+import signal
+import subprocess
+import sys
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 import pytest
+import yaml
 from checkpoint_deployment import (
     CAPTURE_CONTROL_TOKEN,
     COUNTER_SCRIPT,
@@ -773,3 +777,162 @@ async def test_a_restart_episode_keeps_running_through_a_checkpoint_without_a_cr
     assert continued.json()["result"]["reward"] == 1.0
     assert restarted.json()["result"]["reward"] == 1.0
     assert restarted.json()["episode_id"]["attempt"] == 0
+
+
+def collector(deployment: Deployment, tmp_path: Path, **config: Any) -> subprocess.Popen:
+    """Start rollout collection over ``tmp_path/input.jsonl`` against the deployment, as a separate process."""
+    settings = {
+        "input_jsonl_fpath": str(tmp_path / "input.jsonl"),
+        "output_jsonl_fpath": str(tmp_path / "rollouts.jsonl"),
+        "checkpoint_dir": str(tmp_path / "collection-ckpt"),
+        **config,
+    }
+    log = open(tmp_path / "collector.log", "a")
+    return subprocess.Popen(
+        [sys.executable, str(Path(__file__).parent / "collect.py"), json.dumps(settings)],
+        env=os.environ | {"NEMO_GYM_CONFIG_DICT": yaml.safe_dump(deployment.config), "RAY_TMPDIR": "/tmp"},
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+
+
+def collection_input(tmp_path: Path, topology: str, rollout_id: str = "long-1") -> dict[str, Any]:
+    """Write one row and return the collection settings that route it.
+
+    ``legacy`` rows name their agent; ``native`` rows are materialized tasks routed by their taskset.
+    """
+    if topology == "native":
+        episode = weather_episode(rollout_id)
+        row = {"task_id": episode["task"]["task_id"], "task_input": episode["task"]["task_input"]}
+        row["_ng_rollout_id"] = rollout_id
+        settings = {"environment_server_routes": {"example_single_tool_call:e2e": "environment"}}
+    else:
+        row = weather_row(rollout_id) | {"agent_ref": {"type": "responses_api_agents", "name": "agent"}}
+        row.pop("_ng_attempt_index")
+        settings = {}
+    (tmp_path / "input.jsonl").write_text(json.dumps(row) + "\n")
+    return settings
+
+
+def reward_of(row: dict) -> Optional[float]:
+    """A legacy row carries its reward at the top level; a native episode record nests it in its result."""
+    if "reward" in row:
+        return row["reward"]
+    return (row.get("result") or {}).get("reward")
+
+
+async def wait_for_exit(process: subprocess.Popen, timeout: float = 120) -> int:
+    await wait_until(lambda: process.poll() is not None, timeout=timeout)
+    return process.returncode
+
+
+@pytest.mark.parametrize("topology", ["legacy", "native"])
+async def test_rollout_collection_checkpoints_on_preemption_and_continues_after_a_restart(
+    deploy, tmp_path: Path, topology: str
+) -> None:
+    """One long task: SIGTERM checkpoints it and stops collection; Gym restarts; the rerun continues it."""
+    deployment = deploy(topology)
+    deployment.backend("/_ctl/hold", {"after_calls": 1})
+    routes = collection_input(tmp_path, topology)
+
+    first = collector(deployment, tmp_path, **routes)
+    await wait_until(lambda: len(deployment.backend_calls()) == 2, timeout=120)
+    first.send_signal(signal.SIGTERM)
+    stopped = await wait_for_exit(first)
+    latest = (tmp_path / "collection-ckpt/LATEST").read_text().strip()
+    manifest = json.loads((tmp_path / "collection-ckpt" / latest / "collection.json").read_text())
+
+    # The preemption takes Gym down with it; the requeued job starts fresh servers.
+    deployment.crash_gym()
+    deployment.backend("/_ctl/release", {})
+    deployment.start_gym()
+    second = collector(deployment, tmp_path, resume_from_cache=True, **routes)
+    finished = await wait_for_exit(second, timeout=300)
+
+    rows = [json.loads(line) for line in (tmp_path / "rollouts.jsonl").read_text().splitlines()]
+    calls = [call["n_messages"] for call in deployment.backend_calls()]
+    assert stopped == 75, (tmp_path / "collector.log").read_text()[-2000:]
+    assert [(row["rollout_id"], row["attempt"]) for row in manifest["continued"]] == [("long-1", 0)]
+    assert finished == 0, (tmp_path / "collector.log").read_text()[-2000:]
+    assert [(reward_of(row), row["_ng_attempt_index"]) for row in rows] == [(1.0, 1)]
+    # The continued attempt regenerates only the undelivered call; the first model call is not repeated.
+    assert calls == [calls[0], calls[0] + 2, calls[0] + 2]
+
+
+async def test_a_checkpoint_on_request_lets_collection_continue(deploy, tmp_path: Path) -> None:
+    deployment = deploy("legacy")
+    deployment.backend("/_ctl/hold", {"after_calls": 1})
+    collection_input(tmp_path, "legacy")
+
+    process = collector(deployment, tmp_path)
+    await wait_until(lambda: len(deployment.backend_calls()) == 2, timeout=120)
+    process.send_signal(signal.SIGUSR1)
+    await wait_until(lambda: (tmp_path / "collection-ckpt/LATEST").exists(), timeout=60)
+    deployment.backend("/_ctl/release", {})
+    finished = await wait_for_exit(process, timeout=300)
+
+    rows = [json.loads(line) for line in (tmp_path / "rollouts.jsonl").read_text().splitlines()]
+    assert finished == 0, (tmp_path / "collector.log").read_text()[-2000:]
+    assert [row["reward"] for row in rows] == [1.0]
+    assert [call["n_messages"] for call in deployment.backend_calls()] == [1, 3]
+
+
+@pytest.mark.skipif(
+    not os.environ.get("NEMO_GYM_CHECKPOINT_VLLM_URL"), reason="set NEMO_GYM_CHECKPOINT_VLLM_URL to a vLLM server"
+)
+async def test_real_model_collection_finishes_every_row_once_after_its_collector_is_killed(
+    deploy, tmp_path: Path
+) -> None:
+    """Checkpoint a real-model collection, kill the collector without warning while the Gym servers keep running,
+    and resume: rows sent after the checkpoint are retired and sent again, and every row finishes exactly once."""
+    deployment = deploy(
+        "native",
+        inference_url=os.environ["NEMO_GYM_CHECKPOINT_VLLM_URL"],
+        model_name=os.environ.get("NEMO_GYM_CHECKPOINT_VLLM_MODEL", "Qwen/Qwen3-0.6B"),
+    )
+    count = 48
+    episode = weather_episode("unused")
+    rows = [
+        {
+            "task_id": episode["task"]["task_id"],
+            "task_input": episode["task"]["task_input"],
+            "_ng_rollout_id": f"col-{i}",
+        }
+        for i in range(count)
+    ]
+    (tmp_path / "input.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    routes = {
+        "environment_server_routes": {"example_single_tool_call:e2e": "environment"},
+        "num_samples_in_parallel": 4,
+    }
+    output = tmp_path / "rollouts.jsonl"
+
+    def written() -> int:
+        return len(output.read_text().splitlines()) if output.exists() else 0
+
+    first = collector(deployment, tmp_path, **routes)
+    await wait_until(lambda: written() >= 8, timeout=180)
+    first.send_signal(signal.SIGUSR1)
+    await wait_until(lambda: (tmp_path / "collection-ckpt/LATEST").exists(), timeout=120)
+    at_checkpoint = written()
+    # More rows are sent after the checkpoint; then the collector dies without a chance to checkpoint again.
+    # The Gym servers keep running, so the rows it left in flight are still running there.
+    await wait_until(lambda: written() >= at_checkpoint + 4, timeout=180)
+    first.kill()
+    await wait_for_exit(first)
+    killed_at = written()
+    logged = (tmp_path / "collection-ckpt/dispatched.jsonl").read_text().splitlines()
+
+    second = collector(deployment, tmp_path, resume_from_cache=True, **routes)
+    finished = await wait_for_exit(second, timeout=600)
+
+    results = [json.loads(line) for line in output.read_text().splitlines()]
+    rollout_ids = [row["_ng_rollout_id"] for row in results]
+    print(f"rows at checkpoint: {at_checkpoint}; at kill: {killed_at}; logged sends: {len(logged) - 1}")
+    print("rewards:", collections.Counter(reward_of(row) for row in results))
+    print("attempts:", collections.Counter(row.get("_ng_attempt_index", 0) for row in results))
+    assert finished == 0, (tmp_path / "collector.log").read_text()[-2000:]
+    assert killed_at < count, "every row finished before the kill"
+    # Every row finishes exactly once, and none fails.
+    assert sorted(rollout_ids) == sorted(row["_ng_rollout_id"] for row in rows)
+    assert all(row.get("failure_kind") is None and reward_of(row) is not None for row in results)
