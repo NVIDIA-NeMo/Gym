@@ -61,6 +61,10 @@ VLLM_COMMON_ARGS=(
 # @bxyu-nvidia: We set num_speculative_tokens_per_batch_size to 0 here since prefill does not need to speculate any tokens, it just needs to know that we are speculating.
 VLLM_PREFILL_ARGS=(
     --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS},\"num_speculative_tokens_per_batch_size\":[[1,1024,0]]}"
+    # MRV2 captures a one-token graph for the zero-draft schedule, but Mamba's
+    # full-graph capture requires 1 + num_speculative_tokens. Keep prefill
+    # piecewise until that dynamic-speculation capture path supports Mamba.
+    --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
     --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
