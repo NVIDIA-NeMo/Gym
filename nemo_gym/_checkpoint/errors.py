@@ -18,6 +18,9 @@ class ControlError(Exception):
         self.detail = detail
 
     def response(self) -> JSONResponse:
+        from nemo_gym.telemetry.gym_metrics import record_checkpoint_event
+
+        record_checkpoint_event("refused", code=self.code)
         return JSONResponse(
             status_code=self.status_code, content={"error": {"code": self.code, "detail": self.detail}}
         )
