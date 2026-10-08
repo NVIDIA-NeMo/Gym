@@ -45,9 +45,9 @@ loop so that ``exec`` has a live container to attach to, exactly like the Docker
 provider. Modal's own ``timeout`` still ends the sandbox at ``ttl_s``.
 
 **Readiness.** ``create()`` returns only after a configurable exec probe passes,
-so ``upload_file``/``exec`` never race the container start. A sandbox that
-fails the probe is terminated before the error is raised, so nothing billable
-leaks.
+so ``upload_file``/``exec`` never race the container start. Failed or cancelled
+creation attempts bounded cleanup before propagating the original error. The
+remote TTL remains the backstop when cleanup cannot be confirmed.
 
 Authentication is the Modal SDK's own: ``MODAL_TOKEN_ID``/``MODAL_TOKEN_SECRET``
 or ``~/.modal.toml`` from ``modal token new``. Nothing secret lives in the YAML.
