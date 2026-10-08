@@ -24,6 +24,7 @@ import asyncio
 import collections
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -51,6 +52,7 @@ from checkpoint_deployment import (
 import nemo_gym.server_utils as server_utils
 from nemo_gym._checkpoint import coordination
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.sandbox.providers.opensandbox import snapshots
 
 
 # The policy model server runs in one process, or as a coordinator plus uvicorn workers.
@@ -1093,3 +1095,51 @@ async def test_retiring_a_sandboxed_episode_stops_its_sandbox(deploy, tmp_path: 
     assert replacement.json()["reward"] == 1.0
     assert len(after["boxes"]) == 2
     assert retired["snapshots"] == {}, "a retire takes no snapshot"
+
+
+# -- snapshot garbage collection --------------------------------------------------------------------------
+
+
+async def test_snapshot_gc_keeps_what_retained_checkpoints_name(deploy, tmp_path: Path) -> None:
+    deployment = deploy("sandbox")
+    deployment.backend("/_ctl/script", NOTES_SCRIPT_THREE)
+    deployment.backend("/_ctl/hold", {"after_calls": 1})
+    expected = ("one", "two", "three")
+    checkpoints = tmp_path / "ckpts"
+    async with httpx.AsyncClient(base_url=deployment.url("environment"), timeout=120) as http:
+        run = asyncio.create_task(http.post("/run", json=notes_row("gc-1", expected=expected)))
+        await wait_until(lambda: len(deployment.backend_calls()) == 2)
+        # Two checkpoints of the same episode, each pausing the sandbox into its own snapshot.
+        await checkpoint(deployment, checkpoints / "c1", ["gc-1"], checkpoint_id="c1")
+        participants = await deployment.participants()
+        await coordination.resume(participants, "c1", deadline_ts=deadline())
+        deployment.backend("/_ctl/hold", {"after_calls": 2, "release_held": True})
+        await wait_until(lambda: len(deployment.backend_calls()) == 3)
+        await checkpoint(deployment, checkpoints / "c2", ["gc-1"], checkpoint_id="c2")
+        before = deployment.sandbox_state()
+
+        # The controller prunes the first checkpoint; the operator's sweep keeps only what the second names.
+        shutil.rmtree(checkpoints / "c1")
+        code = await snapshots.cleanup_snapshots(
+            domain=f"http://127.0.0.1:{deployment.sandbox_port}",
+            protocol="http",
+            access_key="e2e",
+            sandbox_id=None,
+            states=None,
+            snapshot_ids=None,
+            kill_paused=False,
+            reap=True,
+            retain_from=checkpoints,
+        )
+        after = deployment.sandbox_state()
+
+        await coordination.resume(participants, "c2", deadline_ts=deadline())
+        deployment.backend("/_ctl/release", {})
+        response = await run
+
+    assert code == 0
+    assert len(before["snapshots"]) == 2
+    [remaining] = after["snapshots"].values()
+    assert remaining["files"] == {"notes": "one\ntwo\n"}, "the second checkpoint's snapshot survives"
+    assert remaining["id"] in snapshots.retained_snapshot_ids(checkpoints)
+    assert response.json()["reward"] == 1.0

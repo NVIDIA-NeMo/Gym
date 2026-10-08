@@ -508,6 +508,7 @@ def test_cli_forwards_arguments_and_return_codes(
             "snapshot_ids": None,
             "kill_paused": True,
             "reap": True,
+            "retain_from": None,
             "tls_verify": False,
         }
     ]
@@ -564,6 +565,7 @@ def test_cli_uses_standalone_connection_config(
             "snapshot_ids": ["snap-a", "snap-b"],
             "kill_paused": False,
             "reap": False,
+            "retain_from": None,
             "tls_verify": False,
         }
     ]

@@ -25,13 +25,20 @@ any Python with aiohttp and PyYAML, for example as a job submitted by file path.
     snapshots.py --connection-config env.yaml --sandbox-id <id> --reap
     snapshots.py --connection-config env.yaml --kill-paused --reap    # also delete paused sandboxes
     snapshots.py --domain <host> --api-key <key> --snapshot-id <id> --reap
+    snapshots.py --connection-config env.yaml --retain-from <checkpoints> --reap   # keep what checkpoints name
+
+Partial-rollout checkpoints record the snapshot each session's sandbox was paused into, and a snapshot must
+live as long as a checkpoint that can restore it. ``--retain-from`` points at the controller's retained
+checkpoints: every snapshot their records name is kept, the rest are reaped.
 """
 
 import argparse
 import asyncio
+import json
 import sys
 import urllib.parse
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -44,6 +51,46 @@ REAP_SWEEPS = 3
 PAGE_SIZE = 100
 
 
+def retained_snapshot_ids(checkpoint_root: str | Path) -> set[str]:
+    """Snapshot ids named by every participant records file under ``checkpoint_root``.
+
+    Walks ``<root>/**/gym/<kind>/<instance>/manifest.json``, reads each manifest's records file, and collects the
+    ``snapshot_id`` of every sandbox checkpoint state (a mapping holding ``descriptor`` and ``snapshot_id``),
+    however a participant nested it in its record. An unreadable manifest or records file is an error: never
+    reap on a partial view of what is retained.
+    """
+    root = Path(checkpoint_root)
+    if not root.is_dir():
+        raise ValueError(f"retain_from {str(root)!r} is not a directory")
+    retained: set[str] = set()
+    for manifest_path in sorted(root.rglob("manifest.json")):
+        if manifest_path.parents[2].name != "gym":
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            records_file = manifest["records_file"]
+            if not isinstance(records_file, str) or not records_file or "/" in records_file:
+                raise ValueError(f"invalid records_file {records_file!r}")
+            with (manifest_path.parent / records_file).open("rb") as handle:
+                for line in handle:
+                    _collect_snapshot_ids(json.loads(line), retained)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise ValueError(f"cannot read retained checkpoint state at {manifest_path}: {error}") from error
+    return retained
+
+
+def _collect_snapshot_ids(value: object, into: set[str]) -> None:
+    if isinstance(value, dict):
+        snapshot_id = value.get("snapshot_id")
+        if isinstance(snapshot_id, str) and snapshot_id and "descriptor" in value:
+            into.add(snapshot_id)
+        for item in value.values():
+            _collect_snapshot_ids(item, into)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_snapshot_ids(item, into)
+
+
 async def cleanup_snapshots(
     *,
     domain: str,
@@ -54,13 +101,22 @@ async def cleanup_snapshots(
     snapshot_ids: list[str] | None,
     kill_paused: bool,
     reap: bool,
+    retain_from: str | Path | None = None,
     tls_verify: bool = False,
 ) -> int:
     """List matching snapshots (and paused sandboxes) and optionally delete them.
 
     ``snapshot_ids=None`` lists snapshots; a list, even an empty one, names them
     exactly. Blank selectors are rejected rather than widening the scope.
+    ``retain_from`` keeps every snapshot the checkpoints under that directory name.
     """
+    if retain_from is not None and snapshot_ids is not None:
+        raise ValueError("retain_from cannot be combined with snapshot_ids, which already name what to delete")
+    if retain_from is not None and kill_paused:
+        # Deleting a paused sandbox releases its checkpoints on the server, retained or not.
+        raise ValueError("retain_from cannot be combined with kill_paused")
+    # Read before the first request, so an unreadable checkpoint tree reaps nothing.
+    retained = retained_snapshot_ids(retain_from) if retain_from is not None else set()
     for name, values in (
         ("sandbox_id", [] if sandbox_id is None else [sandbox_id]),
         ("states", states or []),
@@ -131,6 +187,7 @@ async def cleanup_snapshots(
             else:
                 params = [] if sandbox_id is None else [("sandboxId", sandbox_id)]
                 snapshots = await list_all("snapshots", [*params, *(("state", state) for state in states)])
+                snapshots = [snapshot for snapshot in snapshots if snapshot["id"] not in retained]
             paused: list[dict[str, Any]] = []
             if kill_paused:
                 # Servers disagree on state casing, so match paused sandboxes client-side.
@@ -142,6 +199,8 @@ async def cleanup_snapshots(
             return snapshots, paused
 
         snapshots, paused = await list_matches()
+        if retain_from is not None:
+            print(f"Keeping {len(retained)} snapshot(s) named by the checkpoints under {retain_from}")
         action = "Deleting" if reap else "Would delete"
         for snapshot in snapshots:
             status = snapshot.get("status")
@@ -220,6 +279,7 @@ def _run(
                 snapshot_ids=args.snapshot_ids,
                 kill_paused=args.kill_paused,
                 reap=args.reap,
+                retain_from=args.retain_from,
                 tls_verify=tls_verify,
             )
         )
@@ -257,11 +317,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--reap", action="store_true", help="Delete matches; otherwise only audit them.")
     parser.add_argument(
+        "--retain-from",
+        metavar="DIR",
+        help="Directory of retained partial-rollout checkpoints; every snapshot their records name is kept.",
+    )
+    parser.add_argument(
         "--tls-verify",
         action="store_true",
         help="Verify the server certificate (off by default, like connection.tls_verify).",
     )
     args = parser.parse_args(argv)
+
+    if args.retain_from and args.snapshot_ids:
+        parser.error("--retain-from cannot be combined with --snapshot-id")
+    if args.retain_from and args.kill_paused:
+        parser.error("--retain-from cannot be combined with --kill-paused")
 
     if args.snapshot_ids and (args.sandbox_id is not None or args.states):
         parser.error("--snapshot-id cannot be combined with --sandbox-id or --state")
