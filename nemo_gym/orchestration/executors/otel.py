@@ -57,10 +57,20 @@ def driver_telemetry_env(gym_job_id: str, span_groups: str, *, logs: bool = True
         "NEMO_GYM_OTEL_LOGS_ENABLED": "1" if logs else "0",
         "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://localhost:{OTLP_HTTP_PORT}",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-        # No per-signal logs endpoint: logs follow the protocol above to the collector's HTTP
-        # port. Gym installs nemo-lens[sdk] and never the gRPC exporter, so the log exporter is
-        # the HTTP one; pointing it at the gRPC port made every batch time out.
+        # No per-signal logs endpoint here: which exporter nemo-lens builds depends on what is
+        # installed in the driver container, which this process cannot see. The driver picks the
+        # matching port at startup -- see LOGS_ENDPOINT_PRELUDE.
     }
+
+
+# Each OTLP log exporter only talks to its own receiver, and which one nemo-lens builds depends
+# on what the driver container has installed -- Gym alone resolves HTTP, a host that installs Gym
+# alongside its own deps can supply gRPC. Picked in the container, the first place it is knowable.
+LOGS_ENDPOINT_PRELUDE = (
+    'if python3 -c "import opentelemetry.exporter.otlp.proto.grpc" 2>/dev/null; then'
+    f" export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:{OTLP_GRPC_PORT};"
+    f" else export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:{OTLP_HTTP_PORT}; fi"
+)
 
 
 # Seconds the collector keeps running after the driver exits, so one more scrape sees the final

@@ -498,15 +498,27 @@ def test_script_lets_an_explicit_driver_env_win_over_telemetry_defaults():
 
 
 def test_script_ships_gym_logs_by_default_and_can_switch_them_off():
-    line = _driver_line(_script(_config(driver=_DRIVER_WITH_INSTALL)))
+    script = _script(_config(driver=_DRIVER_WITH_INSTALL))
+    line = _driver_line(script)
     assert "NEMO_GYM_OTEL_LOGS_ENABLED=1" in line
-    # No per-signal logs endpoint: logs follow OTEL_EXPORTER_OTLP_PROTOCOL to the collector's
-    # HTTP port. Gym never installs the gRPC exporter, so pinning logs to the gRPC port made
-    # every batch time out.
+    # The logs endpoint is not on the srun line: the port depends on which exporter the
+    # container has, so the driver picks it there.
     assert "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" not in line
     assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" in line
     off = _config(driver=_DRIVER_WITH_INSTALL, otel={"gym_logs": False})
     assert "NEMO_GYM_OTEL_LOGS_ENABLED=0" in _driver_line(_script(off))
+
+
+def test_the_driver_points_logs_at_the_port_its_installed_exporter_can_reach():
+    script = _script(_config(driver=_DRIVER_WITH_INSTALL))
+    assert 'if python3 -c "import opentelemetry.exporter.otlp.proto.grpc" 2>/dev/null; then' in script
+    assert "export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4317;" in script
+    assert "else export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4318; fi" in script
+
+
+def test_the_driver_picks_no_logs_endpoint_when_gym_logs_are_off():
+    script = _script(_config(driver=_DRIVER_WITH_INSTALL, otel={"gym_logs": False}))
+    assert "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" not in script
 
 
 def test_script_honours_configured_gym_span_groups():

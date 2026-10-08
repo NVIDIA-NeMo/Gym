@@ -38,6 +38,7 @@ from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_SERVICE_NAME,
     FINAL_SCRAPE_GRACE_SECONDS,
     GYM_TELEMETRY_EXTRA,
+    LOGS_ENDPOINT_PRELUDE,
     SHUTDOWN_WAIT_SECONDS,
     collector_config_path,
     driver_telemetry_env,
@@ -1002,6 +1003,7 @@ def build_sbatch_script(
         prepare_cmd=prepare_cmd,
         command=benchmark.command,
         extras=(GYM_TELEMETRY_EXTRA,) if instrumented else (),
+        otel_logs_prelude=LOGS_ENDPOINT_PRELUDE if instrumented and config.otel.gym_logs else None,
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
