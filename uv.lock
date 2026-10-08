@@ -16,7 +16,9 @@ constraints = [
     { name = "msgpack", specifier = ">=1.2.1" },
 ]
 overrides = [
+    { name = "gprof2dot", marker = "sys_platform == 'never'" },
     { name = "opencv-python-headless", marker = "sys_platform == 'never'" },
+    { name = "pathspec", marker = "sys_platform == 'never'" },
     { name = "pycountry", marker = "sys_platform == 'never'" },
     { name = "pynvvideocodec", marker = "sys_platform == 'never'" },
     { name = "spacy", specifier = ">=3.8.13" },
@@ -1513,15 +1515,6 @@ wheels = [
 ]
 
 [[package]]
-name = "gprof2dot"
-version = "2025.4.14"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/bb/fd/cad13fa1f7a463a607176432c4affa33ea162f02f58cc36de1d40d3e6b48/gprof2dot-2025.4.14.tar.gz", hash = "sha256:35743e2d2ca027bf48fa7cba37021aaf4a27beeae1ae8e05a50b55f1f921a6ce", size = 39536, upload-time = "2025-04-14T07:21:45.76Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/71/ed/89d760cb25279109b89eb52975a7b5479700d3114a2421ce735bfb2e7513/gprof2dot-2025.4.14-py3-none-any.whl", hash = "sha256:0742e4c0b4409a5e8777e739388a11e1ed3750be86895655312ea7c20bd0090e", size = 37555, upload-time = "2025-04-14T07:21:43.319Z" },
-]
-
-[[package]]
 name = "grpcio"
 version = "1.82.0rc1"
 source = { registry = "https://pypi.org/simple" }
@@ -2579,7 +2572,7 @@ version = "1.17.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "mypy-extensions" },
-    { name = "pathspec" },
+    { name = "pathspec", marker = "sys_platform == 'never'" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/8e/22/ea637422dedf0bf36f3ef238eab4e455e2a0dcc3082b5cc067615347ab8e/mypy-1.17.1.tar.gz", hash = "sha256:25e01ec741ab5bb3eec8ba9cdb0f769230368a22c959c4937360efb89b7e9f01", size = 3352570, upload-time = "2025-07-31T07:54:19.204Z" }
@@ -2686,7 +2679,6 @@ all = [
     { name = "daytona" },
     { name = "defusedxml" },
     { name = "e2b" },
-    { name = "gprof2dot" },
     { name = "mypy" },
     { name = "opensandbox" },
     { name = "pre-commit" },
@@ -2701,7 +2693,6 @@ all = [
 dev = [
     { name = "coverage" },
     { name = "defusedxml" },
-    { name = "gprof2dot" },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -2756,7 +2747,6 @@ requires-dist = [
     { name = "flashinfer-python", marker = "extra == 'vllm'", specifier = "==0.6.18" },
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "gitpython", specifier = ">=3.1.61" },
-    { name = "gprof2dot", marker = "extra == 'dev'" },
     { name = "httptools" },
     { name = "hydra-core" },
     { name = "itsdangerous" },
