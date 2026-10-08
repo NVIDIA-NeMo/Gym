@@ -6240,6 +6240,7 @@ class TestEnvironmentServerRouting:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed: bool
     ) -> None:
         """A typed NOOA episode keeps its grade/patch or partial evidence in the canonical artifact."""
+        from nemo_gym.base_responses_api_model import CaptureStore
         from nemo_gym.single_agent_turn_types import SingleAgentTurnResponse
 
         task_id = {"taskset": "swe_pro", "task_id": "instance_qutebrowser__qutebrowser-f91ace"}
@@ -6260,8 +6261,13 @@ class TestEnvironmentServerRouting:
             "tool_choice": "auto",
             "tools": [],
         }
+        reference = {"response_id": "resp-policy", "model_ref": {"type": "responses_api_models", "name": "policy"}}
         evidence = {
-            "ng_agent_observations": {"source": "nooa", "records": [], "gaps": []},
+            "ng_agent_observations": {
+                "source": "nooa",
+                "records": [{"kind": "agent_invocation", "invocation_id": "nooa-root", "model_calls": [reference]}],
+                "gaps": [],
+            },
             "ng_trajectory": {
                 "task_id": str(task_id),
                 "rollout_id": "1-0",
@@ -6269,6 +6275,7 @@ class TestEnvironmentServerRouting:
                     {
                         "invocation_id": "nooa-root",
                         "status": "completed",
+                        "model_calls": [reference],
                         "conversation": [
                             {"type": "function_call_output", "call_id": "tool-1", "output": "patch saved"}
                         ],
@@ -6311,9 +6318,33 @@ class TestEnvironmentServerRouting:
             }
         # Serialize the production wire type, including its optional ng_trajectory field.
         wire = SingleAgentTurnResponse.model_validate(payload).model_dump(mode="json")
-        post = AsyncMock(return_value=FakeResponse(200, wire))
+        capture_dir = tmp_path / "captures"
+        store = CaptureStore(capture_dir)
+
+        async def respond(**kwargs):
+            # Capture occurs after the collector clears stale records and dispatches the episode.
+            for call_id, status, model_response in (
+                ("failed-attempt", 500, {"error": {"message": "unavailable"}}),
+                ("successful-attempt", 200, {"id": "resp-policy", "output": []}),
+            ):
+                store.record(
+                    "1-0",
+                    {
+                        "model_call_id": call_id,
+                        "model_ref": reference["model_ref"],
+                        "client_session_id": "nooa-root",
+                        "dialect": "responses",
+                        "status_code": status,
+                        "request": {"input": "fix the issue"},
+                        "response": model_response,
+                    },
+                )
+            return FakeResponse(200, wire)
+
+        post = AsyncMock(side_effect=respond)
         client = install_fake_server_client(monkeypatch, post)
         client.global_config_dict = _environment_server_config()
+        client.global_config_dict.update(observability_enabled=True, model_call_capture_dir=str(capture_dir))
         monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: client.global_config_dict)
 
         expected = pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts") if failed else nullcontext()
@@ -6339,6 +6370,19 @@ class TestEnvironmentServerRouting:
         assert trajectory["invocations"][0]["conversation"][0]["output"] == "patch saved"
         assert trajectory["turns"][0]["answer"] == "patch saved"
         assert trajectory["tool_calls"][0]["output"] == "patch saved"
+        assert {call["model_call_id"] for call in trajectory["model_calls"]} == {
+            "failed-attempt",
+            "successful-attempt",
+        }
+        assert {ref["model_call_id"] for ref in trajectory["invocations"][0]["model_calls"]} == {
+            "failed-attempt",
+            "successful-attempt",
+        }
+        assert len(trajectory["invocations"][0]["model_calls"]) == 2
+        failed_call = next(call for call in trajectory["model_calls"] if call["model_call_id"] == "failed-attempt")
+        assert failed_call["response_metadata"]["status_code"] == 500
+        assert failed_call["request"]["input"] == "fix the issue"
+        assert failed_call["response"]["error"]["message"] == "unavailable"
         if failed:
             assert record[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
             assert record["_ng_failure_partial_response"]["id"] == "nooa-final"
