@@ -58,13 +58,26 @@ NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
 #   losing general internet access.
 AgentNetworkMode = Literal["official", "no_internet_preinstalled", "block_target"]
 
-# "block_target" wrapper: installed in place of the real pip/pip3/git binaries (the real binary
-# is moved aside to "<path>.nl2repobench-real" and exec'd from there), rather than relying on a
+# "block_target" wrapper: installed in place of the real binaries (the real binary is moved
+# aside to "<path>.nl2repobench-real" and exec'd from there), rather than relying on a
 # PATH-prepend - this guarantees the guard runs regardless of how the sandbox's non-interactive
 # shell resolves PATH, instead of depending on shell-specific PATH precedence/expansion rules.
 # Substring-matches a normalized (lowercase, "_"->"-") task_id against every argv token, so it
 # only catches tasks whose real PyPI/GitHub name is the task_id itself - a known, accepted gap
 # (see docs/PIPELINE.md).
+#
+# Two templates:
+# - _GUARD_SCRIPT_TEMPLATE: blanket argv substring match, used for pip/pip3/git/curl/wget. Safe
+#   to blanket-match because these tools are essentially never used to run the agent's own tests
+#   or legitimate work in a way that would coincidentally mention the target name.
+# - _GUARD_SCRIPT_TEMPLATE_MODULE_AWARE: used for python/python3.x binaries and uv, which ARE
+#   used constantly for legitimate work (running the agent's own tests, scripts, etc.) that
+#   routinely mentions the target name incidentally (e.g. `python -m pytest tests/test_sklearn.py`
+#   for task "sklearn" would false-positive-block under a blanket match). Only engages the
+#   substring check when the invocation is shaped like a package-fetch: `python -m pip ...`,
+#   `python -m uv ...`, or `uv pip ...` - confirmed from live transcripts as the actual bypass
+#   shapes used (`python3.12 -m pip download <target>`, `uv pip install <target>.whl` etc.),
+#   not a blanket "python touched this name anywhere" check.
 _GUARD_SCRIPT_TEMPLATE = """#!/usr/bin/env bash
 set -euo pipefail
 TARGET="{target}"
@@ -77,6 +90,36 @@ for arg in "$@"; do
     exit 1
   fi
 done
+exec "$REAL" "$@"
+"""
+
+_GUARD_SCRIPT_TEMPLATE_MODULE_AWARE = """#!/usr/bin/env bash
+set -euo pipefail
+TARGET="{target}"
+REAL="{real_path}"
+norm() {{ echo "$1" | tr 'A-Z_' 'a-z-'; }}
+args=("$@")
+is_pkg_fetch=false
+for i in "${{!args[@]}}"; do
+  a=$(norm "${{args[$i]}}")
+  if [[ "$a" == "pip" && $i -gt 0 && "${{args[$((i-1))]}}" == "-m" ]]; then
+    is_pkg_fetch=true
+    break
+  fi
+  if [[ "$a" == "pip" && "$(basename "$REAL")" == uv ]]; then
+    is_pkg_fetch=true
+    break
+  fi
+done
+if $is_pkg_fetch; then
+  for arg in "${{args[@]}}"; do
+    a=$(norm "$arg")
+    if [[ "$a" == *"$TARGET"* ]]; then
+      echo "nl2repobench guard: blocked '$(basename "$REAL") $*' - matches guarded task target '$TARGET' (package-fetch shape)" >&2
+      exit 1
+    fi
+  done
+fi
 exec "$REAL" "$@"
 """
 
@@ -421,52 +464,85 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 local_start_md_path.unlink(missing_ok=True)
         return sandbox
 
+    # Blanket-match tools: never legitimately invoked in a way that would coincidentally mention
+    # the target name, so any argv substring hit is a real block. pip3.x name variants added
+    # alongside pip/pip3 since some images expose only the versioned name.
+    _BLANKET_GUARD_TOOLS = (
+        "pip",
+        "pip3",
+        "pip3.9",
+        "pip3.10",
+        "pip3.11",
+        "pip3.12",
+        "pip3.13",
+        "git",
+        "curl",
+        "wget",
+    )
+    # Module-aware tools: used constantly for legitimate work (running the agent's own tests,
+    # scripts) that routinely mentions the target name incidentally - only guarded when invoked
+    # in a package-fetch shape (`-m pip ...` / `uv pip ...`), see
+    # _GUARD_SCRIPT_TEMPLATE_MODULE_AWARE.
+    _MODULE_AWARE_GUARD_TOOLS = (
+        "python",
+        "python3",
+        "python3.9",
+        "python3.10",
+        "python3.11",
+        "python3.12",
+        "python3.13",
+        "uv",
+    )
+
     async def _install_pip_git_guard(self, sandbox: AsyncSandbox, task: Task) -> None:
-        """Replace pip/pip3/git in place with wrappers that refuse to install/clone this task's
-        own package/repo by name, while passing every other invocation through untouched. Used
-        for agent_network_mode == "block_target", where network access otherwise stays open."""
+        """Replace pip/pip3/git/curl/wget/uv/python(3.x) in place with wrappers that refuse to
+        fetch this task's own package/repo by name, while passing every other invocation through
+        untouched. Used for agent_network_mode == "block_target", where network access otherwise
+        stays open. Covers the bypass vectors confirmed live in transcripts: direct pip/git, bare
+        curl/wget to PyPI/GitHub/jsdelivr mirrors, `python -m pip`, and `uv pip install`."""
 
         current_task_id = task_id(task)
         target = current_task_id.lower().replace("_", "-")
-        tool_names = ("pip", "pip3", "git")
-        discover = await sandbox.exec(
-            command="for n in pip pip3 git; do command -v \"$n\" || echo ''; done",
-            cwd="/",
-            timeout_s=30,
+        tool_groups = (
+            (self._BLANKET_GUARD_TOOLS, _GUARD_SCRIPT_TEMPLATE),
+            (self._MODULE_AWARE_GUARD_TOOLS, _GUARD_SCRIPT_TEMPLATE_MODULE_AWARE),
         )
-        if discover.return_code != 0:
-            raise RuntimeError(
-                f"Failed to discover pip/pip3/git locations for guard install on {current_task_id!r}: "
-                f"{discover.stderr or discover.stdout or '(no output)'}"
-            )
-        real_paths = (discover.stdout or "").splitlines()
-        for name, real_path in zip(tool_names, real_paths):
-            real_path = real_path.strip()
-            if not real_path:
-                continue  # tool isn't installed in this image; nothing to guard
-            backup_path = f"{real_path}.nl2repobench-real"
-            move_result = await sandbox.exec(
-                command=f"mv {shlex.quote(real_path)} {shlex.quote(backup_path)}", cwd="/", timeout_s=30
-            )
-            if move_result.return_code != 0:
+        for tool_names, template in tool_groups:
+            discover_cmd = "; ".join(f'command -v "{n}" || echo \'\'' for n in tool_names)
+            discover = await sandbox.exec(command=discover_cmd, cwd="/", timeout_s=30)
+            if discover.return_code != 0:
                 raise RuntimeError(
-                    f"Failed to back up real {name!r} for guard install on {current_task_id!r}: "
-                    f"{move_result.stderr or move_result.stdout or '(no output)'}"
+                    f"Failed to discover {tool_names!r} locations for guard install on "
+                    f"{current_task_id!r}: {discover.stderr or discover.stdout or '(no output)'}"
                 )
-            script = _GUARD_SCRIPT_TEMPLATE.format(target=target, real_path=backup_path)
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
-                f.write(script)
-                local_script_path = Path(f.name)
-            try:
-                await sandbox.upload(local_script_path, real_path)
-            finally:
-                local_script_path.unlink(missing_ok=True)
-            chmod_result = await sandbox.exec(command=f"chmod +x {shlex.quote(real_path)}", cwd="/", timeout_s=30)
-            if chmod_result.return_code != 0:
-                raise RuntimeError(
-                    f"Failed to chmod guard wrapper for {name!r} on {current_task_id!r}: "
-                    f"{chmod_result.stderr or chmod_result.stdout or '(no output)'}"
+            real_paths = (discover.stdout or "").splitlines()
+            for name, real_path in zip(tool_names, real_paths):
+                real_path = real_path.strip()
+                if not real_path:
+                    continue  # tool isn't installed in this image; nothing to guard
+                backup_path = f"{real_path}.nl2repobench-real"
+                move_result = await sandbox.exec(
+                    command=f"mv {shlex.quote(real_path)} {shlex.quote(backup_path)}", cwd="/", timeout_s=30
                 )
+                if move_result.return_code != 0:
+                    raise RuntimeError(
+                        f"Failed to back up real {name!r} for guard install on {current_task_id!r}: "
+                        f"{move_result.stderr or move_result.stdout or '(no output)'}"
+                    )
+                script = template.format(target=target, real_path=backup_path)
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
+                    f.write(script)
+                    local_script_path = Path(f.name)
+                try:
+                    await sandbox.upload(local_script_path, real_path)
+                finally:
+                    local_script_path.unlink(missing_ok=True)
+                chmod_result = await sandbox.exec(command=f"chmod +x {shlex.quote(real_path)}", cwd="/", timeout_s=30)
+                if chmod_result.return_code != 0:
+                    raise RuntimeError(
+                        f"Failed to chmod guard wrapper for {name!r} on {current_task_id!r}: "
+                        f"{chmod_result.stderr or chmod_result.stdout or '(no output)'}"
+                    )
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
         try:
