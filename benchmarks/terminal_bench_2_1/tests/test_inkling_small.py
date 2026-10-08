@@ -165,6 +165,7 @@ def test_profile_preserves_evaluation_settings_and_adds_deployment_from_sandbox_
     assert agent["entrypoint"] == "app.py"
     assert agent["interleaved_thinking"] is model["uses_interleaved_reasoning"] is True
     assert agent["terminal_hidden_mounts"] == ["/mnt/s3-data", "/mnt/.s3-gate"]
+    # The tmux binary that mount hiding needs only comes from sandbox_utils.yaml (the recipe header says to add it).
     assert bool(agent["remote_tmux_binary_path"]) is deployment
     assert agent["model_context_limit"] == 1048576
     assert agent["sandbox_timeout"] == 10800
