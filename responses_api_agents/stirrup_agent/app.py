@@ -702,13 +702,14 @@ async def _run_stirrup_agent(
     if is_gdpval and reference_files and reference_file_urls:
         import os as _os_ref
 
-        from responses_api_agents.stirrup_agent.tasks.gdpval import _download_reference_files
+        # FIXME: removed once stirrup runs behind an environment server
+        from resources_servers.gdpval.reference_files import download_reference_files
 
         ref_root = _os_ref.environ.get("GDPVAL_REF_FILES_DIR")
         if ref_root:
             Path(ref_root).mkdir(parents=True, exist_ok=True)
         input_files_dir = tempfile.mkdtemp(prefix="gdpval_ref_files_", dir=ref_root)
-        downloaded = _download_reference_files(reference_files, reference_file_urls, Path(input_files_dir))
+        downloaded = download_reference_files(reference_files, reference_file_urls, Path(input_files_dir))
         if downloaded:
             print(f"Downloaded {len(downloaded)} reference files to {input_files_dir}", flush=True)
         else:
@@ -859,7 +860,7 @@ async def _run_stirrup_agent(
 
             # 6. Reference files
             if input_files_dir and Path(input_files_dir).is_dir():
-                # ``_download_reference_files`` writes each ``file_path`` from the
+                # ``download_reference_files`` writes each ``file_path`` from the
                 # dataset row directly under ``input_files_dir``. The GDPVal HF
                 # corpus prefixes every entry with ``reference_files/`` (matching
                 # the dataset's directory layout), so ``input_files_dir`` already

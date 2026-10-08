@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Sequence, Tuple
 
+from resources_servers.gdpval import persisted_layout
+
 
 _BINARY_EXTENSIONS = {
     ".pdf",
@@ -189,17 +191,13 @@ def _find_candidate_root(global_config: Mapping[str, Any], gdpval_server_name: s
 
 
 def _repeat_dirs(root: Path, task_id: str) -> list[Path]:
-    task = root / f"task_{task_id}"
-    if not task.is_dir():
-        return []
-    repeats = sorted(path for path in task.iterdir() if path.is_dir() and path.name.startswith("repeat_"))
-    return repeats or [task]
+    return persisted_layout.repeat_dirs(persisted_layout.task_dir(root, task_id))
 
 
 def _has_valid_finish_marker(repeat_dirs: Sequence[Path]) -> bool:
     """Whether a reference task has at least one persisted completion marker."""
     for repeat in repeat_dirs:
-        marker = repeat / "finish_params.json"
+        marker = repeat / persisted_layout.FINISH_PARAMS_FILE
         try:
             marker_stat = marker.stat()  # Follow the immutable transport-view symlink.
             if not stat.S_ISREG(marker_stat.st_mode) or marker_stat.st_size > 16 * 1024 * 1024:
