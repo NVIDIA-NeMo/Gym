@@ -1073,7 +1073,7 @@ target = "policy"
 
         manifest = json.loads((tmp_path / "condition" / "switchyard-condition.json").read_text())
         assert manifest["route"] == "policy-model"
-        assert manifest["nemo_switchyard_version"] == "0.2.0"
+        assert manifest["nemo_switchyard_version"] == "0.3.0"
 
         snapshot = json.loads((tmp_path / "condition" / "switchyard-stats.json").read_text())
         assert snapshot["mode"] == "hosted"
