@@ -110,6 +110,8 @@ gym env init --environment my_eval --profile custom-gym-verifier
 
 Use `--benchmark` instead of `--environment` for a benchmark. The scaffold writes `environments/my_eval/manifest.yaml`, `config.yaml`, `README.md`, and sample data, and creates a full resources server skeleton under `resources_servers/my_eval/`.
 
+If an existing scorer already exports `VERIFIER_FIXTURE`, use `--reuse-verifier NAME --reward-range 0 1 --higher-is-better` instead and supply that scorer's actual reward contract.
+
 ### 3. Implement the Resources Server
 
 Fill in the scaffolded component:
