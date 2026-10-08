@@ -79,6 +79,19 @@ client, so those 38 are excluded up front rather than left to time out). The bro
 `prepare_swe_gym.py` writes only the supported rows. On a Slurm cluster where OpenSandbox is only reachable
 from inside, `temp/temp_launch_swe_gym_golden_patch_full.sh` runs all of this on the cpu partition.
 
+The sweep only shows that the golden patch is sufficient. The matching negative control grades the same
+rows with no patch at all, and every row must come back unresolved:
+
+```bash
+python resources_servers/swe_gym/apply_golden_patch.py \
+  +training_jsonl=resources_servers/swe_gym/data/swe_gym_training.jsonl \
+  +output_jsonl=results/swe_gym_empty_patch/pass_1.jsonl +concurrency=64 +empty_patch=true
+```
+
+On 2026-10-08 all 2,278 supported rows came back unresolved with an empty patch (the test patch applied and
+pytest ran on the touched files in every sandbox; every FAIL_TO_PASS test failed on the base commit), so no
+row in `data/supported_instance_ids.txt` scores a pass without a fix.
+
 ## Running an agent
 
 ```bash

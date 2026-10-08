@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from resources_servers.swe_gym.apply_golden_patch import EMPTY_RESPONSE, build_payload
 from resources_servers.swe_gym.swebench_specs import (
     SPECS,
     normalize_test_id,
@@ -518,3 +519,15 @@ class TestGoldenPatchAggregation:
         assert classify([self._obs(True, False)] * 3, 3) == "broken"
         assert classify([self._obs(True, True), self._obs(True, True), self._obs(False, False)], 3) == "inconclusive"
         assert classify([self._obs(True, True)] * 2, 3) == "inconclusive"
+
+
+def test_build_payload_empty_patch_control_blanks_only_the_patch():
+    example = {"instance_id": "x__1", "patch": "diff --git a/f.py b/f.py\n", "repo": "x"}
+    golden = build_payload(example)
+    assert golden["patch"] == example["patch"]
+    assert golden["response"] == EMPTY_RESPONSE
+    assert golden["responses_create_params"] == {"input": []}
+    control = build_payload(example, empty_patch=True)
+    assert control["patch"] == ""
+    assert control["instance_id"] == "x__1"
+    assert example["patch"] != ""  # the input row is left untouched

@@ -80,6 +80,19 @@ misses are single environment-sensitive tests such as aiohttp's `test_client_ses
 numpy's lerp/cholesky property tests), and `prepare_r2e_gym.py` writes only those rows. On a Slurm cluster where OpenSandbox is only reachable
 from inside, `temp/temp_launch_r2e_gym_golden_patch_full.sh` runs all of this on the cpu partition.
 
+The sweep only shows that the golden patch is sufficient. The matching negative control grades the same
+rows with no patch at all, and every row must come back unresolved:
+
+```bash
+python resources_servers/r2e_gym/apply_golden_patch.py \
+  +training_jsonl=resources_servers/r2e_gym/data/r2e_gym_training.jsonl \
+  +output_jsonl=results/r2e_gym_empty_patch/pass_1.jsonl +concurrency=64 +empty_patch=true
+```
+
+On 2026-10-08 all 4,553 supported rows came back unresolved with an empty patch (the hidden tests ran in
+every sandbox and failed or errored on the pre-fix tree; one pandas row segfaults pytest before the fix),
+so no row in `data/supported_instance_ids.txt` scores a pass without a fix.
+
 ## Running an agent
 
 ```bash
