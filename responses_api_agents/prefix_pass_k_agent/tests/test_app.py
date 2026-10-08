@@ -33,6 +33,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from nemo_gym.sandbox.providers.base import SandboxExecResult
+
 
 def _load(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -277,8 +279,9 @@ class TestRun:
         sandbox = FakeSandbox(_result(stderr="signal: killed", return_code=-1))
         assert asyncio.run(_bare_agent(step_timeout=3600)._run(sandbox, "kill -9 $$")) == (-1, "", None)
 
-    def test_typed_timeout_quotes_the_raw_command(self):
-        sandbox = FakeSandbox(_result(return_code=-1, error_type="timeout"))
+    @pytest.mark.parametrize("return_code", [-1, 124])
+    def test_typed_timeout_quotes_the_raw_command(self, return_code: int) -> None:
+        sandbox = FakeSandbox(_result(return_code=return_code, error_type="timeout"))
         _, _, info = asyncio.run(_bare_agent(exec_env={"PAGER": "cat"})._run(sandbox, "make test"))
         assert info.endswith("Command 'make test' timed out after 30 seconds")
 
@@ -615,6 +618,14 @@ class Resetting:
 
 
 class TestExecErrors:
+    @pytest.mark.parametrize("return_code", [125, -1])
+    def test_returned_sandbox_error_is_not_command_output_or_timeout(self, return_code: int) -> None:
+        sandbox = FakeSandbox(SandboxExecResult(None, "execd failed to launch", return_code, "sandbox"))
+        with pytest.raises(AGENT.SandboxExecError) as caught:
+            asyncio.run(_bare_agent(step_timeout=0)._run(sandbox, "ls"))
+        assert caught.value.failure_kind == "agent_run_error"
+        assert "execd failed to launch" in str(caught.value)
+
     def test_a_reset_is_raised_not_answered_as_a_failed_command(self):
         with pytest.raises(AGENT.SandboxExecError) as caught:
             asyncio.run(_bare_agent()._run(Resetting(), "ls"))
@@ -663,8 +674,9 @@ class TestExecErrors:
 class TestAbortedAttemptIsMasked:
     """The review's case: a reset must not reach pass@k as an ordinary 0 (or a lucky 1)."""
 
-    def _run(self, monkeypatch, verify):
+    def _run(self, monkeypatch, verify, *, exec_result: SandboxExecResult | None = None):
         agent = _bare_agent(
+            wire="backticks",
             resources_server=SimpleNamespace(name="rs"),
             record_git_state=True,
             commit_worktree=False,
@@ -687,22 +699,15 @@ class TestAbortedAttemptIsMasked:
         async def head(sb):
             return "abc"
 
-        async def aborted_responses(request, params):
-            agent._session_id_to_stats["s"] = {
-                "exec_errors": 1,
-                "failure_kind": "transport_peer_drop",
-                "failure_reason": "sandbox exec failed: ConnectionResetError",
-            }
-            return AGENT.NeMoGymResponse(
-                id="r",
-                created_at=0,
-                model="m",
-                object="response",
-                output=[],
-                tool_choice="auto",
-                tools=[],
-                parallel_tool_calls=True,
-            )
+        async def exec_command(command, timeout_s=None):
+            if exec_result is not None:
+                return exec_result
+            raise ConnectionResetError("Connection reset by peer")
+
+        sandbox.exec = exec_command
+
+        async def must_not_generate(*args, **kwargs):
+            raise AssertionError("the candidate ran after the sandbox failed")
 
         class Reply:
             cookies = {}
@@ -720,7 +725,7 @@ class TestAbortedAttemptIsMasked:
         object.__setattr__(agent, "_head", head)
         object.__setattr__(agent, "_git_state", must_not_touch_git)
         object.__setattr__(agent, "_worktree_patch", must_not_touch_git)
-        object.__setattr__(agent, "responses", aborted_responses)
+        object.__setattr__(agent, "_generate", must_not_generate)
 
         async def ok(response):
             return None
@@ -731,7 +736,10 @@ class TestAbortedAttemptIsMasked:
         monkeypatch.setattr(AGENT, "raise_for_status", ok)
         monkeypatch.setattr(AGENT, "get_response_json", as_json)
         body = AGENT.PrefixPassKRunRequest.model_validate(
-            {"responses_create_params": {"input": [{"role": "user", "content": "task"}]}}
+            {
+                "responses_create_params": {"input": [{"role": "user", "content": "task"}]},
+                "prefix_pass_k": {"prefix": [{"action": "ls", "content": "captured action"}]},
+            }
         )
         request = SimpleNamespace(cookies={}, session={AGENT.SESSION_ID_KEY: "s"}, state=SimpleNamespace())
         result = asyncio.run(agent.run(request, body))
@@ -746,6 +754,18 @@ class TestAbortedAttemptIsMasked:
     def test_a_lucky_pass_is_masked_too(self, monkeypatch):
         result, _ = self._run(monkeypatch, lambda req: req | {"reward": 1.0})
         assert (result.reward, result.mask_sample) == (0.0, True)
+
+    @pytest.mark.parametrize("reward", [0.0, 1.0])
+    def test_a_returned_sandbox_error_aborts_and_masks(self, monkeypatch, reward: float) -> None:
+        result, sandbox = self._run(
+            monkeypatch,
+            lambda req: req | {"reward": reward},
+            exec_result=SandboxExecResult(None, "execd failed to launch", 125, "sandbox"),
+        )
+        assert (result.exec_errors, result.forwards, result.reward, result.mask_sample) == (1, 0, 0.0, True)
+        assert result.failure_kind == "agent_run_error"
+        assert "execd failed to launch" in result.failure_reason
+        assert sandbox.commands == ["stop"]
 
     def test_a_verifier_that_fails_on_the_broken_sandbox_still_yields_a_masked_sample(self, monkeypatch):
         def fails(req):

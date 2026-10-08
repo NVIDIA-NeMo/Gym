@@ -259,7 +259,8 @@ def parse_bash_tool_calls(raw: str, max_calls: int = 3) -> List[Dict[str, Any]]:
         if not isinstance(call, dict):
             continue
         function = call["function"] if isinstance(call.get("function"), dict) else call
-        if (function.get("name") or "").strip() != "bash":
+        name = function.get("name")
+        if not isinstance(name, str) or name.strip() != "bash":
             continue
         arguments = function.get("arguments")
         if isinstance(arguments, str):

@@ -425,6 +425,12 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                 TRANSPORT_PEER_DROP if isinstance(exc, (ConnectionError, ClientConnectionError)) else AGENT_RUN_ERROR
             )
             raise SandboxExecError(kind, f"sandbox exec failed: {type(exc).__name__}: {exc}"[:500]) from exc
+        # Providers may return an infrastructure failure instead of raising it.
+        if result.error_type and result.error_type != "timeout":
+            raise SandboxExecError(
+                AGENT_RUN_ERROR,
+                f"sandbox exec failed ({result.error_type}): {result.stderr or 'no details'}"[:500],
+            )
         # stdout is the command's merged output. stderr is the SANDBOX's status
         # text -- "exit status 1", "signal: killed" -- never program output: the
         # harness would not show it, and appending it put "exit status 1" under

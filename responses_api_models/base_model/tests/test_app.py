@@ -24,8 +24,11 @@ a hallucinated conversation.
 
 import asyncio
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 
 def _load(name: str, path: Path):
@@ -153,6 +156,15 @@ class TestParseBashToolCall:
 
     def test_other_tool_name_is_rejected(self):
         assert BM.parse_bash_tool_calls('[{"name": "python", "arguments": {"command": "x"}}]') == []
+
+    @pytest.mark.parametrize("name", [None, 0, 1, True, [], ["bash"], {}, {"name": "bash"}])
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_non_string_names_are_rejected(self, name: object, nested: bool) -> None:
+        call = {"name": name, "arguments": {"command": "pwd"}}
+        malformed = {"function": call} if nested else call
+        assert BM.parse_bash_tool_calls(json.dumps([malformed])) == []
+        valid = {"name": "bash", "arguments": {"command": "ls"}}
+        assert BM.parse_bash_tool_calls(json.dumps([malformed, valid])) == [valid]
 
     def test_empty_command_is_rejected(self):
         assert BM.parse_bash_tool_calls('[{"name": "bash", "arguments": {"command": "  "}}]') == []
