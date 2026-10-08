@@ -480,7 +480,11 @@ def test_notification_workflows_use_pinned_shared_summary_without_checkout() -> 
         assert notify["environment"] == "main"
         assert notify["permissions"] == {}
         assert all("checkout" not in step.get("uses", "") for step in steps)
-        assert set(notify["needs"]) == set(jobs) - {"notify-failure", "merge-queue-notification"}
+        excluded_jobs = {"notify-failure", "merge-queue-notification"}
+        if workflow_file == CICD_MAIN_WORKFLOW:
+            # Harness P0 is reported separately and is not part of Gym's nightly gate.
+            excluded_jobs.add("harness_conformance")
+        assert set(notify["needs"]) == set(jobs) - excluded_jobs
         assert "failure()" in notify["if"]
         assert "always() && !cancelled()" in notify["if"]
         assert "needs." not in notify["if"]

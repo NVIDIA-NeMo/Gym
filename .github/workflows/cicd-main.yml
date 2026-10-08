@@ -375,7 +375,7 @@ jobs:
   notify-failure:
     name: Notify test failure
     runs-on: ubuntu-latest
-    needs: [ephemeral-runner-routing, pre-flight, classify_changes, unit_tests, harness_conformance, container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
+    needs: [ephemeral-runner-routing, pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
     environment: main
     permissions: {}
     # Use the event directly: setup outputs are empty when setup fails.
