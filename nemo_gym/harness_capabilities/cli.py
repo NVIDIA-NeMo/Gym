@@ -12,11 +12,34 @@ import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from string import ascii_letters, digits
+from typing import Iterator
 
 from . import __version__
 from .checker import NAMES, PROFILE, EvidenceScope, inspect_record
-from .contracts import PATH_MODELS, SCHEMA_VERSION
-from .reader import digest_file, hydrate_record, json_rows
+from .contracts import SCHEMA_VERSION
+
+
+def _reject_constant(value: str) -> None:
+    raise ValueError("nonfinite JSON number")
+
+
+def json_rows(path: Path) -> Iterator[tuple[int, dict]]:
+    """Read JSONL strictly; malformed/truncated rows are checker errors."""
+    with path.open(encoding="utf-8") as handle:
+        for number, line in enumerate(handle, 1):
+            if line.strip():
+                try:
+                    value = json.loads(line, parse_constant=_reject_constant)
+                except (ValueError, RecursionError) as exc:
+                    raise ValueError(f"{path.name}:{number}: invalid JSON") from exc
+                if not isinstance(value, dict):
+                    raise ValueError(f"{path.name}:{number}: expected an object")
+                yield number, value
+
+
+def digest_file(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def _json(value: object) -> str:
@@ -57,18 +80,10 @@ def inspect_bundle(
             raise ValueError("capture directory does not exist")
         sources.extend(sorted(capture_dir.glob("*.capture.*")))
     hashes = {str(path.resolve()): digest_file(path) for path in sources}
-    registry = {path: adapter.json_schema() for path, adapter in PATH_MODELS.items()}
-    registry_hash = hashlib.sha256(_json({"path_models": registry, "profile": PROFILE}).encode()).hexdigest()
-    # Include model validators as well as generated shapes in report identity.
-    gym = Path(__file__).parent.parent
-    checker_sources = sorted(Path(__file__).parent.glob("*.py")) + [
-        gym / name
-        for name in ("rollout_observability.py", "base_responses_api_model.py", "config_types.py", "openai_utils.py")
-    ]
+    checker_sources = sorted(Path(__file__).parent.glob("*.py"))
     checker_hash = hashlib.sha256("".join(digest_file(p) for p in checker_sources).encode()).hexdigest()
     manifest = {
         "sources": hashes,
-        "registry_sha256": registry_hash,
         "checker_sha256": checker_hash,
         "profile": profile,
         "applicability": asdict(scope),
@@ -79,18 +94,10 @@ def inspect_bundle(
     totals = {key: {"records": 0, "fulfilled": 0, "not_fulfilled": 0, "not_applicable": 0} for key in NAMES}
     token_availability = {}
     passing_records = 0
-    identities: set[object] = set()
     count = 0
     try:
         with (temporary / "evidence_results.jsonl").open("w") as handle:
-            for line, raw in json_rows(bundle):
-                record = hydrate_record(raw, capture_dir=capture_dir)
-                identity = (record.get("_ng_task_index"), record.get("_ng_rollout_index"))
-                if identity == (None, None):
-                    identity = (record.get("ng_trajectory") or {}).get("rollout_id")
-                if identity in identities:
-                    record.setdefault("_capability_reader_issues", []).append("duplicate rollout identity in input")
-                identities.add(identity)
+            for line, record in json_rows(bundle):
                 result = inspect_record(record, source=f"{bundle.name}:{line}", scope=scope)
                 count += 1
                 passing_records += result["verdict"] == "fulfilled"
@@ -118,7 +125,7 @@ def inspect_bundle(
             }
             for key, counts in totals.items()
         }
-        # Apply the join alternative per rollout, not only to aggregate columns.
+        # Require the individual P0 checks to pass on every rollout.
         passed = passing_records == count
         summary = {
             "schema_version": "harness-evidence/v1",
@@ -137,7 +144,9 @@ def inspect_bundle(
             "limits": [
                 "retained artifacts only; no live qualification or health certification",
                 "TE-6 checks shipped Gym reward/resolution; extended verifier provenance is not certified",
-                "TE-10 and P1 evidence are outside this profile",
+                "sandbox rows are reported under TE-6; record presence is enforced only with require_sandbox",
+                "all applicable individual P0 checks must pass; TE labels only group results",
+                "all current checks are P0, including ownership and call-to-step checks",
             ],
             **manifest,
         }
@@ -208,7 +217,11 @@ def inspect_matrix(
             "| Harness | " + " | ".join(NAMES) + " | P0 |",
             "|---|" + "---|" * (len(NAMES) + 1),
         ]
-        labels = {"fulfilled": "PASS", "not_fulfilled": "FAIL", "not_applicable": "N/A"}
+        labels = {
+            "fulfilled": "PASS",
+            "not_fulfilled": "FAIL",
+            "not_applicable": "N/A",
+        }
         for name, summary in rows.items():
             table.append(
                 "| "
@@ -224,8 +237,8 @@ def inspect_matrix(
                 "",
                 *[f"- {key}: {name}" for key, name in NAMES.items()],
                 "",
-                "P0 requires all applicable TE-1–TE-7 and TE-8 or TE-9 on every record.",
-                "TE-2 PASS means usage was preserved, not that every provider metric was available.",
+                "P0 requires every applicable individual P0 check to pass on every record; TE labels only group results.",
+                "TE-2 PASS means saved counts have valid types and ranges; availability is reported separately.",
                 "See each evidence_summary.json for input hashes, applicability, token availability and limitations.",
             ]
         )
@@ -248,7 +261,9 @@ def main(argv: list[str] | None = None) -> int:
     inspect = subparsers.add_parser("inspect")
     inspect.add_argument("--bundle", required=True, type=Path)
     inspect.add_argument(
-        "--capture-dir", type=Path, help="cross-check original captures; missing JSONL payloads still fail"
+        "--capture-dir",
+        type=Path,
+        help="include capture sidecars in input provenance; checks use designated rollout fields",
     )
     inspect.add_argument("--profile", choices=[PROFILE], default=PROFILE)
     matrix = subparsers.add_parser("matrix")
@@ -260,8 +275,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         command.add_argument("--no-verifier", action="store_true", help="this pair has no verifier")
         command.add_argument("--no-steps", action="store_true", help="this pair has no policy step structure")
+        command.add_argument(
+            "--require-sandbox", action="store_true", help="require saved sandbox outcomes for this pair"
+        )
     args = parser.parse_args(argv)
-    scope = EvidenceScope(tools=not args.no_tools, verifier=not args.no_verifier, steps=not args.no_steps)
+    scope = EvidenceScope(
+        tools=not args.no_tools,
+        verifier=not args.no_verifier,
+        steps=not args.no_steps,
+        require_sandbox=args.require_sandbox,
+    )
     if args.command == "inspect":
         return run_inspection(
             bundle=args.bundle, output=args.output, profile=args.profile, capture_dir=args.capture_dir, scope=scope
