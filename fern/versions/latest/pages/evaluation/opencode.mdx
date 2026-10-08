@@ -203,8 +203,10 @@ the direct-call `execution_mode`; missing access and provider is an error.
 `setup_timeout` bounds native runtime installation.
 
 The existing SWE-bench Verified/Multilingual/Pro, DeepSWE, and Terminal Bench 2.1
-flat-row recipes explicitly select `legacy_sandbox` and are fronted by a compatibility
-EnvironmentServer that still delegates orchestration to agent `/run`. Use
+flat-row recipes retain the `opencode_sandboxed_agent` entrypoint and their existing
+deployment names, including the Nemotron evaluation overlays. Their compatibility
+EnvironmentServer still delegates orchestration to agent `/run`; migrating these
+recipes is separate from adding session support. Use
 `swebench/pro/opencode_taskset` for taskset-routed SWE-bench Pro collection. ViBench uses the
 compatibility implementation in `opencode_agent.legacy`
 because it owns and harvests its build sandbox. This keeps the package name stable
