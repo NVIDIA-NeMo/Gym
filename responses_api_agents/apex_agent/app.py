@@ -99,6 +99,9 @@ class ApexAgentConfig(BaseResponsesAPIAgentConfig):
     supports_vision: bool
     temperature: float = Field(ge=0.0)
     top_p: float = Field(gt=0.0, le=1.0)
+    # After a turn exhausts max_output_tokens without a tool call, run the next
+    # turn with thinking disabled and a recovery notice (see stirrup_runtime).
+    truncation_recovery: bool = True
 
     max_snapshot_bytes: Optional[int] = Field(default=None, gt=0)
     max_world_bytes: Optional[int] = Field(default=None, gt=0)
@@ -517,6 +520,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
                 if body.responses_create_params.top_p is not None
                 else self.config.top_p
             ),
+            "truncation_recovery": self.config.truncation_recovery,
             "foundry_services": body.foundry_services,
             "edgar_user_agent": self.config.edgar_user_agent,
             "task_slug": body.task_slug,
@@ -587,6 +591,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
         response.apex_trajectory = result.get("trajectory") or []
         response.apex_agent_mode = result.get("agent_mode")
         response.apex_completion_status = result.get("completion_status")
+        response.apex_length_truncations = result.get("n_length_truncations")
         response.apex_resume_segments = result.get("resume_segments")
         response.apex_resumed_from_turn = result.get("resumed_from_turn")
         response.apex_resume_checkpoints = result.get("n_resume_checkpoints")
