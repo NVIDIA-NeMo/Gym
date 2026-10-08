@@ -183,6 +183,20 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         ),
     )
 
+    unfinished_episodes: Literal["mask", "fail"] = Field(
+        default="mask",
+        description=(
+            "How to score episodes the agent did not end itself: OpenHands stopped it at agent_max_turns "
+            "(max_iteration), it ran out of context (context_window), or the loop detector stopped it "
+            "(stuck_in_loop).\n"
+            "  'mask' (default): turn-cap and context-window episodes are excluded from the loss (mask_sample); "
+            "loop-detector exits are graded on the patch left on disk.\n"
+            "  'fail': all three stay in the loss with reward 0, so RL sees that running out the budget fails. "
+            "`resolved` still reports the measured test verdict. OOM kills and agent / eval wall-clock timeouts stay "
+            "masked either way."
+        ),
+    )
+
     agent_prompt_overrides: Optional[list[AgentPromptOverride]] = Field(
         default=None,
         description="List of (user_prompt_template, system_prompt_template, agent_cls) overrides. "
@@ -314,6 +328,8 @@ class SWEBenchMetrics(BaseModel):
 
     # Failure-mode signals used to decide mask_sample downstream.
     agent_error_kind: Optional[str] = None
+    # The episode ended without the agent finishing it: turn cap, context window or loop detector.
+    unfinished: Optional[bool] = None
     agent_timed_out: Optional[bool] = None
     eval_timed_out: Optional[bool] = None
 
@@ -2402,6 +2418,19 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
 ########################################
 
 
+# Agent error kinds for episodes the agent did not end itself (see SWEBenchWrapperConfig.unfinished_episodes).
+UNFINISHED_AGENT_ERROR_KINDS = ("max_iteration", "context_window", "stuck_in_loop")
+
+
+def _task_reward(metrics: SWEBenchMetrics, unfinished_episodes: str) -> float:
+    """1.0 for a resolved task; with unfinished_episodes="fail", only if the agent also finished the episode."""
+    if not metrics.resolved:
+        return 0.0
+    if unfinished_episodes == "fail" and metrics.unfinished:
+        return 0.0
+    return 1.0
+
+
 def _classify_agent_error(err: Optional[str]) -> Optional[str]:
     if not err:
         return None
@@ -3894,7 +3923,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         # Decide whether to mask this sample from the GRPO gradient.
         # 1) Patch passed eval but agent did not actually submit (hit max-turns
-        #    or blew the context window) — the reward is accidental.
+        #    or blew the context window) — the reward is accidental. Only with
+        #    unfinished_episodes="mask"; with "fail" these score 0 instead (see run()).
         # 2) Final eval step timed out — reward is unreliable.
         # 3) Agent itself timed out (wall-clock) — mask regardless of resolved.
         # 4) Memory watchdog killed the agent container (OOM).
@@ -3905,8 +3935,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         agent_timed_out = bool(persisted_metrics.agent_timed_out)
         oom_killed = bool(persisted_metrics.oom_killed)
         eval_oom_killed = bool(persisted_metrics.eval_oom_killed)
+        metrics_to_update["unfinished"] = agent_error_kind in UNFINISHED_AGENT_ERROR_KINDS
         if (
-            agent_error_kind in ("max_iteration", "context_window")
+            (self.config.unfinished_episodes == "mask" and agent_error_kind in ("max_iteration", "context_window"))
             or eval_timed_out
             or agent_timed_out
             or oom_killed
@@ -4052,7 +4083,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
                 response=response,
-                reward=1.0 if metrics.resolved else 0.0,
+                reward=_task_reward(metrics, self.config.unfinished_episodes),
                 # Report it on the contract as well; `instance_config.mask_sample` stays
                 # for one release so existing consumers keep working.
                 mask_sample=instance_config.mask_sample,

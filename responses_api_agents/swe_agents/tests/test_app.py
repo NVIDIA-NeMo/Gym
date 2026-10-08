@@ -3416,3 +3416,110 @@ def test_merge_reparents_a_new_live_child_to_the_stable_recorded_root() -> None:
 
     merged = merge_replay_subagent_trajectories(manifest, captured)
     assert merged[0]["parent_session_id"] == "recorded_root"
+
+
+########################################
+# unfinished_episodes
+########################################
+
+
+class TestUnfinishedEpisodes:
+    @staticmethod
+    async def _inner_metadata(monkeypatch, tmp_path: Path, persisted_metrics: dict, mode: str) -> tuple[bool, dict]:
+        """Run `_inner_responses` past the masking decision with the agent run stubbed out."""
+        wrapper = _create_wrapper(monkeypatch)
+        wrapper.config.unfinished_episodes = mode
+        params = _make_instance_config(str(tmp_path), unfinished_episodes=mode)
+        params.metrics_fpath.write_text(json.dumps(persisted_metrics))
+        monkeypatch.setattr(swe_app, "runner_ray_remote", MagicMock(remote=AsyncMock(return_value=None)))
+        monkeypatch.setattr(
+            SWEBenchWrapper, "get_openhands_trajectory_from_completions", lambda self, *args: ([], [], 0, None)
+        )
+        response = await wrapper._inner_responses(params, MagicMock())
+        return json.loads(response.metadata["instance_config"])["mask_sample"], json.loads(
+            response.metadata["metrics"]
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "agent_error_kind,masked_by_default",
+        [("max_iteration", True), ("context_window", True), ("stuck_in_loop", False)],
+    )
+    async def test_unfinished_kinds(self, monkeypatch, tmp_path, agent_error_kind, masked_by_default) -> None:
+        persisted = {"agent_error_kind": agent_error_kind}
+        masked, metrics = await self._inner_metadata(monkeypatch, tmp_path / "mask", persisted, "mask")
+        assert masked is masked_by_default
+        assert metrics["unfinished"] is True
+        masked, metrics = await self._inner_metadata(monkeypatch, tmp_path / "fail", persisted, "fail")
+        assert masked is False
+        assert metrics["unfinished"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["mask", "fail"])
+    async def test_infrastructure_failures_stay_masked(self, monkeypatch, tmp_path, mode) -> None:
+        for i, persisted in enumerate(
+            [{"agent_timed_out": True}, {"eval_timed_out": True}, {"oom_killed": True}, {"eval_oom_killed": True}]
+        ):
+            masked, metrics = await self._inner_metadata(monkeypatch, tmp_path / str(i), persisted, mode)
+            assert masked is True
+            assert metrics["unfinished"] is False
+
+    @pytest.mark.asyncio
+    async def test_finished_episode_is_not_unfinished(self, monkeypatch, tmp_path) -> None:
+        masked, metrics = await self._inner_metadata(monkeypatch, tmp_path, {"agent_error_kind": None}, "fail")
+        assert masked is False
+        assert metrics["unfinished"] is False
+
+    def test_task_reward(self) -> None:
+        resolved_unfinished = SWEBenchMetrics(resolved=True, unfinished=True)
+        resolved_finished = SWEBenchMetrics(resolved=True, unfinished=False)
+        assert swe_app._task_reward(resolved_unfinished, "mask") == 1.0
+        assert swe_app._task_reward(resolved_unfinished, "fail") == 0.0
+        assert swe_app._task_reward(resolved_finished, "fail") == 1.0
+        assert swe_app._task_reward(SWEBenchMetrics(resolved=False, unfinished=False), "mask") == 0.0
+        # Metrics written before the field existed.
+        assert swe_app._task_reward(SWEBenchMetrics(resolved=True), "fail") == 1.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode,expected_reward", [("mask", 1.0), ("fail", 0.0)])
+    async def test_run_reward_for_resolved_unfinished_episode(self, monkeypatch, mode, expected_reward) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        wrapper.config.unfinished_episodes = mode
+        mock_response = NeMoGymResponse(
+            id="swebench-test",
+            created_at=123,
+            model="test-model",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+            metadata={
+                "input": "[]",
+                "metrics": json.dumps(
+                    {"resolved": True, "patch_exists": True, "agent_error_kind": "stuck_in_loop", "unfinished": True}
+                ),
+                "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
+            },
+        )
+        with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
+            from nemo_gym.base_resources_server import BaseRunRequest
+
+            body = BaseRunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                    model="test-model",
+                    input=[],
+                    metadata={
+                        "problem_statement": "Fix",
+                        "instance_id": "test-1",
+                        "base_commit": "abc",
+                        "dataset_name": "SWE-bench",
+                        "split": "test",
+                        "instance_dict": "{}",
+                    },
+                )
+            )
+            result = await wrapper.run(body)
+        assert result.resolved is True
+        assert result.unfinished is True
+        assert result.reward == expected_reward
