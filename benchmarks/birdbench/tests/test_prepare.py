@@ -15,8 +15,12 @@ class _FakeDbHandle:
     in ``test_build_db_values.py``; here we only care about how ``prepare()`` assembles rows.
     """
 
-    def __init__(self, cur, description_dir, dscp="name_or_col_dscp"):
+    instances = []
+
+    def __init__(self, cur, description_dir, dscp="name_or_col_dscp", dialect="sqlite", db_id=None):
         del cur, description_dir, dscp
+        self.dialect, self.db_id = dialect, db_id
+        _FakeDbHandle.instances.append(self)
 
     def sql_context_for_question(self, question: str) -> str:
         del question
@@ -47,6 +51,7 @@ def prepared(tmp_path, monkeypatch):
     monkeypatch.setattr(birdbench_prepare, "OUTPUT_FPATH", output_fpath)
     monkeypatch.setattr(birdbench_prepare, "ensure_bird_sql", lambda: dev_databases_dir)
     monkeypatch.setattr(birdbench_prepare, "DbHandle", _FakeDbHandle)
+    _FakeDbHandle.instances.clear()
 
     def _run(entries, **kwargs):
         (dev_databases_dir.parent / "dev.json").write_text(json.dumps(entries))
@@ -83,3 +88,26 @@ class TestPrepareEvidence:
     def test_assertion_on_empty_question(self, prepared):
         with pytest.raises(AssertionError):
             prepared([_entry(question="")])
+
+
+class TestPrepareDialect:
+    def test_default_is_sqlite_and_writes_default_output(self, prepared):
+        prepared([_entry()])
+        assert [(h.dialect, h.db_id) for h in _FakeDbHandle.instances] == [("sqlite", "db1")]
+
+    def test_spark_dialect_is_forwarded_to_the_schema_builder(self, prepared):
+        rows = prepared([_entry(sql="SELECT IIF(1, 1, 0)")], dialect="spark")
+        assert [(h.dialect, h.db_id) for h in _FakeDbHandle.instances] == [("spark", "db1")]
+        assert rows[0]["gt_sql"] == "SELECT IIF(1, 1, 0)"  # gold is never transpiled
+
+    def test_unsupported_dialect_raises(self, prepared):
+        with pytest.raises(ValueError, match="Unsupported dialect"):
+            prepared([_entry()], dialect="postgres")
+
+    def test_spark_output_does_not_overwrite_the_sqlite_file(self, prepared, tmp_path):
+        prepared([_entry()])
+        prepared([_entry()], dialect="spark")
+        assert sorted(p.name for p in (tmp_path / "data").iterdir()) == [
+            "birdbench_benchmark.jsonl",
+            "birdbench_spark_benchmark.jsonl",
+        ]

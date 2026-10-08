@@ -1,8 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import datetime
+import decimal
+import importlib.util
 import io
 import sqlite3
+import subprocess
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -25,8 +29,11 @@ from resources_servers.bird_sql.app import (
 )
 from resources_servers.bird_sql.eval_utils import (
     execute_and_compare,
+    execute_and_compare_spark,
+    execute_spark_async,
     execute_sqlite,
     execute_sqlite_async,
+    normalize_rows,
     result_sets_match,
 )
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
@@ -649,3 +656,228 @@ class TestEnsureBirdSql:
         )
         with pytest.raises(RuntimeError, match="dev_databases directory missing"):
             ensure_bird_sql(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Spark dialect
+# ---------------------------------------------------------------------------
+
+
+def _java_available() -> bool:
+    try:
+        return subprocess.run(["java", "-version"], capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+requires_spark = pytest.mark.skipif(
+    importlib.util.find_spec("pyspark") is None
+    or importlib.util.find_spec("sqlglot") is None
+    or importlib.util.find_spec("pandas") is None
+    or importlib.util.find_spec("pyarrow") is None
+    or not _java_available(),
+    reason="Spark dialect needs a JDK plus pyspark, sqlglot, pandas and pyarrow",
+)
+
+
+class TestNormalizeRows:
+    def test_normalizes_engine_types(self):
+        rows = [(decimal.Decimal("1.50"), datetime.date(2020, 1, 2), b"ab", 3, None, "x", 0.1 + 0.2)]
+        assert normalize_rows(rows) == [(1.5, "2020-01-02", "ab", 3, None, "x", 0.3)]
+
+    def test_decimal_and_float_compare_equal_after_normalizing(self):
+        assert result_sets_match(normalize_rows([(decimal.Decimal("0.1"),)]), normalize_rows([(0.1,)]))
+
+
+class TestExecuteSparkAsyncTimeout:
+    @pytest.mark.asyncio
+    async def test_timeout_cancels_spark_job_group(self, monkeypatch):
+        import time
+
+        monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_spark", lambda *_a: time.sleep(0.5))
+        session = MagicMock()
+        rows = await execute_spark_async(session, "SELECT 1", asyncio.Semaphore(1), timeout_s=0.05)
+        assert rows is None
+        session.sparkContext.cancelJobGroup.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_compare_reports_pred_timeout_tag(self, monkeypatch):
+        import time
+
+        def fake_execute_spark(_session, sql, _job_group):
+            if "SLOW" in sql:
+                time.sleep(0.5)
+            return [(1,)]
+
+        monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_spark", fake_execute_spark)
+        monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_sqlite", lambda *_a: [(1,)])
+        match, gold, pred, err = await execute_and_compare_spark(
+            Path("/x.sqlite"), MagicMock(), "SELECT 1", "SELECT SLOW", asyncio.Semaphore(2), timeout_s=0.05
+        )
+        assert (match, gold, pred, err) == (False, [(1,)], None, "pred_sql_timeout")
+
+
+@pytest.mark.asyncio
+async def test_verify_spark_dialect_routes_to_spark(tmp_path, monkeypatch):
+    sessions = {"TestDB": object()}
+    monkeypatch.setattr("resources_servers.bird_sql.app.ensure_bird_sql", lambda _path: tmp_path)
+    monkeypatch.setattr("resources_servers.bird_sql.setup_bird_spark.ensure_bird_spark", lambda *_a: sessions)
+    seen = {}
+
+    async def fake_spark(**kw):
+        seen.update(kw)
+        return True, [(1,)], [(1,)], None
+
+    async def fail_sqlite(**_kw):
+        raise AssertionError("sqlite path must not run for dialect=spark")
+
+    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare_spark", fake_spark)
+    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fail_sqlite)
+    config = BirdSqlResourcesServerConfig(
+        host="127.0.0.1", port=20099, entrypoint="", bird_sql_dir=str(tmp_path), dialect="spark"
+    )
+    server = BirdSqlResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    resp = await server.verify(_make_verify_request("```sql\nSELECT x FROM t\n```", gt_sql="SELECT x FROM t"))
+    assert resp.reward == 1.0
+    assert seen["session"] is sessions["TestDB"]
+    assert seen["db_path"] == tmp_path / "TestDB" / "TestDB.sqlite"  # gold runs on SQLite
+    assert seen["gold_sql"] == "SELECT x FROM t"  # untouched, never transpiled
+
+
+@requires_spark
+class TestSqliteToParquet:
+    def test_types_and_string_fallback(self, tmp_path):
+        import pandas as pd
+
+        from resources_servers.bird_sql.setup_bird_spark import sqlite_to_parquet
+
+        db = tmp_path / "d.sqlite"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE t (i INTEGER, r REAL, dirty INTEGER, d DATE, s TEXT)")
+        conn.executemany(
+            "INSERT INTO t VALUES (?, ?, ?, ?, ?)",
+            [(1, 1.5, 1, "2020-01-01", "a"), (None, 2.5, "oops", "2020-01-02", None)],
+        )
+        conn.commit()
+        conn.close()
+
+        fallbacks = sqlite_to_parquet(db, tmp_path / "out")
+
+        assert fallbacks == [{"db": "d", "table": "t", "column": "dirty", "type": "INTEGER"}]
+        df = pd.read_parquet(tmp_path / "out" / "t" / "data.parquet")
+        assert str(df["i"].dtype) == "Int64" and df["i"].isna().tolist() == [False, True]
+        assert str(df["r"].dtype) == "float64"
+        assert df["dirty"].tolist() == ["1", "oops"]  # fell back to string, nothing lost
+        assert df["d"].tolist() == ["2020-01-01", "2020-01-02"]  # dates stay strings, as in SQLite
+        assert df["s"].isna().tolist() == [False, True] and df["s"].iloc[0] == "a"  # NULL stays NULL
+
+
+class _SparkEnv(dict):
+    """``{db_id: SparkSession}`` plus the directory holding the SQLite files the gold SQL runs on."""
+
+    dev_dir: Path
+
+
+@pytest.fixture(scope="module")
+def spark_sessions(tmp_path_factory):
+    from resources_servers.bird_sql.setup_bird_spark import ensure_bird_spark
+
+    dev = tmp_path_factory.mktemp("dev_databases")
+    (dev / "TestDB").mkdir()
+    conn = sqlite3.connect(str(dev / "TestDB" / "TestDB.sqlite"))
+    conn.execute("CREATE TABLE t (x INTEGER)")
+    conn.executemany("INSERT INTO t VALUES (?)", [(1,), (2,), (3,)])
+    conn.commit()
+    conn.close()
+    sessions = _SparkEnv(ensure_bird_spark(dev, tmp_path_factory.mktemp("warehouse")))
+    sessions.dev_dir = dev
+    return sessions
+
+
+@requires_spark
+class TestExecuteAndCompareSpark:
+    @staticmethod
+    async def _compare(sessions, gold, pred):
+        db_path = sessions.dev_dir / "TestDB" / "TestDB.sqlite"
+        return await execute_and_compare_spark(
+            db_path, sessions["TestDB"], gold, pred, asyncio.Semaphore(2), timeout_s=60
+        )
+
+    @pytest.mark.asyncio
+    async def test_match_ignores_row_order(self, spark_sessions):
+        match, gold, pred, err = await self._compare(
+            spark_sessions, "SELECT x FROM t ORDER BY x", "SELECT x FROM t ORDER BY x DESC"
+        )
+        assert (match, err) == (True, None)
+        assert sorted(gold) == sorted(pred) == [(1,), (2,), (3,)]
+
+    @pytest.mark.asyncio
+    async def test_gold_stays_sqlite_and_pred_is_spark(self, spark_sessions):
+        # IIF() is SQLite-only and Spark has no such function; the gold is not transpiled, so each side
+        # runs its own dialect and only the result sets are compared.
+        match, _gold, _pred, err = await self._compare(
+            spark_sessions, "SELECT IIF(x > 1, 1, 0) FROM t", "SELECT CASE WHEN x > 1 THEN 1 ELSE 0 END FROM t"
+        )
+        assert (match, err) == (True, None)
+
+    @pytest.mark.asyncio
+    async def test_float_noise_across_engines_is_normalized(self, spark_sessions):
+        # SQLite gives 3 * 0.1 = 0.30000000000000004; Spark's x / 10 gives 0.3.
+        match, _gold, _pred, err = await self._compare(spark_sessions, "SELECT x * 0.1 FROM t", "SELECT x / 10 FROM t")
+        assert (match, err) == (True, None)
+
+    @pytest.mark.asyncio
+    async def test_ansi_mode_is_on_so_invalid_casts_error(self, spark_sessions):
+        # With ANSI off this would return NULL and "match" a NULL gold; real Spark 4 / Databricks raise instead.
+        match, _gold, pred, err = await self._compare(
+            spark_sessions, "SELECT NULL FROM t", "SELECT CAST('abc' AS INT) FROM t"
+        )
+        assert (match, pred, err) == (False, None, "pred_sql_error")
+
+    @pytest.mark.asyncio
+    async def test_mismatch(self, spark_sessions):
+        match, _gold, pred, err = await self._compare(spark_sessions, "SELECT x FROM t", "SELECT x FROM t WHERE x > 1")
+        assert (match, err) == (False, None)
+        assert sorted(pred) == [(2,), (3,)]
+
+    @pytest.mark.asyncio
+    async def test_trailing_semicolon_is_accepted(self, spark_sessions):
+        match, _g, _p, err = await self._compare(spark_sessions, "SELECT x FROM t", "SELECT x FROM t;")
+        assert (match, err) == (True, None)
+
+    @pytest.mark.asyncio
+    async def test_pred_error(self, spark_sessions):
+        match, gold, pred, err = await self._compare(spark_sessions, "SELECT x FROM t", "SELECT nope FROM t")
+        assert (match, pred, err) == (False, None, "pred_sql_error")
+        assert gold is not None
+
+    @pytest.mark.asyncio
+    async def test_gold_error(self, spark_sessions):
+        assert await self._compare(spark_sessions, "SELEC", "SELECT x FROM t") == (False, None, None, "gold_sql_error")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("pred", ["DROP TABLE t", "SELECT 1; DROP TABLE t", "INSERT INTO t VALUES (9)"])
+    async def test_non_query_statements_are_rejected_and_do_not_modify_data(self, spark_sessions, pred):
+        _match, _gold, pred_rows, err = await self._compare(spark_sessions, "SELECT x FROM t", pred)
+        assert (pred_rows, err) == (None, "pred_sql_error")
+        match, *_ = await self._compare(spark_sessions, "SELECT x FROM t", "SELECT x FROM t")
+        assert match is True
+
+    @pytest.mark.asyncio
+    async def test_verify_end_to_end(self, spark_sessions, tmp_path, monkeypatch):
+        monkeypatch.setattr("resources_servers.bird_sql.app.ensure_bird_sql", lambda _path: spark_sessions.dev_dir)
+        monkeypatch.setattr(
+            "resources_servers.bird_sql.setup_bird_spark.ensure_bird_spark", lambda *_a: spark_sessions
+        )
+        config = BirdSqlResourcesServerConfig(
+            host="127.0.0.1", port=20099, entrypoint="", bird_sql_dir=str(tmp_path), dialect="spark"
+        )
+        server = BirdSqlResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        sqlite_gold = "SELECT IIF(x > 1, 1, 0) FROM t"  # SQLite-only syntax; never transpiled
+        spark_answer = "```sql\nSELECT CASE WHEN x > 1 THEN 1 ELSE 0 END FROM t\n```"
+        good = await server.verify(_make_verify_request(spark_answer, gt_sql=sqlite_gold))
+        bad = await server.verify(_make_verify_request("```sql\nSELECT max(x) FROM t\n```", gt_sql=sqlite_gold))
+        assert (good.reward, good.failure_reason) == (1.0, FailureCode.NONE)
+        assert (bad.reward, bad.execution_match) == (0.0, False)

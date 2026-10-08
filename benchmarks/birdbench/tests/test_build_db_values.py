@@ -364,3 +364,69 @@ class TestDbHandle:
         handle = build_db_values.DbHandle(cur, description_dir=tmp_path)
         assert handle.relevant_hits_for_question("anything") == []
         conn.close()
+
+
+class TestBuildSqlContextLabels:
+    def test_custom_labels_render_names_and_default_is_unchanged(self):
+        kwargs = dict(
+            table_names=["students"],
+            column_types_by_table={"students": {"Free Meal (K-12)": "BIGINT"}},
+            primary_keys_by_table={},
+            descriptions_by_table={},
+            values_by_column={},
+            foreign_keys=[],
+        )
+        plain = build_db_values.build_sql_context(**kwargs)
+        labelled = build_db_values.build_sql_context(
+            **kwargs, table_label=lambda t: f"`db`.`{t}`", column_label=lambda c: f"`{c}`"
+        )
+        assert "- students:\n  - Free Meal (K-12):" in plain
+        assert "- `db`.`students`:\n  - `Free Meal (K-12)`:" in labelled
+
+
+class TestAllForeignKeysColumnRef:
+    def test_default_and_custom_column_ref(self, cur):
+        assert build_db_values._all_foreign_keys(cur, ["students", "enrollments"]) == [
+            "enrollments.student_id = students.student_id"
+        ]
+        quoted = build_db_values._all_foreign_keys(cur, ["students", "enrollments"], lambda t, c: f"`db`.`{t}`.`{c}`")
+        assert quoted == ["`db`.`enrollments`.`student_id` = `db`.`students`.`student_id`"]
+
+
+class TestDbHandleDialect:
+    def test_unsupported_dialect_raises(self, cur, tmp_path):
+        with pytest.raises(ValueError, match="Unsupported dialect"):
+            build_db_values.DbHandle(cur, description_dir=tmp_path, dialect="postgres")
+
+    def test_spark_requires_db_id(self, cur, tmp_path):
+        with pytest.raises(ValueError, match="requires db_id"):
+            build_db_values.DbHandle(cur, description_dir=tmp_path, dialect="spark")
+
+
+@pytest.mark.skipif(
+    not all(importlib.util.find_spec(m) for m in ("bm25s", "nltk", "pandas", "pyarrow")),
+    reason="requires bm25s, nltk, pandas and pyarrow",
+)
+class TestDbHandleSpark:
+    def test_sql_context_is_qualified_quoted_and_uses_loaded_spark_types(self, tmp_path):
+        db_path = tmp_path / "school" / "school.sqlite"
+        db_path.parent.mkdir()
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE students (student_id INTEGER PRIMARY KEY, name TEXT, `Free Meal (K-12)` REAL)")
+        conn.execute(
+            "CREATE TABLE notes (student_id INTEGER, dirty INTEGER, FOREIGN KEY (student_id) REFERENCES students(student_id))"
+        )
+        conn.execute("INSERT INTO students VALUES (1, 'Alice', 1.5)")
+        conn.execute("INSERT INTO notes VALUES (1, 'oops')")  # non-numeric data in an INTEGER column
+        conn.commit()
+
+        handle = build_db_values.DbHandle(conn.cursor(), tmp_path, dialect="spark", db_id="school")
+        context = handle.sql_context_for_question("What is Alice's meal count?")
+        conn.close()
+
+        assert "- `school`.`students`:" in context and "- `school`.`notes`:" in context
+        assert "  - `Free Meal (K-12)`:\n      data_type: DOUBLE" in context
+        assert "  - `student_id`:\n      data_type: BIGINT (primary key)" in context
+        assert "  - `name`:\n      data_type: STRING" in context
+        assert "  - `dirty`:\n      data_type: STRING" in context  # fell back to string when loaded
+        assert "- `school`.`notes`.`student_id` = `school`.`students`.`student_id`" in context

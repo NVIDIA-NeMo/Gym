@@ -15,6 +15,11 @@ question) with per-question BM25 hits (via ``bm25s`` -- pure Python, no JVM) aga
 question text, so the values shown are ones actually likely to be relevant. See
 ``build_db_values.py`` for the full retrieval and rendering design.
 
+With ``dialect="spark"`` the schema is rendered for Spark SQL instead (``schema.table`` names, backtick-quoted
+identifiers, Spark column types); ``gt_sql`` is still the original SQLite gold, which the ``bird_sql`` server
+runs on SQLite and compares against the model's Spark SQL result. Spark rows are written to
+``birdbench_spark_benchmark.jsonl`` so they never overwrite the SQLite ones.
+
 Calls ``ensure_bird_sql()`` so the download cache is shared with the ``bird_sql`` resource
 server (avoids a duplicate ~1.4 GB download).
 
@@ -35,7 +40,11 @@ DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "birdbench_benchmark.jsonl"
 
 
-def prepare(include_evidence: bool = True, dscp: str = "name_or_col_dscp") -> Path:
+def prepare(
+    include_evidence: bool = True,
+    dscp: str = "name_or_col_dscp",
+    dialect: str = "sqlite",
+) -> Path:
     """Download BIRD dev, produce ``birdbench_benchmark.jsonl``. Returns the output path.
 
     Args:
@@ -50,8 +59,15 @@ def prepare(include_evidence: bool = True, dscp: str = "name_or_col_dscp") -> Pa
             the default, matching this benchmark's original pre-``dscp`` behavior). E.g.
             ``"name,col_dscp"`` uses both fields, name first. Blank fields are dropped. See
             ``build_db_values._combine_description``.
+        dialect: SQL dialect the ``sql_context`` is rendered for: ``sqlite`` (default) or ``spark``. Non-default
+            dialects write ``birdbench_<dialect>_benchmark.jsonl`` next to the default output.
     """
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if dialect not in ("sqlite", "spark"):
+        raise ValueError(f"Unsupported dialect {dialect!r}; expected 'sqlite' or 'spark'")
+    output_fpath = (
+        OUTPUT_FPATH if dialect == "sqlite" else OUTPUT_FPATH.with_name(f"birdbench_{dialect}_benchmark.jsonl")
+    )
+    output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
     dev_databases_dir = ensure_bird_sql()
     # dev_databases_dir == <base>/dev_20240627/dev_databases → dev.json is one level up.
@@ -70,10 +86,16 @@ def prepare(include_evidence: bool = True, dscp: str = "name_or_col_dscp") -> Pa
         db_path = dev_databases_dir / db_id / f"{db_id}.sqlite"
         conn = sqlite3.connect(str(db_path))
         conn.text_factory = lambda b: b.decode(errors="ignore")
-        db_handles[db_id] = DbHandle(conn.cursor(), dev_databases_dir / db_id / "database_description", dscp=dscp)
+        db_handles[db_id] = DbHandle(
+            conn.cursor(),
+            dev_databases_dir / db_id / "database_description",
+            dscp=dscp,
+            dialect=dialect,
+            db_id=db_id,
+        )
 
     count = 0
-    with open(OUTPUT_FPATH, "w") as f_out:
+    with open(output_fpath, "w") as f_out:
         for i, entry in enumerate(entries):
             db_id = entry["db_id"]
             evidence = entry.get("evidence")
@@ -95,8 +117,8 @@ def prepare(include_evidence: bool = True, dscp: str = "name_or_col_dscp") -> Pa
             f_out.write(json.dumps(row) + "\n")
             count += 1
 
-    print(f"Wrote {count} BIRD dev entries to {OUTPUT_FPATH}")
-    return OUTPUT_FPATH
+    print(f"Wrote {count} BIRD dev entries to {output_fpath}")
+    return output_fpath
 
 
 if __name__ == "__main__":

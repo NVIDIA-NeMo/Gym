@@ -17,9 +17,12 @@ default thread pool under a semaphore for bounded concurrency.
 """
 
 import asyncio
+import datetime
+import decimal
 import sqlite3
+import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 
 ResultRow = tuple[Any, ...]
@@ -73,6 +76,87 @@ def result_sets_match(gold: ResultSet, pred: ResultSet) -> bool:
             return False
 
 
+def normalize_rows(rows: list[tuple[Any, ...]]) -> ResultSet:
+    """Make engine-specific Python types comparable: floats/decimals rounded, dates stringified, bytes decoded."""
+
+    def norm(value: Any) -> Any:
+        if isinstance(value, (float, decimal.Decimal)):
+            return round(float(value), 6)
+        if isinstance(value, (datetime.date, datetime.datetime)):
+            return str(value)
+        if isinstance(value, bytes):
+            return value.decode(errors="replace")
+        return value
+
+    return [tuple(norm(v) for v in row) for row in rows]
+
+
+def execute_spark(session: Any, sql: str, job_group: str) -> Optional[ResultSet]:
+    """Execute a single read-only query on a Spark session and return all rows.
+
+    Returns ``None`` if execution raises or ``sql`` is not exactly one query (``SELECT``/``WITH``/set operation):
+    the Spark warehouse is shared by every rollout, so DDL/DML from a model must never run.
+    """
+    import sqlglot
+    from sqlglot import exp
+
+    try:
+        statements = sqlglot.parse(sql, read="spark")
+        if len(statements) != 1 or not isinstance(statements[0], exp.Query):
+            return None
+        session.sparkContext.setJobGroup(job_group, sql[:200], interruptOnCancel=True)
+        return normalize_rows([tuple(row) for row in session.sql(sql.strip().rstrip(";")).collect()])
+    except Exception:
+        return None
+
+
+async def execute_spark_async(
+    session: Any,
+    sql: str,
+    semaphore: asyncio.Semaphore,
+    timeout_s: float = 30.0,
+    raise_on_timeout: bool = False,
+) -> Optional[ResultSet]:
+    """Execute SQL on Spark in a worker thread, bounded by semaphore.
+
+    Returns ``None`` on timeout (unless ``raise_on_timeout`` is True) or query exception. On timeout the Spark job
+    group is cancelled; ``asyncio.wait_for`` alone would leave the job running.
+    """
+    async with semaphore:
+        job_group = uuid.uuid4().hex
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(execute_spark, session, sql, job_group), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            session.sparkContext.cancelJobGroup(job_group)
+            if raise_on_timeout:
+                raise
+            return None
+
+
+Runner = Callable[[str], Awaitable[Optional[ResultSet]]]
+
+
+async def _compare(
+    run_gold: Runner, run_pred: Runner, gold_sql: str, pred_sql: str
+) -> tuple[bool, Optional[ResultSet], Optional[ResultSet], Optional[str]]:
+    """Run gold then pred (runners raise ``asyncio.TimeoutError`` on timeout) and compare."""
+    try:
+        gold_rows = await run_gold(gold_sql)
+    except asyncio.TimeoutError:
+        return False, None, None, "gold_sql_timeout"
+    if gold_rows is None:
+        return False, None, None, "gold_sql_error"
+
+    try:
+        pred_rows = await run_pred(pred_sql)
+    except asyncio.TimeoutError:
+        return False, gold_rows, None, "pred_sql_timeout"
+    if pred_rows is None:
+        return False, gold_rows, None, "pred_sql_error"
+
+    return result_sets_match(gold_rows, pred_rows), gold_rows, pred_rows, None
+
+
 async def execute_and_compare(
     db_path: Path,
     gold_sql: str,
@@ -80,19 +164,32 @@ async def execute_and_compare(
     semaphore: asyncio.Semaphore,
     timeout_s: float = 30.0,
 ) -> tuple[bool, Optional[ResultSet], Optional[ResultSet], Optional[str]]:
-    """Execute both queries and compare. Returns (match, gold, pred, error_tag)."""
-    try:
-        gold_rows = await execute_sqlite_async(db_path, gold_sql, semaphore, timeout_s, raise_on_timeout=True)
-    except asyncio.TimeoutError:
-        return False, None, None, "gold_sql_timeout"
-    if gold_rows is None:
-        return False, None, None, "gold_sql_error"
+    """Execute both queries on SQLite and compare. Returns (match, gold, pred, error_tag)."""
 
-    try:
-        pred_rows = await execute_sqlite_async(db_path, pred_sql, semaphore, timeout_s, raise_on_timeout=True)
-    except asyncio.TimeoutError:
-        return False, gold_rows, None, "pred_sql_timeout"
-    if pred_rows is None:
-        return False, gold_rows, None, "pred_sql_error"
+    async def run(sql: str) -> Optional[ResultSet]:
+        return await execute_sqlite_async(db_path, sql, semaphore, timeout_s, raise_on_timeout=True)
 
-    return result_sets_match(gold_rows, pred_rows), gold_rows, pred_rows, None
+    return await _compare(run, run, gold_sql, pred_sql)
+
+
+async def execute_and_compare_spark(
+    db_path: Path,
+    session: Any,
+    gold_sql: str,
+    pred_sql: str,
+    semaphore: asyncio.Semaphore,
+    timeout_s: float = 30.0,
+) -> tuple[bool, Optional[ResultSet], Optional[ResultSet], Optional[str]]:
+    """Run the BIRD gold SQL on SQLite and the model's Spark SQL on Spark, then compare. Same return as above.
+
+    No gold transpilation: the gold stays the original SQLite query and only its result set is compared.
+    """
+
+    async def run_gold(sql: str) -> Optional[ResultSet]:
+        rows = await execute_sqlite_async(db_path, sql, semaphore, timeout_s, raise_on_timeout=True)
+        return None if rows is None else normalize_rows(rows)
+
+    async def run_pred(sql: str) -> Optional[ResultSet]:
+        return await execute_spark_async(session, sql, semaphore, timeout_s, raise_on_timeout=True)
+
+    return await _compare(run_gold, run_pred, gold_sql, pred_sql)
