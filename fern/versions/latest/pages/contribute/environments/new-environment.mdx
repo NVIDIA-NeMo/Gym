@@ -469,7 +469,7 @@ The resources server owns and exports one `VERIFIER_FIXTURE`, so every workload 
 - a malformed request that fails as declared; and
 - for a seeded environment, the same request producing the same reward after an explicit reseed on fresh server instances.
 
-Fixture execution runs directly in the resources server's dependency environment and does not start Gym services or Ray. The first run prepares that environment in the same way as existing server tests. Updating expected rewards is explicit and atomic; range, endpoint, malformed-input, and determinism checks still apply. `gym env init --reuse-verifier` checks that the selected resources-server entrypoint declares a fixture, and `gym env test` executes it. A shared fixture attests the scorer itself, so a workload that overrides `grading_mode` needs workload-specific cases.
+Fixture execution runs directly in the resources server's dependency environment and does not start Gym services or Ray. The first run prepares that environment in the same way as existing server tests. Updating expected rewards is explicit and atomic; range, endpoint, malformed-input, and determinism checks still apply. `gym env init --reuse-verifier NAME` checks that the selected resources-server entrypoint declares a fixture, and `gym env test` executes it. A shared fixture attests the scorer itself, so a workload that overrides `grading_mode` needs workload-specific cases.
 
 ## Reference
 
