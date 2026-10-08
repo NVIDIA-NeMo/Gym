@@ -79,8 +79,10 @@ Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is r
 only for its compatibility `/run`, not native sessions.
 
 Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with Python 3.8+,
-bash, tar/gzip, and SHA-256 utilities. Missing bootstrap packages are installed with apt-get
-or apk when running as root; otherwise preinstall them in the image. Older Alpine images
+bash, tar/gzip, and SHA-256 utilities. Session setup uses POSIX sh to install missing Python/Bash
+with apt-get or apk when running as root, before launching the Bash runtime installer;
+otherwise preinstall them in the image. Setup fails on either a nonzero exit or a provider error.
+Older Alpine images
 also need patchelf so Pi's Node can use a private, checksum-verified C++ library without
 replacing the task's system library. The pinned Node version has no arm64 musl build.
 The provider must support sandbox exec and file upload/download.

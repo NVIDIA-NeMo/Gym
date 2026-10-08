@@ -248,7 +248,9 @@ async def test_install_failure_preserves_stdout_and_stderr(setup):
     agent, sandbox = setup
     sandbox.exec.side_effect = [
         SimpleNamespace(return_code=0, error_type=None, stdout="", stderr=""),
-        SimpleNamespace(return_code=1, stdout="Node cannot load libstdc++.so.6", stderr="exit status 1"),
+        SimpleNamespace(
+            return_code=1, error_type=None, stdout="Node cannot load libstdc++.so.6", stderr="exit status 1"
+        ),
         SimpleNamespace(return_code=0, error_type=None, stdout="", stderr=""),
     ]
     with pytest.raises(RuntimeError) as error:
@@ -259,6 +261,37 @@ async def test_install_failure_preserves_stdout_and_stderr(setup):
     sandbox.launch.assert_not_awaited()
     sandbox.stop.assert_not_awaited()
     agent.server_client.post.assert_not_called()
+
+
+@pytest.mark.parametrize("stage", ["prepare", "install"])
+@pytest.mark.parametrize("error_type", ["timeout", "sandbox"])
+@pytest.mark.parametrize("owned", [False, True])
+async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage, error_type, owned):
+    agent, sandbox = setup
+    request = Request({"type": "http", "session": {}})
+    body = seed()
+    if owned:
+        agent.config.sandbox_provider = "sandbox"
+        body = body.model_copy(update={"sandbox_access": None})
+        sandbox.start = AsyncMock()
+    ok = SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+    error = SimpleNamespace(return_code=0, error_type=error_type, stdout="bootstrap output", stderr="provider failed")
+    sandbox.exec.side_effect = ([ok] if owned else []) + ([error, ok] if stage == "prepare" else [ok, error, ok])
+    with patch("responses_api_agents.pi_agent.app.AsyncSandbox", return_value=sandbox) as sandbox_class:
+        sandbox_class.connect = AsyncMock(return_value=sandbox)
+        with pytest.raises(RuntimeError, match=f"error_type={error_type}") as failed:
+            await agent.seed_agent_session(request, body)
+    assert "bootstrap output" in str(failed.value)
+    assert "provider failed" in str(failed.value)
+    assert not request.session
+    sandbox.launch.assert_not_awaited()
+    if owned:
+        sandbox.start.assert_awaited_once()
+        sandbox.stop.assert_awaited_once()
+    else:
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
+    assert not any(record.state is not None for record in agent._session_records.values())
 
 
 @pytest.mark.parametrize("limit", [0, -1, 128, 2**53])
@@ -678,7 +711,7 @@ async def test_install_failure_disconnects_without_stopping_owner(setup):
     agent, sandbox = setup
     sandbox.exec.side_effect = [
         SimpleNamespace(return_code=0, error_type=None),
-        SimpleNamespace(return_code=1, stderr="npm failed", stdout=""),
+        SimpleNamespace(return_code=1, error_type=None, stderr="npm failed", stdout=""),
         SimpleNamespace(return_code=0, error_type=None),
     ]
     request = Request({"type": "http", "session": {}})

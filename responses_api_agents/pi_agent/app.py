@@ -78,6 +78,28 @@ MCP_SETUP_ERROR_EXIT_CODE = 78  # Must match gym_mcp.mjs (EX_CONFIG).
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
+def _sandbox_prepare_command(directory: str) -> str:
+    # Keep the bootstrap POSIX sh: Bash must exist before its installer can run.
+    bootstrap = """set -eu
+set --
+command -v python3 >/dev/null 2>&1 || set -- "$@" python3
+command -v bash >/dev/null 2>&1 || set -- "$@" bash
+if [ "$#" -gt 0 ]; then
+    [ "$(id -u)" = 0 ] || { echo "Native Pi requires $*: preinstall these tools or use a root image." >&2; exit 1; }
+    if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache "$@"
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+    else
+        echo "Native Pi requires $*: preinstall these tools (automatic installation requires apt-get or apk)." >&2
+        exit 1
+    fi
+fi
+"""
+    return bootstrap + f"mkdir -p {shlex.quote(directory + '/home/.pi/agent')}"
+
+
 def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
     if isinstance(stdout, bytes):
         stdout = stdout.decode(errors="replace")
@@ -549,9 +571,15 @@ class PiAgent(SimpleResponsesAPIAgent):
                     raise RuntimeError(
                         f"Cannot create Pi sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
-            prepared = await sandbox.exec(f"mkdir -p {shlex.quote(directory + '/home/.pi/agent')}", timeout_s=30)
-            if prepared.return_code != 0:
-                raise RuntimeError(prepared.stderr or "Cannot create Pi sandbox session directory")
+            prepared = await sandbox.exec(
+                _sandbox_prepare_command(directory), timeout_s=self.config.sandbox_install_timeout_seconds
+            )
+            if prepared.return_code != 0 or prepared.error_type:
+                details = "\n".join(part for part in (prepared.stderr, prepared.stdout) if part)
+                raise RuntimeError(
+                    f"Cannot prepare Pi session (exit {prepared.return_code}, "
+                    f"error_type={prepared.error_type}): {details[-16000:]}"
+                )
             # Install only the agent runtime in the existing task sandbox.
             # Resources has already prepared the task repository and its dependencies.
             installer = "install_pi_runtime.sh"
@@ -562,12 +590,13 @@ class PiAgent(SimpleResponsesAPIAgent):
                 cwd=workdir,
                 timeout_s=self.config.sandbox_install_timeout_seconds,
             )
-            if installed.return_code != 0:
+            if installed.return_code != 0 or installed.error_type:
                 # Background execution puts the installer log in stdout and may
                 # leave only a generic "exit status 1" in stderr. Preserve both.
                 details = "\n".join(part for part in (installed.stderr, installed.stdout) if part)
                 raise RuntimeError(
-                    f"Pi sandbox installation failed (exit {installed.return_code}): {details[-16000:]}"
+                    f"Pi sandbox installation failed (exit {installed.return_code}, "
+                    f"error_type={installed.error_type}): {details[-16000:]}"
                 )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
         except BaseException as error:
