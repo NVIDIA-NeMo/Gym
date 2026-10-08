@@ -7,20 +7,7 @@ import pytest
 from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
-from responses_api_agents.opencode_agent.legacy import LegacyOpenCodeAgent, LegacyOpenCodeAgentConfig
-from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent, OpenCodeSandboxedAgentConfig
-
-
-def test_existing_entrypoint_reuses_the_legacy_implementation() -> None:
-    assert OpenCodeSandboxedAgent is LegacyOpenCodeAgent
-    assert OpenCodeSandboxedAgentConfig is LegacyOpenCodeAgentConfig
-    config_path = Path(__file__).parents[1] / "configs" / "benchmark.yaml"
-    config = OmegaConf.load(config_path)
-    settings = config.opencode_benchmark_agent.responses_api_agents.opencode_sandboxed_agent
-    assert settings.entrypoint == "app.py"
-    assert settings.execution_failure_reward_zero is True
-    assert settings.output_token_policy == "remaining_context"
-    assert settings.preinstalled_opencode is True
+from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
 
 
 def _resolve_config(path: str, monkeypatch: pytest.MonkeyPatch) -> DictConfig:
@@ -62,6 +49,8 @@ def test_existing_benchmarks_keep_legacy_bindings(recipe: str, prefix: str, monk
         OmegaConf.to_container(settings, resolve=True) | {"name": agent_name}
     )
     assert agent_config.resources_server.name == f"{prefix}_opencode_resources_server"
+    resources = get_first_server_config_dict(config, agent_config.resources_server.name)
+    assert "opencode_sandboxed_agent" in resources.allowed_agents
     assert settings.entrypoint == "app.py"
     assert settings.datasets
     environment = get_first_server_config_dict(config, f"{prefix}_environment_server")

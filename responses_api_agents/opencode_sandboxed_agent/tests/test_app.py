@@ -43,6 +43,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    NeMoGymSummary,
 )
 from nemo_gym.rollout_observability import (
     AgentInvocation,
@@ -53,27 +54,27 @@ from nemo_gym.rollout_observability import (
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
-from responses_api_agents.opencode_agent import legacy as app_module
-from responses_api_agents.opencode_agent.legacy import (
-    LegacyOpenCodeAgent,
-    LegacyOpenCodeAgentConfig,
-    LegacyOpenCodeAgentRunRequest,
+from responses_api_agents.opencode_sandboxed_agent import app as app_module
+from responses_api_agents.opencode_sandboxed_agent.app import (
+    OpenCodeSandboxedAgent,
+    OpenCodeSandboxedAgentConfig,
+    OpenCodeSandboxedAgentRunRequest,
 )
 
 
-class TestLegacyOpenCodeAgent:
-    def test_legacy_import_does_not_load_local_or_native_execution(self) -> None:
+class TestOpenCodeSandboxedAgent:
+    def test_import_only_loads_shared_opencode_observability(self) -> None:
         code = (
             f"import sys; import responses_api_agents; responses_api_agents.__path__ = [{str(Path(__file__).resolve().parents[2])!r}]; "
-            "import responses_api_agents.opencode_agent.legacy; "
-            "assert 'responses_api_agents.opencode_agent.app' not in sys.modules; "
-            "assert 'responses_api_agents.opencode_agent.setup_opencode' not in sys.modules; "
-            "assert 'responses_api_agents.opencode_agent.sandbox' not in sys.modules"
+            "import responses_api_agents.opencode_sandboxed_agent.app; "
+            "assert {name for name in sys.modules if name == 'responses_api_agents.opencode_agent' "
+            "or name.startswith('responses_api_agents.opencode_agent.')} == "
+            "{'responses_api_agents.opencode_agent', 'responses_api_agents.opencode_agent.observability'}"
         )
         subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
 
-    def _create_config(self) -> LegacyOpenCodeAgentConfig:
-        return LegacyOpenCodeAgentConfig(
+    def _create_config(self) -> OpenCodeSandboxedAgentConfig:
+        return OpenCodeSandboxedAgentConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -101,7 +102,7 @@ class TestLegacyOpenCodeAgent:
         async def created_spec(sandbox_config: Dict[str, Any]) -> Any:
             config = self._create_config()
             config.sandbox_config = sandbox_config
-            server = LegacyOpenCodeAgent(config=config, server_client=MagicMock(spec=ServerClient))
+            server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
             await server._start_sandbox()
             return sandbox.start.await_args.args[0]
 
@@ -131,7 +132,7 @@ class TestLegacyOpenCodeAgent:
         monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
         monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
         monkeypatch.setattr(app_module, "AsyncSandbox", async_sandbox)
-        server = LegacyOpenCodeAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
 
         await server._start_sandbox(sandbox_id="sb-1", workdir="/workspace/repo")
         assert async_sandbox.connect.await_args.args[0] == {"sandbox_id": "sb-1", "workdir": "/workspace/repo"}
@@ -147,11 +148,9 @@ class TestLegacyOpenCodeAgent:
     def test_opencode_export_to_output_items(
         self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(
-            "responses_api_agents.opencode_agent.artifacts.uuid4", MagicMock(return_value=MagicMock(hex=""))
-        )
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", MagicMock(return_value=MagicMock(hex="")))
 
-        actual_output_items = LegacyOpenCodeAgent._opencode_export_to_output_items(None, opencode_export_test_data)
+        actual_output_items = OpenCodeSandboxedAgent._opencode_export_to_output_items(None, opencode_export_test_data)
         expected_output_items = [
             NeMoGymEasyInputMessage(content=[{"text": "hello", "type": "input_text"}], role="user", type="message"),
             NeMoGymResponseOutputMessage(
@@ -165,18 +164,16 @@ class TestLegacyOpenCodeAgent:
                 status="completed",
                 type="message",
             ),
-            NeMoGymResponseOutputMessage(
-                id="msg_",
-                content=[
-                    NeMoGymResponseOutputText(
-                        annotations=[],
-                        text="<think>Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.</think>",
-                        type="output_text",
+            NeMoGymResponseReasoningItem(
+                id="rs_",
+                summary=[
+                    NeMoGymSummary(
+                        text="Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.",
+                        type="summary_text",
                     )
                 ],
-                role="assistant",
-                status="completed",
-                type="message",
+                type="reasoning",
+                encrypted_content=None,
             ),
             NeMoGymResponseFunctionToolCall(
                 arguments='{"filePath": "/testbed/astropy/modeling/separable.py"}',
@@ -197,26 +194,8 @@ class TestLegacyOpenCodeAgent:
 
         assert expected_output_items == actual_output_items
 
-    @mark.parametrize("part_type", ["text", "reasoning"])
-    @mark.parametrize(
-        "text", ["", " \n\t", "literal <think> opening", "literal </think> closing", " <think>x</think> \n"]
-    )
-    def test_export_preserves_explicit_part_type_and_exact_text(self, part_type: str, text: str) -> None:
-        export = {"messages": [{"info": {"role": "assistant"}, "parts": [{"type": part_type, "text": text}]}]}
-        items = LegacyOpenCodeAgent._opencode_export_to_output_items(None, export)
-        assert len(items) == 1
-        item = items[0]
-        if part_type == "text":
-            assert isinstance(item, NeMoGymResponseOutputMessage)
-            assert len(item.content) == 1
-            assert item.content[0].text == text
-        else:
-            assert isinstance(item, NeMoGymResponseReasoningItem)
-            assert len(item.summary) == 1
-            assert item.summary[0].text == text
-
     def test_opencode_export_to_usages(self, opencode_export_test_data: Dict[str, Any]) -> None:
-        actual_usages = LegacyOpenCodeAgent._opencode_export_to_usages(None, opencode_export_test_data)
+        actual_usages = OpenCodeSandboxedAgent._opencode_export_to_usages(None, opencode_export_test_data)
         expected_usages = [
             NeMoGymResponseUsage(
                 input_tokens=7863,
@@ -257,7 +236,7 @@ class TestLegacyOpenCodeAgent:
                 }
             ]
         }
-        (usage,) = LegacyOpenCodeAgent._opencode_export_to_usages(None, export)
+        (usage,) = OpenCodeSandboxedAgent._opencode_export_to_usages(None, export)
         assert usage.input_tokens == expected_input
         assert usage.input_tokens_details.cached_tokens == cache_read
         assert usage.output_tokens == 22
@@ -292,7 +271,7 @@ class TestLegacyOpenCodeAgent:
                 },
             ]
         }
-        usage = NeMoGymResponseUsage.sum_from_list(LegacyOpenCodeAgent._opencode_export_to_usages(None, export))
+        usage = NeMoGymResponseUsage.sum_from_list(OpenCodeSandboxedAgent._opencode_export_to_usages(None, export))
         assert usage.input_tokens == 11591
         assert usage.input_tokens_details.cached_tokens == 5760
         assert usage.output_tokens == 183
@@ -322,7 +301,7 @@ class TestLegacyOpenCodeAgent:
                 ],
             ]
         }
-        usages = LegacyOpenCodeAgent._opencode_export_to_usages(None, export)
+        usages = OpenCodeSandboxedAgent._opencode_export_to_usages(None, export)
         assert len(usages) == 2
         assert usages[0].output_tokens == 3509 + reasoning
         assert usages[1].output_tokens == reasoning
@@ -348,14 +327,14 @@ class TestLegacyOpenCodeAgent:
         if stage_ripgrep:
             binary = tmp_path / "rg with spaces"
             binary.write_text("#!/bin/sh\necho 'ripgrep test'\n")
-            config = LegacyOpenCodeAgentConfig.model_validate(
+            config = OpenCodeSandboxedAgentConfig.model_validate(
                 config.model_dump() | {"local_ripgrep_binary_path": str(binary)}
             )
             config.preinstalled_opencode = True
             config.opencode_version = "test"
         client = MagicMock(spec=ServerClient)
         client.global_config_dict = {"observability_enabled": observability_enabled}
-        server = LegacyOpenCodeAgent(config=config, server_client=client)
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
 
         sandbox_mock = MagicMock()
         sandbox_mock.exec = AsyncMock(
@@ -375,20 +354,18 @@ class TestLegacyOpenCodeAgent:
         )
 
         monkeypatch.setattr(
-            "responses_api_agents.opencode_agent.legacy.Path.exists",
+            "responses_api_agents.opencode_sandboxed_agent.app.Path.exists",
             lambda self: True,
         )
         monkeypatch.setattr(
-            "responses_api_agents.opencode_agent.legacy.Path.read_text",
+            "responses_api_agents.opencode_sandboxed_agent.app.Path.read_text",
             lambda self: json.dumps(opencode_export_test_data),
         )
         monkeypatch.setattr(
-            "responses_api_agents.opencode_agent.legacy.uuid4", MagicMock(return_value=MagicMock(hex=""))
+            "responses_api_agents.opencode_sandboxed_agent.app.uuid4", MagicMock(return_value=MagicMock(hex=""))
         )
-        monkeypatch.setattr(
-            "responses_api_agents.opencode_agent.artifacts.uuid4", MagicMock(return_value=MagicMock(hex=""))
-        )
-        monkeypatch.setattr("responses_api_agents.opencode_agent.legacy.time", MagicMock(return_value=0.0))
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", MagicMock(return_value=MagicMock(hex="")))
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.time", MagicMock(return_value=0.0))
 
         actual_response = await server.responses(
             request=MagicMock(
@@ -439,18 +416,16 @@ class TestLegacyOpenCodeAgent:
                     status="completed",
                     type="message",
                 ),
-                NeMoGymResponseOutputMessage(
-                    id="msg_",
-                    content=[
-                        NeMoGymResponseOutputText(
-                            annotations=[],
-                            text="<think>Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.</think>",
-                            type="output_text",
+                NeMoGymResponseReasoningItem(
+                    id="rs_",
+                    summary=[
+                        NeMoGymSummary(
+                            text="Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.",
+                            type="summary_text",
                         )
                     ],
-                    role="assistant",
-                    status="completed",
-                    type="message",
+                    type="reasoning",
+                    encrypted_content=None,
                 ),
                 NeMoGymResponseFunctionToolCall(
                     arguments='{"filePath": "/testbed/astropy/modeling/separable.py"}',
@@ -502,10 +477,7 @@ class TestLegacyOpenCodeAgent:
         expected_uploads = []
         if remaining_context:
             expected_uploads.append(
-                call(
-                    Path(app_module.__file__).parents[1] / "opencode_sandboxed_agent" / "remaining-context.js",
-                    "/tmp/nemo-gym-remaining-context.js",
-                )
+                call(Path(app_module.__file__).with_name("remaining-context.js"), "/tmp/nemo-gym-remaining-context.js")
             )
         if observability_enabled:
             expected_uploads.append(
@@ -563,7 +535,7 @@ class TestLegacyOpenCodeAgent:
 
     def test_missing_local_ripgrep_is_rejected(self, tmp_path: Path) -> None:
         with raises(ValidationError, match="Path does not point to a file"):
-            LegacyOpenCodeAgentConfig.model_validate(
+            OpenCodeSandboxedAgentConfig.model_validate(
                 self._create_config().model_dump() | {"local_ripgrep_binary_path": str(tmp_path / "missing-rg")}
             )
 
@@ -573,13 +545,13 @@ class TestLegacyOpenCodeAgent:
     ) -> None:
         binary = tmp_path / "rg"
         binary.write_bytes(b"readable upload")
-        config = LegacyOpenCodeAgentConfig.model_validate(
+        config = OpenCodeSandboxedAgentConfig.model_validate(
             self._create_config().model_dump() | {"local_ripgrep_binary_path": str(binary)}
         )
         seed = SimpleNamespace(ok=True, cookies={}, json=AsyncMock(return_value={"sandbox_handle": "seed"}))
         client = MagicMock(spec=ServerClient)
         client.post = AsyncMock(return_value=seed)
-        server = LegacyOpenCodeAgent(config=config, server_client=client)
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
         upload_error = error_type("ripgrep upload failed")
         sandbox = MagicMock(
             upload=AsyncMock(side_effect=upload_error),
@@ -590,7 +562,9 @@ class TestLegacyOpenCodeAgent:
         monkeypatch.setattr(server, "_start_sandbox", AsyncMock(return_value=sandbox))
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
         request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "upload-failure"}})
-        body = LegacyOpenCodeAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "Solve"}]})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
 
         with raises(error_type) as caught:
             await server.run(request, body)
@@ -606,7 +580,7 @@ class TestLegacyOpenCodeAgent:
 
     @mark.parametrize("return_code,error_type", [(125, "TimeoutError"), (124, "timeout"), (124, None)])
     def test_agent_sandbox_observation_classifies_timeout_errors(self, return_code, error_type) -> None:
-        server = LegacyOpenCodeAgent(
+        server = OpenCodeSandboxedAgent(
             config=self._create_config(),
             server_client=MagicMock(spec=ServerClient),
         )
@@ -656,9 +630,9 @@ class TestLegacyOpenCodeAgent:
             "observability_enabled": observability_enabled,
             "token_id_capture": {"enabled": token_capture_enabled, "all_agents": False},
         }
-        server = LegacyOpenCodeAgent(config=self._create_config(), server_client=server_client)
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
         monkeypatch.setattr(
-            "responses_api_agents.opencode_agent.legacy.sandbox_server_url",
+            "responses_api_agents.opencode_sandboxed_agent.app.sandbox_server_url",
             lambda _name, **kwargs: "http://model-server",
         )
         request = MagicMock()
@@ -795,7 +769,7 @@ class TestLegacyOpenCodeAgent:
             "observability_enabled": collect_observations,
             "token_id_capture": {"enabled": False, "all_agents": False},
         }
-        server = LegacyOpenCodeAgent(config=self._create_config(), server_client=server_client)
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
         server._create_opencode_config = AsyncMock(return_value={})
 
         sandbox = MagicMock()
@@ -824,7 +798,7 @@ class TestLegacyOpenCodeAgent:
                 value = str(snapshot_path)
             return shlex.quote(value)
 
-        monkeypatch.setattr("responses_api_agents.opencode_agent.legacy.quote", local_quote)
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.quote", local_quote)
 
         async def download(remote_path: str, local_path: Path) -> None:
             if remote_path == "/tmp/opencode_export.json":
@@ -840,7 +814,7 @@ class TestLegacyOpenCodeAgent:
         sandbox.stop = AsyncMock(side_effect=RuntimeError("resource server already stopped the sandbox"))
         server._start_sandbox = AsyncMock(return_value=sandbox)
         monkeypatch.setattr(
-            "responses_api_agents.opencode_agent.legacy.__file__",
+            "responses_api_agents.opencode_sandboxed_agent.app.__file__",
             str(tmp_path / "app.py"),
         )
 
@@ -869,7 +843,7 @@ class TestLegacyOpenCodeAgent:
 
         server_client.post = AsyncMock(side_effect=post)
         request = RunRequest()
-        body = LegacyOpenCodeAgentRunRequest.model_validate(
+        body = OpenCodeSandboxedAgentRunRequest.model_validate(
             {
                 "responses_create_params": {"input": [{"role": "user", "content": "solve"}]},
                 "_ng_task_index": 7,
@@ -964,7 +938,7 @@ class TestLegacyOpenCodeAgent:
         request = SimpleNamespace(cookies={}, session={SESSION_ID_KEY: "session-1"}, state=SimpleNamespace())
         server_client = MagicMock(spec=ServerClient)
         server_client.post = AsyncMock(return_value=Response())
-        server = LegacyOpenCodeAgent(config=self._create_config(), server_client=server_client)
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
 
         stopped = anyio.Event()
 
@@ -982,8 +956,8 @@ class TestLegacyOpenCodeAgent:
             rollout_started.set()
             await anyio.sleep_forever()
 
-        monkeypatch.setattr(LegacyOpenCodeAgent, "responses", responses)
-        body = LegacyOpenCodeAgentRunRequest.model_validate(
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", responses)
+        body = OpenCodeSandboxedAgentRunRequest.model_validate(
             {"responses_create_params": {"input": [{"role": "user", "content": "solve"}]}}
         )
 
@@ -998,7 +972,7 @@ class TestLegacyOpenCodeAgent:
 
 
 class TestBenchmarkLifecycle:
-    _create_config = TestLegacyOpenCodeAgent._create_config
+    _create_config = TestOpenCodeSandboxedAgent._create_config
 
     @mark.parametrize("model_timeout", [None, 3600000])
     async def test_config_overlay_keeps_model_route_and_remaining_budget(self, monkeypatch, model_timeout):
@@ -1008,10 +982,10 @@ class TestBenchmarkLifecycle:
         config.output_token_policy = "remaining_context"
         config.opencode_config = {"provider": {"nemo_gym": {"models": {"dummy_model": {"limit": {"output": 65536}}}}}}
         config.opencode_config["agent"] = {"build": {"prompt": "Custom instructions."}}
-        server = LegacyOpenCodeAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
         monkeypatch.setattr(app_module, "sandbox_server_url", lambda _, **kwargs: "http://model.example:8000")
         monkeypatch.setattr(
-            LegacyOpenCodeAgent, "base_url_for_run", MagicMock(return_value="http://model.example:8000")
+            OpenCodeSandboxedAgent, "base_url_for_run", MagicMock(return_value="http://model.example:8000")
         )
         request = MagicMock()
         request.json = AsyncMock(return_value={})
@@ -1045,7 +1019,7 @@ class TestBenchmarkLifecycle:
             "workdir": "/workspace",
             "files": {"/tmp/test": "contents"},
         }
-        server = LegacyOpenCodeAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
         await server._start_sandbox()
         spec = sandbox.start.await_args.args[0]
         assert spec.image == "registry/image@sha256:abc"
@@ -1066,13 +1040,15 @@ class TestBenchmarkLifecycle:
         seed.json = AsyncMock(return_value={})
         client = MagicMock(spec=ServerClient)
         client.post = AsyncMock(return_value=seed)
-        server = LegacyOpenCodeAgent(config=self._create_config(), server_client=client)
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=client)
         sandbox = MagicMock(stop=AsyncMock())
         server._start_sandbox = AsyncMock(return_value=sandbox)
-        monkeypatch.setattr(LegacyOpenCodeAgent, "responses", AsyncMock(side_effect=error))
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", AsyncMock(side_effect=error))
         monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
         request = MagicMock(cookies={}, session={SESSION_ID_KEY: "trial"})
-        body = LegacyOpenCodeAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "Solve"}]})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
         server._sandbox_id_to_run_result["trial"] = {"partial": "evidence"}
         with raises(type(error)):
             await server.run(request, body)
@@ -1091,13 +1067,15 @@ class TestBenchmarkLifecycle:
         config = self._create_config()
         config.sandbox_timeout = 14400
         config.tool_servers = [ResourcesServerRef(type="resources_servers", name="tavily")]
-        server = LegacyOpenCodeAgent(config=config, server_client=client)
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
         monkeypatch.setattr(
             "nemo_gym.sandbox.agent_tools.sandbox_server_url", lambda _, **kwargs: "http://10.0.0.3:63123"
         )
         monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
         request = MagicMock(cookies={"session": "original"})
-        body = LegacyOpenCodeAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "Solve"}]})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
         entries = await server._seed_tool_servers(request, body)
         assert entries == {
             "tavily": {
@@ -1129,7 +1107,7 @@ class TestBenchmarkLifecycle:
             )
 
         client.post = AsyncMock(side_effect=post)
-        server = LegacyOpenCodeAgent(config=config, server_client=client)
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
         sandbox = MagicMock(stop=AsyncMock())
         server._start_sandbox = AsyncMock(return_value=sandbox)
         response = NeMoGymResponse(
@@ -1156,11 +1134,13 @@ class TestBenchmarkLifecycle:
             }
             return response
 
-        monkeypatch.setattr(LegacyOpenCodeAgent, "responses", failed_response)
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", failed_response)
         monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
         request = MagicMock(cookies={}, session={SESSION_ID_KEY: "trial"})
         request.state = SimpleNamespace()
-        body = LegacyOpenCodeAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "Solve"}]})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
         result = await server.run(request, body)
         assert result.reward == 0.0
         assert result.opencode_failed
@@ -1173,10 +1153,10 @@ class TestBenchmarkLifecycle:
 
 @mark.parametrize("failure", ["exception", "command", "download", "empty"])
 async def test_export_failure_returns_empty_failed_response(tmp_path, failure):
-    config = TestLegacyOpenCodeAgent()._create_config()
+    config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)
     config.execution_failure_reward_zero = True
-    server = LegacyOpenCodeAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
     sandbox = MagicMock()
     sandbox.exec = AsyncMock(
         side_effect=[
@@ -1219,9 +1199,9 @@ async def test_export_failure_returns_empty_failed_response(tmp_path, failure):
 
 
 async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
-    config = TestLegacyOpenCodeAgent()._create_config()
+    config = TestOpenCodeSandboxedAgent()._create_config()
     config.tool_servers = [ResourcesServerRef(type="resources_servers", name="search")]
-    server = LegacyOpenCodeAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
     sandbox = MagicMock(
         upload=AsyncMock(),
         download=AsyncMock(),
@@ -1245,8 +1225,7 @@ async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
             body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
         )
     sandbox.upload.assert_awaited_once_with(
-        Path(app_module.__file__).parents[1] / "opencode_sandboxed_agent" / "required-mcp.js",
-        "/tmp/nemo-gym-required-mcp.js",
+        Path(app_module.__file__).with_name("required-mcp.js"), "/tmp/nemo-gym-required-mcp.js"
     )
     assert sandbox.exec.await_count == 2
     sandbox.download.assert_not_awaited()
@@ -1256,11 +1235,7 @@ async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
 @mark.skipif(shutil.which("node") is None, reason="Node is required for the OpenCode extension")
 def test_required_mcp_extension():
     result = subprocess.run(
-        [
-            "node",
-            "--test",
-            str(Path(__file__).parents[2] / "opencode_sandboxed_agent" / "tests" / "test_required_mcp.mjs"),
-        ],
+        ["node", "--test", str(Path(__file__).with_name("test_required_mcp.mjs"))],
         capture_output=True,
         text=True,
         errors="replace",
@@ -1279,7 +1254,7 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
 
     from nemo_gym.rollout_observability import AgentObservationBundle
 
-    config = TestLegacyOpenCodeAgent()._create_config()
+    config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)
     config.preinstalled_opencode = True
     config.execution_failure_reward_zero = force_zero
@@ -1299,7 +1274,7 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
         )
 
     client.post = AsyncMock(side_effect=post)
-    server = LegacyOpenCodeAgent(config=config, server_client=client)
+    server = OpenCodeSandboxedAgent(config=config, server_client=client)
     monkeypatch.setattr(server, "_capture_correlation_enabled", lambda: collect_observations)
     sandbox = MagicMock(stop=AsyncMock(), upload=AsyncMock())
 
@@ -1327,7 +1302,7 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
             source="opencode", records=[AgentInvocation(invocation_id="rollout", status="completed")]
         ),
     )
-    body = LegacyOpenCodeAgentRunRequest.model_validate(
+    body = OpenCodeSandboxedAgentRunRequest.model_validate(
         {
             "_ng_rollout_id": "rollout" if collect_observations else None,
             "responses_create_params": {"input": [{"role": "user", "content": "Solve"}]},
@@ -1359,11 +1334,7 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
 @mark.skipif(shutil.which("node") is None, reason="Node.js is needed to exercise the OpenCode plugin hooks")
 def test_assistant_message_plugin_hooks() -> None:
     subprocess.run(
-        [
-            shutil.which("node"),
-            "--test",
-            str(Path(__file__).parents[2] / "opencode_sandboxed_agent/tests/assistant_message_header.test.mjs"),
-        ],
+        [shutil.which("node"), "--test", str(Path(__file__).with_name("assistant_message_header.test.mjs"))],
         check=True,
         timeout=30,
     )

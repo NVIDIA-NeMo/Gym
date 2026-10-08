@@ -14,6 +14,7 @@ from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, OpenCodeAgentRunRequest
 from responses_api_agents.opencode_agent.tests.test_native_sessions import seed
+from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent
 
 
 def make_agent(mode: str) -> OpenCodeAgent:
@@ -24,6 +25,7 @@ def make_agent(mode: str) -> OpenCodeAgent:
             name="opencode",
             entrypoint="app.py",
             execution_mode=mode,
+            resources_server={"type": "resources_servers", "name": "resources"} if mode == "legacy_sandbox" else None,
             model_server={"type": "responses_api_models", "name": "policy"},
             opencode_version="1.17.11",
         ),
@@ -139,6 +141,7 @@ async def test_explicit_legacy_dispatch_retains_client_request_and_configuration
     request = Request({"type": "http", "session": {}})
     body = NeMoGymResponseCreateParamsNonStreaming(input="task")
     legacy = agent._legacy()
+    assert type(legacy) is OpenCodeSandboxedAgent
     assert legacy is agent._legacy()
     assert legacy.server_client is agent.server_client
     assert legacy.config.opencode_max_context_window == 32768
@@ -158,3 +161,13 @@ def test_legacy_mode_retains_its_pinned_default_without_mutating_local_config() 
     legacy = agent._legacy()
     assert legacy.config.opencode_version == "1.17.11"
     assert agent.config.opencode_version is None
+
+
+def test_legacy_bridge_requires_the_existing_resources_binding() -> None:
+    agent = make_agent("legacy_sandbox")
+    agent.config.resources_server = None
+    with pytest.raises(HTTPException) as error:
+        agent._legacy()
+    assert error.value.status_code == 422
+    assert "resources_server" in error.value.detail
+    assert agent._legacy_agent is None

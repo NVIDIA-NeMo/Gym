@@ -238,17 +238,23 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     def _legacy(self) -> SimpleResponsesAPIAgent:
         if self.config.execution_mode != "legacy_sandbox":
             raise RuntimeError("The legacy sandbox bridge requires execution_mode=legacy_sandbox")
+        if self.config.resources_server is None:
+            raise HTTPException(422, "Legacy OpenCode requires resources_server")
         if self._legacy_agent is None:
-            from responses_api_agents.opencode_agent.legacy import LegacyOpenCodeAgent, LegacyOpenCodeAgentConfig
+            from responses_api_agents.opencode_sandboxed_agent.app import (
+                OpenCodeSandboxedAgent,
+                OpenCodeSandboxedAgentConfig,
+            )
 
             values = self.config.model_dump()
             if values["opencode_version"] is None:
-                # None preserves the local installer's default; the bridge has its own pinned default.
-                values.pop("opencode_version")
-            config = LegacyOpenCodeAgentConfig(
-                **{key: value for key, value in values.items() if key in LegacyOpenCodeAgentConfig.model_fields}
+                # The unchanged sandboxed config class requires an explicit version.
+                # Preserve the bridge's default, matching the shipped sandboxed YAML.
+                values["opencode_version"] = "1.17.11"
+            config = OpenCodeSandboxedAgentConfig(
+                **{key: value for key, value in values.items() if key in OpenCodeSandboxedAgentConfig.model_fields}
             )
-            self._legacy_agent = LegacyOpenCodeAgent(config=config, server_client=self.server_client)
+            self._legacy_agent = OpenCodeSandboxedAgent(config=config, server_client=self.server_client)
         return self._legacy_agent
 
     @staticmethod

@@ -34,7 +34,7 @@ class _Response:
         return json.dumps(self.payload).encode()
 
 
-def _resolved_config(path: str):
+def _resolved_config():
     return GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             skip_load_from_cli=True,
@@ -42,20 +42,45 @@ def _resolved_config(path: str):
             offline=True,
             initial_global_config_dict=OmegaConf.create(
                 {
-                    "config_paths": [path],
+                    "config_paths": [
+                        "resources_servers/swebench_pro/configs/swebench_pro.yaml",
+                        "responses_api_agents/opencode_agent/configs/opencode_agent.yaml",
+                        "environment_servers/single_agent_turn/configs/single_agent_turn.yaml",
+                    ],
                     "policy_model": {"responses_api_models": {"dummy_model": {"entrypoint": "app.py"}}},
+                    "environment_routing_mode": "taskset",
+                    "environment_server_routes": {"swebench_pro:smoke": "swebench_pro_opencode"},
+                    "swebench_pro_opencode_resources_server": {"_inherit_from": "swebench_pro_resources_server"},
+                    "swebench_pro_opencode_agent": {"_inherit_from": "opencode_agent"},
+                    "swebench_pro_opencode": {
+                        "_inherit_from": "single_agent_turn",
+                        "environment_servers": {
+                            "single_agent_turn": {
+                                "resources_server": {
+                                    "type": "resources_servers",
+                                    "name": "swebench_pro_opencode_resources_server",
+                                },
+                                "agent_server": {
+                                    "type": "responses_api_agents",
+                                    "name": "swebench_pro_opencode_agent",
+                                },
+                            }
+                        },
+                    },
                 }
             ),
         )
     )
 
 
-async def test_native_recipe_routes_collector_through_environment_and_responses(
+async def test_session_composition_routes_collector_through_environment_and_responses(
     setup, monkeypatch: pytest.MonkeyPatch
 ):
     agent, sandbox = setup
     monkeypatch.chdir(Path(__file__).resolve().parents[3])
-    config = _resolved_config("benchmarks/swebench/pro/opencode_taskset.yaml")
+    # The benchmark's existing allowlist is unchanged; this integration is opt-in.
+    monkeypatch.setenv("NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING", "1")
+    config = _resolved_config()
     agent_name = "swebench_pro_opencode_agent"
     resources_name = "swebench_pro_opencode_resources_server"
     environment_name = config.environment_server_routes["swebench_pro:smoke"]
