@@ -19,6 +19,7 @@ from nemo_gym.global_config import HF_TOKEN_KEY_NAME, maybe_get_global_config_di
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "math_500_benchmark.jsonl"
 SOURCE_ID = "ai4bharat/indic-math-500"
+SOURCE_REVISION = "29557d8eaa22621b82f3af5557ab60babcf3feb5"
 EXPECTED_ROWS = 500
 LANGUAGE_NAMES = {
     "as": "Assamese",
@@ -89,7 +90,7 @@ def prepare(
     output_fpath: str | None = None,
     source_parquet: str | None = None,
 ) -> Path:
-    """Read a local test split, or download it, and write native Gym tasks."""
+    """Read a local test split, or download the pinned revision, and write native Gym tasks."""
     source = source_parquet
     if source is not None:
         from pyarrow.parquet import read_table
@@ -102,6 +103,7 @@ def prepare(
             repo_id=SOURCE_ID,
             filename="test.parquet",
             repo_type="dataset",
+            revision=SOURCE_REVISION,
             token=token or get_token(),
         )
         records = load_dataset("parquet", data_files={"test": source}, split="test").to_list()

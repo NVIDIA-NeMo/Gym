@@ -1,17 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 config_paths:
-  - benchmarks/math-500/config.yaml
+  - resources_servers/math_with_judge/configs/math_with_judge.yaml
 
-math_500_math_with_judge_resources_server:
+indic_math_500_math_with_judge_resources_server:
+  _inherit_from: math_with_judge
   resources_servers:
     math_with_judge:
+      should_use_judge: false
       # Preserve the 500-question denominator while accepting explicit final-answer formats beyond \boxed{}.
       format_tolerant_answer_extraction: true
 
-math_500_math_with_judge_simple_agent:
+indic_math_500_math_with_judge_simple_agent:
+  _inherit_from: math_with_judge_simple_agent
   responses_api_agents:
     simple_agent:
+      resources_server:
+        name: indic_math_500_math_with_judge_resources_server
       datasets:
         - name: indic_math_500
           type: benchmark
