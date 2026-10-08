@@ -1,0 +1,364 @@
+---
+title: "Equivalence Match"
+description: "Extract an agent's answer and compare it deterministically with a reference value, structure, or rule."
+position: 1
+---
+import { NavButton } from "../../../../../components/NavButton";
+
+# Equivalence Match
+
+Use an **equivalence-match verifier** when correctness can be decided deterministically from the agent's output and task metadata. The verifier:
+
+1. Extracts the answer-bearing part of the response.
+2. Converts the prediction and reference to comparable representations.
+3. Applies a task-appropriate equality or similarity rule.
+4. Maps the result to a reward.
+
+This pattern is usually faster, cheaper, and more reproducible than an [LLM-as-Judge](/build-verifiers/verification-patterns/llm-as-judge). The main design risk is choosing an equivalence rule that is either too strict and rejects valid answers or too permissive and accepts wrong ones.
+
+<NavButton href="/build-verifiers/verification-patterns" label="Back to Verification Patterns" direction="back" />
+
+---
+
+## Start With the Narrowest Correct Rule
+
+Prefer the simplest rule that captures all valid answers for the task:
+
+1. **Exact match** for closed answer sets such as multiple-choice letters.
+2. **Normalized match** when formatting differences are irrelevant.
+3. **Numeric tolerance** for floating-point results.
+4. **Symbolic equivalence** when different mathematical forms can represent the same value.
+5. **Continuous similarity** only when correctness is naturally graded rather than binary.
+
+Keep extraction separate from comparison. This makes failures observable: you can distinguish "no answer was extracted" from "an answer was extracted but did not match."
+
+---
+
+## Exact String Match
+
+Exact matching is appropriate after extraction has reduced the output to a canonical value, such as one allowed multiple-choice letter. Do not compare the entire free-form response when reasoning or formatting may vary.
+
+This example is condensed from [`mcqa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mcqa):
+
+```python
+ANSWER_PATTERN = re.compile(r"(?i)answer\s*:\s*([A-Z])\b")
+
+def extract_choice(text: str, allowed: set[str]) -> str | None:
+    match = ANSWER_PATTERN.search(text)
+    if not match:
+        return None
+    choice = match.group(1).upper()
+    return choice if choice in allowed else None
+
+prediction = extract_choice(response.output_text, {"A", "B", "C", "D"})
+gold = expected_answer.strip().upper()
+reward = 1.0 if prediction is not None and prediction == gold else 0.0
+```
+
+Validate extracted values against the allowed answer set. Otherwise an overly broad regular expression can turn incidental prose into a prediction.
+
+Examples:
+
+- [`mcqa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mcqa) supports boxed, `Answer:`, Markdown-aware, and dataset-supplied extraction expressions before exact letter comparison.
+- [`gpqa_diamond`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gpqa_diamond) extracts a choice and compares it with the reference answer.
+- [`circle_count`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/circle_count) extracts a discrete count and assigns a binary reward.
+
+---
+
+## Normalized Text Match
+
+Normalize only differences that the task declares irrelevant. Common operations include lowercasing, removing punctuation or articles, canonicalizing Unicode, and collapsing whitespace.
+
+This SQuAD-style normalization is condensed from [`hotpotqa_qa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/hotpotqa_qa):
+
+```python
+def normalize_answer(text: str) -> str:
+    text = text.lower()
+    text = "".join(ch for ch in text if ch not in string.punctuation)
+    text = re.sub(r"\b(a|an|the)\b", " ", text)
+    return " ".join(text.split())
+
+prediction = extract_answer(response.output_text)
+reward = float(
+    any(normalize_answer(prediction) == normalize_answer(answer) for answer in accepted_answers)
+)
+```
+
+Store legitimate aliases as reference data or generate them with explicit, reviewable rules. Avoid open-ended "synonym" replacement: it can silently make semantically different answers equal.
+
+Examples:
+
+- [`hotpotqa_qa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/hotpotqa_qa) parses an answer from JSON, applies SQuAD-style normalization, and supports curated surface-form alternatives.
+- [`equivalence_rule`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_rule) lowercases and collapses whitespace before exact or fuzzy comparison.
+- [`ruler`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ruler) uses task-specific deterministic answer matching for long-context retrieval tasks.
+
+---
+
+## Numeric Match With Tolerance
+
+Floating-point strings can differ while representing effectively the same result. First try normalized exact equality, then parse finite numeric values and compare them with an explicit relative and absolute tolerance.
+
+This example follows [`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code):
+
+```python
+import math
+
+def numeric_match(actual: str | None, expected: str) -> bool:
+    if actual is None:
+        return False
+
+    actual_n = normalize_math_text(actual)
+    expected_n = normalize_math_text(expected)
+    if actual_n == expected_n:
+        return True
+
+    try:
+        actual_f = float(actual_n)
+        expected_f = float(expected_n)
+    except (ValueError, OverflowError):
+        return False
+
+    return math.isfinite(actual_f) and math.isfinite(expected_f) and math.isclose(
+        actual_f,
+        expected_f,
+        rel_tol=1e-6,
+        abs_tol=1e-6,
+    )
+```
+
+Choose tolerances from the task's units and expected numerical precision, not as a universal constant. Reject non-finite values unless the benchmark explicitly permits them.
+
+Examples:
+
+- [`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code) normalizes math delimiters, checks exact equality, then applies a relative numeric tolerance.
+- [`litmus_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/litmus_agent) supports `isclose`, absolute-window, and relative-window numeric grading rules.
+
+---
+
+## Regex and Boxed Extraction
+
+Many benchmarks ask the model to mark its final answer with `\boxed{...}` or `Answer:`. Extraction is not itself verification; it creates the candidate that a later comparison rule scores.
+
+Use the last final-answer marker so intermediate reasoning does not win. For boxed LaTeX, track brace depth instead of using a regular expression that stops at the first nested `}`:
+
+```python
+def extract_last_boxed(text: str) -> str | None:
+    marker = r"\boxed{"
+    start = text.rfind(marker)
+    if start < 0:
+        return None
+
+    depth = 1
+    answer_start = start + len(marker)
+    for index, char in enumerate(text[answer_start:], start=answer_start):
+        depth += (char == "{") - (char == "}")
+        if depth == 0:
+            answer = text[answer_start:index].strip()
+            return answer or None
+    return None
+
+prediction = extract_last_boxed(response.output_text)
+reward = float(prediction is not None and answers_match(prediction, expected_answer))
+```
+
+Examples:
+
+- [`mcqa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mcqa) handles nested boxed answers, `Answer:` payloads, and custom extraction regexes.
+- [`math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code) searches the final assistant response and tool output for the last boxed answer.
+- [`format_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/format_verification) checks task-specific response formatting.
+
+<Warning>
+Do not use `eval()` to parse model-generated answers. Prefer constrained regular expressions, `json.loads()`, or a domain parser.
+</Warning>
+
+---
+
+## Symbolic Equivalence
+
+String equality is insufficient for mathematics: `x(x + 1)` and `x^2 + x` are different strings but equivalent expressions. Use a maintained parser and symbolic verifier with time and concurrency limits.
+
+[`math_with_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge) uses the `math-verify` library, which parses expressions and uses symbolic math checks:
+
+```python
+from math_verify import grader
+from math_verify.metric import math_metric
+from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
+
+verify_math = math_metric(
+    gold_extraction_target=(LatexExtractionConfig(),),
+    pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
+)
+
+score, extracted = verify_math(
+    [rf"\boxed{{{expected_answer}}}"],
+    [generated_answer],
+)
+reward = float(score)
+
+# The underlying parsed expressions can also be checked directly when present.
+if extracted is not None:
+    gold_candidates, prediction_candidates = extracted
+    equivalent = any(
+        grader.verify(gold, prediction)
+        for gold in gold_candidates
+        for prediction in prediction_candidates
+    )
+```
+
+Symbolic simplification can be expensive or hang on adversarial expressions. Run it with a timeout and bounded concurrency. Treat parser failure separately from a valid but non-equivalent expression.
+
+Examples:
+
+- [`math_with_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge) runs library verification in a killable subprocess and optionally falls back to an LLM judge.
+- [`imo_proofbench_judge`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/imo_proofbench_judge) combines deterministic math handling with proof-oriented judging.
+
+---
+
+## Fuzzy and Continuous Similarity
+
+Use continuous similarity when partial overlap is meaningful, such as translation or long-form retrieval. Return a score in `[0, 1]` so it can be used directly as a dense reward.
+
+This example follows [`mrcr`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mrcr):
+
+```python
+from difflib import SequenceMatcher
+
+def similarity(response: str, expected: str, required_prefix: str) -> float:
+    if not response.startswith(required_prefix):
+        return 0.0
+
+    prediction = response.removeprefix(required_prefix)
+    reference = expected.removeprefix(required_prefix)
+    return float(SequenceMatcher(None, prediction, reference).ratio())
+
+reward = similarity(response.output_text.strip(), expected_answer, random_prefix)
+```
+
+Different metrics encode different notions of similarity. Pin metric versions and tokenizers, and do not compare scores produced with different configurations.
+
+Examples:
+
+- [`mrcr`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/mrcr) uses `SequenceMatcher.ratio()` after enforcing a required prefix.
+- [`equivalence_rule`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/equivalence_rule) offers normalized sequence similarity and a weighted prefix variant.
+- [`wmt_translation`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/wmt_translation) computes sentence chrF and spBLEU, using normalized chrF as the reward.
+
+---
+
+## Structured Output Match
+
+Parse structured output before comparing it. Depending on the task, correctness can mean either:
+
+- **Value equality:** the parsed object must equal a reference object.
+- **Shape validity:** the parsed object must satisfy a schema, even when many values are valid.
+
+This grid-equality example is condensed from [`arc_agi`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/arc_agi):
+
+```python
+def parse_grid(candidate: str) -> list[list[int]] | None:
+    try:
+        grid = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+
+    if not (
+        isinstance(grid, list)
+        and grid
+        and all(isinstance(row, list) and row for row in grid)
+        and all(isinstance(cell, int) for row in grid for cell in row)
+    ):
+        return None
+    return grid
+
+prediction = parse_grid(extract_grid_text(response.output_text))
+reward = float(prediction is not None and prediction == expected_output)
+```
+
+For schema-only tasks, parse the response and validate the resulting object:
+
+```python
+response_obj = json.loads(response.output_text)
+validate_against_schema_openapi(response_obj, strict_schema)
+reward = 1.0
+```
+
+Examples:
+
+- [`arc_agi`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/arc_agi) extracts a JSON grid, validates integer cells, and compares the nested lists.
+- [`structured_outputs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/structured_outputs) parses JSON, YAML, XML, TOML, CSV, or tool arguments and validates them against a strict OpenAPI schema.
+
+---
+
+## Instruction and Constraint Checking
+
+Some tasks define correctness as satisfying a set of programmatic constraints rather than matching one answer. Build one checker per instruction, retain each boolean result for diagnostics, and then choose binary or fractional aggregation.
+
+This example is condensed from [`instruction_following`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/instruction_following):
+
+```python
+checks: list[bool] = []
+for instruction_id, kwargs in zip(instruction_ids, instruction_kwargs):
+    instruction_cls = instructions_registry.INSTRUCTION_DICT[instruction_id]
+    instruction = instruction_cls(instruction_id)
+    instruction.build_description(**{k: v for k, v in kwargs.items() if v is not None})
+    checks.append(bool(instruction.check_following(response.output_text)))
+
+if grading_mode == "binary":
+    reward = float(all(checks))
+else:
+    reward = sum(checks) / len(checks) if checks else 0.0
+```
+
+Examples:
+
+- [`instruction_following`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/instruction_following) runs registry-backed checks and supports all-or-nothing or fractional reward.
+- [`ifbench`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ifbench) records strict and loose instruction checks and supports binary or fractional grading.
+
+---
+
+## Implement the Pattern in `verify()`
+
+A resources server should return both the reward and enough structured evidence to debug it:
+
+```python
+class AnswerVerifyResponse(BaseVerifyResponse):
+    extracted_answer: str | None
+    extraction_successful: bool
+
+async def verify(self, body: AnswerVerifyRequest) -> AnswerVerifyResponse:
+    prediction = extract_answer(body.response.output_text)
+    matched = prediction is not None and compare(prediction, body.expected_answer)
+
+    return AnswerVerifyResponse(
+        **body.model_dump(),
+        reward=float(matched),
+        extracted_answer=prediction,
+        extraction_successful=prediction is not None,
+    )
+```
+
+Keep the reference answer in typed request metadata, not in the prompt text alone. Preserve the extracted prediction and any component scores in the verify response so reward profiling can reveal extraction failures, overly strict normalization, and partial-credit behavior.
+
+---
+
+## Test the Decision Boundary
+
+For every equivalence verifier, add tests for:
+
+- A canonical correct answer.
+- A valid alternative representation.
+- A near miss that must remain incorrect.
+- Missing, malformed, and ambiguous answers.
+- Multiple final-answer markers.
+- Extreme numeric values or deeply nested structured input where applicable.
+- Empty output and unexpected response item types.
+
+The most important tests sit at the boundary between accepted variation and false positives. A verifier that accepts the happy path but over-rewards near misses will produce misleading evaluation metrics and a weak training signal.
+
+---
+
+## Related Topics
+
+- [Build Verifiers](/build-verifiers) — resources server interfaces and verifier responsibilities
+- [Verification Patterns](/build-verifiers/verification-patterns) — choose another scoring pattern
+- [LLM-as-Judge](/build-verifiers/verification-patterns/llm-as-judge) — evaluate semantic or rubric-based criteria that deterministic rules cannot express reliably
+- [Multi-Reward Verification](/build-verifiers/multi-reward-verification) — expose several component scores from one verifier
