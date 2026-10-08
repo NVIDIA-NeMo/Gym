@@ -478,6 +478,7 @@ class TestApp:
 
         assert agent.server_client.post.call_count == 4  # retry fired -> attempt 1 + verify
         assert result.reward == 1.0
+        assert result.timed_out == 0
 
 
 def test_prompt_tokens_from_tokenize_response_shapes():
@@ -525,6 +526,34 @@ class TestRolloutTimeout:
         assert result.timed_out is True
         # One model call plus one tool call, then the timeout check fires.
         assert agent.server_client.post.call_count == 2
+
+    async def test_run_scores_a_timed_out_rollout_without_the_judge(self) -> None:
+        agent = BrowsecompAgent(config=_make_config(), server_client=MagicMock(spec=ServerClient))
+        timed_out = _make_model_response([_make_msg("still searching")])
+        timed_out["timed_out"] = True
+        timed_out["num_tool_calls"] = 7
+
+        def _http(read_bytes: bytes | None = None) -> MagicMock:
+            m = MagicMock()
+            m.ok = True
+            m.cookies = {}
+            if read_bytes is not None:
+                m.read = AsyncMock(return_value=read_bytes)
+            return m
+
+        # seed_session and /v1/responses only: no /verify call.
+        agent.server_client.post = AsyncMock(side_effect=[_http(), _http(json.dumps(timed_out).encode())])
+        request_mock = MagicMock()
+        request_mock.cookies = {}
+        body = BrowsecompAgentRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "q"}])
+        )
+        result = await agent.run(request_mock, body)
+
+        assert agent.server_client.post.call_count == 2
+        assert result.reward == 0.0
+        assert result.timed_out == 1
+        assert result.num_tool_calls == 7
 
     def test_default_has_no_timeout(self) -> None:
         assert _make_config().rollout_timeout_s is None
