@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Private reference check
+
+# Runs on copy-pr-bot's approved mirror branch, including PRs from forks.
+on:
+  push:
+    branches:
+      - "pull-request/**"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  private-reference-check:
+    if: github.repository == 'NVIDIA-NeMo/Gym'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Gym mirror
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Get pull request details
+        id: pr
+        uses: nv-gha-runners/get-pr-info@090577647b8ddc4e06e809e264f7881650ecdccf # main
+
+      - name: Verify mirror commit
+        env:
+          PR_INFO: ${{ steps.pr.outputs.pr-info }}
+        run: jq -e --arg sha "$GITHUB_SHA" '.head.sha == $sha' <<< "$PR_INFO" >/dev/null
+
+      - name: Create read-only Guardwords token
+        id: guardwords-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          app-id: ${{ vars.BOT_ID }}
+          private-key: ${{ secrets.BOT_KEY }}
+          owner: NVIDIA-NeMo
+          repositories: Guardwords
+          permission-contents: read
+
+      - name: Check out private guardwords
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: NVIDIA-NeMo/Guardwords
+          ref: main
+          token: ${{ steps.guardwords-token.outputs.token }}
+          path: .guardwords
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Install YAML parser
+        run: python -m pip install --disable-pip-version-check --no-input "PyYAML==6.0.2"
+
+      - name: Scan added lines
+        env:
+          BASE_SHA: ${{ fromJSON(steps.pr.outputs.pr-info).base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+          GUARDWORDS_FILE: ${{ github.workspace }}/.guardwords/guardwords.yaml
+        run: python3 scripts/ci/check_private_references.py --patterns "$GUARDWORDS_FILE" --base "$BASE_SHA" --head "$HEAD_SHA"
