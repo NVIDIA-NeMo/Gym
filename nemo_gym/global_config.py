@@ -2061,7 +2061,17 @@ def resolve_dataset_agent(
             raise ConfigError(f"Taskset {taskset!r} must route to its declaring agent {declaring_instance_name!r}.")
         if not is_agent:
             resources_ref = environment_config.get("resources_server")
-            if (
+            if resources_ref is None:
+                # A server that binds no resources server, such as a legacy_agent relay, reaches the
+                # declaring resources server through its agent, as rows routed by agent do.
+                bound = agents_by_resources_server(global_config_dict).get(str(declaring_instance_name), [])
+                if not set(agent_names) & set(bound):
+                    raise ConfigError(
+                        f"Environment Server {environment_name!r} binds no resources server, and none of its "
+                        f"agents references declaring resources server {declaring_instance_name!r} for taskset "
+                        f"{taskset!r}."
+                    )
+            elif (
                 not isinstance(resources_ref, DictConfig)
                 or resources_ref.get("name") != declaring_instance_name
                 or resources_ref.get("type", RESOURCES_SERVER_TYPE_KEY_NAME) != RESOURCES_SERVER_TYPE_KEY_NAME

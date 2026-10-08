@@ -56,6 +56,8 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     GlobalConfigDictParser,
+    environment_server_attributed_agent,
+    get_first_server_config_dict,
     get_global_config_dict,
     resolve_dataset_agent,
     taskset_environment_server,
@@ -540,6 +542,10 @@ class TasksetSchemas(BaseModel):
     def for_taskset(cls, global_config_dict: DictConfig, taskset: str) -> "TasksetSchemas":
         environment = taskset_environment_server(global_config_dict, taskset)
         resources_ref = environment.config.get("resources_server")
+        agent_name = environment_server_attributed_agent(environment.config)
+        if resources_ref is None and agent_name is not None:
+            # A server that binds no resources server, such as a legacy_agent relay, uses its agent's.
+            resources_ref = get_first_server_config_dict(global_config_dict, agent_name).get("resources_server")
         resources_name = resources_ref.get("name") if isinstance(resources_ref, DictConfig) else None
         resources = global_config_dict.get(resources_name) if isinstance(resources_name, str) else None
         servers = resources.get("resources_servers") if isinstance(resources, DictConfig) else None

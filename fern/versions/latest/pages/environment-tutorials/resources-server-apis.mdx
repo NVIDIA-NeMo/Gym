@@ -524,6 +524,14 @@ through fields other than `agent_server`, such as a `user_agent` and an
 the Environment Server instead of an agent. Collation preserves existing collector
 task indices, rollout IDs, and retry attempts outside `task_input`.
 
+A taskset can also route to a `legacy_agent` Environment Server, which relays `/run`
+to an agent that has not moved to an Environment Server protocol. Rollout collection
+sends that server the run request row the agent reads today, rebuilt from the task's
+fields and the collector keys, instead of an episode request. The relay binds no
+resources server, so a taskset declared on a resources server routes to it when the
+relay's agent references that resources server. Existing datasets can therefore
+declare `taskset:` before their agents migrate.
+
 ## Next Steps
 
 - Build a seed/verify environment in [Single-Step Environment](/environment-tutorials/single-step-environment).

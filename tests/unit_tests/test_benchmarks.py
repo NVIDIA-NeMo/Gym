@@ -1296,6 +1296,55 @@ class TestNativeTasksetBenchmark:
             _resolve_dataset_owner_agent(multi_agent_config, "resources")
 
 
+class TestTasksetRouteToLegacyAgentRelay:
+    """A taskset may route to a legacy_agent relay, which binds no resources server, in front of an unmigrated agent."""
+
+    @pytest.fixture
+    def config(self):
+        return OmegaConf.create(
+            {
+                "environment_server_routes": {"qa": "relay"},
+                "resources": {"resources_servers": {"impl": {"entrypoint": "app.py"}}},
+                "agent": {
+                    "responses_api_agents": {
+                        "impl": {
+                            "entrypoint": "app.py",
+                            "resources_server": {"type": "resources_servers", "name": "resources"},
+                        }
+                    }
+                },
+                "relay": {
+                    "environment_servers": {
+                        "legacy_agent": {
+                            "entrypoint": "app.py",
+                            "agent_server": {"type": "responses_api_agents", "name": "agent"},
+                        }
+                    }
+                },
+            }
+        )
+
+    def test_resources_declared_taskset_reaches_the_relay_through_its_agent(self, config):
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        assert resolve_dataset_agent(config, "resources", taskset="qa") == "agent"
+
+    def test_relay_agent_must_reference_the_declaring_resources_server(self, config):
+        from nemo_gym.config_types import ConfigError
+        from nemo_gym.global_config import resolve_dataset_agent
+
+        config.agent.responses_api_agents.impl.resources_server.name = "other"
+        with pytest.raises(ConfigError, match="binds no resources server, and none of its agents references"):
+            resolve_dataset_agent(config, "resources", taskset="qa")
+
+    def test_collation_validates_against_the_relay_agents_resources_schema(self, config):
+        from nemo_gym.train_data_utils import TasksetSchemas
+
+        assert TasksetSchemas.for_taskset(config, "qa") == TasksetSchemas(
+            environment_implementation="legacy_agent", resources_implementation="impl"
+        )
+
+
 class TestAgentPinDiscoveryCollateRollout:
     """The agent discovery resolves for a pinned benchmark is the agent rollout dispatch routes
     its collated rows to (previously the pin was honored at discovery only)."""
