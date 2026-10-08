@@ -796,6 +796,7 @@ class TestApp:
         monkeypatch: MonkeyPatch,
         *,
         propagate_context_overflow_errors: bool = False,
+        use_completions_api: bool = False,
         external_staging_backend: str | None = None,
         route_around_failing_endpoints: bool = False,
         endpoint_failure_threshold: int = 3,
@@ -813,6 +814,7 @@ class TestApp:
             return_token_id_information=False,
             uses_reasoning_parser=False,
             propagate_context_overflow_errors=propagate_context_overflow_errors,
+            use_completions_api=use_completions_api,
             route_around_failing_endpoints=route_around_failing_endpoints,
             endpoint_failure_threshold=endpoint_failure_threshold,
             endpoint_retry_after_s=endpoint_retry_after_s,
@@ -872,6 +874,45 @@ class TestApp:
                 assert response.json()["incomplete_details"] == {"reason": "max_output_tokens"}
             else:
                 assert '"finish_reason": "length"' in response.text
+
+    @mark.parametrize("use_completions_api", [False, True])
+    def test_an_engine_error_the_server_does_not_handle_is_logged_with_its_body(
+        self, monkeypatch: MonkeyPatch, caplog, use_completions_api: bool
+    ) -> None:
+        # Any engine answer but the handled context-length 400 reaches the caller as a plain
+        # server error that carries only the status; the log keeps the status, the request path,
+        # the rollout id, and the engine's body.
+        server = self._setup_server(monkeypatch, use_completions_api=use_completions_api)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=422, message="Unprocessable Entity")
+        error.response_content = (
+            b'{"object":"error","message":"tools.3.type: Input should be \'function\'","type":"BadRequestError",'
+            b'"param":null,"code":422}'
+        )
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        mock_client.create_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            response = TestClient(app).post(
+                "/ng-rollout/r0/v1/chat/completions",
+                json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        assert response.status_code == 500
+        logged = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING and "engine answered" in record.getMessage()
+        ]
+        assert len(logged) == 1
+        assert "engine answered 422" in logged[0]
+        assert "/v1/chat/completions" in logged[0]
+        assert "(rollout r0)" in logged[0]
+        assert "Input should be 'function'" in logged[0]
 
     def test_transport_log_error_event_omits_request_headers(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         log_path = tmp_path / "model-io-transport.jsonl"
@@ -4214,6 +4255,32 @@ def _make_minimal_audio_model() -> VLLMModel:
     return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
 
 
+def _translate_responses_request(model: VLLMModel, request: NeMoGymResponseCreateParamsNonStreaming) -> dict:
+    chat = model._converter.responses_to_chat_completion_create_params(request)
+    return model._preprocess_chat_completion_create_params(MagicMock(), chat.model_dump(exclude_unset=True))
+
+
+def test_responses_metadata_sampling_reaches_vllm() -> None:
+    model = _make_minimal_audio_model()
+    request = NeMoGymResponseCreateParamsNonStreaming(
+        input="Solve the problem.",
+        temperature=1.0,
+        top_p=0.95,
+        max_output_tokens=120000,
+        metadata={
+            "chat_template_kwargs": json.dumps({"enable_thinking": True}),
+            "extra_body": json.dumps({"top_k": 64, "seed": 3}),
+        },
+    )
+
+    outbound = _translate_responses_request(model, request)
+
+    assert (outbound["temperature"], outbound["top_p"], outbound["max_tokens"]) == (1.0, 0.95, 120000)
+    assert outbound["top_k"] == 64
+    assert outbound["seed"] == 3
+    assert outbound["chat_template_kwargs"] == {"enable_thinking": True}
+
+
 class TestAudioDataSplice:
     def test_no_metadata_passthrough(self) -> None:
         """No audio_data in metadata → user message content stays a plain string."""
@@ -4345,17 +4412,16 @@ def _make_audio_path_model(audio_root: str | None = None) -> VLLMModel:
 
 
 class TestAudioPathSplice:
-    def test_absolute_path_encodes_to_data_uri(self, tmp_path) -> None:
+    def test_responses_audio_path_encodes_to_data_uri(self, tmp_path) -> None:
         wav = tmp_path / "clip.wav"
         wav.write_bytes(_AUDIO_BYTES)
 
         model = _make_audio_path_model()
-        body = {
-            "model": "dummy-model",
-            "messages": [{"role": "user", "content": "Transcribe."}],
-            "metadata": {"audio_path": str(wav)},
-        }
-        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        request = NeMoGymResponseCreateParamsNonStreaming(
+            input="Transcribe.",
+            metadata={"audio_path": str(wav)},
+        )
+        result = _translate_responses_request(model, request)
 
         # audio_path consumed; metadata empty → dropped.
         assert "metadata" not in result

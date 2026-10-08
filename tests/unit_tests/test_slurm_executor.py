@@ -199,7 +199,8 @@ def test_run_writes_the_local_index(tmp_path, monkeypatch):
 
 def test_run_dir_is_readable_by_other_users_but_secrets_are_not(tmp_path, monkeypatch):
     # Staging happens in a 0700 temp dir and the copy keeps modes, so without an explicit
-    # chmod every run dir lands private to the submitter.
+    # chmod every run dir lands private to the submitter. job.sh holds the resolved secrets;
+    # the resolved config holds only `host:` references, so it is written like the manifest.
     conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 "])
     _install(monkeypatch, conn)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
@@ -209,7 +210,8 @@ def test_run_dir_is_readable_by_other_users_but_secrets_are_not(tmp_path, monkey
     run_dir = Path(record.run_dir)
     assert oct(run_dir.stat().st_mode & 0o777) == oct(0o755)
     assert oct((run_dir / "bench_a" / "job.sh").stat().st_mode & 0o777) == oct(0o600)
-    assert oct((run_dir / RESOLVED_CONFIG_NAME).stat().st_mode & 0o777) == oct(0o600)
+    manifest_mode = (run_dir / MANIFEST_NAME).stat().st_mode & 0o777
+    assert oct((run_dir / RESOLVED_CONFIG_NAME).stat().st_mode & 0o777) == oct(manifest_mode)
 
 
 def test_run_records_a_failed_benchmark_without_disturbing_the_others(tmp_path, monkeypatch):

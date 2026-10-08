@@ -145,7 +145,7 @@ def test_check_ids_encode_subject_without_replacing_evaluation_scope() -> None:
         {health.CheckInput.RECORD, health.CheckInput.TRAJECTORY, health.CheckInput.AGENT_TURNS}
     )
     assert by_id["rollout_token_count_mismatch"].reads == frozenset(
-        {health.CheckInput.RECORD, health.CheckInput.TRAJECTORY, health.CheckInput.BOUND_CALLS}
+        {health.CheckInput.RECORD, health.CheckInput.TRAJECTORY, health.CheckInput.OWNED_MODEL_CALLS}
     )
     with pytest.raises(ValueError, match="cannot read both"):
         health.CheckSpec(
@@ -391,7 +391,7 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
                 futures.append(future)
             return futures
 
-        async def _call_aggregate_metrics(self, results, rows, output_fpath):
+        async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
             metrics_path = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
             metrics_path.write_bytes(orjson.dumps([{"key_metrics": {"reward": 1.0}}]))
             return metrics_path
@@ -979,7 +979,7 @@ def test_turn_call_scope_gap_only_gates_completeness_checks(tmp_path: Path, gap:
     checks = {finding.check for finding in digest.findings}
     incomplete = gap == "turn_model_call_scope_incomplete"
     assert set(digest.unobserved) == ({"rollout_token_count_mismatch"} if incomplete else set())
-    assert ("rollout_token_count_mismatch" in checks) is not incomplete
+    assert "rollout_token_count_mismatch" not in checks
     assert "agent_turn_hollow" in checks
     assert digest.policy_calls_observed is not incomplete
     coverage = result.summary["run"]["artifacts"]["coverage"]["task_no_successful_model_calls"]
@@ -1619,3 +1619,67 @@ def test_only_final_failure_affects_health_for_bound_calls(tmp_path, final_faile
     )
     assert digest.verdict == ("unhealthy" if final_failed else "healthy")
     assert digest.model_call_errors == (2 if final_failed else 1)
+
+
+@pytest.mark.parametrize("duplicate_reference", [False, True])
+def test_usage_counts_invocation_owned_compaction_once(tmp_path: Path, duplicate_reference: bool) -> None:
+    record = _record(0, 0, usage={"input_tokens": 8, "output_tokens": 5})
+    refs = [{"model_call_id": "c1"}, {"model_call_id": "summary"}]
+    if duplicate_reference:
+        refs.append({"model_call_id": "summary"})
+    record["ng_trajectory"]["invocations"] = [{"invocation_id": "root", "model_calls": refs}]
+    rollout_path = _write_fixture(
+        tmp_path,
+        [
+            (
+                record,
+                [
+                    _call(),
+                    _call(model_call_id="summary", response_id="summary-response", tokens_in=5, tokens_out=3),
+                    _call(model_call_id="unowned", response_id="unowned-response", tokens_in=100, tokens_out=100),
+                ],
+            )
+        ],
+    )
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+    assert not digest.findings
+    assert "rollout_token_count_mismatch" not in digest.unobserved
+
+
+def test_usage_compaction_missing_capture_remains_unobserved(tmp_path: Path) -> None:
+    record = _record(0, 0, usage={"input_tokens": 8, "output_tokens": 5})
+    record["ng_trajectory"]["invocations"] = [
+        {
+            "invocation_id": "root",
+            "model_calls": [
+                {"model_call_id": "c1"},
+                {"model_call_id": "missing-summary"},
+            ],
+        }
+    ]
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [_call()])]), workers=1).rollouts
+    assert "rollout_token_count_mismatch" in digest.unobserved
+    assert {f.check for f in digest.findings} == {"trajectory_capture_mismatch"}
+
+
+def test_usage_still_reports_incorrect_invocation_total(tmp_path: Path) -> None:
+    record = _record(0, 0, usage={"input_tokens": 8, "output_tokens": 6})
+    record["ng_trajectory"]["invocations"] = [
+        {
+            "invocation_id": "root",
+            "model_calls": [
+                {"model_call_id": "c1"},
+                {"model_call_id": "summary"},
+            ],
+        }
+    ]
+    calls = [_call(), _call(model_call_id="summary", response_id="summary-response", tokens_in=5, tokens_out=3)]
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, calls)]), workers=1).rollouts
+    [finding] = digest.findings
+    assert finding.check == "rollout_token_count_mismatch"
+    assert finding.detail == {
+        "transcript_prompt": 8,
+        "transcript_completion": 6,
+        "capture_prompt": 8,
+        "capture_completion": 5,
+    }

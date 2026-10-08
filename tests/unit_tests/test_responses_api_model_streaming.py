@@ -27,7 +27,7 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-from fastapi import Body, Request
+from fastapi import Body, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
 
@@ -704,6 +704,11 @@ class _FailingModel(_EchoModel):
         raise RuntimeError("backend exploded")
 
 
+class _HTTPErrorModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        raise HTTPException(status_code=400, detail={"error": {"code": "context_length_exceeded"}})
+
+
 def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
     server = model_cls(
         config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name=""),
@@ -774,6 +779,14 @@ class TestResponsesDispatchRoute:
         payload = json.loads(failed[0][len("data: ") :])
         assert payload["response"]["status"] == "failed"
         assert "backend exploded" in payload["response"]["error"]["message"]
+
+    def test_streaming_http_exception_keeps_its_status(self) -> None:
+        # An HTTPException is a status the server chose to return; it is raised before the
+        # stream is committed, so it is not converted into a response.failed event.
+        client, _ = _client(_HTTPErrorModel)
+        resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+        assert resp.status_code == 400
+        assert resp.json() == {"detail": {"error": {"code": "context_length_exceeded"}}}
 
     def test_non_streaming_backend_error_still_raises(self) -> None:
         # Without the streaming contract, a backend failure is a normal exception (HTTP 500), not a
