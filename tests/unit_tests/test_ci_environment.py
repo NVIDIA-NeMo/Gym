@@ -481,7 +481,7 @@ def test_notify_failure_passes_dependency_results_and_preserves_destination() ->
 
         assert notify_step["with"] == {
             "needs-json": "${{ toJSON(needs) }}",
-            "webhook": "${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}",
+            "webhook": "${{ secrets.SLACK_WEBHOOK }}",
         }, workflow_file
         assert jobs["notify-failure"]["environment"] == "main", workflow_file
 
