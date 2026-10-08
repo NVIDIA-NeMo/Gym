@@ -90,6 +90,10 @@ class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig
 
 
 class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
+    # Each submission is evaluated on its own: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
     config: CompetitiveCodingChallengesResourcesServerConfig
 
