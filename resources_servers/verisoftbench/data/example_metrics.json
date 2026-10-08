@@ -2,12 +2,14 @@
     "name": "example",
     "type": "example",
     "jsonl_fpath": "resources_servers/verisoftbench/data/example.jsonl",
+    "taskset": null,
     "num_repeats": 1,
     "source": null,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
     "license": "MIT",
     "Number of examples": 5,
+    "Number of tasks": 0,
     "Number of tools": {
         "Total # non-null values": 0,
         "Average": 0.0,
@@ -21,6 +23,13 @@
         "Min": 1191.0,
         "Max": 1196.0,
         "Standard deviation": 2.07
+    },
+    "Json-dumped task-input words (proxy for token count)": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
     },
     "Number of turns": {
         "Total # non-null values": 5,
