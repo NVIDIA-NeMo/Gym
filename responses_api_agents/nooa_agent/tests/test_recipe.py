@@ -55,6 +55,7 @@ def test_swe_recipe_uses_borrowed_sandbox_and_native_environment() -> None:
     assert agent.nooa.execution_mode == "sandboxed"
     assert agent.num_workers == 1
     assert agent.model_server.name == "policy_model"
+    assert agent.max_policy_calls is None
     assert environment.resources_server.name == "swebench_pro_nooa_resources_server"
     assert not environment.resources_tool_transports
     resources = config[environment.resources_server.name].resources_servers.swebench_pro

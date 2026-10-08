@@ -68,5 +68,6 @@ metadata in `task_input.task_data`; only the Responses request reaches NOOA. Swa
 remote infrastructure without changing the agent recipe.
 
 The overall deadline belongs to the Environment Server (`default_episode_timeout_seconds`), not the agent.
-`max_policy_calls` remains NOOA's model-call budget. The old `resources_server` and `run_timeout_secs` agent
-configuration fields are removed; tool transport is supplied by native session grants.
+NOOA has no model-call limit by default (`max_policy_calls: null`). Set a positive `max_policy_calls` to opt into a
+shared model-call budget for the rollout. The old `resources_server` and `run_timeout_secs` agent configuration
+fields are removed; tool transport is supplied by native session grants.

@@ -23,7 +23,7 @@ swebench_pro_nooa_agent:
     nooa_agent:
       nooa:
         execution_mode: sandboxed
-      max_policy_calls: 100
+      max_policy_calls: null
 
 swebench_pro_nooa:
   _inherit_from: single_agent_turn
