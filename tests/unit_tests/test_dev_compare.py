@@ -123,7 +123,12 @@ class TestClassification:
         "old_extra, new_extra, expected_side, expected_reason",
         [
             ({}, {"mask_sample": True}, "new", "mask_sample"),
-            ({"failure_kind": "agent_crashed"}, {}, "old", "failure_kind=agent_crashed"),
+            (
+                {"failure_kind": "agent_crashed", "mask_sample": True},
+                {},
+                "old",
+                "mask_sample (failure_kind=agent_crashed)",
+            ),
             ({}, {"reward": None}, "new", "no reward"),
         ],
     )
@@ -139,6 +144,33 @@ class TestClassification:
         task = result.tasks[0]
         side = task.new if expected_side == "new" else task.old
         assert side.masked == expected_reason
+
+    def test_failure_kind_without_mask_sample_is_a_measured_zero_not_a_mask(self) -> None:
+        # The Harbor server scores a verifier timeout (or a missing/invalid reward file) as 0.0 with mask_sample
+        # false and a failure_kind label. That is a measured reward: against an old 1.0 it is a flip, and the
+        # report keeps the failure_kind in the flip's detail so the reader sees why.
+        timed_out = new_row("t", 0.0, failure_kind="harbor:verifier_timeout")
+        result = compare_rollouts([old_row("t", 1.0)], [timed_out])
+        counts = result.counts()
+        assert counts["flipped"] == 1 and counts["flipped_old_win"] == 1
+        assert counts["masked"] == 0 and counts["flipped_agent_error"] == 0
+        assert result.old_masked_rows == 0 and result.new_masked_rows == 0
+        task = result.tasks[0]
+        assert task.category == "flipped" and task.winner == "old"
+        assert task.new.masked is None and task.new.reward == 0.0
+        assert task.new.failure_kind == "harbor:verifier_timeout" and task.old.failure_kind is None
+        report = render_report(result, roots=[])
+        assert "## Masked (0)" in report
+        assert (
+            "## Flips (1)\n### t: old=1.0 new=0.0 -> old wins\n"
+            "    new scored with failure_kind=harbor:verifier_timeout (not masked)\n"
+        ) in report
+        summary = json.loads(json.dumps(summary_dict(result)))["tasks"][0]
+        assert summary["category"] == "flipped" and summary["new"]["failure_kind"] == "harbor:verifier_timeout"
+        assert summary["old"]["failure_kind"] is None
+        # Equal measured zeros on both sides stay identical, kind or not.
+        identical = compare_rollouts([old_row("t", 0.0)], [timed_out])
+        assert identical.tasks[0].category == "identical" and identical.counts()["masked"] == 0
 
     def test_missing_in_each_direction(self) -> None:
         result = compare_rollouts(
@@ -596,7 +628,7 @@ class TestReport:
                 "task": "terminal-bench/t",
                 "category": "missing",
                 "winner": None,
-                "old": {"reward": 1.0, "rows": 1, "masked": None, "agent_error": None},
+                "old": {"reward": 1.0, "rows": 1, "masked": None, "agent_error": None, "failure_kind": None},
                 "new": None,
             }
         ]
@@ -617,8 +649,8 @@ class TestReport:
             "task": "b",
             "category": "flipped",
             "winner": "old",
-            "old": {"reward": 1.0, "rows": 1, "masked": None, "agent_error": None},
-            "new": {"reward": 0.0, "rows": 1, "masked": None, "agent_error": None},
+            "old": {"reward": 1.0, "rows": 1, "masked": None, "agent_error": None, "failure_kind": None},
+            "new": {"reward": 0.0, "rows": 1, "masked": None, "agent_error": None, "failure_kind": None},
         }
 
 

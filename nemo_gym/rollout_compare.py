@@ -116,6 +116,7 @@ class TaskSide:
     masked: Optional[str]  # why this side is masked, or None
     agent_error: Optional[str]  # an agent-level error marker (legacy `error`, `*_error_type` metadata), or None
     reward_rows: int = 0  # rows that contributed to `reward` (fewer than `rows` when some are masked)
+    failure_kind: Optional[str] = None  # a `failure_kind` on a counted (unmasked) row: a scored failure, or None
 
     @property
     def repeated(self) -> bool:
@@ -370,18 +371,27 @@ def _match_plain_to_keyed(
 
 
 def mask_reason(row: dict[str, Any]) -> Optional[str]:
-    """Why a row does not count: `mask_sample`, a `failure_kind`, no reward, or a NaN/infinite reward."""
+    """Why a row does not count: `mask_sample`, no reward, or a NaN/infinite reward.
+
+    A `failure_kind` alone does not mask: with `mask_sample` false it labels a measured reward (e.g. the Harbor
+    server's scored zero for a verifier timeout), which counts like any other reward; see `measured_failure_kind`.
+    """
     if row.get("mask_sample"):
         kind = row.get("failure_kind")
         return f"mask_sample (failure_kind={kind})" if kind else "mask_sample"
-    if row.get("failure_kind"):
-        return f"failure_kind={row['failure_kind']}"
     reward = row.get("reward")
     if reward is None:
         return "no reward"
     if isinstance(reward, float) and not math.isfinite(reward):
         return f"non-finite reward ({reward!r})"
     return None
+
+
+def measured_failure_kind(row: dict[str, Any]) -> Optional[str]:
+    """The `failure_kind` of a row that still counts (not masked): a scored failure the report labels but does
+    not set aside, so a flip it causes is a real flip."""
+    kind = row.get("failure_kind")
+    return str(kind) if kind and not mask_reason(row) else None
 
 
 def agent_error(row: dict[str, Any]) -> Optional[str]:
@@ -419,6 +429,7 @@ def summarize_side(rows: list[dict[str, Any]]) -> TaskSide:
     reasons = [reason for reason in (mask_reason(row) for row in rows) if reason]
     rewards = [reward for reward in (_finite_reward_of(row) for row in rows) if reward is not None]
     errors = [err for err in (agent_error(row) for row in rows) if err]
+    kinds = [kind for kind in (measured_failure_kind(row) for row in rows) if kind]
     masked = None
     if reasons:
         masked = reasons[0] if len(rows) == 1 else f"{len(reasons)}/{len(rows)} rows masked: {reasons[0]}"
@@ -428,6 +439,7 @@ def summarize_side(rows: list[dict[str, Any]]) -> TaskSide:
         masked=masked,
         agent_error=errors[0] if errors else None,
         reward_rows=len(rewards),
+        failure_kind=kinds[0] if kinds else None,
     )
 
 
@@ -580,6 +592,8 @@ def _flip_block(task: TaskComparison, roots: list[Path], tail: int) -> list[str]
     for side_name, side in (("old", task.old), ("new", task.new)):
         if side.agent_error:
             lines.append(f"    {side_name} agent error: {side.agent_error}")
+        if side.failure_kind:
+            lines.append(f"    {side_name} scored with failure_kind={side.failure_kind} (not masked)")
     text, source = verifier_output(_losing_row(loser_side), roots)
     if text is None:
         lines.append(f"    {task.loser} verifier output {source}")
@@ -650,7 +664,13 @@ def summary_dict(result: CompareResult) -> dict[str, Any]:
     def side_dict(side: Optional[TaskSide]) -> Optional[dict[str, Any]]:
         if side is None:
             return None
-        return {"reward": side.reward, "rows": len(side.rows), "masked": side.masked, "agent_error": side.agent_error}
+        return {
+            "reward": side.reward,
+            "rows": len(side.rows),
+            "masked": side.masked,
+            "agent_error": side.agent_error,
+            "failure_kind": side.failure_kind,
+        }
 
     return {
         "counts": result.counts(),
