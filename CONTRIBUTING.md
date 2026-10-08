@@ -141,6 +141,11 @@ If DCO checks fail after you have already pushed, see the [Development Setup Gui
   `.pre-commit-config.yaml` are the enforced configuration. Annotate new or
   changed public boundaries and document generated public APIs; mypy is useful
   for focused type-checkable areas but is not a repository-wide strict CI gate.
+- This repository is public. Do not publish NVIDIA internal or confidential
+  information, including internal URLs, employee filesystem paths, private
+  dataset or checkpoint details, or personal access contacts. Before merge,
+  review docs, comments, scripts, configs, example data, logs, and screenshots
+  against the [public repository content guidelines](https://docs.nvidia.com/nemo/gym/main/contribute/development-setup#public-repository-content).
 - Every change must assess whether tests and documentation need updating. State
   what was added or changed, or record a justified `N/A` in the PR body.
   Significant user-facing features should document their motivation,

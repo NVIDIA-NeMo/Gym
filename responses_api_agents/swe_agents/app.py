@@ -3095,7 +3095,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if key in provider_specific_fields:
                 final_assistant_message[key] = provider_specific_fields[key]
 
-        if final_assistant_message.get("content") or final_assistant_message.get("tool_calls"):
+        # Empty decoded output can still contain sampled tokens (for example, EOS).
+        if (
+            final_assistant_message.get("content")
+            or final_assistant_message.get("tool_calls")
+            or final_assistant_message.get("generation_token_ids")
+        ):
             messages.append(final_assistant_message)
 
         return messages, tools

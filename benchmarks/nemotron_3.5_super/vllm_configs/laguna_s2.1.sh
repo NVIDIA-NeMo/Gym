@@ -18,7 +18,7 @@ VLLM_COMMON_ARGS=(
     --enable-prefix-caching
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
-    --moe-backend triton
+    --kv-cache-dtype fp8
     --data-parallel-size 1
     --data-parallel-size-local 1
     --tensor-parallel-size 4
@@ -31,12 +31,12 @@ DECODE_KV_TRANSFER_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_consume
 
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config "$PREFILL_KV_TRANSFER_CONFIG"
-    --max-num-batched-tokens 33920
-    --max-num-seqs 1024
+    --max-num-batched-tokens 8192
+    --max-num-seqs 256
 )
 VLLM_DECODE_ARGS=(
     --kv-transfer-config "$DECODE_KV_TRANSFER_CONFIG"
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-    --max-num-batched-tokens 33920
-    --max-num-seqs 1024
+    --max-num-batched-tokens 8192
+    --max-num-seqs 256
 )
