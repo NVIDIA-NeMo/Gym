@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Use materialized task_id/task_input rows with gym eval run --no-serve --input.
-# Native collection calls EnvironmentServer /run, which activates agent /v1/responses.
+# Taskset collection calls EnvironmentServer /run, which activates agent /v1/responses.
 config_paths:
   - resources_servers/swebench_pro/configs/swebench_pro.yaml
   - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
