@@ -79,10 +79,16 @@ class _ModelClient:
         url_path: str,
         json: NeMoGymResponseCreateParamsNonStreaming,
         cookies: dict[str, str],
+        headers: dict[str, str] | None = None,
     ) -> ClientResponse:
         # The supplied path already includes rollout and token-capture routing.
         return await request(
-            "POST", self.base_url + url_path, _internal=True, json=json.model_dump(exclude_unset=True), cookies=cookies
+            "POST",
+            self.base_url + url_path,
+            _internal=True,
+            json=json.model_dump(exclude_unset=True),
+            cookies=cookies,
+            headers=headers,
         )
 
 

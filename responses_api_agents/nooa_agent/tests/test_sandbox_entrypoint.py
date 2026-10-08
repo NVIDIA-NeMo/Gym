@@ -64,10 +64,12 @@ async def test_model_route_applied_once_and_cookie_jar_forwarded(monkeypatch) ->
         url_path=p.request.model_url_path,
         json=p.request.responses_create_params,
         cookies=p.request.model_cookies,
+        headers={"x-session-id": "child-invocation"},
     )
     assert call.await_args.args == ("POST", "http://model:8000/ng-rollout/task-a1/train/v1/responses")
     assert call.await_args.kwargs["json"]["temperature"] == 0.2
     assert call.await_args.kwargs["cookies"] == {"model": "old"}
+    assert call.await_args.kwargs["headers"] == {"x-session-id": "child-invocation"}
 
 
 @pytest.mark.asyncio
