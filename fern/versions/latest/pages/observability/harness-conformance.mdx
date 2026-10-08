@@ -94,14 +94,6 @@ Each scenario's `health_expectations` overrides the default `healthy` expectatio
 unknown check IDs are configuration errors. New registered rollout checks default
 to `healthy`. Task-level checks requiring repeated executions are outside this suite.
 
-Only token reconciliation expects `unobserved`: in `usage_omitted` and the HTTP-error
-scenarios, the scripted provider deliberately supplies no usage for some attempts.
-Those scenarios expect the missing-token check to report `unhealthy`; `model_error`
-also expects an ended-on-failed-call finding. Its explicit `steps=False` scope excludes
-the two turn-based health checks. Other outcomes must match their expectations;
-missing health results never satisfy an expected `unobserved` result. These tests exercise
-the configured scenarios, not a guarantee that every benchmark rollout is healthy.
-
 Each check reports `pass` (✓), `fail` (✗: requirement not demonstrated), or
 `not_applicable` (—: excluded by the check's applicability condition).
 Missing required input and blocked prerequisites fail the check; the result retains
