@@ -18,6 +18,7 @@ import functools
 import glob as glob_module
 import json
 import logging
+import math
 import os
 import tempfile
 import time
@@ -60,6 +61,7 @@ from nemo_gym.config_types import (
 from nemo_gym.deliverables import is_deliverable
 from nemo_gym.episode_types import is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.exporters.base import HistogramMetric
 from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -2724,6 +2726,7 @@ class RolloutCollectionHelper(BaseModel):
         if len(dispatched_per_agent) > 1:
             print(f"Dispatching rollouts round-robin across {len(dispatched_per_agent)} agents")
         completed_count = 0
+        task_completion_times_s: list[float] = []
         persisted_count = len(persisted_success_keys)
         collection_succeeded = False
         latency_tracker = DispatchLatencyTracker()
@@ -2862,6 +2865,18 @@ class RolloutCollectionHelper(BaseModel):
                             )
 
                 completed_count += 1
+                # Completed rollouts only: failures and undispatched rows do not
+                # describe task completion time. Each repeat is one observation.
+                if (
+                    exporters_enabled
+                    and not no_persist
+                    and failure_class is None
+                    and not no_result
+                    and rollout_latency_ms is not None
+                    and math.isfinite(rollout_latency_ms)
+                    and rollout_latency_ms >= 0
+                ):
+                    task_completion_times_s.append(rollout_latency_ms / 1000)
                 if config.retain_results_in_memory:
                     rows.append(row)
                     results.append(result)
@@ -2977,7 +2992,13 @@ class RolloutCollectionHelper(BaseModel):
                     tqdm.write(print_str)
 
                     if get_exporters():
-                        step_metrics = {"progress/total/rollouts_per_min": rollouts_per_min}
+                        step_metrics: dict[str, float | HistogramMetric] = {
+                            "progress/total/rollouts_per_min": rollouts_per_min
+                        }
+                        if task_completion_times_s:
+                            step_metrics["progress/total/task_completion_time_seconds"] = HistogramMetric(
+                                values=tuple(task_completion_times_s)
+                            )
                         for agent_name, metrics in agent_name_to_metrics.items():
                             scored = agent_name_to_metric_counts[agent_name]["reward"]
                             if not scored:
