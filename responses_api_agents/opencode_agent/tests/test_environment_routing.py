@@ -70,7 +70,8 @@ async def test_native_recipe_routes_collector_through_environment_and_responses(
     agent.config = OpenCodeAgentConfig.model_validate(
         OmegaConf.to_container(get_first_server_config_dict(config, agent_name), resolve=True) | {"name": agent_name}
     )
-    assert agent.config.execution_mode == "sandbox"
+    # Session routing must not require an execution-mode override.
+    assert agent.config.execution_mode == "local"
     agent.server_client.global_config_dict = config
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = config

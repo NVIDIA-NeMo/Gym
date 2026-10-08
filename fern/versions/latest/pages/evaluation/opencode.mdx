@@ -7,22 +7,24 @@ position: 4
 # OpenCode Wiring
 
 `responses_api_agents/opencode_agent` is the canonical OpenCode package. Its shipped
-`opencode_agent.yaml` selects native sandbox execution. OpenCode and its tools run in
-the task sandbox; EnvironmentServer owns the episode lifecycle.
+`opencode_agent.yaml` supports both session-based sandbox execution and unseeded local
+CLI calls. With an agent session, OpenCode and its tools run in the task sandbox;
+EnvironmentServer owns the episode lifecycle.
 
-## Select the execution mode
+## Session-based routing
 
-| `execution_mode` | Caller | Execution and ownership |
+| Request | Caller | Execution and ownership |
 |---|---|---|
-| `sandbox` | EnvironmentServer | Borrows `SandboxAccess`, or creates a sandbox using an explicitly configured provider when no access is supplied. |
-| `local` | A guest runner already inside its task container | Runs OpenCode in the current process's filesystem, using `repo_dir` when set. |
-| `legacy_sandbox` | Existing agent `/run` benchmark recipes | Uses the older Resources `/seed_session` and `sandbox_handle` bridge. |
+| Agent session present | EnvironmentServer | Borrows `SandboxAccess`, or creates a sandbox using an explicitly configured provider when no access is supplied. |
+| No agent session | Direct or embedded caller | Runs the local CLI in the adapter's filesystem, using `repo_dir` when set. |
+| No agent session and explicit `execution_mode: legacy_sandbox` | Existing agent `/run` benchmark recipes | Uses the older Resources `/seed_session` and `sandbox_handle` bridge. |
 
-The Python config defaults to `local` to preserve existing embedded callers in the
-generic harness, AnySWE, and CVDP. Use `opencode_agent.yaml` for native deployment,
-`opencode_local_agent.yaml` for local execution, or `opencode_legacy_agent.yaml` only
-for a Resources lifecycle that has not migrated. Native requests never fall back to
-host execution or the legacy bridge.
+No mode override is needed for ordinary session/local routing. Older `local` and
+`sandbox` values remain accepted as aliases for this behavior. Invalid or closed
+session markers are errors, never a fallback to local execution or the legacy bridge.
+`opencode_local_agent.yaml` provides an alternative local provider/Resources example;
+`opencode_legacy_agent.yaml` is only for a Resources lifecycle that has not migrated.
+Local agent `/run` still requires a Resources binding; direct `/v1/responses` does not.
 
 ## Wire a native episode
 
@@ -56,7 +58,6 @@ single_agent_turn:
 opencode_agent:
   responses_api_agents:
     opencode_agent:
-      execution_mode: sandbox
       num_workers: 1
       model_server:
         type: responses_api_models

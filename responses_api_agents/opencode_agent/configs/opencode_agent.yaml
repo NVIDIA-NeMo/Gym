@@ -1,14 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Native EnvironmentServer sessions: Resources creates and owns the task sandbox.
+# Agent sessions run in a sandbox; unseeded requests run the local CLI.
 # Use opencode_local_agent.yaml for local CLI execution or opencode_legacy_agent.yaml
 # for existing flat-row benchmark /run recipes.
 opencode_agent:
   responses_api_agents:
     opencode_agent:
       entrypoint: app.py
-      execution_mode: sandbox
       num_workers: 1
       resources_server: null
       model_server:

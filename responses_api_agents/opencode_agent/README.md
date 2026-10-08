@@ -27,4 +27,8 @@ never triggers a replacement or host execution. With neither access nor a usable
 provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
 Native sessions are selected by the session cookie, regardless of `execution_mode`.
-That setting still controls unseeded local/legacy calls; `sandbox` rejects unseeded calls.
+Without an agent session, requests run the local CLI, including with the default config.
+Invalid or closed sessions are rejected, never retried on the host. The older `local`
+and `sandbox` mode values are compatibility aliases for this session-based routing;
+only explicit `legacy_sandbox` selects the old Resources bridge. Local `/run` still
+requires a Resources binding; direct `/v1/responses` does not.

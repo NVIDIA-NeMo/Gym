@@ -1,12 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException, Request
+from fastapi.testclient import TestClient
+from omegaconf import OmegaConf
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage
+from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, OpenCodeAgentRunRequest
 from responses_api_agents.opencode_agent.tests.test_native_sessions import seed
@@ -44,21 +48,64 @@ async def test_local_runtime_install_is_deferred_until_execution() -> None:
         assert not agent._local_runtime_ready
 
 
-async def test_unseeded_native_mode_cannot_fall_back_to_host_or_bridge() -> None:
-    agent = make_agent("sandbox")
-    request = Request({"type": "http", "session": {}})
-    with patch.object(agent, "_create_episode", AsyncMock()) as local:
-        with pytest.raises(HTTPException) as response_error:
-            await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-        with pytest.raises(HTTPException) as run_error:
-            await agent.run(request, OpenCodeAgentRunRequest(responses_create_params={"input": "task"}))
-    assert response_error.value.status_code == run_error.value.status_code == 409
-    local.assert_not_awaited()
+@pytest.mark.parametrize("mode", ["default", "local", "sandbox"])
+@pytest.mark.parametrize("path", ["/v1/responses", "/ng-rollout/local-smoke/v1/responses"])
+def test_unseeded_responses_run_local_cli(mode: str, path: str) -> None:
+    agent = make_agent("local" if mode == "default" else mode)
+    if mode == "default":
+        config = OmegaConf.load(Path(__file__).parents[1] / "configs/opencode_agent.yaml")
+        agent.config = OpenCodeAgentConfig.model_validate(
+            dict(config.opencode_agent.responses_api_agents.opencode_agent)
+            | {"host": "localhost", "port": 8001, "name": "opencode"}
+        )
+    message = NeMoGymResponseOutputMessage(
+        id="msg-local",
+        role="assistant",
+        type="message",
+        status="completed",
+        content=[{"type": "output_text", "text": "local result", "annotations": []}],
+    )
+    with (
+        patch.object(
+            agent,
+            "_run_opencode",
+            AsyncMock(
+                return_value=(
+                    [message],
+                    {"input_tokens": 3, "output_tokens": 2},
+                    "local-model",
+                    AgentObservationBundle(source="opencode"),
+                )
+            ),
+        ) as local,
+        patch("responses_api_agents.opencode_agent.app.create_provider") as provider,
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        response = client.post(path, json={"input": "task", "temperature": 0.7})
+    assert response.status_code == 200, response.text
+    assert response.json()["output"][0]["content"][0]["text"] == "local result"
+    assert response.json()["usage"]["total_tokens"] == 5
+    local.assert_awaited_once()
+    assert local.call_args.args == ("task", None)
+    assert local.call_args.kwargs["rollout_id"] == ("local-smoke" if "ng-rollout" in path else None)
+    provider.assert_not_called()
     assert agent._legacy_agent is None
+
+
+@pytest.mark.parametrize("mode", ["local", "sandbox"])
+async def test_unseeded_run_requires_resources_not_a_session(mode: str) -> None:
+    agent = make_agent(mode)
+    with pytest.raises(HTTPException) as error:
+        await agent.run(
+            Request({"type": "http", "session": {}}),
+            OpenCodeAgentRunRequest(responses_create_params={"input": "task"}),
+        )
+    assert error.value.status_code == 422
+    assert "resources_server" in error.value.detail
     agent.server_client.post.assert_not_called()
 
 
-@pytest.mark.parametrize("mode", ["local", "legacy_sandbox"])
+@pytest.mark.parametrize("mode", ["local", "sandbox", "legacy_sandbox"])
 @pytest.mark.parametrize("marker", [None, "closed-session"])
 async def test_native_markers_never_enter_other_modes(mode: str, marker: str | None) -> None:
     agent = make_agent(mode)
@@ -73,7 +120,7 @@ async def test_native_markers_never_enter_other_modes(mode: str, marker: str | N
     assert agent._legacy_agent is None
 
 
-@pytest.mark.parametrize("mode", ["local", "legacy_sandbox"])
+@pytest.mark.parametrize("mode", ["local", "sandbox", "legacy_sandbox"])
 async def test_native_seed_dispatch_is_independent_of_legacy_mode(mode: str) -> None:
     agent = make_agent(mode)
     with patch.object(
