@@ -18,7 +18,17 @@ import re
 import warnings
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, PrivateAttr, Tag, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    PrivateAttr,
+    SerializationInfo,
+    Tag,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 
 # Reject unknown fields on all config models so typos in YAML surface immediately.
@@ -31,6 +41,32 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # (e.g. slurm_script.py) detect this prefix and emit an unquoted shell reference instead
 # of a literal, so the value is picked up from the job's actual environment at run time.
 RUNTIME_ENV_PREFIX = "runtime:"
+
+
+# `model_dump` context flag: write each `host:` env value as its `host:VAR` reference, so a
+# record meant for other readers never holds the submitter's resolved secrets.
+HOST_ENV_REFS = "host_env_refs"
+
+
+class _HostEnvRefs(BaseModel):
+    """Remembers which `env` values came from `host:` so a dump can write the reference back."""
+
+    _host_env_refs: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _keep_host_env_refs(cls, data: Any, handler: Any) -> Any:
+        model = handler(data)
+        raw = data.get("env") if isinstance(data, dict) else None
+        if isinstance(raw, dict):
+            model._host_env_refs = {k: v for k, v in raw.items() if isinstance(v, str) and v.startswith("host:")}
+        return model
+
+    @field_serializer("env", check_fields=False)
+    def _serialize_env(self, env: dict[str, str], info: SerializationInfo) -> dict[str, str]:
+        if info.context and info.context.get(HOST_ENV_REFS):
+            return {k: self._host_env_refs.get(k, v) for k, v in env.items()}
+        return env
 
 
 def resolve_env_dict(env: dict[str, str]) -> dict[str, str]:
@@ -76,7 +112,7 @@ class HealthCheckConfig(_StrictModel):
     timeout_seconds: int = 60
 
 
-class BaseServiceConfig(_StrictModel):
+class BaseServiceConfig(_HostEnvRefs, _StrictModel):
     container: str
     # Resolved to the sole compute resource name at validation time when not set.
     placement: str | None = None
@@ -377,7 +413,7 @@ class GymInstallConfig(_StrictModel):
     ref: str  # Git tag or commit hash.
 
 
-class DriverConfig(_StrictModel):
+class DriverConfig(_HostEnvRefs, _StrictModel):
     container: str = "python:3.12"
     gym_install: GymInstallConfig | None = None
     # Name of a service in `services:` to use as the policy model. When set, injects

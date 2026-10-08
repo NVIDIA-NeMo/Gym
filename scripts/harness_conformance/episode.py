@@ -18,13 +18,11 @@ from pathlib import Path
 import uvicorn
 import yaml
 
-from nemo_gym.harness_capabilities.reader import digest_file
+from nemo_gym.harness_capabilities.cli import digest_file
 
 from .provider import Probe
+from .registry import HARNESSES
 from .scenarios import SCENARIOS
-
-
-HARNESSES = {"opencode": "OpenCodeAgent", "pi": "PiAgent", "codex": "CodexAgent", "hermes": "HermesAgent"}
 
 
 class _Server(uvicorn.Server):

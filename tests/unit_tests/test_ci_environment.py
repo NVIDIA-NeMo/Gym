@@ -248,7 +248,15 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "  pull-requests: read\n" in workflow
     assert "id-token:" not in workflow
     assert "uses: ./.github/workflows/unit-tests.yml" in workflow
-    assert workflow.count("base-ref: ${{ needs.pre-flight.outputs.base_ref }}") == 2
+    jobs = _cicd_main_jobs()
+    base_ref = "${{ needs.pre-flight.outputs.base_ref }}"
+    for job in ("unit_tests", "harness_conformance"):
+        assert jobs[job]["with"]["base-ref"] == base_ref
+    assert [
+        step["with"]["base-ref"]
+        for step in jobs["classify_changes"]["steps"]
+        if step.get("uses") == "./.github/actions/classify-changes"
+    ] == [base_ref]
     assert "uses: ./.github/actions/classify-changes" in workflow
     assert "uses: ./.github/actions/test-template" in workflow
     assert "base-ref: ${{ needs.pre-flight.outputs.base_ref }}" in workflow

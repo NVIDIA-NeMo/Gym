@@ -145,7 +145,7 @@ def test_check_ids_encode_subject_without_replacing_evaluation_scope() -> None:
         {health.CheckInput.RECORD, health.CheckInput.TRAJECTORY, health.CheckInput.AGENT_TURNS}
     )
     assert by_id["rollout_token_count_mismatch"].reads == frozenset(
-        {health.CheckInput.RECORD, health.CheckInput.TRAJECTORY, health.CheckInput.BOUND_CALLS}
+        {health.CheckInput.RECORD, health.CheckInput.TRAJECTORY, health.CheckInput.OWNED_MODEL_CALLS}
     )
     with pytest.raises(ValueError, match="cannot read both"):
         health.CheckSpec(
@@ -979,7 +979,7 @@ def test_turn_call_scope_gap_only_gates_completeness_checks(tmp_path: Path, gap:
     checks = {finding.check for finding in digest.findings}
     incomplete = gap == "turn_model_call_scope_incomplete"
     assert set(digest.unobserved) == ({"rollout_token_count_mismatch"} if incomplete else set())
-    assert ("rollout_token_count_mismatch" in checks) is not incomplete
+    assert "rollout_token_count_mismatch" not in checks
     assert "agent_turn_hollow" in checks
     assert digest.policy_calls_observed is not incomplete
     coverage = result.summary["run"]["artifacts"]["coverage"]["task_no_successful_model_calls"]
@@ -1363,6 +1363,76 @@ def test_a_failure_the_client_retried_successfully_stays_healthy(tmp_path: Path)
     assert not [item for item in digest.findings if item.check == "rollout_ended_on_failed_model_call"]
 
 
+_NO_GENERATION = {"response_status": None, "finish_reason": None}
+FAILED_ATTEMPTS = {
+    # Terminus cancels a call at its per-call limit: no status, no body, no usage.
+    "cancelled": {"status_code": None, "error_category": "cancelled", "response": None, **_NO_GENERATION},
+    # An HTTP error keeps its JSON error body, so "no response" alone would miss it.
+    "http_429": {
+        "status_code": 429,
+        "error_category": "rate_limit",
+        "response": {"error": {"code": 429}},
+        **_NO_GENERATION,
+    },
+    "http_500": {
+        "status_code": 500,
+        "error_category": "upstream_error",
+        "response": {"error": {"code": 500}},
+        **_NO_GENERATION,
+    },
+}
+
+
+def _owned_attempts(*calls: dict) -> dict:
+    """A rollout whose turn owns every attempt, with transcript usage from the successful call only."""
+    refs = [{"model_call_id": call["model_call_id"]} for call in calls]
+    return _record(0, 0, refs=refs, usage={"input_tokens": 3, "output_tokens": 2})
+
+
+@pytest.mark.parametrize("tokens_out", [None, 0])
+@pytest.mark.parametrize("failure", FAILED_ATTEMPTS.values(), ids=FAILED_ATTEMPTS.keys())
+def test_a_failed_attempt_followed_by_a_successful_call_is_healthy(tmp_path, failure, tokens_out):
+    """A failed attempt has no usable usage, so its counts say nothing about token accounting.
+
+    Measured on a TB2.1 run: 115 rollouts recovered from a Terminus per-call cancel and were
+    still unhealthy, only because the cancelled attempt had no token counts.
+    """
+    failed = _call(model_call_id="attempt", started_at=1.0, tokens_in=None, tokens_out=tokens_out, **failure)
+    retried = _call(model_call_id="retry", started_at=2.0)
+    rollout_path = _write_fixture(tmp_path, [(_owned_attempts(failed, retried), [failed, retried])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert digest.verdict == "healthy"
+    assert not digest.findings
+    assert not digest.unobserved
+    assert digest.model_call_errors == 1
+
+
+@pytest.mark.parametrize("failure", FAILED_ATTEMPTS.values(), ids=FAILED_ATTEMPTS.keys())
+def test_a_rollout_ending_on_a_failed_attempt_is_unhealthy_for_that_reason_only(tmp_path, failure):
+    succeeded = _call(model_call_id="first", started_at=1.0)
+    failed = _call(model_call_id="last", started_at=2.0, tokens_in=None, tokens_out=None, **failure)
+    rollout_path = _write_fixture(tmp_path, [(_owned_attempts(succeeded, failed), [succeeded, failed])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert digest.verdict == "unhealthy"
+    assert {finding.check for finding in digest.findings} == {"rollout_ended_on_failed_model_call"}
+
+
+def test_a_body_capture_could_not_parse_still_needs_token_counts(tmp_path: Path) -> None:
+    """`capture_parse_error` marks a 2xx call whose body was unreadable: a capture defect, not a failed call."""
+    unparsed = _call(
+        error_category="capture_parse_error", response=None, tokens_in=None, tokens_out=None, **_NO_GENERATION
+    )
+    rollout_path = _write_fixture(tmp_path, [(_record(0, 0), [unparsed])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert "model_call_missing_token_counts" in {finding.check for finding in digest.findings}
+
+
 def test_the_check_is_unobserved_when_no_calls_were_captured(tmp_path: Path) -> None:
     record = _unreferenced_failure_record([])
     rollout_path = _write_fixture(tmp_path, [(record, [])])
@@ -1619,3 +1689,67 @@ def test_only_final_failure_affects_health_for_bound_calls(tmp_path, final_faile
     )
     assert digest.verdict == ("unhealthy" if final_failed else "healthy")
     assert digest.model_call_errors == (2 if final_failed else 1)
+
+
+@pytest.mark.parametrize("duplicate_reference", [False, True])
+def test_usage_counts_invocation_owned_compaction_once(tmp_path: Path, duplicate_reference: bool) -> None:
+    record = _record(0, 0, usage={"input_tokens": 8, "output_tokens": 5})
+    refs = [{"model_call_id": "c1"}, {"model_call_id": "summary"}]
+    if duplicate_reference:
+        refs.append({"model_call_id": "summary"})
+    record["ng_trajectory"]["invocations"] = [{"invocation_id": "root", "model_calls": refs}]
+    rollout_path = _write_fixture(
+        tmp_path,
+        [
+            (
+                record,
+                [
+                    _call(),
+                    _call(model_call_id="summary", response_id="summary-response", tokens_in=5, tokens_out=3),
+                    _call(model_call_id="unowned", response_id="unowned-response", tokens_in=100, tokens_out=100),
+                ],
+            )
+        ],
+    )
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+    assert not digest.findings
+    assert "rollout_token_count_mismatch" not in digest.unobserved
+
+
+def test_usage_compaction_missing_capture_remains_unobserved(tmp_path: Path) -> None:
+    record = _record(0, 0, usage={"input_tokens": 8, "output_tokens": 5})
+    record["ng_trajectory"]["invocations"] = [
+        {
+            "invocation_id": "root",
+            "model_calls": [
+                {"model_call_id": "c1"},
+                {"model_call_id": "missing-summary"},
+            ],
+        }
+    ]
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [_call()])]), workers=1).rollouts
+    assert "rollout_token_count_mismatch" in digest.unobserved
+    assert {f.check for f in digest.findings} == {"trajectory_capture_mismatch"}
+
+
+def test_usage_still_reports_incorrect_invocation_total(tmp_path: Path) -> None:
+    record = _record(0, 0, usage={"input_tokens": 8, "output_tokens": 6})
+    record["ng_trajectory"]["invocations"] = [
+        {
+            "invocation_id": "root",
+            "model_calls": [
+                {"model_call_id": "c1"},
+                {"model_call_id": "summary"},
+            ],
+        }
+    ]
+    calls = [_call(), _call(model_call_id="summary", response_id="summary-response", tokens_in=5, tokens_out=3)]
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, calls)]), workers=1).rollouts
+    [finding] = digest.findings
+    assert finding.check == "rollout_token_count_mismatch"
+    assert finding.detail == {
+        "transcript_prompt": 8,
+        "transcript_completion": 6,
+        "capture_prompt": 8,
+        "capture_completion": 5,
+    }

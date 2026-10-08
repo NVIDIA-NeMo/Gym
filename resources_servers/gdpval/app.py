@@ -58,6 +58,7 @@ from resources_servers.gdpval.judge_panel import (
     make_rng,
     panel_summary,
 )
+from resources_servers.gdpval.judge_telemetry import JudgeTelemetrySink, classify_judge_error
 from resources_servers.gdpval.scoring import SCORING_ERROR_KEY
 
 
@@ -379,6 +380,13 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # runs to post-mortem judge verdicts.
     persist_raw_judge_responses: bool = False
 
+    # Optional structured JSONL telemetry for comparison-judge preflight,
+    # provider attempts, retry recovery, and invalid responses. Each resources
+    # server process writes ``judge-events.<pid>.jsonl`` in this directory. The
+    # log contains request shape and relative file labels, never file contents,
+    # prompts, base64, credentials, or absolute paths.
+    judge_telemetry_output_dir: Optional[str] = None
+
 
 class GDPValVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(populate_by_name=True)
@@ -456,6 +464,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
+        self._judge_telemetry = JudgeTelemetrySink(self.config.judge_telemetry_output_dir)
         # Normalize the reference-model set: prefer the multi-reference
         # ``reference_models`` mapping; fall back to the legacy single-reference
         # fields (treated as a single reference id ``"reference"``).
@@ -1051,6 +1060,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     # reproducible and each reference subset draws independently —
                     # this makes multi-stage ELO reruns replayable per stage.
                     rng = make_rng(self.config.judge_sampling_seed, body.task_id, ref_id, ref_dir.name)
+                    telemetry_context = {
+                        "task_id": body.task_id,
+                        "stage_index": body.stage_index,
+                        "reference_model": ref_id,
+                        "reference_repeat": ref_dir.name,
+                    }
                     try:
                         matchup_judges = list(judges)
                         media_exclusions: List[Dict[str, Any]] = []
@@ -1162,6 +1177,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                                             judge,
                                             body.prompt or "",
                                             candidate_sections,
+                                            telemetry=self._judge_telemetry,
+                                            telemetry_context={**telemetry_context, "render_dpi": dpi},
                                         )
                                         receipt["render_dpi"] = dpi
                                         attempted_preflights.append(receipt)
@@ -1195,6 +1212,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                                         judge,
                                         body.prompt or "",
                                         candidate_sections,
+                                        telemetry=self._judge_telemetry,
+                                        telemetry_context={**telemetry_context, "render_dpi": dpi},
                                     )
                                     receipt["render_dpi"] = dpi
                                     attempted_preflights.append(receipt)
@@ -1228,6 +1247,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                             num_trials=self.config.num_comparison_trials,
                             return_raw_responses=self.config.persist_raw_judge_responses,
                             rng=rng,
+                            telemetry=self._judge_telemetry,
+                            telemetry_context=telemetry_context,
+                            transport_by_judge=transport_receipts,
                         )
                         result["transport_by_judge"] = transport_receipts
                         if media_exclusions:
@@ -1236,6 +1258,11 @@ class GDPValResourcesServer(SimpleResourcesServer):
                             result["native_pdf_overflow"] = overflow_plan
                     except Exception as e:  # noqa: BLE001 — isolate per-matchup judge failures
                         last_error = e
+                        self._judge_telemetry.emit(
+                            "judge_matchup_failed",
+                            **telemetry_context,
+                            error=classify_judge_error(e, retryable=False),
+                        )
                         if isinstance(e, TransportIneligibleError):
                             transport_ineligible_matchups += 1
                         ref_errors.setdefault(ref_id, []).append(f"{ref_dir.name}: {e!r}")
