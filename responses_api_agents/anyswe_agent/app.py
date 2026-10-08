@@ -317,8 +317,10 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         if formatter.endswith(".sif"):
             raise ValueError("sandbox_provider requires a container image, not a .sif file")
         formatter = formatter.removeprefix("docker://")
+        # `{instance_id}` is the Docker Hub swebench form (`__` -> `_1776_`, lowercased); registries that keep the
+        # original id in the repository name use `{raw_instance_id}`.
         instance_id = problem_info["instance_id"].replace("__", "_1776_").lower()
-        image = formatter.format(instance_id=instance_id)
+        image = formatter.format(instance_id=instance_id, raw_instance_id=problem_info["instance_id"])
         if ":" not in image.rsplit("/", 1)[-1]:
             image += ":latest"
         return image

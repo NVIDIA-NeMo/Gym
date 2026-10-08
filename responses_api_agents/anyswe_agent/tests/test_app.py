@@ -145,6 +145,15 @@ class TestSandboxAPI:
         )
         assert image == "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest"
 
+    def test_image_raw_instance_id_keeps_original_form(self) -> None:
+        image = AnySweAgent._sandbox_image(
+            {
+                "instance_id": "astropy__astropy-14182",
+                "container_formatter": "docker://registry.example.com/tasks/{raw_instance_id}:318",
+            }
+        )
+        assert image == "registry.example.com/tasks/astropy__astropy-14182:318"
+
     def test_spec_forwards_public_sandbox_fields(self) -> None:
         params = SimpleNamespace(
             sandbox_spec={
