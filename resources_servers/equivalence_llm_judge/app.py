@@ -353,6 +353,11 @@ def _extract_question_text(
 class LLMJudgeResourcesServer(SimpleResourcesServer):
     """Judge-only verifier using an LLM to compare answers."""
 
+    # Each verification is one judge call: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
+
     ray_enabled = False
 
     config: LLMJudgeResourcesServerConfig

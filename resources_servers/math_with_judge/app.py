@@ -150,6 +150,10 @@ def _run_math_verify_in_subprocess(expected_answer: str, generated_answer: str, 
 
 
 class LibraryJudgeMathResourcesServer(SimpleResourcesServer):
+    # Each answer is checked on its own: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = False
     # These judge messages are adapted from ones used in Arena Hard.
     # https://github.com/lmarena/arena-hard-auto/blob/196f6b826783b3da7310e361a805fa36f0be83f3/utils/judge_utils.py
