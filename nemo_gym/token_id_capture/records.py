@@ -143,10 +143,11 @@ class TokenEntry(BaseModel):
     # The response id returned to the client for this model call.
     # Terminal attribution uses it to match the agent's final response to these captured tokens.
     response_id: str | None = None
-    # Why generation stopped, in the Chat Completions vocabulary: ``stop``, ``length``,
-    # ``tool_calls``, or ``content_filter``. ``response_finish_reason`` derives it from
-    # either served payload shape. ``None`` means the payload stated no reason or the
-    # record predates this field.
+    # Why generation stopped, usually in the Chat Completions vocabulary: ``stop``, ``length``,
+    # ``tool_calls``, or ``content_filter``. ``response_finish_reason`` derives it from either
+    # served payload shape, and other engine values pass through unchanged; only ``length`` and
+    # ``content_filter`` are consumed. ``None`` means the payload stated no reason or the record
+    # predates this field.
     finish_reason: str | None = None
     # This non-semantic timestamp helps diagnose retries and sibling branches.
     created_at: float = 0.0

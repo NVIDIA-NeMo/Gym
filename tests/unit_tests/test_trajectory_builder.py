@@ -264,7 +264,16 @@ def test_projection_marks_a_terminal_call_cut_at_the_output_budget_incomplete():
     assert truncated["incomplete_details"] == {"reason": "max_output_tokens"}
 
 
-@pytest.mark.parametrize("finish_reason", ["stop", "tool_calls", "content_filter", None])
+def test_projection_marks_a_content_filtered_terminal_call_incomplete():
+    # The converter's other incomplete verdict: a terminal call the engine stopped on its content
+    # filter is incomplete for that reason, so the delivered response says so too.
+    out = prefix_merging([_entry("c1", [1, 2, 3], [10, 11], finish_reason="content_filter")])
+    resp = project_main_chain_response("t0-r0", out, model="m")
+    assert resp["status"] == "incomplete"
+    assert resp["incomplete_details"] == {"reason": "content_filter"}
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "tool_calls", None])
 def test_projection_leaves_the_status_unset_for_other_finish_reasons(finish_reason):
     out = prefix_merging([_entry("c1", [1, 2, 3], [10, 11], finish_reason=finish_reason)])
     resp = project_main_chain_response("t0-r0", out, model="m")

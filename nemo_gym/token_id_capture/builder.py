@@ -608,6 +608,12 @@ def project_chain_to_output_items(chain: Chain) -> list[dict]:
     return items
 
 
+# The Responses ``incomplete_details.reason`` the rebuilt response reports for the terminal
+# call's Chat Completions finish reason, the same mapping the Responses converter applies to a
+# served chat completion. ``stop`` and ``tool_calls`` are complete endings and map to nothing.
+_INCOMPLETE_REASON_BY_FINISH_REASON = {"length": "max_output_tokens", "content_filter": "content_filter"}
+
+
 def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = "") -> dict:
     """Rebuild the main chain as a Responses object whose output items are contiguous.
 
@@ -616,9 +622,12 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
     Token fields describe one unbroken sequence across the rollout.
     The sequence combines items from multiple model calls.
 
-    When the delivered chain's terminal call stopped for ``length``, the payload carries
-    ``status: "incomplete"`` with ``incomplete_details.reason: "max_output_tokens"``, the
-    verdict the Responses converter gives a chat completion cut at the output-token budget.
+    When the delivered chain's terminal call stopped for ``length`` or ``content_filter``, the
+    payload carries ``status: "incomplete"`` with the matching ``incomplete_details.reason``
+    (``max_output_tokens`` or ``content_filter``), the verdict the Responses converter gives a
+    chat completion that ended the same way. The finish reason is recorded by the local capture
+    path (``capture_tokens``); a call staged under worker custody carries none, so a chain built
+    from externally staged records reports no verdict.
     """
     if not out.chains:
         raise ValueError("capture produced no safe trainable chain")
@@ -641,10 +650,12 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
         "usage": {"input_tokens": n_in, "output_tokens": n_out},
     }
     # Only the terminal call decides: an earlier ``length`` stop did not end the delivered
-    # chain, because a later call extended it. Any other finish reason leaves ``status`` unset.
-    if mains[0].links[-1].entry.finish_reason == "length":
+    # chain, because a later call extended it. A complete ending, or an unrecorded finish
+    # reason, leaves ``status`` unset.
+    incomplete_reason = _INCOMPLETE_REASON_BY_FINISH_REASON.get(mains[0].links[-1].entry.finish_reason)
+    if incomplete_reason is not None:
         response["status"] = "incomplete"
-        response["incomplete_details"] = {"reason": "max_output_tokens"}
+        response["incomplete_details"] = {"reason": incomplete_reason}
     return response
 
 
