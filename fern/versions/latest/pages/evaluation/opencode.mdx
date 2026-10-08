@@ -31,11 +31,11 @@ Resources implementation that supports native sessions. For SWE Pro, Resources r
 SWE-bench Pro implements that Resources contract. The model server's advertised
 address must be reachable from inside the task sandbox.
 
-The [native SWE-bench Pro composition](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/swebench/pro/opencode_native.yaml)
+The [taskset SWE-bench Pro composition](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/swebench/pro/opencode_taskset.yaml)
 provides those bindings and selects `environment_routing_mode: taskset`. It routes
 `swebench_pro:smoke` tasks to the `swebench_pro_opencode` EnvironmentServer. Add your
-model and sandbox provider configurations when starting the servers. The earlier
-`opencode_agent_swebench_pro_native.yaml` path includes this composition and preserves
+model and sandbox provider configurations when starting the servers. The
+`opencode_agent_swebench_pro.yaml` config includes this composition and preserves
 its direct API deployment alias.
 
 ```yaml
@@ -94,11 +94,11 @@ jq -c '{
 }' benchmarks/swebench/data/swebench_pro_benchmark.jsonl > /tmp/swebench_pro_native.jsonl
 
 gym env start \
-    --config benchmarks/swebench/pro/opencode_native.yaml \
+    --config benchmarks/swebench/pro/opencode_taskset.yaml \
     --model-type vllm_model
 
 gym eval run --no-serve \
-    --config benchmarks/swebench/pro/opencode_native.yaml \
+    --config benchmarks/swebench/pro/opencode_taskset.yaml \
     --model-type vllm_model \
     --input /tmp/swebench_pro_native.jsonl \
     --output results/opencode-native.jsonl
@@ -204,7 +204,7 @@ the direct-call `execution_mode`; missing access and provider is an error.
 The existing SWE-bench Verified/Multilingual/Pro, DeepSWE, and Terminal Bench 2.1
 flat-row recipes explicitly select `legacy_sandbox` and are fronted by a compatibility
 EnvironmentServer that still delegates orchestration to agent `/run`. Use
-`swebench/pro/opencode_native` for native SWE-bench Pro collection. ViBench uses the
+`swebench/pro/opencode_taskset` for taskset-routed SWE-bench Pro collection. ViBench uses the
 compatibility implementation in `opencode_agent.legacy`
 because it owns and harvests its build sandbox. This keeps the package name stable
 while those lifecycles migrate; the compatibility bridge is outside the native path.

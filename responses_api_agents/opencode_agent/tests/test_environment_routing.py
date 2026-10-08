@@ -53,8 +53,8 @@ def _resolved_config(path: str):
 @pytest.mark.parametrize(
     "config_path",
     [
-        "benchmarks/swebench/pro/opencode_native.yaml",
-        "responses_api_agents/opencode_agent/configs/opencode_agent_swebench_pro_native.yaml",
+        "benchmarks/swebench/pro/opencode_taskset.yaml",
+        "responses_api_agents/opencode_agent/configs/opencode_agent_swebench_pro.yaml",
     ],
 )
 async def test_native_recipe_routes_collector_through_environment_and_responses(
