@@ -308,9 +308,23 @@ class TestBuildOpenclawConfig:
         cfg = agent._build_openclaw_config({"tools": {"deny": ["message", "gateway"]}})
         assert cfg["tools"]["deny"] == ["message", "gateway"]
 
-    def test_terminal_only_tool_policy_preserved_with_headless_deny(self) -> None:
+    def test_terminal_only_tool_and_lean_prompt_policy_preserved_with_headless_deny(self) -> None:
         agent = _make_agent(
             openclaw_config={
+                "agents": {
+                    "defaults": {
+                        "skipBootstrap": True,
+                        "contextInjection": "never",
+                        "startupContext": {"enabled": False},
+                        "skills": [],
+                    }
+                },
+                "skills": {
+                    "limits": {
+                        "maxSkillsInPrompt": 0,
+                        "maxSkillsPromptChars": 0,
+                    }
+                },
                 "tools": {
                     "profile": "minimal",
                     "alsoAllow": ["exec"],
@@ -320,6 +334,15 @@ class TestBuildOpenclawConfig:
         )
         cfg = agent._build_openclaw_config({})
 
+        defaults = cfg["agents"]["defaults"]
+        assert defaults["skipBootstrap"] is True
+        assert defaults["contextInjection"] == "never"
+        assert defaults["startupContext"] == {"enabled": False}
+        assert defaults["skills"] == []
+        assert cfg["skills"]["limits"] == {
+            "maxSkillsInPrompt": 0,
+            "maxSkillsPromptChars": 0,
+        }
         assert cfg["tools"]["profile"] == "minimal"
         assert cfg["tools"]["alsoAllow"] == ["exec"]
         assert cfg["tools"]["deny"] == ["session_status", "message"]

@@ -229,27 +229,10 @@ not a passing test. The direct config-resolution assertions did pass for the
 Qwen, Nano, and Super recipes, including OpenClaw context `15872` and output
 limit `4096`. Re-run the real pytest on a compute node with working Ray.
 
-## Remaining code fix: reduce OpenClaw's fixed prompt
+## Implemented OpenClaw prompt reduction awaiting runtime validation
 
-The pushed Gym config currently narrows the OpenClaw tools to `exec`:
-
-```yaml
-openclaw_config:
-  agents:
-    defaults:
-      workspace: "."
-  tools:
-    profile: minimal
-    alsoAllow:
-      - exec
-    deny:
-      - session_status
-```
-
-Job `2178116` proves tool reduction alone is insufficient. OpenClaw 2026.6.11
-still injects fixed workspace/bootstrap and skill text before its first model
-call. The next change should make the Terminal-Bench profile lean without
-altering the other harnesses. The available OpenClaw config controls are:
+The Gym profile narrows the OpenClaw tools to `exec` and now also removes the
+fixed bootstrap, startup-memory, and skill prompt material:
 
 ```yaml
 openclaw_config:
@@ -258,9 +241,9 @@ openclaw_config:
       workspace: "."
       skipBootstrap: true
       contextInjection: never
+      startupContext:
+        enabled: false
       skills: []
-      experimental:
-        localModelLean: true
   skills:
     limits:
       maxSkillsInPrompt: 0
@@ -273,16 +256,25 @@ openclaw_config:
       - session_status
 ```
 
-Treat this as a proposed patch, not validated code. Add config-resolution and
-OpenClaw merge tests, rerun the 57-test Gym subset, commit/push Gym, and only
-then rerun Nano. If the prompt still overflows, measure which prompt sections
-remain before increasing the advertised context. Do not simply advertise the
-full 16,384 vLLM boundary: an earlier run proved that leaves no server-side
-generation token.
+Job `2178116` proved tool reduction alone was insufficient. The added controls
+target the remaining OpenClaw 2026.6.11 fixed prompt. `contextInjection:
+never` makes the runtime provide no bootstrap/context files; `skills: []`
+filters every discovered skill, with zero prompt limits as a defensive second
+gate; and startup memory is disabled. `localModelLean` is deliberately not
+enabled because this OpenClaw release can use it to add a tool-search surface,
+while the explicit terminal policy is already stricter.
+
+The config-resolution and merge tests pass in the focused 57-test Gym suite,
+and `openclaw config validate --json` reports `valid: true` with no warnings.
+The change still requires a real Nano rerun. If the prompt still overflows,
+measure which prompt sections remain before increasing the advertised context.
+Do not simply advertise the full 16,384 vLLM boundary: an earlier run proved
+that leaves no server-side generation token.
 
 ## Validation order
 
-1. Apply and test the lean OpenClaw prompt configuration above.
+1. Fetch the branch containing the lean OpenClaw prompt configuration above
+   and rerun its focused tests.
 2. Run the two-node synchronous Nano recipe:
    `grpo_anyterminal_multi_harness_nemotron_nano_omni_sync_2n_debug_single_controller.yaml`.
 3. Let the four-row epoch finish naturally. Do not lower or otherwise use
@@ -365,7 +357,8 @@ of reusing these IDs.
 3. Restore secrets without printing them and confirm W&B is online at
    `adlr/multi-harness-RL`.
 4. Verify both imported package paths and run the focused tests.
-5. Implement and push the lean OpenClaw prompt fix.
+5. Confirm the lean OpenClaw prompt fix is present in the resolved runtime
+   configuration.
 6. Run Nano sync and audit all 32 rollouts plus four optimizer steps.
 7. Run Super 8-node sync and Super 16-node async with the specified Super
    checkpoint.
@@ -374,5 +367,6 @@ of reusing these IDs.
 9. Re-run current PR checks and confirm both local worktrees match their
    remote branches.
 
-Until steps 6 and 7 pass, the correct project status is: **implementation
-pushed; end-to-end runtime validation blocked by OpenClaw fixed-prompt size**.
+Until steps 6 and 7 pass, the correct project status is: **lean OpenClaw fix
+implemented and unit/schema-validated; end-to-end Nano and Super runtime
+validation still pending**.

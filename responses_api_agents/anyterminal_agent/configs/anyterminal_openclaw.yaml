@@ -20,6 +20,22 @@ anyterminal_openclaw:
           agents:
             defaults:
               workspace: "."
+              # Terminal-Bench supplies the complete task in the user turn. Do not create or
+              # inject OpenClaw's generic workspace bootstrap files or startup-memory prelude;
+              # their fixed prompt can exhaust a training model's input budget before the first
+              # policy call.
+              skipBootstrap: true
+              contextInjection: never
+              startupContext:
+                enabled: false
+              # An explicit empty filter removes bundled skills from both discovery and the
+              # system prompt. The global zero limits below defend the same invariant if the
+              # selected agent id cannot be resolved and the filter fallback changes upstream.
+              skills: []
+          skills:
+            limits:
+              maxSkillsInPrompt: 0
+              maxSkillsPromptChars: 0
           tools:
             # Keep the initial tool schema below the policy context limit. Terminal-Bench only
             # needs a shell; the broad coding profile also enables web, memory, sessions, cron,

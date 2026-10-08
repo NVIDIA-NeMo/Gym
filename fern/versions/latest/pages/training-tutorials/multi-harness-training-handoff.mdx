@@ -37,9 +37,10 @@ of those changes and exposed the remaining blocker:
 - Therefore no optimizer step completed, and neither PR should yet be called
   end-to-end runtime validated.
 
-The next patch should disable bootstrap/context injection and skill prompt
-material for the Terminal-Bench OpenClaw profile. This proposed change and its
-required validation are recorded in
+The branch now disables bootstrap/context injection, startup memory, and skill
+prompt material for the Terminal-Bench OpenClaw profile. Its unit and native
+schema checks pass, but a real Nano rerun is still required. The change and its
+validation status are recorded in
 [OpenClaw runtime blocker](#openclaw-runtime-blocker).
 
 ## Pull requests and exact heads
@@ -293,7 +294,7 @@ were active, but both OpenClaw siblings still overflowed locally with zero
 usage. Tool reduction alone is therefore insufficient.
 
 OpenClaw still injects workspace/bootstrap and skill material into its fixed
-prompt. The next proposed patch is:
+prompt unless explicitly disabled. The branch now adds:
 
 ```yaml
 openclaw_config:
@@ -302,9 +303,9 @@ openclaw_config:
       workspace: "."
       skipBootstrap: true
       contextInjection: never
+      startupContext:
+        enabled: false
       skills: []
-      experimental:
-        localModelLean: true
   skills:
     limits:
       maxSkillsInPrompt: 0
@@ -317,10 +318,14 @@ openclaw_config:
       - session_status
 ```
 
-These controls exist in the OpenClaw 2026.6.11 schema, but this block is not
-yet in the pushed Gym config. Add config-resolution and merge tests, rerun the
-focused Gym suite, and then repeat Nano. Do not advertise the full 16,384 vLLM
-boundary as a shortcut; an earlier run proved that it leaves no serving token.
+These controls exist in the OpenClaw 2026.6.11 schema. The config-resolution
+and merge tests pass in the focused 57-test Gym suite, and native `openclaw
+config validate --json` reports `valid: true` with no warnings. The branch
+deliberately omits `localModelLean`: this release can use it to add a
+tool-search surface, whereas the explicit terminal policy is stricter. Repeat
+Nano before treating the fix as runtime validated. Do not advertise the full
+16,384 vLLM boundary as a shortcut; an earlier run proved that it leaves no
+serving token.
 
 ## Fast validation sequence
 
@@ -522,8 +527,8 @@ or sandbox timeout.
 ## Resume checklist
 
 1. Fetch both latest PR branch tips and verify the imported package paths.
-2. Add the lean OpenClaw bootstrap/context/skill configuration, extend its
-   config tests, rerun the focused 57-test suite, and push Gym.
+2. Confirm the lean OpenClaw bootstrap/context/startup-memory/skill
+   configuration is present and rerun the focused 57-test suite.
 3. Recreate or locate the Terminal-Bench data, task directories, verifier
    tests, and Enroot images.
 4. Configure W&B as `adlr/multi-harness-RL` with full result tables.
@@ -541,9 +546,9 @@ or sandbox timeout.
 
 <Warning>
 The routing implementation, terminal-only OpenClaw profile, 4,096-token
-OpenClaw output reserve, and focused configuration checks are pushed. The
-terminal-only runtime attempt still failed on OpenClaw's fixed bootstrap/skill
-prompt, and the corrected Nano and requested Super-model Terminal-Bench
-training proofs are pending. Do not present the two pull requests as
-runtime-validated until the acceptance gates above pass.
+OpenClaw output reserve, lean fixed-prompt configuration, and focused
+configuration checks are implemented. The pre-lean runtime attempt failed on
+OpenClaw's fixed bootstrap/skill prompt; the post-lean Nano and requested
+Super-model Terminal-Bench training proofs are pending. Do not present the two
+pull requests as runtime-validated until the acceptance gates above pass.
 </Warning>
