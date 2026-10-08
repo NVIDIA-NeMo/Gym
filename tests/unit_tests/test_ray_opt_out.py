@@ -5,8 +5,15 @@ import ast
 import warnings
 from pathlib import Path
 
+import pytest
+
 from nemo_gym import PARENT_DIR
-from nemo_gym.server_utils import _WARNED_IMPLICIT_RAY_SERVERS, _server_uses_ray
+from nemo_gym.server_utils import (
+    _WARNED_IMPLICIT_RAY_SERVERS,
+    _declared_ray_enabled,
+    _server_uses_ray,
+    entrypoint_may_use_ray,
+)
 
 
 DIRECT_RAY_COMPONENTS = {
@@ -30,10 +37,10 @@ DIRECT_RAY_COMPONENTS = {
         "swe_agents",
     },
     "responses_api_models": {"local_vllm_model"},
+    "environment_servers": set(),
 }
 
 INHERITED_RAY_DECLARATIONS = {
-    ("resources_servers/gpqa_diamond/app.py", "GPQADiamondResourcesServer"): False,
     ("resources_servers/legal_agent_bench/harbor_bridge.py", "LegalAgentBenchHarborBridge"): True,
     ("responses_api_models/genrm_model/app.py", "GenRMModel"): True,
 }
@@ -94,17 +101,6 @@ def _server_class_declarations(root: Path = PARENT_DIR) -> list[tuple[Path, ast.
     return declarations
 
 
-def _declared_ray_value(class_node: ast.ClassDef) -> bool | None:
-    for item in class_node.body:
-        if not isinstance(item, ast.Assign):
-            continue
-        if not any(isinstance(target, ast.Name) and target.id == "ray_enabled" for target in item.targets):
-            continue
-        if isinstance(item.value, ast.Constant) and isinstance(item.value.value, bool):
-            return item.value.value
-    return None
-
-
 def test_omitted_ray_flag_preserves_compatibility(caplog) -> None:
     class LegacyServer:
         ray_enabled = None
@@ -162,7 +158,7 @@ def test_shipped_server_classes_declare_ray_usage() -> None:
     declarations = _server_class_declarations()
     assert declarations
     for path, class_node, expected in declarations:
-        actual = _declared_ray_value(class_node)
+        actual = _declared_ray_enabled(class_node)
         if actual is None:
             key = (str(path.relative_to(PARENT_DIR)), class_node.name)
             actual = INHERITED_RAY_DECLARATIONS.get(key)
@@ -172,3 +168,61 @@ def test_shipped_server_classes_declare_ray_usage() -> None:
             )
 
     assert not problems, "Shipped server classes must declare Ray usage:\n" + "\n".join(problems)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param(
+            "class Server:\n    ray_enabled = False\nServer.run_webserver()\n",
+            False,
+            id="declared-false",
+        ),
+        pytest.param(
+            "class Server:\n    ray_enabled = True\nServer.run_webserver()\n",
+            True,
+            id="declared-true",
+        ),
+        pytest.param("class Server:\n    pass\nServer.run_webserver()\n", True, id="undeclared"),
+        pytest.param(
+            "from elsewhere import Server\nServer.run_webserver()\n",
+            True,
+            id="imported-class",
+        ),
+        pytest.param(
+            "class Base:\n    ray_enabled = False\nclass Server(Base):\n    pass\nServer.run_webserver()\n",
+            True,
+            id="inherited-declaration",
+        ),
+        pytest.param(
+            "class A:\n    ray_enabled = False\nclass B:\n    ray_enabled = True\n"
+            "A.run_webserver() if flag else B.run_webserver()\n",
+            True,
+            id="one-of-several-uses-ray",
+        ),
+        pytest.param("import uvicorn\nuvicorn.run(app)\n", True, id="no-run-webserver"),
+        pytest.param("class Server(:\n", True, id="unparseable"),
+    ],
+)
+def test_entrypoint_may_use_ray_reads_declarations_conservatively(tmp_path: Path, source: str, expected: bool) -> None:
+    entrypoint = tmp_path / "app.py"
+    entrypoint.write_text(source)
+
+    assert entrypoint_may_use_ray(entrypoint) is expected
+
+
+def test_missing_entrypoint_may_use_ray(tmp_path: Path) -> None:
+    assert entrypoint_may_use_ray(tmp_path / "missing.py") is True
+
+
+def test_entrypoint_detection_matches_shipped_server_declarations() -> None:
+    expected_by_path: dict[Path, bool] = {}
+    for path, _class_node, expected in _server_class_declarations():
+        expected_by_path[path] = expected_by_path.get(path, False) or expected
+
+    mismatches = [
+        f"{path.relative_to(PARENT_DIR)}: expected {expected}"
+        for path, expected in expected_by_path.items()
+        if entrypoint_may_use_ray(path) is not expected
+    ]
+    assert not mismatches, "Orchestrator Ray detection disagrees with shipped declarations:\n" + "\n".join(mismatches)
