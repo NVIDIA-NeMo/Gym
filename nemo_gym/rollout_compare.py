@@ -32,12 +32,14 @@ import statistics
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, TypeVar
 
 from pydantic import Field
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 
+
+_T = TypeVar("_T")
 
 Category = Literal["identical", "flipped", "flipped_agent_error", "masked", "missing"]
 Side = Literal["old", "new"]
@@ -156,7 +158,7 @@ class CompareResult:
     new_masked_rows: int = 0
     old_prefix_stripped: Optional[str] = None
     new_prefix_stripped: Optional[str] = None
-    keyed_by_taskset: bool = False  # tasks are labelled `taskset/task_id` because a side spans several tasksets
+    keyed_by_taskset: bool = False  # tasks are labelled `taskset/task_id`: both sides span several tasksets
     notes: list[str] = field(default_factory=list)
 
     def by_category(self, category: Category) -> list[TaskComparison]:
@@ -307,8 +309,59 @@ def _common_prefix(ids: list[str]) -> Optional[str]:
     return None
 
 
-def _strip_prefix(grouped: dict[str, list[dict[str, Any]]], prefix: str) -> dict[str, list[dict[str, Any]]]:
+def _strip_prefix(grouped: dict[str, _T], prefix: str) -> dict[str, _T]:
     return {task_id[len(prefix) :]: rows for task_id, rows in grouped.items()}
+
+
+def _join_sides(
+    old: dict[str, _T], new: dict[str, _T]
+) -> tuple[dict[str, _T], dict[str, _T], Optional[str], Optional[str]]:
+    """Strip a `<prefix>/` namespace from whichever side carries one when that is what keeps the ids apart:
+    legacy servers often namespace the task (`terminal-bench/x`) where the Harbor path does not."""
+    old_prefix = new_prefix = None
+    if old and new and not (set(old) & set(new)):
+        old_prefix, new_prefix = _common_prefix(list(old)), _common_prefix(list(new))
+        if old_prefix and not new_prefix:
+            old = _strip_prefix(old, old_prefix)
+        elif new_prefix and not old_prefix:
+            new = _strip_prefix(new, new_prefix)
+        else:
+            old_prefix = new_prefix = None
+    return old, new, old_prefix, new_prefix
+
+
+Groups = dict[str, list[dict[str, Any]]]
+
+
+def _match_plain_to_keyed(
+    plain: Groups, plain_key: str, keyed: Groups, keyed_key: str
+) -> tuple[Groups, Groups, Optional[str], Optional[str], dict[str, list[str]]]:
+    """Join a side of plain task ids to one keyed `taskset/task_id`. A keyed group is relabelled with its plain
+    task id when that id lives in exactly one taskset (or in the plain side's own taskset); an id the plain side
+    carries that recurs across tasksets is ambiguous: its groups keep their taskset labels and are reported.
+    Returns the two sides, the prefix stripped from each, and the ambiguous ids with their taskset labels."""
+    labels_by_id: dict[str, list[str]] = {}
+    taskset_of_label: dict[str, Optional[str]] = {}
+    for label, rows in keyed.items():
+        taskset, task_id = _task_identity(rows[0], keyed_key)
+        labels_by_id.setdefault(task_id, []).append(label)
+        taskset_of_label[label] = taskset
+    plain, labels_by_id, plain_prefix, keyed_prefix = _join_sides(plain, labels_by_id)
+    matched: Groups = {}
+    ambiguous: dict[str, list[str]] = {}
+    for task_id, labels in labels_by_id.items():
+        chosen = labels
+        if task_id in plain and len(labels) > 1:
+            own_taskset = _task_identity(plain[task_id][0], plain_key)[0]
+            chosen = [label for label in labels if taskset_of_label[label] == own_taskset] or labels
+        if len(chosen) == 1:
+            matched[task_id] = keyed[chosen[0]]
+            matched.update((label, keyed[label]) for label in labels if label != chosen[0])
+        else:
+            matched.update((label, keyed[label]) for label in labels)
+            if task_id in plain:
+                ambiguous[task_id] = labels
+    return plain, matched, plain_prefix, keyed_prefix, ambiguous
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -394,22 +447,20 @@ def compare_rollouts(
         # An empty side (everything missing) borrows the other side's detected key.
         old_key = detect_task_key(old_rows) if old_rows else detect_task_key(new_rows)
         new_key = detect_task_key(new_rows) if new_rows else old_key
-    # A side spanning several tasksets may repeat a task id, so the taskset becomes part of the key and heading.
+    # A side spanning several tasksets may repeat a task id, so on that side the taskset becomes part of the key
+    # and heading. A side with no taskset (legacy rows) or a single one keeps plain ids; against a keyed side it
+    # joins on the task id where that is unambiguous.
     old_tasksets, new_tasksets = tasksets_of(old_rows, old_key), tasksets_of(new_rows, new_key)
-    with_taskset = len(old_tasksets) > 1 or len(new_tasksets) > 1
-    old = group_by_task(old_rows, old_key, with_taskset=with_taskset)
-    new = group_by_task(new_rows, new_key, with_taskset=with_taskset)
-
-    old_prefix = new_prefix = None
-    if old and new and not (set(old) & set(new)):
-        # Legacy servers often namespace the task (`terminal-bench/x`) where the Harbor path does not.
-        old_prefix, new_prefix = _common_prefix(list(old)), _common_prefix(list(new))
-        if old_prefix and not new_prefix:
-            old = _strip_prefix(old, old_prefix)
-        elif new_prefix and not old_prefix:
-            new = _strip_prefix(new, new_prefix)
-        else:
-            old_prefix = new_prefix = None
+    old_keyed, new_keyed = len(old_tasksets) > 1, len(new_tasksets) > 1
+    old = group_by_task(old_rows, old_key, with_taskset=old_keyed)
+    new = group_by_task(new_rows, new_key, with_taskset=new_keyed)
+    ambiguous: dict[str, list[str]] = {}
+    if old_keyed and not new_keyed:
+        new, old, new_prefix, old_prefix, ambiguous = _match_plain_to_keyed(new, new_key, old, old_key)
+    elif new_keyed and not old_keyed:
+        old, new, old_prefix, new_prefix, ambiguous = _match_plain_to_keyed(old, old_key, new, new_key)
+    else:
+        old, new, old_prefix, new_prefix = _join_sides(old, new)
 
     tasks: list[TaskComparison] = []
     repeated: list[str] = []
@@ -433,12 +484,24 @@ def compare_rollouts(
         tasks.append(TaskComparison(task, category, old_side, new_side, winner))
 
     notes = []
-    if with_taskset:
+    if old_keyed and new_keyed:
         notes.append(
-            "a side spans several tasksets ("
+            "both sides span several tasksets ("
             + ", ".join(sorted(old_tasksets | new_tasksets))
             + "); tasks are keyed and listed as taskset/task_id"
         )
+    elif old_keyed or new_keyed:
+        side, tasksets = ("old", old_tasksets) if old_keyed else ("new", new_tasksets)
+        notes.append(
+            f"the {side} side spans several tasksets (" + ", ".join(sorted(tasksets)) + "); its tasks are matched "
+            "to the other side's plain ids on task_id"
+        )
+        if ambiguous:
+            notes.append(
+                f"{len(ambiguous)} task id(s) recur across tasksets on the {side} side and cannot be matched "
+                "(listed as missing under taskset/task_id): "
+                + ", ".join(f"{task_id} ({', '.join(labels)})" for task_id, labels in sorted(ambiguous.items()))
+            )
     if repeated:
         notes.append(
             f"{len(repeated)} task(s) have several rows on a side; they are compared on the mean reward: "
@@ -454,7 +517,7 @@ def compare_rollouts(
         new_masked_rows=sum(1 for row in new_rows if mask_reason(row)),
         old_prefix_stripped=old_prefix,
         new_prefix_stripped=new_prefix,
-        keyed_by_taskset=with_taskset,
+        keyed_by_taskset=old_keyed and new_keyed,
         notes=notes,
     )
 

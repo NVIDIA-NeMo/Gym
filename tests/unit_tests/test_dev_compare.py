@@ -282,17 +282,102 @@ class TestTaskKey:
         counts = result.counts()
         assert counts["identical"] == 1 and counts["flipped_new_win"] == 1 and counts["missing"] == 0
         assert result.notes == [
-            "a side spans several tasksets (tb-a, tb-b); tasks are keyed and listed as taskset/task_id"
+            "both sides span several tasksets (tb-a, tb-b); tasks are keyed and listed as taskset/task_id"
         ]
         assert "### tb-b/x: old=0.0 new=1.0 -> new wins" in render_report(result, roots=[])
         assert summary_dict(result)["join"]["keyed_by_taskset"] is True
 
-    def test_several_tasksets_on_one_side_only_still_keys_by_taskset(self) -> None:
+    def test_two_tasksets_on_both_sides_keep_the_taskset_key_even_when_the_tasksets_differ(self) -> None:
+        def row(taskset: str, task: str, reward: float) -> dict:
+            return new_row(task, reward, _ng_task_id={"taskset": taskset, "task_id": task})
+
+        old = [row("tb-a", "x", 1.0), row("tb-b", "y", 0.0)]
+        new = [row("tb-a", "x", 1.0), row("tb-c", "y", 1.0)]
+        result = compare_rollouts(old, new)
+        assert result.keyed_by_taskset
+        assert [(t.task, t.category) for t in result.tasks] == [
+            ("tb-a/x", "identical"),
+            ("tb-b/y", "missing"),
+            ("tb-c/y", "missing"),
+        ]
+
+    def test_legacy_side_joins_a_two_taskset_harbor_side_on_the_plain_id(self) -> None:
+        # Legacy rows carry no taskset, so forcing the taskset key on them would leave every task missing.
+        old = [{"task_name": "x", "reward": 1.0}, {"task_name": "y", "reward": 0.0}]
+        new = [
+            new_row("x", 1.0, _ng_task_id={"taskset": "tb21", "task_id": "x"}),
+            new_row("y", 1.0, _ng_task_id={"taskset": "tb4", "task_id": "y"}),
+        ]
+        result = compare_rollouts(old, new)
+        assert not result.keyed_by_taskset
+        assert [(t.task, t.category) for t in result.tasks] == [("x", "identical"), ("y", "flipped")]
+        assert result.notes == [
+            "the new side spans several tasksets (tb21, tb4); its tasks are matched to the other side's plain ids "
+            "on task_id"
+        ]
+        assert summary_dict(result)["join"]["keyed_by_taskset"] is False
+
+    def test_namespaced_legacy_side_joins_a_two_taskset_harbor_side_after_prefix_strip(self) -> None:
+        # The reference fixture's shape (legacy `terminal-bench/x` vs Harbor dict ids) with a second taskset.
+        old = [old_row("x", 1.0), old_row("y", 0.0)]
+        new = [
+            new_row("x", 1.0, _ng_task_id={"taskset": "tb21", "task_id": "x"}),
+            new_row("y", 1.0, _ng_task_id={"taskset": "tb4", "task_id": "y"}),
+        ]
+        result = compare_rollouts(old, new)
+        assert not result.keyed_by_taskset and result.old_prefix_stripped == "terminal-bench/"
+        assert [(t.task, t.category) for t in result.tasks] == [("x", "identical"), ("y", "flipped")]
+
+    def test_two_taskset_side_as_old_joins_a_plain_side_too(self) -> None:
+        old = [
+            new_row("x", 1.0, _ng_task_id={"taskset": "tb21", "task_id": "x"}),
+            new_row("y", 0.0, _ng_task_id={"taskset": "tb4", "task_id": "y"}),
+        ]
+        new = [{"task_name": "x", "reward": 1.0}, {"task_name": "y", "reward": 1.0}]
+        result = compare_rollouts(old, new)
+        assert [(t.task, t.category, t.winner) for t in result.tasks] == [
+            ("x", "identical", None),
+            ("y", "flipped", "new"),
+        ]
+        assert result.notes[0].startswith("the old side spans several tasksets (tb21, tb4)")
+
+    def test_ambiguous_plain_id_across_tasksets_is_reported_not_guessed(self) -> None:
+        old = [{"task_name": "x", "reward": 1.0}, {"task_name": "y", "reward": 1.0}]
+        new = [
+            new_row("x", 1.0, _ng_task_id={"taskset": "tb-a", "task_id": "x"}),
+            new_row("x", 0.0, _ng_task_id={"taskset": "tb-b", "task_id": "x"}),
+            new_row("y", 1.0, _ng_task_id={"taskset": "tb-b", "task_id": "y"}),
+        ]
+        result = compare_rollouts(old, new)
+        assert [(t.task, t.category) for t in result.tasks] == [
+            ("tb-a/x", "missing"),
+            ("tb-b/x", "missing"),
+            ("x", "missing"),
+            ("y", "identical"),
+        ]
+        assert result.notes[1] == (
+            "1 task id(s) recur across tasksets on the new side and cannot be matched (listed as missing under "
+            "taskset/task_id): x (tb-a/x, tb-b/x)"
+        )
+        assert "note: 1 task id(s) recur across tasksets" in render_report(result, roots=[])
+
+    def test_single_taskset_side_picks_its_own_taskset_when_the_id_recurs(self) -> None:
+        # The plain side knows its taskset (tb-a), which settles an id that recurs on the two-taskset side.
         def row(taskset: str, reward: float) -> dict:
             return new_row("x", reward, _ng_task_id={"taskset": taskset, "task_id": "x"})
 
         result = compare_rollouts([row("tb-a", 1.0), row("tb-b", 0.0)], [row("tb-a", 1.0)])
-        assert [(t.task, t.category) for t in result.tasks] == [("tb-a/x", "identical"), ("tb-b/x", "missing")]
+        assert not result.keyed_by_taskset
+        assert [(t.task, t.category) for t in result.tasks] == [("tb-b/x", "missing"), ("x", "identical")]
+        assert len(result.notes) == 1  # no ambiguity reported
+
+    def test_differently_named_single_taskset_joins_a_two_taskset_side_on_the_plain_id(self) -> None:
+        def row(taskset: str, task: str, reward: float) -> dict:
+            return new_row(task, reward, _ng_task_id={"taskset": taskset, "task_id": task})
+
+        result = compare_rollouts([row("a", "x", 1.0), row("b", "y", 0.0)], [row("c", "x", 1.0), row("c", "y", 1.0)])
+        assert not result.keyed_by_taskset
+        assert [(t.task, t.category) for t in result.tasks] == [("x", "identical"), ("y", "flipped")]
 
     def test_single_taskset_keeps_the_plain_task_id(self) -> None:
         result = compare_rollouts([old_row("x", 1.0)], [new_row("x", 1.0)])
@@ -718,6 +803,8 @@ class TestCliWiring:
             "résumé/ancien.jsonl",  # non-ASCII, which json.dumps would turn into \u00e9 escapes
             r"runs\old\old.jsonl",  # backslashes, which Hydra's quoted grammar would keep doubled
             'say "hi".jsonl',  # a quote
+            "run-${SLURM_JOB_ID}.jsonl",  # an unexpanded template, which OmegaConf would try to interpolate
+            r"a\${x}.jsonl",  # a backslash before `${`, which OmegaConf would read as an escape
         ],
     )
     def test_paths_and_quoted_options_reach_the_command_verbatim(
@@ -785,16 +872,21 @@ class TestCliWiring:
 
     def test_end_to_end_through_hydra(self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys: CaptureFixture) -> None:
         # The real path: argparse values seed the config, Hydra parses the remaining overrides, `dev_compare`
-        # validates `RolloutCompareConfig`. The run lives in a directory with a space and non-ASCII characters.
-        run_dir = tmp_path / "résumé dir"
+        # validates `RolloutCompareConfig`. The run lives in a directory with a space, non-ASCII characters and an
+        # unexpanded `${SLURM_JOB_ID}`, which must reach the config verbatim rather than as an OmegaConf
+        # interpolation; so must `--logs-root` and `--json`.
+        run_dir = tmp_path / "résumé dir" / "run-${SLURM_JOB_ID}"
+        logs_root = run_dir / "logs-${SLURM_JOB_ID}"
+        b_logs = write_verifier_log(logs_root, "b-logs", ["FAILED test_b", "1 failed (b new)"])
         old = write_jsonl(run_dir / "old.jsonl", [old_row("a", 1.0), old_row("b", 1.0), old_row("c", 0.0)])
-        new = write_jsonl(run_dir / "new.jsonl", [new_row("a", 1.0), new_row("b", 0.0), new_row("c", 0.0)])
-        json_path = run_dir / "summary.json"
+        new = write_jsonl(
+            run_dir / r"new-a\${x}.jsonl", [new_row("a", 1.0), new_row("b", 0.0, logs_dir=b_logs), new_row("c", 0.0)]
+        )
+        json_path = run_dir / "summary-${SLURM_JOB_ID}.json"
         monkeypatch.setattr(gc, "_GLOBAL_CONFIG_DICT", None)
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(
-            sys, "argv", ["gym", "dev", "compare", str(old), str(new), "--tail", "1", "--json", str(json_path)]
-        )
+        argv = ["gym", "dev", "compare", str(old), str(new), "--tail", "1", "--logs-root", str(logs_root)]
+        monkeypatch.setattr(sys, "argv", [*argv, "--json", str(json_path)])
         with pytest.raises(SystemExit) as exc_info:
             main()
         assert exc_info.value.code == 0
@@ -803,6 +895,8 @@ class TestCliWiring:
         assert "identical                    2" in out
         assert "flipped                      1   old-win 1, new-win 0" in out
         assert "### b: old=1.0 new=0.0 -> old wins" in out
+        assert f"new verifier output (last 1 lines of {logs_root / b_logs / 'test-stdout.txt'}):" in out
+        assert "    | 1 failed (b new)" in out
         assert out.endswith(f"wrote {json_path}\n")
         assert json.loads(json_path.read_text())["counts"]["identical"] == 2
 
