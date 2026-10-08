@@ -178,6 +178,18 @@ def sanitize_streaming_responses_body(
         kept_items = []
         carrier_tools: list[Any] = []
         for item in input_items:
+            # Codex can replay assistant text without annotations. The strict output-text
+            # schema requires this field, so supply its empty value before validating the
+            # item; otherwise an ordinary assistant turn is silently lost from the history.
+            if (
+                isinstance(item, dict)
+                and item.get("type") in (None, "message")
+                and item.get("role") == "assistant"
+                and isinstance(item.get("content"), list)
+            ):
+                for part in item["content"]:
+                    if isinstance(part, dict) and part.get("type") == "output_text":
+                        part.setdefault("annotations", [])
             if isinstance(item, dict) and item.get("type") == "function_call" and item.get("namespace"):
                 item["name"] = f"{item.pop('namespace')}{NAMESPACE_TOOL_DELIMITER}{item.get('name')}"
             # Codex's code mode ships tools inside an `additional_tools` input item instead of the
