@@ -1,0 +1,19 @@
+# CAD/data subset of BenchCAD 77fd16a's uv.lock; no upstream source is vendored.
+# nlopt 2.11 supplies ARM wheels, as in upstream docker/sandbox.arm64.Dockerfile.
+cadquery==2.3.0
+cadquery-ocp==7.9.3.0
+casadi==3.7.2
+ezdxf==1.4.3
+huggingface-hub==1.14.0
+multimethod==2.0.2
+nlopt==2.11.0
+nptyping==2.5.0
+numpy==1.26.4
+pandas==3.0.2
+pillow==12.2.0
+pyarrow==24.0.0
+scikit-image==0.26.0
+scipy==1.17.1
+trimesh==4.12.2
+typish==1.9.3
+vtk==9.5.2
