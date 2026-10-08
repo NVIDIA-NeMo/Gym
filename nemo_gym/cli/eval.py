@@ -49,6 +49,7 @@ from nemo_gym.config_types import (
     BenchmarkDatasetConfig,
     ConfigError,
     ConfigPathNotFoundError,
+    DatasetConfig,
     ServerInstanceConfig,
 )
 from nemo_gym.discovery import read_config_metadata
@@ -63,6 +64,7 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
     resolve_dataset_agent,
+    taskset_environment_server_name,
 )
 
 
@@ -84,7 +86,8 @@ def _inspect_benchmark(name: str, benchmarks: dict, global_config_dict) -> None:
     domain, description = read_config_metadata(bench.path)
     details = {
         "config": str(bench.path.resolve()),
-        "agent": bench.agent_name,
+        "agent": bench.agent_name or "",
+        "environment server": bench.environment_server or "",
         "num repeats": str(bench.num_repeats),
         "dataset": str(bench.dataset.jsonl_fpath),
         "prepare script": str(bench.dataset.prepare_script),
@@ -141,6 +144,7 @@ def list_benchmarks() -> None:
             {
                 "name": name,
                 "agent_name": bench.agent_name,
+                "environment_server": bench.environment_server,
                 "domain": metadata[name][0] or "",
                 "num_repeats": bench.num_repeats,
                 "description": metadata[name][1] or "",
@@ -169,7 +173,9 @@ def list_benchmarks() -> None:
 
     for name, bench in benchmarks.items():
         domain, description = metadata[name]
-        table.add_row(name, domain or "", description or "", bench.agent_name, str(bench.num_repeats))
+        # A taskset routed to a server that fronts several agents has no single agent; name the server instead.
+        agent = bench.agent_name or f"{bench.environment_server} (environment server)"
+        table.add_row(name, domain or "", description or "", agent, str(bench.num_repeats))
 
     print_rich_table(table)
 
@@ -180,6 +186,10 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
 
     The benchmark is identified from a config_paths entry pointing to a
     benchmarks/*/config.yaml file.
+
+    With `use_cached_prepared_benchmarks=true`, an existing prepared file is reused. A prepare.py whose output
+    depends on its own code (for example, settings written into each row) can define
+    `is_prepared_data_current(fpath: Path) -> bool`; when it returns False, the cached file is prepared again.
 
     Examples:
 
@@ -205,15 +215,17 @@ def _multiprocess_benchmark_prepare_fn(args):
     prepare_script_args: Dict[str, Any]
     (benchmark_config, prepare_module_path, prepare_script_args) = args
 
-    print(f"Preparing benchmark: {benchmark_config.name}")
+    print(f"Preparing dataset: {benchmark_config.name}")
 
     module = importlib.import_module(prepare_module_path)
     output_fpath = module.prepare(**prepare_script_args)
-    if output_fpath.absolute() != benchmark_config.dataset.jsonl_fpath.absolute():
+    expected_output_fpath = Path(benchmark_config.dataset.jsonl_fpath).absolute()
+    if output_fpath.absolute() != expected_output_fpath:
         raise ConfigError(
-            f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
+            f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. "
+            f"Instead got {output_fpath=} jsonl_fpath={expected_output_fpath}"
         )
-    print(f"Benchmark data prepared at: {output_fpath}")
+    print(f"Dataset prepared at: {output_fpath}")
 
 
 def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
@@ -235,11 +247,11 @@ def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
         site.addsitedir(sysconfig.get_paths()["purelib"])
     except FileNotFoundError as exc:
         raise ConfigError(
-            f"`uv` is required to install prepare_dependencies for benchmark '{benchmark_config.name}'."
+            f"`uv` is required to install prepare_dependencies for dataset '{benchmark_config.name}'."
         ) from exc
     except subprocess.CalledProcessError as exc:
         raise ConfigError(
-            f"Could not install prepare_dependencies for benchmark '{benchmark_config.name}': {' '.join(dependencies)}"
+            f"Could not install prepare_dependencies for dataset '{benchmark_config.name}': {' '.join(dependencies)}"
         ) from exc
 
 
@@ -256,7 +268,7 @@ def prepare_benchmark() -> None:
     # A benchmark dataset may be declared by an agent block (legacy) or a resources server
     # block (decoupled layout). `resolve_dataset_agent` is the same resolver rollout dispatch
     # uses, so preparation and rollout always agree.
-    benchmarks_dict: Dict[str, BenchmarkConfig] = dict()
+    datasets_to_prepare: List[BenchmarkConfig] = []
     inspected_server_instances: List[str] = []
     for server_instance_name in global_config_dict:
         server_config = global_config_dict[server_instance_name]
@@ -269,59 +281,60 @@ def prepare_benchmark() -> None:
         inspected_server_instances.append(server_instance_name)
         inner_server_config = get_first_server_config_dict(global_config_dict, server_instance_name)
 
-        datasets: List[BenchmarkDatasetConfig] = []
+        datasets: List[BenchmarkDatasetConfig | DatasetConfig] = []
         for dataset in inner_server_config.get("datasets") or []:
-            if dataset["type"] != "benchmark":
+            if dataset["type"] == "benchmark":
+                datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
+            elif dataset.get("prepare_script"):
+                datasets.append(DatasetConfig.model_validate(dataset))
+            else:
                 continue
 
-            datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
+        for dataset in datasets:
+            try:
+                agent_name = resolve_dataset_agent(
+                    global_config_dict,
+                    str(server_instance_name),
+                    pin=getattr(dataset, "agent", None),
+                    taskset=dataset.taskset,
+                )
+            except ConfigError as e:
+                raise ConfigError(f"Dataset {dataset.name!r}: {e}") from e
 
-        if len(datasets) < 1:
-            continue
-
-        if len(datasets) != 1:
-            raise ConfigError(
-                f"Expected exactly 1 benchmark dataset for server instance `{server_instance_name}`, "
-                f"but found {len(datasets)}: {[d.name for d in datasets]}. "
-                "A benchmark config must define a single benchmark dataset."
+            datasets_to_prepare.append(
+                BenchmarkConfig(
+                    name=dataset.name,
+                    path=Path(""),
+                    agent_name=agent_name,
+                    num_repeats=dataset.num_repeats,
+                    dataset=dataset,
+                    environment_server=taskset_environment_server_name(global_config_dict, dataset.taskset),
+                )
             )
 
-        dataset = datasets[0]
-
-        try:
-            agent_name = resolve_dataset_agent(global_config_dict, str(server_instance_name), pin=dataset.agent)
-        except ConfigError as e:
-            raise ConfigError(f"Benchmark dataset {dataset.name!r}: {e}") from e
-
-        # Keyed by the declaring instance: two declarations may resolve to the same agent, and
-        # keying by agent would silently drop all but the last.
-        benchmarks_dict[str(server_instance_name)] = BenchmarkConfig(
-            name=dataset.name,
-            path=Path(""),
-            agent_name=agent_name,
-            num_repeats=dataset.num_repeats,
-            dataset=dataset,
-        )
-
-    if not benchmarks_dict:
+    if not datasets_to_prepare:
         raise ConfigError(
-            "No benchmark config found. "
+            "No preparable dataset config found. "
             + (
-                f"Inspected server instances {inspected_server_instances}, but none declared a `benchmark` dataset."
+                f"Inspected server instances {inspected_server_instances}, but none declared a `benchmark` dataset "
+                "or another dataset with `prepare_script`."
                 if inspected_server_instances
                 else "No server instances with `responses_api_agents` were found in the resolved config."
             )
-            + " Pass a benchmark with `gym eval prepare --benchmark <name>` (e.g. `--benchmark aime24`)."
+            + " Pass a config with `gym eval prepare --config <config path>`."
         )
 
-    # Validate all benchmarks before preparing any
+    # Validate all datasets before preparing any
     prepare_script_missing: List[BenchmarkConfig] = []
     prepare_function_missing: List[BenchmarkConfig] = []
 
     validated: List[Tuple[BenchmarkConfig, str]] = []
     already_prepared: List[BenchmarkConfig] = []
-    for benchmark_config in benchmarks_dict.values():
-        prepare_script_path = benchmark_config.dataset.prepare_script
+    for benchmark_config in datasets_to_prepare:
+        prepare_script = benchmark_config.dataset.prepare_script
+        if prepare_script is None:
+            raise ConfigError(f"Dataset {benchmark_config.name!r} has no prepare_script")
+        prepare_script_path = Path(prepare_script)
         if not prepare_script_path.exists():
             prepare_script_missing.append(benchmark_config)
             continue
@@ -333,16 +346,23 @@ def prepare_benchmark() -> None:
             prepare_function_missing.append(benchmark_config)
             continue
 
-        is_already_prepared = benchmark_config.dataset.jsonl_fpath.exists()
+        is_already_prepared = Path(benchmark_config.dataset.jsonl_fpath).exists()
         if prepare_benchmark_config.use_cached_prepared_benchmarks and is_already_prepared:
-            already_prepared.append(benchmark_config)
-            continue
+            is_current = getattr(module, "is_prepared_data_current", None)
+            if callable(is_current) and not is_current(benchmark_config.dataset.jsonl_fpath):
+                print(
+                    f"The cached file for {benchmark_config.name} ({benchmark_config.dataset.jsonl_fpath}) "
+                    "is out of date, so it will be prepared again."
+                )
+            else:
+                already_prepared.append(benchmark_config)
+                continue
 
         validated.append((benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args)))
 
     if already_prepared:
         already_prepared_str = "".join(f"- {bc.name}: {bc.dataset.jsonl_fpath}\n" for bc in already_prepared)
-        already_prepared_str = f"""The following benchmarks have already been prepared. Since `use_cached_prepared_benchmarks=true`, we will skip re-preparation of those benchmarks.
+        already_prepared_str = f"""The following datasets have already been prepared. Since `use_cached_prepared_benchmarks=true`, we will skip re-preparation of those datasets.
         {already_prepared_str}"""
         print(already_prepared_str)
 
@@ -351,18 +371,18 @@ def prepare_benchmark() -> None:
         prepare_script_missing_str = "".join(
             f"- {bc.name}: {bc.dataset.prepare_script}\n" for bc in prepare_script_missing
         )
-        errors_to_print += f"""The following benchmarks are missing a valid prepare script:
+        errors_to_print += f"""The following datasets are missing a valid prepare script:
 {prepare_script_missing_str}
 """
     if prepare_function_missing:  # pragma: no cover
         prepare_function_missing_str = "".join(
             f"- {bc.name}: {bc.dataset.prepare_script}\n" for bc in prepare_function_missing
         )
-        errors_to_print += f"""The following benchmarks have a prepare script, but are missing the prepare function:
+        errors_to_print += f"""The following datasets have a prepare script, but are missing the prepare function:
 {prepare_function_missing_str}
 """
     if errors_to_print:
-        errors_to_print = f"""Did not prepare any benchmarks due to benchmark config errors.
+        errors_to_print = f"""Did not prepare any datasets due to dataset config errors.
 {errors_to_print}"""
         raise ConfigError(errors_to_print)
 

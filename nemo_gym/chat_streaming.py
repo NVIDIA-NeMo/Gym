@@ -28,9 +28,9 @@ its existing non-streaming backend call and re-emitting it as an SSE stream. Thi
 - the response-side synthesizer that re-emits a complete ``NeMoGymChatCompletion`` as the
   ``chat.completion.chunk`` SSE sequence a streaming client expects, terminated by ``data: [DONE]``.
 
-Only the SSE envelope is synthesized -- there is no true token-by-token streaming. The backend
-call completes before the first byte is emitted, so the model server's retry and
-error-normalization behavior is fully preserved on this path. External staging stores training
+Only the SSE envelope is synthesized -- there is no true token-by-token streaming. The dispatch
+sends keepalive comments while the backend computes, then emits the complete answer. Backend
+failures after the stream starts become terminal SSE errors. External staging stores training
 tokens separately; token ids and training logprobs are not carried in the ``chat.completion.chunk``
 schema. A client that does not set ``stream_options.include_usage``
 gets no usage chunk, so a model-call record reconstructed from this stream will lack token counts.

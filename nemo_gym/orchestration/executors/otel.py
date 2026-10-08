@@ -57,9 +57,9 @@ def driver_telemetry_env(gym_job_id: str, span_groups: str, *, logs: bool = True
         "NEMO_GYM_OTEL_LOGS_ENABLED": "1" if logs else "0",
         "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://localhost:{OTLP_HTTP_PORT}",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-        # nemo-lens builds its log exporter over gRPC regardless of the protocol setting, so logs
-        # get the collector's gRPC port explicitly (the SDK's per-signal endpoint takes precedence).
-        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": f"http://localhost:{OTLP_GRPC_PORT}",
+        # No per-signal logs endpoint: logs follow the protocol above to the collector's HTTP
+        # port. Gym installs nemo-lens[sdk] and never the gRPC exporter, so the log exporter is
+        # the HTTP one; pointing it at the gRPC port made every batch time out.
     }
 
 
@@ -190,7 +190,6 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
 
     attributes = [
         ("service.name", obs.service_name, "upsert"),
-        ("Authorization", token, "upsert"),
         ("user", getpass.getuser(), "upsert"),
         ("run_id", remote_bench_dir.parent.name, "upsert"),
         ("slurm_job_id", "${env:SLURM_JOB_ID}", "upsert"),
@@ -204,6 +203,8 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
     # `${env:SLURM_JOB_ID}` expands to a bare number, which the collector types as an int;
     # dashboards match it as a label string.
     resource_actions.append({"key": "slurm_job_id", "action": "convert", "converted_type": "string"})
+    # The token rides only on the managed export, never into the job-directory copies.
+    managed_actions = [{"key": "Authorization", "value": token, "action": "upsert"}, *resource_actions]
 
     # Operations that exist only as spans (sandbox start/exec, model calls) still get latency and count series.
     span_metrics = {
@@ -214,6 +215,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         "metrics_flush_interval": f"{obs.scrape_interval_seconds}s",
     }
 
+    metric_receivers = (["prometheus"] if scrape_configs else []) + ["otlp", "span_metrics"]
     doc = {
         "extensions": {"health_check": {"endpoint": f"0.0.0.0:{COLLECTOR_HEALTH_PORT}"}},
         "connectors": {"span_metrics": span_metrics},
@@ -228,7 +230,8 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         },
         "processors": {
             "batch": {},
-            "resource": {"attributes": resource_actions},
+            "resource/managed": {"attributes": managed_actions},
+            "resource/local": {"attributes": resource_actions},
             "transform/identity": identity,
             "transform/metric_names": rename_colon_metrics,
         },
@@ -240,24 +243,38 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         },
         "service": {
             "extensions": ["health_check"],
-            # otlphttp says nothing about a 2xx at info level; debug is the only way to see
-            # from the log that exports are leaving at all.
-            "telemetry": {"logs": {"level": "debug"}},
+            # debug would print every batch, token included, into the collector log.
+            "telemetry": {"logs": {"level": "info"}},
             "pipelines": {
                 "metrics": {
-                    "receivers": (["prometheus"] if scrape_configs else []) + ["otlp", "span_metrics"],
-                    "processors": ["transform/metric_names", "transform/identity", "resource", "batch"],
-                    "exporters": ["otlp_http/managed", "file/metrics"],
+                    "receivers": metric_receivers,
+                    "processors": ["transform/metric_names", "transform/identity", "resource/managed", "batch"],
+                    "exporters": ["otlp_http/managed"],
+                },
+                "metrics/local": {
+                    "receivers": metric_receivers,
+                    "processors": ["transform/metric_names", "transform/identity", "resource/local", "batch"],
+                    "exporters": ["file/metrics"],
                 },
                 "traces": {
                     "receivers": ["otlp"],
-                    "processors": ["transform/identity", "resource", "batch"],
-                    "exporters": ["otlp_http/managed", "file/traces", "span_metrics"],
+                    "processors": ["transform/identity", "resource/managed", "batch"],
+                    "exporters": ["otlp_http/managed"],
+                },
+                "traces/local": {
+                    "receivers": ["otlp"],
+                    "processors": ["transform/identity", "resource/local", "batch"],
+                    "exporters": ["file/traces", "span_metrics"],
                 },
                 "logs": {
                     "receivers": ["otlp"],
-                    "processors": ["transform/identity", "resource", "batch"],
-                    "exporters": ["otlp_http/managed", "file/logs"],
+                    "processors": ["transform/identity", "resource/managed", "batch"],
+                    "exporters": ["otlp_http/managed"],
+                },
+                "logs/local": {
+                    "receivers": ["otlp"],
+                    "processors": ["transform/identity", "resource/local", "batch"],
+                    "exporters": ["file/logs"],
                 },
             },
         },
