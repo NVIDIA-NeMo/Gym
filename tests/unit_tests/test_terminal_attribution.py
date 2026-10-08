@@ -543,6 +543,33 @@ def test_terminal_resolves_a_final_retry_group():
     assert set(legacy.notes.unresolved_retries) == {"call_a", "call_b"}
 
 
+def test_a_call_delivered_before_a_checkpoint_and_issued_again_after_a_restore_keeps_only_the_reissued_call():
+    # The model server delivered a reply before its own checkpoint, so that checkpoint keeps the call's row,
+    # but the agent held the reply at the boundary before the call.
+    # After a crash the restored agent calls again from that boundary: same parent and prompt, another generation.
+    entries = [
+        _entry("call1", [1, 2], [3, 4], text="step one", response_id="resp_1"),
+        _entry("delivered", [1, 2, 3, 4, 5], [6, 7], text="held", response_id="resp_held", parent_call_id="call1"),
+        _entry("reissued", [1, 2, 3, 4, 5], [8, 9], text="again", response_id="resp_again", parent_call_id="call1"),
+        _entry(
+            "terminal",
+            [1, 2, 3, 4, 5, 8, 9, 10],
+            [11],
+            text="final answer",
+            response_id="resp_final",
+            parent_call_id="reissued",
+        ),
+    ]
+    out = run_builder(entries, terminal_call_id="terminal")
+
+    # The two calls are a retry group; the sibling on the terminal path is kept, as for a client retry.
+    assert out.notes.terminal_chain == "delivered"
+    assert out.quarantined == ["delivered"]
+    assert out.notes.unresolved_retries == []
+    main = [c for c in out.chains if c.chain_id == "main"][0]
+    assert [link.entry.model_call_id for link in main.links] == ["call1", "reissued", "terminal"]
+
+
 def test_terminal_not_captured_is_reported():
     out = run_builder(_chain_entries(), terminal_call_id="ghost")
     assert out.notes.terminal_chain == "not_captured"
