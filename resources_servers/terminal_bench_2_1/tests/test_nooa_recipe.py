@@ -150,12 +150,16 @@ def test_relative_deployment_root_is_rejected_before_writing(tmp_path: Path) -> 
     assert not output.exists()
 
 
-def test_nooa_recipe_uses_native_borrowing_one_repeat_and_configurable_provider() -> None:
+@pytest.mark.parametrize("benchagent", [False, True])
+def test_nooa_recipe_uses_native_borrowing_one_repeat_and_configurable_provider(benchagent: bool) -> None:
     from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
     from resources_servers.terminal_bench_2_1.app import TerminalBench21ResourcesServerConfig
 
     parser = GlobalConfigDictParser()
-    _, configs = parser.load_extra_config_paths([str(ROOT / "benchmarks/terminal_bench_2_1/nooa.yaml")])
+    paths = [str(ROOT / "benchmarks/terminal_bench_2_1/nooa.yaml")]
+    if benchagent:
+        paths.append(str(ROOT / "benchmarks/nooa_baselines/benchagent-tb.yaml"))
+    _, configs = parser.load_extra_config_paths(paths)
     config = OmegaConf.merge(*configs)
     parser._recursively_swap_keys(config)
     environment = SingleAgentTurnEnvironmentServerConfig(
@@ -174,7 +178,7 @@ def test_nooa_recipe_uses_native_borrowing_one_repeat_and_configurable_provider(
         ),
     )
     assert agent.nooa.execution_mode == "sandboxed"
-    assert agent.max_policy_calls == 100
+    assert agent.max_policy_calls is None
     assert agent.context_window == 262144
     assert agent.num_workers == resources.num_workers == 1
     assert resources.sandbox_provider == "sandbox"

@@ -52,7 +52,9 @@ def test_swe_baseline_reply_budget_preserves_prompt_and_verifier_data(tmp_path: 
         prepare_native(source=source, max_output_tokens=0)
 
 
-def test_swe_recipe_uses_borrowed_sandbox_and_native_environment() -> None:
+@pytest.mark.parametrize("recipe", ["nooa.yaml", "nooa_baseline.yaml"])
+@pytest.mark.parametrize("benchagent", [False, True])
+def test_swe_recipe_uses_borrowed_sandbox_and_native_environment(recipe: str, benchagent: bool) -> None:
     from omegaconf import OmegaConf
 
     from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
@@ -60,7 +62,10 @@ def test_swe_recipe_uses_borrowed_sandbox_and_native_environment() -> None:
     from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 
     parser = GlobalConfigDictParser()
-    _, configs = parser.load_extra_config_paths([str(ROOT / "benchmarks/swebench/pro/nooa.yaml")])
+    paths = [str(ROOT / "benchmarks/swebench/pro" / recipe)]
+    if benchagent:
+        paths.append(str(ROOT / "benchmarks/nooa_baselines/benchagent-swe.yaml"))
+    _, configs = parser.load_extra_config_paths(paths)
     config = OmegaConf.merge(*configs)
     parser._recursively_swap_keys(config)
     environment = SingleAgentTurnEnvironmentServerConfig(

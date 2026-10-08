@@ -105,9 +105,12 @@ and optional `runtime_requirements_file`. That file selects dependencies for
 Gym's normal sandbox-runtime preparation; it does not install server packages
 or replace the runtime bootstrap. Omitting it preserves the default TaskAgent
 profile. The adapter preserves the task working directory, upstream summarizer
-and delegation defaults, structured return, and shared Gym model-call budget
-and capture. Direct invocation keeps exceptions visible to Gym for failure reporting. Each new agent/provider
-combination still requires a real canary before full dispatch.
+and delegation defaults, structured return, and shared Gym model-call accounting
+and capture. Both TaskAgent and BenchAgent recipes use `max_policy_calls: null`,
+so model calls are uncapped; a positive value opts into a shared rollout limit.
+Time and context limits still apply. Direct invocation keeps exceptions visible
+to Gym for failure reporting. Each new agent/provider combination still requires
+a real canary before full dispatch.
 
 ## Use an existing endpoint
 

@@ -581,7 +581,8 @@ def test_native_endpoints_preserve_generation_receipt_and_cleanup(server):
     box.stop.assert_awaited_once()
 
 
-def test_nooa_recipe_resolves_with_explicit_runtime_and_artifact_paths(monkeypatch, tmp_path):
+@pytest.mark.parametrize("benchagent", [False, True])
+def test_nooa_recipe_resolves_with_explicit_runtime_and_artifact_paths(monkeypatch, tmp_path, benchagent: bool):
     from omegaconf import OmegaConf
 
     from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
@@ -591,7 +592,10 @@ def test_nooa_recipe_resolves_with_explicit_runtime_and_artifact_paths(monkeypat
     monkeypatch.setenv("GDPVAL_CONTAINER_PATH", "/images/audited-gdp.sif")
     monkeypatch.setenv("PERSIST_DELIVERABLES_DIR", str(tmp_path))
     parser = GlobalConfigDictParser()
-    _, configs = parser.load_extra_config_paths([str(root / "benchmarks/gdpval/nooa.yaml")])
+    paths = [str(root / "benchmarks/gdpval/nooa.yaml")]
+    if benchagent:
+        paths.append(str(root / "benchmarks/nooa_baselines/benchagent-gdp.yaml"))
+    _, configs = parser.load_extra_config_paths(paths)
     config = OmegaConf.merge(*configs)
     parser._recursively_swap_keys(config)
     environment = SingleAgentTurnEnvironmentServerConfig(
@@ -621,7 +625,8 @@ def test_nooa_recipe_resolves_with_explicit_runtime_and_artifact_paths(monkeypat
         ]
         == 1
     )
-    assert agent.context_window == 262144 and agent.max_policy_calls == 250
+    assert agent.context_window == 262144
+    assert agent.max_policy_calls is None
     assert agent.nooa.execution_mode == "sandboxed"
     assert "--userns" in config.sandbox.apptainer.create.extra_start_args
     assert "--fakeroot" not in config.sandbox.apptainer.create.extra_start_args

@@ -36,7 +36,10 @@ async def test_adapter_restores_task_cwd_and_always_drains_cleanup(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_real_benchagent_delegation_uses_gym_trace_and_shared_call_budget(tmp_path, monkeypatch):
+@pytest.mark.parametrize("limit", [None, 2])
+async def test_real_benchagent_delegation_uses_gym_trace_and_shared_call_budget(
+    tmp_path, monkeypatch, limit: int | None
+):
     pytest.importorskip("nooa_bench.bench_agent")
     from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig
     from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunRequest
@@ -68,7 +71,7 @@ async def test_real_benchagent_delegation_uses_gym_trace_and_shared_call_budget(
         invocation=invocation,
         server_client=client,
         model_server_name="policy",
-        max_policy_calls=2,
+        max_policy_calls=limit,
         context_window=262144,
     )
     result = await runner.run(

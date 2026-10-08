@@ -50,7 +50,7 @@ max_resident_rollout_tasks: ${num_samples_in_parallel}
 swebench_pro_nooa_agent:
   responses_api_agents:
     nooa_agent:
-      max_policy_calls: 100
+      max_policy_calls: null
       context_window: 262144
 
 swebench_pro_nooa_resources_server:

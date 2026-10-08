@@ -31,7 +31,7 @@ terminal_bench_2_1_nooa_agent:
       context_window: 262144
       nooa:
         execution_mode: sandboxed
-      max_policy_calls: 100
+      max_policy_calls: null
 
 terminal_bench_2_1_nooa:
   _inherit_from: single_agent_turn
