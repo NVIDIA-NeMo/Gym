@@ -462,7 +462,7 @@ It does not import components, start services, execute preparation code, call a 
 
 ## Verifier Fixture Contract
 
-The resources server owns and exports one `VERIFIER_FIXTURE`, so every workload that reuses the scorer also reuses its scoring tests. The fixture requires three cases, plus a fourth when the manifest declares `seeded`:
+The resources server owns and exports one `VERIFIER_FIXTURE`, so every workload that reuses the scorer also reuses its scoring tests. See [example_single_tool_call](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_single_tool_call/app.py), [equivalence_llm_judge](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/equivalence_llm_judge/app.py), and [aegis_v4_safety](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/aegis_v4_safety/app.py) for working examples. The fixture requires three cases, plus a fourth when the manifest declares `seeded`:
 
 - a full-reward case that reaches the better endpoint declared by `higher_is_better`;
 - a zero-reward case that reaches the opposite endpoint;
