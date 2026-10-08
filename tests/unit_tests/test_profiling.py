@@ -29,6 +29,7 @@ class TestProfiling:
         monkeypatch.setattr(nemo_gym.profiling, "graph_from_dot_file", MagicMock(return_value=(MagicMock(),)))
 
         monkeypatch.setattr(Profiler, "_check_for_dot_installation", MagicMock())
+        monkeypatch.setattr(nemo_gym.profiling, "_require_gprof2dot", MagicMock(return_value=MagicMock()))
 
         profiler = Profiler(name="test_name", base_profile_dir=tmp_path / "profile")
         profiler.start()
@@ -55,7 +56,7 @@ class TestProfiling:
         monkeypatch.setattr(builtins, "__import__", fake_import)
 
         profiler = Profiler(name="test_name", base_profile_dir=tmp_path / "profile")
-        with raises(ModuleNotFoundError, match=r"Install nemo-gym\[dev\]"):
+        with raises(ModuleNotFoundError, match=r"uv pip install --no-config gprof2dot"):
             profiler.dump()
 
         assert not profiler.base_profile_dir.exists()
