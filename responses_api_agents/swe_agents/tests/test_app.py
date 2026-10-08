@@ -3416,3 +3416,48 @@ def test_merge_reparents_a_new_live_child_to_the_stable_recorded_root() -> None:
 
     merged = merge_replay_subagent_trajectories(manifest, captured)
     assert merged[0]["parent_session_id"] == "recorded_root"
+
+
+########################################
+# Agent error classification and masking
+########################################
+
+
+class TestAgentErrorMasking:
+    # The OpenHands local runtime raises this when its action-execution server process exits; the
+    # controller records it as the episode error.
+    RUNTIME_DIED_ERROR = (
+        "RetryError[<Future at 0x7f3a1c2d4e50 state=finished raised RuntimeError>]: Server process died"
+    )
+
+    def test_classify_agent_error(self) -> None:
+        assert swe_app._classify_agent_error(None) is None
+        assert swe_app._classify_agent_error("Agent reached maximum iteration in headless mode") == "max_iteration"
+        assert swe_app._classify_agent_error("ContextWindowExceededError") == "context_window"
+        assert swe_app._classify_agent_error("Agent got stuck in a loop") == "stuck_in_loop"
+        assert swe_app._classify_agent_error(self.RUNTIME_DIED_ERROR) == "runtime_died"
+        assert swe_app._classify_agent_error("AgentRuntimeDisconnectedError: Server process died") == "runtime_died"
+        assert swe_app._classify_agent_error("some other failure") == "other"
+
+    @staticmethod
+    async def _mask_sample_for(monkeypatch, tmp_path: Path, persisted_metrics: dict) -> bool:
+        """Run `_inner_responses` past the masking decision with the agent run stubbed out."""
+        wrapper = _create_wrapper(monkeypatch)
+        params = _make_instance_config(str(tmp_path))
+        params.metrics_fpath.write_text(json.dumps(persisted_metrics))
+        monkeypatch.setattr(swe_app, "runner_ray_remote", MagicMock(remote=AsyncMock(return_value=None)))
+        monkeypatch.setattr(
+            SWEBenchWrapper, "get_openhands_trajectory_from_completions", lambda self, *args: ([], [], 0, None)
+        )
+        response = await wrapper._inner_responses(params, MagicMock())
+        return json.loads(response.metadata["instance_config"])["mask_sample"]
+
+    @pytest.mark.asyncio
+    async def test_runtime_death_is_masked(self, monkeypatch, tmp_path) -> None:
+        agent_error_kind = swe_app._classify_agent_error(self.RUNTIME_DIED_ERROR)
+        assert await self._mask_sample_for(monkeypatch, tmp_path, {"agent_error_kind": agent_error_kind}) is True
+
+    @pytest.mark.asyncio
+    async def test_genuine_agent_failure_is_not_masked(self, monkeypatch, tmp_path) -> None:
+        assert await self._mask_sample_for(monkeypatch, tmp_path, {"agent_error_kind": "other"}) is False
+        assert await self._mask_sample_for(monkeypatch, tmp_path, {"agent_error_kind": None}) is False

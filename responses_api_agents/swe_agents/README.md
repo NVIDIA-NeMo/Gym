@@ -608,7 +608,7 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
   "resolved": true,
   "patch_exists": true,
   "model_patch": "diff --git ...",
-  "agent_error_kind": null, // "max_iteration" | "context_window" | "stuck_in_loop" | "oom" | "other" | null
+  "agent_error_kind": null, // "max_iteration" | "context_window" | "stuck_in_loop" | "runtime_died" | "oom" | "other" | null
   "agent_timed_out": false,
   "eval_timed_out": false,
   "oom_killed": false,       // memory watchdog killed the agent container — see Memory watchdog
@@ -674,6 +674,7 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 3. The agent hit `swebench_agent_timeout` (wall-clock) regardless of `resolved`.
 4. The memory watchdog killed the **agent** container (OOM).
 5. The memory watchdog killed the **eval** container (OOM).
+6. The OpenHands runtime server died under the agent (`runtime_died`) — an infrastructure failure, not a policy outcome.
 
 Agent error strings are bucketed by `_classify_agent_error`:
 
@@ -682,6 +683,7 @@ Agent error strings are bucketed by `_classify_agent_error`:
 | `maximum iteration`                 | `max_iteration`  |
 | `ContextWindow` / `context window`  | `context_window` |
 | `stuck in a loop`                   | `stuck_in_loop`  |
+| `Server process died`               | `runtime_died`   |
 | anything else                       | `other`          |
 
 `oom` is set directly by `_apply_watchdog_stats` when the memory watchdog kills the agent container — it bypasses `_classify_agent_error` since there's no error string to classify (the container is killed, not erroring out on its own). See [Memory watchdog](#memory-watchdog-oom-handling).
