@@ -420,6 +420,13 @@ class AsyncSandbox:
             raise RuntimeError("Sandbox has not been started")
         return self._handle
 
+    @property
+    def handle(self) -> SandboxHandle | None:
+        """The provider handle of a started sandbox, or ``None`` before start and after stop."""
+        if self._handle is None or self._stopped:
+            return None
+        return self._handle
+
     async def start(
         self,
         spec: SandboxSpec | None = None,
