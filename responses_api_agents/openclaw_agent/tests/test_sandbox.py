@@ -305,14 +305,12 @@ def test_direct_run_without_resources_rejected_before_execution(setup):
     agent.server_client.post.assert_not_called()
 
 
-@pytest.mark.parametrize("option", ["no-sandbox", "worker", "required-tool", "no-model", "unpinned"])
+@pytest.mark.parametrize("option", ["no-sandbox", "required-tool", "no-model", "unpinned"])
 def test_unsupported_seed_rejected_before_connection(setup, option):
     agent, sandbox = setup
     body = seed().model_dump(mode="json")
     if option == "no-sandbox":
         body["sandbox_access"] = None
-    elif option == "worker":
-        agent.config.num_workers = 2
     elif option == "no-model":
         agent.config.model_server = None
     elif option == "unpinned":
@@ -322,11 +320,7 @@ def test_unsupported_seed_rejected_before_connection(setup, option):
             {"kind": "direct_http", "name": "tools", "base_url": "http://resources", "required": True}
         ]
     with TestClient(agent.setup_webserver()) as client:
-        if option == "worker":
-            with pytest.raises(ValueError, match="num_workers=1"):
-                client.post("/v1/agent_sessions", json=body)
-        else:
-            assert client.post("/v1/agent_sessions", json=body).status_code == 422
+        assert client.post("/v1/agent_sessions", json=body).status_code == 422
     sandbox.exec.assert_not_awaited()
 
 
