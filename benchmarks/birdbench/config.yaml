@@ -14,6 +14,7 @@ config_paths:
 prepare_script_args:
   include_evidence: true
   dscp: name_or_col_dscp
+  dialect: sqlite  # or `spark`; see the "Spark SQL dialect" section of benchmarks/birdbench/README.md
 
 # Inherit-from directives isolate this benchmark config from the generic server config.
 birdbench_bird_sql_resources_server:

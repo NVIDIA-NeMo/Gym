@@ -18,7 +18,7 @@ separately into the environment you run `gym` from.
 uv pip install bm25s nltk
 ```
 
-**Spark SQL dialect (in development)** -- needs a JDK plus Python packages
+**Spark SQL dialect** -- needs a JDK plus Python packages
 (`pyspark` for execution, `sqlglot` to transpile the gold SQL):
 
 ```bash
@@ -29,14 +29,9 @@ export JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"
 
 # Linux: install any JDK 17 (e.g. `apt install openjdk-17-jdk`) and set JAVA_HOME.
 
-uv pip install "pyspark>=3.5,<4" sqlglot pandas pyarrow setuptools
+uv pip install "pyspark>=3.5,<4" sqlglot pandas pyarrow
 java -version   # sanity check; should report 17
 ```
-
-`setuptools` is needed because PySpark 3.5 imports `distutils`, which Python
-3.12+ no longer ships. If Spark fails with `PYTHON_VERSION_MISMATCH`, its
-workers picked up a different Python than the driver; set
-`PYSPARK_PYTHON` to the interpreter you run `gym` with.
 
 Spark runs in local mode inside the server process, so no cluster or daemon is
 needed.
@@ -84,6 +79,46 @@ Set `prepare_script_args.include_evidence: false` (pre-declared in
 ```bash
 gym eval prepare --benchmark birdbench +prepare_script_args.include_evidence=false
 ```
+
+## Spark SQL dialect
+
+The same 1534 tasks can be run with the model writing **Spark SQL** instead of SQLite. This is a flag, not a separate
+benchmark:
+
+- The model's query runs on a local PySpark copy of the databases (needs the JDK and Spark packages from
+  Installation above).
+- The BIRD gold SQL is **not transpiled**: it still runs on the original SQLite database, and only the two result
+  sets are compared (unordered set equality; floats rounded to 6 places, dates compared as strings).
+- Only a single `SELECT`/`WITH` model query is executed; anything else scores as an execution error.
+
+```bash
+# 1. Prepare: Spark column types, `db_id`.`table` names, backtick-quoted identifiers in sql_context.
+#    Writes data/birdbench_spark_benchmark.jsonl (the SQLite file is left alone).
+gym eval prepare --benchmark birdbench +prepare_script_args.dialect=spark
+
+# 2. Serve: the server's dialect is set separately. The lower concurrency cap is optional (Spark runs in
+#    local mode on 4 cores; SQLite's default is 32).
+gym env start --model-type vllm_model --benchmark birdbench \
+    +birdbench_bird_sql_resources_server.resources_servers.bird_sql.dialect=spark \
+    +birdbench_bird_sql_resources_server.resources_servers.bird_sql.max_concurrency=8
+
+# 3. Collect rollouts with the Spark data and prompt.
+gym eval run --no-serve \
+    --agent birdbench_bird_sql_simple_agent \
+    --input benchmarks/birdbench/data/birdbench_spark_benchmark.jsonl \
+    --prompt-config benchmarks/birdbench/prompts/spark.yaml \
+    --output results/birdbench_spark_rollouts.jsonl
+```
+
+On first start the server writes each SQLite database to Parquet under
+`resources_servers/bird_sql/.bird_sql/spark_warehouse/` (a minute or two) and reuses it afterwards. In `sql_context`, a
+numeric column whose SQLite data is not cleanly numeric is shown (and stored) as `STRING`, and date/datetime columns
+are `STRING`, as in SQLite.
+
+Because the gold is the answer under SQLite semantics, a correct Spark query can occasionally return a different
+result when the gold relies on SQLite-specific behavior (bare `GROUP BY` columns, integer division, case-insensitive
+`LIKE`, loose text/number comparison). `spark_gold_check.py` estimates how many tasks are affected (about 8% of
+tasks, 121 of 1534, differ or error when the gold is mechanically transpiled to Spark with ANSI mode on).
 
 ## Running servers
 

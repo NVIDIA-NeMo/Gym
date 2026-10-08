@@ -28,7 +28,7 @@ import re
 import sqlite3
 from pathlib import Path
 from sqlite3 import Cursor
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 _VALUE_MAX_LEN = 40
@@ -69,14 +69,21 @@ def _primary_key_columns(cur: Cursor, table_name: str) -> set:
     return {row[1] for row in cur.fetchall() if row[5]}  # row[5] = pk (0 if not, else its position in the PK)
 
 
-def _all_foreign_keys(cur: Cursor, table_names: List[str]) -> List[str]:
-    """["table.from_col = ref_table.to_col", ...] across every table in this database."""
+def _all_foreign_keys(
+    cur: Cursor,
+    table_names: List[str],
+    column_ref: Callable[[str, str], str] = lambda table, column: f"{table}.{column}",
+) -> List[str]:
+    """["table.from_col = ref_table.to_col", ...] across every table in this database.
+
+    ``column_ref(table, column)`` renders one side of each pair (plain ``table.column`` by default).
+    """
     foreign_keys: List[str] = []
     for table_name in table_names:
         cur.execute(f"PRAGMA foreign_key_list('{table_name}')")
         for row in cur.fetchall():
             ref_table, from_col, to_col = row[2], row[3], row[4]
-            foreign_keys.append(f"{table_name}.{from_col} = {ref_table}.{to_col}")
+            foreign_keys.append(f"{column_ref(table_name, from_col)} = {column_ref(ref_table, to_col)}")
     return foreign_keys
 
 
@@ -370,6 +377,8 @@ def build_sql_context(
     descriptions_by_table: Dict[str, Dict[str, str]],
     values_by_column: Dict[Tuple[str, str], List[Any]],
     foreign_keys: List[str],
+    table_label: Callable[[str], str] = lambda table: table,
+    column_label: Callable[[str], str] = lambda column: column,
 ) -> str:
     """Per-table, per-column schema, plus a trailing "#### Foreign key" section:
 
@@ -399,16 +408,19 @@ def build_sql_context(
     text as YAML. Quoting here is minimal -- only when a value would otherwise be ambiguous or
     malformed on the page (an embedded newline, an empty value, or stray leading/trailing
     whitespace).
+
+    ``table_label``/``column_label`` render how each table/column name is displayed (bare by default; the
+    Spark dialect shows backtick-quoted, schema-qualified names).
     """
     lines: List[str] = ["#### Tables"]
     for table_name in table_names:
-        lines.append(f"- {table_name}:")
+        lines.append(f"- {table_label(table_name)}:")
         pk_columns = primary_keys_by_table.get(table_name, set())
         for column_name, data_type in column_types_by_table[table_name].items():
             description = descriptions_by_table.get(table_name, {}).get(column_name, "")
             values = values_by_column.get((table_name, column_name), [])
             type_display = f"{data_type} (primary key)" if column_name in pk_columns else data_type
-            lines.append(f"  - {column_name}:")
+            lines.append(f"  - {column_label(column_name)}:")
             lines.append(f"      data_type: {type_display}")
             lines.append(f"      description: {_render_scalar(description)}")
             lines.append("      values:")
@@ -428,19 +440,46 @@ def build_sql_context(
 class DbHandle:
     """Everything needed to answer questions against one database, computed once."""
 
-    def __init__(self, cur: Cursor, description_dir: Path, dscp: str = "name_or_col_dscp"):
+    def __init__(
+        self,
+        cur: Cursor,
+        description_dir: Path,
+        dscp: str = "name_or_col_dscp",
+        dialect: str = "sqlite",
+        db_id: Optional[str] = None,
+    ):
+        """``dialect="spark"`` (needs ``db_id``) renders the schema for Spark SQL: schema-qualified, backtick-quoted
+        table headings and column names, and the Spark column types the ``bird_sql`` server will actually load.
+        """
+        if dialect not in ("sqlite", "spark"):
+            raise ValueError(f"Unsupported dialect {dialect!r}; expected 'sqlite' or 'spark'")
+        if dialect == "spark" and not db_id:
+            raise ValueError("dialect='spark' requires db_id (the Spark schema name)")
         self.cur = cur
+        self.dialect = dialect
+        self.db_id = db_id
         self.table_names = _table_names(cur)
         self.column_types_by_table = {t: _column_types(cur, t) for t in self.table_names}
+        if dialect == "spark":
+            # Imported here: only the Spark dialect needs pandas/pyarrow.
+            from resources_servers.bird_sql.setup_bird_spark import spark_column_types
+
+            sqlite_path = Path(cur.execute("PRAGMA database_list").fetchall()[0][2])
+            self.column_types_by_table = spark_column_types(sqlite_path)
         dscp_fields = parse_dscp_fields(dscp)
         self.descriptions_by_table = {
             t: _column_descriptions(description_dir, t, dscp_fields) for t in self.table_names
         }
         self.primary_keys_by_table = {t: _primary_key_columns(cur, t) for t in self.table_names}
-        self.foreign_keys = _all_foreign_keys(cur, self.table_names)
+        self.foreign_keys = _all_foreign_keys(cur, self.table_names, self._column_ref)
         self.sampled_values = _sample_table_values(cur, self.table_names)
         corpus = _collect_column_values(cur, self.table_names)
         self.retriever = _build_retriever(corpus) if corpus else None
+
+    def _column_ref(self, table: str, column: str) -> str:
+        if self.dialect == "spark":
+            return f"`{self.db_id}`.`{table}`.`{column}`"
+        return f"{table}.{column}"
 
     def relevant_hits_for_question(self, question: str) -> List[Dict[str, str]]:
         return _relevant_hits_for_question(self.retriever, question) if self.retriever else []
@@ -455,4 +494,13 @@ class DbHandle:
             self.descriptions_by_table,
             values_by_column,
             self.foreign_keys,
+            **self._labels(),
         )
+
+    def _labels(self) -> Dict[str, Callable[[str], str]]:
+        if self.dialect == "spark":
+            return {
+                "table_label": lambda table: f"`{self.db_id}`.`{table}`",
+                "column_label": lambda column: f"`{column}`",
+            }
+        return {}

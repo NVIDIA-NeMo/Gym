@@ -7,6 +7,10 @@ SQLite database from the BIRD dev split, then comparing the result set against
 the ground-truth query's result set via unordered set equality (the official
 BIRD evaluator's rule).
 
+With ``dialect: spark`` the model is expected to write Spark SQL: it is executed on a local PySpark copy of
+the databases (see ``setup_bird_spark.py``) and its result set is compared against the original SQLite
+gold query's result set. The gold SQL is never transpiled.
+
 Only the model's query is scored. When the verifier itself cannot measure it (the
 database is missing or corrupt, the gold query cannot run, the executor crashes)
 the row keeps the model's answer, is masked and names ``failure_kind``
@@ -18,7 +22,7 @@ import logging
 import re
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
 from pydantic import ConfigDict
 
@@ -42,7 +46,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     observe_programmatic_grading,
 )
-from resources_servers.bird_sql.eval_utils import execute_and_compare
+from resources_servers.bird_sql.eval_utils import execute_and_compare, execute_and_compare_spark
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
 
 
@@ -114,6 +118,8 @@ class BirdSqlResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     name: str = "bird_sql"
     bird_sql_dir: str = "resources_servers/bird_sql/.bird_sql"
+    dialect: Literal["sqlite", "spark"] = "sqlite"
+    spark_warehouse_dir: str = "resources_servers/bird_sql/.bird_sql/spark_warehouse"
     max_concurrency: int = 32
     sql_execution_timeout_s: float = 30.0
 
@@ -148,11 +154,20 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        self._dev_databases_dir: Path = ensure_bird_sql(self._resolve_bird_sql_dir())
+        self._dev_databases_dir: Path = ensure_bird_sql(self._resolve_dir(self.config.bird_sql_dir))
         self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
+        self._spark_sessions: Dict[str, Any] = {}
+        if self.config.dialect == "spark":
+            # Imported here so the default SQLite path needs neither pandas nor pyspark/JVM.
+            from resources_servers.bird_sql.setup_bird_spark import ensure_bird_spark
 
-    def _resolve_bird_sql_dir(self) -> Path:
-        p = Path(self.config.bird_sql_dir)
+            self._spark_sessions = ensure_bird_spark(
+                self._dev_databases_dir, self._resolve_dir(self.config.spark_warehouse_dir)
+            )
+
+    @staticmethod
+    def _resolve_dir(path: str) -> Path:
+        p = Path(path)
         if not p.is_absolute():
             p = Path(__file__).parent.parent.parent / p
         return p
@@ -225,13 +240,23 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
             )
 
         try:
-            match, _gold, _pred, err = await execute_and_compare(
-                db_path=db_path,
-                gold_sql=body.gt_sql,
-                pred_sql=extracted_sql,
-                semaphore=self._semaphore,
-                timeout_s=self.config.sql_execution_timeout_s,
-            )
+            if self.config.dialect == "spark":
+                match, _gold, _pred, err = await execute_and_compare_spark(
+                    db_path=db_path,
+                    session=self._spark_sessions[body.db_id],
+                    gold_sql=body.gt_sql,
+                    pred_sql=extracted_sql,
+                    semaphore=self._semaphore,
+                    timeout_s=self.config.sql_execution_timeout_s,
+                )
+            else:
+                match, _gold, _pred, err = await execute_and_compare(
+                    db_path=db_path,
+                    gold_sql=body.gt_sql,
+                    pred_sql=extracted_sql,
+                    semaphore=self._semaphore,
+                    timeout_s=self.config.sql_execution_timeout_s,
+                )
         except Exception as e:
             logger.exception("BIRD verify execution error on id=%s db_id=%s: %s", body.id, body.db_id, e)
             return _verifier_failure(FailureCode.UNKNOWN_ERROR, f"BIRD verifier crashed: {type(e).__name__}", cause=e)
