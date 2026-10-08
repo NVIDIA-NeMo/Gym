@@ -1110,14 +1110,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             status="incomplete" if length_limited else None,
             incomplete_details={"reason": "max_output_tokens"} if length_limited else None,
         )
-        # TODO @bxyu-nvidia: Remove
-        # receipt = {
-        #     "response": response.model_dump(mode="json"),
-        #     "execution": {key: value for key, value in run_result.items() if not key.startswith("_ng_")},
-        # }
-        # pending = results_dir / "generation.json.partial"
-        # pending.write_text(json.dumps(receipt))
-        # pending.replace(results_dir / "generation.json")
         return response
 
     async def run(
