@@ -161,7 +161,9 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         "model_attempts": len((witness or {}).get("attempts", [])),
         "evidence": evidence,
         "artifact_report": report,
-        "health_report": str(health_report.relative_to(directory)) if health_inputs and not scenario.timeout_kind else None,
+        "health_report": str(health_report.relative_to(directory))
+        if health_inputs and not scenario.timeout_kind
+        else None,
         "hashes": {
             path.name: digest_file(path)
             for path in (
@@ -303,5 +305,10 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, TypeError, KeyError) as exc:
         print(f"runner_error: {exc}", file=sys.stderr)
         return 2
-    print(args.output.resolve() / "conformance_report.md")
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(
+            "The job summary links the uploaded report and probe logs (probes/conformance_report.md in the artifact)."
+        )
+    else:
+        print(args.output.resolve() / "conformance_report.md")
     return code
