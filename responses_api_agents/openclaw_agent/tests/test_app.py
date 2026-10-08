@@ -957,11 +957,22 @@ class TestConfigYaml:
         app_path = Path(__file__).resolve().parent.parent / "app.py"
         compile(app_path.read_text(), str(app_path), "exec")
 
-    def test_config_yaml_parses(self) -> None:
+    def test_default_config_selects_environment_sessions(self) -> None:
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "openclaw_agent.yaml"
         data = yaml.safe_load(cfg_path.read_text())
-        assert "openclaw_agent" in data
+        assert set(data) == {"openclaw_agent"}
+        inner = data["openclaw_agent"]["responses_api_agents"]["openclaw_agent"]
+        assert inner["entrypoint"] == "app.py"
+        assert inner["resources_server"] is None
+        assert inner["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
+        assert inner["model"] == "${policy_model_name}"
+
+    def test_local_config_yaml_parses(self) -> None:
+        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "openclaw_local_agent.yaml"
+        data = yaml.safe_load(cfg_path.read_text())
+        assert set(data) == {"openclaw_agent"}
         inner = data["openclaw_agent"]["responses_api_agents"]["openclaw_agent"]
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 32
         assert inner["command"] == "openclaw"
+        assert inner["resources_server"] == {"type": "resources_servers", "name": "???"}
