@@ -141,7 +141,7 @@ For benchmarks, run `gym eval prepare --benchmark my_eval` first to generate the
 
 ### 6. Generate Example Rollouts (Required for Behavior Changes)
 
-When environment or agent work changes runtime behavior, configure a model endpoint, run a representative rollout, and inspect the agent and verifier results. `gym env start` blocks the terminal, so run it in one terminal and `gym eval run` in a second:
+When environment or agent work changes runtime behavior (as defined in [Guiding Principles](#guiding-principles) and `AGENTS.md`), configure a model endpoint, run a representative rollout, and inspect the agent and verifier results. `gym env start` blocks the terminal, so run it in one terminal and `gym eval run` in a second:
 
 ```bash
 # Terminal 1 - starts all servers (blocks until stopped):
