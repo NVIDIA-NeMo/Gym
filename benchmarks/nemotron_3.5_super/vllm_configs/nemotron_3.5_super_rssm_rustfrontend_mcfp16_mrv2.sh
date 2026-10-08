@@ -20,8 +20,9 @@ GYM_MODEL_PARAMS=(
 # Not used when the model has no Mamba layers.
 export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
-# @bxyu-nvidia: V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
-export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_V2_MODEL_RUNNER=1
+
+export VLLM_USE_RUST_FRONTEND=1
 
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 # @bxyu-nvidia: We set --prefix-match-unit 128 because the Mooncake store prefill lookup gets more expensive the smaller this number is
@@ -43,7 +44,9 @@ VLLM_COMMON_ARGS=(
     --block-size 128
     --mamba-cache-mode align
     --mamba-backend flashinfer
-    --mamba-ssm-cache-dtype float32
+    --mamba-ssm-cache-dtype float16
+    --enable-mamba-cache-stochastic-rounding
+    --mamba-cache-philox-rounds 5
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
     --skip-mm-profiling
@@ -60,6 +63,10 @@ VLLM_COMMON_ARGS=(
 # @bxyu-nvidia: We set num_speculative_tokens_per_batch_size to 0 here since prefill does not need to speculate any tokens, it just needs to know that we are speculating.
 VLLM_PREFILL_ARGS=(
     --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS},\"num_speculative_tokens_per_batch_size\":[[1,1024,0]]}"
+    # MRV2 captures a one-token graph for the zero-draft schedule, but Mamba's
+    # full-graph capture requires 1 + num_speculative_tokens. Keep prefill
+    # piecewise until that dynamic-speculation capture path supports Mamba.
+    --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
     --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
