@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../../
+# Fork based on BenchFlow v0.6.3. Branch: `gym`
+benchflow @ git+https://github.com/ludwig-n/benchflow@a7ccd891e4fb924f616777b49ddebc295c4c2570
+pyyaml
