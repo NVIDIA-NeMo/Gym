@@ -22,6 +22,8 @@ override-dependencies = [
     "torchaudio; sys_platform == 'never'",
     "pycountry; sys_platform == 'never'",
     "wcwidth; sys_platform == 'never'",
+    "gprof2dot; sys_platform == 'never'",
+    "pathspec; sys_platform == 'never'",
 
     # Role-local repairs for legacy OSWorld dependency metadata.
     "grpcio-status==1.71.2",

@@ -96,6 +96,18 @@ jobs:
     with:
       base-ref: ${{ needs.pre-flight.outputs.base_ref }}
 
+  # P0 is published separately; requiring that check is a repository rules decision.
+  harness_conformance:
+    name: Harness conformance
+    needs: [pre-flight]
+    uses: ./.github/workflows/harness-conformance.yml
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    with:
+      base-ref: ${{ needs.pre-flight.outputs.base_ref }}
+
   container_build:
     name: Build Gym container
     needs: [pre-flight, classify_changes, unit_tests]
@@ -363,7 +375,7 @@ jobs:
   notify-failure:
     name: Notify test failure
     runs-on: ubuntu-latest
-    needs: [ephemeral-runner-routing, pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
+    needs: [ephemeral-runner-routing, pre-flight, classify_changes, unit_tests, harness_conformance, container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
     environment: main
     permissions: {}
     # Use the event directly: setup outputs are empty when setup fails.

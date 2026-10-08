@@ -24,6 +24,7 @@ import yaml
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
+    NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -505,6 +506,30 @@ class TestEnv:
         assert env["OPENAI_BASE_URL"] == "http://model/v1"
         assert provider["options"]["baseURL"] == "http://model/v1"
         assert provider["models"]["Qwen3.6-35B-A3B"]["limit"]["output"] == 131072
+
+    def test_model_server_replayed_reasoning_is_accepted_by_gym_chat_completions(self) -> None:
+        agent = _make_agent(model="m", model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            field = agent._build_opencode_config()["provider"]["nemo"]["models"]["m"]["interleaved"]["field"]
+
+        # OpenCode replays an assistant turn after a tool call with the interleaved field set.
+        replayed = {
+            "role": "assistant",
+            "content": "",
+            field: "thinking",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "task", "arguments": "{}"}}],
+        }
+        body = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {
+                "model": "m",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    replayed,
+                    {"role": "tool", "tool_call_id": "c1", "content": "done"},
+                ],
+            }
+        )
+        assert body.messages[1]["reasoning_content"] == "thinking"
 
 
 class TestWorkspaceRoot:
