@@ -60,17 +60,15 @@ source .venv/bin/activate
 ```
 
 NeMo User Sim samples personas from the extended Nemotron-Personas dataset on NGC. If `en_US` is not already
-cached under `~/.data-designer/managed-assets/datasets/`, configure the NGC CLI:
+cached under `~/.data-designer/managed-assets/datasets/`, export an NGC API key:
 
 ```bash
-uvx --from "git+https://github.com/NVIDIA-NeMo/UserSim.git@a5f676bf6dc5a73914c8a0860f97c10dd2c214ee" \
-  usersim setup-ngc
 export NGC_CLI_API_KEY="<your-ngc-key>"
 ```
 
-See the [NGC CLI installation guide](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#installing-ngc-catalog-cli)
-and [API key guide](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#ngc-api-keys) if setup needs
-manual credentials.
+Preparation installs the pinned NGC CLI, downloads the pinned persona asset, verifies its checksum, and caches it
+for later runs. See the [API key guide](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#ngc-api-keys)
+to create a key. If organization discovery fails, also export `NGC_CLI_ORG`.
 
 Create or update `env.yaml` in the repository root:
 
@@ -205,9 +203,9 @@ gym eval run \
 
 ## Next steps
 
-- [Inspect NeMo User Sim rollouts](/tutorials/evaluation-tutorials/nemo-user-sim-rollout-inspection) for
+- [Inspect NeMo User Sim rollouts](/tutorials/evaluation-tutorials/nemo-user-sim-rollout-collection/rollout-inspection) for
   conversations, tools, scores, invocations, and model-call captures.
-- [Troubleshoot NeMo User Sim rollouts](/tutorials/evaluation-tutorials/nemo-user-sim-rollout-troubleshooting) for
+- [Troubleshoot NeMo User Sim rollouts](/tutorials/evaluation-tutorials/nemo-user-sim-rollout-collection/rollout-troubleshooting) for
   collection, simulation, and grading failures.
-- [NeMo User Sim integration reference](/tutorials/evaluation-tutorials/nemo-user-sim-integration-reference) for
+- [NeMo User Sim integration reference](/tutorials/evaluation-tutorials/nemo-user-sim-rollout-collection/integration-reference) for
   architecture, ownership, contracts, and field semantics.
