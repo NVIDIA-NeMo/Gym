@@ -19,6 +19,7 @@ from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig, _unique_usage_messages
 
@@ -189,7 +190,11 @@ def setup():
 @pytest.mark.parametrize("stage", ["prepare", "install"])
 @pytest.mark.parametrize("error_type", ["timeout", "sandbox"])
 @pytest.mark.parametrize("owned", [False, True])
-async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage, error_type, owned):
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [("bootstrap output", "provider failed"), (None, "provider failed"), ("bootstrap output", None), (None, None)],
+)
+async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage, error_type, owned, stdout, stderr):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}})
     body = seed()
@@ -199,14 +204,17 @@ async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage
         body = body.model_copy(update={"sandbox_access": None})
         sandbox.start = AsyncMock()
     ok = SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
-    error = SimpleNamespace(return_code=0, error_type=error_type, stdout="bootstrap output", stderr="provider failed")
+    error = SandboxExecResult(return_code=0, error_type=error_type, stdout=stdout, stderr=stderr)
     sandbox.exec.side_effect = ([ok] if owned else []) + ([error, ok] if stage == "prepare" else [ok, error, ok])
     with patch("responses_api_agents.openclaw_agent.app.AsyncSandbox", return_value=sandbox) as sandbox_class:
         sandbox_class.connect = AsyncMock(return_value=sandbox)
         with pytest.raises(RuntimeError, match=f"error={error_type}") as failed:
             await agent.seed_agent_session(request, body)
-    assert "bootstrap output" in str(failed.value)
-    assert "provider failed" in str(failed.value)
+    assert "exit 0" in str(failed.value)
+    if stdout is not None:
+        assert stdout in str(failed.value)
+    if stderr is not None:
+        assert stderr in str(failed.value)
     assert not request.session
     sandbox.launch.assert_not_awaited()
     if owned:
