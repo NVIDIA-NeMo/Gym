@@ -233,6 +233,49 @@ def test_env_wins_over_yaml(clean_otel_env):
     assert os.environ["OTEL_SERVICE_NAME"] == "set-by-hand"
 
 
+def test_lens_fallback_env_wins_over_yaml(clean_otel_env):
+    """A `NEMO_LENS_*` setting must survive a YAML value for the same field.
+
+    Lens reads `NEMO_GYM_OTEL_*` before `NEMO_LENS_*`, so exporting the YAML value under the
+    Gym prefix would silently override the user's fallback. That is how a job-wide
+    `NEMO_LENS_SPAN_GROUPS` or `NEMO_LENS_EXPORTER` used to vanish in every Gym server.
+    """
+    clean_otel_env.setenv("NEMO_LENS_EXPORTER", "otlp")
+    clean_otel_env.setenv("NEMO_LENS_SPAN_GROUPS", "per_rollout")
+    clean_otel_env.setenv("NEMO_LENS_METRICS_ENABLED", "0")
+
+    configure_telemetry_env(
+        TelemetryConfig(enabled=True, exporter="console", span_groups="all", metrics_enabled=True, logs_enabled=True)
+    )
+
+    for key in ("EXPORTER", "SPAN_GROUPS", "METRICS_ENABLED"):
+        assert f"NEMO_GYM_OTEL_{key}" not in os.environ, f"NEMO_GYM_OTEL_{key} would shadow NEMO_LENS_{key}"
+    assert is_telemetry_metrics_enabled() is False
+    # A field the user did not set through lens still carries the YAML value.
+    assert os.environ["NEMO_GYM_OTEL_LOGS_ENABLED"] == "1"
+
+
+def test_lens_fallback_env_reaches_the_resolved_lens_config(clean_otel_env):
+    """What a server process actually resolves, through lens's own prefix lookup."""
+    lens = pytest.importorskip("nemo.lens")
+    clean_otel_env.setenv("NEMO_LENS_EXPORTER", "otlp")
+    clean_otel_env.setenv("NEMO_LENS_SPAN_GROUPS", "per_rollout")
+
+    configure_telemetry_env(TelemetryConfig(enabled=True, exporter="console", span_groups="all"))
+
+    config = lens.NemoLensConfig.from_env(prefix="NEMO_GYM_OTEL", fallback_prefix="NEMO_LENS")
+    assert config.exporter == "otlp"
+    assert config.span_groups == "per_rollout"
+
+
+def test_lens_run_id_is_shared_rather_than_replaced(clean_otel_env):
+    """A run id set through lens names the run; Gym must not mint a second one beside it."""
+    clean_otel_env.setenv("NEMO_LENS_RUN_ID", "outer-run")
+
+    assert configure_telemetry_env(TelemetryConfig(enabled=True)) == "outer-run"
+    assert "NEMO_GYM_OTEL_RUN_ID" not in os.environ
+
+
 def test_disabled_config_produces_no_run_id(clean_otel_env):
     assert configure_telemetry_env(TelemetryConfig(enabled=False)) is None
     assert "NEMO_GYM_OTEL_RUN_ID" not in os.environ

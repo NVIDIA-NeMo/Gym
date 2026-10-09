@@ -90,9 +90,19 @@ config file.
 | `NEMO_GYM_OTEL_RUN_ID` | `run_id` |
 | `OTEL_SERVICE_NAME` | `service_name` |
 
-`NEMO_LENS_*` works as a fallback for any of the `NEMO_GYM_OTEL_*` names, so
-`NEMO_LENS_ENABLED=1` turns telemetry on. A `NEMO_GYM_OTEL_*` variable beats its
+For the settings `nemo-lens` itself reads (`enabled`, `span_groups`, `exporter`,
+`traces_enabled`, `metrics_enabled`, `logs_enabled`, and `run_id`), `NEMO_LENS_*` works as a
+fallback, so `NEMO_LENS_ENABLED=1` turns telemetry on. The memory profiling settings have no
 `NEMO_LENS_*` equivalent.
+
+The order of precedence is:
+
+1. `NEMO_GYM_OTEL_*`
+2. `NEMO_LENS_*`
+3. The `telemetry:` config block
+
+A `NEMO_LENS_*` variable set by a job that runs NeMo Gym alongside other NeMo libraries, such
+as NeMo RL, therefore applies to NeMo Gym's servers as well.
 
 Boolean variables accept `1`, `true`, `yes`, `on` and their negations.
 
