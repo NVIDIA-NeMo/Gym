@@ -227,9 +227,11 @@ Preserve model HTTP status and error bodies for context-limit handling and retri
 | Outcome | Handling |
 | --- | --- |
 | Model or configured execution limit | Preserve partial work as incomplete; it may remain gradable. |
-| Setup, provider, API, or runtime failure | Propagate the error without benchmark verification. |
+| Setup, provider, API, or runtime failure | Preserve failure evidence; sandbox sessions propagate the error without benchmark verification. |
 | Completed verification | Report the score, including valid zeros. |
 | Missing or inconclusive verification | Report missing measurement separately from scored attempts. |
+
+Local compatibility paths can have a different evidence contract. For example, [Hermes's local `/run`](https://github.com/NVIDIA-NeMo/Gym/blob/77509af61efe53e6bb01244209e2a6e9c9e8a403/responses_api_agents/hermes_agent/README.md#local-compatibility) retains terminal provider failures through verification, then returns `mask_sample: true` and `failure_kind: agent_request_failed`, even if the verifier awards a positive reward. These failed rollouts remain excluded from scores; Hermes sandbox sessions keep their retryable failure path.
 
 Reward `1` or HTTP `200` alone does not prove a healthy episode.
 
