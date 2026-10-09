@@ -41,7 +41,7 @@ import orjson
 
 # Increment when fingerprint canonicalization or hash layout changes.
 # Resolvers ignore entries stamped with a different version.
-FINGERPRINT_VERSION = 3
+FINGERPRINT_VERSION = 4
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
@@ -118,6 +118,31 @@ def canonicalize_tool_arguments(value: Any) -> str:
     else:
         parsed = value
     return _canonical_json(parsed)
+
+
+def canonicalize_tool_call_id(value: Any) -> str:
+    """Normalize the one lossless tool-call ID rewrite used by OpenClaw.
+
+    vLLM emits IDs such as ``chatcmpl-tool-<hex>``. OpenClaw strips the two
+    separators and echoes ``chatcmpltool<hex>`` in both the assistant tool call
+    and its tool result. The suffix still identifies the exact call, so these
+    two spellings are equivalent lineage witnesses.
+
+    Keep this deliberately narrower than general punctuation stripping. IDs
+    outside this generated vLLM shape remain byte-for-byte significant.
+    """
+    call_id = str(value or "")
+    verbose_prefix = "chatcmpl-tool-"
+    compact_prefix = "chatcmpltool"
+    if call_id.startswith(verbose_prefix):
+        suffix = call_id[len(verbose_prefix) :]
+    elif call_id.startswith(compact_prefix):
+        suffix = call_id[len(compact_prefix) :]
+    else:
+        return call_id
+    if suffix and all(character in "0123456789abcdefABCDEF" for character in suffix):
+        return f"{compact_prefix}{suffix}"
+    return call_id
 
 
 def _is_assistant_authored(message: dict) -> bool:
@@ -228,7 +253,7 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
             name = f"{message['namespace']}__{name}"
         tools.append(
             (
-                str(message.get("call_id") or message.get("id") or ""),
+                canonicalize_tool_call_id(message.get("call_id") or message.get("id")),
                 name,
                 canonicalize_tool_arguments(message.get("arguments")),
             )
@@ -239,7 +264,7 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 tools.append(
                     (
-                        str(block.get("id") or ""),
+                        canonicalize_tool_call_id(block.get("id")),
                         str(block.get("name", "")),
                         canonicalize_tool_arguments(block.get("input")),
                     )
@@ -248,7 +273,7 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
         function = (call or {}).get("function") or {}
         tools.append(
             (
-                str((call or {}).get("id") or ""),
+                canonicalize_tool_call_id((call or {}).get("id")),
                 str(function.get("name", "")),
                 canonicalize_tool_arguments(function.get("arguments")),
             )
@@ -268,7 +293,7 @@ def _tool_results_of(message: dict) -> list[tuple[str, str]]:
         output = message.get("output")
         parts.append(
             (
-                str(message.get("call_id") or message.get("id") or ""),
+                canonicalize_tool_call_id(message.get("call_id") or message.get("id")),
                 output if isinstance(output, str) else _canonical_json(output),
             )
         )
@@ -276,7 +301,7 @@ def _tool_results_of(message: dict) -> list[tuple[str, str]]:
         content = message.get("content")
         parts.append(
             (
-                str(message.get("tool_call_id") or ""),
+                canonicalize_tool_call_id(message.get("tool_call_id")),
                 content if isinstance(content, str) else _canonical_json(content),
             )
         )
@@ -286,7 +311,7 @@ def _tool_results_of(message: dict) -> list[tuple[str, str]]:
             if isinstance(block, dict) and block.get("type") == "tool_result":
                 inner = block.get("content")
                 payload = inner if isinstance(inner, str) else _canonical_json(inner)
-                parts.append((str(block.get("tool_use_id") or block.get("id") or ""), payload))
+                parts.append((canonicalize_tool_call_id(block.get("tool_use_id") or block.get("id")), payload))
     return parts
 
 

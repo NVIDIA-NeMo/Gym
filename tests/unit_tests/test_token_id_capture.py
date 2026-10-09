@@ -2673,6 +2673,45 @@ def test_wrapped_reasoning_the_chat_harness_drops_does_not_break_resolution():
     assert lineage.resolve(sent + [changed]).status == ParentResolutionStatus.UNRESOLVED
 
 
+def test_openclaw_tool_call_id_rewrite_does_not_break_resolution():
+    """Resolve the lossless vLLM tool-call ID rewrite observed in OpenClaw."""
+    sent = [{"role": "user", "content": "q"}]
+    served_id = "chatcmpl-tool-863127ed64b40525"
+    echoed_id = "chatcmpltool863127ed64b40525"
+    served = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": served_id,
+                "function": {"name": "exec", "arguments": '{"command":"whoami"}'},
+            }
+        ],
+    }
+    echoed = {
+        **served,
+        "tool_calls": [{**served["tool_calls"][0], "id": echoed_id}],
+    }
+    lineage = RolloutLineage()
+    lineage.record("call-1", sent + [served], cum_tokens=[1, 2], digest="d", context_len=len(sent))
+
+    resolved = lineage.resolve(sent + [echoed, {"role": "tool", "tool_call_id": echoed_id, "content": "root"}])
+
+    assert resolved.status == ParentResolutionStatus.RESOLVED
+    assert resolved.match is not None and resolved.match.model_call_id == "call-1"
+
+    changed = {
+        **echoed,
+        "tool_calls": [
+            {
+                **echoed["tool_calls"][0],
+                "id": "chatcmpltoolffffffffffffffff",
+            }
+        ],
+    }
+    assert lineage.resolve(sent + [changed]).status == ParentResolutionStatus.UNRESOLVED
+
+
 @pytest.mark.parametrize(
     "before, after",
     [
