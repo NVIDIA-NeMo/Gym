@@ -84,6 +84,10 @@ class ScicodeVerifyRequest(ScicodeRunRequest, BaseVerifyRequest):
 
 
 class ScicodeVerifyResponse(BaseVerifyResponse):
+    # Retain the agent's compact accounting records through verification. None
+    # distinguishes historical final-step-only rollouts from whole-problem usage.
+    token_usage_version: Optional[int] = None
+    step_usage: Optional[List[dict]] = None
     # Declared so it survives into the rollout output (identifies the problem); the request's
     # sub_steps/solutions are intentionally not carried through to keep rollout rows small.
     problem_id: str = ""
@@ -102,6 +106,7 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
 
 
 class ScicodeResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: ScicodeResourcesServerConfig
     _resolved_test_data_path: Optional[str] = PrivateAttr(default=None)
     _resolved_grading_interpreters: Optional[List[tuple[str, str]]] = PrivateAttr(default=None)

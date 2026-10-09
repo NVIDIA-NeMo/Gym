@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -93,6 +94,7 @@ class RolloutTokenCapture:
         *,
         prefix_token_ids: list[int] | None = None,
         stream: bool = False,
+        weight_version: int | None = None,
     ) -> ActiveCall:
         """Admit a typed gate contract and stamp its generation weight version.
 
@@ -103,6 +105,10 @@ class RolloutTokenCapture:
         When the admission carries the prefix inline the argument may be omitted;
         if given it must match. A text root accepts no prefix.
         Violations are caller bugs and raise ``CaptureError``; they never poison the call.
+
+        ``weight_version`` is supplied when engine-finished metadata owns the
+        authoritative per-call epoch. Other worker capture paths leave it unset
+        and read the serving worker's current version provider instead.
         """
         if not isinstance(admission, CaptureAdmission):
             raise TypeError("admission must be a CaptureAdmission")
@@ -112,9 +118,10 @@ class RolloutTokenCapture:
                 "token capture does not support streaming responses"
             )
         resolved_prefix = self._resolve_prefix(admission, prefix_token_ids)
-        weight_version = self._weight_version_fn()
+        if weight_version is None:
+            weight_version = self._weight_version_fn()
         if type(weight_version) is not int or weight_version < 0:
-            raise CaptureError(f"weight_version_fn must return a non-negative int, got {weight_version!r}")
+            raise CaptureError(f"weight_version must be a non-negative int, got {weight_version!r}")
         return ActiveCall(admission=admission, weight_version=weight_version, prefix_token_ids=resolved_prefix)
 
     @staticmethod
@@ -152,8 +159,13 @@ class RolloutTokenCapture:
         generated_token_ids: list[int],
         generated_logprobs: list[float],
         extras: dict[str, Any] | None = None,
+        attachments: Mapping[str, Any] | None = None,
     ) -> CommitCoords:
-        """Stage a normalized delta before returning lightweight coordinates."""
+        """Stage a normalized delta before returning lightweight coordinates.
+
+        ``attachments`` are opaque framework payloads staged in the same sink
+        write as the record; they are forwarded untouched and never digested.
+        """
         self._claim_completion(call)
         admission = call.admission
         try:
@@ -222,7 +234,14 @@ class RolloutTokenCapture:
             # (a child is only admitted after its parent's coords returned).
             # Serializing here would head-of-line block every concurrent
             # completion on the worker behind one sink round trip.
-            result = self._sink.stage(record)
+            # Legacy text-only sinks accept only ``stage(record)``; the keyword
+            # is passed exactly when the caller supplied attachments so such a
+            # sink fails loudly (TypeError -> capture_failed) instead of having
+            # its attachments silently dropped by a retry without them.
+            if attachments is None:
+                result = self._sink.stage(record)
+            else:
+                result = self._sink.stage(record, attachments=attachments)
             if not isinstance(result, StageResult):
                 raise TypeError(f"StagingSink.stage returned {type(result).__name__}, expected StageResult")
         except Exception:
@@ -262,7 +281,9 @@ class RolloutTokenCapture:
     def complete_call_from_response(
         self,
         call: ActiveCall,
-        response_payload: dict[str, Any],
+        response_payload: Any,
+        *,
+        attachments: Mapping[str, Any] | None = None,
     ) -> CommitCoords:
         """Extract engine-native material and stage it as one atomic lifecycle step."""
         if self._adapter is None:
@@ -287,6 +308,7 @@ class RolloutTokenCapture:
             generated_token_ids=generated_token_ids,
             generated_logprobs=generated_logprobs,
             extras=extras,
+            attachments=attachments,
         )
 
     def fail_call(self, call: ActiveCall, *, reason: str) -> CommitCoords:

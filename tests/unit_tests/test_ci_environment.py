@@ -15,7 +15,6 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CICD_MAIN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "cicd-main.yml"
 CLASSIFY_CHANGES_ACTION = REPO_ROOT / ".github" / "actions" / "classify-changes" / "action.yml"
-IS_MAIN_OR_RELEASE_REF_ACTION = REPO_ROOT / ".github" / "actions" / "is-main-or-release-ref" / "action.yml"
 FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "full-test-suite.yml"
 GPU_E2E_CONFIG = REPO_ROOT / "tests" / "e2e" / "gpu_e2e.yaml"
 GPU_E2E_DATASET = REPO_ROOT / "tests" / "e2e" / "gpu_smoke.jsonl"
@@ -190,6 +189,43 @@ def test_github_full_test_jobs_reclaim_disk_before_dependency_restore() -> None:
             assert section.index("reclaim_runner_disk.sh") < section.index("Cache uv dependencies")
 
 
+def test_scheduled_cicd_runs_do_not_cancel_in_progress() -> None:
+    cicd_workflow = CICD_MAIN_WORKFLOW.read_text()
+    unit_workflow = UNIT_TEST_WORKFLOW.read_text()
+
+    assert (
+        "concurrency:\n"
+        "  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}\n"
+        "  cancel-in-progress: ${{ github.event_name != 'schedule' }}\n" in cicd_workflow
+    )
+    assert "concurrency:" not in unit_workflow
+
+
+def test_coverage_gate_compares_fractional_percentages() -> None:
+    import tomllib
+
+    coverage_report = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["tool"]["coverage"]["report"]
+
+    assert coverage_report["precision"] == 2
+    assert coverage_report["fail_under"] == 95.0
+
+
+def test_full_test_suite_installs_telemetry_extra_for_coverage_gate() -> None:
+    # The full test suite measures coverage against the repo-wide gate
+    # (pyproject.toml fail_under). The tests/unit_tests/telemetry tests are gated on
+    # nemo-lens (requires_lens), which only the telemetry extra installs. If the
+    # full-test-suite install omits that extra, those tests skip, the telemetry
+    # modules count as uncovered, and the gate fails below its threshold.
+    workflow = FULL_TEST_WORKFLOW.read_text()
+
+    assert "uv sync" in workflow, "full test suite must install dependencies with uv sync"
+    sync_lines = [line for line in workflow.splitlines() if "uv sync" in line]
+    assert any("--extra telemetry" in line for line in sync_lines), (
+        "full-test-suite.yml must sync the telemetry extra so the nemo-lens-gated "
+        "telemetry tests run and the coverage gate is not starved: " + repr(sync_lines)
+    )
+
+
 def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
     results_path = (
@@ -211,7 +247,15 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "  pull-requests: read\n" in workflow
     assert "id-token:" not in workflow
     assert "uses: ./.github/workflows/unit-tests.yml" in workflow
-    assert workflow.count("base-ref: ${{ needs.pre-flight.outputs.base_ref }}") == 2
+    jobs = _cicd_main_jobs()
+    base_ref = "${{ needs.pre-flight.outputs.base_ref }}"
+    for job in ("unit_tests", "harness_conformance"):
+        assert jobs[job]["with"]["base-ref"] == base_ref
+    assert [
+        step["with"]["base-ref"]
+        for step in jobs["classify_changes"]["steps"]
+        if step.get("uses") == "./.github/actions/classify-changes"
+    ] == [base_ref]
     assert "uses: ./.github/actions/classify-changes" in workflow
     assert "uses: ./.github/actions/test-template" in workflow
     assert "base-ref: ${{ needs.pre-flight.outputs.base_ref }}" in workflow
@@ -224,7 +268,12 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "if: false" not in workflow
     assert "Temporarily disabled" not in workflow
     assert "needs.pre-flight.outputs.docs_only" not in workflow
-    assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
+    runner_label = (
+        "runs-on: ${{ startsWith(needs.pre-flight.outputs.runner_prefix, 'ephe-v2-') "
+        "&& format('{0}-a{1}', needs.pre-flight.outputs.runner_prefix, github.run_attempt) "
+        "|| needs.pre-flight.outputs.runner_prefix }}"
+    )
+    assert runner_label in workflow
     assert "matrix:" in workflow
     assert "script: ${{ matrix.script }}" in workflow
     assert "test-type: ${{ matrix.test_type }}" in workflow
@@ -241,7 +290,12 @@ def test_cicd_container_build_pushes_sha_image_after_unit_tests() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
 
     assert "name: Build Gym container" in workflow
-    assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
+    runner_label = (
+        "runs-on: ${{ startsWith(needs.pre-flight.outputs.runner_prefix, 'ephe-v2-') "
+        "&& format('{0}-a{1}', needs.pre-flight.outputs.runner_prefix, github.run_attempt) "
+        "|| needs.pre-flight.outputs.runner_prefix }}"
+    )
+    assert runner_label in workflow
     assert "uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f" in workflow
     assert "uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25" in workflow
     assert "build-contexts: nemo-gym=." in workflow
@@ -388,8 +442,8 @@ def test_cicd_docs_only_nightly_jobs_override_skipped_unit_status() -> None:
 def test_notify_failure_ref_check_allows_only_main_and_release_branches(
     ref: str, allowed: str, tmp_path: Path
 ) -> None:
-    action = yaml.safe_load(IS_MAIN_OR_RELEASE_REF_ACTION.read_text())
-    (script,) = (step["run"] for step in action["runs"]["steps"] if step.get("name") == "Check ref")
+    jobs = yaml.safe_load(CICD_MAIN_WORKFLOW.read_text())["jobs"]
+    (script,) = (step["run"] for step in jobs["notify-failure"]["steps"] if step.get("id") == "ref_check")
 
     output_path = tmp_path / f"github_output_{ref}"
     output_path.write_text("")
@@ -403,26 +457,39 @@ def test_notify_failure_ref_check_allows_only_main_and_release_branches(
     assert f"allowed={allowed}" in output_path.read_text(), (result.stdout, result.stderr)
 
 
-def test_notify_failure_uses_shared_ref_check_action() -> None:
-    for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
-        jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
-        steps = jobs["notify-failure"]["steps"]
-        (ref_check_step,) = (step for step in steps if step.get("name") == "Check ref is main or a release branch")
-
-        assert ref_check_step["uses"] == "./.github/actions/is-main-or-release-ref", workflow_file
-        assert any(step.get("name") == "Checkout repository" for step in steps), workflow_file
-
-
-def test_notification_workflows_pin_slack_rejection_handling() -> None:
+def test_notification_workflows_use_pinned_shared_summary_without_checkout() -> None:
     expected_action = (
-        "NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@f07495d7a01aad5578a407db8e0c4f4e395375f6"
+        "NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@631c404d00a9e60afc591cd071d35d2e18f82fc6"
     )
+    ref_scripts = []
     for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
         jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
-        steps = jobs["notify-failure"]["steps"]
+        notify = jobs["notify-failure"]
+        steps = notify["steps"]
+        (ref_step,) = (step for step in steps if step.get("id") == "ref_check")
         (notify_step,) = (step for step in steps if step.get("name") == "Notify Gym alerts channel")
 
+        ref_scripts.append(ref_step["run"])
+        assert ref_step["env"] == {"REF": "${{ github.ref_name }}"}
+        assert notify_step["if"] == "steps.ref_check.outputs.allowed == 'true'"
         assert notify_step["uses"] == expected_action, workflow_file
+        assert notify_step["with"] == {
+            "needs-json": "${{ toJSON(needs) }}",
+            "webhook": "${{ secrets.SLACK_WEBHOOK }}",
+        }
+        assert notify["environment"] == "main"
+        assert notify["permissions"] == {}
+        assert all("checkout" not in step.get("uses", "") for step in steps)
+        excluded_jobs = {"notify-failure", "merge-queue-notification"}
+        if workflow_file == CICD_MAIN_WORKFLOW:
+            # Harness P0 is reported separately and is not part of Gym's nightly gate.
+            excluded_jobs.add("harness_conformance")
+        assert set(notify["needs"]) == set(jobs) - excluded_jobs
+        assert "failure()" in notify["if"]
+        assert "always() && !cancelled()" in notify["if"]
+        assert "needs." not in notify["if"]
+        assert "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'" in notify["if"]
+    assert ref_scripts[0] == ref_scripts[1]
 
 
 def test_full_test_suite_runs_on_schedule_and_dispatch_not_push() -> None:
@@ -464,7 +531,12 @@ def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
 
     for path in ("**.md", "fern/**", "LICENSE", "benchmarks/**"):
         assert path in action
-    for path in ("resources_servers/**", "responses_api_agents/**", "responses_api_models/**"):
+    for path in (
+        "resources_servers/**",
+        "responses_api_agents/**",
+        "responses_api_models/**",
+        "environment_servers/**",
+    ):
         assert path in action
 
     assert "uses: ./.github/actions/classify-changes" in unit_workflow
@@ -623,7 +695,7 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "--max-output-tokens 4096" in script
 
     env_config = (REPO_ROOT / "tests" / "e2e" / "inference_provider_env.yaml").read_text()
-    assert "max_steps: 2" in env_config
+    assert "max_policy_calls: 2" in env_config
 
 
 def _valid_inference_provider_rollout() -> dict:
@@ -759,14 +831,12 @@ def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -
     bin_dir.mkdir()
     capture_path = tmp_path / "ng-test-all.args"
 
+    # setup_dev.sh reuses a uv already on PATH when it is the pinned version, so the
+    # test puts a fake pinned uv first. The fake uv's `sync` is a no-op so it works
+    # against this bare repo (which intentionally has no pyproject.toml).
     _write_executable(
-        bin_dir / "curl",
+        bin_dir / "uv",
         """#!/usr/bin/env bash
-cat <<'INSTALL'
-set -eu
-mkdir -p "${UV_UNMANAGED_INSTALL}"
-cat > "${UV_UNMANAGED_INSTALL}/uv" <<'UV'
-#!/usr/bin/env bash
 set -eu
 case "${1:-}" in
     --version) printf '%s\\n' 'uv 0.11.29' ;;
@@ -778,12 +848,9 @@ case "${1:-}" in
         : > "${venv_dir}/bin/python"
         chmod +x "${venv_dir}/bin/python"
         ;;
-    sync) ;;
+    lock|sync) ;;
     *) printf 'unexpected fake uv command: %s\\n' "$*" >&2; exit 2 ;;
 esac
-UV
-chmod +x "${UV_UNMANAGED_INSTALL}/uv"
-INSTALL
 """,
     )
     _write_executable(
@@ -830,3 +897,107 @@ def test_server_tests_rejects_unsafe_venv_root(venv_root: str) -> None:
 
     assert result.returncode == 2
     assert f"GYM_CI_UV_VENV_DIR must be an absolute non-root path: {venv_root}" in result.stderr
+
+
+def test_setup_dev_reuses_pinned_uv_and_syncs_offline_in_container() -> None:
+    # setup_dev.sh reuses a present uv when it is the pinned version (baked CI
+    # image or a runner that ships it) and only downloads the pinned uv when it
+    # is absent or wrong; in the container (NEMO_GYM_CONTAINER=1) it syncs
+    # offline from the pre-populated cache.
+    setup_dev = SETUP_DEV.read_text()
+
+    assert "command -v uv >/dev/null 2>&1" in setup_dev
+    assert "setup_uv_sync_args=(--offline)" in setup_dev
+    assert "setup_uv_sync_args=()" in setup_dev
+
+
+def test_lint_reuses_pre_commit_on_path() -> None:
+    # lint.sh reuses a pre-commit already on PATH (the offline/container dev
+    # environment); otherwise it installs the pinned pre-commit (version from
+    # uv.lock) into an isolated venv. It does not use uv or setup_dev.sh.
+    lint = (REPO_ROOT / "scripts" / "ci" / "lint.sh").read_text()
+
+    assert "command -v pre-commit" in lint
+    assert "uv.lock" in lint
+    assert "uv sync" not in lint
+    assert "setup_dev.sh" not in lint
+
+
+def test_dockerfile_seeds_runtime_uv_cache_for_offline_ci() -> None:
+    # The release image must pre-populate the runtime uv cache with the full
+    # dependency set (project + dev extra) so setup_dev.sh's `uv sync --offline`
+    # resolves entirely from the cache in a fresh venv (e.g. ray, pytest).
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+
+    assert "ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv" in dockerfile
+    assert "--extra vllm --extra telemetry --extra dev" in dockerfile
+
+
+def test_dockerfile_seeds_pre_commit_hook_cache_for_offline_lint() -> None:
+    # lint.sh's offline branch reuses the baked pre-commit executable, but
+    # `pre-commit run` also needs the hook repositories and per-hook
+    # environments declared in .pre-commit-config.yaml: without a seeded
+    # PRE_COMMIT_HOME, the first lint run in a clean container still clones
+    # the hook repos from GitHub and pip-installs the local hooks'
+    # dependencies from PyPI. The release image must seed the hook cache at
+    # build time and leave it writable by the runtime UID (asserted by the
+    # non-root smoke test).
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+
+    assert "ENV PRE_COMMIT_HOME=/opt/nemo-gym/cache/pre-commit" in dockerfile
+    seed_cache_start = dockerfile.index("RUN git init --quiet")
+    install_hooks = dockerfile.index("pre-commit install-hooks", seed_cache_start)
+    remove_git_dir = dockerfile.index("rm -rf .git", install_hooks)
+    assert seed_cache_start < install_hooks < remove_git_dir
+    assert 'chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${PRE_COMMIT_HOME}"' in dockerfile
+    assert 'test -w "${PRE_COMMIT_HOME}"' in dockerfile
+
+
+@pytest.mark.parametrize("container", [False, True])
+@pytest.mark.parametrize("lock_status", [0, 1])
+def test_setup_dev_checks_lock_before_sync(tmp_path: Path, container: bool, lock_status: int) -> None:
+    repo_root = tmp_path / "repo"
+    ci_dir = repo_root / "scripts" / "ci"
+    ci_dir.mkdir(parents=True)
+    shutil.copy2(SETUP_DEV, ci_dir / "setup_dev.sh")
+    shutil.copy2(REPO_ROOT / ".python-version", repo_root / ".python-version")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture = tmp_path / "uv.args"
+    _write_executable(
+        bin_dir / "uv",
+        """#!/usr/bin/env bash
+set -eu
+case "$1" in
+    --version) echo 'uv 0.11.29' ;;
+    cache) echo "${UV_CACHE_DIR}" ;;
+    lock) echo "$*" >> "${GYM_CI_CAPTURE}"; exit "${LOCK_STATUS}" ;;
+    sync) echo "$*" >> "${GYM_CI_CAPTURE}" ;;
+    *) echo "unexpected uv command: $*" >&2; exit 2 ;;
+esac
+""",
+    )
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    _write_executable(venv / "bin" / "python", "#!/usr/bin/env bash\nexit 0\n")
+    (venv / "bin" / "activate").write_text("")
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "GYM_CI_DEV_VENV_DIR": str(venv),
+            "UV_CACHE_DIR": str(tmp_path / "cache"),
+            "GYM_CI_CAPTURE": str(capture),
+            "LOCK_STATUS": str(lock_status),
+            "NEMO_GYM_CONTAINER": "1" if container else "0",
+        }
+    )
+
+    result = subprocess.run(["bash", str(ci_dir / "setup_dev.sh")], capture_output=True, text=True, env=env)
+
+    assert result.returncode == lock_status, result.stderr
+    offline = " --offline" if container else ""
+    expected = [f"lock --check{offline}"]
+    if lock_status == 0:
+        expected.append(f"sync --extra dev{offline}")
+    assert capture.read_text().splitlines() == expected

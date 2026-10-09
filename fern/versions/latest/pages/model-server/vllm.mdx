@@ -241,12 +241,16 @@ Make sure your input JSONL respects the selected mode in the [Constraint matrix]
 | `model` | `str` | — | **Required.** Model name as registered in vLLM. |
 | `return_token_id_information` | `bool` | — | **Required.** Set `true` for training (token IDs + log probs), `false` for inference only. |
 | `uses_reasoning_parser` | `bool` | — | **Required.** Set `true` for reasoning models (extracts `<think>` tags), `false` otherwise. |
+| `reasoning_field` | `str` | `both` | Which key(s) carry the `<think>` reasoning that vllm_model extracts from replayed assistant messages (`uses_reasoning_parser: true`, `uses_interleaved_reasoning: true`, `preserve_reasoning_in_assistant_content: false`): `both`, `reasoning`, or `reasoning_content`. Use a single key for servers that reject a message carrying both. When unset, falls back to the `NEMO_GYM_REASONING_FIELD` environment variable, then `both`. |
 | `replace_developer_role_with_system` | `bool` | `false` | Convert "developer" role to "system" for models that don't support developer role. |
 | `chat_template_kwargs` | `dict` | `null` | Override chat template parameters. Forwarded to upstream chat completions when `use_completions_api: false`, or to `apply_chat_template` when `use_completions_api: true` and `render_chat_template: true`. |
+| `forward_request_chat_template_kwargs` | `bool` | `false` | Merge a request's top-level `chat_template_kwargs` over the configured value. When `false`, the request field is accepted and dropped, with a warning logged once. Chat path only: ignored when `use_completions_api: true`. |
 | `extra_body` | `dict` | `null` | Pass additional vLLM-specific parameters (e.g., `guided_json`). |
 | `use_completions_api` | `bool` | `false` | When `true`, drives vLLM's `/v1/completions` instead of `/v1/chat/completions`. See [Two upstream backends](#two-upstream-backends). |
 | `render_chat_template` | `bool` | `false` | Only consulted when `use_completions_api: true`. When `true`, renders messages to the `prompt` string client-side via `AutoTokenizer.apply_chat_template`. Lifts the multi-turn restriction. See [Render modes](#render-modes). |
 | `tokenizer` | `str` | `null` | Only consulted when `use_completions_api: true` and `render_chat_template: true`. HF identifier or local path passed to `AutoTokenizer.from_pretrained`. When `null`, falls back to `model`. Use this to borrow a chat template from a different model. |
+| `drop_hosted_tools` | `bool` | `false` | Streaming (`stream: true`) requests only; available on every model server. When `true`, every tool type other than `function` and `custom` is dropped from the request before it reaches the backend: the provider-hosted tools (web search, file search, code interpreter, image generation, computer use, remote MCP) and client-executed built-in types such as `local_shell`. A backend that serves none of them cannot answer a call to one, so the model sees only the tools the client executes. |
+| `drop_custom_tools` | `bool` | `false` | Streaming requests only; available on every model server. When `true`, `custom` (free-form) tools are dropped instead of being converted to Chat Completions custom tools, which a backend that expresses function tools only rejects with 422. Leave `false` for a backend with free-form tool support. |
 
 ### Advanced: `chat_template_kwargs`
 
@@ -256,6 +260,13 @@ Override chat template behavior for specific models:
 chat_template_kwargs:
   enable_thinking: false  # Model-specific
 ```
+
+Per-request values can come from two places, merged over the configured value in this order (later wins):
+
+1. A request's top-level `chat_template_kwargs` (for example, OpenAI SDK clients that pass it in `extra_body`). Applied only when `forward_request_chat_template_kwargs: true`; otherwise it is dropped and a warning is logged once per server. Forwarding changes generation for agents that send it on every call, such as Stirrup's `enable_thinking`, so re-run baselines when you enable it.
+2. `metadata.chat_template_kwargs`, a JSON-encoded object on the request.
+
+With `use_completions_api: true`, only the configured value and `metadata.chat_template_kwargs` apply. Streaming (`stream: true`) requests never forward the top-level field.
 
 ### Advanced: `extra_body`
 

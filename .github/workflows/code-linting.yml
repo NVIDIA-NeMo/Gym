@@ -17,6 +17,8 @@ name: Code linting
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  merge_group:
+    types: [checks_requested]
   workflow_call:
 
 jobs:

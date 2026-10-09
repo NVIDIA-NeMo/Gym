@@ -50,6 +50,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
@@ -95,13 +96,14 @@ class ResponsesConverterState(BaseModel):
     messages: List[NeMoGymChatCompletionMessageParam] = Field(default_factory=list)
 
     content_buffer: str = ""
+    refusal_buffer: str = ""
     tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(default_factory=list)
     assistant_item_buffered: bool = False
 
     token_information: Optional[TokenIDLogProbMixin] = None
 
     def flush_assistant(self) -> None:
-        if not (self.assistant_item_buffered or self.content_buffer or self.tool_calls_buffer):
+        if not (self.assistant_item_buffered or self.content_buffer or self.refusal_buffer or self.tool_calls_buffer):
             self.token_information = None
             return
 
@@ -112,6 +114,8 @@ class ResponsesConverterState(BaseModel):
         # Omit rather than send `tool_calls: []` — OpenAI rejects empty arrays.
         if self.tool_calls_buffer:
             shared_params["tool_calls"] = self.tool_calls_buffer
+        if self.refusal_buffer:
+            shared_params["refusal"] = self.refusal_buffer
 
         if self.return_token_id_information and self.token_information is not None:
             message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -124,6 +128,7 @@ class ResponsesConverterState(BaseModel):
         self.messages.append(message)
 
         self.content_buffer = ""
+        self.refusal_buffer = ""
         self.tool_calls_buffer = []
         self.assistant_item_buffered = False
         self.token_information = None
@@ -135,6 +140,50 @@ def _token_information_from_mapping(value: Dict[str, Any]) -> Optional[TokenIDLo
     if "prompt_token_ids" not in value:
         return None
     return TokenIDLogProbMixin.model_validate(value)
+
+
+def _chat_logprobs_to_responses(logprobs: Any) -> Optional[List[Dict[str, Any]]]:
+    """Chat choice logprobs in the shape ``ResponseOutputText.logprobs`` expects.
+
+    Same field names on both sides; the Responses models require ``bytes`` to be
+    iterable where chat allows null.
+    """
+    content = getattr(logprobs, "content", None)
+    if not content:
+        return None
+
+    def _one(entry: Any) -> Dict[str, Any]:
+        out = entry.model_dump()
+        out["bytes"] = out.get("bytes") or []
+        out["top_logprobs"] = [{**alt, "bytes": alt.get("bytes") or []} for alt in (out.get("top_logprobs") or [])]
+        return out
+
+    return [_one(entry) for entry in content]
+
+
+def _align_logprobs_to_text(
+    logprobs: Optional[List[Dict[str, Any]]], original: str, removed: List[Tuple[int, int]]
+) -> Optional[List[Dict[str, Any]]]:
+    """Keep the token entries that survive removing the ``removed`` character spans.
+
+    Reasoning extraction shortens the output text; its logprobs must shrink with it or
+    they describe different text. The kept positions come from the removal itself, never
+    from searching for the answer text, which may also occur inside the reasoning. If the
+    tokens do not reconstruct ``original`` the alignment is unknowable and the logprobs
+    are dropped rather than misattributed.
+    """
+    if not logprobs or not removed:
+        return logprobs
+    if "".join(e.get("token") or "" for e in logprobs) != original:
+        return None
+    kept, offset = [], 0
+    for entry in logprobs:
+        token_end = offset + len(entry.get("token") or "")
+        inside_removed = any(start <= offset and token_end <= end for start, end in removed)
+        if token_end > offset and not inside_removed:
+            kept.append(entry)
+        offset = token_end
+    return kept or None
 
 
 class ResponsesConverter(BaseModel):
@@ -164,6 +213,13 @@ class ResponsesConverter(BaseModel):
         responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
     ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
         responses_create_params = responses_create_params.model_dump(exclude_none=True, exclude_unset=True)
+        if responses_create_params.get("include") == []:
+            del responses_create_params["include"]
+
+        # Codex serializes include=[] even when no additional fields are requested.
+        # Only the empty list is equivalent to omission; nonempty includes still require Responses.
+        if responses_create_params.get("include") == []:
+            responses_create_params.pop("include")
 
         unsupported_fields = sorted(
             {
@@ -275,8 +331,22 @@ class ResponsesConverter(BaseModel):
 
         text = responses_create_params.pop("text", None)
         if text is not None:
-            if text.get("format") is not None:
-                raise NotImplementedError("Responses text format has no implemented Chat Completions conversion.")
+            text_format = text.get("format")
+            if text_format is not None:
+                format_type = text_format.get("type")
+                if format_type == "json_schema":
+                    json_schema = {"name": text_format["name"], "schema": text_format["schema"]}
+                    for key in ("strict", "description"):
+                        if text_format.get(key) is not None:
+                            json_schema[key] = text_format[key]
+                    responses_create_params["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": json_schema,
+                    }
+                elif format_type == "json_object":
+                    responses_create_params["response_format"] = {"type": "json_object"}
+                elif format_type != "text":
+                    raise NotImplementedError(f"Unsupported Responses text format type {format_type!r}.")
             if text.get("verbosity") is not None:
                 responses_create_params["verbosity"] = text["verbosity"]
 
@@ -416,8 +486,19 @@ class ResponsesConverter(BaseModel):
                     # Tool-call only turns have "None" according to the official API spec.
                     pass
                 elif isinstance(content, list):
-                    content_str = "".join([part.get("text", "") for part in content])
-                    final_content += content_str
+                    text_parts: list[str] = []
+                    refusal_parts: list[str] = []
+                    for part in content:
+                        text = part.get("text")
+                        refusal = part.get("refusal")
+                        if isinstance(text, str):
+                            text_parts.append(text)
+                        if isinstance(refusal, str):
+                            refusal_parts.append(refusal)
+                        if not isinstance(text, str) and not isinstance(refusal, str):
+                            raise NotImplementedError(f"Unsupported assistant content part: {part!r}")
+                    final_content += "".join(text_parts)
+                    state.refusal_buffer += "".join(refusal_parts)
                 elif isinstance(content, str):
                     final_content += content
                 else:
@@ -491,6 +572,11 @@ class ResponsesConverter(BaseModel):
         See: https://docs.nvidia.com/nemo/gym/main/infrastructure/engineering-notes/responses-api-evolution
         for background on reasoning in the Responses API.
         """
+        if m.get("encrypted_content") or m.get("content"):
+            raise NotImplementedError(
+                "Responses reasoning content/encrypted_content cannot be preserved by this Chat Completions "
+                "conversion; route the request to a model server that passes Responses through."
+            )
         state.assistant_item_buffered = True
         if "summary" in m and m["summary"]:
             texts = [s["text"] for s in m["summary"]]
@@ -641,14 +727,24 @@ class ResponsesConverter(BaseModel):
     # =======================================================
 
     def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
-        return self.postprocess_assistant_message_dict(choice.message.model_dump(exclude_none=True))
+        return self.postprocess_assistant_message_dict(
+            choice.message.model_dump(exclude_none=True),
+            logprobs=_chat_logprobs_to_responses(choice.logprobs),
+        )
 
-    def postprocess_assistant_message_dict(self, message_dict: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
+    def postprocess_assistant_message_dict(
+        self, message_dict: Dict[str, Any], *, logprobs: Any = None
+    ) -> List[NeMoGymResponseOutputItem]:
         response_output = []
 
         content = message_dict.get("content") or ""
+        refusal = message_dict.get("refusal") or ""
         if self.uses_reasoning_parser:
             reasoning_matches, content = self._extract_reasoning_from_content(content)
+            if reasoning_matches:
+                original = message_dict.get("content") or ""
+                removed = [m.span() for m in self.THINK_TAG_PATTERN.finditer(original)]
+                logprobs = _align_logprobs_to_text(logprobs, original, removed)
         else:
             reasoning_matches = []
         if reasoning_matches:
@@ -663,20 +759,31 @@ class ResponsesConverter(BaseModel):
             response_output.append(reasoning_item)
 
         tool_calls_raw = message_dict.get("tool_calls", []) or []
-        has_empty_output = not (response_output or tool_calls_raw)
+        has_empty_output = not (response_output or tool_calls_raw or refusal)
 
-        if content or has_empty_output:
+        if content or refusal or has_empty_output:
+            message_content = []
+            if content or has_empty_output:
+                message_content.append(
+                    NeMoGymResponseOutputText(
+                        type="output_text",
+                        text=content,
+                        annotations=[],
+                        logprobs=logprobs,
+                    )
+                )
+            if refusal:
+                message_content.append(
+                    NeMoGymResponseOutputRefusal(
+                        type="refusal",
+                        refusal=str(refusal),
+                    )
+                )
             response_output.append(
                 NeMoGymResponseOutputMessage(
                     id=f"msg_{uuid4().hex}",
                     role=message_dict.get("role"),
-                    content=[
-                        NeMoGymResponseOutputText(
-                            type="output_text",
-                            text=content,
-                            annotations=[],
-                        )
-                    ],
+                    content=message_content,
                     status="completed",
                     type="message",
                 )
@@ -782,6 +889,11 @@ class ResponsesConverter(BaseModel):
         elif choice.finish_reason == "content_filter":
             incomplete_details = {"reason": "content_filter"}
 
+        native_finish_reason = getattr(choice, "native_finish_reason", None)
+        provider_metadata = (
+            {"native_finish_reason": str(native_finish_reason)} if native_finish_reason is not None else {}
+        )
+
         # Chat Completion -> Response
         return NeMoGymResponse(
             # Under external token capture the chat completion's envelope id is
@@ -819,6 +931,7 @@ class ResponsesConverter(BaseModel):
             status="incomplete" if incomplete_details is not None else "completed",
             incomplete_details=incomplete_details,
             usage=usage,
+            **provider_metadata,
         )
 
 

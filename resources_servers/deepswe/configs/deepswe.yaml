@@ -10,7 +10,7 @@ deepswe_resources_server:
       expected_task_count: 113
       is_verifying_golden_patch: false
       task_cpu_multiplier: 2.0
-      task_memory_multiplier: 2.0
+      task_memory_multiplier: 4.0
 
       sandbox_provider: sandbox
       enforce_agent_no_network: true
@@ -21,6 +21,11 @@ deepswe_resources_server:
         metadata:
           benchmark: deepswe-v1-1
           istio.io/dataplane-mode: none
+        provider_options:
+          resource_requests:
+            cpu: 0.5
+            memory_mib: 512
+            disk_gib: 20
 
       logs_dir: resources_servers/deepswe/logs
       clear_verifier_logs: true

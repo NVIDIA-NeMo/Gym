@@ -1,2 +1,2 @@
--e nemo-gym[dev] @ ../../
+-e nemo-gym[dev,ray] @ ../../
 numpy==2.2.6

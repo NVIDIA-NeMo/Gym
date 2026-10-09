@@ -59,7 +59,13 @@ apt-get purge -y \
     libmp3lame* \
     2>/dev/null || true
 
+# Gym never imports dbus or GObject; drop the base image's Python bindings.
+apt-get purge -y python3-dbus python3-gi
+
 apt-get autoremove -y
+
+# CVE-2026-45447: PKCS#7/S-MIME use-after-free in OpenSSL's PKCS7_verify().
+apt-get install -y --only-upgrade openssl libssl3t64
 
 # Install enroot for the EnrootProvider sandbox backend.
 # GitHub releases provide signed .debs for amd64 and arm64.
@@ -87,6 +93,12 @@ curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-contai
 apt-get update
 apt-get install -y nvidia-container-toolkit
 rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+# Remove the CUDA base image's bundled Nsight Systems. Gym does not profile
+# with nsys, and the bundled copy ships prebuilt Go binaries flagged by scans.
+rm -rf /usr/local/cuda*/NsightSystems-cli-* /opt/nvidia/nsight-systems*
+apt-get remove --purge -y --allow-change-held-packages 'nsight-systems*' || true
+rm -f /usr/local/cuda/bin/nsys /usr/local/bin/nsys
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -165,7 +177,7 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 # an environment variable — they would have to rebuild. Off remains the default: the code
 # is inert until NEMO_LENS_ENABLED=1.
 RUN uv venv --seed && \
-    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --no-install-project
+    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --extra dev --no-install-project
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
@@ -201,11 +213,54 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 # worktree was created for the runtime UID in the base stage, so restore build ownership
 # before setuptools invokes Git.
 RUN chown root:root /opt/nemo-gym && \
-    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry
+    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry --extra dev
 
-# Keep runtime uv and XDG caches separate from the root-owned build cache that
-# backs the symlinked project environment.
+# Seed the runtime uv cache with the full dependency set (including the dev
+# extra and the project itself) so that CI scripts can run offline: setup_dev.sh
+# resolves `uv sync --extra dev --offline` from this cache in a fresh venv.
+# The runtime cache is separate from the root-owned build cache (/opt/uv/cache)
+# that backs the symlinked project environment.
 ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv
+RUN uv venv /opt/nemo-gym/cache/seed-venv && \
+    UV_PROJECT_ENVIRONMENT=/opt/nemo-gym/cache/seed-venv \
+        uv sync --locked --extra vllm --extra telemetry --extra dev && \
+    rm -rf /opt/nemo-gym/cache/seed-venv && \
+    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
+
+# Optional: seed the same cache with every server module's venv so that
+# scripts/ci/server_tests.sh can run offline too. Pass
+# --build-arg NEMO_GYM_SEED_SERVER_ENVS=1 for an image that runs the server
+# suite without a package index. Each server installs its own unlocked
+# requirements.txt or pyproject.toml (including git sources) outside the root
+# lock, so the seed above does not cover them, and together they are large
+# (about 25 GB more cache for all 212 servers in October 2026), hence opt-in.
+# `ng_test_all +setup_only=true` installs each venv exactly as the server suite
+# does (same discovery, requirements, and head-server pins), outside the source
+# tree, and deletes it; only the downloaded and built distributions stay.
+ARG NEMO_GYM_SEED_SERVER_ENVS=""
+RUN <<"EOF" bash -exu
+if [[ -n "${NEMO_GYM_SEED_SERVER_ENVS:-}" ]]; then
+    seed_venv_root="$(mktemp -d)"
+    ng_test_all +setup_only=true +delete_venvs_after_each_test=true \
+        "+uv_cache_dir=${UV_CACHE_DIR}" "+uv_venv_dir=${seed_venv_root}"
+    rm -rf "${seed_venv_root}"
+    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
+fi
+EOF
+
+# Seed the pre-commit hook cache (PRE_COMMIT_HOME) so the image's offline lint
+# path needs no network: lint.sh reuses the baked pre-commit executable, but a
+# bare `pre-commit run` still clones the hook repositories declared in
+# .pre-commit-config.yaml and pip-installs the local hooks' dependencies on
+# first run. Resolving every hook environment here, while the build has
+# network, keeps the runtime lint hermetic.
+ENV PRE_COMMIT_HOME=/opt/nemo-gym/cache/pre-commit
+# Local build contexts exclude .git, but pre-commit requires a repository to
+# resolve the configuration. Use disposable metadata while seeding the cache.
+RUN git init --quiet && \
+    pre-commit install-hooks && \
+    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${PRE_COMMIT_HOME}" && \
+    rm -rf .git
 RUN install -d -o "${RUNTIME_UID}" -g "${RUNTIME_GID}" \
         "${UV_CACHE_DIR}" \
         /opt/nemo-gym/cache/xdg
@@ -218,6 +273,16 @@ RUN <<"EOF" bash -exu
 if [[ -n "${NEMO_GYM_PREFETCH_CONFIGS:-}" ]]; then
     gym env prefetch "+config_paths=[${NEMO_GYM_PREFETCH_CONFIGS}]"
 fi
+
+# ray's bundled Java worker jar ships an outdated httpcore5 with a known CVE
+# (GHSA-hf6x-8p5f-cgmf). Gym never uses Ray's Java cross-language worker, and
+# removing the jar doesn't affect ray.init(), remote tasks, actors, or
+# ray.serve (verified locally). Covers both installed venvs (site-packages)
+# and uv's own cache (archive-v0): confirmed uv silently skips a missing
+# cached file and installs everything else fine, even fully offline, so
+# purging it from the cache too doesn't break installing a fresh venv later
+# for a server not prefetched here.
+find /opt -name ray_dist.jar -delete
 
 # Keep ownership changes for generated caches and server venvs in the layer
 # that creates them so later layers do not duplicate their contents.
@@ -249,6 +314,7 @@ RUN export HOME=/home/nemo-runtime \
     test -w "${HOME}" && \
     test -w "${XDG_CACHE_HOME}" && \
     test -w "${UV_CACHE_DIR}" && \
+    test -w "${PRE_COMMIT_HOME}" && \
     test -w /opt/nemo-gym/cache && \
     test -w /opt/nemo-gym/results && \
     test -x /usr/local/bin/uv && \

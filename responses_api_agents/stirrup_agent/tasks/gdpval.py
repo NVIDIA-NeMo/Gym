@@ -159,7 +159,7 @@ class GDPValTask(TaskStrategy):
         # GDPval MUST run inside the Apptainer sandbox built from
         # containers/gdpval.def. The sandbox carries the heavy dependency set
         # the task prompt advertises (TeX Live, the full data/ML/document/audio
-        # stack, CPU torch, ...). We deliberately do NOT install these into the
+        # stack, ...). We deliberately do NOT install these into the
         # evaluation/agent container — that would bloat the eval image by many
         # GB. Consequently the local (non-sandbox) backend cannot provide the
         # advertised environment, and silently falling back to it would run
