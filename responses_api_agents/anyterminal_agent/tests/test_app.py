@@ -622,7 +622,7 @@ class TestHarnessProcessorSetup:
 
     def test_no_script_creates_empty_deps(self, tmp_path: Path) -> None:
         proc = self._proc_no_script()
-        with patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=tmp_path):
+        with patch.object(type(proc), "_runtime_root", new_callable=PropertyMock, return_value=tmp_path):
             result = proc.setup()
         expected = tmp_path / "deps" / "anyterminal_no_such_agent_deps"
         assert result == expected
@@ -631,17 +631,18 @@ class TestHarnessProcessorSetup:
 
     def test_sentinel_match_skips_reinstall(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         proc = self._proc_no_script()
-        with patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=tmp_path):
+        with patch.object(type(proc), "_runtime_root", new_callable=PropertyMock, return_value=tmp_path):
             proc.setup()
             proc.setup()
         assert "already at" in capsys.readouterr().out
 
     def test_installer_serializes_shared_source_build(self, tmp_path: Path) -> None:
         root = tmp_path / "gym"
-        parent = root / "responses_api_agents" / "anyterminal_agent"
+        source_dir = root / "responses_api_agents" / "anyterminal_agent"
+        runtime_root = tmp_path / "cache" / "anyterminal_agent"
         agent_dir = root / "responses_api_agents" / "fake_agent"
         script = agent_dir / "scripts" / "fake_agent_deps.sh"
-        shared = parent / "setup_scripts" / "_portable_python.sh"
+        shared = source_dir / "setup_scripts" / "_portable_python.sh"
         script.parent.mkdir(parents=True)
         shared.parent.mkdir(parents=True)
         script.write_text("#!/bin/bash\n")
@@ -658,15 +659,16 @@ class TestHarnessProcessorSetup:
 
         with (
             patch.object(app, "PARENT_DIR", root),
-            patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=parent),
+            patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=source_dir),
+            patch.object(type(proc), "_runtime_root", new_callable=PropertyMock, return_value=runtime_root),
             patch("responses_api_agents.anyterminal_agent.app._file_lock", side_effect=record_lock),
             patch("responses_api_agents.anyterminal_agent.app.Popen") as popen,
         ):
             popen.return_value.wait.return_value = 0
             proc.setup()
 
-        deps_dir = parent / "deps" / "anyterminal_fake_agent_deps"
-        assert lock_targets == [deps_dir, parent / "deps" / "runtime-install"]
+        deps_dir = runtime_root / "deps" / "anyterminal_fake_agent_deps"
+        assert lock_targets == [deps_dir, runtime_root / "deps" / "runtime-install"]
 
     def test_rechecks_sentinel_after_acquiring_lock(self, tmp_path: Path) -> None:
         proc = self._proc_no_script()
@@ -680,7 +682,7 @@ class TestHarnessProcessorSetup:
             shutil.rmtree(lock_path)
 
         with (
-            patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=tmp_path),
+            patch.object(type(proc), "_runtime_root", new_callable=PropertyMock, return_value=tmp_path),
             patch("responses_api_agents.anyterminal_agent.app.time.sleep", side_effect=finish_other_install),
         ):
             assert proc.setup() == deps_dir
