@@ -2655,6 +2655,24 @@ def test_reasoning_the_harness_drops_does_not_break_resolution():
     assert resolved.match is not None and resolved.match.model_call_id == "call-1"
 
 
+def test_wrapped_reasoning_the_chat_harness_drops_does_not_break_resolution():
+    """Resolve a tool continuation when Chat omits synthesized reasoning."""
+    sent = [{"role": "user", "content": "q"}]
+    tool_call = {"id": "tool-1", "function": {"name": "lookup", "arguments": '{"q":"x"}'}}
+    served = {"role": "assistant", "content": "<think>private reasoning</think>", "tool_calls": [tool_call]}
+    echoed = {"role": "assistant", "content": "", "tool_calls": [tool_call]}
+    lineage = RolloutLineage()
+    lineage.record("call-1", sent + [served], cum_tokens=[1, 2], digest="d", context_len=len(sent))
+
+    resolved = lineage.resolve(sent + [echoed, {"role": "tool", "tool_call_id": "tool-1", "content": "result"}])
+
+    assert resolved.status == ParentResolutionStatus.RESOLVED
+    assert resolved.match is not None and resolved.match.model_call_id == "call-1"
+
+    changed = {**echoed, "tool_calls": [{**tool_call, "function": {**tool_call["function"], "arguments": "{}"}}]}
+    assert lineage.resolve(sent + [changed]).status == ParentResolutionStatus.UNRESOLVED
+
+
 @pytest.mark.parametrize(
     "before, after",
     [

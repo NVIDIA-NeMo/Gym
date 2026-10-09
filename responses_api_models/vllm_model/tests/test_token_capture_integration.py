@@ -67,7 +67,7 @@ def _model(client: NeMoGymAsyncOpenAI, **config_overrides: Any) -> VLLMModel:
 )
 @pytest.mark.parametrize("tool_call", [False, True])
 def test_external_staging_resolves_served_reasoning_history(tmp_path, endpoint, reasoning_field, tool_call) -> None:
-    """Echoing served output must preserve capture ancestry across API conversion."""
+    """Echoing served output, with optional reasoning omission, must preserve capture ancestry."""
     records = {}
 
     class Sink:
@@ -158,6 +158,10 @@ def test_external_staging_resolves_served_reasoning_history(tmp_path, endpoint, 
                     output = [
                         {key: value for key, value in served["choices"][0]["message"].items() if value is not None}
                     ]
+                    # OpenClaw preserves the assistant tool call but does not echo
+                    # the leading reasoning block synthesized by VLLMModel.
+                    if reasoning_field == "reasoning_content" and tool_call:
+                        output[0]["content"] = output[0]["content"].split("</think>", 1)[-1]
                 history.extend(output)
                 if tool_call:
                     if endpoint == "responses":

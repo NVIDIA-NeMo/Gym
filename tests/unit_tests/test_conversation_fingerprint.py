@@ -69,6 +69,36 @@ def test_reasoning_items_are_excluded():
     assert assistant_fingerprint([reasoning, message]) == assistant_fingerprint([message])
 
 
+def test_wrapped_reasoning_may_be_omitted_but_visible_assistant_text_may_not():
+    served = {
+        "role": "assistant",
+        "content": "<think>private reasoning</think>calling",
+        "tool_calls": [{"id": "c1", "function": {"name": "lookup", "arguments": "{}"}}],
+    }
+    echoed = {
+        "role": "assistant",
+        "content": "calling",
+        "tool_calls": [{"id": "c1", "function": {"name": "lookup", "arguments": "{}"}}],
+    }
+    edited = {**echoed, "content": "different visible text"}
+
+    assert assistant_fingerprint([served]) == assistant_fingerprint([echoed])
+    assert conversation_digest([served]) == conversation_digest([echoed])
+    assert assistant_fingerprint([served]) != assistant_fingerprint([edited])
+    assert conversation_digest([served]) != conversation_digest([edited])
+
+
+def test_only_complete_leading_think_blocks_are_ignored():
+    plain = {"role": "assistant", "content": "answer"}
+    wrapped_twice = {"role": "assistant", "content": "<think>one</think><think>two</think>answer"}
+    embedded = {"role": "assistant", "content": "visible <think>literal</think> answer"}
+    unterminated = {"role": "assistant", "content": "<think>visible because malformed"}
+
+    assert assistant_fingerprint([wrapped_twice]) == assistant_fingerprint([plain])
+    assert assistant_fingerprint([embedded]) != assistant_fingerprint([plain])
+    assert assistant_fingerprint([unterminated]) != assistant_fingerprint([plain])
+
+
 def test_no_model_authored_turn_yields_the_empty_fingerprint():
     assert assistant_fingerprint([{"role": "user", "content": "question"}]) == ""
     assert assistant_fingerprint([]) == ""

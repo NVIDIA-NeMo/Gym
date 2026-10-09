@@ -41,7 +41,7 @@ import orjson
 
 # Increment when fingerprint canonicalization or hash layout changes.
 # Resolvers ignore entries stamped with a different version.
-FINGERPRINT_VERSION = 2
+FINGERPRINT_VERSION = 3
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
@@ -62,7 +62,7 @@ def assistant_fingerprint(messages: list[dict]) -> str:
         if not _is_assistant_authored(message):
             continue
         count += 1
-        for content_type, payload in _content_of(message.get("content")):
+        for content_type, payload in _lineage_content_of(message):
             _update_field(hasher, b"\x00", content_type)
             _update_field(hasher, b"\x01", payload)
         for call_id, name, arguments in _tools_of(message):
@@ -86,7 +86,7 @@ def conversation_digest(messages: list[dict]) -> str:
         if not isinstance(message, dict):
             raise ValueError(f"request item is not an object: {type(message).__name__}")
         _update_field(hasher, b"\x00", str(message.get("role") or message.get("type") or ""))
-        for content_type, payload in _content_of(message.get("content")):
+        for content_type, payload in _lineage_content_of(message):
             _update_field(hasher, b"\x01", content_type)
             _update_field(hasher, b"\x02", payload)
         for call_id, name, arguments in _tools_of(message):
@@ -135,7 +135,43 @@ def _is_assistant_authored(message: dict) -> bool:
     return message.get("type") == "function_call"
 
 
-def _content_of(content: Any) -> list[tuple[str, str]]:
+def _lineage_content_of(message: dict) -> list[tuple[str, str]]:
+    """Return content that a harness must echo to continue token lineage.
+
+    Parsed reasoning is not part of the continuation witness. Depending on its
+    API dialect, a harness may omit standalone reasoning blocks or a leading
+    ``<think>...</think>`` block synthesized by the vLLM model server. Visible
+    assistant text after those carriers remains part of the witness.
+    """
+    assistant_authored = _is_assistant_authored(message)
+    parts = _content_of(message.get("content"), exclude_reasoning=assistant_authored)
+    if not assistant_authored:
+        return parts
+
+    normalized: list[tuple[str, str]] = []
+    at_start = True
+    for content_type, payload in parts:
+        if at_start and content_type == "text":
+            payload = _strip_leading_think_blocks(payload)
+            if not payload:
+                continue
+        at_start = False
+        normalized.append((content_type, payload))
+    return normalized
+
+
+def _strip_leading_think_blocks(text: str) -> str:
+    """Remove complete leading reasoning wrappers emitted by the model server."""
+    remaining = text
+    while remaining.startswith("<think>"):
+        end = remaining.find("</think>", len("<think>"))
+        if end < 0:
+            break
+        remaining = remaining[end + len("</think>") :]
+    return remaining
+
+
+def _content_of(content: Any, *, exclude_reasoning: bool = False) -> list[tuple[str, str]]:
     """Return typed content parts without discarding prompt-shaping blocks.
 
     Tool calls are normalized separately by ``_tools_of``.
@@ -156,6 +192,8 @@ def _content_of(content: Any) -> list[tuple[str, str]]:
         if not isinstance(block, dict):
             raise ValueError(f"unsupported content block: {type(block).__name__}")
         block_type = str(block.get("type") or "")
+        if exclude_reasoning and block_type in {"reasoning", "thinking", "redacted_thinking"}:
+            continue
         if block_type in {"tool_use", "tool_result"}:
             continue
         if isinstance(block.get("text"), str) and block_type in {
