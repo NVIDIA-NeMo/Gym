@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from copy import deepcopy
 from threading import Lock
 from time import monotonic, time, time_ns
@@ -31,6 +32,7 @@ from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
     SimpleResponsesAPIModel,
+    annotate_current_model_call,
 )
 from nemo_gym.openai_utils import (
     REQUIRED_TOKEN_METADATA_FIELDS,
@@ -86,6 +88,15 @@ _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "step": "x-nemo-gym-log-step",
     "parse_attempt": "x-nemo-gym-log-parse-attempt",
 }
+
+
+# vLLM's over-context error names the size of the rejected request ("... you requested 32818 tokens ...").
+_REQUESTED_TOKENS_RE = re.compile(r"requested (\d+) tokens")
+
+
+def _parse_requested_tokens(message: str) -> Optional[int]:
+    match = _REQUESTED_TOKENS_RE.search(message or "")
+    return int(match.group(1)) if match else None
 
 
 def _transport_log_context(request: Request) -> Dict[str, Any]:
@@ -480,6 +491,11 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         client = self._resolve_client(request)
         response_dict = await client.create_response(**body_dict)
+        incomplete = response_dict.get("incomplete_details") if isinstance(response_dict, dict) else None
+        annotate_current_model_call(
+            upstream_response_id=response_dict.get("id"),
+            upstream_finish_reason=(incomplete or {}).get("reason") or response_dict.get("status"),
+        )
 
         return NeMoGymResponse.model_validate(response_dict)
 
@@ -937,6 +953,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
             """
             result_content_str = e.response_content.decode()
+            annotate_current_model_call(
+                upstream_status=e.status,
+                upstream_error=result_content_str[:2000],
+                rejected_request_tokens=_parse_requested_tokens(result_content_str),
+            )
 
             is_out_of_context_length = e.status == 400 and (
                 "context length" in result_content_str or "max_tokens" in result_content_str
@@ -984,6 +1005,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         choice_dict = chat_completion_dict["choices"][0]
+        annotate_current_model_call(
+            upstream_response_id=chat_completion_dict.get("id"),
+            upstream_finish_reason=choice_dict.get("finish_reason"),
+        )
         self._verify_generation_prefix(body_dict, chat_completion_dict)
         if self.config.uses_reasoning_parser:
             # See the TODO wrt reasoning_content above
@@ -1398,6 +1423,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             completion_dict = await client.create_completion(**completion_body)
         except ClientResponseError as e:
             result_content_str = e.response_content.decode()
+            annotate_current_model_call(
+                upstream_status=e.status,
+                upstream_error=result_content_str[:2000],
+                rejected_request_tokens=_parse_requested_tokens(result_content_str),
+            )
             is_out_of_context_length = e.status == 400 and (
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
@@ -1410,6 +1440,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                 return res
             raise
 
+        annotate_current_model_call(
+            upstream_response_id=completion_dict.get("id"),
+            upstream_finish_reason=(completion_dict["choices"][0] or {}).get("finish_reason"),
+        )
         if self.config.return_token_id_information:
             choice_dict = completion_dict["choices"][0]
             if choice_dict.get("prompt_token_ids") is None:

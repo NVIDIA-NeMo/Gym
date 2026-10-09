@@ -28,6 +28,7 @@ routing.
 
 import asyncio
 import fcntl
+import hashlib
 import inspect
 import json
 import logging
@@ -36,8 +37,9 @@ import re
 import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional
 from uuid import uuid4
 
 import orjson
@@ -62,11 +64,21 @@ from nemo_gym.responses_streaming import (
     validate_streaming_responses_params,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
+from nemo_gym.rollout_observability import (
+    CLIENT_AGENT_HEADER,
+    CLIENT_ATTEMPT_HEADER,
+    CLIENT_CALL_ID_HEADER,
+    CLIENT_PURPOSE_HEADER,
+    CLIENT_SENT_AT_HEADER,
+    AgentObservationBundle,
+    ObservationGap,
+    join_model_call_observations,
+)
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
     SimpleServer,
+    observe_request_attempts,
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -415,6 +427,10 @@ class ModelCallCaptureConfig(BaseModel):
 
     observability_enabled: bool = False
     model_call_capture_dir: Optional[Path] = None
+    # "metadata" replaces prompt and response text with sizes and hashes while keeping ids, usage, finish
+    # reason, tool names and tool calls with their arguments; latency runs use it so a capture file does not
+    # hold a megabyte of prompt per call.
+    model_call_capture_payloads: Literal["full", "metadata"] = "full"
 
     @model_validator(mode="after")
     def validate_capture_dir(self) -> "ModelCallCaptureConfig":
@@ -698,6 +714,19 @@ class ModelCallRecord(BaseModel):
         default=None,
         description="Client-declared correlation identifier; evidence only, not a security boundary.",
     )
+    # Client-declared trace headers (x-ng-*, see nemo_gym.rollout_observability); evidence only.
+    client_call_id: Optional[str] = None
+    client_attempt: Optional[int] = None
+    client_sent_at_ms: Optional[float] = None
+    client_agent: Optional[str] = None
+    client_purpose: Optional[str] = None
+    # Fields the serving handler attached through annotate_current_model_call (upstream_*, rejected_request_tokens).
+    annotations: dict[str, Any] = Field(default_factory=dict)
+    # HTTP attempts the model server itself made upstream while serving this call (transport retries).
+    request_attempts: list[dict[str, Any]] = Field(default_factory=list)
+    # Characters of assistant text in the response; computed in both payload modes.
+    response_text_chars: Optional[int] = None
+    payload_mode: Optional[str] = None
 
     # Durable append order, not a causal or semantic order for concurrent calls.
     call_index: int
@@ -800,6 +829,21 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
         client_session_id=(
             exchange.get("client_session_id") if isinstance(exchange.get("client_session_id"), str) else None
         ),
+        client_call_id=exchange.get("client_call_id") if isinstance(exchange.get("client_call_id"), str) else None,
+        client_attempt=exchange.get("client_attempt") if isinstance(exchange.get("client_attempt"), int) else None,
+        client_sent_at_ms=(
+            float(exchange["client_sent_at_ms"])
+            if isinstance(exchange.get("client_sent_at_ms"), (int, float))
+            else None
+        ),
+        client_agent=exchange.get("client_agent") if isinstance(exchange.get("client_agent"), str) else None,
+        client_purpose=exchange.get("client_purpose") if isinstance(exchange.get("client_purpose"), str) else None,
+        annotations=exchange.get("annotations") if isinstance(exchange.get("annotations"), dict) else {},
+        request_attempts=(
+            exchange.get("request_attempts") if isinstance(exchange.get("request_attempts"), list) else []
+        ),
+        response_text_chars=_response_text_chars(raw_response),
+        payload_mode=exchange.get("payload_mode") if isinstance(exchange.get("payload_mode"), str) else None,
         call_index=call_index,
         model_ref=exchange.get("model_ref"),
         model=model if isinstance(model, str) else None,
@@ -879,6 +923,190 @@ _OBSERVED_PATHS = {
 # A client may declare its persisted session ID for exact correlation with an AgentInvocation.
 # It is correlation evidence, not authentication; absence is fail-safe.
 _CLIENT_SESSION_HEADER = b"x-session-id"
+_CLIENT_TRACE_HEADERS = (
+    CLIENT_CALL_ID_HEADER,
+    CLIENT_ATTEMPT_HEADER,
+    CLIENT_SENT_AT_HEADER,
+    CLIENT_AGENT_HEADER,
+    CLIENT_PURPOSE_HEADER,
+)
+
+
+class _CallAnnotations:
+    __slots__ = ("model_call_id", "fields")
+
+    def __init__(self, model_call_id: str) -> None:
+        self.model_call_id = model_call_id
+        self.fields: dict[str, Any] = {}
+
+
+_CURRENT_CALL_ANNOTATIONS: ContextVar[Optional[_CallAnnotations]] = ContextVar(
+    "nemo_gym_model_call_annotations", default=None
+)
+
+
+def annotate_current_model_call(**fields: Any) -> bool:
+    """Merge fields into the capture record of the model call being served in this context; False if none.
+
+    The serving handler uses it for what only it can see: the engine's response id and finish reason, the
+    upstream HTTP status and error body, and the size of a request the engine rejected.
+    """
+    current = _CURRENT_CALL_ANNOTATIONS.get()
+    if current is None:
+        return False
+    current.fields.update({key: value for key, value in fields.items() if value is not None})
+    return True
+
+
+def _client_trace_headers(headers: list) -> dict[str, Any]:
+    """Parse the optional x-ng-* headers; malformed numeric values are dropped, never raised."""
+    values = {name: _unique_request_header(headers, name.encode("latin-1")) for name in _CLIENT_TRACE_HEADERS}
+    result: dict[str, Any] = {}
+    if values[CLIENT_CALL_ID_HEADER]:
+        result["client_call_id"] = values[CLIENT_CALL_ID_HEADER]
+    try:
+        if values[CLIENT_ATTEMPT_HEADER]:
+            result["client_attempt"] = int(values[CLIENT_ATTEMPT_HEADER])
+    except ValueError:
+        pass
+    try:
+        if values[CLIENT_SENT_AT_HEADER]:
+            result["client_sent_at_ms"] = float(values[CLIENT_SENT_AT_HEADER])
+    except ValueError:
+        pass
+    if values[CLIENT_AGENT_HEADER]:
+        result["client_agent"] = values[CLIENT_AGENT_HEADER]
+    if values[CLIENT_PURPOSE_HEADER]:
+        result["client_purpose"] = values[CLIENT_PURPOSE_HEADER]
+    return result
+
+
+def _text_chars(value: Any) -> int:
+    return len(value) if isinstance(value, str) else 0
+
+
+def _metadata_request(request: dict[str, Any]) -> dict[str, Any]:
+    """Keep everything except conversation content; summarise content as count, chars and sha256."""
+    out = {key: value for key, value in request.items() if key not in ("messages", "input", "tools", "system")}
+    for key in ("messages", "input", "system"):
+        if key not in request:
+            continue
+        items = request[key]
+        raw = orjson.dumps(items)
+        out[f"{key}_count"] = len(items) if isinstance(items, list) else 1
+        out[f"{key}_chars"] = len(raw)
+        out[f"{key}_sha256"] = hashlib.sha256(raw).hexdigest()
+    tools = request.get("tools")
+    if isinstance(tools, list):
+        out["tool_names"] = [
+            ((tool.get("function") or {}).get("name") if isinstance(tool.get("function"), dict) else tool.get("name"))
+            for tool in tools
+            if isinstance(tool, dict)
+        ]
+    return out
+
+
+def _metadata_response(response: dict[str, Any]) -> dict[str, Any]:
+    """Keep ids, usage, status and tool calls; replace assistant text and reasoning with character counts."""
+    out = {key: value for key, value in response.items() if key not in ("choices", "output", "content")}
+    choices = response.get("choices")
+    if isinstance(choices, list):  # Chat Completions
+        stripped_choices = []
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+            stripped_message = {
+                key: value
+                for key, value in message.items()
+                if key not in ("content", "reasoning_content", "reasoning")
+            }
+            stripped_message["content"] = None
+            stripped_message["content_chars"] = _text_chars(message.get("content"))
+            stripped_message["reasoning_content_chars"] = _text_chars(
+                message.get("reasoning_content") or message.get("reasoning")
+            )
+            stripped_choices.append(
+                {**{k: v for k, v in choice.items() if k not in ("message", "logprobs")}, "message": stripped_message}
+            )
+        out["choices"] = stripped_choices
+    output = response.get("output")
+    if isinstance(output, list):  # Responses
+        stripped_output = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "message":
+                text = sum(
+                    _text_chars(part.get("text")) for part in item.get("content") or [] if isinstance(part, dict)
+                )
+                stripped_output.append(
+                    {
+                        "type": "message",
+                        "id": item.get("id"),
+                        "role": item.get("role"),
+                        "status": item.get("status"),
+                        "text_chars": text,
+                    }
+                )
+            elif item_type == "reasoning":
+                text = sum(
+                    _text_chars(part.get("text")) for part in item.get("summary") or [] if isinstance(part, dict)
+                )
+                stripped_output.append({"type": "reasoning", "id": item.get("id"), "summary_chars": text})
+            elif item_type == "function_call":
+                stripped_output.append(item)
+            else:
+                stripped_output.append({"type": item_type, "id": item.get("id")})
+        out["output"] = stripped_output
+    content = response.get("content")
+    if isinstance(content, list):  # Anthropic Messages
+        stripped_content = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                stripped_content.append(block)
+            elif block.get("type") == "text":
+                stripped_content.append({"type": "text", "text_chars": _text_chars(block.get("text"))})
+            else:
+                stripped_content.append({"type": block.get("type"), "chars": _text_chars(block.get("thinking"))})
+        out["content"] = stripped_content
+    return out
+
+
+def _response_text_chars(response: Any) -> Optional[int]:
+    if not isinstance(response, dict):
+        return None
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
+        if "content_chars" in message:
+            return int(message["content_chars"])
+        return _text_chars(message.get("content"))
+    output = response.get("output")
+    if isinstance(output, list):
+        total = 0
+        for item in output:
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            if "text_chars" in item:
+                total += int(item["text_chars"])
+            else:
+                total += sum(
+                    _text_chars(part.get("text")) for part in item.get("content") or [] if isinstance(part, dict)
+                )
+        return total
+    content = response.get("content")
+    if isinstance(content, list):
+        return sum(
+            int(block.get("text_chars", 0)) if "text_chars" in block else _text_chars(block.get("text"))
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return None
+
 
 _TERMINAL_SSE_LINES: dict[str, dict[bytes, str]] = {
     "responses": {
@@ -1181,6 +1409,10 @@ def _record(
     latency_ms: float,
     ttft_ms: Optional[float] = None,
     response_raw: Optional[str] = None,
+    client_headers: Optional[dict[str, Any]] = None,
+    annotations: Optional[dict[str, Any]] = None,
+    request_attempts: Optional[list[dict[str, Any]]] = None,
+    payload_mode: str = "full",
 ) -> None:
     """Append one exchange (success or failure). Best-effort: never raises."""
     request_body = None
@@ -1195,6 +1427,17 @@ def _record(
         except Exception:
             request_raw = request_bytes.decode("utf-8", errors="replace")
 
+    response_raw_chars = None
+    if payload_mode == "metadata":
+        if isinstance(request_body, dict):
+            request_body = _metadata_request(request_body)
+        if isinstance(response_body, dict):
+            response_body = _metadata_response(response_body)
+            if response_raw is not None:
+                # A parsed response already carries the metadata; the raw SSE text is the full output.
+                response_raw_chars = len(response_raw)
+                response_raw = None
+
     try:
         exchange = {
             "model_call_id": model_call_id,
@@ -1208,13 +1451,22 @@ def _record(
             "error_category": error_category,
             "request": request_body,
             "response": response_body,
+            "payload_mode": payload_mode,
         }
         if client_session_id is not None:
             exchange["client_session_id"] = client_session_id
+        if client_headers:
+            exchange.update(client_headers)
+        if annotations:
+            exchange["annotations"] = dict(annotations)
+        if request_attempts:
+            exchange["request_attempts"] = list(request_attempts)
         if request_raw is not None:
             exchange["request_raw"] = request_raw
         if response_raw is not None:
             exchange["response_raw"] = response_raw
+        if response_raw_chars is not None:
+            exchange["response_raw_chars"] = response_raw_chars
         store.record(rollout_id, exchange)
     except Exception:
         logger.warning("Model-call capture failed for one %s call.", dialect, exc_info=True)
@@ -1281,9 +1533,11 @@ class _CaptureMiddleware:
         delta_records: bool = False,
         external_staging: bool = False,
         token_capture_enabled: bool = False,
+        payload_mode: str = "full",
     ) -> None:
         self._app = app
         self._store = store
+        self._payload_mode = payload_mode
         self._model_server_name = model_server_name
         # This store records training tokens for correlated training-capture calls.
         self._token_store = token_store
@@ -1351,6 +1605,7 @@ class _CaptureMiddleware:
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
+        client_headers = _client_trace_headers(scope.get("headers") or [])
 
         # Give the model server a token sink keyed to this call.
         # The sink records token ids from the complete response.
@@ -1381,6 +1636,11 @@ class _CaptureMiddleware:
                 if sink_token is not None:
                     reset_token_sink(sink_token)
             return
+
+        annotations = _CallAnnotations(model_call_id)
+        annotations_token = _CURRENT_CALL_ANNOTATIONS.set(annotations)
+        attempts_context = observe_request_attempts()
+        request_attempts = attempts_context.__enter__()
 
         request_body = bytearray()
 
@@ -1458,6 +1718,10 @@ class _CaptureMiddleware:
                     latency_ms=(time.perf_counter() - start) * 1000.0,
                     ttft_ms=state["ttft_ms"],
                     response_raw=upstream_body.decode("utf-8", errors="replace") if upstream_body else None,
+                    client_headers=client_headers,
+                    annotations=annotations.fields,
+                    request_attempts=request_attempts,
+                    payload_mode=self._payload_mode,
                 )
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
@@ -1469,6 +1733,8 @@ class _CaptureMiddleware:
             await _fail_uncommitted_external_call(capture_context)
             if sink_token is not None:
                 reset_token_sink(sink_token)
+            attempts_context.__exit__(None, None, None)
+            _CURRENT_CALL_ANNOTATIONS.reset(annotations_token)
 
         completed_at = time.time()
         latency_ms = (time.perf_counter() - start) * 1000.0
@@ -1526,6 +1792,10 @@ class _CaptureMiddleware:
                 latency_ms=latency_ms,
                 ttft_ms=ttft_ms,
                 response_raw=response_raw,
+                client_headers=client_headers,
+                annotations=annotations.fields,
+                request_attempts=request_attempts,
+                payload_mode=self._payload_mode,
             )
 
         try:
@@ -1631,6 +1901,7 @@ def install_model_call_capture(
         delta_records=(capture_settings.token_id_capture.delta_records if capture_settings is not None else False),
         external_staging=external_staging,
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
+        payload_mode=config.model_call_capture_payloads,
     )
 
 

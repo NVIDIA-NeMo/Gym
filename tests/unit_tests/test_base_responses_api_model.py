@@ -21,7 +21,7 @@ import pytest
 from fastapi import Body, FastAPI, Response
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
@@ -1879,3 +1879,121 @@ def test_engine_metrics_survive_chat_completion_validation():
         }
     )
     assert completion.model_dump(mode="json")["metrics"] == {"queue_time_ms": 12.5}
+
+
+def _drive_capture(
+    tmp_path,
+    *,
+    headers,
+    response_body,
+    request_body=b'{"messages":[{"role":"user","content":"hi"}]}',
+    **middleware_kwargs,
+):
+    """Run one captured chat call through the middleware; ``on_call`` runs inside the downstream app."""
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+
+    store = CaptureStore(tmp_path)
+    on_call = middleware_kwargs.pop("on_call", None)
+
+    async def app(_scope, receive, send):
+        await receive()
+        if on_call is not None:
+            on_call()
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": response_body, "more_body": False})
+
+    async def receive():
+        return {"type": "http.request", "body": request_body, "more_body": False}
+
+    async def send(_message):
+        pass
+
+    asyncio.run(
+        _CaptureMiddleware(app, store=store, model_server_name="srv", **middleware_kwargs)(
+            {
+                "type": "http",
+                "path": "/ng-rollout/r1/v1/chat/completions",
+                "raw_path": b"/ng-rollout/r1/v1/chat/completions",
+                "headers": headers,
+            },
+            receive,
+            send,
+        )
+    )
+    [call] = read_model_call_records(store, "r1")
+    return call
+
+
+_CHAT_BODY = (
+    b'{"id":"chatcmpl-9","model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant",'
+    b'"content":"I will look.","reasoning_content":"thinking hard","tool_calls":[{"id":"t1","type":"function",'
+    b'"function":{"name":"bash","arguments":"{\\"command\\":\\"ls\\"}"}}]}}],'
+    b'"usage":{"prompt_tokens":10,"completion_tokens":7,"completion_tokens_details":{"reasoning_tokens":3}}}'
+)
+
+
+def test_capture_records_the_client_trace_headers_and_the_servers_annotations(tmp_path):
+    """The harness's x-ng-* headers and the model server's annotations land on the record, so the collector can
+    join it to the harness's own call without guessing."""
+    from nemo_gym.base_responses_api_model import annotate_current_model_call
+
+    def annotate():
+        assert annotate_current_model_call(upstream_response_id="chatcmpl-9", rejected_request_tokens=None)
+        annotate_current_model_call(upstream_finish_reason="tool_calls", upstream_status=200)
+
+    call = _drive_capture(
+        tmp_path,
+        headers=[
+            (b"x-session-id", b"ses-1"),
+            (b"x-ng-client-call-id", b"t2-abc"),
+            (b"x-ng-client-attempt", b"2"),
+            (b"x-ng-client-sent-at", b"1791272665939"),
+            (b"x-ng-agent", b"build"),
+            (b"x-ng-purpose", b"compaction_summary"),
+        ],
+        response_body=_CHAT_BODY,
+        on_call=annotate,
+    )
+    assert (call.client_session_id, call.client_call_id, call.client_attempt) == ("ses-1", "t2-abc", 2)
+    assert call.client_sent_at_ms == 1791272665939.0
+    assert (call.client_agent, call.client_purpose) == ("build", "compaction_summary")
+    assert call.annotations == {
+        "upstream_response_id": "chatcmpl-9",
+        "upstream_finish_reason": "tool_calls",
+        "upstream_status": 200,
+    }
+    assert call.response_text_chars == len("I will look.")
+    assert call.payload_mode == "full"
+    # Malformed numeric headers are dropped, never raised.
+    bad = _drive_capture(tmp_path / "b", headers=[(b"x-ng-client-attempt", b"two")], response_body=_CHAT_BODY)
+    assert bad.client_attempt is None and bad.client_call_id is None
+
+
+def test_metadata_payload_mode_keeps_ids_usage_and_tool_calls_but_not_the_text(tmp_path):
+    call = _drive_capture(tmp_path, headers=[], response_body=_CHAT_BODY, payload_mode="metadata")
+    assert call.payload_mode == "metadata"
+    assert (
+        "messages" not in call.request and call.request["messages_count"] == 1 and call.request["messages_chars"] > 0
+    )
+    message = call.response["choices"][0]["message"]
+    assert message["content"] is None and message["content_chars"] == len("I will look.")
+    assert message["reasoning_content_chars"] == len("thinking hard") and "reasoning_content" not in message
+    assert call.tool_calls and call.tool_calls[0]["name"] == "bash"
+    assert (call.tokens_in, call.tokens_out, call.tokens_reasoning) == (10, 7, 3)
+    assert call.response_text_chars == len("I will look.")
+
+
+def test_capture_config_payload_mode_defaults_to_full():
+    from nemo_gym.base_responses_api_model import ModelCallCaptureConfig
+
+    assert ModelCallCaptureConfig().model_call_capture_payloads == "full"
+    assert (
+        ModelCallCaptureConfig(
+            observability_enabled=True, model_call_capture_dir="/tmp/x", model_call_capture_payloads="metadata"
+        ).model_call_capture_payloads
+        == "metadata"
+    )
+    with pytest.raises(ValidationError):
+        ModelCallCaptureConfig(model_call_capture_payloads="summary")

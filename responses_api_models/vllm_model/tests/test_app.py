@@ -809,6 +809,43 @@ class TestApp:
             assert response.status_code == 200
             assert '"finish_reason": "length"' in response.text
 
+    def test_the_capture_record_is_annotated_with_the_engines_view(self, monkeypatch: MonkeyPatch) -> None:
+        """What only this server sees goes onto the capture record: the engine's response id and finish reason
+        on success, and the HTTP status, error body and rejected request size on an over-context error."""
+        from responses_api_models.vllm_model import app as vllm_app
+
+        seen: list[dict] = []
+        monkeypatch.setattr(vllm_app, "annotate_current_model_call", lambda **fields: seen.append(fields) or True)
+        server = self._setup_server(monkeypatch)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = (
+            b'{"error":{"message":"This model\'s maximum context length is 32768 tokens. However, you requested '
+            b'32818 tokens in the messages","code":400}}'
+        )
+        completion = {
+            "id": "chatcmpl-77",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "dummy_model",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=[error, completion])
+        server._clients = [mock_client]
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        client = TestClient(app)
+        body = {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]}
+        assert client.post("/v1/chat/completions", json=body).status_code == 200
+        assert client.post("/v1/chat/completions", json=body).status_code == 200
+
+        assert seen[0]["upstream_status"] == 400 and seen[0]["rejected_request_tokens"] == 32818
+        assert "maximum context length" in seen[0]["upstream_error"]
+        assert seen[1] == {"upstream_response_id": "chatcmpl-77", "upstream_finish_reason": "stop"}
+        assert vllm_app._parse_requested_tokens("no number here") is None
+
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]
         for worker in workers:
