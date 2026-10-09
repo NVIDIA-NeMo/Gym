@@ -11,7 +11,7 @@ exact acceptance gates. The longer design and code map are in
 ## Current live status
 
 - The current implementation commits are Gym `3baa93c02` and NeMo RL
-  `4164817d8` on branch `ehosseiniasl/multi-harness-training-routing`. They are
+  `68fc9a372` on branch `ehosseiniasl/multi-harness-training-routing`. They are
   the commits that must be present before the next runtime validation.
 - Nano job `2180485`, W&B run
   [`dv8ch7n8`](https://wandb.ai/adlr/multi-harness-RL/runs/dv8ch7n8), completed
@@ -31,7 +31,7 @@ exact acceptance gates. The longer design and code map are in
   correlated token-capture URL while routing native compaction to the
   uncorrelated model endpoint; Hermes receives the real 15,872-token context
   and uses the uncorrelated endpoint for compression.
-- RL `4164817d8` fixes observability lost during token-capture reassembly.
+- RL `68fc9a372` fixes observability lost during token-capture reassembly.
   Scalar and numeric-histogram rollout metrics now survive the finalizer and
   are mirrored into the resolved harness namespace. W&B should receive keys
   such as `train/anyterminal_openclaw/total_reward/mean`,
@@ -188,7 +188,7 @@ Use branch `ehosseiniasl/multi-harness-training-routing` in both repositories.
 | Repository | Pull request | Minimum implementation commit |
 |---|---|---|
 | NeMo Gym | [NVIDIA-NeMo/Gym#4082](https://github.com/NVIDIA-NeMo/Gym/pull/4082) | `3baa93c02` |
-| NeMo RL | [NVIDIA-NeMo/RL#4521](https://github.com/NVIDIA-NeMo/RL/pull/4521) | `4164817d8` |
+| NeMo RL | [NVIDIA-NeMo/RL#4521](https://github.com/NVIDIA-NeMo/RL/pull/4521) | `68fc9a372` |
 
 The Gym branch tip also contains documentation commits newer than the
 implementation hash. Fetch the branch tip and use the hashes above only as
@@ -210,7 +210,7 @@ git remote add contributor https://github.com/ehosseiniasl/NeMo-RL.git
 git fetch contributor ehosseiniasl/multi-harness-training-routing
 git switch -c ehosseiniasl/multi-harness-training-routing \
   --track contributor/ehosseiniasl/multi-harness-training-routing
-git merge-base --is-ancestor 4164817d8 HEAD
+git merge-base --is-ancestor 68fc9a372 HEAD
 ```
 
 After cloning, both ancestry commands must exit zero. Also run `git status
@@ -396,7 +396,7 @@ uv run pytest -q tests/unit/models/generation/test_vllm_generation.py \
 git diff --check
 ```
 
-At commit `4164817d8`, all five multi-harness recipe tests and all three focused
+At commit `68fc9a372`, all five multi-harness recipe tests and all three focused
 rollout/finalizer metric tests pass with a working Ray cluster. Focused Ruff,
 Ruff format, and `git diff --check` also pass. The source login sandbox cannot
 start Ray GCS, so run those tests outside the sandbox or on a compute node.
@@ -452,7 +452,7 @@ token.
 
 ## Validation order
 
-1. Fetch Gym commit `3baa93c02` or newer and RL commit `4164817d8` or newer,
+1. Fetch Gym commit `3baa93c02` or newer and RL commit `68fc9a372` or newer,
    then rerun their focused tests.
 2. Run the two-node synchronous Nano recipe:
    `grpo_anyterminal_multi_harness_nemotron_nano_omni_sync_2n_debug_single_controller.yaml`.
@@ -555,7 +555,7 @@ of reusing these IDs.
 ## Resume checklist
 
 1. Fetch both branch tips and verify Gym contains `3baa93c02` and RL contains
-   `4164817d8` with the minimum-commit ancestry checks.
+   `68fc9a372` with the minimum-commit ancestry checks.
 2. Copy/remap the validation bundle, outer container, caches, four task images,
    dataset, and model checkpoint.
 3. Restore secrets without printing them and confirm W&B is online at
