@@ -331,5 +331,8 @@ PYPINS
 
 RUN mkdir -p /workspace
 
+# Lets git work in repositories owned by another user, such as uploaded or extracted files.
+RUN git config --global --add safe.directory '*'
+
 WORKDIR /root
 CMD ["/bin/bash"]
