@@ -14,8 +14,8 @@
 # limitations under the License.
 """Server startup spans and histograms, asserted against in-memory OTel exporters.
 
-Runs wherever the OTel SDK is importable: the spans are created against the OTel API directly
-and the span-group gate is patched, so nemo-lens is not needed.
+These run wherever the OTel SDK is importable, without nemo-lens.
+The spans are created against the OTel API directly, and the tests patch the span-group gate.
 """
 
 import os
