@@ -30,6 +30,7 @@ from typing import (
 from unittest.mock import AsyncMock, call
 
 import openai
+import orjson
 import pytest
 from aiohttp import ClientResponseError, ClientTimeout
 from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
@@ -744,6 +745,58 @@ class TestNeMoGymResponse:
         assert isinstance(params.input, list)
         assert isinstance(params.input[0], NeMoGymResponseFunctionWebSearch)
         assert params.input[0].model_dump(mode="json") == payload
+
+    def test_output_text_logprobs_replay_as_input_and_serialize_repeatedly(self) -> None:
+        """A next-turn request that replays assistant logprobs encodes completely on every serialization."""
+        logprobs = [
+            {
+                "token": "hi",
+                "bytes": [104, 105],
+                "logprob": -0.1,
+                "top_logprobs": [{"token": "hi", "bytes": [104, 105], "logprob": -0.1}],
+            }
+        ]
+        response = NeMoGymResponse.model_validate(
+            {
+                "id": "resp_1",
+                "created_at": 0,
+                "model": "m",
+                "object": "response",
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "hi", "annotations": [], "logprobs": logprobs}],
+                    },
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "lookup",
+                        "arguments": "{}",
+                        "status": "completed",
+                    },
+                ],
+            }
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": [{"role": "user", "content": "q"}]})
+        # This follows simple_agent, which deep-copies the body and then appends the model output and the tool result.
+        body = body.model_copy(deep=True)
+        new_body = body.model_copy(
+            update={"input": [*body.input, *response.output, NeMoGymFunctionCallOutput(call_id="call_1", output="ok")]}
+        )
+
+        for _ in range(2):
+            encoded = orjson.loads(orjson.dumps(new_body.model_dump(exclude_unset=True)))
+            assert encoded["input"][1]["content"][0]["logprobs"] == logprobs
+            assert encoded["input"][2]["type"] == "function_call"
+            assert encoded["input"][3] == {"call_id": "call_1", "output": "ok"}
+            assert response.model_dump(mode="json")["output"][0]["content"][0]["logprobs"] == logprobs
 
     def test_web_search_call_keeps_typed_sdk_actions(self) -> None:
         from openai.types.responses.response_function_web_search import (

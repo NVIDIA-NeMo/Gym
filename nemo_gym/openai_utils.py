@@ -125,7 +125,7 @@ from openai.types.responses.response_output_item import (
 from openai.types.responses.response_output_item import (
     McpApprovalResponse as OutputMcpApprovalResponse,
 )
-from openai.types.responses.response_output_text_param import Annotation, Logprob
+from openai.types.responses.response_output_text_param import Annotation
 from openai.types.responses.response_reasoning_item import (
     Content as ReasoningContent,
 )
@@ -244,6 +244,28 @@ class NeMoGymResponseReasoningItem(BaseModel):
     # status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
+class NeMoGymLogprobTopLogprob(TypedDict, total=False):
+    """Copy of openai.types.responses.response_output_text_param.LogprobTopLogprob with List in place of Iterable."""
+
+    token: Required[str]
+    bytes: Required[List[int]]
+    logprob: Required[float]
+
+
+class NeMoGymLogprob(TypedDict, total=False):
+    """Copy of openai.types.responses.response_output_text_param.Logprob with List in place of Iterable.
+
+    Pydantic validates an Iterable field into a lazy iterator that can be read only once.
+    The model server fills these logprobs, and the agent sends the output message back as input on the next turn.
+    With the lazy form, orjson cannot encode that next request, and a second serialization returns empty lists.
+    """
+
+    token: Required[str]
+    bytes: Required[List[int]]
+    logprob: Required[float]
+    top_logprobs: Required[List[NeMoGymLogprobTopLogprob]]
+
+
 class NeMoGymResponseOutputText(BaseModel):
     # Override the Iterable to avoid lazy iterators in Pydantic validation.
     # The default is the empty list because a client that replays an output message it received
@@ -252,7 +274,7 @@ class NeMoGymResponseOutputText(BaseModel):
     annotations: List[Annotation] = Field(default_factory=list)
     text: str
     type: Literal["output_text"] = "output_text"
-    logprobs: Optional[List[Logprob]] = None
+    logprobs: Optional[List[NeMoGymLogprob]] = None
 
 
 class NeMoGymResponseOutputRefusal(BaseModel):
