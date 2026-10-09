@@ -43,6 +43,7 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.model_usage import ModelUsageCapture
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -956,6 +957,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
             cookies = seed_resp.cookies
 
             rollout_id = self.rollout_id_from_run(body)
+            # Legacy pairings own their lifecycle here, outside single_agent_turn.
+            usage_capture = (
+                await ModelUsageCapture.start(self.server_client.global_config_dict, rollout_id=rollout_id)
+                if rollout_id is not None
+                else None
+            )
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
                 url_path=self.url_path_for_run("/v1/responses", body),
@@ -972,6 +979,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
             )
 
+            gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
+            if usage_capture is not None:
+                gym_resp.usage = await usage_capture.usage()
+                agent_resp_json["usage"] = (
+                    gym_resp.usage.model_dump(mode="json") if gym_resp.usage is not None else None
+                )
+
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
@@ -981,7 +995,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await raise_for_status(verify_resp)
             verify_json = await get_response_json(verify_resp)
 
-            gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
             turns = sum(
                 1
                 for item in gym_resp.output
@@ -993,7 +1006,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
             result = verify_json | {"turns_used": turns, "finished_naturally": naturally}
             if observations is not None:
                 result["ng_agent_observations"] = observations.model_dump(mode="json")
-            return HermesAgentVerifyResponse.model_validate(result)
+            verify_response = HermesAgentVerifyResponse.model_validate(result)
+            # Verifiers may rewrite the response; usage still belongs to the agent execution.
+            verify_response.response.usage = gym_resp.usage
+            return verify_response
 
 
 if __name__ == "__main__":

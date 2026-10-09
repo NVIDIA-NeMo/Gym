@@ -21,7 +21,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
+from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
@@ -29,6 +31,8 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     _AgentSessionRecord,
 )
+from nemo_gym.base_responses_api_model import CaptureStore
+from nemo_gym.config_types import AgentServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -60,6 +64,8 @@ from responses_api_agents.hermes_agent.sandbox import HermesSandboxSession, _san
 
 class _FakeResponse:
     ok = True
+    status = 200
+    headers = {}
 
     def __init__(self, payload: dict, cookies: dict | None = None) -> None:
         self.payload = payload
@@ -766,20 +772,21 @@ class TestResultUsage:
         )
         assert response.usage is None
 
-    def test_missing_details_remain_unknown(self) -> None:
+    @pytest.mark.parametrize(("prompt_tokens", "completion_tokens"), [(10, 20), (0, 0)])
+    def test_native_totals_preserve_zero_and_unknown_details(self, prompt_tokens: int, completion_tokens: int) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         response = hermes._response_from_result(
             body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
             result={
                 "messages": [{"role": "assistant", "content": "done"}],
-                "prompt_tokens": 10,
-                "completion_tokens": 20,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
             },
             model_name="model",
         )
-        assert response.usage.input_tokens == 10
-        assert response.usage.output_tokens == 20
-        assert response.usage.total_tokens == 30
+        assert response.usage.input_tokens == prompt_tokens
+        assert response.usage.output_tokens == completion_tokens
+        assert response.usage.total_tokens == prompt_tokens + completion_tokens
         assert response.usage.input_tokens_details.cached_tokens is None
         assert response.usage.output_tokens_details.reasoning_tokens is None
 
@@ -1098,6 +1105,141 @@ class TestMaxTokens:
         assert seen["max_tokens"] is None
 
 
+class TestRunUsage:
+    @pytest.mark.parametrize("native_usage_available", [False, True])
+    @pytest.mark.parametrize(
+        "capture_mode", ["complete", "missing_usage", "missing_capture", "incomplete", "disabled", "no_identity"]
+    )
+    def test_legacy_run_reports_agent_usage_before_verification(
+        self, tmp_path: Path, capture_mode: str, native_usage_available: bool
+    ) -> None:
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {
+            "observability_enabled": capture_mode != "disabled",
+            "model_call_capture_dir": str(tmp_path),
+        }
+        agent = HermesAgent(config=_config(), server_client=client)
+        store = CaptureStore(tmp_path)
+        rollout_id = "1-2-a3"
+        body = {"responses_create_params": {"input": "solve"}}
+        if capture_mode != "no_identity":
+            body.update({"_ng_task_index": 1, "_ng_rollout_index": 2, "_ng_attempt_index": 3})
+        run_body = HermesAgentRunRequest.model_validate(body)
+        response = agent._response_from_result(
+            body=run_body.responses_create_params,
+            model_name="model",
+            result={"messages": [{"role": "assistant", "content": "answer", "prompt_token_ids": [1, 2]}]}
+            | ({"prompt_tokens": 600, "completion_tokens": 80} if native_usage_available else {}),
+        ).model_dump(mode="json")
+        expected_counts = None
+        if capture_mode == "complete":
+            expected_counts = (30, 10)
+        elif native_usage_available and capture_mode in {"disabled", "no_identity"}:
+            expected_counts = (600, 80)
+        expected_usage = (
+            {
+                "input_tokens": expected_counts[0],
+                "output_tokens": expected_counts[1],
+                "total_tokens": sum(expected_counts),
+                "input_tokens_details": {"cached_tokens": None},
+                "output_tokens_details": {"reasoning_tokens": None},
+            }
+            if expected_counts is not None
+            else None
+        )
+
+        def record(prompt: int, completion: int = 1, key: str = rollout_id) -> None:
+            store.record(
+                key,
+                {
+                    "response": {
+                        "id": "repeated-id",
+                        "usage": {
+                            "prompt_tokens": prompt,
+                            "completion_tokens": completion,
+                        },
+                    }
+                },
+            )
+
+        record(1000)  # A previous execution under the same capture key.
+
+        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+            if url_path == "/run":
+                request = SimpleNamespace(headers={}, cookies=cookies)
+                result = await agent.run(request, HermesAgentRunRequest.model_validate_json(kwargs["data"]))
+                return _FakeResponse(result.model_dump(mode="json"))
+            if url_path == "/aggregate_metrics":
+                metrics = await agent.aggregate_metrics(json)
+                return _FakeResponse(metrics.model_dump(mode="json"))
+            if url_path == "/seed_session":
+                record(2000)
+                return _FakeResponse({}, {"session": "1"})
+            if url_path.endswith("/v1/responses"):
+                expected_path = (
+                    "/v1/responses"
+                    if capture_mode in {"disabled", "no_identity"}
+                    else f"/ng-rollout/{rollout_id}/v1/responses"
+                )
+                assert url_path == expected_path
+                assert cookies == {"session": "1"}
+                if capture_mode != "missing_capture":
+                    record(10, 3)
+                    record(20, 7)
+                if capture_mode == "missing_usage":
+                    store.record(rollout_id, {"response": {}})
+                if capture_mode == "incomplete":
+                    store.mark_incomplete(rollout_id)
+                record(4000, key="1-2")  # A different dispatch attempt.
+                return _FakeResponse(response, cookies)
+            assert url_path == "/verify"
+            assert json["response"]["usage"] == expected_usage
+            record(3000)  # Judge usage must not change the agent's total.
+            return _FakeResponse(
+                json
+                | {
+                    "reward": 1.0,
+                    "response": json["response"]
+                    | {
+                        "usage": {
+                            "input_tokens": 999,
+                            "output_tokens": 999,
+                            "total_tokens": 1998,
+                            "input_tokens_details": {"cached_tokens": 0},
+                            "output_tokens_details": {"reasoning_tokens": 0},
+                        }
+                    },
+                }
+            )
+
+        client.post = AsyncMock(side_effect=post)
+        environment = LegacyAgentEnvironmentServer(
+            config=LegacyAgentEnvironmentServerConfig(
+                name="environment",
+                host="localhost",
+                port=8000,
+                entrypoint="app.py",
+                agent_server=AgentServerRef(type="responses_api_agents", name="agent"),
+            ),
+            server_client=client,
+        )
+        with TestClient(environment.setup_webserver()) as http:
+            reply = http.post("/run", json=body)
+            assert reply.status_code == 200
+            metrics_reply = http.post("/aggregate_metrics", json={"verify_responses": [reply.json()]})
+            assert metrics_reply.status_code == 200
+            metrics = metrics_reply.json()["agent_metrics"]
+            for field in ("input_tokens", "output_tokens", "total_tokens"):
+                if expected_usage is None:
+                    assert f"mean/{field}" not in metrics
+                else:
+                    assert metrics[f"mean/{field}"] == expected_usage[field]
+        result = reply.json()
+        assert result["response"]["usage"] == expected_usage
+        assert result["response"]["output"] == response["output"]
+        assert result["reward"] == 1.0
+
+
 class TestObservability:
     @pytest.mark.parametrize(
         ("terminal_backend", "runtime_gap"),
@@ -1144,9 +1286,9 @@ class TestObservability:
             runtime_gap,
         ]
 
-    def test_run_returns_observations_without_leaking_internal_attachment(self) -> None:
+    def test_run_returns_observations_without_leaking_internal_attachment(self, tmp_path: Path) -> None:
         server_client = MagicMock(spec=ServerClient)
-        server_client.global_config_dict = {"observability_enabled": True}
+        server_client.global_config_dict = {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}
         agent = HermesAgent(config=_config(), server_client=server_client)
         response = NeMoGymResponse.model_validate(
             {

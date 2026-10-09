@@ -38,6 +38,7 @@ from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
+from nemo_gym.model_usage import ModelUsageCapture
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnFailure,
@@ -167,6 +168,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     ),
                 )
             )
+        usage_capture = await ModelUsageCapture.start(
+            self.server_client.global_config_dict, rollout_id=request.episode_id.capture_key
+        )
         agent_session_id = f"agent-session-{uuid4().hex}"
         agent_cookies: dict[str, str] = {}
 
@@ -250,12 +254,17 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         try:
             await agent_cleanup.close()
         except Exception as error:
+            if usage_capture is not None:
+                # Cleanup has not confirmed the end of model activity.
+                agent_response = agent_response.model_copy(update={"usage": None})
             raise self._failure(
                 stage="cleanup",
                 failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
             ) from error
+        if usage_capture is not None:
+            agent_response = agent_response.model_copy(update={"usage": await usage_capture.usage()})
         try:
             verify_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -288,9 +297,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             task_id=request.task.task_id,
             result=verification.model_copy(
                 update={
+                    "response": verification.response.model_copy(update={"usage": agent_response.usage}),
                     "ng_agent_observations": agent_close_response.agent_observations
                     if agent_close_response is not None
-                    else None
+                    else None,
                 }
             ),
         )
