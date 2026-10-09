@@ -613,6 +613,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, f"OpenClaw sandbox execution does not support extra request fields: {sorted(extras)}"
             )
+        if "chat_template_kwargs" in (body.metadata or {}):
+            raise HTTPException(422, "Configure chat_template_kwargs on the Gym model server for OpenClaw")
         supported = {"input", "instructions", "model"}
         for name, field in type(body).model_fields.items():
             if name in supported:
@@ -1079,6 +1081,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         except ValueError:
             pass  # signal handlers need the main thread; fall back to timeout-only salvage
 
+    def _clear_failed_local_setup(self, task: asyncio.Task[None]) -> None:
+        # All shielded waiters may have gone away before the installer fails.
+        failed = task.cancelled() or task.exception() is not None
+        if failed and self._local_setup_task is task:
+            self._local_setup_task = None
+
     async def _run_openclaw(
         self,
         instruction: str,
@@ -1095,6 +1103,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             self._local_setup_task = asyncio.create_task(
                 asyncio.to_thread(ensure_openclaw, self.config.openclaw_version, node_bin_dir=self.config.node_bin_dir)
             )
+            self._local_setup_task.add_done_callback(self._clear_failed_local_setup)
         setup_task = self._local_setup_task
         try:
             # Share one installation across concurrent local calls. Cancelling

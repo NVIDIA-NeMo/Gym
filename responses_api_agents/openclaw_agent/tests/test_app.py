@@ -18,6 +18,7 @@ import json
 import os
 import signal
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -125,6 +126,38 @@ async def test_lazy_local_install_uses_configured_node_runtime(tmp_path: Path) -
                 with pytest.raises(RuntimeError, match="stop before onboard"):
                     await agent._run_openclaw("task", None)
         install.assert_called_once_with("2026.6.11", node_bin_dir="/opt/task-node/bin")
+
+
+async def test_failed_install_retries_after_all_waiters_cancel() -> None:
+    started, release = threading.Event(), threading.Event()
+
+    def fail_install(*args, **kwargs) -> None:
+        started.set()
+        assert release.wait(3)
+        raise RuntimeError("install failed after cancellation")
+
+    agent = _make_agent()
+    with (
+        patch("responses_api_agents.openclaw_agent.app.ensure_openclaw", side_effect=fail_install) as install,
+        patch.object(agent, "_workspace_root", side_effect=RuntimeError("install completed")),
+    ):
+        waiter = asyncio.create_task(agent._run_openclaw("task", None))
+        try:
+            async with asyncio.timeout(2):
+                while not started.is_set():
+                    await asyncio.sleep(0.01)
+            setup = agent._local_setup_task
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+        finally:
+            release.set()
+        with pytest.raises(RuntimeError, match="after cancellation"):
+            await setup
+        install.side_effect = None
+        with pytest.raises(RuntimeError, match="install completed"):
+            await agent._run_openclaw("task", None)
+        assert install.call_count == 2
 
 
 class TestExtractInstruction:

@@ -197,7 +197,10 @@ Sandbox request support is deliberately explicit:
   and prepended to OpenClaw's user prompt. The harness retains its own system prompt.
 - The request `model`, when supplied, must match the configured model.
 - `max_output_tokens`, `temperature`, `top_p`, reasoning overrides, tool-selection controls, output
-  schemas, history replay, and other unsupported Responses options are rejected before activation.
+  schemas, history replay, request `metadata`, and other unsupported Responses options are rejected before activation.
+  This includes `metadata.extra_body.seed` added by `num_repeats_add_seed`; disable that option
+  for sandbox sessions. Request `metadata.chat_template_kwargs` is also rejected; configure it
+  on the Gym model server instead.
   The sandbox config also rejects `max_output_tokens`: model metadata does not prove an effective
   inference limit. Configure sampling and per-call limits on the Gym model server and inspect the
   effective captured requests. An episode-wide token budget is not implemented.

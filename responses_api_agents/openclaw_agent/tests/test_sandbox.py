@@ -426,6 +426,28 @@ def test_request_allowlist_rejects_future_fields_but_accepts_defaults(setup):
     sandbox.launch.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "metadata,hint",
+    [
+        ({"extra_body": json.dumps({"seed": 1})}, "request field metadata"),
+        ({"chat_template_kwargs": json.dumps({"enable_thinking": True})}, "Gym model server"),
+    ],
+)
+def test_metadata_rejection_preserves_activation_and_configuration_hint(setup, metadata, hint):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        path = "/ng-rollout/openclaw-smoke-a2/v1/responses"
+        rejected = client.post(path, json={"input": "task", "metadata": metadata})
+        assert rejected.status_code == 422
+        assert hint in rejected.json()["detail"]
+        sandbox.launch.assert_not_awaited()
+        client.post(path, json={"input": "task"}).raise_for_status()
+        sandbox.launch.assert_awaited_once()
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+
+
 def test_no_session_keeps_existing_local_path(setup):
     agent, sandbox = setup
     with patch.object(agent, "_create_response", AsyncMock(side_effect=RuntimeError("legacy path reached"))) as legacy:
