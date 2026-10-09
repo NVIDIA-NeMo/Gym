@@ -61,6 +61,7 @@ gym eval compare              # compare a baseline eval run against a candidate 
 
 # Contributor helpers
 gym dev test                  # run NeMo Gym's unit tests
+gym dev compare OLD NEW       # per-task parity report between two rollout files (migration aid)
 ```
 
 ## Common Options
@@ -1111,6 +1112,16 @@ Run NeMo Gym's core unit tests with coverage reporting.
 ```bash
 gym dev test
 ```
+
+### `gym dev compare`
+
+Compare two rollout JSONL files task by task. A temporary migration aid: before an old resources server is deleted in favour of its Harbor-path replacement, run both on the same tasks and use this report as the gate.
+
+```bash
+gym dev compare old/rollouts.jsonl new/rollouts.jsonl --logs-root resources_servers/harbor --json compare.json
+```
+
+Rows are joined by task id (`_ng_task_id` on the Harbor path; `task_name` or a `verifier_metadata` id on legacy servers; override with `--key FIELD`). When both sides span several tasksets, tasks are keyed and listed as `taskset/task_id`. When only one side does, the other side keeps its plain task ids and each is matched to the task id that appears in exactly one taskset (or in that side's own taskset); an id that recurs across tasksets is reported as ambiguous and listed as missing. A masked-failures sidecar (`<name>_failures.jsonl`) is folded back in. Each task is classified as identical, flipped (split into old-win and new-win), masked, or missing (only one side has it). A task is masked when either side has `mask_sample` true, a `reward` that is absent or null, or a NaN or infinite reward (reported with the raw value). A `failure_kind` on a row with `mask_sample` false (such as the Harbor server's scored zero for a verifier timeout) does not mask: the reward counts, and a flip it causes is listed as a flip with the `failure_kind` printed beside the side that carries it. A flip where one side also reports an agent error is listed separately as a rerun candidate. A string or boolean `reward` is an input error that names the file, line and task. When a side has several rows for a task, the mean reward is compared. For every flip the report prints both rewards and the last `--tail` lines (default 15) of the losing side's verifier output, read from `verifier_logs_dir` (resolved against the current directory, each file's directory, and `--logs-root`) or from the row's embedded `test_output`; a log that cannot be read is reported as unavailable with the reason. `gym --json dev compare OLD NEW` prints the JSON summary on stdout instead of the report (the same object `--json PATH` writes). The exit code is 0 for a report and 1 when an input cannot be read or the `--json PATH` file cannot be written.
 
 ---
 

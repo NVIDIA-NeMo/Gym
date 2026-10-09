@@ -816,6 +816,24 @@ def _dataset_validate(args: argparse.Namespace, overrides: list[str]) -> None:
     validate_target(args, overrides)
 
 
+def _dev_compare(args: argparse.Namespace, overrides: list[str]) -> None:
+    """`gym dev compare OLD NEW`: the paths and quoted options reach the command verbatim (as `gym eval run` passes
+    its TARGET) rather than through Hydra's override grammar, which mangles non-ASCII and backslashes. The root
+    `gym --json` toggle switches stdout to the JSON summary; `--json PATH` after the subcommand writes it to a file."""
+    from nemo_gym.cli.dev import dev_compare
+
+    # The remaining tokens (e.g. `+tail=3`, `+verbose=true`) are Hydra overrides, handed over as dispatch() does.
+    sys.argv = [sys.argv[0], *overrides]
+    dev_compare(
+        json_stdout=getattr(args, "json", False),
+        old_rollouts=args.old_rollouts,
+        new_rollouts=args.new_rollouts,
+        key=args.key,
+        logs_root=args.logs_root,
+        json_output=args.json_output,
+    )
+
+
 # One-line help for each command group, shown in `gym --help`.
 GROUPS = {
     "list": "List available components (benchmarks, environments, agents, models, resources-servers).",
@@ -1413,6 +1431,49 @@ COMMANDS = {
         ),
     ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
+    # Temporary migration aid: the parity gate before an old resources server is deleted for its Harbor path.
+    # Register-only flags (no Hydra translation) are consumed by `_dev_compare`, like `gym eval run`'s TARGET.
+    "dev compare": Command(
+        target=_dev_compare,
+        summary="Compare two rollout JSONL files task by task and show the losing verifier output for every flip.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "old_rollouts", metavar="OLD_ROLLOUTS", help="Rollouts JSONL from the old (reference) side."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "new_rollouts", metavar="NEW_ROLLOUTS", help="Rollouts JSONL from the new (candidate) side."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--key",
+                    metavar="FIELD",
+                    help="Dotted field holding the task id on both sides (default: detected, e.g. _ng_task_id or "
+                    "task_name).",
+                ),
+            ),
+            _value_flag("tail", "tail", "Lines of the losing side's verifier output to print per flip (default 15)."),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--logs-root",
+                    dest="logs_root",
+                    metavar="DIR",
+                    help="Directory against which a relative verifier_logs_dir is resolved (e.g. "
+                    "resources_servers/harbor).",
+                ),
+            ),
+            # `--json PATH` after the subcommand writes a file. The root `gym --json` toggle (before the subcommand)
+            # is still honoured: it prints the same summary on stdout instead of the report.
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--json", dest="json_output", metavar="PATH", help="Also write a machine-readable summary here."
+                ),
+            ),
+        ),
+    ),
 }
 
 
