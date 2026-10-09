@@ -439,3 +439,35 @@ def test_subagent_modes_shape_the_opencode_config() -> None:
 
     with pytest.raises(ValueError, match="subagent mode"):
         make_job(opencode_subagents="sometimes")
+
+
+def test_hub_post_outlasts_a_provider_outage(hub_judge, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 503 streak shorter than the transient budget still yields the judge result."""
+    import io
+    import urllib.error
+
+    module, _ = hub_judge
+    monkeypatch.setenv("AVB_JUDGE_BASE_URL", "https://hub.example")
+    monkeypatch.setenv("NVINFERENCE_API_KEY", "k")
+    naps: list[float] = []
+    monkeypatch.setattr(module.time, "sleep", naps.append)
+    calls = {"n": 0}
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(request, timeout):
+        calls["n"] += 1
+        if calls["n"] <= 6:
+            raise urllib.error.HTTPError(request.full_url, 503, "unavailable", {}, io.BytesIO(b"x"))
+        return Resp(b'{"ok": true}')
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
+    module.FAILURES.clear()
+    assert module.real_post("/v1/messages", {}) == {"ok": True}
+    assert calls["n"] == 7 > module.ATTEMPTS
+    assert max(naps) == module.MAX_BACKOFF_SECONDS and module.FAILURES == []
