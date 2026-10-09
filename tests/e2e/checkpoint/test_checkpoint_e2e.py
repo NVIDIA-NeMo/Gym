@@ -1326,3 +1326,48 @@ async def test_snapshot_gc_keeps_what_retained_checkpoints_name(deploy, tmp_path
     assert remaining["files"] == {"notes": "one\ntwo\n"}, "the second checkpoint's snapshot survives"
     assert remaining["id"] in snapshots.retained_snapshot_ids(checkpoints)
     assert response.json()["reward"] == 1.0
+
+
+# -- borrowed sandbox: the resources server owns it, the agent runs tools in it -----------------------------
+
+
+@pytest.mark.parametrize("refresh", [True, False])
+async def test_a_borrowed_sandbox_is_refreshed_after_the_owner_rebuilt_it(
+    deploy, tmp_path: Path, refresh: bool
+) -> None:
+    deployment = deploy("borrowed_sandbox", borrower_refreshes_access=refresh)
+    deployment.backend("/_ctl/script", NOTES_SCRIPT)
+    deployment.backend("/_ctl/hold", {"after_calls": 1})
+    async with httpx.AsyncClient(base_url=deployment.url("environment"), timeout=120) as http:
+        first = asyncio.create_task(http.post("/run", json=notes_episode("borrowed-1")))
+        await wait_until(lambda: len(deployment.backend_calls()) == 2)
+        await checkpoint(deployment, tmp_path / "ckpt", ["borrowed-1"])
+        [snapshot] = deployment.sandbox_state()["snapshots"].values()
+        # The episode continues past the checkpoint: the agent appends "two" into the owner's live sandbox through
+        # the access it was handed at seed, then its final model call is held.
+        participants = await deployment.participants()
+        await coordination.resume(participants, "c1", deadline_ts=deadline())
+        deployment.backend("/_ctl/hold", {"after_calls": 2, "release_held": True})
+        await wait_until(lambda: len(deployment.backend_calls()) == 3)
+        await wait_until(
+            lambda: deployment.sandbox_state()["boxes"][snapshot["sandboxId"]]["files"] == {"notes": "one\ntwo\n"}
+        )
+        # Then every Gym process dies. The owner rebuilds the sandbox from its snapshot under a new id.
+        await crash_and_restore(deployment, tmp_path / "ckpt", ["borrowed-1"])
+        first.cancel()
+        replacement = await http.post("/run", json=notes_episode("borrowed-1", attempt=1))
+        after = deployment.sandbox_state()
+
+    old = after["boxes"][snapshot["sandboxId"]]
+    [fork] = [box for box in after["boxes"].values() if box["from_snapshot"] == snapshot["id"]]
+    assert old["state"] == "stopped" and old["files"] == {"notes": "one\ntwo\n"}
+    assert replacement.status_code == 200, replacement.text
+    if refresh:
+        # The agent asked the owner for the current access, so the replayed "two" landed in the rebuilt sandbox.
+        assert replacement.json()["result"]["reward"] == 1.0
+        assert fork["files"] == {"notes": "one\ntwo\n"}
+    else:
+        # Kept the stale access to the superseded sandbox: its tool calls failed and the rebuilt sandbox never got
+        # the second note. This is why a borrower must re-resolve its access after a restore.
+        assert replacement.json()["result"]["reward"] != 1.0
+        assert fork["files"] == {"notes": "one\n"}
