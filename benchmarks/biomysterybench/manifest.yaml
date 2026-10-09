@@ -1,0 +1,28 @@
+name: biomysterybench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: BioMysteryBench evaluates agents on real-world bioinformatics tasks with objective ground-truth answers.
+modality: text
+licensing: CC-BY-4.0
+authors:
+- Sanyam Kapoor
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: config.yaml
+agent_server: harbor_agent_general
+datasets:
+- name: biomysterybench
+  type: benchmark
+  jsonl_fpath: benchmarks/biomysterybench/data/gym.jsonl
+  prepare_script: benchmarks/biomysterybench/harbor/adapter.py
+  num_repeats: 4
+model_server: policy_model
+canonical_split: benchmark
+lifecycle: experimental
