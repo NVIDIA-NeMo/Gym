@@ -48,6 +48,20 @@ Bounded attributes identify the binding connector limit, queue outcome, and dest
 ``gym.http.connection_pool.connect_total`` (observable counter): all connection attempts
 (``connect()`` calls), including attempts that later fail or are abandoned.
 Compare its value with the queue-duration histogram count to calculate the queued fraction.
+
+Partial-rollout checkpoints
+---------------------------
+``gym.checkpoint.operation_duration_ms`` (histogram): one participant's control operation (``prepare``,
+``commit``, ``restore``, ``resume``, ``retire``) or one controller coordination call, by operation, participant
+kind (``controller`` for coordination), and outcome.
+
+``gym.checkpoint.records_total`` / ``gym.checkpoint.bytes_total`` (counters): records and bytes a participant
+wrote at commit or read at restore, by operation and kind.
+
+``gym.checkpoint.events_total`` (counter): things that change a checkpoint's outcome without failing a call,
+by event: ``lease_expired`` (a participant resumed on its own, aborting the checkpoint), ``prepare_not_ready``
+(a prepare reached its deadline with blockers), ``refused`` (a request refused for a checkpoint, with its error
+code), and ``generation_cut`` (one in-flight call's cut, with its disposition).
 """
 
 import logging
@@ -68,6 +82,10 @@ HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT = "gym.http.connection_pool.connect_tota
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
 HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_outcome"
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
+CHECKPOINT_OPERATION_INSTRUMENT = "gym.checkpoint.operation_duration_ms"
+CHECKPOINT_RECORDS_INSTRUMENT = "gym.checkpoint.records_total"
+CHECKPOINT_BYTES_INSTRUMENT = "gym.checkpoint.bytes_total"
+CHECKPOINT_EVENTS_INSTRUMENT = "gym.checkpoint.events_total"
 
 #: Milliseconds. Provisioning a remote sandbox takes tens of seconds and a long command can run
 #: for minutes; the SDK's default boundaries end at 10 s and would put most of both in +Inf.
@@ -276,6 +294,42 @@ def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[st
         )
     except Exception:
         logger.debug("nemo-lens: failed to register %s", HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT, exc_info=True)
+
+
+#: Milliseconds. Most operations take milliseconds; commit and restore at tens of thousands of rollouts take seconds.
+CHECKPOINT_DURATION_BOUNDARIES_MS: tuple[float, ...] = (1, 5, 10, 50, 100, 500, 1_000, 5_000, 10_000, 30_000, 120_000)
+
+
+def record_checkpoint_operation(duration_ms: float, *, operation: str, kind: str, outcome: str) -> None:
+    """Record one checkpoint operation's wall-clock, by operation, participant kind, and outcome."""
+    _record_histogram(
+        CHECKPOINT_OPERATION_INSTRUMENT,
+        "ms",
+        "Wall-clock time of one partial-rollout checkpoint operation.",
+        duration_ms,
+        {"nemo.gym.checkpoint.operation": operation, "nemo.gym.checkpoint.participant_kind": kind, "outcome": outcome},
+        boundaries=CHECKPOINT_DURATION_BOUNDARIES_MS,
+    )
+
+
+def record_checkpoint_volume(*, operation: str, kind: str, records: int, size_bytes: int) -> None:
+    """Count the records and bytes a participant wrote at commit or read at restore."""
+    attributes = {"nemo.gym.checkpoint.operation": operation, "nemo.gym.checkpoint.participant_kind": kind}
+    _record_counter(CHECKPOINT_RECORDS_INSTRUMENT, "Checkpoint records written or read.", attributes, records)
+    _record_counter(CHECKPOINT_BYTES_INSTRUMENT, "Checkpoint record bytes written or read.", attributes, size_bytes)
+
+
+def record_checkpoint_event(event: str, amount: int = 1, **attributes: str) -> None:
+    """Count a checkpoint event (``lease_expired``, ``prepare_not_ready``, ``refused``, ``generation_cut``)."""
+    _record_counter(
+        CHECKPOINT_EVENTS_INSTRUMENT,
+        "Events that change a partial-rollout checkpoint's outcome without failing a call.",
+        {
+            "nemo.gym.checkpoint.event": event,
+            **{f"nemo.gym.checkpoint.{name}": value for name, value in attributes.items()},
+        },
+        amount,
+    )
 
 
 def _reset_for_testing() -> None:
