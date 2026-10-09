@@ -88,7 +88,10 @@ def test_owned_http_failures_match_the_declared_scenario(tmp_path, record, name,
     failed = deepcopy(trajectory["model_calls"][0])
     failed.update(model_call_id="failed-attempt", started_at=0.0, completed_at=0.5, token_stats={})
     failed["response_metadata"].update(
-        response_id=None, status_code=status, error_category="http_error", response_status=None
+        response_id=None,
+        status_code=status,
+        error_category="timeout" if status == 504 else "http_error",
+        response_status=None,
     )
     failed["response"] = {"error": {"message": "injected failure"}}
     ref = {"model_call_id": "failed-attempt", "model_ref": failed["response_metadata"]["model_ref"]}

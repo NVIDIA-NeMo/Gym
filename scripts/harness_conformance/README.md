@@ -116,6 +116,8 @@ python scripts/run_harness_conformance.py --harness codex \
 | `usage_omitted` | Successful tool sequence with no provider usage fields | TE-1–TE-9, including unknown usage |
 | `retry_429` | Two 429 replies before the tool sequence | TE-1–TE-9, including distinct attempts with identical request bodies |
 | `retry_500` | One 500 reply before the tool sequence | TE-1–TE-9, including retained error payloads |
+| `harness_model_request_timeout` | Withhold the first reply until the harness's own request deadline | Explicit saved harness deadline and interrupted call |
+| `model_server_timeout_response` | Return a timeout error body with HTTP 504 on the first request | Saved request, timeout body and status |
 | `model_error` | Persistent 400 with no model response ID | TE-1, TE-2, TE-4, TE-7, and TE-8/TE-9 |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
 
@@ -124,6 +126,31 @@ usage includes prompt, completion, reasoning, total, and cached counts. Chat
 replies also include reasoning text. Requests adapt only the shell-tool name and
 argument schema advertised by the harness. Unsupported tool protocols are
 reported as exercise failures.
+
+The two timeout scenarios run only `model.timeout_stimulus` and
+`model.timeout_retained`. They impose no retry, recovery, grade or health verdict
+and do not qualify the full TE-1 contract.
+Later requests can succeed if the harness retries; retry policy is unchanged.
+Evidence may be in the normal rollout or the failure row, never repaired from
+capture sidecars.
+
+`harness_model_request_timeout` sets a two-second native client deadline:
+OpenCode's `provider.nemo.options.timeout`, Hermes's `HERMES_API_TIMEOUT`,
+Pi's isolated `httpIdleTimeoutMs`, or Codex's `stream_idle_timeout_ms`.
+Codex receives SSE headers and a comment before silence so its idle clock starts;
+the other drivers receive no response headers. `--timeout` remains a longer
+whole-episode safety guard and cannot satisfy the recording check.
+
+This check targets the **proposed FEA-433** `ng_trajectory.time_limits` record:
+`scope=model_call`, `enforced_by=harness`, `evidence=harness_output`, the configured
+limit name/value, and `target.model_call_id` resolving to the interrupted request.
+That producer/schema work is not implemented here. Missing records fail;
+disconnections, generic cancellation and elapsed time are not timeout evidence.
+
+`model_server_timeout_response` tests preservation of a server-reported timeout.
+HTTP 504 is the fixture's chosen response, not a claim that every timeout uses
+504 or that a deadline really fired inside the server. It does not exercise
+vLLM adapter internals. The existing `retry_500` scenario is unchanged.
 
 The runner observes actual retry behavior. A runtime that does not retry the
 injected error leaves that scenario incomplete. A terminal error must still

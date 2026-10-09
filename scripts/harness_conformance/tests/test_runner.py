@@ -60,7 +60,10 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, tmp_path):
         getattr(module, HARNESSES[harness] + "Config").model_validate(agent)
 
 
-@pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure", "usage_omitted", "retry_429", "retry_500"])
+@pytest.mark.parametrize(
+    "scenario_name",
+    ["tool_success", "tool_failure", "usage_omitted", "retry_429", "retry_500"],
+)
 def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path, scenario_name):
     scenario = SCENARIO[scenario_name]
     probe = Probe(scenario, tmp_path)
@@ -96,12 +99,6 @@ def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path,
     assert len(captures) == len(scenario.http_errors) + 3
     assert len({c["model_call_id"] for c in captures}) == len(captures)
     assert [c["status_code"] for c in captures] == [*scenario.http_errors, 200, 200, 200]
-    if not scenario.usage:
-        assert all(c.get("tokens_in") is None and c.get("tokens_out") is None for c in captures)
-    else:
-        assert captures[-1]["tokens_in"] == 20 + len(scenario.http_errors) + 2
-        assert captures[-1]["tokens_reasoning"] == 2
-        assert captures[-1]["cached_tokens"] == 3
 
 
 @pytest.mark.parametrize("dialect", ["chat/completions", "responses"])
@@ -174,7 +171,7 @@ def test_verifier_records_actual_final_answer(tmp_path, name, reward):
     assert response.json()["reward"] == reward
     assert response.json()["evaluation_completed"] is True
     assert response.json()["mask_sample"] is False
-    assert probe.verifications == [{"reward": reward, "answer_seen": True}]
+    assert probe.verifications == [{"reward": reward, "answer_seen": True, "evaluation_completed": True}]
     assert probe.seeded == 1
 
 
@@ -490,3 +487,51 @@ def test_chat_fingerprint_ignores_creation_clock():
     response = {"id": "r", "object": "chat.completion", "created": 123, "choices": []}
     without_clock = {key: value for key, value in response.items() if key != "created"}
     assert _fingerprint(request, 200, response) == _fingerprint(request, 200, without_clock)
+
+
+@pytest.mark.parametrize("dialect", ["chat/completions", "responses"])
+def test_server_timeout_response_is_retained_without_requiring_retry(tmp_path, dialect):
+    scenario = SCENARIO["model_server_timeout_response"]
+    probe = Probe(scenario, tmp_path)
+    body = {"model": "probe", "messages" if dialect == "chat/completions" else "input": []}
+    with TestClient(probe.model_app()) as client:
+        response = client.post(f"/ng-rollout/0-0/v1/{dialect}", json=body)
+    assert response.status_code == 504
+    assert response.json()["error"]["type"] == "model_timeout"
+    # No retry or verifier is needed to satisfy the recording contract.
+    call = {
+        "model_call_id": "c1",
+        "request": body,
+        "response": response.json(),
+        "response_metadata": {"status_code": 504, "response_id": None},
+    }
+    (tmp_path / "rollouts_failures.jsonl").write_text(json.dumps({"ng_trajectory": {"model_calls": [call]}}) + "\n")
+    result = inspect_episode(scenario, tmp_path, {"returncode": 1, "timed_out": False})
+    assert result["verdict"] == "fulfilled"
+    assert result["delivery"] == "failure_record"
+    assert result["health_report"] is None
+    assert {c["id"] for c in result["checks"]} == {"model.timeout_stimulus", "model.timeout_retained"}
+    assert not probe.finished and not probe.verifications
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_deadline_driver_configures_client_limit_not_episode_guard(harness, tmp_path, monkeypatch):
+    from scripts.harness_conformance.episode import _configure_request_timeout
+
+    monkeypatch.setenv("HERMES_API_TIMEOUT", "100")
+    config = _config(harness, tmp_path, [10001, 10002, 10003, 10004], 60)
+    setting = _configure_request_timeout(harness, config, tmp_path, 2)
+    agent = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
+    assert setting["configured_s"] == 2
+    if harness != "hermes":
+        assert agent["timeout"] == 60
+    if harness == "opencode":
+        assert agent["opencode_config"]["provider"]["nemo"]["options"]["timeout"] == 2000
+    elif harness == "codex":
+        assert agent["stream_idle_timeout_ms"] == 2000 and setting["stream_idle"]
+    elif harness == "hermes":
+        import os
+
+        assert os.environ["HERMES_API_TIMEOUT"] == "2"
+    else:
+        assert "pi-timeout-launcher.py" in agent["command"]

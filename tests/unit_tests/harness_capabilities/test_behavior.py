@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from nemo_gym.harness_capabilities.behavior import inspect_behavior, model_checks, tool_checks
+from nemo_gym.harness_capabilities.behavior import inspect_behavior, model_checks, model_timeout_checks, tool_checks
 from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
 
 
@@ -112,3 +112,62 @@ def test_missing_output_witness_cannot_qualify_artifacts(behavior_episode):
     assert checks["tools.witness_output"]["reasons"] == [
         "retained tool output differs from the independent tool witness"
     ]
+
+
+@pytest.mark.parametrize("kind", ["harness_deadline", "server_response"])
+@pytest.mark.parametrize(
+    "mutation", [None, "missing", "wrong_request", "wrong_origin", "cancelled_only", "partial_stream"]
+)
+def test_timeout_recording_does_not_require_retry_or_verification(kind, mutation):
+    request = {"input": [{"role": "user", "content": "task"}]}
+    error = {"error": {"message": "policy model request timed out", "type": "model_timeout", "code": "504"}}
+    first = {"request": request, "response": error, "status_code": 504}
+    setting = {"limit": "test_request_timeout", "configured_s": 2.0}
+    if kind == "harness_deadline":
+        first.update(response=None, status_code=None, response_withheld=True)
+    witness = {"attempts": [first], "timeout_setting": setting}
+    call = {
+        "model_call_id": "call-1",
+        "request": copy.deepcopy(request),
+        "response": first["response"],
+        "response_metadata": {"status_code": first["status_code"], "response_id": None},
+    }
+    record = {
+        "ng_trajectory": {
+            "model_calls": [call],
+            "time_limits": [
+                {
+                    "scope": "model_call",
+                    "limit": setting["limit"],
+                    "configured_s": 2.0,
+                    "enforced_by": "harness",
+                    "evidence": "harness_output",
+                    "target": {"model_call_id": "call-1"},
+                }
+            ],
+        }
+    }
+    if mutation == "missing":
+        record = None
+    elif mutation == "wrong_request":
+        call["request"] = {"input": []}
+    elif mutation == "wrong_origin":
+        record["ng_trajectory"]["time_limits"][0]["enforced_by"] = "gym"
+        call["response_metadata"]["status_code"] = 500
+    elif mutation == "cancelled_only":
+        record["ng_trajectory"]["time_limits"] = []
+        call["response"] = None
+        call["response_metadata"]["error_category"] = "cancelled"
+    elif mutation == "partial_stream":
+        call["response"] = ": conformance wait\n\n"
+        call["response_metadata"]["error_category"] = "stream_truncated"
+    checks = model_timeout_checks(witness, record, timeout_kind=kind, fingerprint=fingerprint)
+    assert {c["id"] for c in checks} == {"model.timeout_stimulus", "model.timeout_retained"}
+    assert checks[0]["status"] == "pass"
+    expected = "pass" if mutation is None or (kind == "harness_deadline" and mutation == "partial_stream") else "fail"
+    assert checks[1]["status"] == expected
+
+
+def test_unexercised_timeout_cannot_pass_with_plausible_artifacts():
+    checks = model_timeout_checks({}, {"ng_trajectory": {}}, timeout_kind="harness_deadline", fingerprint=fingerprint)
+    assert all(c["status"] == "fail" for c in checks)

@@ -3,6 +3,7 @@
 
 """Controlled Chat/Responses endpoints and private episode witnesses."""
 
+import asyncio
 import json
 import shlex
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ class Probe:
     tool_calls: list[dict] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
     verifications: list[dict] = field(default_factory=list)
+    timeout_setting: dict | None = None
     seeded: int = 0
     finished: bool = False
 
@@ -41,6 +43,7 @@ class Probe:
             "tool_calls": self.tool_calls,
             "violations": self.violations,
             "verifications": self.verifications,
+            "timeout_setting": self.timeout_setting,
             "seeded": self.seeded,
             "finished": self.finished,
         }
@@ -120,11 +123,54 @@ class Probe:
             status = self.scenario.http_errors[index]
         elif self.scenario.terminal_error:
             status = self.scenario.http_errors[-1]
+        if index == 0 and self.scenario.timeout_kind == "harness_deadline":
+            # Save the in-flight request before waiting. A disconnect is a witness
+            # of cancellation, NOT proof of which deadline fired.
+            attempt = {
+                "attempt_id": f"attempt-{index}",
+                "request": body,
+                "response": None,
+                "status_code": None,
+                "response_withheld": True,
+            }
+            self.attempts.append(attempt)
+            self.save()
+
+            async def wait_for_client() -> None:
+                while not await request.is_disconnected():
+                    await asyncio.sleep(0.01)
+                attempt["client_disconnected"] = True
+                self.save()
+
+            if self.timeout_setting and self.timeout_setting.get("stream_idle"):
+
+                async def silent_stream():
+                    # Codex starts its stream-idle clock after response headers.
+                    # This SSE comment contains no model output.
+                    yield ": conformance wait\n\n"
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        attempt["stream_closed"] = True
+                        self.save()
+
+                return StreamingResponse(silent_stream(), media_type="text/event-stream")
+            await wait_for_client()
+            # Match cancellation at the capture boundary without manufacturing
+            # an HTTP timeout response for a client-enforced deadline.
+            raise asyncio.CancelledError("client disconnected during withheld model response")
+        server_timeout = index == 0 and self.scenario.timeout_kind == "server_response"
+        if server_timeout:
+            status = 504
         response_id = f"resp_{uuid4().hex}"
         namespaces = {}
         if status != 200:
             payload = {
-                "error": {"message": "controlled model failure", "type": "conformance_error", "code": str(status)}
+                "error": {
+                    "message": "policy model request timed out" if server_timeout else "controlled model failure",
+                    "type": "model_timeout" if server_timeout else "conformance_error",
+                    "code": str(status),
+                }
             }
         else:
             try:
@@ -260,7 +306,7 @@ class Probe:
                 for item in output
             )
             reward = float(complete and self.scenario.expected_reward == 1.0)
-            self.verifications.append({"reward": reward, "answer_seen": complete})
+            self.verifications.append({"reward": reward, "answer_seen": complete, "evaluation_completed": True})
             self.save()
             return {**body, "reward": reward, "evaluation_completed": True, "mask_sample": False}
 
