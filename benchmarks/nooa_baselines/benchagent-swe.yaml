@@ -11,3 +11,8 @@ swebench_pro_nooa_agent:
         invocation_adapter: responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent
         execution_mode: sandboxed
         init_kwargs: {}
+
+swebench_pro_nooa:
+  environment_servers:
+    single_agent_turn:
+      finish_agent_before_verification: true

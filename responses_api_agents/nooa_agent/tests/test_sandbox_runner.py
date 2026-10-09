@@ -57,6 +57,7 @@ def artifact(error: RunnerError | None = None) -> SandboxResult:
 
 
 def complete_files(r: SandboxNOOARunner, s: MemorySandbox, error: RunnerError | None = None) -> None:
+    s.files[r.directory + "/completion.json"] = json.dumps({"return_code": 0, "timed_out": False})
     s.files[r.directory + "/cleanup.json"] = json.dumps({"cleanup_confirmed": True})
     s.files[r.directory + "/result.json"] = artifact(error).model_dump_json()
 
@@ -72,12 +73,12 @@ async def test_launch_quotes_paths_runs_in_task_and_preserves_cookies(limit: int
     complete_files(r, s)
     request = payload().request
     result = await r.run(request)
-    command = s.exec.await_args.args[0]
+    command = s.exec.await_args_list[1].args[0]
     assert "'/opt/nooa env/bin/python'" in command
     assert "sandbox_entrypoint" in command
     assert "launch.claim" in command
     assert "stdout.log" in command and "stderr.log" in command
-    assert s.exec.await_args.kwargs == {"cwd": "/app", "timeout_s": None}
+    assert s.exec.await_args_list[1].kwargs == {"cwd": "/app", "timeout_s": 30, "preserve_background_services": True}
     launch = SandboxInput.model_validate_json(s.files[r.directory + "/input.json"])
     assert launch.max_policy_calls == limit
     assert launch.request.rollout_id == request.rollout_id
@@ -85,7 +86,8 @@ async def test_launch_quotes_paths_runs_in_task_and_preserves_cookies(limit: int
     assert launch.context_window == 262144
     assert request.resource_cookies == result.resource_cookies == {"resource": "new"}
     assert request.model_cookies == {"model": "new"}
-    assert r.stopped
+    assert not r.stopped
+    assert "--completion-receipt" in command
 
 
 @pytest.mark.asyncio
@@ -142,3 +144,19 @@ async def test_stop_with_receipt_does_not_signal_reused_pid() -> None:
     await r.stop()
     await r.stop()
     s.exec.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "completion", [None, {"return_code": 7, "timed_out": False}, {"return_code": 0, "timed_out": True}]
+)
+async def test_result_alone_cannot_confirm_successful_worker_completion(completion) -> None:
+    r, s = runner()
+    complete_files(r, s)
+    if completion is None:
+        del s.files[r.directory + "/completion.json"]
+    else:
+        s.files[r.directory + "/completion.json"] = json.dumps(completion)
+    with pytest.raises(RuntimeError, match="completion is unconfirmed|did not complete successfully"):
+        await r.run(payload().request)
+    assert r.stopped

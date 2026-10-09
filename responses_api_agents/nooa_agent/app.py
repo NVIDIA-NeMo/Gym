@@ -23,6 +23,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from pydantic import ConfigDict
 
 from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionState,
@@ -190,6 +191,29 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             raise
         return finalize_run_result(state.result)[0]
 
+    async def finish_agent_session(
+        self, request: Request, body: AgentCloseSessionRequest
+    ) -> AgentCloseSessionResponse:
+        """Freeze completed execution and collect evidence without stopping task services."""
+        current = self._agent_session_id_from_request(request)
+        if current is not None and current != body.agent_session_id:
+            raise HTTPException(409, "agent_session_id does not match the session cookie")
+        async with self._locked_agent_session(body.agent_session_id) as record:
+            if record.episode_id != body.episode_id:
+                raise HTTPException(409, "episode_id does not match the seeded agent session")
+            if record.close_response is not None:
+                return record.close_response.model_copy(deep=True)
+            state = record.state
+            if record.closing or not isinstance(state, NOOASessionState):
+                raise HTTPException(409, "Agent session is closing or unavailable")
+            async with state.lock:
+                if state.execution is None or not state.execution.done():
+                    raise HTTPException(409, "Agent execution has not finished")
+                # A failed execution must take the normal bounded close path.
+                state.execution.result()
+                state.closing = True
+            return self._session_evidence(state)
+
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         assert isinstance(state, NOOASessionState)
         async with state.lock:
@@ -203,6 +227,9 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             await state.runner.close()
             if state.runner.artifact is not None and state.runner.artifact.response is not None:
                 state.result = state.runner.artifact.run_result()
+        return self._session_evidence(state)
+
+    def _session_evidence(self, state: NOOASessionState) -> AgentCloseSessionResponse:
         response = trajectory = None
         observations = state.runner.observations if isinstance(state.runner, SandboxNOOARunner) else None
         if state.result is not None:

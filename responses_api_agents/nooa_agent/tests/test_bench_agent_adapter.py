@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from nooa.tools.shell_tools import ShellTools
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from responses_api_agents.nooa_agent.bench_agent_adapter import invoke_bench_agent
@@ -18,7 +19,7 @@ async def test_adapter_restores_task_cwd_and_always_drains_cleanup(tmp_path, mon
     monkeypatch.chdir(tmp_path)
     value = object()
     agent = SimpleNamespace(
-        shell=SimpleNamespace(cwd="/wrong", close=AsyncMock()),
+        shell=SimpleNamespace(cwd="/wrong", close=AsyncMock(), session=ShellTools(cwd=str(tmp_path)).session),
         _install_python_tools=MagicMock(),
         _solve_task=AsyncMock(return_value=value, side_effect=error),
         aclose=AsyncMock(),
@@ -148,8 +149,8 @@ def test_benchagent_runtime_profile_changes_fingerprint_without_replacing_defaul
             return archive.extractfile("runtime-requirements.txt").read().decode()
 
     # Public source revisions, not credentials.
-    assert "051472343211914222e24ce36d8752f4e86bbe43" in requirements(default)  # pragma: allowlist secret
+    assert "19caab169b018476ac433d040f6ae3f06aeff101" in requirements(default)  # pragma: allowlist secret
     actual = requirements(selected)
-    assert actual.count("564a34014a354f11009cf7dda44a81b039a04273") == 3  # pragma: allowlist secret
+    assert actual.count("19caab169b018476ac433d040f6ae3f06aeff101") == 3  # pragma: allowlist secret
     assert "subdirectory=packages/nooa-cli" in actual and "subdirectory=packages/nooa-bench" in actual
     assert "051472343211914222e24ce36d8752f4e86bbe43" not in actual  # pragma: allowlist secret

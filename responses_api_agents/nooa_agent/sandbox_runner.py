@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Borrow a task sandbox and supervise one whole NOOA activation."""
 
+import asyncio
 import json
 import tempfile
 from pathlib import Path
@@ -74,22 +75,46 @@ class SandboxNOOARunner:
         d, python = quote(self.directory), quote(self.python)
         # The atomic claim also fences an exec whose response is lost or delayed until after close.
         command = (
-            f"trap '' TERM; ln -s launch {d}/launch.claim 2>/dev/null || exit 0; "
-            f"echo $$ > {d}/runner.pid && exec {python} -I {d}/supervisor.py "
-            f"--cleanup-timeout 5 --stop-file {d}/runner.stop --receipt {d}/cleanup.json -- "
+            f"(trap '' TERM; ln -s launch {d}/launch.claim 2>/dev/null || exit 0; "
+            f"{python} -I {d}/supervisor.py --pid-file {d}/runner.pid "
+            f"--cleanup-timeout 5 --stop-file {d}/runner.stop --receipt {d}/cleanup.json "
+            f"--completion-receipt {d}/completion.json -- "
             f"{python} -I -m responses_api_agents.nooa_agent.sandbox_entrypoint "
-            f"{d}/input.json {d}/result.json >{d}/stdout.log 2>{d}/stderr.log"
+            f"{d}/input.json {d}/result.json; echo $? > {d}/runner.exit) "
+            f">{d}/stdout.log 2>{d}/stderr.log </dev/null &"
         )
         self.launched = True
         # Episode cancellation comes from single_agent_turn; no second episode clock.
-        await self.sandbox.exec(command, cwd=self.workdir, timeout_s=None)
-        await self.stop()
+        launch = await self.sandbox.exec(command, cwd=self.workdir, timeout_s=30, preserve_background_services=True)
+        if launch.return_code != 0:
+            raise RuntimeError("Could not launch NOOA supervisor")
+        while True:
+            # One small exec avoids repeated failed provider downloads while the
+            # worker runs. A cleanup receipt also covers launch/setup failures.
+            status = await self.sandbox.exec(
+                f"test -f {d}/completion.json || test -f {d}/cleanup.json || test -f {d}/runner.exit",
+                cwd="/",
+                timeout_s=30,
+            )
+            if status.return_code == 0:
+                break
+            await asyncio.sleep(2)
         await self.collect()
         if self.artifact is None:
+            await self.stop()
             raise RuntimeError(f"NOOA sandbox result is missing or malformed: {self.diagnostics}")
+        try:
+            completion = json.loads(await self._read("completion.json"))
+        except Exception:
+            await self.stop()
+            raise RuntimeError("NOOA worker completion is unconfirmed")
+        if completion.get("return_code") != 0 or completion.get("timed_out") is not False:
+            await self.stop()
+            raise RuntimeError(f"NOOA worker did not complete successfully: {completion}")
         request.model_cookies.update(self.artifact.model_cookies)
         request.resource_cookies.update(self.artifact.resource_cookies)
         if self.artifact.error is not None:
+            await self.stop()
             detail = self.artifact.error.message
             error = ConnectionError(detail) if self.artifact.error.kind == "transient" else RuntimeError(detail)
             if self.artifact.response is not None:
