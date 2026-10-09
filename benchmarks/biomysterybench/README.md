@@ -14,13 +14,13 @@ docker build --file benchmarks/biomysterybench/Dockerfile --tag benchmarks/biomy
 Prepare the benchmark dataset using the task environment image:
 ```shell
 gym eval prepare --benchmark biomysterybench \
-  ++prepare_script_args.docker_image=benchmarks/biomysterybench:latest \
-  ++prepare_script_args.output_dir=benchmarks/biomysterybench/data
+  ++prepare_script_args.output_dir="${PWD}/benchmarks/biomysterybench/data" \
+  ++prepare_script_args.docker_image=benchmarks/biomysterybench:latest
 ```
 
 > [!tip]
-> Use `++prepare_script_args.<name>=<value>` to set or override preparation arguments.
-> Add `++prepare_script_args.overwrite=true` to overwrite existing generated tasks, or `++prepare_script_args.data_dir=<path>` to reuse a downloaded source dataset.
+> Use `++prepare_script_args.<name>=<value>` to set or override preparation arguments (see the adapter's [`prepare` function](./harbor/adapter.py#L155)).
+> Add `++prepare_script_args.overwrite=true` to overwrite existing generated tasks.
 
 > [!warning]
 > Preparation downloads a large dataset and requires access to [Anthropic/BioMysteryBench-full](https://huggingface.co/datasets/Anthropic/BioMysteryBench-full). Authenticate with `uvx hf auth login` if required. Add `++prepare_script_args.limit=1` to convert one task for debugging; this does not limit the source download.
@@ -40,18 +40,14 @@ gym eval run \
   --output "${PWD}/benchmarks/biomysterybench/logs/rollouts.jsonl" \
   --concurrency 8 \
   --resume \
-  ++harbor_dataset_path="${PWD}/benchmarks/biomysterybench/data"
+  ++prepare_script_args.output_dir="${PWD}/benchmarks/biomysterybench/data"
 ```
-
-> [!tip]
-> If you override `prepare_script_args.output_dir` during preparation, set `harbor_dataset_path` to its absolute path
-> and update the dataset's `jsonl_fpath` in `config.yaml` to match. Add `--limit 1` for a small debugging run.
 
 ### Configuration Variables
 
 | Variable | Type | Description |
 | --- | --- | --- |
-| `harbor_dataset_path` | Hydra value | Path to the generated Harbor dataset. |
+| `prepare_script_args.output_dir` | Hydra value | Absolute directory path for generated Harbor tasks and `gym.jsonl`. |
 | `output_jsonl_fpath` | Hydra value | Rollout output path; used as the default jobs directory. Automatically set when using the `-o/--output` flag in the script above. |
 | `policy_model_name` | Hydra value | Model name passed to the OpenCode agent. Must use OpenCode provider in [opencode.json](./harbor/task-template/environment/opencode.json). Automatically set when using `-m/--model` flag in the script above. |
 | `SINGULARITY_CACHEDIR` | Environment variable | Singularity image cache directory; `/harbor` is appended. |
