@@ -621,6 +621,30 @@ def test_responses_to_chat_completion_reasoning_without_summary_is_noop(converte
     assert params.messages[0]["content"] == "the answer"
 
 
+@pytest.mark.parametrize(
+    "extra_content",
+    [
+        {"encrypted_content": "opaque-content"},
+        {"content": [{"type": "reasoning_text", "text": "Do not discard this reasoning"}]},
+    ],
+)
+def test_reasoning_content_without_chat_representation_is_rejected(
+    converter: ResponsesConverter, extra_content: dict
+) -> None:
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "id": "rs_1",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "Keep this summary too"}],
+                **extra_content,
+            }
+        ]
+    )
+    with pytest.raises(NotImplementedError, match="reasoning content/encrypted_content cannot be preserved"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
 def test_responses_to_chat_completion_model_and_max_tokens_and_tools(converter: ResponsesConverter):
     params = converter.responses_to_chat_completion_create_params(
         NeMoGymResponseCreateParamsNonStreaming(
@@ -1744,6 +1768,15 @@ def test_downconverting_present_responses_only_fields_fails_explicitly(
         converter.responses_to_chat_completion_create_params(params)
 
 
+def test_downconverting_treats_empty_include_as_absent(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", include=[])
+
+    chat_params = converter.responses_to_chat_completion_create_params(params)
+
+    assert "include" not in chat_params.model_dump(exclude_unset=True)
+    assert chat_params.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+
 def test_downconverting_null_responses_only_fields_treats_them_as_absent(converter: ResponsesConverter):
     params = NeMoGymResponseCreateParamsNonStreaming(
         input="hi",
@@ -1834,3 +1867,23 @@ def test_training_variant_of_raises_a_named_error_for_an_unregistered_class():
 
     with pytest.raises(NotImplementedError, match="has no ForTraining variant"):
         training_variant_of(_NotAnItem)
+
+
+def test_empty_include_preserves_reasoning_and_tool_history(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        include=[],
+        input=[
+            {"role": "user", "content": "Inspect the repository"},
+            {"type": "reasoning", "id": "r1", "summary": [{"type": "summary_text", "text": "Check files first"}]},
+            {"type": "function_call", "call_id": "c1", "name": "shell", "arguments": '{"cmd":"ls"}'},
+            {"type": "function_call_output", "call_id": "c1", "output": "README.md"},
+        ],
+    )
+    converted = converter.responses_to_chat_completion_create_params(params)
+    without_include = params.model_copy(update={"include": None})
+    assert converted == converter.responses_to_chat_completion_create_params(without_include)
+    assert converted.messages[1]["content"] == "<think>Check files first</think>"
+    assert converted.messages[1]["tool_calls"][0]["id"] == "c1"
+    assert converted.messages[2]["content"] == "README.md"
+    assert params.include == []
+    assert params.input[1].summary[0].text == "Check files first"

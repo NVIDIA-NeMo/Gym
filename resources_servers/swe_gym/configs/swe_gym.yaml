@@ -1,0 +1,72 @@
+# Resources server for SWE-Gym/SWE-Gym (https://huggingface.co/datasets/SWE-Gym/SWE-Gym).
+#
+# 2,438 SWE-bench-format Python tasks from 11 repos. Every row names its own prebuilt image
+# (docker.io/xingyaoww/sweb.eval.x86_64.<owner>_s_<repo>-<pr>) with the repo at /testbed and a conda
+# env named testbed; the eval recipe per (repo, version) is vendored in swebench_specs.py.
+swe_gym_resources_server:
+  resources_servers:
+    swe_gym:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      evaluation_timeout: 3600
+      is_verifying_golden_patch: false
+      # Scrub the agent sandbox's git history (SWE-bench images clone the full upstream history, so
+      # the fix commit and later release tags are otherwise reachable). Never turn this off for runs
+      # whose rewards are used for training.
+      apply_anti_cheating: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        # Limits are the BURST ceiling; requests are the guaranteed floor. cpu_cap_env sizes pytest-xdist
+        # and BLAS to the limit. pandas / dask / modin test modules are the heavy end of this set.
+        resources:
+          cpu: 8
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: swe-gym
+
+# Golden-patch validation: grade the dataset's own patch instead of an agent's. A row whose golden
+# patch does not resolve is a broken row, and scoring an agent against it measures noise.
+# Run it with resources_servers/swe_gym/apply_golden_patch.py (3 passes, then aggregate_golden_patch.py).
+swe_gym_golden_patch_resources_server:
+  resources_servers:
+    swe_gym:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      # The official recipe re-runs the repo's install step before testing; pandas rebuilds its C
+      # extensions there, and a 1-vCPU request on a loaded node stretches it further, so the ceiling is wide.
+      evaluation_timeout: 3600
+      is_verifying_golden_patch: true
+
+      # A full-set sweep runs hundreds of verifications concurrently against this one server; the
+      # per-task log parse and result encode are real CPU, so spread them over workers.
+      num_workers: 8
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 8
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: swe-gym-golden-patch

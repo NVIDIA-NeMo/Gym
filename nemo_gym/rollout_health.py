@@ -33,6 +33,7 @@ from nemo_gym.health.checks import (
     _ended_on_failed_call,
     _is_context_overflow_rejection,
     _is_failed,
+    _is_failed_attempt,
     _is_successful,
     _normalized_trajectory_calls,
     _replay_identity,
@@ -183,7 +184,10 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             or not bindings.complete
             or not bindings.matched_calls
             or not _transcript_tokens(record)[2]
-            or any(call.get("tokens_in") is None or call.get("tokens_out") is None for call in bindings.matched_calls)
+            or any(
+                not _is_failed_attempt(call) and (call.get("tokens_in") is None or call.get("tokens_out") is None)
+                for call in bindings.matched_calls
+            )
         ):
             unobserved.append(spec.id)
             continue
