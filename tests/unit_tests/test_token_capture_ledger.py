@@ -698,3 +698,17 @@ async def test_a_call_on_a_retired_rollout_is_not_admitted_for_staging(store, re
     assert context.capture_admission is None
     with pytest.raises(RolloutRetiredError):
         await store.has_rows("r1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["retire", "delete"])
+async def test_removing_ledgers_forgets_their_cached_rows(tmp_path, method):
+    store = FileLineageStore(tmp_path)
+    for index in range(5):
+        await _record_call_1(store, rollout_id=f"r{index}")
+
+    await getattr(store, method)([f"r{index}" for index in range(5)])
+
+    assert store._ledger_cache == {}
+    # A cache that also tracks its size must account for every removal, or it slowly fills with nothing.
+    assert getattr(store, "_ledger_cache_weight", 0) == 0

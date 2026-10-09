@@ -872,6 +872,13 @@ class FileLineageStore(IncrementalLineageStore):
         # discipline covers both and no second lock file is minted.
         return self._store._locked(rollout_id)
 
+    def _ledger_cache_pop(self, rollout_id: str) -> None:
+        # Forget a rollout's cached rows. Every removal goes through here, so that a cache that also tracks
+        # its size (NVIDIA-NeMo/Gym#4268) stays consistent. Different rollouts are removed concurrently from
+        # worker threads, so the dictionary needs the guard.
+        with self._cache_guard:
+            self._ledger_cache.pop(rollout_id, None)
+
     def _read(self, rollout_id: str) -> list[dict]:
         path = self._ledger_path(rollout_id)
         if not path.exists():
@@ -1073,8 +1080,7 @@ class FileLineageStore(IncrementalLineageStore):
                         changed = True
                     except FileNotFoundError:
                         pass
-                with self._cache_guard:
-                    self._ledger_cache.pop(rollout_id, None)
+                self._ledger_cache_pop(rollout_id)
         if changed:
             self._fsync_ledger_root()
         return {"removed": removed, "absent": absent}
