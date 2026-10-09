@@ -513,6 +513,25 @@ def test_token_store_refuses_to_nest_rollout_locks(tmp_path):
         pass
 
 
+def test_token_store_refuses_to_nest_locks_of_one_directory_through_any_handle(tmp_path):
+    with TokenCaptureStore(tmp_path)._locked("r1"):
+        # Another handle on the same directory shares the stripes, so nesting could still deadlock.
+        with pytest.raises(RuntimeError, match="while holding the lock of rollout 'r1'"):
+            with TokenCaptureStore(tmp_path / ".")._locked("r2"):
+                pass
+
+
+def test_token_store_allows_nesting_locks_of_different_directories(tmp_path):
+    training = TokenCaptureStore(tmp_path / "training")
+    evaluation = TokenCaptureStore(tmp_path / "evaluation")
+    # The two directories share no lock files, so holding one lock while taking the other cannot deadlock.
+    with training._locked("r1"):
+        with evaluation._locked("r1"):
+            pass
+    with training._locked("r2"):
+        pass
+
+
 def test_token_store_recovers_state_lag_from_the_durable_jsonl_tail(tmp_path):
     store = TokenCaptureStore(tmp_path)
     first = TokenEntry(

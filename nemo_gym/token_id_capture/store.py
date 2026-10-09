@@ -59,7 +59,8 @@ logger = logging.getLogger(__name__)
 LOCK_STRIPES = 65536
 LOCK_DIR = ".locks"
 
-# Whether this thread already holds a rollout lock; see ``TokenCaptureStore._locked``.
+# The rollout lock this thread holds in each capture directory, by resolved lock directory;
+# see ``TokenCaptureStore._locked``.
 _lock_holder = threading.local()
 
 
@@ -76,6 +77,8 @@ class TokenCaptureStore:
     def __init__(self, root: str | Path) -> None:
         self._root = Path(root)
         (self._root / LOCK_DIR).mkdir(parents=True, exist_ok=True)
+        # Resolved so that every handle on one directory shares a key in the nesting guard.
+        self._lock_dir = (self._root / LOCK_DIR).resolve()
 
     @property
     def root(self) -> Path:
@@ -105,21 +108,26 @@ class TokenCaptureStore:
     def _locked(self, rollout_id: str, *, shared: bool = False):
         """Hold the rollout's lock.
 
-        Never take a second rollout's lock while holding one. Two rollouts can share a stripe, and two
-        ``flock`` calls on one file through separate handles block each other even within one thread,
-        so nesting could deadlock. Nesting raises instead.
+        Never take a second rollout's lock in the same capture directory while holding one. Two rollouts can
+        share a stripe, and two ``flock`` calls on one file through separate handles block each other even
+        within one thread, so nesting could deadlock. Nesting raises instead. Locks of different capture
+        directories share no files, so holding one while taking another is allowed.
         """
-        if getattr(_lock_holder, "rollout_id", None) is not None:
+        held = getattr(_lock_holder, "held", None)
+        if held is None:
+            held = _lock_holder.held = {}
+        if self._lock_dir in held:
             raise RuntimeError(
-                f"cannot lock rollout {rollout_id!r} while holding the lock of rollout {_lock_holder.rollout_id!r}"
+                f"cannot lock rollout {rollout_id!r} while holding the lock of rollout {held[self._lock_dir]!r} "
+                f"in the same capture directory {self._root}"
             )
         with self.lock_path_for(rollout_id).open("a+b") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
-            _lock_holder.rollout_id = rollout_id
+            held[self._lock_dir] = rollout_id
             try:
                 yield
             finally:
-                _lock_holder.rollout_id = None
+                del held[self._lock_dir]
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _read_state(self, rollout_id: str) -> dict[str, Any]:
