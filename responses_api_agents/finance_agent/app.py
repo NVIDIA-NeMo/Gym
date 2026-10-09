@@ -297,8 +297,10 @@ class FinanceAgent(SimpleResponsesAPIAgent):
 
     def _render_tool_observation(self, tool_output: str) -> str:
         """Render an error for the selected harness without changing success output."""
+        if self.config.tool_error_observation != "error_prefix":
+            return tool_output
         error = self._tool_error_message(tool_output)
-        if error is not None and self.config.tool_error_observation == "error_prefix":
+        if error is not None:
             return f"[ERROR] {error}"
         return tool_output
 

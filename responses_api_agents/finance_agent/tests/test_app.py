@@ -835,6 +835,32 @@ class TestResponses:
         tool_outputs = [item for item in res.json()["output"] if item["type"] == "function_call_output"]
         assert tool_outputs[0]["output"] == "[ERROR] answer is required"
 
+    @pytest.mark.parametrize(
+        ("instance", "tool_name"),
+        [
+            ("finance_agent", "sec_filing_search"),
+            ("finance_agent", "submit_final_result"),
+            ("finance_agent_v2", "submit_final_result"),
+        ],
+    )
+    def test_existing_profiles_preserve_raw_large_integer_tool_output(self, instance: str, tool_name: str) -> None:
+        agent, client = _make_agent_and_client(_make_config(policy=_shipped_policy(instance), max_steps=1))
+        # A raw tool body need not fit Python's integer conversion limit.
+        # V1 forwards it unchanged; V2 also short-circuits its error check on a terminal tool.
+        tool_output = '{"value":' + "1" * 5000 + "}"
+        resource_mock = _dotjson_mock({})
+        resource_mock.content.read.return_value = tool_output.encode()
+        model_mock = _dotjson_mock(_tool_call_response(tool_name, "{}"))
+        agent.server_client.post = AsyncMock(side_effect=_route(model_mock, resource_mock))
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        tool_outputs = [item for item in res.json()["output"] if item["type"] == "function_call_output"]
+        assert [item["output"] for item in tool_outputs] == [tool_output]
+        expected_stop_reason = "done_tool" if tool_name == "submit_final_result" else "max_turns"
+        assert res.json()["metadata"]["stop_reason"] == expected_stop_reason
+
     def test_max_steps_terminates_loop(self) -> None:
         """Loop exits after max_steps even if model keeps producing tool calls."""
         config = _make_config(max_steps=2)
