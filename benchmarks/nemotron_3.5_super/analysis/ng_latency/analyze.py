@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -17,10 +16,11 @@ from ng_latency.derive import DEFINITIONS, FLAGS, derive_trial
 from ng_latency.paths import METRICS_DIR_NAME, locate, metrics_dir
 from ng_latency.spans import TIMELINE_SCHEMA_VERSION
 from ng_latency.summarize import summarize
-from ng_latency.viz import render_index_html, render_trial_html
+from ng_latency.viz import render_timelines_html
 
 
 TIMELINE_NAME = "rollouts_timeline.jsonl"
+TIMELINES_PAGE = "timelines.html"
 _BUILD_HINT = "run `python -m nemo_gym.latency.timeline build` there first"
 
 
@@ -66,13 +66,6 @@ def _rows_by_rollout_id(path: Optional[Path]) -> dict[str, dict[str, Any]]:
                 row = orjson.loads(line)
                 rows[_identity(row)["rollout_id"]] = row
     return rows
-
-
-def timeline_filename(replica: str, rollout_id: str) -> str:
-    def safe(text: str) -> str:
-        return re.sub(r"[^A-Za-z0-9_-]", "_", text)
-
-    return f"{safe(replica)}__{safe(rollout_id)}.html"
 
 
 def run_analysis(run_dir: Path, *, timelines: bool = True, rollouts_name: str = "rollouts.jsonl") -> dict[str, Any]:
@@ -130,15 +123,9 @@ def run_analysis(run_dir: Path, *, timelines: bool = True, rollouts_name: str = 
     )
     outputs.append(summary_path)
     if timelines:
-        folder = out_dir / "timelines"
-        folder.mkdir(exist_ok=True)
-        links: dict[str, str] = {}
-        for trial in trials:
-            name = timeline_filename(str(trial["replica"]), str(trial["rollout_id"]))
-            links[f"{trial['replica']}/{trial['rollout_id']}"] = name
-            page = render_trial_html(records[(trial["replica"], trial["rollout_id"])], trial)
-            (folder / name).write_text(page, encoding="utf-8")
-            outputs.append(folder / name)
-        (folder / "index.html").write_text(render_index_html(trials, links), encoding="utf-8")
-        outputs.append(folder / "index.html")
+        # Every rollout's timeline on one page: a few megabytes per replica, one file instead of hundreds.
+        page_path = out_dir / TIMELINES_PAGE
+        entries = [(records[(trial["replica"], trial["rollout_id"])], trial) for trial in trials]
+        page_path.write_text(render_timelines_html(entries), encoding="utf-8")
+        outputs.append(page_path)
     return {"summary": summary, "trials": len(trials), "outputs": [str(p) for p in outputs]}
