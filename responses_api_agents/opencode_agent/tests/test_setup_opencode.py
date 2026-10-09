@@ -30,6 +30,7 @@ from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode, 
         ("", "", 0, None),
         (" \n\t", "", 0, None),
         ("1.17.11", "", 1, None),
+        ("1.17.10", "", 0, "1.17.10"),
     ],
 )
 def test_installed_version_handles_unavailable_output(stdout, stderr, returncode, expected) -> None:
@@ -39,7 +40,11 @@ def test_installed_version_handles_unavailable_output(stdout, stderr, returncode
         patch("responses_api_agents.opencode_agent.setup_opencode.subprocess.run", return_value=result),
     ):
         assert installed_opencode_version() == expected
-        ensure_opencode("1.17.11")
+        if expected == "1.17.11":
+            ensure_opencode("1.17.11")
+        else:
+            with pytest.raises(RuntimeError, match="Expected OpenCode 1.17.11"):
+                ensure_opencode("1.17.11")
 
 
 def test_installed_version_timeout_is_unavailable() -> None:

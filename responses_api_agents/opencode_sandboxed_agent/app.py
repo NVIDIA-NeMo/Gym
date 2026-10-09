@@ -84,9 +84,13 @@ from nemo_gym.server_utils import (
     raise_for_status,
 )
 from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
+from responses_api_agents.opencode_agent.runtime import (
+    OBSERVABILITY_PATCH,
+    OPENCODE_VERSION,
+    apply_observability_patch,
+)
 
 
-_ASSISTANT_MESSAGE_PLUGIN = Path(__file__).with_name("assistant_message_header.js")
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
 
 
@@ -415,7 +419,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
 
-    opencode_version: str
+    opencode_version: str = OPENCODE_VERSION
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
     remote_opencode_musl_binary_path: Optional[str] = None
@@ -794,7 +798,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         opencode_thinking_str = "--thinking"
 
         if self.config.preinstalled_opencode:
-            install_str = f'test "$(opencode --version)" = {quote(self.config.opencode_version)}'
+            install_str = ":"
         elif self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
             if self.config.remote_opencode_musl_binary_path:
                 install_str = _build_remote_opencode_install_command(
@@ -826,11 +830,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 build_agent[name] = value
         if self._model_call_capture_enabled():
             # Keep the plugin outside the task repo so it cannot enter a generated patch.
-            await sandbox.upload(_ASSISTANT_MESSAGE_PLUGIN, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
-            effective_config["plugin"] = [
-                *effective_config.get("plugin", []),
-                f"file://{_REMOTE_ASSISTANT_MESSAGE_PLUGIN}",
-            ]
+            await sandbox.upload(OBSERVABILITY_PATCH, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
+            apply_observability_patch(effective_config, plugin_path=Path(_REMOTE_ASSISTANT_MESSAGE_PLUGIN))
         opencode_config_content = json.dumps(effective_config)
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
@@ -864,6 +865,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && {install_str} \
         {ripgrep_install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
+        && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
         && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \

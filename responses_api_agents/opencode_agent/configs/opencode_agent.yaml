@@ -31,4 +31,3 @@ opencode_agent:
               apiKey: ${nvidia_api_key}
             models:
               nvidia/qwen/qwen3-next-80b-a3b-instruct: {}
-      opencode_version: 1.17.11

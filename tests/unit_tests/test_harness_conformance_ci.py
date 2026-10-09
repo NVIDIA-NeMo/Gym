@@ -13,6 +13,23 @@ from scripts.harness_conformance.ci import changed_harnesses, report, select_har
 from scripts.harness_conformance.registry import HARNESSES
 
 
+def test_opencode_install_uses_shared_default(monkeypatch):
+    from scripts.harness_conformance.ci import install_runtime
+
+    from responses_api_agents.opencode_agent import setup_opencode
+    from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
+    from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
+    from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
+
+    versions = []
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(setup_opencode, "_npm_install", lambda npm, version: versions.append(version))
+    install_runtime("opencode")
+    assert versions == [OPENCODE_VERSION]
+    assert OpenCodeAgentConfig.model_fields["opencode_version"].default == OPENCODE_VERSION
+    assert OpenCodeSandboxedAgentConfig.model_fields["opencode_version"].default == OPENCODE_VERSION
+
+
 @pytest.mark.parametrize("harness", HARNESSES)
 def test_adapter_changes_select_only_that_harness(harness):
     assert select_harnesses([f"responses_api_agents/{harness}_agent/requirements.txt", "fern/docs.yml"]) == [harness]
