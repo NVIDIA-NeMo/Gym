@@ -435,7 +435,9 @@ class HarborResourcesServer(SimpleResourcesServer):
             LOGGER.exception(f"Verification infrastructure failed for {task.task_id}")
             return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
 
-        extras = {"verifier_return_code": result.return_code, "verifier_logs_dir": str(logs_dir)}
+        # Absolute, so the row names a folder that exists from wherever the run was launched; the server
+        # process runs from its own folder, where a relative artifacts_dir would otherwise resolve.
+        extras = {"verifier_return_code": result.return_code, "verifier_logs_dir": str(Path(logs_dir).resolve())}
         rewards, problem = parse_reward_file(logs_dir)
         if rewards is None:
             kind = MISSING_REWARD_KIND if "written" in (problem or "") else INVALID_REWARD_KIND

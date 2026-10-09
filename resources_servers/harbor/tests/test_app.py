@@ -345,6 +345,7 @@ class TestVerify:
         # tests/ was uploaded as an archive and unpacked into /tests.
         assert any(remote.endswith(".tar.gz") for _, remote in sandbox.uploads)
         assert any("tar -xzf" in call["command"] and "/tests" in call["command"] for call in sandbox.execs)
+        assert Path(payload["verifier_logs_dir"]).is_absolute()
         assert (Path(payload["verifier_logs_dir"]) / "reward.txt").read_text() == "1\n"
 
     def test_prepare_runs_as_root_on_a_non_root_image(self, tmp_path, monkeypatch):
