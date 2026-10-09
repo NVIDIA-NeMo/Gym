@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.session_capture import SessionCapture, SessionCaptureConfig
+from nemo_gym.agent_utils.sandbox_session_capture import SandboxSessionCapture, SandboxSessionCaptureConfig
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
@@ -1649,8 +1649,8 @@ CAPTURE_EVENTS: list[str] = []
 CAPTURED = TokenCapture(atif_trajectories=[{"steps": []}], metrics={"calls": 2})
 
 
-class FakeCapture(SessionCapture):
-    """A session capture that serves a fixed endpoint, or fails to start when its options say so."""
+class FakeCapture(SandboxSessionCapture):
+    """A sandbox session capture that serves a fixed endpoint, or fails to start when its options say so."""
 
     def __init__(self, *, start: str = "ok", model: str | None = "served-model"):
         self.start_mode, self.model = start, model
@@ -1674,17 +1674,19 @@ class FakeCapture(SessionCapture):
 def capturing(agent, **options) -> None:
     CAPTURE_EVENTS.clear()
     agent.config.model_server = None
-    agent.config.session_capture = SessionCaptureConfig(implementation=f"{__name__}:FakeCapture", options=options)
+    agent.config.sandbox_session_capture = SandboxSessionCaptureConfig(
+        implementation=f"{__name__}:FakeCapture", options=options
+    )
 
 
 def test_config_takes_model_server_or_session_capture_not_both():
     capture = {"implementation": f"{__name__}:FakeCapture"}
     fields = {"name": "pi", "host": "localhost", "port": 8001, "entrypoint": "app.py", "pi_version": "0.80.2"}
     model_server = {"type": "responses_api_models", "name": "policy"}
-    with pytest.raises(ValidationError, match="set model_server: null to use session_capture"):
-        PiAgentConfig(**fields, model_server=model_server, session_capture=capture)
-    assert PiAgentConfig(**fields, session_capture=capture).model_server is None
-    assert PiAgentConfig(**fields, model_server=model_server).session_capture is None
+    with pytest.raises(ValidationError, match="set model_server: null to use sandbox_session_capture"):
+        PiAgentConfig(**fields, model_server=model_server, sandbox_session_capture=capture)
+    assert PiAgentConfig(**fields, sandbox_session_capture=capture).model_server is None
+    assert PiAgentConfig(**fields, model_server=model_server).sandbox_session_capture is None
 
 
 @pytest.mark.parametrize("endpoint", ["responses", "run"])
@@ -1693,7 +1695,7 @@ async def test_session_capture_refuses_the_local_path(setup, endpoint):
     capturing(agent)
     request = Request({"type": "http", "session": {}})
     with patch.object(agent, "_create_episode", AsyncMock()) as host:
-        with pytest.raises(HTTPException, match="session_capture runs only in agent sessions") as raised:
+        with pytest.raises(HTTPException, match="sandbox_session_capture runs only in agent sessions") as raised:
             if endpoint == "responses":
                 await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
             else:

@@ -36,7 +36,7 @@ from nemo_gym.agent_utils.sandbox_session import (
     harness_not_run_observations,
     harness_not_run_response,
 )
-from nemo_gym.agent_utils.session_capture import SessionCaptureConfig
+from nemo_gym.agent_utils.sandbox_session_capture import SandboxSessionCaptureConfig
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -495,13 +495,14 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     # Capture each sandbox session's model calls with a component in the task sandbox. The sandboxed Pi then calls
     # the capture's endpoint instead of a Gym model server, and the session close returns what it captured.
-    session_capture: Optional[SessionCaptureConfig] = None
+    sandbox_session_capture: Optional[SandboxSessionCaptureConfig] = None
 
     @model_validator(mode="after")
     def _one_sandbox_model_endpoint(self) -> "PiAgentConfig":
-        if self.model_server is not None and self.session_capture is not None:
+        if self.model_server is not None and self.sandbox_session_capture is not None:
             raise ValueError(
-                "Pi takes model_server or session_capture, not both; set model_server: null to use session_capture"
+                "Pi takes model_server or sandbox_session_capture, not both; "
+                "set model_server: null to use sandbox_session_capture"
             )
         return self
 
@@ -552,8 +553,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "Pi sandbox workdir must be absolute")
         if any(access.required for access in self.effective_tool_accesses(body)):
             raise HTTPException(422, "Pi supports its own sandbox tools, not required HTTP/MCP tools")
-        if self.config.model_server is None and self.config.session_capture is None:
-            raise HTTPException(422, "Pi requires a sandbox-reachable Gym model_server or a session_capture")
+        if self.config.model_server is None and self.config.sandbox_session_capture is None:
+            raise HTTPException(422, "Pi requires a sandbox-reachable Gym model_server or a sandbox_session_capture")
         if not self.config.pi_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.pi_version):
             raise HTTPException(422, "Pi requires an exact pi_version, for example 0.80.2")
         if self.config.command != "pi" or self.config.extra_args or self.config.env:
@@ -578,7 +579,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 workdir=workdir,
                 owns_sandbox=owns_sandbox,
                 harness="Pi",
-                session_capture=self.config.session_capture,
+                session_capture=self.config.sandbox_session_capture,
             ),
             runtime=runtime,
         )
@@ -1198,7 +1199,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 raise HTTPException(409, "Pi sandbox sessions support one activation; retry the same request")
             # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
-        self._refuse_local_path_with_session_capture()
+        self._refuse_local_path_with_sandbox_session_capture()
         # AnySWE, AnyTerminal and HarnessAgent pass generic Responses fields here.
         # Preserve their local CLI contract; only native sessions enforce the new
         # request boundary. Legacy model selection and caps remain config-owned.
@@ -1215,21 +1216,21 @@ class PiAgent(SimpleResponsesAPIAgent):
             update={_INTERNAL_OBSERVATIONS_KEY: episode.observations.model_dump(mode="json")}
         )
 
-    def _refuse_local_path_with_session_capture(self) -> None:
-        """Refuse work outside an agent session when a session capture is configured.
+    def _refuse_local_path_with_sandbox_session_capture(self) -> None:
+        """Refuse work outside an agent session when a sandbox session capture is configured.
 
         Only sandbox sessions run the capture. The local CLI path would call the model directly and record nothing,
         so it fails before any work instead of silently producing uncaptured rollouts.
         """
-        if self.config.session_capture is not None:
+        if self.config.sandbox_session_capture is not None:
             raise HTTPException(
-                422, "session_capture runs only in agent sessions; the local path cannot capture calls"
+                422, "sandbox_session_capture runs only in agent sessions; the local path cannot capture calls"
             )
 
     async def run(self, request: Request, body: PiAgentRunRequest) -> PiAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
             raise HTTPException(409, "Pi sessions require EnvironmentServer /run")
-        self._refuse_local_path_with_session_capture()
+        self._refuse_local_path_with_sandbox_session_capture()
         if self.config.resources_server is None:
             raise HTTPException(
                 422, "Pi /run requires resources_server; use EnvironmentServer /run for sandbox sessions"

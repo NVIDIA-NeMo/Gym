@@ -47,7 +47,7 @@ class PiSandboxSession(AgentSessionState):
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
-    # The session capture's endpoint, when one is configured and started.
+    # The sandbox session capture's endpoint, when one is configured and started.
     model_endpoint: ModelEndpoint | None = None
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
