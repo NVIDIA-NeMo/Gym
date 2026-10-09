@@ -797,28 +797,28 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         opencode_thinking_str = "--thinking"
 
-        if self.config.preinstalled_opencode:
-            install_str = ":"
-        elif self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
-            if self.config.remote_opencode_musl_binary_path:
-                install_str = _build_remote_opencode_install_command(
-                    install_script_path=self.config.remote_opencode_install_script_path,
-                    binary_path=self.config.remote_opencode_binary_path,
-                    musl_binary_path=self.config.remote_opencode_musl_binary_path,
-                )
+        install_str = ":"
+        if not self.config.preinstalled_opencode:
+            if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
+                if self.config.remote_opencode_musl_binary_path:
+                    install_str = _build_remote_opencode_install_command(
+                        install_script_path=self.config.remote_opencode_install_script_path,
+                        binary_path=self.config.remote_opencode_binary_path,
+                        musl_binary_path=self.config.remote_opencode_musl_binary_path,
+                    )
+                else:
+                    install_str = (
+                        f"bash {quote(self.config.remote_opencode_install_script_path)} "
+                        f"--binary {quote(self.config.remote_opencode_binary_path)}"
+                    )
             else:
-                install_str = (
-                    f"bash {quote(self.config.remote_opencode_install_script_path)} "
-                    f"--binary {quote(self.config.remote_opencode_binary_path)}"
+                print(
+                    "Downloading and installing OpenCode in the sandbox. Please consider mounting or uploading the appropriate OpenCode binary instead!",
+                    file=sys.stderr,
                 )
-        else:
-            print(
-                "Downloading and installing OpenCode in the sandbox. Please consider mounting or uploading the appropriate OpenCode binary instead!",
-                file=sys.stderr,
-            )
-            install_str = f"""installer=$(mktemp) && curl -fL -o "$installer" https://opencode.ai/install \
-        && echo "Downloaded OpenCode installer to $installer" \
-        && VERSION={self.config.opencode_version} bash "$installer\""""
+                install_str = f"""installer=$(mktemp) && curl -fL -o "$installer" https://opencode.ai/install \
+            && echo "Downloaded OpenCode installer to $installer" \
+            && VERSION={self.config.opencode_version} bash "$installer\""""
 
         effective_config = await self._create_opencode_config(request)
         for name in self._runtime_plugins():
