@@ -19,6 +19,7 @@ from scripts.harness_conformance.scenarios import SCENARIOS
 from nemo_gym.base_responses_api_model import build_model_call_record
 from nemo_gym.config_types import ConfigError
 from nemo_gym.harness_capabilities.cli import json_rows
+from nemo_gym.server_utils import ServerClient
 from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
 
 
@@ -59,6 +60,28 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, tmp_path):
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
         getattr(module, HARNESSES[harness] + "Config").model_validate(agent)
+
+
+@pytest.mark.parametrize("scenario_name", ["tool_success", "retry_429"])
+def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_name):
+    from omegaconf import OmegaConf
+
+    config = _config("opencode", tmp_path, [10001, 10002, 10003, 10004], 12)
+    server_client = ServerClient(head_server_config=config["head_server"], global_config_dict=OmegaConf.create(config))
+    header = server_client.assistant_message_header("policy_model")
+    assert header is not None
+    probe = Probe(SCENARIO[scenario_name], tmp_path)
+    with TestClient(probe.model_app(assistant_message_header=header)) as client:
+        response = client.post(
+            "/ng-rollout/0-0/v1/chat/completions",
+            json={"model": "conformance-model", "messages": [], "tools": [TOOL]},
+            headers={"x-session-id": "session", header.decode(): "assistant-message"},
+        )
+    assert response.status_code == (429 if scenario_name == "retry_429" else 200)
+    [(_, capture)] = list(json_rows(tmp_path / "capture/0-0.capture.jsonl"))
+    call = build_model_call_record(capture, call_index=0)
+    assert call.client_session_id == "session"
+    assert call.client_assistant_message_id == "assistant-message"
 
 
 @pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure", "usage_omitted", "retry_429", "retry_500"])

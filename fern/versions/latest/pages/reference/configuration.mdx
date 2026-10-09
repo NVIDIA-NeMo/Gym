@@ -314,6 +314,13 @@ wandb_api_key: your-wandb-key
 - **When to use:** Set to `true` for multi-node setups (e.g. multi-node Ray clusters) where servers must communicate across machines.
 - **Effect:** Resolves and uses the host's IP address (`gethostbyname(gethostname())`) instead of localhost.
 
+**`sidecar`** — Optional block that starts a local HTTP/2 PING proxy so requests to NVCF endpoints survive the 340 second idle limit.
+
+- **Default:** absent or `enabled: false` — nothing is started and no URL changes.
+- **`instances`:** required when enabled. Each entry (`name`, `upstream`, `listen`) gets its own proxy, started on the node that starts the Gym servers.
+- **Effect:** model-server `*base_url` values whose host matches an instance's `upstream` are rewritten to `http://127.0.0.1:<port>`; top-level keys such as `policy_base_url` are left alone.
+- **See:** [NVCF Long Requests](/main/infrastructure/nvcf-h2-ping-sidecar) for every key.
+
 ---
 
 ## Experiment Tracking

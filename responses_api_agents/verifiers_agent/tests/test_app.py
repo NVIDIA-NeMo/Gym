@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -27,6 +28,9 @@ from responses_api_agents.verifiers_agent.app import (
     VerifiersAgent,
     VerifiersAgentConfig,
     _NoStoreCookieJar,
+)
+from responses_api_agents.verifiers_agent.app import (
+    logger as agent_app_logger,
 )
 
 
@@ -512,3 +516,65 @@ class TestRolloutObservability:
         assert trajectory.turns == []
         assert [gap.code for gap in trajectory.gaps] == ["model_call_reference_unavailable"]
         assert trajectory.invocations[0].status == "incomplete"
+
+
+class TestExportStateColumns:
+    """``export_state_columns`` copies extra verifiers State keys into the response, and is off by default."""
+
+    RECORDS = [{"index": 0, "type": "gmail_message_sent_to", "app": "gmail", "role": "objective", "passed": True}]
+
+    def _run(self, **config_overrides) -> tuple[list[str], dict]:
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+            **config_overrides,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: False}
+        agent = VerifiersAgent(config=config, server_client=server_client)
+        seen_columns = []
+
+        async def fake_run_group(*, group_inputs, client, model, sampling_args, state_columns):
+            seen_columns.extend(state_columns)
+            state = {
+                "reward": 1.0,
+                "metrics": {},
+                "completion": [],
+                "trajectory": [],
+                "assertion_results": self.RECORDS,
+            }
+            # Like verifiers' state_to_output: a requested column missing from the State comes back as None.
+            return [{**state, **{column: state.get(column) for column in state_columns}}]
+
+        env = MagicMock()
+        env.run_group = fake_run_group
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL),
+            patch.object(VerifiersAgent, "_get_env", return_value=env),
+        ):
+            response = TestClient(agent.setup_webserver()).post(
+                "/run",
+                json={"task_idx": 0, "responses_create_params": {"input": [{"role": "user", "content": "hi"}]}},
+            )
+        assert response.status_code == 200, response.text
+        return seen_columns, response.json()
+
+    def test_default_requests_only_the_trajectory_and_omits_the_field(self) -> None:
+        columns, body = self._run()
+        assert columns == ["trajectory"]
+        assert "exported_state" not in body["response"]
+
+    def test_requested_columns_reach_the_response(self) -> None:
+        columns, body = self._run(export_state_columns=["assertion_results", "trajectory"])
+        assert columns == ["trajectory", "assertion_results"]
+        assert body["response"]["exported_state"] == {"assertion_results": self.RECORDS}
+
+    def test_columns_missing_from_the_state_are_omitted_with_a_warning(self, caplog) -> None:
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            _, body = self._run(export_state_columns=["assertion_result"])
+        assert "exported_state" not in body["response"]
+        assert "['assertion_result'] not on the verifiers State" in caplog.text

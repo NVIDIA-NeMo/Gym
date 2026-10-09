@@ -23,6 +23,7 @@ from numbers import Real
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import orjson
 from pandas import DataFrame, Series, notna
 from pandas.core.groupby.generic import DataFrameGroupBy
@@ -41,7 +42,7 @@ from nemo_gym.global_config import (
     rollout_run_key,
     rollout_run_labels,
 )
-from nemo_gym.metrics_config import ACROSS_REPEATS_MARKER, PassMajorityStat, Stat
+from nemo_gym.metrics_config import ACROSS_REPEATS_MARKER, COMPLETION_TOKEN_METRIC_NAMES, PassMajorityStat, Stat
 from nemo_gym.metrics_config import (
     is_primary_metric as is_repeat_aggregatable_metric,
 )
@@ -200,7 +201,12 @@ class RewardProfiler:
             )
             return None
 
-        return Histogram(data)
+        try:
+            return Histogram(data)
+        except ValueError as error:
+            if "Too many bins for data range" not in str(error):
+                raise
+            return Histogram(np_histogram=np.histogram(data, bins=1))
 
     def describe_dataframe(self, df: DataFrame) -> DataFrame:
         stat_index = [
@@ -1127,6 +1133,42 @@ def _add_custom_repeat_metrics(
         agent_metrics.update({name: value for name, value in aggregate.items() if name != AGENT_REF_KEY_NAME})
 
 
+def _add_completion_token_metrics(
+    profiler: RewardProfiler,
+    verify_responses: List[Dict[str, Any]],
+    repeat_level_metrics: List[Dict[str, Any]],
+    agent_metrics: Dict[str, Any],
+) -> None:
+    """Summarize ng_perf token usage by repeat for the existing CI aggregation."""
+    perf_by_repeat: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for response in verify_responses:
+        if isinstance(response.get("ng_perf"), dict):
+            perf_by_repeat[response.get(ROLLOUT_INDEX_KEY_NAME, 0)].append(response["ng_perf"])
+
+    repeat_rows = {row[ROLLOUT_INDEX_KEY_NAME]: row for row in repeat_level_metrics}
+    token_repeat_rows = []
+    for repeat_idx, records in perf_by_repeat.items():
+        summary = compute_perf_summary(records, total_rollouts=len(records))
+        values = {name: summary[name] for name in COMPLETION_TOKEN_METRIC_NAMES if summary and name in summary}
+        if not values:
+            continue
+        row = repeat_rows.get(repeat_idx)
+        if row is None:
+            row = {
+                AGENT_REF_KEY_NAME: {"name": "agent"},
+                ROLLOUT_INDEX_KEY_NAME: repeat_idx,
+            }
+            repeat_level_metrics.append(row)
+        row.update(values)
+        token_repeat_rows.append({AGENT_REF_KEY_NAME: {"name": "agent"}, **values})
+
+    if not token_repeat_rows:
+        return
+    repeat_level_metrics.sort(key=lambda row: row[ROLLOUT_INDEX_KEY_NAME])
+    for aggregate in profiler._aggregate_repeat_level_metrics(token_repeat_rows):
+        agent_metrics.update({name: value for name, value in aggregate.items() if name != AGENT_REF_KEY_NAME})
+
+
 def compute_aggregate_metrics(
     verify_responses: List[Dict[str, Any]],
     compute_metrics_fn=None,
@@ -1243,6 +1285,8 @@ def compute_aggregate_metrics(
             compute_repeat_metrics_fn,
         )
 
+    _add_completion_token_metrics(rp, verify_responses, repeat_level_metrics, serialized_agent)
+
     serialized_repeat_level_metrics = [
         {k: v for k, v in entry.items() if k != AGENT_REF_KEY_NAME} for entry in repeat_level_metrics
     ]
@@ -1252,8 +1296,6 @@ def compute_aggregate_metrics(
         agent_metrics=serialized_agent,
         key_metrics=key_metrics,
         perf_summary=perf_summary,
-        # Repeat-level variability is a quality statistic, so it comes from the scored
-        # subset like the rest: `profile_from_data` above is already given only those.
         repeat_level_metrics=serialized_repeat_level_metrics,
     )
 
