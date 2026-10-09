@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.mcp_auto_exposure import harvest_tools
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from resources_servers.gdpval import app
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig
@@ -17,6 +18,7 @@ from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesS
 
 # The tool JSON the certified runs sent to the model.
 _CERTIFIED_TOOL_DEFINITIONS = Path(__file__).parent / "data" / "tool_definitions.json"
+_BENCHMARK_TOOLS = Path(__file__).resolve().parents[3] / "benchmarks" / "gdpval" / "tools.json"
 
 
 def _server(**extra) -> GDPValResourcesServer:
@@ -65,6 +67,22 @@ def test_tool_definitions_match_the_certified_runs(server):
 
     assert definitions == json.loads(_CERTIFIED_TOOL_DEFINITIONS.read_text())
     assert all(t.binding is not None for t in tools.values()), "every tool must be callable over MCP"
+
+
+def test_benchmark_tools_are_the_certified_tool_definitions():
+    certified = json.loads(_CERTIFIED_TOOL_DEFINITIONS.read_text())
+
+    assert json.loads(_BENCHMARK_TOOLS.read_text()) == [
+        {"type": "function", **t["function"], "strict": None} for t in certified
+    ]
+
+
+def test_benchmark_tools_are_valid_request_tools():
+    tools = json.loads(_BENCHMARK_TOOLS.read_text())
+
+    params = NeMoGymResponseCreateParamsNonStreaming(input=[], tools=tools)
+
+    assert params.model_dump(mode="json")["tools"] == tools
 
 
 def test_web_search_rotates_through_the_configured_keys_and_returns_the_formatted_reply(monkeypatch):
