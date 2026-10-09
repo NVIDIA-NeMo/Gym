@@ -44,7 +44,8 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    SimpleResourcesServer,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
 )
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
@@ -68,6 +69,7 @@ from resources_servers.swebench.patch_capture import (
     capture_model_patch,
     prepare_git_for_commits,
 )
+from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 
 
 class ScaleSWEResourcesServerConfig(BaseResourcesServerConfig):
@@ -140,7 +142,7 @@ class ScaleSWEVerifyResponse(BaseVerifyResponse):
     model_patch: str | None = None
 
 
-class ScaleSWEResourcesServer(SimpleResourcesServer):
+class ScaleSWEResourcesServer(SandboxSessionResourcesServer):
     ray_enabled = False
     config: ScaleSWEResourcesServerConfig
 
@@ -250,21 +252,37 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                 drop_sections=drop_patch_sections,
             )
         finally:
-            await self._stop_sandbox(original_sandbox)
+            await self._release_task_sandbox(session_id, original_sandbox)
 
-    async def seed_session(self, request: Request, body: ScaleSWESeedSessionRequest) -> ScaleSWESeedSessionResponse:
+    async def seed_session(
+        self, request: Request, body: ScaleSWESeedSessionRequest | ResourcesSeedSessionRequest
+    ) -> ScaleSWESeedSessionResponse | ResourcesSeedSessionResponse:
+        """Start the instance's image so an agent can work in it.
+
+        An Environment Server seeds a typed session and gets the sandbox back as ``sandbox_access``; an
+        agent's ``/run`` seeds with the row and gets the sandbox handle.
+        """
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return await self.seed_task_sandbox_session(request, body, ScaleSWEInstanceRequest)
+        session_id = request.session[SESSION_ID_KEY]
+        await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
+        await self._start_task_sandbox(session_id, body)
+        return ScaleSWESeedSessionResponse(
+            sandbox_handle=str(self._session_id_to_sandbox[session_id]._handle.sandbox_id)
+        )
+
+    async def _start_task_sandbox(self, session_id: str, body: ScaleSWEInstanceRequest) -> str:
         """Start the instance's image, then run ``pre_commands`` so the agent sees the prepared
         checkout (parent_commit, fix-commit history scrubbed) rather than the image's raw,
         unprepared state -- ``pre_commands`` used to only run inside the eval script at /verify
         time, which left an agent's own working session never actually checked out to the right
         commit at all.
         """
-        session_id = request.session[SESSION_ID_KEY]
-        await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
-        self._session_id_to_pristine_untracked.pop(session_id, None)
-        self._session_id_to_base_commit.pop(session_id, None)
+        self._forget_task_sandbox_state(session_id)
 
         sandbox = await self._create_sandbox(body)
+        # Own the sandbox before preparing it, so a failed seed can still stop it.
+        self._session_id_to_sandbox[session_id] = sandbox
 
         pre = clean_commands(body.pre_commands)
         if pre:
@@ -287,8 +305,11 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
             sandbox, body.workdir
         )
-        self._session_id_to_sandbox[session_id] = sandbox
-        return ScaleSWESeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
+        return body.workdir
+
+    def _forget_task_sandbox_state(self, session_id: str) -> None:
+        self._session_id_to_pristine_untracked.pop(session_id, None)
+        self._session_id_to_base_commit.pop(session_id, None)
 
     async def verify(self, request: Request, body: ScaleSWEVerifyRequest) -> ScaleSWEVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
@@ -297,6 +318,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         if self.config.is_verifying_golden_patch:
             capture = PatchCapture.static(body.patch, mode, "golden")
         else:
+            self._claim_task_sandbox(session_id)
             base_commit = self._session_id_to_base_commit.pop(session_id, "")
             if not base_commit:
                 capture = PatchCapture.static("", mode, "none")
