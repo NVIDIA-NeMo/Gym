@@ -12,6 +12,7 @@ from harbor.llms.base import LLMResponse
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseFunctionToolCall, NeMoGymResponseOutputMessage
 from nemo_gym.rollout_observability import (
+    COMPACTION_PURPOSES,
     ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,
@@ -212,7 +213,7 @@ class TerminusObservations:
                     for m in self.trajectory.model_calls
                     if m.started_at is not None
                     and m.started_at > compaction.completed_at
-                    and m.model_call_purpose not in ("compaction_summary", "compaction_question")
+                    and m.model_call_purpose not in COMPACTION_PURPOSES
                 ),
                 None,
             )

@@ -405,3 +405,82 @@ def test_join_model_calls_rejects_cross_invocation_compaction_ownership() -> Non
 def test_sandbox_observation_rejects_negative_usage() -> None:
     with pytest.raises(ValidationError):
         SandboxObservation(role="agent", cpu_time_s=-1)
+
+
+def test_timed_records_carry_clock_domain_and_the_latency_fields() -> None:
+    """One record per class with the fields the latency pipeline reads; all optional, all round-trip through JSON."""
+    from nemo_gym.rollout_observability import AgentPhaseObservation
+
+    call = TrajectoryModelCall(
+        model_call_id="mc-1",
+        client_call_id="t2-abc",
+        invocation_id="inv-1",
+        clock_domain="node:host-a",
+        started_at=10.0,
+        completed_at=12.5,
+        duration_ms=2500.0,
+        processed_at=12.6,
+        server_started_at=10.01,
+        server_completed_at=12.49,
+        server_duration_ms=2480.0,
+        status="ok",
+        model_call_purpose="compaction_questions",
+        parsed_tool_calls=2,
+        task_complete=False,
+        context_overflow=False,
+        rejected_request_tokens=None,
+    )
+    tool = ToolCallObservation(
+        invocation_id="inv-1",
+        tool_call_id="call_3_1",
+        clock_domain="node:host-a",
+        batch_id="batch-3",
+        batch_index=1,
+        requested_wait_s=1.0,
+        output_trajectory_index=7,
+        output_chars=120,
+        status="completed",
+    )
+    invocation = AgentInvocation(
+        invocation_id="inv-1",
+        clock_domain="sandbox:sb-1",
+        requested_at=1.0,
+        response_observed_at=9.0,
+        process_started_at=0.5,
+        process_exited_at=9.5,
+    )
+    compaction = ContextCompactionObservation(
+        invocation_id="inv-1", clock_domain="node:host-a", duration_ms=3000.0, rejected_request_tokens=150000
+    )
+    phase = AgentPhaseObservation(
+        name="verify",
+        started_at=20.0,
+        completed_at=25.0,
+        duration_ms=5000.0,
+        status="completed",
+        clock_domain="node:a",
+    )
+    bundle = AgentObservationBundle(source="x", records=[invocation, tool, compaction, phase])
+    restored = AgentObservationBundle.model_validate(bundle.model_dump(mode="json"))
+    assert [type(record).__name__ for record in restored.records] == [
+        "AgentInvocation",
+        "ToolCallObservation",
+        "ContextCompactionObservation",
+        "AgentPhaseObservation",
+    ]
+    assert restored.records[3].kind == "agent_phase" and restored.records[3].name == "verify"
+    record = TrajectoryRecord(task_id="t", rollout_id="r", model_calls=[call], phases=[phase])
+    dumped = record.model_dump(mode="json")
+    assert dumped["model_calls"][0]["server_duration_ms"] == 2480.0
+    assert dumped["model_calls"][0]["model_call_purpose"] == "compaction_questions"
+    assert dumped["phases"][0]["name"] == "verify"
+    # The spec's six purposes replace the never-produced singular "compaction_question".
+    with pytest.raises(ValidationError):
+        TrajectoryModelCall(model_call_purpose="compaction_question")
+
+
+def test_agent_phase_rejects_an_end_before_its_start() -> None:
+    from nemo_gym.rollout_observability import AgentPhaseObservation
+
+    with pytest.raises(ValidationError):
+        AgentPhaseObservation(name="verify", started_at=5.0, completed_at=4.0)

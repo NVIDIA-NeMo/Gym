@@ -73,6 +73,7 @@ from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
+    COMPACTION_PURPOSES,
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
@@ -425,20 +426,11 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         c.completed_at is None or c.tokens_before is None or c.tokens_after is None for c in observed_compactions
     ):
         summary_calls = sorted(
-            [
-                c
-                for c in model_calls
-                if c.model_call_purpose in ("compaction_summary", "compaction_question") and c.started_at is not None
-            ],
+            [c for c in model_calls if c.model_call_purpose in COMPACTION_PURPOSES and c.started_at is not None],
             key=lambda c: c.started_at,
         )
         agent_calls = sorted(
-            [
-                c
-                for c in model_calls
-                if c.started_at is not None
-                and c.model_call_purpose not in ("compaction_summary", "compaction_question")
-            ],
+            [c for c in model_calls if c.started_at is not None and c.model_call_purpose not in COMPACTION_PURPOSES],
             key=lambda c: c.started_at,
         )
         compactions_by_time = sorted(

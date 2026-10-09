@@ -19,6 +19,40 @@ if TYPE_CHECKING:
     from nemo_gym.base_responses_api_model import ModelCallRecord
 
 
+# Request headers a harness may send with a model call so the model server's capture record can be joined to the
+# harness's own record exactly. Evidence only, never authentication; absence is fail-safe.
+CLIENT_CALL_ID_HEADER = "x-ng-client-call-id"  # harness-minted id of one logical call, same across its retries
+CLIENT_ATTEMPT_HEADER = "x-ng-client-attempt"  # 1-based attempt number within the logical call
+CLIENT_SENT_AT_HEADER = "x-ng-client-sent-at"  # epoch milliseconds on the sender's clock, just before sending
+CLIENT_AGENT_HEADER = "x-ng-agent"  # harness agent or role name (OpenCode: build, plan, compaction, ...)
+CLIENT_PURPOSE_HEADER = "x-ng-purpose"  # harness-declared purpose, one of MODEL_CALL_PURPOSES
+
+MODEL_CALL_PURPOSES = (
+    "agent_step",
+    "subagent_step",
+    "compaction_summary",
+    "compaction_questions",
+    "compaction_answers",
+    "compaction_fallback",
+)
+COMPACTION_PURPOSES = frozenset(purpose for purpose in MODEL_CALL_PURPOSES if purpose.startswith("compaction"))
+
+ModelCallPurpose = Literal[
+    "agent_step",
+    "subagent_step",
+    "compaction_summary",
+    "compaction_questions",
+    "compaction_answers",
+    "compaction_fallback",
+]
+ModelCallStatus = Literal["ok", "error", "timeout", "cancelled", "incomplete"]
+
+_CLOCK_DOMAIN_DESCRIPTION = (
+    "Clock the timestamps of this record were read from: node:<host> for a Gym process, sandbox:<id> for times "
+    "copied from an artifact the sandbox wrote. Never subtract timestamps across domains."
+)
+
+
 class ObservationModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
@@ -91,6 +125,7 @@ class TrajectoryModelCallAttempt(ObservationModel):
     status: Literal["completed", "error", "timeout", "cancelled"]
     status_code: Optional[int] = None
     error_type: Optional[str] = None
+    clock_domain: Optional[str] = Field(default=None, description=_CLOCK_DOMAIN_DESCRIPTION)
 
     @model_validator(mode="after")
     def validate_timing(self) -> "TrajectoryModelCallAttempt":
@@ -108,9 +143,7 @@ class TrajectoryModelCall(ObservationModel):
     response: Optional[Any] = None
     response_metadata: TrajectoryResponseMetadata = Field(default_factory=TrajectoryResponseMetadata)
     token_stats: TrajectoryTokenStats = Field(default_factory=TrajectoryTokenStats)
-    model_call_purpose: Optional[
-        Literal["agent_step", "subagent_step", "compaction_summary", "compaction_question"]
-    ] = None
+    model_call_purpose: Optional[ModelCallPurpose] = None
     model_response_kind: Optional[Literal["tool_call", "text", "other"]] = None
     attempts: list[TrajectoryModelCallAttempt] = Field(
         default_factory=list,
@@ -119,6 +152,46 @@ class TrajectoryModelCall(ObservationModel):
             "attempt visibility, not that there was exactly one attempt."
         ),
     )
+    # Latency fields. started_at / completed_at / duration_ms above are the logical call as the harness saw it,
+    # retries included; the model server's own bounds for the attempt that answered sit beside them.
+    clock_domain: Optional[str] = Field(default=None, description=_CLOCK_DOMAIN_DESCRIPTION)
+    status: Optional[ModelCallStatus] = Field(
+        default=None, description="Outcome of the logical call as the harness saw it; incomplete = rejected request."
+    )
+    client_call_id: Optional[str] = Field(
+        default=None, description="The id the harness sent as x-ng-client-call-id; equals model_call_id when minted."
+    )
+    invocation_id: Optional[str] = Field(default=None, description="Conversation (session) this call belongs to.")
+    server_started_at: Optional[float] = None
+    server_completed_at: Optional[float] = None
+    server_duration_ms: Optional[float] = Field(default=None, ge=0, description="Model server's own duration.")
+    processed_at: Optional[float] = Field(
+        default=None,
+        description=(
+            "When the harness finished handling the response (Terminus: decision parsed; OpenCode: step finished). "
+            "The gap after completed_at is harness processing, not model time."
+        ),
+    )
+    parsed_tool_calls: Optional[int] = Field(
+        default=None, ge=0, description="Tool actions the harness parsed out of a text response (Terminus commands)."
+    )
+    task_complete: Optional[bool] = Field(default=None, description="The response declared the task complete.")
+    context_overflow: Optional[bool] = Field(
+        default=None, description="The request was rejected for exceeding the context window."
+    )
+    rejected_request_tokens: Optional[int] = Field(
+        default=None, ge=0, description="Size of a rejected request as the engine reported it."
+    )
+
+    @model_validator(mode="after")
+    def validate_timing(self) -> "TrajectoryModelCall":
+        for start, end in (
+            (self.started_at, self.completed_at),
+            (self.server_started_at, self.server_completed_at),
+        ):
+            if start is not None and end is not None and end < start:
+                raise ValueError("completed_at must not precede started_at")
+        return self
 
 
 class TrajectoryTurn(ObservationModel):
@@ -162,6 +235,19 @@ class AgentInvocation(ObservationModel):
         default_factory=list,
         description="Normalized conversation items supported by this producer; gaps describe unavailable evidence.",
     )
+    clock_domain: Optional[str] = Field(default=None, description=_CLOCK_DOMAIN_DESCRIPTION)
+    requested_at: Optional[float] = Field(
+        default=None, description="Subagents: when the parent held the spawning tool call (its part was created)."
+    )
+    response_observed_at: Optional[float] = Field(
+        default=None, description="Subagents: when the parent observed the spawning tool's result."
+    )
+    process_started_at: Optional[float] = Field(
+        default=None, description="Root invocation of a process-based harness: the process was launched."
+    )
+    process_exited_at: Optional[float] = Field(
+        default=None, description="Root invocation of a process-based harness: the process exited."
+    )
 
     @model_validator(mode="after")
     def validate_timing(self) -> "AgentInvocation":
@@ -203,6 +289,20 @@ class ToolCallObservation(ObservationModel):
     timing_source: Optional[Literal["executor", "artifact", "harness"]] = None
     status: Literal["completed", "failed", "timeout", "cancelled", "incomplete", "unknown"] = "unknown"
     error_type: Optional[str] = None
+    clock_domain: Optional[str] = Field(default=None, description=_CLOCK_DOMAIN_DESCRIPTION)
+    batch_id: Optional[str] = Field(
+        default=None, description="Harnesses that run several tool calls from one decision share this id among them."
+    )
+    batch_index: Optional[int] = Field(default=None, ge=1, description="1-based position within the batch.")
+    requested_wait_s: Optional[float] = Field(
+        default=None, ge=0, description="Wait the model asked for after sending the command (Terminus)."
+    )
+    output_trajectory_index: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Index in the rollout's response.output of the item that carried this tool's result to the model.",
+    )
+    output_chars: Optional[int] = Field(default=None, ge=0, description="Length of the tool result the model read.")
 
     @model_validator(mode="after")
     def validate_timing(self) -> "ToolCallObservation":
@@ -291,6 +391,34 @@ class ContextCompactionObservation(ObservationModel):
         default=None,
         description="First invocation model call observed after compaction.",
     )
+    clock_domain: Optional[str] = Field(default=None, description=_CLOCK_DOMAIN_DESCRIPTION)
+    duration_ms: Optional[float] = Field(default=None, ge=0, description="Monotonic duration when harness-timed.")
+    rejected_request_tokens: Optional[int] = Field(
+        default=None, ge=0, description="For an overflow compaction: the rejected request's size per the engine."
+    )
+
+
+class AgentPhaseObservation(ObservationModel):
+    """One lifecycle phase the harness or agent server went through around the agent run.
+
+    Names in use: seed_session, connect_sandbox, start_sandbox, agent_setup, agent_execute, agent_sandbox_exec,
+    agent_export, agent_observations_snapshot, verify, sandbox_stop. Phases place pre- and post-agent time.
+    """
+
+    kind: Literal["agent_phase"] = "agent_phase"
+    name: str
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    duration_ms: Optional[float] = Field(default=None, ge=0)
+    status: Literal["completed", "failed", "timeout", "cancelled", "incomplete", "unknown"] = "unknown"
+    error_type: Optional[str] = None
+    clock_domain: Optional[str] = Field(default=None, description=_CLOCK_DOMAIN_DESCRIPTION)
+
+    @model_validator(mode="after")
+    def validate_timing(self) -> "AgentPhaseObservation":
+        if self.started_at is not None and self.completed_at is not None and self.completed_at < self.started_at:
+            raise ValueError("completed_at must not precede started_at")
+        return self
 
 
 class ObservationGap(ObservationModel):
@@ -302,7 +430,7 @@ class ObservationGap(ObservationModel):
 
 
 AgentObservationRecord = Annotated[
-    AgentInvocation | ToolCallObservation | ContextCompactionObservation | SandboxObservation,
+    AgentInvocation | ToolCallObservation | ContextCompactionObservation | SandboxObservation | AgentPhaseObservation,
     Field(discriminator="kind"),
 ]
 
@@ -351,6 +479,7 @@ class TrajectoryRecord(ObservationModel):
     model_calls: list[TrajectoryModelCall] = Field(default_factory=list)
     tool_calls: list[TrajectoryToolCall] = Field(default_factory=list)
     compactions: list[ContextCompactionObservation] = Field(default_factory=list)
+    phases: list[AgentPhaseObservation] = Field(default_factory=list)
     gaps: list[ObservationGap] = Field(default_factory=list)
 
     @model_validator(mode="after")
