@@ -48,12 +48,12 @@ filesystem paths. Keep GDP's canonical flat input for later judging.
 
 ## Optional BenchAgent baseline
 
-The default TaskAgent keeps NOOA revision
-`051472343211914222e24ce36d8752f4e86bbe43`. Run BenchAgent in a new output directory
+The default TaskAgent uses NOOA revision
+`19caab169b018476ac433d040f6ae3f06aeff101`. Run BenchAgent in a new output directory
 and separate environments so existing TaskAgent results and dependencies remain
 reproducible. The optional profile pins **all three** packages, `nooa`,
 `nooa-cli` and `nooa-bench`, to
-`564a34014a354f11009cf7dda44a81b039a04273` in
+`19caab169b018476ac433d040f6ae3f06aeff101` in
 `responses_api_agents/nooa_agent/runtime/benchagent-requirements.txt`.
 
 First complete standard serial `gym env prefetch --config "$BENCHMARK_SETUP_CONFIG"`
@@ -244,3 +244,31 @@ zero GPUs; supply account/partition/QoS and adequate memory/time for your
 chosen concurrency. Apptainer task processes consume controller resources;
 OpenSandbox task resources are separate from the Slurm allocation. Release
 only the allocations you created after all controllers finish.
+
+
+## Service verification and failure handling
+
+The BenchAgent TB and SWE profiles enable `finish_agent_before_verification`.
+Finishing collects the final response and evidence while retaining task services;
+closing the session after verification performs bounded descendant cleanup.
+Timeouts, cancellation and failed workers still clean up immediately. Other
+profiles retain close-before-verification unless they opt in.
+
+BenchAgent invocations use NOOA's `preserve_background_services()` scope so fresh
+shell instances and delegated async work retain services until the verifier has
+finished. The external supervisor owns final cleanup. Custom profiles must use a
+NOOA revision providing this scope and `summary_fork_active()`; the immutable
+requirements pins above include both APIs.
+
+A successful main model call clears an earlier transport-error latch. Optional
+summary calls do not set or clear the parent's latch. Actual terminal exceptions
+are retained, while required-resource failures and swallowed unrecovered model
+failures remain fatal. These changes repair lifecycle and failure reporting;
+they do not change native grading tests or claim a benchmark score increase.
+
+
+The VLLM model adapter also normalizes equal `reasoning`/`reasoning_content`
+aliases and omits `prompt_cache_key` only when all configured backend URLs are
+`https://inference-api.nvidia.com/v1`. Unequal values and other backends are
+unchanged. This prevents that gateway from rejecting replayed reasoning as a
+duplicate field; it does not retry or discard failed model calls.

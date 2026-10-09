@@ -65,8 +65,11 @@ def _supervise(
     timeout: float | None,
     cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT,
     stop_path: Path | None = None,
+    completion_path: Path | None = None,
 ) -> CleanupReceipt:
-    """Enforce a worker deadline, then acknowledge cleanup after all descendants exit."""
+    """Publish worker completion, optionally retaining descendants until episode teardown."""
+    if completion_path is not None and stop_path is None:
+        raise ValueError("Deferred cleanup requires a durable stop file")
     process = None
     stopping = False
     receipt: CleanupReceipt = {"cleanup_confirmed": False, "return_code": None, "error": None, "timed_out": False}
@@ -98,6 +101,16 @@ def _supervise(
                 process.wait(timeout=cleanup_timeout)
             except subprocess.TimeoutExpired:
                 pass
+        if completion_path is not None:
+            completion = {"return_code": process.poll(), "timed_out": receipt["timed_out"]}
+            temporary = completion_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(completion))
+            temporary.replace(completion_path)
+            # Keep the subreaper alive so detached services stay owned and can be
+            # reaped after verification. Never defer cancellation or worker failure.
+            if process.poll() == 0 and not receipt["timed_out"] and not stopping:
+                while not stopping and not stop_path.exists():
+                    time.sleep(0.05)
     except Exception as exc:
         receipt["error"] = str(exc)
     finally:
@@ -129,13 +142,25 @@ def main() -> int:
     parser.add_argument("--timeout", type=_positive_seconds)
     parser.add_argument("--cleanup-timeout", type=_positive_seconds, default=DEFAULT_CLEANUP_TIMEOUT)
     parser.add_argument("--receipt", type=Path, required=True)
+    parser.add_argument("--pid-file", type=Path)
     parser.add_argument("--stop-file", type=Path)
+    parser.add_argument("--completion-receipt", type=Path, help="Keep successful worker services until stop")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("a worker command is required after --")
-    receipt = _supervise(command, timeout=args.timeout, cleanup_timeout=args.cleanup_timeout, stop_path=args.stop_file)
+    if args.completion_receipt is not None and args.stop_file is None:
+        parser.error("--completion-receipt requires --stop-file")
+    if args.pid_file is not None:
+        args.pid_file.write_text(str(os.getpid()))
+    receipt = _supervise(
+        command,
+        timeout=args.timeout,
+        cleanup_timeout=args.cleanup_timeout,
+        stop_path=args.stop_file,
+        completion_path=args.completion_receipt,
+    )
     temporary = args.receipt.with_suffix(".tmp")
     temporary.write_text(json.dumps(receipt))
     temporary.replace(args.receipt)

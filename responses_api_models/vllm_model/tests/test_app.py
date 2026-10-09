@@ -764,6 +764,34 @@ PARAMETERIZE_DATA = [
 
 
 class TestApp:
+    @mark.parametrize(
+        "base_urls, reasoning, expected_alias",
+        [
+            (["https://inference-api.nvidia.com/v1"], "thought", False),
+            (["https://inference-api.nvidia.com/v1/"], "thought", False),
+            (["https://inference-api.nvidia.com/v1"], "different thought", True),
+            (["http://localhost:8000/v1"], "thought", True),
+            (["https://inference-api.nvidia.com/v1", "http://localhost:8000/v1"], "thought", True),
+        ],
+    )
+    def test_nvidia_gateway_normalizes_only_equivalent_reasoning_aliases(
+        self, monkeypatch, base_urls, reasoning, expected_alias
+    ):
+        server = self._setup_server(monkeypatch)
+        server.config.base_url = base_urls
+        body = {
+            "prompt_cache_key": "rollout-cache",
+            "messages": [{"role": "assistant", "reasoning_content": "thought", "reasoning": reasoning}],
+        }
+        result = server._apply_sampling_overrides(body)
+        message = result["messages"][0]
+        assert message["reasoning_content"] == "thought"
+        assert ("reasoning" in message) == expected_alias
+        if expected_alias:
+            assert message["reasoning"] == reasoning
+        gateway_only = all(url.rstrip("/") == "https://inference-api.nvidia.com/v1" for url in base_urls)
+        assert ("prompt_cache_key" in result) == (not gateway_only)
+
     def _setup_server(
         self,
         monkeypatch: MonkeyPatch,

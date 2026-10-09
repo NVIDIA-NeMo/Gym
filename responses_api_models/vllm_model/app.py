@@ -450,6 +450,16 @@ class VLLMModel(SimpleResponsesAPIModel):
         """
         if self.config.sampling_overrides:
             body_dict.update(self.config.sampling_overrides)
+        if all(url.rstrip("/") == "https://inference-api.nvidia.com/v1" for url in self.config.base_url):
+            # This gateway rejects the cache hint and aliases reasoning fields.
+            body_dict.pop("prompt_cache_key", None)
+            for message in body_dict.get("messages", []):
+                if (
+                    "reasoning_content" in message
+                    and "reasoning" in message
+                    and message["reasoning"] == message["reasoning_content"]
+                ):
+                    message.pop("reasoning")
         return body_dict
 
     async def _responses_native(

@@ -2,6 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Core, CLI and benchmark packages must come from the same reviewed revision.
 jsonschema>=4.25.1,<5
-nooa @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/564a34014a354f11009cf7dda44a81b039a04273.tar.gz
-nooa-cli @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/564a34014a354f11009cf7dda44a81b039a04273.tar.gz#subdirectory=packages/nooa-cli
-nooa-bench @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/564a34014a354f11009cf7dda44a81b039a04273.tar.gz#subdirectory=packages/nooa-bench
+nooa @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/19caab169b018476ac433d040f6ae3f06aeff101.tar.gz
+nooa-cli @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/19caab169b018476ac433d040f6ae3f06aeff101.tar.gz#subdirectory=packages/nooa-cli
+nooa-bench @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/19caab169b018476ac433d040f6ae3f06aeff101.tar.gz#subdirectory=packages/nooa-bench

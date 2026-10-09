@@ -104,7 +104,7 @@ class AgentCloseSessionRequest(BaseModel):
 
 
 class AgentCloseSessionResponse(BaseModel):
-    """Confirm closure and return captured observations."""
+    """Return final evidence after execution finishes or session closure."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -250,6 +250,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         app.post("/v1/agent_sessions")(self.seed_agent_session)
         app.post("/v1/agent_sessions/close")(self.close_agent_session)
+        app.post("/v1/agent_sessions/finish")(self.finish_agent_session)
 
         return app
 
@@ -284,6 +285,18 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 raise HTTPException(409, "agent_session_id is already bound to another seed request")
             request.session["agent_session_id"] = body.agent_session_id
             return AgentSeedSessionResponse(agent_session_id=body.agent_session_id)
+
+    async def finish_agent_session(
+        self,
+        request: Request,
+        body: AgentCloseSessionRequest,
+    ) -> AgentCloseSessionResponse:
+        """Return final evidence before verification.
+
+        Adapters that own live task services may retain them until close. The
+        default preserves existing adapters' close-before-verification behavior.
+        """
+        return await self.close_agent_session(request, body)
 
     async def close_agent_session(
         self,

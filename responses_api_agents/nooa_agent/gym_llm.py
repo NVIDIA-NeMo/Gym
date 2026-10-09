@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 import aiohttp
+from nooa.agents.summarization import summary_fork_active
 from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall, UnifiedLLM
 from nooa.unifiedllm.limits import REPLY_CAP_KEYS, ContextLimits
 from pydantic import BaseModel
@@ -354,8 +355,15 @@ class GymResponsesLLM(UnifiedLLM):
             call.response = response
             self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
         except Exception as error:
-            self._state.fatal_error = error
+            # A summary fork catches its own failures and leaves parent history
+            # intact. It must not poison the executing agent's rollout state.
+            if not summary_fork_active():
+                self._state.fatal_error = error
             raise
+        if not summary_fork_active():
+            # The main model call recovered; retain historical errors in capture
+            # evidence, not as a permanent veto on successful completion.
+            self._state.fatal_error = None
 
         function_calls = [item for item in response.output if isinstance(item, NeMoGymResponseFunctionToolCall)]
         usage = response.usage.model_dump(mode="json") if response.usage is not None else None
