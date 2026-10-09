@@ -1647,12 +1647,14 @@ class TestServerUtils:
         assert "ValueError: actionable inner failure" in captured
 
     def _mock_global_client(self, monkeypatch: MonkeyPatch, error: Exception, failures: int | None) -> MagicMock:
-        """Global-client stand-in whose request() raises `error` `failures` times, then succeeds (never if None).
+        """Global-client stand-in whose request() raises `error` on the first `failures` calls, then succeeds.
 
-        request() fails the test once called more often than any test needs, so a retry loop that never stops fails
-        fast instead of hanging. It uses `fail()`, whose BaseException the loop's `except Exception` cannot catch.
+        With `failures=None`, request() always raises. Once called more often than any test needs, it fails the test
+        instead, so a retry loop that never stops fails fast instead of hanging. It uses `fail()`, whose BaseException
+        the loop's `except Exception` cannot catch.
         """
         client = MagicMock()
+        # The most any test needs is MAX_NUM_TRIES + 3 calls.
         allowed_calls = nemo_gym.server_utils.MAX_NUM_TRIES + 6
         attempts = 0
 
