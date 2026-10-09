@@ -623,6 +623,8 @@ class TestFriendlyValidationError:
     ) -> str:
         """Drive the real router + config parse for `gym <argv> ++head_server.port=notanint`; return stdout."""
         monkeypatch.setenv("COLUMNS", "1000")  # rich soft-wraps at 80 columns off-TTY, splitting the message
+        # env.yaml is read from cwd before the install root, so an empty one shadows a developer's own.
+        (tmp_path / "env.yaml").write_text("")
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.setattr(gc, "_GLOBAL_CONFIG_DICT", None)
