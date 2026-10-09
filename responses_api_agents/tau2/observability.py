@@ -119,7 +119,10 @@ def build_trajectory(
         if not isinstance(message, (AssistantMessage, UserMessage)) or message.raw_data is None:
             continue
         invocation_id = f"{result.id}:{'agent' if message.role == 'assistant' else 'user_simulator'}"
-        invocation = invocations.setdefault(invocation_id, AgentInvocation(invocation_id=invocation_id))
+        if invocation_id not in invocations:
+            invocations[invocation_id] = AgentInvocation(invocation_id=invocation_id)
+            observations.records.append(invocations[invocation_id])
+        invocation = invocations[invocation_id]
         response_id = message.raw_data.get("id")
         refs = (
             [

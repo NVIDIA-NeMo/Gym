@@ -137,6 +137,11 @@ def test_native_model_turns_supply_perf_and_keep_tool_observations(missing_captu
     trajectory = build_trajectory(
         result, observations=observations, task_id="task", rollout_id="0-0", policy_model=policy, user_model=user
     )
+    # Model-only participants must also reach the observation join, not just the trajectory.
+    simulator = next(
+        r for r in observations.records if getattr(r, "invocation_id", None) == "simulation:user_simulator"
+    )
+    assert simulator.model_calls[0].response_id == "user-1"
     calls = [
         {"model_call_id": "c0", "response_id": "user-1", "model_ref": user.model_dump(), "tokens_out": 10},
         {"model_call_id": "c1", "response_id": "policy-1", "model_ref": policy.model_dump(), "tokens_out": 20},
