@@ -76,6 +76,7 @@ from nemo_gym.rollout_collection import (
     _build_trajectory_record,
     _CompletedRollout,
     _drop_truncated_tail,
+    _episode_request_body,
     _expand_input_glob,
     _failure_rows_counted_as_zero,
     _failures_path_for,
@@ -8445,6 +8446,19 @@ class TestEnvironmentServerRouting:
         assert rows[0][ROLLOUT_INDEX_KEY_NAME] == 0
         assert rows[0][NG_ENVIRONMENT_SERVER_KEY] == "environment"
 
+    def test_episode_request_carries_the_repeat_index_across_attempts(self) -> None:
+        row = {
+            "_ng_task_index": 3,
+            "_ng_rollout_index": 2,
+            "_ng_attempt_index": 1,
+            "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+            "task_input": {"responses_create_params": {"input": "fix it"}},
+        }
+
+        episode_id = _episode_request_body(row)["episode_id"]
+
+        assert episode_id == {"rollout_id": "3-2", "attempt": 1, "repeat": 2}
+
     async def test_taskset_route_builds_native_episode_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
         payload = {"reward": 1.0, "agent_ref": {"name": "hermes"}}
         post = AsyncMock(return_value=FakeResponse(200, payload))
@@ -8482,7 +8496,7 @@ class TestEnvironmentServerRouting:
         assert post.await_args.kwargs["server_name"] == "environment"
         assert AGENT_REF_KEY_NAME not in rows[0]
         assert post.await_args.kwargs["json"] == {
-            "episode_id": {"rollout_id": "0-0", "attempt": 0},
+            "episode_id": {"rollout_id": "0-0", "attempt": 0, "repeat": 0},
             "task": {
                 "task_id": {
                     "taskset": "swe_pro",
@@ -8679,7 +8693,7 @@ class TestEnvironmentServerRouting:
         assert set(calls) == {"environment", "legacy_environment"}
         # The native row goes to its taskset's route as an episode request.
         assert calls["environment"]["task"]["task_id"]["taskset"] == "swe_pro"
-        assert calls["environment"]["episode_id"] == {"rollout_id": "0-0", "attempt": 0}
+        assert calls["environment"]["episode_id"] == {"rollout_id": "0-0", "attempt": 0, "repeat": 0}
         # The flat row goes to the environment server fronting its agent, as today's flat body.
         assert calls["legacy_environment"] is flat_row
         assert calls["legacy_environment"][AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}

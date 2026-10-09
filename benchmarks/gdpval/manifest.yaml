@@ -23,9 +23,10 @@ datasets:
   type: benchmark
   jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark.jsonl
   prepare_script: benchmarks/gdpval/prepare.py
+  prompt_config: benchmarks/gdpval/prompts/default-stirrup.yaml
   num_repeats: 1
 model_server: policy_model
 rollout_driver: resources_servers.gdpval.multistage_orchestrator:run_rollout_collection
 canonical_split: benchmark
-prompt_source: agent
+standard_prompt_config: benchmarks/gdpval/prompts/default-stirrup.yaml
 lifecycle: active

@@ -229,7 +229,7 @@ def test_explicit_identity_does_not_require_collector_indexes(task_id_field: str
     assert response.json()["reward"] == 1.0
     seed_body = client.calls[0][2]["json"]
     assert seed_body["task_id"] == {"taskset": "resources", "task_id": "task"}
-    assert seed_body["episode_id"] == {"rollout_id": "explicit-rollout", "attempt": 2}
+    assert seed_body["episode_id"] == {"rollout_id": "explicit-rollout", "attempt": 2, "repeat": 0}
     assert client.calls[2][1] == "/ng-rollout/explicit-rollout-a2/v1/responses"
 
 
@@ -248,7 +248,7 @@ def test_task_identity_preserves_index_fallback_and_zero(task_fields: dict[str, 
     )
 
     assert request.task.task_id.task_id == expected_task_id
-    assert request.episode_id == EpisodeId(rollout_id="3-2", attempt=0)
+    assert request.episode_id == EpisodeId(rollout_id="3-2", attempt=0, repeat=2)
 
 
 @pytest.mark.parametrize("task_source", ["resources", "agent"])

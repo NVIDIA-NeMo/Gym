@@ -37,21 +37,35 @@ unset — there is one panel-based code path either way.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import shutil
+import tempfile
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Set, Tuple
+from typing import Annotated, Any, Dict, List, Literal, Optional, Set, Tuple, Union
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
-from nemo_gym.server_utils import get_server_url
+from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
+from nemo_gym.server_utils import SESSION_ID_KEY, get_server_url
+from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
     dir_media_modalities,
@@ -59,7 +73,17 @@ from resources_servers.gdpval.judge_panel import (
     panel_summary,
 )
 from resources_servers.gdpval.judge_telemetry import JudgeTelemetrySink, classify_judge_error
+from resources_servers.gdpval.reference_files import download_reference_files
 from resources_servers.gdpval.scoring import SCORING_ERROR_KEY
+from resources_servers.gdpval.task_data import TaskData
+from resources_servers.gdpval.task_sandbox import (
+    WORKDIR,
+    GDPValSandboxConfig,
+    collect_deliverables,
+    missing_files,
+    start_task_sandbox,
+)
+from resources_servers.gdpval.tavily_search import TavilySearch, fetch_web_page, web_client
 
 
 LOGGER = logging.getLogger(__name__)
@@ -82,23 +106,6 @@ def _is_invalid_judge_result(judge_result: Any) -> bool:
 
 _DEFAULT_JUDGE_PROMPT_FPATH = str(Path(__file__).parent / "prompts" / "judge_prompt.j2")
 _DEFAULT_REFERENCE_ELO = 1000.0
-
-
-def _iter_ref_repeat_dirs(task_dir: Path) -> List[Path]:
-    """All reference deliverable dirs for a task, supporting both layouts.
-
-    New: ``task_<id>/repeat_<n>/`` — return every repeat dir, sorted. Old:
-    flat ``task_<id>/`` — return ``[task_dir]``. Missing → ``[]``.
-
-    Returning every repeat lets the comparison verifier judge each eval
-    rollout against *all* reference rollouts so the win rate (and ELO)
-    averages over reference variance instead of being anchored to a single
-    sample.
-    """
-    if not task_dir.is_dir():
-        return []
-    repeats = sorted(p for p in task_dir.iterdir() if p.is_dir() and p.name.startswith("repeat_"))
-    return repeats or [task_dir]
 
 
 def _safe_output_text(response: Any) -> str:
@@ -387,6 +394,84 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # prompts, base64, credentials, or absolute paths.
     judge_telemetry_output_dir: Optional[str] = None
 
+    # Keys for the ``web_search`` tool: a key, a list of keys, or a comma-separated string
+    # with optional surrounding ``[...]``. Each call makes ``tavily_max_sweeps × len(keys)``
+    # attempts at most, rotating keys on 401/403/429 and 5xx.
+    tavily_api_key: Union[str, List[str]]
+    tavily_max_sweeps: int = Field(default=1, ge=1)
+
+    # /verify writes each rollout's files to ``<persist_deliverables_dir>/task_<task_id>/repeat_<n>/``.
+    persist_deliverables_dir: str
+    # Names a top-level sandbox provider block.
+    sandbox_provider: str
+    sandbox_config: GDPValSandboxConfig
+
+
+# Tool descriptions and request-model titles reproduce the tool JSON of the certified runs.
+FINISH_TOOL_DESCRIPTION = (
+    "Signal task completion with a reason. Use when the task is finished or cannot proceed further. "
+    "Note that you will need a separate turn to finish."
+)
+ABANDON_TASK_FINISH_TOOL_DESCRIPTION = (
+    "Signal that you do not believe the task can be completed, with a brief reason, instead of submitting "
+    "files. Use only when required inputs are missing, a hard dependency is unavailable, or the request is "
+    "incoherent. Do not use it to escape difficulty. Note that you will need a separate turn to finish."
+)
+WEB_SEARCH_TOOL_DESCRIPTION = "Search the web using Tavily. Returns top results with content snippets."
+FETCH_WEB_PAGE_TOOL_DESCRIPTION = "Fetch and extract the main content from a web page as markdown."
+
+
+class FinishRequest(BaseModel):
+    """Same shape as stirrup.tools.finish.FinishParams, with ``paths`` coercion."""
+
+    model_config = ConfigDict(title="CoercingFinishParams")
+
+    reason: Annotated[str, Field(description="Reason for finishing.")]
+    paths: Annotated[
+        list[str],
+        Field(description="List of file paths created or modified. Do not include directories, only files."),
+    ]
+
+    @field_validator("paths", mode="before")
+    @classmethod
+    def _coerce_paths(cls, v):
+        # Some tool-call parsers deliver the list as a JSON-encoded string or a bare filename.
+        if isinstance(v, list):
+            return [str(p) for p in v]
+        if isinstance(v, str):
+            stripped = v.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, list):
+                    return [str(p) for p in parsed]
+            if stripped:
+                return [stripped]
+            return []
+        return v
+
+
+class AbandonTaskFinishRequest(BaseModel):
+    """Early-exit finish tool: abandon the task without submitting deliverables."""
+
+    model_config = ConfigDict(title="AbandonFinishParams")
+
+    reason: Annotated[str, Field(description="Brief reason the task cannot be completed.")]
+
+
+class WebSearchRequest(BaseModel):
+    model_config = ConfigDict(title="_SearchParams")
+
+    query: Annotated[str, Field(description="Natural language search query.")]
+
+
+class FetchWebPageRequest(BaseModel):
+    model_config = ConfigDict(title="_FetchParams")
+
+    url: Annotated[str, Field(description="Full HTTP or HTTPS URL of the web page to fetch.")]
+
 
 class GDPValVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(populate_by_name=True)
@@ -458,6 +543,17 @@ class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
     per_reference: Optional[Dict[str, Dict[str, Any]]] = None
 
 
+@dataclass
+class _TaskSession:
+    episode_id: EpisodeId
+    task_id: TaskId
+    sandbox: Optional[AsyncSandbox]
+    reference_dir: Path
+    # The finish or abandon_task_finish call the agent made.
+    finish_call: Optional[Dict[str, Any]] = None
+    deliverables_dir: Optional[str] = None
+
+
 class GDPValResourcesServer(SimpleResourcesServer):
     ray_enabled = False
     config: GDPValResourcesServerConfig
@@ -465,6 +561,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any) -> None:
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
         self._judge_telemetry = JudgeTelemetrySink(self.config.judge_telemetry_output_dir)
+        self._tavily = TavilySearch(api_keys=self.config.tavily_api_key, max_sweeps=self.config.tavily_max_sweeps)
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("GDPVal sessions are process-local and require num_workers=1")
+        self._sessions: Dict[str, _TaskSession] = {}
+        self._closed_sessions: Dict[str, EpisodeId] = {}
+        self._session_locks: Dict[str, asyncio.Lock] = {}
         # Normalize the reference-model set: prefer the multi-reference
         # ``reference_models`` mapping; fall back to the legacy single-reference
         # fields (treated as a single reference id ``"reference"``).
@@ -494,6 +596,158 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     "deployment container, or set preconvert_office_to_pdf=false to opt out."
                 )
         super().model_post_init(context)
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            try:
+                async with parent_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                await self.shutdown()
+
+        app.router.lifespan_context = lifespan
+        app.post("/finish", description=FINISH_TOOL_DESCRIPTION)(self.finish)
+        app.post("/abandon_task_finish", description=ABANDON_TASK_FINISH_TOOL_DESCRIPTION)(self.abandon_task_finish)
+        app.post("/web_search", description=WEB_SEARCH_TOOL_DESCRIPTION)(self.web_search)
+        app.post("/fetch_web_page", description=FETCH_WEB_PAGE_TOOL_DESCRIPTION)(self.fetch_web_page)
+        return app
+
+    async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
+        session_id = body.resources_session_id
+        request.session[SESSION_ID_KEY] = session_id
+        async with self._session_locks.setdefault(session_id, asyncio.Lock()):
+            if session_id in self._closed_sessions:
+                raise ValueError(f"Resources session is already closed: {session_id}")
+            session = self._sessions.get(session_id)
+            if session is not None:
+                if (session.episode_id, session.task_id) != (body.episode_id, body.task_id):
+                    raise ValueError("resources_session_id is already bound to another episode or task")
+                return await self._seed_response(session_id, session)
+            task = TaskData.model_validate(body.task_data)
+            if body.task_id.task_id != task.task_id:
+                raise ValueError("TaskId does not match the GDPVal task_id")
+            reference_dir = Path(tempfile.mkdtemp(prefix="gdpval_ref_files_"))
+            try:
+                reference_files = await self._download_reference_files(task, reference_dir)
+                sandbox = await start_task_sandbox(
+                    self.config.sandbox_provider,
+                    self.config.sandbox_config,
+                    task_id=task.task_id,
+                    reference_dir=reference_dir,
+                    reference_files=reference_files,
+                )
+            except BaseException:
+                shutil.rmtree(reference_dir, ignore_errors=True)
+                raise
+            session = _TaskSession(body.episode_id, body.task_id, sandbox, reference_dir)
+            try:
+                response = await self._seed_response(session_id, session)
+            except BaseException:
+                await self._release(session)
+                raise
+            self._sessions[session_id] = session
+            return response
+
+    async def _download_reference_files(self, task: TaskData, reference_dir: Path) -> List[str]:
+        # The prompt lists every reference file, so a task without all of them cannot start.
+        expected = [path.lstrip("/") for path in task.reference_files or []]
+        downloaded = await asyncio.to_thread(
+            download_reference_files, task.reference_files or [], task.reference_file_urls or [], reference_dir
+        )
+        missing = sorted(set(expected) - set(downloaded))
+        if missing:
+            raise RuntimeError(f"Could not download the reference files {missing} of task {task.task_id}")
+        return downloaded
+
+    async def _seed_response(self, session_id: str, session: _TaskSession) -> ResourcesSeedSessionResponse:
+        return ResourcesSeedSessionResponse(
+            resources_session_id=session_id,
+            sandbox_access=SandboxAccess(
+                connection=DirectSandboxConnection(
+                    provider_config_ref=self.config.sandbox_provider,
+                    descriptor=await session.sandbox.serialize(),
+                ),
+                workdir=WORKDIR,
+            ),
+        )
+
+    async def close_resources_session(
+        self, request: Request, body: ResourcesCloseSessionRequest
+    ) -> ResourcesCloseSessionResponse:
+        session_id = body.resources_session_id
+        async with self._session_locks.setdefault(session_id, asyncio.Lock()):
+            if session_id not in self._closed_sessions:
+                session = self._sessions.get(session_id)
+                if session is not None:
+                    if session.episode_id != body.episode_id:
+                        raise ValueError("episode_id does not match the seeded resources session")
+                    await self._release(session)
+                    del self._sessions[session_id]
+                self._closed_sessions[session_id] = body.episode_id
+            elif self._closed_sessions[session_id] != body.episode_id:
+                raise ValueError("episode_id does not match the closed resources session")
+        request.session.pop(SESSION_ID_KEY, None)
+        return ResourcesCloseSessionResponse(resources_session_id=session_id)
+
+    async def _release(self, session: _TaskSession) -> None:
+        if session.sandbox is not None:
+            await session.sandbox.stop()
+            session.sandbox = None
+        await asyncio.to_thread(shutil.rmtree, session.reference_dir, ignore_errors=True)
+
+    async def shutdown(self) -> None:
+        for session_id, session in list(self._sessions.items()):
+            try:
+                await self._release(session)
+            except Exception:
+                LOGGER.exception("Failed to stop the sandbox of GDPVal session %s", session_id)
+        self._sessions.clear()
+
+    def _get_session(self, request: Request) -> _TaskSession:
+        session = self._sessions.get(request.session.get(SESSION_ID_KEY))
+        if session is None:
+            raise HTTPException(status_code=400, detail="No seeded GDPVal session for this request")
+        return session
+
+    async def finish(self, request: Request, body: FinishRequest) -> str:
+        session = self._get_session(request)
+        if session.sandbox is None:
+            raise HTTPException(status_code=409, detail="The task sandbox is no longer available")
+        missing = await missing_files(session.sandbox, body.paths)
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"ERROR: Files do not exist: {missing}. Verify paths and ensure files were saved.",
+            )
+        session.finish_call = {"tool": "finish", **body.model_dump()}
+        return body.reason
+
+    async def abandon_task_finish(self, request: Request, body: AbandonTaskFinishRequest) -> str:
+        self._get_session(request).finish_call = {"tool": "abandon_task_finish", **body.model_dump()}
+        return body.reason
+
+    async def web_search(self, body: WebSearchRequest) -> str:
+        async with web_client() as client:
+            return await self._tavily.search(body.query, client)
+
+    async def fetch_web_page(self, body: FetchWebPageRequest) -> str:
+        async with web_client() as client:
+            return await fetch_web_page(body.url, client)
+
+    async def _collect_deliverables(self, session: _TaskSession) -> str:
+        # The first /verify of a session copies the files out and stops the sandbox; later ones rescore them.
+        if session.deliverables_dir is None:
+            task_dir = persisted_layout.repeat_dir(
+                self.config.persist_deliverables_dir, session.task_id.task_id, session.episode_id.repeat
+            )
+            await collect_deliverables(session.sandbox, session.finish_call, session.reference_dir, task_dir)
+            await self._release(session)
+            session.deliverables_dir = str(task_dir)
+        return session.deliverables_dir
 
     def _effective_panel(self) -> List[JudgePanelMember]:
         """The panel to grade with — always a non-empty list of members.
@@ -653,7 +907,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
             )
         return routed, audio_capable, video_capable
 
-    async def verify(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
+    async def verify(self, request: Request, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
+        session = self._sessions.get(request.session.get(SESSION_ID_KEY))
+        if session is not None:
+            body = body.model_copy(update={"deliverables_dir": await self._collect_deliverables(session)})
         if self.config.reward_mode == "comparison":
             return await self._verify_comparison(body)
 
@@ -689,7 +946,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         deliverable_content_blocks: Optional[List[Dict[str, Any]]] = None
 
         if body.deliverables_dir and Path(body.deliverables_dir).is_dir():
-            from responses_api_agents.stirrup_agent.file_reader import (
+            from resources_servers.gdpval.file_reader import (
                 convert_deliverables_to_content_blocks,
                 read_deliverable_files,
             )
@@ -813,8 +1070,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # simply skipped — the eval model just isn't judged against it here.
         ref_dirs_by_id: Dict[str, List[Path]] = {}
         for ref_id, ref_cfg in active_references.items():
-            ref_task_root = Path(ref_cfg.deliverables_dir) / f"task_{body.task_id}"
-            dirs = [d for d in _iter_ref_repeat_dirs(ref_task_root) if task_attempted(str(d))]
+            ref_task_root = persisted_layout.task_dir(ref_cfg.deliverables_dir, body.task_id)
+            dirs = [d for d in persisted_layout.repeat_dirs(ref_task_root) if task_attempted(str(d))]
             if dirs:
                 ref_dirs_by_id[ref_id] = dirs
 
@@ -1048,7 +1305,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             # Judge the eval submission against every reference model, and within
             # each model against every available reference repeat. Raw vote
             # counts (not just per-matchup majority) are summed so the win rate
-            # averages over reference variance — see ``_iter_ref_repeat_dirs``.
+            # averages over reference variance instead of anchoring on one sample.
             for ref_id, dirs in ref_dirs_by_id.items():
                 ref_wins = ref_losses = ref_ties = 0
                 ref_judged_repeats = 0

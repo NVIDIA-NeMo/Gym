@@ -57,6 +57,13 @@ def test_capture_key_qualifies_retries() -> None:
         EpisodeId(rollout_id="r-a2")
 
 
+def test_repeat_defaults_to_the_first_repeat() -> None:
+    assert EpisodeId(rollout_id="3-2").model_dump() == {"rollout_id": "3-2", "attempt": 0, "repeat": 0}
+    assert EpisodeId.model_validate({"rollout_id": "3-2", "repeat": 2}).repeat == 2
+    with pytest.raises(ValidationError):
+        EpisodeId(rollout_id="3-2", repeat=-1)
+
+
 def test_task_id_contains_only_logical_identity() -> None:
     task_id = TaskId(taskset="swebench_pro:test", task_id="instance-1")
     assert task_id.model_dump() == {

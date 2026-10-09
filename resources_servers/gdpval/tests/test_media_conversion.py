@@ -13,7 +13,7 @@ Covers the shared PDF→page-image + text rasterizer
 content-block builders — the pairwise comparison scorer
 (:func:`resources_servers.gdpval.comparison.build_file_section`) and the rubric
 visual scorer
-(:func:`responses_api_agents.stirrup_agent.file_reader.convert_deliverables_to_content_blocks`).
+(:func:`resources_servers.gdpval.file_reader.convert_deliverables_to_content_blocks`).
 
 All tests skip gracefully when PyMuPDF (``fitz``) isn't installed.
 """
@@ -246,7 +246,7 @@ class TestComparisonImagesAndText:
 
 class TestRubricImagesAndText:
     def test_convert_deliverables_rasterizes_pdf(self, tmp_path) -> None:
-        from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
+        from resources_servers.gdpval.file_reader import convert_deliverables_to_content_blocks
 
         (tmp_path / "report.pdf").write_bytes(_make_pdf_bytes(pages=2))
         blocks = convert_deliverables_to_content_blocks(
@@ -258,7 +258,7 @@ class TestRubricImagesAndText:
         )
 
     def test_convert_deliverables_native_mode_keeps_pdf_url(self, tmp_path) -> None:
-        from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
+        from resources_servers.gdpval.file_reader import convert_deliverables_to_content_blocks
 
         (tmp_path / "report.pdf").write_bytes(_make_pdf_bytes(pages=1))
         blocks = convert_deliverables_to_content_blocks(str(tmp_path))  # default native_pdf
@@ -267,7 +267,7 @@ class TestRubricImagesAndText:
         )
 
     def test_convert_deliverables_skips_audio_when_not_av_capable(self, tmp_path) -> None:
-        from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
+        from resources_servers.gdpval.file_reader import convert_deliverables_to_content_blocks
 
         (tmp_path / "clip.mp3").write_bytes(b"ID3fakeaudio")
         blocks = convert_deliverables_to_content_blocks(
@@ -282,7 +282,7 @@ class TestRubricImagesAndText:
 
     def test_convert_deliverables_audio_passthrough_when_av_capable(self, tmp_path) -> None:
         # images_and_text == self-hosted vLLM judge -> input_audio (not image_url).
-        from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
+        from resources_servers.gdpval.file_reader import convert_deliverables_to_content_blocks
 
         (tmp_path / "clip.mp3").write_bytes(b"ID3fakeaudio")
         blocks = convert_deliverables_to_content_blocks(
@@ -292,7 +292,7 @@ class TestRubricImagesAndText:
 
     def test_convert_deliverables_video_passthrough_when_av_capable(self, tmp_path) -> None:
         # Self-hosted vLLM judge -> video_url data URL.
-        from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
+        from resources_servers.gdpval.file_reader import convert_deliverables_to_content_blocks
 
         (tmp_path / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
         blocks = convert_deliverables_to_content_blocks(
@@ -306,7 +306,7 @@ class TestRubricImagesAndText:
     def test_convert_deliverables_video_capable_stubs_audio(self, tmp_path) -> None:
         # MiniMax-M3 case: reads video but NOT audio -> video passes through as a
         # native block, audio is dropped (skipped) even in the same directory.
-        from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
+        from resources_servers.gdpval.file_reader import convert_deliverables_to_content_blocks
 
         (tmp_path / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
         (tmp_path / "voice.mp3").write_bytes(b"ID3fakeaudio")
@@ -332,7 +332,7 @@ class TestRubricImagesAndText:
 
     def test_convert_deliverables_native_mode_av_uses_image_url(self, tmp_path) -> None:
         # native_pdf == frontier judge (Gemini) -> AV stays an image_url data URL.
-        from responses_api_agents.stirrup_agent.file_reader import convert_deliverables_to_content_blocks
+        from resources_servers.gdpval.file_reader import convert_deliverables_to_content_blocks
 
         (tmp_path / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
         blocks = convert_deliverables_to_content_blocks(str(tmp_path), media_mode="native_pdf", video_capable=True)

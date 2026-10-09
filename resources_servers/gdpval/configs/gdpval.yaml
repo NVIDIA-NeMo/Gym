@@ -13,3 +13,16 @@ gdpval_resources_server:
         name: gdpval_judge_model
       judge_responses_create_params_overrides: {}
       judge_telemetry_output_dir: null
+      tavily_api_key: ${oc.env:TAVILY_API_KEY,dummy}
+      persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR,output/gdpval/deliverables}
+      # Names a top-level provider block such as nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml.
+      sandbox_provider: sandbox
+      sandbox_config:
+        # An OCI image built from containers/Dockerfile; see resources_servers/gdpval/README.md.
+        image: ${oc.env:GDPVAL_SANDBOX_IMAGE,null}
+        # Without a TTL the OpenSandbox SDK expires a sandbox 10 minutes after creation.
+        ttl_s: 21600
+        env:
+          # execd otherwise waits 1 s after every command.
+          EXECD_API_GRACE_SHUTDOWN: 50ms
+        resources: {cpu: 16, memory_mib: 65536}

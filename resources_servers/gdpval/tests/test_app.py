@@ -15,6 +15,7 @@
 import base64
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -26,13 +27,17 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
+from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.app import (
     GDPValResourcesServer,
     GDPValResourcesServerConfig,
     GDPValVerifyRequest,
-    _iter_ref_repeat_dirs,
     _strict_comparison_trial_failure,
 )
+
+
+# A request without a seeded session, as reverify and multistage reuse send.
+_NO_SESSION = SimpleNamespace(session={})
 
 
 def _server(reward_mode: str = "rubric", **extra) -> GDPValResourcesServer:
@@ -43,6 +48,10 @@ def _server(reward_mode: str = "rubric", **extra) -> GDPValResourcesServer:
         name="",
         reward_mode=reward_mode,
         judge_model_server={"type": "responses_api_models", "name": "judge"},
+        tavily_api_key="test-key",
+        sandbox_provider="test",
+        sandbox_config={},
+        persist_deliverables_dir="unused",
         # Default off in tests: avoids triggering the host-libreoffice install
         # check in model_post_init. Tests that exercise the preconvert path
         # set this back to True explicitly.
@@ -147,7 +156,7 @@ class TestStrictComparisonTrials:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            return await server.verify(body)
+            return await server.verify(_NO_SESSION, body)
 
     @pytest.mark.asyncio
     async def test_complete_contract_passes_when_enabled(self, tmp_path) -> None:
@@ -241,14 +250,14 @@ class TestStrictComparisonTrials:
             RuntimeError,
             match=rf"strict comparison trial contract failed for task task-1: {missing}_missing",
         ):
-            await server.verify(body)
+            await server.verify(_NO_SESSION, body)
 
     @pytest.mark.parametrize("missing", ["reference", "eval"])
     @pytest.mark.asyncio
     async def test_missing_artifact_keeps_legacy_response_by_default(self, tmp_path, missing) -> None:
         server, body = self._missing_artifact_server_and_body(tmp_path, missing=missing, strict=None)
 
-        response = await server.verify(body)
+        response = await server.verify(_NO_SESSION, body)
 
         assert server.config.strict_comparison_trials is False
         assert response.reward == 0.0
@@ -261,10 +270,10 @@ class TestStrictComparisonTrials:
 
         if strict:
             with pytest.raises(RuntimeError, match="reference_missing"):
-                await server.verify(body)
+                await server.verify(_NO_SESSION, body)
             return
 
-        response = await server.verify(body)
+        response = await server.verify(_NO_SESSION, body)
         dumped = response.model_dump()
         assert dumped["_ng_failure_class"] == "reference_missing"
         assert dumped["_ng_failure_terminal"] is True
@@ -294,7 +303,7 @@ class TestStrictComparisonTrials:
         server.config.missing_eval_task_ids = task_ids
         body.stage_index = stage
         with patch("resources_servers.gdpval.comparison.run_trials") as judge:
-            response = await server.verify(body)
+            response = await server.verify(_NO_SESSION, body)
         judge.assert_not_called()
         if expected_loss:
             assert response.total_losses == 4
@@ -362,13 +371,13 @@ class TestStrictComparisonTrials:
         assert response.judge_response["total_invalid"] == 1
 
 
-class TestIterRefRepeatDirs:
+class TestRepeatDirs:
     def test_returns_all_repeats_sorted(self, tmp_path) -> None:
         td = tmp_path / "task_x"
         (td / "repeat_1").mkdir(parents=True)
         (td / "repeat_0").mkdir()
         (td / "repeat_2").mkdir()
-        assert _iter_ref_repeat_dirs(td) == [
+        assert persisted_layout.repeat_dirs(td) == [
             td / "repeat_0",
             td / "repeat_1",
             td / "repeat_2",
@@ -378,10 +387,10 @@ class TestIterRefRepeatDirs:
         td = tmp_path / "task_x"
         td.mkdir()
         (td / "deliverable.docx").write_text("x")
-        assert _iter_ref_repeat_dirs(td) == [td]
+        assert persisted_layout.repeat_dirs(td) == [td]
 
     def test_missing_dir_returns_empty(self, tmp_path) -> None:
-        assert _iter_ref_repeat_dirs(tmp_path / "does-not-exist") == []
+        assert persisted_layout.repeat_dirs(tmp_path / "does-not-exist") == []
 
 
 class TestApp:
@@ -424,7 +433,7 @@ class TestApp:
     async def test_verify_rubric_no_rubric_returns_zero(self) -> None:
         server = _server(reward_mode="rubric")
         body = _verify_request(rubric_json=None, rubric_pretty="")
-        resp = await server.verify(body)
+        resp = await server.verify(_NO_SESSION, body)
         assert resp.reward == 0.0
         assert resp.verify_mode == "rubric"
         assert resp.invalid_judge_response is True
@@ -449,7 +458,7 @@ class TestApp:
             patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
         ):
-            resp = await server.verify(body)
+            resp = await server.verify(_NO_SESSION, body)
 
         assert resp.reward == 0.7
         assert resp.verify_mode == "rubric"
@@ -488,7 +497,7 @@ class TestApp:
             patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
         ):
-            await server.verify(body)
+            await server.verify(_NO_SESSION, body)
 
         judges = captured["judges"]
         assert len(judges) == 1
@@ -531,7 +540,7 @@ class TestApp:
             patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
         ):
-            await server.verify(body)
+            await server.verify(_NO_SESSION, body)
 
         judges = captured["judges"]
         assert [j.name for j in judges] == ["gpt-5.5", "gemini-3.1-pro", "claude-opus-4.8"]
@@ -580,13 +589,13 @@ class TestApp:
             patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
             # Avoid pulling in real file-reader conversion for the .mp3 stub.
-            patch("responses_api_agents.stirrup_agent.file_reader.read_deliverable_files", return_value=""),
+            patch("resources_servers.gdpval.file_reader.read_deliverable_files", return_value=""),
             patch(
-                "responses_api_agents.stirrup_agent.file_reader.convert_deliverables_to_content_blocks",
+                "resources_servers.gdpval.file_reader.convert_deliverables_to_content_blocks",
                 return_value=[],
             ),
         ):
-            await server.verify(body)
+            await server.verify(_NO_SESSION, body)
 
         assert [j.name for j in captured["judges"]] == ["gemini-3.1-pro"]
 
@@ -612,7 +621,7 @@ class TestApp:
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
             pytest.raises(ValueError, match="no configured judge can read video"),
         ):
-            await server.verify(body)
+            await server.verify(_NO_SESSION, body)
 
     @pytest.mark.asyncio
     async def test_verify_rubric_video_no_capable_judge_warn_falls_back(self, tmp_path) -> None:
@@ -638,13 +647,13 @@ class TestApp:
         with (
             patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
-            patch("responses_api_agents.stirrup_agent.file_reader.read_deliverable_files", return_value=""),
+            patch("resources_servers.gdpval.file_reader.read_deliverable_files", return_value=""),
             patch(
-                "responses_api_agents.stirrup_agent.file_reader.convert_deliverables_to_content_blocks",
+                "resources_servers.gdpval.file_reader.convert_deliverables_to_content_blocks",
                 return_value=[],
             ),
         ):
-            await server.verify(body)
+            await server.verify(_NO_SESSION, body)
 
         assert [j.name for j in captured["judges"]] == ["gpt-5.5"]
 
@@ -674,13 +683,13 @@ class TestApp:
         with (
             patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
-            patch("responses_api_agents.stirrup_agent.file_reader.read_deliverable_files", return_value=""),
+            patch("resources_servers.gdpval.file_reader.read_deliverable_files", return_value=""),
             patch(
-                "responses_api_agents.stirrup_agent.file_reader.convert_deliverables_to_content_blocks",
+                "resources_servers.gdpval.file_reader.convert_deliverables_to_content_blocks",
                 return_value=[],
             ),
         ):
-            await server.verify(body)
+            await server.verify(_NO_SESSION, body)
 
         assert [j.name for j in captured["judges"]] == ["gpt-5.5"]
 
@@ -691,7 +700,7 @@ class TestApp:
             reference_deliverables_dir=str(tmp_path / "no-such-dir"),
         )
         body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}])
-        resp = await server.verify(body)
+        resp = await server.verify(_NO_SESSION, body)
         assert resp.reward == 0.0
         assert resp.verify_mode == "comparison"
         assert resp.judge_response == {"error": "reference_missing"}
@@ -741,7 +750,7 @@ class TestApp:
         monkeypatch.setattr("resources_servers.gdpval.app.get_server_url", lambda _: "http://localhost:9999")
         monkeypatch.setattr("openai.OpenAI", lambda **_: client)
 
-        response = await server.verify(_verify_request(deliverables_dir=str(eval_dir)))
+        response = await server.verify(_NO_SESSION, _verify_request(deliverables_dir=str(eval_dir)))
 
         if has_inputs and not from_eval:
             assert response.model_dump()["_ng_failure_class"] == "transport_ineligible"
@@ -814,7 +823,7 @@ class TestApp:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()) as openai_ctor,
         ):
-            resp = await server.verify(body)
+            resp = await server.verify(_NO_SESSION, body)
 
         # All three reference repeats must be judged.
         assert len(seen_ref_dirs) == 3
@@ -866,7 +875,7 @@ class TestApp:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            resp = await server.verify(body)
+            resp = await server.verify(_NO_SESSION, body)
 
         assert call_count["n"] == 1
         assert resp.total_wins == 0
@@ -916,7 +925,7 @@ class TestApp:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            resp = await server.verify(body)
+            resp = await server.verify(_NO_SESSION, body)
 
         assert captured_kwargs["return_raw_responses"] is True
         assert resp.judge_response["per_ref_repeat"][0]["raw_responses"] == canned_raw
@@ -986,7 +995,7 @@ class TestApp:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            resp = await server.verify(body)
+            resp = await server.verify(_NO_SESSION, body)
 
         # The panel (both members) is threaded into run_trials with a seeded rng.
         judges = captured["judges"]
@@ -1061,7 +1070,7 @@ class TestApp:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            resp = await server.verify(body)
+            resp = await server.verify(_NO_SESSION, body)
 
         # Only the AV-capable member is passed to run_trials and recorded.
         assert [j.name for j in captured["judges"]] == ["gemini-3.1-pro"]
@@ -1090,7 +1099,7 @@ class TestApp:
             patch("resources_servers.gdpval.scoring.score_with_rubric_structured", side_effect=fake_score_structured),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
         ):
-            resp = await server.verify(body)
+            resp = await server.verify(_NO_SESSION, body)
 
         assert captured_kwargs["include_raw_responses"] is True
         assert resp.judge_response["raw_responses"] == ["FINAL_SCORE[7]\nMAX_POSSIBLE_SCORE[10]"]
@@ -1337,7 +1346,7 @@ class TestMultiReference:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            resp = await server.verify(body)
+            resp = await server.verify(_NO_SESSION, body)
 
         assert set(resp.per_reference) == {"kimi", "gpt5"}
         assert resp.per_reference["kimi"] == {
@@ -1391,7 +1400,7 @@ class TestMultiReference:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            resp = await server.verify(body)
+            resp = await server.verify(_NO_SESSION, body)
 
         assert set(resp.per_reference) == {"gpt5"}
         assert resp.total_wins == 3
@@ -1416,7 +1425,7 @@ class TestMultiReference:
         body = _verify_request(deliverables_dir=str(eval_dir), reference_ids=[])
 
         with patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"):
-            resp = await server.verify(body)
+            resp = await server.verify(_NO_SESSION, body)
 
         assert resp.reward == 0.0
         assert resp.judge_response == {"error": "reference_missing"}
@@ -1474,7 +1483,7 @@ class TestMultiReference:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            resp = await server.verify(body)
+            resp = await server.verify(_NO_SESSION, body)
 
         # Only the surviving reference contributes votes.
         assert set(resp.per_reference) == {"gpt5"}
@@ -1501,7 +1510,7 @@ class TestMultiReference:
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
             with pytest.raises(RuntimeError, match="all .* judge matchup"):
-                await server.verify(body)
+                await server.verify(_NO_SESSION, body)
 
     def test_aggregate_metrics_mle_and_per_reference_stats(self) -> None:
         from nemo_gym.config_types import AggregateMetricsRequest

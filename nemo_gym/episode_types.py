@@ -28,6 +28,7 @@ class EpisodeId(BaseModel):
 
     rollout_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
     attempt: int = Field(default=0, ge=0)
+    repeat: int = Field(default=0, ge=0, description="Index of this rollout among the task's repeats.")
 
     @field_validator("rollout_id")
     @classmethod
