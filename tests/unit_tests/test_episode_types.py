@@ -91,7 +91,7 @@ def test_single_agent_protocol_inherits_shared_failure_metadata(stage: str) -> N
         failure_kind="transport_unreachable",
         stage=stage,
     )
-    saved = failure.model_dump(mode="json", exclude={"partial_response"})
+    saved = failure.model_dump(mode="json", include=set(EpisodeFailure.model_fields))
     shared = EpisodeFailure.model_validate(saved)
     assert shared.stage == stage and shared.failure_kind == "transport_unreachable"
     assert shared.terminal is False

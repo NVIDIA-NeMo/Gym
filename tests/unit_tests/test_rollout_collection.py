@@ -6051,8 +6051,9 @@ class TestDispatchBudget:
         )
         return input_fpath
 
+    @pytest.mark.parametrize("stray_evidence", [False, True])
     async def test_drained_rows_skip_token_capture_and_progress_metrics(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stray_evidence: bool
     ) -> None:
         """A row the budget never started is not a rollout.
 
@@ -6064,6 +6065,8 @@ class TestDispatchBudget:
             nemo_gym.rollout_collection,
             "get_global_config_dict",
             lambda: {
+                "model_call_capture_dir": str(tmp_path / "captures"),
+                "observability_enabled": True,
                 "token_id_capture": {
                     "enabled": True,
                     "all_agents": True,
@@ -6072,10 +6075,19 @@ class TestDispatchBudget:
                     "lineage_store": f"{__name__}:_StubLineageStore",
                     "max_mask_fraction": 0.5,
                     "mask_fraction_min_samples": 1,
-                }
+                },
             },
         )
         monkeypatch.setattr(nemo_gym.rollout_collection, "installed_token_source", lambda: object())
+        capture = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "merge_model_call_capture_into_record", capture)
+        if stray_evidence:
+            drained_result = nemo_gym.rollout_collection._dispatch_drained_result
+
+            def drained_with_evidence(*args, **kwargs):
+                return drained_result(*args, **kwargs) | {"ng_agent_observations": {"source": "stray", "records": []}}
+
+            monkeypatch.setattr(nemo_gym.rollout_collection, "_dispatch_drained_result", drained_with_evidence)
         finalized: list[dict] = []
 
         async def finalize(result: dict, source: object, **kwargs: object) -> dict:
@@ -6109,6 +6121,8 @@ class TestDispatchBudget:
         results = await RolloutCollectionHelper().run_from_config(config)
 
         assert len(finalized) == 3
+        assert capture.call_count == 3
+        assert not any(call.args[0].get(NG_DISPATCH_DRAINED_KEY) for call in capture.call_args_list)
         assert not any(NG_DISPATCH_DRAINED_KEY in result for result in finalized)
         assert sum(bool(result.get(NG_DISPATCH_DRAINED_KEY)) for result in results) == 4
         persisted = [orjson.loads(line) for line in output_fpath.read_bytes().splitlines()]
@@ -8907,11 +8921,206 @@ class TestEnvironmentServerRouting:
         assert "reward" not in nested
         assert nested["verification"] == {"reward": 1.0}
 
-    def test_episode_result_may_not_use_collector_keys(self) -> None:
-        reply = self._native_identity("a") | {"result": {"reward": 1.0, "ng_trajectory": {}}}
+    @pytest.mark.parametrize("key", ["_ng_task_index", "_ng_failure_class", "ng_model_call_capture", "ng_perf"])
+    def test_episode_result_may_not_use_collector_keys(self, key: str) -> None:
+        reply = self._native_identity("a") | {"result": {"reward": 1.0, key: {}}}
 
-        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
+        with pytest.raises(ValueError, match="reserved for rollout collection"):
             nemo_gym.rollout_collection._episode_record(reply)
+
+    @pytest.mark.parametrize("with_evidence", [False, True])
+    def test_typed_episode_failure_preserves_cleanup_diagnostics(self, with_evidence: bool) -> None:
+        from nemo_gym.single_agent_turn_types import SingleAgentTurnResponse
+
+        failure = {"failure_reason": "activation failed", "terminal": False, "cleanup_error": "runner still active"}
+        if with_evidence:
+            failure.update(
+                ng_agent_observations={"source": "hermes", "records": []},
+                ng_trajectory={"task_id": "a", "rollout_id": "0-a"},
+            )
+        wire = SingleAgentTurnResponse.model_validate(self._native_identity("a") | {"failure": failure}).model_dump(
+            mode="json"
+        )
+
+        record = nemo_gym.rollout_collection._episode_record(wire)
+
+        assert record["_ng_failure_message"] == "activation failed"
+        assert record["_ng_failure_cleanup_error"] == "runner still active"
+        for key in ("ng_agent_observations", "ng_trajectory"):
+            if with_evidence:
+                assert record[key] == wire["failure"][key]
+            else:
+                assert key not in record
+
+    @pytest.mark.parametrize("case", ["success-null-trajectory", "success-with-evidence", "failure-with-evidence"])
+    async def test_typed_episode_evidence_survives_collection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+    ) -> None:
+        """Typed wire responses preserve success and cleanup evidence through collection and persistence."""
+        failed = case == "failure-with-evidence"
+        from nemo_gym.base_responses_api_model import CaptureStore
+        from nemo_gym.single_agent_turn_types import SingleAgentTurnResponse
+
+        task_id = {"taskset": "swe_pro", "task_id": "instance_qutebrowser__qutebrowser-f91ace"}
+        materialized = {
+            "task_id": task_id,
+            "task_input": {"responses_create_params": {"input": "fix the issue"}, "task_data": {}},
+            TASK_INDEX_KEY_NAME: 1,
+        }
+        input_path, output_path = tmp_path / "input.jsonl", tmp_path / "rollouts.jsonl"
+        input_path.write_bytes(orjson.dumps(materialized) + b"\n")
+        response = {
+            "id": "hermes-final",
+            "created_at": 1.0,
+            "model": "policy_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        reference = {"response_id": "resp-policy", "model_ref": {"type": "responses_api_models", "name": "policy"}}
+        evidence = {
+            "ng_agent_observations": {
+                "source": "hermes",
+                "records": [{"kind": "agent_invocation", "invocation_id": "hermes-root", "model_calls": [reference]}],
+                "gaps": [],
+            },
+            "ng_trajectory": {
+                "task_id": str(task_id),
+                "rollout_id": "1-0",
+                "invocations": [
+                    {
+                        "invocation_id": "hermes-root",
+                        "status": "completed",
+                        "model_calls": [reference],
+                        "conversation": [
+                            {"type": "function_call_output", "call_id": "tool-1", "output": "patch saved"}
+                        ],
+                    }
+                ],
+                "turns": [
+                    {
+                        "invocation_id": "hermes-root",
+                        "task_id": str(task_id),
+                        "rollout_id": "1-0",
+                        "turn_no": 1,
+                        "timestamp": 1.0,
+                        "step_count": 0,
+                        "question": "fix the issue",
+                        "answer": "patch saved",
+                    }
+                ],
+                "tool_calls": [{"invocation_id": "hermes-root", "tool_call_id": "tool-1", "output": "patch saved"}],
+            },
+        }
+        if case == "success-null-trajectory":
+            evidence = {}
+        payload = {"episode_id": {"rollout_id": "1-0", "attempt": 0}, "task_id": task_id}
+        if failed:
+            payload["failure"] = {
+                "failure_reason": "verification unavailable",
+                "cleanup_error": "RuntimeError: runner still active",
+                "terminal": False,
+                "stage": "verification",
+                "partial_response": response,
+                **evidence,
+            }
+        else:
+            payload["result"] = {
+                "responses_create_params": materialized["task_input"]["responses_create_params"],
+                "response": response,
+                "reward": 1.0,
+                "resolved": True,
+                "evaluation_completed": True,
+                "test_results": {"unit-test": "PASSED"},
+                "model_patch": "patch produced by Hermes",
+                **evidence,
+            }
+        # Serialize the production wire type, including its optional ng_trajectory field.
+        wire = SingleAgentTurnResponse.model_validate(payload).model_dump(mode="json")
+        if case == "success-null-trajectory":
+            assert wire["result"]["ng_trajectory"] is None
+        capture_dir = tmp_path / "captures"
+        store = CaptureStore(capture_dir)
+
+        async def respond(**kwargs):
+            # Capture occurs after the collector clears stale records and dispatches the episode.
+            for call_id, status, model_response in (
+                ("failed-attempt", 500, {"error": {"message": "unavailable"}}),
+                ("successful-attempt", 200, {"id": "resp-policy", "output": []}),
+            ):
+                store.record(
+                    "1-0",
+                    {
+                        "model_call_id": call_id,
+                        "model_ref": reference["model_ref"],
+                        "client_session_id": "hermes-root",
+                        "dialect": "responses",
+                        "status_code": status,
+                        "request": {"input": "fix the issue"},
+                        "response": model_response,
+                    },
+                )
+            return FakeResponse(200, wire)
+
+        post = AsyncMock(side_effect=respond)
+        client = install_fake_server_client(monkeypatch, post)
+        client.global_config_dict = _environment_server_config()
+        client.global_config_dict.update(observability_enabled=True, model_call_capture_dir=str(capture_dir))
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: client.global_config_dict)
+
+        expected = pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts") if failed else nullcontext()
+        with expected:
+            await RolloutCollectionHelper().run_from_config(
+                RolloutCollectionConfig(
+                    input_jsonl_fpath=str(input_path),
+                    output_jsonl_fpath=str(output_path),
+                    environment_routing_mode="taskset",
+                    environment_server_routes={"swe_pro": "environment"},
+                    num_repeats=1,
+                    disable_aggregation=True,
+                    disable_health_check=True,
+                )
+            )
+
+        artifact = _failures_path_for(output_path) if failed else output_path
+        [record] = [orjson.loads(line) for line in artifact.read_bytes().splitlines()]
+        assert record[TASK_INDEX_KEY_NAME] == 1
+        assert record[nemo_gym.rollout_collection.NG_TASK_ID_KEY] == task_id
+        trajectory = record[NG_TRAJECTORY_KEY]
+        assert trajectory["rollout_id"] == "1-0"
+        if case != "success-null-trajectory":
+            assert trajectory["invocations"][0]["conversation"][0]["output"] == "patch saved"
+            assert trajectory["turns"][0]["answer"] == "patch saved"
+            assert trajectory["tool_calls"][0]["output"] == "patch saved"
+        assert {call["model_call_id"] for call in trajectory["model_calls"]} == {
+            "failed-attempt",
+            "successful-attempt",
+        }
+        if case != "success-null-trajectory":
+            assert {ref["model_call_id"] for ref in trajectory["invocations"][0]["model_calls"]} == {
+                "failed-attempt",
+                "successful-attempt",
+            }
+            assert len(trajectory["invocations"][0]["model_calls"]) == 2
+        failed_call = next(call for call in trajectory["model_calls"] if call["model_call_id"] == "failed-attempt")
+        assert failed_call["response_metadata"]["status_code"] == 500
+        assert failed_call["request"]["input"] == "fix the issue"
+        assert failed_call["response"]["error"]["message"] == "unavailable"
+        if failed:
+            assert record[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+            assert record["_ng_failure_message"] == "verification unavailable"
+            assert record["_ng_failure_stage"] == "verification"
+            assert record["_ng_failure_cleanup_error"] == "RuntimeError: runner still active"
+            assert record["_ng_failure_partial_response"]["id"] == "hermes-final"
+            assert "reward" not in record
+            assert not output_path.read_bytes()
+        else:
+            assert (record["reward"], record["resolved"], record["evaluation_completed"]) == (1.0, True, True)
+            assert record["test_results"] == {"unit-test": "PASSED"}
+            assert record["model_patch"] == "patch produced by Hermes"
+            assert not _failures_path_for(output_path).read_bytes()
 
     def test_episode_detection_needs_object_identities_and_an_object_failure(self) -> None:
         """An agent reply echoing identity fields as strings is not an episode reply; a bad failure is an error."""

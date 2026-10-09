@@ -332,8 +332,8 @@ def _is_episode_response(result: Any) -> bool:
 
 
 def _is_collector_key(key: str) -> bool:
-    """Keys rollout collection writes itself; an Environment Server result must not use them."""
-    return key.startswith("_ng_") or key in (NG_TRAJECTORY_KEY, "ng_model_call_capture", NG_PERF_KEY)
+    """Collector-owned fields, excluding producer trajectories that the collector validates and merges."""
+    return key.startswith("_ng_") or key in ("ng_model_call_capture", NG_PERF_KEY)
 
 
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -365,6 +365,11 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             record["_ng_failure_stage"] = failure["stage"]
         if failure.get("partial_response") is not None:
             record["_ng_failure_partial_response"] = failure["partial_response"]
+        if failure.get("cleanup_error") is not None:
+            record["_ng_failure_cleanup_error"] = failure["cleanup_error"]
+        for key in ("ng_agent_observations", NG_TRAJECTORY_KEY):
+            if failure.get(key) is not None:
+                record[key] = failure[key]
         return record
     result = response.get("result")
     if not isinstance(result, Mapping):
@@ -2822,7 +2827,7 @@ class RolloutCollectionHelper(BaseModel):
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off). Never alters the harness output/reward already in `result`.
                 has_agent_evidence = "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result
-                if capture_dirs and (not no_result or has_agent_evidence):
+                if capture_dirs and not result.get(NG_DISPATCH_DRAINED_KEY) and (not no_result or has_agent_evidence):
                     merge_model_call_capture_into_record(
                         result,
                         capture_dirs,
