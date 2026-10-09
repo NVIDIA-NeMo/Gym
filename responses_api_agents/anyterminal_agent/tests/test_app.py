@@ -181,6 +181,14 @@ class TestSetupScriptsExist:
         assert "for attempt in {1..12}" in contents
         assert 'if [ "$hermes_health_ok" -ne 1 ]' in contents
 
+    def test_portable_runtime_repairs_interrupted_gym_install(self) -> None:
+        script = PARENT_DIR / "responses_api_agents" / "anyterminal_agent" / "setup_scripts" / "_portable_python.sh"
+        contents = script.read_text()
+
+        assert 'distribution("nemo-gym")' in contents
+        assert "installed.files is None" in contents
+        assert "pip install --ignore-installed --no-deps" in contents
+
 
 def test_named_sandbox_provider_reference_is_accepted() -> None:
     assert _config(sandbox_provider="sandbox").sandbox_provider == "sandbox"
