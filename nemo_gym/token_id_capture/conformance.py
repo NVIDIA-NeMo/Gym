@@ -284,9 +284,9 @@ async def _require_fenced(name: str, call: Awaitable[object], what: str) -> None
         return
     except Exception as error:  # noqa: BLE001 - any other error is reported as a capture failure.
         raise ConformanceError(
-            f"{name}: {what} after retirement raised {type(error).__name__}, not TokenCaptureRetiredError"
+            name, f"{what} after retirement raised {type(error).__name__}, not TokenCaptureRetiredError"
         ) from error
-    raise ConformanceError(f"{name}: {what} after retirement was accepted")
+    raise ConformanceError(name, f"{what} after retirement was accepted")
 
 
 async def _check_unconditional_retirement(sink: TokenSink, src: TokenSource, rollout_id: str) -> None:

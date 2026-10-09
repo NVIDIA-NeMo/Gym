@@ -370,8 +370,8 @@ class TokenCaptureStore:
             # The same two phases as ``retire_now``: a durable fence first, then the records.
             self._write_fence_unlocked(rollout_id, state)
             self._fsync_root()
-            if self._remove_record_files(rollout_id):
-                self._fsync_root()
+            self._remove_record_files(rollout_id)
+            self._fsync_root()
             return True
 
     def _write_fence_unlocked(self, rollout_id: str, state: dict[str, Any]) -> None:
@@ -383,20 +383,14 @@ class TokenCaptureStore:
         state["retired"] = True
         self._write_state(rollout_id, state, sync_root=False)
 
-    def _remove_record_files(self, rollout_id: str) -> bool:
-        """Remove a rollout's records, intents, and incomplete marker; return whether any existed."""
-        removed = False
+    def _remove_record_files(self, rollout_id: str) -> None:
+        """Remove a rollout's records, intents, and incomplete marker, whichever exist."""
         for path in (
             self.path_for(rollout_id),
             self.incomplete_path_for(rollout_id),
             self.intents_path_for(rollout_id),
         ):
-            try:
-                path.unlink()
-                removed = True
-            except FileNotFoundError:
-                pass
-        return removed
+            path.unlink(missing_ok=True)
 
     async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         """Remove rollouts' records and keep a fence, whatever their state.
@@ -434,11 +428,12 @@ class TokenCaptureStore:
             if unsynced or to_clear:
                 self._fsync_root()
                 unsynced = False
-            for rollout_id in to_clear:
-                with self._locked(rollout_id):
-                    if self._remove_record_files(rollout_id):
-                        unsynced = True
-            if unsynced:
+            if to_clear:
+                # Set before removing: a removal that fails part way has already removed some files.
+                unsynced = True
+                for rollout_id in to_clear:
+                    with self._locked(rollout_id):
+                        self._remove_record_files(rollout_id)
                 self._fsync_root()
                 unsynced = False
         finally:
@@ -464,28 +459,27 @@ class TokenCaptureStore:
         return await asyncio.to_thread(self.delete_now, rollout_ids)
 
     def delete_now(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
-        """Synchronous ``delete``."""
+        """Synchronous ``delete``.
+
+        Every non-empty batch syncs the directory before returning, even when it found nothing to remove: an
+        overlapping delete may have removed the files without syncing yet, and a caller that reuses the rollout
+        ID after this returns must not see the old fence or records come back after a crash.
+        """
         removed, absent = [], []
-        changed = False
+        rollout_ids = validate_rollout_ids(rollout_ids)
+        if not rollout_ids:
+            return {"removed": removed, "absent": absent}
         try:
-            for rollout_id in validate_rollout_ids(rollout_ids):
+            for rollout_id in rollout_ids:
                 with self._locked(rollout_id):
                     (removed if self._has_records(rollout_id) else absent).append(rollout_id)
-                    if self._remove_record_files(rollout_id):
-                        changed = True
-                    try:
-                        self.state_path_for(rollout_id).unlink()
-                        changed = True
-                    except FileNotFoundError:
-                        pass
+                    self._remove_record_files(rollout_id)
+                    self.state_path_for(rollout_id).unlink(missing_ok=True)
         except BaseException:
             # A batch that fails part way still syncs what it removed, since a retry would find nothing left.
-            if changed:
-                self._sync_after_error()
+            self._sync_after_error()
             raise
-        # A repeated or empty delete changes nothing on disk, so it syncs nothing.
-        if changed:
-            self._fsync_root()
+        self._fsync_root()
         return {"removed": removed, "absent": absent}
 
     def _has_records(self, rollout_id: str) -> bool:

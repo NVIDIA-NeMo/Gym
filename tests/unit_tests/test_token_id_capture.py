@@ -476,16 +476,18 @@ def test_token_store_retire_syncs_fences_then_removals_once_per_batch(tmp_path):
     assert fsync_root.call_count == 2
 
 
-def test_token_store_delete_syncs_the_directory_only_when_it_removed_something(tmp_path):
+def test_token_store_delete_syncs_every_non_empty_batch(tmp_path):
+    """An overlapping delete may have removed the files without syncing yet, so a delete that finds nothing still syncs."""
     store = TokenCaptureStore(tmp_path)
     _store_entry(store, "r1")
 
     with patch.object(store, "_fsync_root", wraps=store._fsync_root) as fsync_root:
         assert store.delete_now(["r1"]) == {"removed": ["r1"], "absent": []}
-        assert fsync_root.call_count == 1
-        # A retried batch, or IDs that never captured anything, change nothing on disk.
         assert store.delete_now(["r1", "never-captured"]) == {"removed": [], "absent": ["r1", "never-captured"]}
-        assert fsync_root.call_count == 1
+        assert fsync_root.call_count == 2
+        # An empty batch has nothing to make durable.
+        store.delete_now([])
+        assert fsync_root.call_count == 2
 
 
 def _fail_unlinking_records_of(store: TokenCaptureStore, rollout_id: str):
@@ -629,6 +631,33 @@ def test_a_late_build_failure_after_retire_is_not_counted_as_a_capture_failure(t
     assert sink_module._CAPTURE_FAILURES[0] == failures_before
     assert not any("failed to build" in record.getMessage() for record in caplog.records)
     assert all(record.exc_info is None for record in caplog.records)
+
+
+@pytest.mark.parametrize("method", ["retire_now", "delete_now"])
+def test_token_store_syncs_files_removed_before_a_later_removal_failed(tmp_path, method):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r1")
+    asyncio.run(store.mark_incomplete("r1", "lost-call"))
+    target = store.incomplete_path_for("r1")
+    real_unlink = type(target).unlink
+
+    def unlink(path, missing_ok=False):
+        # The records file goes first; the incomplete marker after it fails.
+        if path == target:
+            raise OSError(errno.EIO, "injected I/O error", str(path))
+        return real_unlink(path, missing_ok=missing_ok)
+
+    syncs = []
+    real_fsync = store._fsync_root
+    with (
+        patch.object(type(target), "unlink", unlink),
+        patch.object(store, "_fsync_root", lambda: (syncs.append(store.path_for("r1").exists()), real_fsync())),
+    ):
+        with pytest.raises(OSError, match="injected I/O error"):
+            getattr(store, method)(["r1"])
+
+    # The failed call itself synced after the records file was already gone.
+    assert False in syncs
 
 
 def test_token_store_delete_removes_the_fence_so_the_rollout_id_can_be_reused(tmp_path):
