@@ -39,13 +39,90 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputTokensDetails,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
+)
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ModelCallRef,
+    ObservationGap,
+    ToolCallObservation,
+)
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
+
+
+def _usage(usages: list[dict[str, Any]]) -> Optional[NeMoGymResponseUsage]:
+    """Sum the chat-completions usage of the episode's model calls; calls that reported none are left out."""
+    total = None
+    for usage in usages:
+        total = accumulate_response_usage(
+            total,
+            NeMoGymResponseUsage(
+                input_tokens=usage["prompt_tokens"],
+                input_tokens_details=NeMoGymResponseInputTokensDetails(
+                    cached_tokens=(usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+                ),
+                output_tokens=usage["completion_tokens"],
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(
+                    reasoning_tokens=(usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+                ),
+                total_tokens=usage["total_tokens"],
+            ),
+        )
+    return total
+
+
+def _observations(output: Optional[dict[str, Any]], model_server: ModelServerRef) -> AgentObservationBundle:
+    """Validate the evidence the sandbox runner reported into an observation bundle.
+
+    Each part is validated on its own, so a part that fails becomes an ``observation_capture_failed`` gap naming
+    it and the rest is kept.
+    """
+    raw = (output or {}).get("observations")
+    if not isinstance(raw, dict):
+        gap = ObservationGap(code="observation_capture_failed", detail="the runner reported no observations")
+        return AgentObservationBundle(source="stirrup", gaps=[gap])
+    records, gaps = [], []
+
+    def failed(part: str, error: Exception) -> None:
+        detail = f"{part}: {type(error).__name__}"
+        gaps.append(
+            ObservationGap(code="observation_capture_failed", invocation_id=raw.get("invocation_id"), detail=detail)
+        )
+
+    try:
+        invocation = AgentInvocation(
+            invocation_id=raw["invocation_id"],
+            status=raw["status"],
+            # Every call goes to the configured model server, so a response ID identifies the call.
+            model_calls=[ModelCallRef(model_ref=model_server, response_id=r) for r in raw["model_response_ids"]],
+        )
+    except Exception as error:
+        failed("invocation", error)
+    else:
+        try:
+            conversation = output.get("input_items", []) + output.get("output_items", [])
+            invocation = AgentInvocation.model_validate({**invocation.model_dump(), "conversation": conversation})
+        except Exception as error:
+            failed("conversation", error)
+        records.append(invocation)
+    for index, tool in enumerate(raw.get("tool_calls") or []):
+        try:
+            records.append(ToolCallObservation.model_validate(tool))
+        except Exception as error:
+            failed(f"tool_calls[{index}]", error)
+    return AgentObservationBundle(source="stirrup", records=records, gaps=gaps)
 
 
 class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
@@ -178,7 +255,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             raise TypeError("Expected Stirrup session state")
         await state.close(self.config.session_close_timeout_seconds)
         return AgentCloseSessionResponse(
-            agent_session_id=state.request.agent_session_id, resources_cookies=state.resources_cookies
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=_observations(state.session.artifacts, self.config.model_server),
+            resources_cookies=state.resources_cookies,
         )
 
     async def _run_sandbox_episode(
@@ -230,6 +309,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             tool_choice="auto",
             tools=[],
             metadata={"elapsed_seconds": str(output["elapsed_seconds"])},
+            usage=_usage(output["usages"]),
         )
 
     async def responses(

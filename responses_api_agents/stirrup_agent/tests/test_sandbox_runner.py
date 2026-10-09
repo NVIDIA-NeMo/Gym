@@ -12,13 +12,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+import stirrup.core.agent as stirrup_agent
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 from stirrup.clients.utils import to_openai_tools
 
+from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
 from responses_api_agents.stirrup_agent.sandbox import HARNESS_FILES
-from responses_api_agents.stirrup_agent.sandbox_runner import LocalShell, remote_tool, run
+from responses_api_agents.stirrup_agent.sandbox_runner import InvocationStatus, LocalShell, Observer, remote_tool, run
 
 
 _TOOLS = json.loads((Path(__file__).resolve().parents[3] / "benchmarks" / "gdpval" / "tools.json").read_text())
@@ -38,15 +40,17 @@ class _ModelServer:
     def __init__(self, answers: list[dict]) -> None:
         self.answers = answers
         self.requests: list[dict] = []
+        self.session_ids: list[str | None] = []
         server = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
                 server.requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                server.session_ids.append(self.headers.get("x-session-id"))
                 message = server.answers[len(server.requests) - 1]
                 payload = json.dumps(
                     {
-                        "id": "chatcmpl-test",
+                        "id": f"chatcmpl-{len(server.requests)}",
                         "object": "chat.completion",
                         "created": 0,
                         "model": "policy",
@@ -124,6 +128,13 @@ class _Resources:
         self._thread.join(timeout=10)
 
 
+@pytest.fixture(autouse=True)
+def restore_run_tool(monkeypatch):
+    """The runner replaces ``run_tool`` on Stirrup's agent classes for its process; undo that after each test."""
+    for cls in (stirrup_agent.Agent, NeMoAgent):
+        monkeypatch.setattr(cls, "run_tool", cls.run_tool)
+
+
 @pytest.fixture
 def calls() -> list:
     return []
@@ -163,7 +174,7 @@ def test_a_conversation_runs_shell_commands_locally_and_task_tools_on_the_resour
         ]
     )
     try:
-        output = asyncio.run(run(_payload(model.base_url, resources.base_url, workdir), tmp_path))
+        output = asyncio.run(run(_payload(model.base_url, resources.base_url, workdir), tmp_path, Observer()))
     finally:
         model.close()
 
@@ -183,11 +194,62 @@ def test_a_conversation_runs_shell_commands_locally_and_task_tools_on_the_resour
     assert len(model.requests) == 5
 
 
+def test_the_run_reports_its_model_calls_and_tool_executions(tmp_path, resources):
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    model = _ModelServer(
+        [
+            _call("code_exec", json.dumps({"cmd": "true"})),
+            _call("code_exec", json.dumps({"cmd": "exit 7"})),
+            _call("web_search", json.dumps({"q": "gdp"})),
+            _call("finish", json.dumps({"reason": "done"})),
+        ]
+    )
+    try:
+        output = asyncio.run(run(_payload(model.base_url, resources.base_url, workdir), tmp_path, Observer()))
+    finally:
+        model.close()
+
+    observations = output["observations"]
+    assert observations["status"] == "completed"
+    assert observations["model_response_ids"] == ["chatcmpl-1", "chatcmpl-2", "chatcmpl-3", "chatcmpl-4"]
+    assert model.session_ids == ["root"] * 4
+    tools = observations["tool_calls"]
+    assert [(t["tool_name"], t["status"]) for t in tools] == [
+        ("code_exec", "completed"),
+        ("code_exec", "failed"),
+        ("web_search", "failed"),
+        ("finish", "completed"),
+    ]
+    outputs = [item["call_id"] for item in output["output_items"] if item["type"] == "function_call_output"]
+    assert [t["tool_call_id"] for t in tools] == outputs
+    assert all(t["completed_at"] >= t["started_at"] > 1e9 and t["duration_ms"] >= 0 for t in tools)
+    usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    assert output["usages"] == [{**usage, "completion_tokens_details": None, "prompt_tokens_details": None}] * 4
+
+
+def test_a_failed_run_still_reports_what_it_observed(tmp_path, resources):
+    model = _ModelServer(
+        [_call("code_exec", json.dumps({"cmd": "true"})), _call("fetch_web_page", json.dumps({"url": "x"}))]
+    )
+    observer = Observer()
+    try:
+        with pytest.raises(Exception, match="500"):
+            asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, observer))
+    finally:
+        model.close()
+
+    report = observer.report(InvocationStatus.FAILED)["observations"]
+    assert report["status"] == "failed"
+    assert report["model_response_ids"] == ["chatcmpl-1", "chatcmpl-2"]
+    assert [t["tool_name"] for t in report["tool_calls"]] == ["code_exec"]
+
+
 def test_a_server_error_from_a_task_tool_fails_the_run(tmp_path, resources):
     model = _ModelServer([_call("fetch_web_page", json.dumps({"url": "https://example.com"}))])
     try:
         with pytest.raises(Exception, match="500"):
-            asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path))
+            asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, Observer()))
     finally:
         model.close()
 
@@ -195,7 +257,7 @@ def test_a_server_error_from_a_task_tool_fails_the_run(tmp_path, resources):
 def test_the_model_sees_the_certified_tool_definitions(tmp_path, resources):
     model = _ModelServer([_call("finish", json.dumps({"reason": "done"}))])
     try:
-        asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path))
+        asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, Observer()))
     finally:
         model.close()
 

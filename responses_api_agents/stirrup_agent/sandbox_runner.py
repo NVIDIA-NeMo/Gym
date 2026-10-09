@@ -18,8 +18,9 @@ import sys
 import tempfile
 import time
 import traceback
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -38,6 +39,11 @@ from stirrup.core.models import (  # noqa: E402
 from stirrup.tools.code_backends.base import CodeExecToolProvider, CommandResult  # noqa: E402
 
 
+if TYPE_CHECKING:
+    from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
+    from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
+
+
 # Web fetches can take minutes; the runner's own deadline still bounds a hung call.
 _TOOL_TIMEOUT_S = 900
 
@@ -49,6 +55,9 @@ class LocalShell(CodeExecToolProvider):
         super().__init__()
         self._workdir = workdir
         self._scratch = scratch
+        # How the last command ended, for its tool-call observation.
+        self.last_exit_code: int | None = None
+        self.last_timed_out = False
 
     async def __aenter__(self) -> Tool:
         return self.get_code_exec_tool()
@@ -82,7 +91,9 @@ class LocalShell(CodeExecToolProvider):
         # The Apptainer backend's end marker left every output ending in a newline.
         if not stdout.endswith("\n"):
             stdout += "\n"
-        if process.returncode in (124, 137, -signal.SIGKILL):
+        self.last_exit_code = process.returncode
+        self.last_timed_out = process.returncode in (124, 137, -signal.SIGKILL)
+        if self.last_timed_out:
             message = f"Command timed out after {timeout} seconds"
             return CommandResult(exit_code=1, stdout=stdout, stderr=f"{stderr}\n{message}" if stderr else message)
         return CommandResult(exit_code=process.returncode, stdout=stdout, stderr=stderr)
@@ -200,7 +211,120 @@ def _report_invalid_arguments() -> None:
     stirrup_agent.Agent.run_tool = run_tool_reporting_invalid_arguments
 
 
-async def run(payload: dict[str, Any], scratch: Path) -> dict[str, Any]:
+# The episode's one agent invocation. Gym's agents name their top-level invocation "root"; the model-call capture
+# assigns a call to the invocation whose ID the call sends as x-session-id.
+INVOCATION_ID = "root"
+
+
+# Values of ``AgentInvocation.status`` and ``ToolCallObservation.status`` in ``nemo_gym.rollout_observability``,
+# which the sandbox cannot import.
+class InvocationStatus(StrEnum):
+    COMPLETED = "completed"
+    INCOMPLETE = "incomplete"
+    FAILED = "failed"
+
+
+class ToolStatus(StrEnum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+
+
+class Observer:
+    """Record the model responses and tool executions the agent server reports as rollout evidence."""
+
+    def __init__(self) -> None:
+        self.response_ids: list[str] = []
+        self.usages: list[dict[str, Any]] = []
+        self.shell: LocalShell | None = None
+        # Keyed by the identity of the message Stirrup puts in the history for the call.
+        self._tools: dict[int, dict[str, Any]] = {}
+        self._clock_offset = time.time() - time.perf_counter()
+
+    def watch_model_calls(self, client: DynamicMaxTokensChatCompletionsClient) -> None:
+        # ``_client`` is the ``openai.AsyncOpenAI`` client Stirrup's ChatCompletionsClient sends every call with.
+        # A call that fails has no response ID; the header still assigns it to this invocation in the capture.
+        client._client = client._client.with_options(default_headers={"x-session-id": INVOCATION_ID})
+        completions = client._client.chat.completions
+        create = completions.create
+
+        async def observed_create(**kwargs: Any) -> Any:
+            response = await create(**kwargs)
+            if response.id:
+                self.response_ids.append(response.id)
+            if response.usage is not None:
+                self.usages.append(response.usage.model_dump())
+            return response
+
+        completions.create = observed_create
+
+    def watch_tool_calls(self, agent_class: type[NeMoAgent]) -> None:
+        run_tool = agent_class.run_tool
+
+        async def observed_run_tool(agent: Any, tool_call: Any, run_metadata: Any) -> Any:
+            shell = self.shell
+            shell.last_exit_code, shell.last_timed_out = None, False
+            message = await run_tool(agent, tool_call, run_metadata)
+            if shell.last_timed_out:
+                status = ToolStatus.TIMEOUT
+            elif not message.success or shell.last_exit_code not in (None, 0):
+                status = ToolStatus.FAILED
+            else:
+                status = ToolStatus.COMPLETED
+            started, completed = message.tool_start_time, message.tool_end_time
+            self._tools[id(message)] = {
+                "kind": "tool_call",
+                "invocation_id": INVOCATION_ID,
+                "tool_call_id": tool_call.tool_call_id,
+                "tool_name": tool_call.name,
+                "started_at": started + self._clock_offset,
+                "completed_at": completed + self._clock_offset,
+                "duration_ms": (completed - started) * 1000,
+                "timing_source": "harness",
+                "status": status,
+            }
+            return message
+
+        agent_class.run_tool = observed_run_tool
+
+    def tool_calls(self, history: list[list[Any]] | None, output_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The tool observations, under the call IDs the conversation uses for them."""
+        if history is not None:
+            from stirrup.core.models import ToolMessage
+
+            from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
+
+            # The same messages, in the same order, that become function_call_output items.
+            results = [
+                msg
+                for turn in history
+                for msg in turn
+                if (isinstance(msg, NeMoUserMessage) and msg.tool_call_id) or isinstance(msg, ToolMessage)
+            ]
+            outputs = [item for item in output_items if item["type"] == "function_call_output"]
+            for message, item in zip(results, outputs):
+                if id(message) in self._tools:
+                    self._tools[id(message)]["tool_call_id"] = item["call_id"]
+        return list(self._tools.values())
+
+    def report(
+        self,
+        status: InvocationStatus,
+        history: list[list[Any]] | None = None,
+        output_items: list[dict[str, Any]] = (),
+    ) -> dict:
+        return {
+            "observations": {
+                "invocation_id": INVOCATION_ID,
+                "status": status,
+                "model_response_ids": self.response_ids,
+                "tool_calls": self.tool_calls(history, list(output_items)),
+            },
+            "usages": self.usages,
+        }
+
+
+async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dict[str, Any]:
     from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
     from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
     from responses_api_agents.stirrup_agent.stirrup_utils import (
@@ -222,12 +346,17 @@ async def run(payload: dict[str, Any], scratch: Path) -> dict[str, Any]:
         missing = set(finish_names or []) - {tool.name for tool in task_tools}
         if missing:
             raise ValueError(f"Finish tools {sorted(missing)} are not among the request's tools")
+        client = DynamicMaxTokensChatCompletionsClient(api_key="gym", **payload["client"])
+        shell = LocalShell(payload["workdir"], scratch)
+        observer.watch_model_calls(client)
+        observer.watch_tool_calls(NeMoAgent)
+        observer.shell = shell
         agent = NeMoAgent(
-            client=DynamicMaxTokensChatCompletionsClient(api_key="gym", **payload["client"]),
+            client=client,
             name="stirrup_agent",
             max_turns=payload["max_turns"],
             tools=[
-                LocalShell(payload["workdir"], scratch),
+                shell,
                 TaskTools([tool for tool in task_tools if tool.name not in (finish_names or [])]),
             ],
             finish_tool=[tool for tool in task_tools if tool.name in finish_names] if finish_names else None,
@@ -238,22 +367,29 @@ async def run(payload: dict[str, Any], scratch: Path) -> dict[str, Any]:
         )
         started = time.time()
         async with agent.session(cache_on_interrupt=False) as session:
-            _, history, _ = await session.run(messages)
+            finish_params, history, _ = await session.run(messages)
+        status = InvocationStatus.COMPLETED if finish_params is not None else InvocationStatus.INCOMPLETE
         input_items, output_items = convert_stirrup_history_to_output_items(history)
         return {
             "input_items": input_items,
             "output_items": output_items,
             "elapsed_seconds": time.time() - started,
             "resources_cookies": {cookie.name: cookie.value for cookie in http.cookies.jar},
+            **observer.report(status, history, output_items),
         }
 
 
 def main(input_path: str, output_path: str) -> None:
     payload = json.loads(Path(input_path).read_text())
+    observer = Observer()
     try:
-        output = asyncio.run(run(payload, Path(input_path).parent))
+        output = asyncio.run(run(payload, Path(input_path).parent, observer))
     except BaseException as error:
-        output = {"error": repr(error), "traceback": traceback.format_exc()}
+        output = {
+            "error": repr(error),
+            "traceback": traceback.format_exc(),
+            **observer.report(InvocationStatus.FAILED),
+        }
     Path(output_path).write_text(json.dumps(output))
 
 
