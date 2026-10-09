@@ -137,20 +137,19 @@ class HarborBMB:
     def write(self):
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        converted = 0
+        gym_rows: list[str] = []
+
+        for task in tqdm(self.tasks, desc="bmb"):
+            if self.limit is not None and len(gym_rows) >= self.limit:
+                break
+
+            task.write(self.output_dir, force=self.overwrite)
+            gym_rows.append(json.dumps(task.gym_input) + "\n")
 
         with (self.output_dir / "gym.jsonl").open("w") as gym_file:
-            for task in tqdm(self.tasks, desc="bmb"):
-                if self.limit is not None and converted >= self.limit:
-                    break
+            gym_file.writelines(gym_rows)
 
-                task.write(self.output_dir, force=self.overwrite)
-
-                gym_file.write(json.dumps(task.gym_input) + "\n")
-
-                converted += 1
-
-        print(f"Adapted {converted} tasks to {self.output_dir}")
+        print(f"Adapted {len(gym_rows)} tasks to {self.output_dir}")
 
 
 def prepare(
