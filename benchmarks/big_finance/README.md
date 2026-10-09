@@ -48,8 +48,16 @@ that model's normal settings.
 `reward_mode=final_answer` is the default and matches the paper headline:
 reward is the judge's binary `final_answer_correct`. Set
 `big_finance_reward_mode=rubric_points` to reward the point-weighted rubric
-fraction instead. Every result includes both metrics, each rubric verdict, the
-judge's raw text, and any judge error. Reverification is stateless.
+fraction instead. Successful grades include both metrics, each rubric verdict,
+and the judge's raw text. Reverification is stateless.
+
+Judge call failures and replies without a readable grading JSON object use Gym's
+standard `judge_failed` path, matching upstream's omission of failed grades.
+The full rollout and failure reason are preserved in
+`<output>_failures.jsonl`, excluded from scores by default, and retryable on resume.
+The failure response is marked `mask_sample: true`; its placeholder reward is
+not a correctness verdict. A valid judge verdict of `final_answer_correct: false`
+remains an ordinary scored zero.
 
 For generation-only rollouts without a reference answer or rubric, set
 `big_finance_reward_mode=passthrough`. The verify endpoint then preserves the
@@ -70,6 +78,12 @@ frozen in `upstream_spec.json`; offline parity tests check them.
 The grader ports upstream trace caps, one structured JSON judge call, binary
 rubric decisions, and point aggregation, but routes the judge through a Gym
 model server rather than LiteLLM.
+
+Tool arguments are normalized for the judge's trace using upstream JSON formatting
+before truncation. Arguments that exceed Python's parsing limits retain their raw
+text. This rendering leaves stored rollouts and actual tool inputs/outputs unchanged.
+For a prose completion, the final answer comes only from the last model turn;
+an empty last turn does not reuse earlier analysis.
 
 The shared Gym `finance_agent` is configured here with
 `prose_only_behavior: finish`, `tool_call_execution: concurrent`, and

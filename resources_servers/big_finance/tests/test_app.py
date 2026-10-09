@@ -29,12 +29,14 @@ from big_finance_harness.tools import (
     ToolError,
     WebSearchTool,
 )
+from fastapi.testclient import TestClient
 from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, PermanentEndpointError
+from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import ServerClient
 from resources_servers.big_finance.app import (
     BigFinanceResourcesServer,
@@ -43,6 +45,7 @@ from resources_servers.big_finance.app import (
     extract_final_answer,
     format_trace,
 )
+from responses_api_agents.finance_agent.app import FinanceAgentVerifyResponse
 from responses_api_models.openai_model.app import (
     SimpleModelServer,
     SimpleModelServerConfig,
@@ -223,6 +226,16 @@ def _response(output: list[dict]) -> NeMoGymResponse:
         tool_choice="auto",
         parallel_tool_calls=True,
     )
+
+
+def _assistant_message(text: str) -> dict:
+    return {
+        "id": "message",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
 
 
 def _server(**overrides) -> BigFinanceResourcesServer:
@@ -435,6 +448,111 @@ def test_truncated_or_failed_terminal_call_does_not_become_final_answer() -> Non
     assert "tool_result [ERROR]: answer is required" in format_trace(failed)
 
 
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        {"type": "function_call_output", "call_id": "research", "output": "Revenue was $10 million."},
+        {"type": "message", "role": "user", "content": "Continue."},
+    ],
+    ids=["tool_result", "user_nudge"],
+)
+@pytest.mark.parametrize(
+    "final_texts,expected",
+    [([], None), ([""], None), (["Revenue ", "was $10 million."], "Revenue was $10 million."), ([" "], " ")],
+    ids=["no_message", "empty_message", "multiple_messages", "whitespace"],
+)
+def test_assistant_final_answer_stays_in_last_model_turn(
+    boundary: dict, final_texts: list[str], expected: str | None
+) -> None:
+    response = _response(
+        [_assistant_message("I will research the company."), boundary]
+        + [_assistant_message(text) for text in final_texts]
+    )
+    response.metadata = {"stop_reason": "assistant_message"}
+    original = response.model_dump()
+
+    assert extract_final_answer(response) == expected
+    assert response.model_dump() == original
+
+
+def test_done_tool_answer_keeps_precedence_over_assistant_text() -> None:
+    response = _response(
+        [
+            _assistant_message("Planning, not the answer."),
+            {
+                "id": "call",
+                "call_id": "final",
+                "type": "function_call",
+                "name": "final_answer",
+                "arguments": '{"answer":"$10 million"}',
+                "status": "completed",
+            },
+            {"type": "function_call_output", "call_id": "final", "output": "$10 million"},
+        ]
+    )
+    response.metadata = {"stop_reason": "done_tool"}
+
+    assert extract_final_answer(response) == "$10 million"
+
+
+@pytest.mark.parametrize(
+    "arguments,display",
+    [
+        (json.dumps({"query": "财" * 600}), '{"query": "' + "财" * 600 + '"}'),
+        ('{  \n "query" : "revenue", "year" : 2025 }', '{"query": "revenue", "year": 2025}'),
+        ("not-json", '{"_unparsed_arguments": "not-json"}'),
+        ("", "{}"),
+    ],
+    ids=["unicode_before_cap", "json_whitespace", "invalid_json", "empty_arguments"],
+)
+def test_trace_formats_arguments_without_changing_rollout(arguments: str, display: str) -> None:
+    tool_output = ' { "observation" : "原始结果" }\n'
+    response = _response(
+        [
+            {
+                "id": "call",
+                "call_id": "research",
+                "type": "function_call",
+                "name": "web_search",
+                "arguments": arguments,
+                "status": "completed",
+            },
+            {"type": "function_call_output", "call_id": "research", "output": tool_output},
+        ]
+    )
+    original = response.model_dump()
+
+    assert format_trace(response) == f"=== step 0 ===\ntool_call web_search({display})\ntool_result: {tool_output}"
+    assert response.model_dump() == original
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    ['{ "value" : ' + "9" * 5000 + " }", '{ "value" : ' + "[" * 10_000 + "0" + "]" * 10_000 + " }"],
+    ids=["oversized_integer", "deeply_nested_json"],
+)
+def test_trace_caps_raw_arguments_when_json_cannot_be_rendered(arguments: str) -> None:
+    response = _response(
+        [
+            {
+                "id": "call",
+                "call_id": "research",
+                "type": "function_call",
+                "name": "web_search",
+                "arguments": arguments,
+                "status": "completed",
+            },
+            {"type": "function_call_output", "call_id": "research", "output": "unchanged tool result"},
+        ]
+    )
+    original = response.model_dump()
+
+    assert format_trace(response) == (
+        f"=== step 0 ===\ntool_call web_search({arguments[:1500]}...)\ntool_result: unchanged tool result"
+    )
+    assert response.model_dump() == original
+
+
 @pytest.mark.asyncio
 async def test_verify_aggregates_points_and_defaults_reward_to_final_answer() -> None:
     server = _server()
@@ -549,11 +667,94 @@ async def test_rubric_points_reward_mode_uses_weighted_fraction() -> None:
     assert result.rubric_points_fraction == pytest.approx(2 / 3)
 
 
-@pytest.mark.asyncio
-async def test_judge_failure_is_exposed_not_raised() -> None:
+@pytest.mark.parametrize("failure", ["timeout", "http_500", "unparseable_text"])
+def test_judge_failure_is_masked_through_verify_route(failure: str) -> None:
     server = _server()
-    server.server_client.post = AsyncMock(side_effect=TimeoutError("judge unavailable"))
-    result = await server.verify(MagicMock(), _request(_response([])))
-    assert result.reward == 0.0
-    assert "TimeoutError" in result.judge_error
-    assert result.rubric_points_possible == 3
+    if failure == "timeout":
+        server.server_client.post = AsyncMock(side_effect=TimeoutError("judge unavailable"))
+        expected_reason = "judge unavailable"
+    elif failure == "http_500":
+        server.server_client.post = AsyncMock(return_value=_provider_error_response(500, b"judge unavailable"))
+        expected_reason = "500"
+    else:
+        raw = MagicMock(ok=True)
+        raw.read = AsyncMock(return_value=_judge_response("I cannot return a verdict."))
+        server.server_client.post = AsyncMock(return_value=raw)
+        expected_reason = "JSON object"
+    request = _request(_response([_assistant_message("Revenue was $10 million.")]))
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request.model_dump(mode="json"))
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["reward"] == 0.0
+    assert result["mask_sample"] is True
+    assert result["instance_config"]["mask_sample"] is True
+    assert result["_ng_failure_class"] == result["failure_kind"] == "judge_failed"
+    assert expected_reason in result["failure_reason"]
+    assert result["response"] == request.response.model_dump(mode="json")
+    forwarded = FinanceAgentVerifyResponse.model_validate(result).model_dump(mode="json")
+    for key in ("mask_sample", "failure_kind", "failure_reason", "_ng_failure_class", "response", "instance_config"):
+        assert forwarded[key] == result[key]
+
+
+@pytest.mark.parametrize("final_correct", [True, False])
+@pytest.mark.parametrize("judge_format", ["schema_alias", "output_text_only"])
+def test_judge_valid_verdict_is_measured_despite_unrelated_response_metadata(
+    final_correct: bool, judge_format: str
+) -> None:
+    server = _server()
+    grade = json.dumps({"final_answer_correct": final_correct, "rubric": []})
+    raw = MagicMock(ok=True)
+    raw.read = AsyncMock(
+        return_value=(
+            _judge_response(grade) if judge_format == "schema_alias" else json.dumps({"output_text": grade}).encode()
+        )
+    )
+    server.server_client.post = AsyncMock(return_value=raw)
+    request = _request(_response([_assistant_message("Revenue was $10 million.")]))
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request.model_dump(mode="json"))
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["reward"] == float(final_correct)
+    assert result["mask_sample"] is False
+    assert result["failure_reason"] is None
+    assert result.get("_ng_failure_class") is None
+    assert result["response"] == request.response.model_dump(mode="json")
+
+
+def test_judge_failure_is_excluded_from_aggregate_reward() -> None:
+    server = _server()
+    request = _request(_response([_assistant_message("Revenue was $10 million.")]))
+    raw = MagicMock(ok=True)
+    raw.read = AsyncMock(return_value=_judge_response('{"final_answer_correct":true,"rubric":[]}'))
+    server.server_client.post = AsyncMock(side_effect=[raw, TimeoutError("judge unavailable")])
+    with TestClient(server.setup_webserver()) as client:
+        good = client.post("/verify", json=request.model_dump(mode="json")).json()
+        failed = client.post("/verify", json=request.model_dump(mode="json")).json()
+    rows = [
+        {
+            **FinanceAgentVerifyResponse.model_validate(row).model_dump(),
+            "_ng_task_index": index,
+            "_ng_rollout_index": 0,
+        }
+        for index, row in enumerate((good, failed))
+    ]
+
+    mixed = compute_aggregate_metrics(rows)
+
+    assert mixed.agent_metrics["mean/reward"] == 1.0
+    assert mixed.agent_metrics["coverage/measured_rollouts"] == 1
+    assert mixed.agent_metrics["coverage/masked_rollouts"] == 1
+    assert mixed.agent_metrics["coverage/measured_tasks"] == 1
+    assert mixed.agent_metrics["coverage/fully_masked_tasks"] == 1
+
+    all_failed = compute_aggregate_metrics(rows[1:])
+
+    assert "mean/reward" not in all_failed.agent_metrics
+    assert "mean/reward" not in all_failed.key_metrics
+    assert all_failed.group_level_metrics == []
+    assert all_failed.agent_metrics["coverage/measured_rollouts"] == 0
+    assert all_failed.agent_metrics["coverage/masked_rollouts"] == 1

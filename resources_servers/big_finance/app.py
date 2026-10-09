@@ -51,6 +51,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, reraise_judge_errors
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -180,11 +181,17 @@ def extract_final_answer(response: NeMoGymResponse) -> Optional[str]:
         return None
 
     if stop_reason == "assistant_message":
+        # The response contains every turn. Only text after the last tool result
+        # (or harness-injected user message) belongs to the final model turn.
+        chunks: list[str] = []
         for item in reversed(response.output):
-            text = _message_text(item)
-            if text.strip():
-                return text
-        return None
+            if getattr(item, "type", None) == "function_call_output":
+                break
+            if getattr(item, "type", None) == "message":
+                if getattr(item, "role", None) != "assistant":
+                    break
+                chunks.append(_message_text(item))
+        return "".join(reversed(chunks)) or None
 
     tool_outputs = {
         getattr(item, "call_id", None): str(getattr(item, "output", "") or "")
@@ -233,6 +240,18 @@ def format_trace(response: NeMoGymResponse) -> str:
                 lines.append(f"assistant: {text}")
         elif item_type == "function_call":
             args = getattr(item, "arguments", "") or ""
+            try:
+                try:
+                    parsed_args = json.loads(args or "{}")
+                except json.JSONDecodeError:
+                    parsed_args = {"_unparsed_arguments": args}
+                # Match upstream's judge rendering without changing the stored
+                # rollout or the arguments actually sent to the tool.
+                args = json.dumps(parsed_args, ensure_ascii=False)
+            except (ValueError, RecursionError, TypeError):
+                # Display must remain available for oversized integers or deeply
+                # nested arguments that Python cannot parse/serialize safely.
+                pass
             if len(args) > _TOOL_ARGS_CAP:
                 args = args[:_TOOL_ARGS_CAP] + "..."
             lines.append(f"tool_call {getattr(item, 'name', '')}({args})")
@@ -385,7 +404,7 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
 
     async def _judge(self, body: BigFinanceVerifyRequest, answer: Optional[str]) -> tuple[dict[str, Any], str]:
         if self.config.judge_model_server is None:
-            raise RuntimeError("judge_model_server is not configured")
+            raise JudgeError("judge_model_server is not configured")
         params = (
             self.config.judge_responses_create_params or NeMoGymResponseCreateParamsNonStreaming(input=[])
         ).model_copy(deep=True)
@@ -401,17 +420,28 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
                 "schema": _response_schema(),
             }
         }
-        response = await asyncio.wait_for(
-            self.server_client.post(
+
+        async def request_judge() -> Any:
+            response = await self.server_client.post(
                 server_name=self.config.judge_model_server.name,
                 url_path="/v1/responses",
                 json=params,
-            ),
-            timeout=self.config.judge_call_timeout_s,
+            )
+            await raise_for_status(response)
+            return await get_response_json(response)
+
+        response = await reraise_judge_errors(
+            asyncio.wait_for(request_judge(), timeout=self.config.judge_call_timeout_s)
         )
-        await raise_for_status(response)
-        text = _responses_output_text(await get_response_json(response))
-        return _parse_json_object(text), text
+        # Keep the lightweight extraction: some model servers serialize the
+        # response schema alias as schema_, so validating the full reply fails.
+        text = _responses_output_text(response)
+        try:
+            grade = _parse_json_object(text)
+        except (ValueError, RecursionError) as exc:
+            # Upstream does not emit a grade when the judge's JSON is unreadable.
+            raise JudgeError(f"Invalid BigFinance judge response: {exc}") from exc
+        return grade, text
 
     async def verify(self, request: Request, body: BigFinanceVerifyRequest) -> BigFinanceVerifyResponse:
         answer = extract_final_answer(body.response)
@@ -455,9 +485,13 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
                 rubric_lines_possible=len(verdicts),
                 judge_text=judge_text,
             )
-        except Exception as exc:  # noqa: BLE001 - preserve rollout and expose judge failure
+        except JudgeError:
+            # The shared verify endpoint routes this to the failures sidecar and
+            # excludes it from valid scores while preserving the whole rollout.
+            raise
+        except Exception as exc:  # noqa: BLE001 - preserve rollout and expose scoring failure
             error = f"{type(exc).__name__}: {exc}"
-            logger.exception("BigFinance judge failed")
+            logger.exception("BigFinance scoring failed")
             return BigFinanceVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
