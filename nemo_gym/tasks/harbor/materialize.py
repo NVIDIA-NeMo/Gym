@@ -97,6 +97,9 @@ def run_config(
                 RESOURCES_SERVER_IMPL: {
                     "entrypoint": "app.py",
                     "sandbox_provider": sandbox_provider,
+                    # Verifier logs sit beside the run's rollouts, as an absolute path: the server
+                    # process runs from its own folder, so a relative default would land there.
+                    "artifacts_dir": str(Path(rows_path).resolve().parent / "verifier"),
                     "tasksets": {taskset: taskset_mapping(tasks, folder)},
                     "datasets": [
                         {

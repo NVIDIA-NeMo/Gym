@@ -325,6 +325,8 @@ class TestMaterialize:
         assert resources["tasksets"]["ds"]["folder"] == str(folder.resolve())
         assert resources["tasksets"]["ds"]["tasks"] == {"a": tasks[0].digest, "b": tasks[1].digest}
         assert resources["datasets"][0]["jsonl_fpath"] == str(rows_path.resolve())
+        # Verifier logs land beside the rollouts, not under the server's own folder.
+        assert resources["artifacts_dir"] == str((tmp_path / "out" / "verifier").resolve())
         agent = config["harbor_ds_agent"]
         assert agent["_inherit_from"] == "hermes_agent"
         assert (
