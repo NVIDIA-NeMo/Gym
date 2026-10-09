@@ -557,9 +557,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             compaction_settings["reserveTokens"] = self.config.compaction_reserve_tokens
         if self.config.compaction_keep_recent_tokens is not None:
             compaction_settings["keepRecentTokens"] = self.config.compaction_keep_recent_tokens
-        (home / ".pi" / "agent" / "settings.json").write_text(
-            json.dumps({"compaction": compaction_settings})
-        )
+        (home / ".pi" / "agent" / "settings.json").write_text(json.dumps({"compaction": compaction_settings}))
         env = self._env(home)
 
         cmd = [*self.config.command_parts, "--print", "--mode", "json", "--no-session"]
