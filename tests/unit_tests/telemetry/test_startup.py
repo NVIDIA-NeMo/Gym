@@ -215,22 +215,26 @@ def test_server_spans_join_the_supervisors_trace_through_the_environment(otel, m
     assert server_root.parent.span_id == per_server.context.span_id
 
 
-def test_supervisor_records_its_stages_and_each_servers_spawn_to_ready(otel):
+def test_supervisor_spans_its_stages_and_each_servers_spawn_to_ready(otel):
     supervisor = SupervisorStartup()
     supervisor.begin_trace()
     supervisor.mark("load_config")
     env = supervisor.server_env("srv", "responses_api_models")
     supervisor.mark("spawn_servers")
     supervisor.server_ready("srv")
-    supervisor.server_ready("srv")  # a later poll must not record a second sample
+    ready_ns = supervisor._servers["srv"].ready_ns
+    supervisor.server_ready("srv")  # a later poll must not move the ready time
     supervisor.finish()
 
     assert int(env[STARTUP_SPAWN_NS_ENV]) > 0
-    names = {span.name for span in otel.spans()}
+    spans = otel.spans()
+    names = {span.name for span in spans}
     assert {"gym.startup", "gym.startup.server", "gym.startup.load_config", "gym.startup.spawn_servers"} <= names
-    (point,) = otel.metrics()[gym_metrics.SERVER_STARTUP_INSTRUMENT]
-    assert point.count == 1
-    assert point.attributes == {"nemo.gym.server.name": "srv", "nemo.gym.server.type": "responses_api_models"}
+    (per_server,) = [span for span in spans if span.name == "gym.startup.server"]
+    assert per_server.end_time == ready_ns
+    assert per_server.attributes["nemo.gym.server.type"] == "responses_api_models"
+    # The supervisor records no histogram: its readiness is only as precise as its health poll.
+    assert otel.metrics() == {}
 
 
 def test_supervisor_with_the_group_off_opens_no_spans_and_sends_no_traceparent(otel, monkeypatch):
@@ -243,13 +247,15 @@ def test_supervisor_with_the_group_off_opens_no_spans_and_sends_no_traceparent(o
 
     assert STARTUP_TRACEPARENT_ENV not in env
     assert otel.spans() == []
-    # The duration histogram is still recorded: it does not depend on the span group.
-    assert gym_metrics.SERVER_STARTUP_INSTRUMENT in otel.metrics()
 
 
 def test_an_unknown_server_becoming_ready_is_ignored(otel):
-    SupervisorStartup().server_ready("never-spawned")
-    assert otel.metrics() == {}
+    supervisor = SupervisorStartup()
+    supervisor.begin_trace()
+    supervisor.server_ready("never-spawned")
+    supervisor.finish()
+
+    assert [span.name for span in otel.spans()] == ["gym.startup"]
 
 
 def test_worker_timeline_starts_at_the_hand_off_to_uvicorn_not_at_spawn(otel, monkeypatch):
