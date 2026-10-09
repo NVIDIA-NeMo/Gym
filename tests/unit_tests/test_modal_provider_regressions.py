@@ -142,8 +142,8 @@ async def test_exec_is_submitted_once_on_ambiguous_transport_error(fake_modal):
     provider = _provider(probe={"command": None}, operations={"retries": 3})
     handle = await provider.create(_spec())
     created[0].exec_script = {"mutate": modal.exception.ServiceError("connection lost")}
-    with pytest.raises(modal.exception.ServiceError):
-        await provider.exec(handle, "mutate")
+    result = await provider.exec(handle, "mutate")
+    assert result.error_type == "sandbox" and result.return_code == 125
     assert len(created[0].exec_calls) == 1
 
 
@@ -602,8 +602,274 @@ async def test_output_chunks_survive_a_stream_failure(fake_modal, error):
             raise getattr(modal.exception, error)("stream ended")
 
     process = FakeProcess(wait_delay=30)
+    wait_cancelled, reader_cancelled = asyncio.Event(), asyncio.Event()
+
+    async def wait():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            wait_cancelled.set()
+
+    async def read():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            reader_cancelled.set()
+
+    process.wait = _Aio(wait)
+    process.stderr.read = _Aio(read)
     process.stdout = PartialStream()
     created[0].exec_script = {"work": process}
-    result = await provider.exec(handle, "work")
+    async with asyncio.timeout(0.5):
+        result = await provider.exec(handle, "work")
+    assert wait_cancelled.is_set() and reader_cancelled.is_set()
     assert result.stdout == "caf\u00e9" and result.return_code == 125
     assert result.error_type == ("timeout" if error == "ExecTimeoutError" else "sandbox")
+
+
+@pytest.mark.parametrize("operation", ["exec", "file"])
+async def test_borrowed_cancellation_preserves_owner_for_diagnostics(fake_modal, operation):
+    _, created = fake_modal()
+    provider = _provider(probe={"command": None})
+    owner = await provider.create(_spec())
+    borrowed = await provider.connect(await provider.serialize_handle(owner))
+    created[0].files["/logs"] = b"diagnostics"
+
+    async def hang(*args):
+        await asyncio.Event().wait()
+
+    created[0].filesystem.write_bytes = _Aio(hang)
+    created[0].exec_script = {"slow": FakeProcess(wait_delay=30)}
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.02):
+            if operation == "exec":
+                await provider.exec(borrowed, "slow")
+            else:
+                await provider.write_file(borrowed, "/out", b"partial")
+    assert created[0].terminated == 0 and created[0].detached == 0
+    assert await provider.read_file(owner, "/logs") == b"diagnostics"
+    await provider.close(owner)
+    assert created[0].terminated == 1
+
+
+@pytest.mark.parametrize(
+    ("code", "elapsed", "timeout", "expected"),
+    [
+        (137, 2.1, 2, "timeout"),
+        (143, 2, 2, "timeout"),
+        (137, 1.9, 2, None),
+        (137, 1.5, 1.2, None),
+        (137, 2, 1.2, "timeout"),
+        (137, 5, 0, None),
+        (137, 5, None, None),
+        (1, 5, 2, None),
+        (0, 5, 2, None),
+        (255, 5, 2, None),
+    ],
+)
+async def test_worker_timeout_signal_uses_rounded_deadline(fake_modal, monkeypatch, code, elapsed, timeout, expected):
+    from nemo_gym.sandbox.providers.modal import provider as module
+
+    _, created = fake_modal()
+    provider = _provider(probe={"command": None}, exec={"default_timeout_s": None})
+    handle = await provider.create(_spec())
+    created[0].exec_script = {"work": FakeProcess(stdout="partial", returncode=code)}
+    clock = iter([10, 10 + elapsed])
+    monkeypatch.setattr(module, "monotonic", lambda: next(clock), raising=False)
+    result = await provider.exec(handle, "work", timeout_s=timeout)
+    assert result.error_type == expected and result.stdout == "partial"
+    assert result.return_code == (125 if expected else code)
+
+
+async def test_slow_output_drain_does_not_turn_early_signal_into_timeout(fake_modal, monkeypatch):
+    from nemo_gym.sandbox.providers.modal import provider as module
+
+    _, created = fake_modal()
+    provider = _provider(probe={"command": None})
+    handle = await provider.create(_spec())
+    now = [0]
+    exited = asyncio.Event()
+    process = FakeProcess(returncode=137)
+
+    async def wait():
+        now[0] = 1
+        exited.set()
+        return 137
+
+    async def read():
+        await exited.wait()
+        now[0] = 10
+        return "partial"
+
+    process.wait = _Aio(wait)
+    process.stdout.read = _Aio(read)
+    created[0].exec_script = {"work": process}
+    monkeypatch.setattr(module, "monotonic", lambda: now[0])
+    result = await provider.exec(handle, "work", timeout_s=2)
+    assert result.return_code == 137 and result.error_type is None
+
+
+@pytest.mark.parametrize("error", ["ConflictError", "NotFoundError"])
+@pytest.mark.parametrize("state", ["wait_done", "poll_exited", "running"])
+async def test_stdin_close_race_respects_process_exit(fake_modal, error, state):
+    modal, created = fake_modal()
+    provider = _provider(probe={"command": None})
+    handle = await provider.create(_spec())
+    process = FakeProcess(stdout="ok", returncode=7, wait_delay=0 if state == "wait_done" else 0.01)
+    process.poll = _Aio(lambda: 7 if state == "poll_exited" else None)
+
+    async def drain():
+        raise getattr(modal.exception, error)("already closed")
+
+    process.stdin.drain = _Aio(drain)
+    created[0].exec_script = {"work": process}
+    async with asyncio.timeout(0.5):
+        result = await provider.exec(handle, "work")
+    assert result.stdout == "ok"
+    assert result.return_code == (125 if state == "running" else 7)
+    assert result.error_type == ("sandbox" if state == "running" else None)
+
+
+@pytest.mark.parametrize("error", ["ConnectionError", "ServiceError", "InternalError", "builtin"])
+async def test_transport_failure_keeps_output_and_never_replays(fake_modal, error):
+    modal, created = fake_modal()
+    provider = _provider(probe={"command": None}, operations={"retries": 3})
+    handle = await provider.create(_spec())
+    exc = ConnectionError if error == "builtin" else getattr(modal.exception, error)
+    process = FakeProcess(stdout="partial", raise_on_wait=exc("lost connection"), wait_delay=0.001)
+    created[0].exec_script = {"mutate": process}
+    result = await provider.exec(handle, "mutate")
+    assert result.stdout == "partial" and "lost connection" in result.stderr
+    assert result.return_code == 125 and result.error_type == "sandbox"
+    assert len(created[0].exec_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "section,field",
+    [
+        ("probe", "timeout_s"),
+        ("probe", "stable_delay_s"),
+        ("operations", "retry_delay_s"),
+        ("operations", "retry_max_delay_s"),
+        ("operations", "tunnel_timeout_s"),
+        ("operations", "close_timeout_s"),
+    ],
+)
+def test_required_numeric_options_reject_none(section, field):
+    with pytest.raises(ValueError, match=field):
+        _provider(**{section: {field: None}})
+
+
+@pytest.mark.parametrize(
+    "section,field",
+    [
+        ("connection", "create_app_if_missing"),
+        ("create", "block_network"),
+        ("create", "strict_resources"),
+        ("exec", "allow_user_rewrite"),
+    ],
+)
+@pytest.mark.parametrize("value", ["false", 1, None])
+def test_boolean_options_require_boolean(section, field, value):
+    with pytest.raises(ValueError, match=field):
+        _provider(**{section: {field: value}})
+
+
+@pytest.mark.parametrize(
+    "descriptor",
+    [
+        None,
+        [],
+        {},
+        {"sandbox_id": None},
+        {"sandbox_id": 1},
+        {"sandbox_id": " "},
+        {"sandbox_id": "sb-x", "port_mode": "bad"},
+        {"sandbox_id": "sb-x", "ports": "80"},
+        {"sandbox_id": "sb-x", "ports": [True]},
+        {"sandbox_id": "sb-x", "ports": [0]},
+        {"sandbox_id": "sb-x", "ports": [65536]},
+        {"sandbox_id": "sb-x", "ports": ["80"]},
+    ],
+)
+async def test_bad_connect_descriptor_never_reaches_sdk(fake_modal, descriptor):
+    modal, _ = fake_modal()
+
+    async def forbidden(*args):
+        pytest.fail("invalid descriptor reached from_id")
+
+    modal.Sandbox.from_id = _Aio(forbidden)
+    with pytest.raises((TypeError, ValueError), match="descriptor"):
+        await _provider().connect(descriptor)
+
+
+@pytest.mark.parametrize("entrypoint", [None, ["custom", "arg"]])
+async def test_default_keepalive_clears_image_entrypoint_only(fake_modal, entrypoint):
+    _, created = fake_modal()
+    await _provider(probe={"command": None}).create(_spec(entrypoint=entrypoint))
+    assert created[0].create_kwargs["image"].entrypoint_override == ([] if entrypoint is None else None)
+
+
+async def test_stopped_sandbox_fails_readiness_without_waiting_for_deadline(fake_modal):
+    from nemo_gym.sandbox.providers.modal import ModalCreateVerificationError
+
+    modal, created = fake_modal()
+    original = modal.Sandbox.create
+
+    async def create(*args, **kwargs):
+        sandbox = await original.aio(*args, **kwargs)
+        sandbox.poll_result = 1
+        sandbox.exec_script = {"printf ok": modal.exception.NotFoundError("gone")}
+        return sandbox
+
+    modal.Sandbox.create = _Aio(create)
+    with pytest.raises(ModalCreateVerificationError, match="stopped.*gone"):
+        async with asyncio.timeout(0.5):
+            await _provider(probe={"deadline_s": 30}).create(_spec())
+    assert len(created[0].exec_calls) == 1 and created[0].terminated == 1
+
+
+@pytest.mark.parametrize("scenario", ["transient", "unknown", "consecutive", "no_deadline"])
+async def test_readiness_retries_and_consecutive_success_contract(fake_modal, scenario):
+    from nemo_gym.sandbox.providers.modal import ModalCreateVerificationError
+
+    modal, created = fake_modal()
+    original = modal.Sandbox.create
+    outcomes = (
+        [modal.exception.ServiceError("transient"), 0]
+        if scenario in ("transient", "unknown")
+        else [0, 1, 0, 0]
+        if scenario == "consecutive"
+        else [1]
+    )
+    calls = []
+
+    async def create(*args, **kwargs):
+        sandbox = await original.aio(*args, **kwargs)
+        if scenario == "unknown":
+            sandbox.poll_exc = modal.exception.ServiceError("status unavailable")
+
+        async def probe(*args, **kwargs):
+            calls.append(1)
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return FakeProcess(stdout="ok", returncode=outcome)
+
+        sandbox.exec = _Aio(probe)
+        return sandbox
+
+    modal.Sandbox.create = _Aio(create)
+    provider = _provider(
+        probe={
+            "stable_count": 2 if scenario == "consecutive" else 1,
+            "deadline_s": None if scenario == "no_deadline" else 2,
+        }
+    )
+    async with asyncio.timeout(0.5):
+        if scenario == "no_deadline":
+            with pytest.raises(ModalCreateVerificationError, match="return_code=1"):
+                await provider.create(_spec())
+        else:
+            await provider.create(_spec())
+    assert len(calls) == {"transient": 2, "unknown": 2, "consecutive": 4, "no_deadline": 1}[scenario]

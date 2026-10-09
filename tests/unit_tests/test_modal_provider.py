@@ -108,6 +108,7 @@ class FakeProcess:
         self._raise = raise_on_wait
         self._delay = wait_delay
         self.wait = _Aio(self._wait)
+        self.poll = _Aio(lambda: self._rc if not self._delay else None)
 
     async def _wait(self):
         if self._delay:
@@ -268,7 +269,14 @@ def _build_fake_modal(*, exec_script=None, create_exc=None):
         @staticmethod
         def from_registry(tag, **kwargs):
             Image.calls.append((tag, kwargs))
-            return types.SimpleNamespace(tag=tag, kwargs=kwargs)
+            image = types.SimpleNamespace(tag=tag, kwargs=kwargs, entrypoint_override=None)
+
+            def entrypoint(args):
+                image.entrypoint_override = args
+                return image
+
+            image.entrypoint = entrypoint
+            return image
 
     class Secret:
         @staticmethod

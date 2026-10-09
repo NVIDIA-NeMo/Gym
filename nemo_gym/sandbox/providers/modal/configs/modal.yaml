@@ -87,7 +87,7 @@ sandbox:
 
     files:
       # SDK streaming copies create parents and avoid buffering local files.
-      # A cancelled/timed-out transfer discards its sandbox to stop partial writes.
+      # Interrupted transfers discard owned sandboxes; borrowed handles retain owner diagnostics.
       transfer_timeout_s: 600.0
 
     operations:

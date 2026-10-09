@@ -87,6 +87,7 @@ def test_process_and_file_async_surface_exists():
     from modal.sandbox_fs import SandboxFilesystem
 
     assert hasattr(ContainerProcess.wait, "aio")
+    assert hasattr(ContainerProcess.poll, "aio")
     assert hasattr(StreamReader.read, "aio")
     assert callable(StreamReader.__aiter__)
     assert hasattr(StreamWriter.drain, "aio")
@@ -102,6 +103,9 @@ def test_exception_classes_the_provider_classifies_exist():
         "NotFoundError",
         "ConflictError",
         "ClientClosed",
+        "ConnectionError",
+        "ServiceError",
+        "InternalError",
         "AuthError",
         "InvalidError",
         "PermissionDeniedError",
@@ -117,6 +121,7 @@ def test_exception_classes_the_provider_classifies_exist():
 
 
 def test_helpers_the_provider_calls_exist():
+    assert callable(modal.Image.entrypoint)
     assert callable(modal.Image.from_registry)
     assert "secret" in _params(modal.Image.from_registry)
     assert {"environment_name"} <= _params(modal.Secret.from_name)
