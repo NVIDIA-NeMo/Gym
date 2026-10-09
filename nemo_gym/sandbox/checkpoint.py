@@ -44,6 +44,7 @@ from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
+from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import (
     ConnectableProvider,
@@ -201,6 +202,17 @@ class SandboxSessionCheckpointer:
                             await entry.sandbox.resume()
                     entry.paused_by_checkpoint = False
         return entry.sandbox
+
+    async def access(self, session_id: str, *, provider_config_ref: str, workdir: str) -> SandboxAccess:
+        """Access to the session's current sandbox for a borrower, such as an agent that runs tools in it.
+
+        A restore may have rebuilt the sandbox from its snapshot under a new id, so a borrower that kept an
+        older access must ask again after a restore. The sandbox is resumed first: a borrower is about to use it.
+        """
+        sandbox = await self.ensure_running(session_id)
+        descriptor = await sandbox.serialize()
+        connection = DirectSandboxConnection(provider_config_ref=provider_config_ref, descriptor=descriptor)
+        return SandboxAccess(connection=connection, workdir=workdir)
 
     async def resume_paused(self, session_ids: Iterable[str]) -> None:
         """Resume the sandboxes a checkpoint paused, before their next use; best effort and bounded.

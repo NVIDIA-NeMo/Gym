@@ -23,8 +23,11 @@ from nemo_gym.base_resources_server import (  # noqa: E402
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.sandbox.access import SandboxAccess  # noqa: E402
 from nemo_gym.sandbox.checkpoint import SandboxSessionCheckpointer  # noqa: E402
 from nemo_gym.sandbox.providers.base import SandboxSpec  # noqa: E402
 from nemo_gym.server_utils import SESSION_ID_KEY  # noqa: E402
@@ -32,6 +35,8 @@ from nemo_gym.server_utils import SESSION_ID_KEY  # noqa: E402
 
 class SandboxNotesConfig(BaseResourcesServerConfig):
     sandbox_backend_url: str
+    # The top-level sandbox block a borrower resolves the handed-out access through.
+    sandbox_provider_ref: str = "sandbox"
 
 
 class AppendNoteRequest(BaseModel):
@@ -59,11 +64,26 @@ class SandboxNotesResourcesServer(SimpleResourcesServer):
         app.post("/append_note")(self.append_note)
         return app
 
-    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+    async def seed_session(
+        self, request: Request, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._sandboxes:
             await self._sandboxes.create(session_id, SandboxSpec(image="notes:1", workdir="/work"))
+        if isinstance(body, ResourcesSeedSessionRequest):
+            # An Environment Server episode: the agent may run tools in this sandbox itself.
+            return ResourcesSeedSessionResponse(
+                resources_session_id=body.resources_session_id,
+                sandbox_access=await self.current_sandbox_access(session_id),
+            )
         return BaseSeedSessionResponse()
+
+    async def current_sandbox_access(self, session_id: str) -> SandboxAccess | None:
+        if session_id not in self._sandboxes:
+            return None
+        return await self._sandboxes.access(
+            session_id, provider_config_ref=self.config.sandbox_provider_ref, workdir="/work"
+        )
 
     async def append_note(self, request: Request, body: AppendNoteRequest) -> AppendNoteResponse:
         sandbox = await self._sandboxes.ensure_running(request.session[SESSION_ID_KEY])
