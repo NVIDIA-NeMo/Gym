@@ -86,7 +86,8 @@ from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
-_NATIVE_SESSION_KEY = "nemo_gym_opencode_native_session"
+# Reject the original cookie key so stale sessions cannot fall back to local execution.
+_OBSOLETE_SESSION_KEY = "nemo_gym_opencode_native_session"
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -128,14 +129,14 @@ set --
 command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
-    [ "$(id -u)" = 0 ] || { echo "Native OpenCode requires $*: preinstall these tools or use a root image." >&2; exit 1; }
+    [ "$(id -u)" = 0 ] || { echo "OpenCode sandbox execution requires $*: preinstall these tools or use a root image." >&2; exit 1; }
     if command -v apk >/dev/null 2>&1; then
         apk add --no-cache "$@"
     elif command -v apt-get >/dev/null 2>&1; then
         apt-get update
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
     else
-        echo "Native OpenCode requires $*: preinstall these tools (automatic installation requires apt-get or apk)." >&2
+        echo "OpenCode sandbox execution requires $*: preinstall these tools (automatic installation requires apt-get or apk)." >&2
         exit 1
     fi
 fi
@@ -178,13 +179,13 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     max_output_tokens: int = 131072
     opencode_version: Optional[str] = None
 
-    # Native sandbox setup and lifecycle. Resources owns the sandbox itself.
+    # Sandbox session setup and lifecycle. Resources owns the sandbox itself.
     remote_opencode_install_script_path: str | None = None
     remote_opencode_binary_path: str | None = None
     remote_opencode_musl_binary_path: str | None = None
     session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
 
-    # Temporary legacy_sandbox compatibility; unused by native sandbox sessions.
+    # Temporary legacy_sandbox compatibility; unused by sandbox sessions.
     opencode_max_context_window: int = 262144
     sandbox_provider: str = "sandbox"
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
@@ -210,7 +211,7 @@ class OpenCodeAgentVerifyResponse(BaseVerifyResponse):
 
 
 class OpenCodeAgent(SimpleResponsesAPIAgent):
-    """Run OpenCode locally or in a Resources-owned native sandbox session."""
+    """Run OpenCode locally or in a borrowed or agent-owned sandbox session."""
 
     ray_enabled = False
 
@@ -511,18 +512,18 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
         session_id = self._agent_session_id_from_request(request)
-        if self._native_session_marker(request) is not None:
+        if self._obsolete_session_marker(request) is not None:
             raise HTTPException(409, "Obsolete OpenCode session cookie; seed a new agent session")
         if session_id is not None:
             state = self._require_agent_session(session_id)
             assert isinstance(state, OpenCodeSandboxSession)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
-            prompt, system = self._native_input(body)
+            prompt, system = self._session_input(body)
             if state.task is None:
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(
-                    self._native_response(state, state.activation_request, prompt=prompt, system=system)
+                    self._session_response(state, state.activation_request, prompt=prompt, system=system)
                 )
             elif body != state.activation_request:
                 raise HTTPException(409, "OpenCode sandbox sessions support one activation; retry the same request")
@@ -547,9 +548,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: OpenCodeAgentRunRequest) -> OpenCodeAgentVerifyResponse:
         if (
             self._agent_session_id_from_request(request) is not None
-            or self._native_session_marker(request) is not None
+            or self._obsolete_session_marker(request) is not None
         ):
-            raise HTTPException(409, "Native OpenCode sessions must use EnvironmentServer /run")
+            raise HTTPException(409, "OpenCode sandbox sessions must use EnvironmentServer /run")
         if self.config.execution_mode == "legacy_sandbox":
             return await self._legacy().run(request, body)
         if self.config.resources_server is None:
@@ -614,22 +615,22 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 | ({"ng_trajectory": trajectory.model_dump(mode="json")} if trajectory is not None else {})
             )
 
-    def _native_session_marker(self, request: Request) -> str | None:
+    def _obsolete_session_marker(self, request: Request) -> str | None:
         try:
             session = request.session
         except (AssertionError, AttributeError):
             return None
-        if not isinstance(session, Mapping) or _NATIVE_SESSION_KEY not in session:
+        if not isinstance(session, Mapping) or _OBSOLETE_SESSION_KEY not in session:
             return None
-        marker = session[_NATIVE_SESSION_KEY]
+        marker = session[_OBSOLETE_SESSION_KEY]
         if not isinstance(marker, str) or not marker:
-            raise HTTPException(409, "Invalid native OpenCode session marker")
+            raise HTTPException(409, "Invalid OpenCode session marker")
         return marker
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
         """Prepare only the harness runtime; Resources owns borrowed task setup."""
         if self.config.model_server is None:
-            raise HTTPException(422, "Native OpenCode requires model_server")
+            raise HTTPException(422, "OpenCode sandbox execution requires model_server")
         owns_sandbox = body.sandbox_access is None
         if owns_sandbox:
             if not self.config.sandbox_provider:
@@ -653,24 +654,26 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             or str(normalized_workdir).startswith("/tmp/nemo-gym-opencode")
         ):
             raise HTTPException(
-                422, "Native OpenCode workdir must be absolute and separate from adapter runtime/session storage"
+                422, "OpenCode sandbox workdir must be absolute and separate from adapter runtime/session storage"
             )
         if any(access.required for access in self.effective_tool_accesses(body)):
-            raise HTTPException(422, "Native OpenCode uses its own tools; required HTTP/MCP tools are unsupported")
+            raise HTTPException(
+                422, "OpenCode sandbox execution uses its own tools; required HTTP/MCP tools are unsupported"
+            )
         if not isinstance(self.config.opencode_version, str) or not re.fullmatch(
             r"\d+\.\d+\.\d+", self.config.opencode_version
         ):
-            raise HTTPException(422, "Native OpenCode requires an exact opencode_version")
+            raise HTTPException(422, "OpenCode sandbox execution requires an exact opencode_version")
         if self.config.context_window <= 0 or self.config.timeout <= 0 or self.config.setup_timeout <= 0:
             raise HTTPException(422, "OpenCode context window and execution timeout must be positive")
         if not 0 < self.config.max_output_tokens <= self.config.context_window:
             raise HTTPException(
-                422, "Native OpenCode max_output_tokens must be positive and not exceed context_window"
+                422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
         unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
         if unsupported:
             raise HTTPException(
-                422, f"Native OpenCode config supports permission/tools only; unsupported: {sorted(unsupported)}"
+                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
             )
         if self.config.remote_opencode_install_script_path and not self.config.remote_opencode_binary_path:
             raise HTTPException(422, "A staged OpenCode installer requires remote_opencode_binary_path")
@@ -708,7 +711,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     )
             command = _sandbox_prepare_command(workdir, directory, runtime)
             result = await sandbox.exec(command, timeout_s=self.config.setup_timeout)
-            self._check_native_setup(command, result)
+            self._check_sandbox_setup(command, result)
             prepared_directory = True
             installer = "install_opencode_runtime.sh"
             await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
@@ -724,7 +727,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 )
             )
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.setup_timeout)
-            self._check_native_setup(command, result)
+            self._check_sandbox_setup(command, result)
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
         except BaseException as error:
             try:
@@ -739,7 +742,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         return state
 
     @staticmethod
-    def _check_native_setup(command: str, result: SandboxExecResult) -> None:
+    def _check_sandbox_setup(command: str, result: SandboxExecResult) -> None:
         if result.return_code != 0 or result.error_type is not None:
             raise RuntimeError(
                 f"OpenCode setup failed: command={command!r}, exit={result.return_code}, "
@@ -757,7 +760,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             agent_session_id=state.request.agent_session_id, agent_observations=observations
         )
 
-    def _native_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+    def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         unsupported = (
             "max_output_tokens",
             "temperature",
@@ -785,21 +788,22 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         for key in unsupported:
             if values.get(key) is not None:
                 raise HTTPException(
-                    422, f"Native OpenCode does not support request field {key}; configure Gym model limits/sampling"
+                    422,
+                    f"OpenCode sandbox execution does not support request field {key}; configure Gym model limits/sampling",
                 )
         if body.tools or body.tool_choice != "auto" or not body.parallel_tool_calls or body.background:
             raise HTTPException(422, "OpenCode owns tool selection and execution policy")
         if (body.metadata or {}).get("chat_template_kwargs") is not None:
             raise HTTPException(422, "Configure chat_template_kwargs on the Gym model server")
         if body.model not in (None, "", "dummy_model", self.config.model_server.name):
-            raise HTTPException(422, "Native OpenCode uses the configured Gym model_server")
+            raise HTTPException(422, "OpenCode sandbox execution uses the configured Gym model_server")
         items = (
             [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
         )
         roles = [getattr(item, "role", None) for item in items]
         if roles not in (["user"], ["system", "user"], ["developer", "user"]):
             raise HTTPException(
-                422, "Native OpenCode accepts one user text prompt and optional system/developer message"
+                422, "OpenCode sandbox execution accepts one user text prompt and optional system/developer message"
             )
         texts = []
         for item in items:
@@ -808,15 +812,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             else:
                 parts = [part if isinstance(part, dict) else part.model_dump() for part in item.content]
                 if any(part.get("type") != "input_text" for part in parts):
-                    raise HTTPException(422, "Native OpenCode supports text input only")
+                    raise HTTPException(422, "OpenCode sandbox execution supports text input only")
                 texts.append("\n".join(part["text"] for part in parts))
         if not texts[-1].strip():
-            raise HTTPException(422, "Native OpenCode requires a nonempty user prompt")
+            raise HTTPException(422, "OpenCode sandbox execution requires a nonempty user prompt")
         return texts[-1], "\n\n".join(
             text for text in [self.config.system_prompt, body.instructions, *texts[:-1]] if text
         )
 
-    def _native_output(
+    def _session_output(
         self, export: dict[str, Any], observations: AgentObservationBundle
     ) -> list[NeMoGymResponseOutputItem]:
         output = []
@@ -851,7 +855,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         return output
 
     @staticmethod
-    def _native_usage(export: dict[str, Any]) -> NeMoGymResponseUsage | None:
+    def _session_usage(export: dict[str, Any]) -> NeMoGymResponseUsage | None:
         # OpenCode 1.17.11 getUsage subtracts cache from input and reasoning from output.
         # Restore inclusive OpenAI counters across the root and subagent model turns.
         infos = export.get("usage_messages", [message["info"] for message in export.get("messages", [])])
@@ -892,7 +896,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             total.output_tokens_details.reasoning_tokens = None
         return total
 
-    async def _native_response(
+    async def _session_response(
         self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, *, prompt: str, system: str
     ) -> NeMoGymResponse:
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
@@ -974,8 +978,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         usage = None
         if export.get("messages"):
             try:
-                output = self._native_output(export, state.observations)
-                usage = self._native_usage(export)
+                output = self._session_output(export, state.observations)
+                usage = self._session_usage(export)
                 if (
                     usage is None
                     or usage.input_tokens_details.cached_tokens is None

@@ -178,13 +178,13 @@ def _parse_opencode_session(
             continue
         if ptype == "tool" and role == "assistant":
             state = part.get("state") if isinstance(part.get("state"), dict) else {}
-            native_call_id = part.get("callID")
-            observed_call_id = native_call_id if isinstance(native_call_id, str) and native_call_id else None
+            opencode_call_id = part.get("callID")
+            observed_call_id = opencode_call_id if isinstance(opencode_call_id, str) and opencode_call_id else None
             call_id = observed_call_id or f"call-{uuid4().hex[:8]}"
             tool_input = state.get("input") or {}
             arguments = json.dumps(tool_input) if isinstance(tool_input, (dict, list)) else str(tool_input)
-            native_status = state.get("status")
-            response_status = "completed" if native_status == "completed" else "incomplete"
+            opencode_status = state.get("status")
+            response_status = "completed" if opencode_status == "completed" else "incomplete"
             call = NeMoGymResponseFunctionToolCall(
                 arguments=arguments,
                 call_id=call_id,
@@ -195,9 +195,9 @@ def _parse_opencode_session(
             )
             conversation.append(call)
             first_item_id_by_message.setdefault((session_id, message_id), call_id)
-            native_time = state.get("time") if isinstance(state.get("time"), dict) else {}
+            opencode_time = state.get("time") if isinstance(state.get("time"), dict) else {}
             # OpenCode retains raw output in SQLite but substitutes this literal in later model inputs after pruning.
-            if native_status == "completed" and native_time.get("compacted") is not None:
+            if opencode_status == "completed" and opencode_time.get("compacted") is not None:
                 observed_tool_output = "[Old tool result content cleared]"
             else:
                 observed_tool_output = state.get("output") if state.get("output") is not None else state.get("error")
@@ -210,24 +210,24 @@ def _parse_opencode_session(
                 )
                 conversation.append(result)
 
-            native_start = native_time.get("start")
-            native_end = native_time.get("end")
+            opencode_start = opencode_time.get("start")
+            opencode_end = opencode_time.get("end")
             valid_interval = (
-                isinstance(native_start, (int, float))
-                and not isinstance(native_start, bool)
-                and isinstance(native_end, (int, float))
-                and not isinstance(native_end, bool)
-                and native_end >= native_start
+                isinstance(opencode_start, (int, float))
+                and not isinstance(opencode_start, bool)
+                and isinstance(opencode_end, (int, float))
+                and not isinstance(opencode_end, bool)
+                and opencode_end >= opencode_start
             )
-            started_at = _milliseconds(native_start) if valid_interval else None
-            completed_at = _milliseconds(native_end) if valid_interval else None
-            duration_ms = float(native_end - native_start) if valid_interval else None
+            started_at = _milliseconds(opencode_start) if valid_interval else None
+            completed_at = _milliseconds(opencode_end) if valid_interval else None
+            duration_ms = float(opencode_end - opencode_start) if valid_interval else None
             status = {
                 "completed": "completed",
                 "error": "failed",
                 "running": "incomplete",
                 "pending": "incomplete",
-            }.get(native_status, "unknown")
+            }.get(opencode_status, "unknown")
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
@@ -239,7 +239,7 @@ def _parse_opencode_session(
                         duration_ms=duration_ms,
                         timing_source="artifact" if started_at is not None else None,
                         status=status,
-                        error_type="tool_error" if native_status == "error" else None,
+                        error_type="tool_error" if opencode_status == "error" else None,
                     )
                 )
             else:
@@ -251,7 +251,7 @@ def _parse_opencode_session(
                     )
                 )
             if observed_call_id is not None and (
-                started_at is None or (native_status in {"completed", "error"} and completed_at is None)
+                started_at is None or (opencode_status in {"completed", "error"} and completed_at is None)
             ):
                 gaps.append(
                     ObservationGap(

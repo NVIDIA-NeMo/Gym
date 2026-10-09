@@ -149,20 +149,20 @@ def test_default_codex_composes_with_exactly_one_native_environment(tmp_path: Pa
     assert resolved.codex_agent.responses_api_agents.codex_agent.resources_server is None
 
 
-def test_native_opencode_template_composes_with_one_environment(tmp_path: Path) -> None:
+def test_opencode_session_template_composes_with_one_environment(tmp_path: Path) -> None:
     config = tmp_path / "agent.yaml"
     default = SCRIPT.parents[1] / "responses_api_agents/opencode_agent/configs/opencode_agent.yaml"
     config.write_text(default.read_text())
     composition = tmp_path / "run.yaml"
     composition.write_text(
         "policy_model_name: test-model\n"
-        + _server_fronting("opencode_agent", name="native_environment", server_type="single_agent_turn_legacy")
+        + _server_fronting("opencode_agent", name="session_environment", server_type="single_agent_turn_legacy")
     )
     before = config.read_text()
     assert migration.main([str(config)]) == 0
     assert config.read_text() == before
     resolved = _parse(config, composition, strict=True)
-    assert _environment_servers_by_agent(resolved) == {"opencode_agent": ["native_environment"]}
+    assert _environment_servers_by_agent(resolved) == {"opencode_agent": ["session_environment"]}
     assert resolved.opencode_agent.responses_api_agents.opencode_agent.resources_server is None
 
 

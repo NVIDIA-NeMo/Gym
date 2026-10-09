@@ -707,13 +707,16 @@ class TestConfigYaml:
         app_path = Path(__file__).resolve().parent.parent / "app.py"
         compile(app_path.read_text(), str(app_path), "exec")
 
-    def test_config_yaml_parses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("training_capture", [None, False, True])
+    def test_config_yaml_parses(self, monkeypatch: pytest.MonkeyPatch, training_capture: bool | None) -> None:
         monkeypatch.chdir(Path(__file__).resolve().parents[3])
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "opencode_agent.yaml"
         _, configs = GlobalConfigDictParser().load_extra_config_paths([str(cfg_path)])
         data = OmegaConf.to_container(OmegaConf.merge(*configs), resolve=True)
         assert "opencode_agent" in data
         inner = data["opencode_agent"]["responses_api_agents"]["opencode_agent"]
+        if training_capture is not None:
+            inner["token_id_capture"] = training_capture
         config = OpenCodeAgentConfig.model_validate(inner | {"host": "localhost", "port": 8000, "name": "opencode"})
         assert config.entrypoint == "app.py"
         assert config.concurrency == 8
@@ -724,3 +727,13 @@ class TestConfigYaml:
         assert config.opencode_config["permission"]["bash"]["*"] == "allow"
         assert config.opencode_config["permission"]["bash"]["*git submodule update*"] == "deny"
         assert config.opencode_config["tools"]["webfetch"] is False
+
+        assert config.token_id_capture is (training_capture is True)
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": True, "token_id_capture": {"enabled": True}}
+        agent = OpenCodeAgent(config=config, server_client=client)
+        capture_path = "/training-token-capture" if training_capture else ""
+        assert (
+            agent.base_url_for_run("http://model", {"_ng_task_index": 0, "_ng_rollout_index": 0})
+            == f"http://model/ng-rollout/0-0{capture_path}"
+        )

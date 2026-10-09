@@ -5,6 +5,9 @@ EnvironmentServer sessions and local CLI calls. An agent session selects the
 sandbox; without one, requests run locally. Invalid or closed sessions fail.
 Local `/run` requires a Resources binding; direct `/v1/responses` does not.
 
+Training token-ID capture is off by default. Enable the agent's `token_id_capture`
+only when explicitly collecting training data; evaluation observability remains independent.
+
 The main config loads `configs/permissions/benchmark.yaml` through `config_paths`.
 It preserves the existing command restrictions; run configs can override individual
 permissions under `opencode_agent.responses_api_agents.opencode_agent.opencode_config.permission`.

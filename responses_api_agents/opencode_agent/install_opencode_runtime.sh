@@ -10,10 +10,10 @@ installer=${4:-}
 musl_binary=${5:-}
 
 require() {
-  command -v "$1" >/dev/null 2>&1 || { echo "Native OpenCode requires $1 in the task image" >&2; exit 1; }
+  command -v "$1" >/dev/null 2>&1 || { echo "OpenCode sandbox execution requires $1 in the task image" >&2; exit 1; }
 }
 require python3
-python3 -c 'import sys; assert sys.platform == "linux" and sys.version_info >= (3, 8), "Native OpenCode requires Linux and Python >=3.8 in the task image"'
+python3 -c 'import sys; assert sys.platform == "linux" and sys.version_info >= (3, 8), "OpenCode sandbox execution requires Linux and Python >=3.8 in the task image"'
 # Serialize preparation of the version-scoped cache in a shared task sandbox.
 # The lock descriptor remains open across exec and releases on installer exit.
 if [ "${NG_OPENCODE_INSTALL_LOCKED:-0}" != 1 ]; then
@@ -22,14 +22,14 @@ fi
 case "$(uname -m)" in
   x86_64) arch=x64-baseline ;;
   aarch64) arch=arm64 ;;
-  *) echo 'Native OpenCode supports Linux x86_64/aarch64 task images' >&2; exit 1 ;;
+  *) echo 'OpenCode sandbox execution supports Linux x86_64/aarch64 task images' >&2; exit 1 ;;
 esac
 if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
   :
 elif [[ "$(ldd --version 2>&1 || true)" == *musl* ]]; then
   arch="${arch}-musl"
 else
-  echo 'Native OpenCode requires glibc or musl; could not identify the sandbox libc' >&2
+  echo 'OpenCode sandbox execution requires glibc or musl; could not identify the sandbox libc' >&2
   exit 1
 fi
 mkdir -p "$runtime/home" "$runtime/cache" "$runtime/data" "$runtime/config"
@@ -51,7 +51,7 @@ if [ -n "$staged_binary" ]; then
 else
   if ! command -v curl >/dev/null 2>&1 || [ ! -s /etc/ssl/certs/ca-certificates.crt ]; then
     if [ "$(id -u)" != 0 ]; then
-      echo 'Native OpenCode needs curl and ca-certificates; preinstall them in the task image (automatic installation requires root)' >&2
+      echo 'OpenCode sandbox execution needs curl and ca-certificates; preinstall them in the task image (automatic installation requires root)' >&2
       exit 1
     fi
     if command -v apk >/dev/null 2>&1; then
@@ -60,7 +60,7 @@ else
       apt-get update
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates
     else
-      echo 'Native OpenCode needs curl and ca-certificates; preinstall them in the task image (automatic installation requires apt-get or apk)' >&2
+      echo 'OpenCode sandbox execution needs curl and ca-certificates; preinstall them in the task image (automatic installation requires apt-get or apk)' >&2
       exit 1
     fi
   fi

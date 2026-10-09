@@ -619,13 +619,13 @@ def test_reported_usage_restores_cached_and_reasoning_tokens_across_subagents():
             {"role": "user"},
         ]
     }
-    usage = OpenCodeAgent._native_usage(export)
+    usage = OpenCodeAgent._session_usage(export)
     assert usage.input_tokens == 24
     assert usage.output_tokens == 11
     assert usage.total_tokens == 35
     assert usage.input_tokens_details.cached_tokens == 6
     assert usage.output_tokens_details.reasoning_tokens == 3
-    assert OpenCodeAgent._native_usage({"messages": []}) is None
+    assert OpenCodeAgent._session_usage({"messages": []}) is None
 
 
 @pytest.mark.parametrize("field", ["cache", "reasoning"])
@@ -636,7 +636,7 @@ def test_reported_usage_does_not_treat_defaulted_or_invalid_details_as_measureme
         tokens["cache"]["read"] = value
     else:
         tokens["reasoning"] = value
-    usage = OpenCodeAgent._native_usage({"usage_messages": [{"role": "assistant", "tokens": tokens}]})
+    usage = OpenCodeAgent._session_usage({"usage_messages": [{"role": "assistant", "tokens": tokens}]})
     # Invalid optional fields neither erase measured base counts nor get coerced into totals.
     assert usage.input_tokens == (11 if field == "cache" else 15)
     assert usage.output_tokens == (3 if field == "reasoning" else 5)
@@ -660,7 +660,7 @@ def test_optional_reported_usage_stays_unknown_across_root_and_subagent_calls(un
     else:
         infos[unknown_turn]["tokens"]["reasoning"] = 0
         infos[unknown_turn]["tokens"]["cache"]["read"] = 0
-    usage = OpenCodeAgent._native_usage({"usage_messages": infos})
+    usage = OpenCodeAgent._session_usage({"usage_messages": infos})
     assert usage.input_tokens_details.cached_tokens is None
     assert usage.output_tokens_details.reasoning_tokens is None
     if unknown_kind == "missing_usage":
@@ -886,7 +886,7 @@ def test_malformed_later_artifact_keeps_partial_output(setup):
         ]
     )
     observations = AgentObservationBundle(source="opencode")
-    output = agent._native_output(export, observations)
+    output = agent._session_output(export, observations)
     assert output[3].content[0].text == "Fixed"
     assert output[-1].output == "failed tool"
     assert output[-1].status == "incomplete"
