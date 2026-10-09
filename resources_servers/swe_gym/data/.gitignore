@@ -1,0 +1,4 @@
+# Prepared training JSONL (patch/test_patch for every supported instance). Regenerate with prepare_swe_gym.py.
+*.jsonl
+!example.jsonl
+!example_rollouts.jsonl

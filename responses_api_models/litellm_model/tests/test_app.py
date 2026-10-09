@@ -510,3 +510,24 @@ class TestLiteLLMModelServer:
 
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == {"error": {"code": "context_length_exceeded"}}
+
+    @pytest.mark.parametrize("allowed,expected", [([], 500), ([429], 500), ([400], 400)])
+    @pytest.mark.parametrize("api", ["responses", "chat/completions"])
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_http_routes_respect_propagation_policy(self, allowed, expected, api, stream) -> None:
+        server = _make_server(propagate_upstream_http_status_codes=allowed)
+        error = ClientResponseError(SimpleNamespace(real_url="https://litellm.example/v1"), (), status=400)
+        error.response_content = b'{"error":{"code":"context_length_exceeded"}}'
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=error)
+        server._client.create_chat_completion = AsyncMock(side_effect=error)
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        body = {"input": "hello"} if api == "responses" else {"messages": [{"role": "user", "content": "hello"}]}
+        body["stream"] = stream
+        response = TestClient(app).post(f"/v1/{api}", json=body)
+        assert response.status_code == expected
+        if expected == 400:
+            assert response.json() == {"detail": {"error": {"code": "context_length_exceeded"}}}
+        operation = server._client.create_response if api == "responses" else server._client.create_chat_completion
+        operation.assert_awaited_once()
