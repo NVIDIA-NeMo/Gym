@@ -14,9 +14,11 @@ permissions:
   pull-requests: read
 
 jobs:
-  guardwords-check:
-    if: github.repository == 'NVIDIA-NeMo/Gym'
+  pr_info:
     runs-on: ubuntu-latest
+    outputs:
+      base_sha: ${{ fromJSON(steps.pr.outputs.pr-info).base.sha }}
+      head_sha: ${{ github.sha }}
     steps:
       - name: Check out Gym mirror
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -33,36 +35,12 @@ jobs:
           PR_INFO: ${{ steps.pr.outputs.pr-info }}
         run: jq -e --arg sha "$GITHUB_SHA" '.head.sha == $sha' <<< "$PR_INFO" >/dev/null
 
-      - name: Create read-only Guardwords token
-        id: guardwords-token
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
-        with:
-          app-id: ${{ vars.BOT_ID }}
-          private-key: ${{ secrets.BOT_KEY }}
-          owner: NVIDIA-NeMo
-          repositories: Guardwords
-          permission-contents: read
-
-      - name: Check out private guardwords
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          repository: NVIDIA-NeMo/Guardwords
-          ref: main
-          token: ${{ steps.guardwords-token.outputs.token }}
-          path: .guardwords
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.13"
-
-      - name: Install YAML parser
-        run: python -m pip install --disable-pip-version-check --no-input "PyYAML==6.0.2"
-
-      - name: Scan added lines
-        env:
-          BASE_SHA: ${{ fromJSON(steps.pr.outputs.pr-info).base.sha }}
-          HEAD_SHA: ${{ github.sha }}
-          GUARDWORDS_FILE: ${{ github.workspace }}/.guardwords/guardwords.yaml
-        run: python3 scripts/ci/check_guardwords.py --patterns "$GUARDWORDS_FILE" --base "$BASE_SHA" --head "$HEAD_SHA"
+  guardwords-check:
+    needs: pr_info
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_guardwords_check.yml@422e1ff80cc916ed4135eef123cad2e5bee1ad4f # FW-CI-templates PR #599
+    with:
+      bot-app-id: ${{ vars.BOT_ID }}
+      base-sha: ${{ needs.pr_info.outputs.base_sha }}
+      head-sha: ${{ needs.pr_info.outputs.head_sha }}
+    secrets:
+      BOT_KEY: ${{ secrets.BOT_KEY }}
