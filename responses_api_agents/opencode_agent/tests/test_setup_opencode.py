@@ -30,6 +30,7 @@ from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode, 
         ("", "", 0, None),
         (" \n\t", "", 0, None),
         ("1.17.11", "", 1, None),
+        ("1.17.10", "", 0, "1.17.10"),
     ],
 )
 def test_installed_version_handles_unavailable_output(stdout, stderr, returncode, expected) -> None:
@@ -39,7 +40,11 @@ def test_installed_version_handles_unavailable_output(stdout, stderr, returncode
         patch("responses_api_agents.opencode_agent.setup_opencode.subprocess.run", return_value=result),
     ):
         assert installed_opencode_version() == expected
-        ensure_opencode("1.17.11")
+        if expected == "1.17.11":
+            ensure_opencode("1.17.11")
+        else:
+            with pytest.raises(RuntimeError, match="Expected OpenCode 1.17.11"):
+                ensure_opencode("1.17.11")
 
 
 def test_installed_version_timeout_is_unavailable() -> None:
@@ -51,3 +56,20 @@ def test_installed_version_timeout_is_unavailable() -> None:
         ),
     ):
         assert installed_opencode_version() is None
+
+
+def test_opencode_install_uses_shared_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.harness_conformance.ci import install_runtime
+
+    from responses_api_agents.opencode_agent import setup_opencode
+    from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
+    from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
+    from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
+
+    versions = []
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(setup_opencode, "_npm_install", lambda npm, version: versions.append(version))
+    install_runtime("opencode")
+    assert versions == [OPENCODE_VERSION]
+    assert OpenCodeAgentConfig.model_fields["opencode_version"].default == OPENCODE_VERSION
+    assert OpenCodeSandboxedAgentConfig.model_fields["opencode_version"].default == OPENCODE_VERSION

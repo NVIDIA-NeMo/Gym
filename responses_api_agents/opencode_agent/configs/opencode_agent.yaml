@@ -15,7 +15,6 @@ opencode_agent:
         type: responses_api_models
         name: policy_model
 
-      opencode_version: 1.17.11
       # Set this to the actual model context window; it is metadata, not an output-token limit.
       context_window: 262144
       timeout: 10800

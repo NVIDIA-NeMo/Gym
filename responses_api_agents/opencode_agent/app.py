@@ -79,6 +79,7 @@ from responses_api_agents.opencode_agent.artifacts import (
     parse_opencode_session,
 )
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
+from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION, apply_observability_patch
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 
@@ -177,7 +178,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     opencode_config: dict[str, Any] = Field(default_factory=dict)
     context_window: int = 262144
     max_output_tokens: int = 131072
-    opencode_version: Optional[str] = None
+    opencode_version: str = OPENCODE_VERSION
 
     # Sandbox session setup and lifecycle. Resources owns the sandbox itself.
     remote_opencode_install_script_path: str | None = None
@@ -317,6 +318,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 },
             )
             nemo["models"] = {self.config.model: model}
+        if self._model_call_capture_enabled():
+            apply_observability_patch(config)
         return config
 
     def _write_opencode_config(self, work_dir: Path, rollout_id: Optional[str] = None) -> None:
