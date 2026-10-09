@@ -56,6 +56,7 @@ from nemo_gym.rollout_observability import (
 )
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection
+from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
@@ -225,6 +226,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
         provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
         try:
+            if provider.name != "local":
+                # The runner calls the model server from the sandbox, which cannot reach a loopback address.
+                sandbox_server_url(self.config.model_server.name, require_reachable=True)
             sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
         except BaseException:
             await provider.aclose()

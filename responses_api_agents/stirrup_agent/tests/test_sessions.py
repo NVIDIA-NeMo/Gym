@@ -5,7 +5,7 @@
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, agent_tools
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
@@ -165,6 +165,26 @@ def test_a_failed_episode_still_closes_with_its_evidence(agent, client, root, mo
     assert [ref["response_id"] for ref in invocation["model_calls"]] == ["chatcmpl-1"]
     assert invocation["conversation"] == []
     assert bundle["gaps"] == []
+
+
+@pytest.mark.parametrize(
+    ("model_url", "reachable"), [("http://127.0.0.1:8000", False), ("http://10.0.0.5:8000", True)]
+)
+def test_a_remote_sandbox_needs_a_model_server_address_it_can_reach(client, monkeypatch, model_url, reachable):
+    class Remote:
+        name = "opensandbox"
+        aclose = AsyncMock()
+
+    class Connected(Exception):
+        pass
+
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}})
+    monkeypatch.setattr(app, "create_provider", lambda _: Remote())
+    monkeypatch.setattr(agent_tools, "get_server_url", lambda _: model_url)
+    monkeypatch.setattr(AsyncSandbox, "connect", AsyncMock(side_effect=Connected))
+
+    with pytest.raises(Connected if reachable else ValueError):
+        _seed(client, sandbox_access=_sandbox_access(), tool_accesses=[_TOOL_ACCESS])
 
 
 def test_a_session_without_a_sandbox_is_rejected(client):
