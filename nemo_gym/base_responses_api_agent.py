@@ -32,7 +32,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
@@ -115,6 +115,18 @@ class AgentCloseSessionResponse(BaseModel):
     agent_session_id: str
     agent_observations: AgentObservationBundle | None = None
     resources_cookies: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class ModelEndpoint:
+    """The OpenAI-compatible endpoint a harness sends its model calls to.
+
+    ``base_url`` ends in the API version (for example ``/v1``).
+    ``model`` is set only when the endpoint dictates the model name; otherwise the harness keeps its own.
+    """
+
+    base_url: str
+    model: str | None = None
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
@@ -425,6 +437,28 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
         base_url = self.server_client._build_server_base_url(server_config)
         return f"{apply_rollout_prefix(base_url, rollout_id, token_capture=self._token_id_capture_enabled())}/v1"
+
+    def model_endpoint(
+        self,
+        *,
+        model_server: ModelServerRef | None,
+        rollout_id: Optional[str] = None,
+        base_url: Optional[str] = None,
+        session_endpoint: ModelEndpoint | None = None,
+    ) -> ModelEndpoint:
+        """Choose the endpoint for a harness's model calls.
+
+        In order: ``session_endpoint``, an endpoint the episode's session supplies (for example a component
+        that records model calls from inside the task sandbox); the Gym model server, with this rollout's
+        capture prefix; the agent's configured ``base_url``, used verbatim because it has no prefix routing.
+        """
+        if session_endpoint is not None:
+            return session_endpoint
+        if model_server is not None:
+            return ModelEndpoint(base_url=self.resolve_model_base_url(model_server.name, rollout_id))
+        if base_url:
+            return ModelEndpoint(base_url=base_url)
+        raise ValueError("No model endpoint: configure model_server or a model base URL")
 
     # TODO: right now there is no validation on the TypedDict NeMoGymResponseCreateParamsNonStreaming
     # We should explicitly add validation at this server level or we should explicitly not validate so that there is flexibility in this API.
