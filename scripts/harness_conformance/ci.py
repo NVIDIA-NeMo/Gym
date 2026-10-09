@@ -60,6 +60,10 @@ def install_runtime(harness: str) -> None:
         return  # The Python requirements contain its pinned runtime.
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
+    if harness == "opencode":
+        from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
+
+        config.setdefault("opencode_version", OPENCODE_VERSION)
     version = config[f"{harness}_version"]
     if not version:
         raise ValueError(f"{harness} needs a pinned runtime version")

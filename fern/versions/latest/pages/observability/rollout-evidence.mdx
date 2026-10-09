@@ -160,6 +160,11 @@ and return an `AgentObservationBundle` as `ng_agent_observations`:
   intervals in `ToolCallObservation`. Join them by invocation and tool-call ID.
 - Record missing evidence as gaps. Sandbox usage must be measured, not copied from configured
   limits or assigned to individual overlapping tools.
+- Report the agent's response `usage` as the sum over model responses that finished. A call that
+  failed without a finished response adds nothing, so report zero tokens when no call finished,
+  for example when every request was rejected. Omit usage only when a finished response's usage
+  was lost; [rollout health](/main/evaluation/rollout-health) then leaves the token comparison
+  unobserved.
 - Supply explicit `TrajectoryTurn` records in a producer `ng_trajectory` when semantic turns are
   observable. Collection preserves them; it does not derive them from an invocation's conversation.
 

@@ -30,7 +30,7 @@ This guide and the check definitions maintain the implemented requirements.
 | TE-6: verifier outcome | Numeric rollout reward and required boolean `evaluation_completed` and `mask_sample`. Saved sandbox IDs, outcomes and failure categories are also checked. `mask_sample=true` excludes the reward from scores. Masked or explicitly incomplete verification requires nonblank `failure_kind` and `failure_reason`. Extended verifier scope/version and judge provenance are not certified by this profile. |
 | TE-7: payloads | Saved request and response/error bodies. Empty returned bodies and explicit no-response transport failures remain distinct. |
 | TE-8: run join | Exactly one explicit invocation owner per captured attempt, including attempts without response ids; exact references. |
-| TE-9: step join | Every retained policy attempt belongs to exactly one identified step. Retries remain attempts on that step. Explicit compaction-helper refs are excluded from policy steps. |
+| TE-9: step join | Every retained policy attempt belongs to exactly one identified step, except HTTP-error attempts may have zero or one step reference. Every attempt still requires invocation ownership. Explicit compaction-helper refs are excluded from policy steps. |
 
 Checks do not repeat Gym's unit tests for ID uniqueness, timestamp ordering or
 usage normalization.

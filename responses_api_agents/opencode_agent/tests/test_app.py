@@ -47,6 +47,7 @@ from responses_api_agents.opencode_agent.app import (
     _parse_opencode_session,
     parse_opencode_session,
 )
+from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 
 
 def _config(**kwargs) -> OpenCodeAgentConfig:
@@ -483,6 +484,17 @@ class TestDeepMerge:
 
 
 class TestEnv:
+    @pytest.mark.parametrize("capture_enabled", [False, True])
+    def test_capture_plugin_preserves_user_config(self, capture_enabled: bool, tmp_path: Path) -> None:
+        agent = _make_agent(opencode_config={"plugin": ["user-plugin"]})
+        agent.server_client.global_config_dict = {"observability_enabled": capture_enabled}
+        agent._write_opencode_config(tmp_path)
+        config = json.loads((tmp_path / "opencode.json").read_text())
+        assert OBSERVABILITY_PATCH.is_file()
+        assert config["plugin"] == ["user-plugin"] + ([OBSERVABILITY_PATCH.as_uri()] if capture_enabled else [])
+        assert agent.config.opencode_config == {"plugin": ["user-plugin"]}
+        assert agent._build_opencode_config() == config
+
     def test_env_passthrough(self) -> None:
         agent = _make_agent(openai_api_key="k", openai_base_url="https://x/v1", env={"FOO": "bar", "EMPTY": ""})
         env = agent._env("/tmp/data")
