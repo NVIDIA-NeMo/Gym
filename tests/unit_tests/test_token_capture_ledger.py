@@ -10,11 +10,13 @@ fail-closed poisoning.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, _custody_columns
-from nemo_gym.token_id_capture.protocols import CaptureLedger
+from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolution
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, compute_digest
 from nemo_gym.token_id_capture.sink import (
     UNRESOLVED_PARENT_REASON,
@@ -240,6 +242,29 @@ async def test_admission_match_uses_staging_chain_without_wire_prefix(store):
     assert context.parent_staging_chain == ["r1/c1"]
     assert context.parent_chain_hash == CHAIN_HASH_1
     assert context.request_items == [USER_1, ASSISTANT_1, USER_2]
+
+
+@pytest.mark.asyncio
+async def test_admission_retries_a_lookup_that_overlaps_ledger_publication():
+    store = InMemoryLineageStore()
+    await _record_call_1(store)
+    request = [USER_1, ASSISTANT_1, USER_2]
+    committed = await store.resolve("r1", request)
+    assert committed.status == ParentResolutionStatus.RESOLVED
+    resolve = AsyncMock(
+        side_effect=[
+            LineageResolution(ParentResolutionStatus.UNRESOLVED, reason="no_match"),
+            committed,
+        ]
+    )
+
+    with patch.object(store, "resolve", resolve):
+        context = await _admit(store, request)
+
+    assert resolve.await_count == 2
+    assert context.capture_admission is not None
+    assert context.capture_admission.parent_call_id == "c1"
+    assert context.capture_admission.mode == "token_in"
 
 
 @pytest.mark.asyncio
