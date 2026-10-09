@@ -138,7 +138,18 @@ rollout in the run nests inside one trace. For long runs, use `per_rollout` inst
 omits `job`, so each rollout becomes its own bounded root trace. See
 [Span Groups](/main/observability/span-groups).
 
-### Only the Orchestrator Emits Spans
+### Startup Traces
+
+Startup is its own trace, separate from the `gym.job` run trace, and both carry the same `run_id`. The
+supervisor opens `gym.startup` with one child per supervisor stage (`load_config`, `init_telemetry`,
+`init_ray`, `start_head_server`, `spawn_servers`, `wait_for_head_server`, `wait_for_servers`,
+`wait_for_model_endpoints`) and one `gym.startup.server` span per server, from spawn to first healthy probe.
+Each server parents its own `gym.server.startup` span, with one child per stage, to that span through a
+`traceparent` passed in its environment. The Uvicorn workers of a multi-worker server inherit the same
+`traceparent` and add a `gym.server.startup.worker` span each, as siblings of the main process's span. Enable it with the `startup` span group, which is in the `default`
+preset.
+
+### Only the Supervisor Emits Spans
 
 The `telemetry:` block reaches servers through environment variables exported before the
 servers start. If you set them after `gym env start` is already running, the servers never
