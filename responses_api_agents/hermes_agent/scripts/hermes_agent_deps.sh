@@ -29,7 +29,7 @@ echo "Installing hermes-agent ($HERMES_SPEC)"
 # new process, so retry the import before declaring the runtime unusable.
 hermes_health_ok=0
 for attempt in {1..12}; do
-    if "$DEPS_DIR/bin/python3" -P -c "import model_tools; from run_agent import AIAgent; print('hermes-agent OK')"; then
+    if PYTHONPATH= "$DEPS_DIR/bin/python3" -P -c "import model_tools; from run_agent import AIAgent; print('hermes-agent OK')"; then
         hermes_health_ok=1
         break
     fi
