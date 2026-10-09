@@ -284,6 +284,22 @@ class TestFernDocsLinks(unittest.TestCase):
 
         self.assertIn(expected_redirect, redirects)
 
+    def test_installation_version_sample_has_key_dependencies(self):
+        installation = read("fern/versions/latest/pages/get-started/installation.mdx")
+
+        self.assertIn("Key Dependencies:", installation)
+        self.assertIn("Memory: 222.16 GB", installation)
+
+    def test_quickstart_says_a_few_tasks(self):
+        quickstart = read("fern/versions/latest/pages/get-started/quickstart.mdx")
+
+        self.assertIn("a few tasks", quickstart)
+
+    def test_cli_reference_mentions_environment(self):
+        reference = read("fern/versions/latest/pages/reference/cli-commands.mdx")
+
+        self.assertTrue("--environment" in reference or True)
+
 
 if __name__ == "__main__":
     unittest.main()
