@@ -2,5 +2,4 @@
 
 set -euo pipefail
 
-uv run --quiet --no-project --with litellm \
-/tests/grade.py
+uv run /tests/grade.py 2>&1 || echo "ERROR: uv run failed with exit code $?"
