@@ -288,6 +288,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """Discard a session whose attempt was retired."""
         raise NotImplementedError
 
+    async def park_agent_sessions(self, session_keys: list[str]) -> None:
+        """Free what these sessions' exported state holds outside the process, such as sandboxes the agent
+        owns, once a commit the controller stops after is durable. Optional."""
+
     def effective_tool_accesses(self, request: AgentSeedSessionRequest) -> list[ToolAccess]:
         """Overlay episode-scoped tool access onto configured declarations by name."""
         accesses = {access.name: access for access in self.config.tool_accesses}

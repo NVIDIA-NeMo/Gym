@@ -16,7 +16,7 @@ from abc import abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
 from starlette.middleware import Middleware
 
@@ -79,7 +79,9 @@ def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
 
 
 # Tool names that would collide with the resources server's own endpoints if advertised over MCP.
-RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "close_session", "aggregate_metrics", "mcp"})
+RESERVED_MCP_TOOL_NAMES = frozenset(
+    {"verify", "seed_session", "close_session", "sandbox_access", "aggregate_metrics", "mcp"}
+)
 
 
 class ReverifyMode(str, Enum):
@@ -269,6 +271,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         app.post("/seed_session")(self.seed_session)
         app.post("/close_session")(self.close_resources_session)
+        app.post("/sandbox_access")(self.sandbox_access)
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
         app.post("/verify")(
             traced_verify_endpoint(
@@ -348,6 +351,25 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     async def retire_session_state(self, session_id: str) -> None:
         """Discard a session whose attempt was retired."""
         raise NotImplementedError
+
+    async def park_session_states(self, session_ids: list[str]) -> None:
+        """Free what these sessions' exported state holds outside the process, such as sandboxes, once a
+        commit the controller stops after is durable. Optional."""
+
+    async def current_sandbox_access(self, session_id: str) -> SandboxAccess | None:
+        """The access a borrower of this session's sandbox should use now, or ``None`` when there is none.
+
+        Servers that hand an agent a ``SandboxAccess`` in their seed reply implement this: after a restore the
+        sandbox may have been rebuilt under a new id, and the agent asks ``/sandbox_access`` before using it.
+        """
+        return None
+
+    async def sandbox_access(self, request: Request) -> SandboxAccess:
+        """Current sandbox access of the request's session; 404 when the session has no sandbox to borrow."""
+        access = await self.current_sandbox_access(request.session[SESSION_ID_KEY])
+        if access is None:
+            raise HTTPException(404, "this session has no sandbox access")
+        return access
 
     def normalize_tool_name(self, name: str) -> str:
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""

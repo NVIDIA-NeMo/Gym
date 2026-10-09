@@ -247,18 +247,21 @@ async def commit(
     episode_ids: Iterable[EpisodeId],
     *,
     deadline_ts: float,
+    stop: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Write every participant's state for the episodes the controller will continue.
 
     ``episode_ids`` must name every episode the controller continues: each episode in flight, and each episode
     restored earlier whose replacement has not started yet, named by that replacement attempt. Restored state of
-    an episode the scope leaves out is retired after the write.
+    an episode the scope leaves out is retired after the write. With ``stop``, the controller stops after this
+    checkpoint instead of resuming, and participants free what their exported state holds outside the process.
     """
     body = {
         "checkpoint_id": checkpoint_id,
         "deadline_ts": deadline_ts,
         "checkpoint_dir": checkpoint_dir,
         "episode_ids": [episode_id.model_dump(mode="json") for episode_id in episode_ids],
+        "stop": stop,
     }
     with _coordinating("commit", checkpoint_id, participants) as span:
         span.set(episodes=len(body["episode_ids"]))

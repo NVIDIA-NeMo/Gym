@@ -23,6 +23,7 @@ class FakeCoordination:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
+        self.commit_stops: list[bool] = []
         self.prepared = True
         self.restore_fails = False
         # Retire calls that fail before one succeeds.
@@ -47,9 +48,17 @@ class FakeCoordination:
         return PrepareResult(prepared=self.prepared, replies={"environment": reply})
 
     async def commit(
-        self, participants: Any, checkpoint_id: str, checkpoint_dir: str, episodes: list, *, deadline_ts: float
+        self,
+        participants: Any,
+        checkpoint_id: str,
+        checkpoint_dir: str,
+        episodes: list,
+        *,
+        deadline_ts: float,
+        stop: bool = False,
     ) -> dict:
         self.calls.append(("commit", sorted((episode.rollout_id, episode.attempt) for episode in episodes)))
+        self.commit_stops.append(stop)
         Path(checkpoint_dir, "gym").mkdir(parents=True)
         return {}
 
@@ -161,6 +170,7 @@ async def test_a_checkpoint_that_stops_does_not_resume_or_start_more_rows(
 
     assert published is not None and checkpoints.stopped
     assert kinds(coordination) == ["prepare", "commit"]
+    assert coordination.commit_stops == [True], "participants free what their exported state holds"
     assert not blocked.done()
     blocked.cancel()
 

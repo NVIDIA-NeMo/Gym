@@ -102,6 +102,11 @@ class CommitRequest(CheckpointRequest):
         description="The episodes the controller continues from this checkpoint. Participants that keep "
         "state for every episode they ever served, such as the model ledger, export only these.",
     )
+    stop: bool = Field(
+        default=False,
+        description="The controller stops after this checkpoint instead of resuming. Once the write is durable, "
+        "participants free the compute their exported state holds outside the process, such as sandboxes.",
+    )
 
 
 class RestoreRequest(CheckpointRequest):
@@ -328,6 +333,13 @@ class CheckpointParticipant(ABC):
     async def forget(self, rollout_ids: list[str]) -> None:
         """Stop refusing these rollouts' retired attempts. Override to tell other processes as well."""
         self.retired.forget(rollout_ids)
+
+    async def park_exported(self, records: list[CheckpointRecord]) -> None:
+        """Free the compute the exported state of ``records`` holds outside the process, such as sandboxes.
+
+        Called once a commit with ``stop`` is durable: the controller stops instead of resuming, and a restore
+        rebuilds that state from the checkpoint. Default: nothing is held outside the process.
+        """
 
     async def restored_pending(self) -> list[EpisodeId]:
         """Restored episodes whose replacement has not started here yet, as the attempts that continue them.
@@ -659,6 +671,16 @@ class ParticipantControlPlane:
             # Restored state outside the scope was not exported, so a retry after a failure here returns the same
             # manifest.
             await _within(request, self._delete_unscoped(request.episode_ids))
+            if request.stop:
+                # The checkpoint is durable; what the stopped process leaves running is a cost, not a loss.
+                try:
+                    await _within(request, self.participant.park_exported(records))
+                except Exception:
+                    LOGGER.warning(
+                        "checkpoint %s: parking the exported state for the stop failed",
+                        request.checkpoint_id,
+                        exc_info=True,
+                    )
             self.phase = CheckpointPhase.COMMITTED
             result = {
                 "phase": self.phase.value,
