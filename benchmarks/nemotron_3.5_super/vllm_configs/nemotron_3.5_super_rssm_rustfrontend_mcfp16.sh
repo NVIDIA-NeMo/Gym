@@ -12,7 +12,6 @@ PREFILL_PROFILE_STEPS="${PREFILL_PROFILE_STEPS:-20}"
 PREFILL_PROFILE_DELAY_SECONDS="${PREFILL_PROFILE_DELAY_SECONDS:-300}"
 
 GYM_MODEL_PARAMS=(
-    "++model_endpoint_readiness_timeout_seconds=1200"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"
 )
