@@ -14,6 +14,7 @@
 # limitations under the License.
 import importlib.metadata
 import os
+import re
 import shlex
 import sys
 from os import environ
@@ -79,6 +80,30 @@ def _get_nemo_gym_install_flags() -> str:
         flags += f"--index-strategy {index_strategy} "
 
     return flags
+
+
+# A requirements line that installs Gym from the checkout root, e.g. `-e nemo-gym[dev,sandbox] @ ../../`.
+_LOCAL_NEMO_GYM_REQUIREMENT_RE = re.compile(
+    r"^\s*(?:-e\s+)?nemo[-_]gym\s*(?:\[(?P<extras>[^\]]*)\])?\s*@\s*\.\./\.\./?\s*(?:#.*)?$"
+)
+
+
+def _local_nemo_gym_extras(requirements_fpath: Path) -> str:
+    """The extras a server requests on its local Gym requirement, formatted as `[a,b]`, or "" for none.
+
+    Installs from PyPI replace the server's `nemo-gym[...] @ ../../` line with a `nemo-gym` requirement, so
+    its extras must be carried over or their dependencies are never installed.
+    """
+    extras: list[str] = []
+    for line in requirements_fpath.read_text().splitlines():
+        match = _LOCAL_NEMO_GYM_REQUIREMENT_RE.match(line)
+        if match is None or not match.group("extras"):
+            continue
+        for extra in match.group("extras").split(","):
+            extra = extra.strip()
+            if extra and extra not in extras:
+                extras.append(extra)
+    return f"[{','.join(extras)}]" if extras else ""
 
 
 def _get_nemo_gym_version_spec(is_editable_install: bool) -> str:
@@ -177,8 +202,9 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 # with support for pre-releases, custom indexes, and version pinning
                 install_flags = _get_nemo_gym_install_flags()
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
+                extras = _local_nemo_gym_extras(dir_path / "requirements.txt")
                 install_cmd = (
-                    f"""(echo 'nemo-gym{version_spec}' && grep -v -F '../..' requirements.txt) | """
+                    f"""(echo 'nemo-gym{extras}{version_spec}' && grep -v -F '../..' requirements.txt) | """
                     f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}{override_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
                 )
         else:

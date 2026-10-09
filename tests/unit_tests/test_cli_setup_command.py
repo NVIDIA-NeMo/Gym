@@ -28,10 +28,13 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.cli._venv_setup
 import nemo_gym.cli.setup_command
+from nemo_gym import PARENT_DIR
 from nemo_gym.cli._venv_setup import SETUP_COMPLETE_MARKER, setup_environment
 from nemo_gym.cli.setup_command import (
+    _LOCAL_NEMO_GYM_REQUIREMENT_RE,
     _get_nemo_gym_install_flags,
     _get_nemo_gym_version_spec,
+    _local_nemo_gym_extras,
     get_venv_path,
     run_command,
     setup_env_command,
@@ -245,6 +248,58 @@ class TestCLISetupCommandSetupEnvCommand:
             )
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install nemo-gym=={version} && uv pip install --no-sources '-e .' ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == self._installation_command(actual_command)
+
+    def test_installs_from_pypi_keeps_requested_extras(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        server_dir = (tmp_path / "first_level" / "second_level").absolute()
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text("-e nemo-gym[dev,sandbox] @ ../../\npytest\n")
+        for name in ("NEMO_GYM_ALLOW_PRERELEASE", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_INDEX_STRATEGY"):
+            monkeypatch.delenv(name, raising=False)
+
+        with patch("importlib.metadata.version", return_value="0.3.0"):
+            actual_command = setup_env_command(
+                dir_path=server_dir,
+                global_config_dict=self._debug_global_config_dict(tmp_path),
+                prefix="my server name",
+            )
+
+        assert "(echo 'nemo-gym[dev,sandbox]==0.3.0' && grep -v -F '../..' requirements.txt)" in (
+            self._installation_command(actual_command)
+        )
+
+
+class TestLocalNemoGymExtras:
+    @pytest.mark.parametrize(
+        ("requirements", "expected"),
+        [
+            ("-e nemo-gym[dev] @ ../../\n", "[dev]"),
+            ("-e nemo-gym[dev,sandbox] @ ../..\n", "[dev,sandbox]"),
+            ("-e nemo-gym[ dev , sandbox ] @ ../../  # local checkout\n", "[dev,sandbox]"),
+            ("nemo_gym[sandbox] @ ../../\n", "[sandbox]"),
+            ("-e nemo-gym @ ../../\n", ""),
+            ("-e ../../\n", ""),
+            ("-e ../../benchmarks/automationbench\n", ""),
+            ("pytest\n", ""),
+            ("-e nemo-gym[dev] @ ../../\n-e nemo-gym[sandbox,dev] @ ../../\n", "[dev,sandbox]"),
+        ],
+    )
+    def test_reads_extras_from_the_local_gym_requirement(
+        self, tmp_path: Path, requirements: str, expected: str
+    ) -> None:
+        requirements_fpath = tmp_path / "requirements.txt"
+        requirements_fpath.write_text(requirements)
+
+        assert _local_nemo_gym_extras(requirements_fpath) == expected
+
+    def test_recognizes_every_shipped_local_gym_requirement(self) -> None:
+        unrecognized = [
+            f"{path.relative_to(PARENT_DIR)}: {line.strip()}"
+            for path in PARENT_DIR.glob("*/*/requirements.txt")
+            for line in path.read_text().splitlines()
+            if "nemo-gym" in line and "../.." in line and not _LOCAL_NEMO_GYM_REQUIREMENT_RE.match(line)
+        ]
+
+        assert not unrecognized, "PyPI installs would drop the extras on these lines:\n" + "\n".join(unrecognized)
 
 
 @pytest.fixture
