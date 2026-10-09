@@ -230,11 +230,19 @@ class _UntypedLateWriteSink(_MemorySink):
         await super().put(entry)
 
 
-@pytest.mark.parametrize("sink_type", [_LateMarkSink, _UntypedLateWriteSink])
-def test_conformance_rejects_a_backend_that_does_not_fence_late_writes(sink_type):
+@pytest.mark.parametrize(
+    ("sink_type", "detail"),
+    [
+        (_LateMarkSink, "a late mark_incomplete after retirement was accepted"),
+        (_UntypedLateWriteSink, "a late put after retirement raised RuntimeError, not TokenCaptureRetiredError"),
+    ],
+)
+def test_conformance_rejects_a_backend_that_does_not_fence_late_writes(sink_type, detail):
     backend = _MemoryBackend()
-    with pytest.raises(ConformanceError, match="unconditional_retirement"):
+    with pytest.raises(ConformanceError) as raised:
         asyncio.run(run_conformance(lambda: sink_type(backend), lambda: _MemorySource(backend)))
+    assert raised.value.check_name == "unconditional_retirement"
+    assert raised.value.detail == detail
 
 
 class _FrozenNotRetiredSink(_MemorySink):
@@ -257,8 +265,13 @@ class _BrokenFreezeAfterRetireSource(_MemorySource):
 
 def test_conformance_requires_the_retired_error_for_late_writes():
     backend = _MemoryBackend()
-    with pytest.raises(ConformanceError, match="unconditional_retirement"):
+    with pytest.raises(ConformanceError) as raised:
         asyncio.run(run_conformance(lambda: _FrozenNotRetiredSink(backend), lambda: _MemorySource(backend)))
+    assert raised.value.check_name == "unconditional_retirement"
+    assert (
+        raised.value.detail
+        == "a late put after retirement raised TokenCaptureFrozenError, not TokenCaptureRetiredError"
+    )
 
 
 def test_conformance_does_not_treat_a_broken_freeze_as_an_empty_rollout():
