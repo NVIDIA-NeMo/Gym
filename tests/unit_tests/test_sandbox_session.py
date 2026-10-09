@@ -45,6 +45,8 @@ async def test_completed_execution_captures_once_before_release(session, owned):
     session.owns_sandbox = owned
     collect = AsyncMock(return_value="transcript")
     assert await execute(session, collect=collect) == "transcript"
+    launch = session.sandbox.exec.await_args.args[0]
+    assert ("--preserve-descendants-on-success" in launch) is (not owned)
     assert session.cleanup == RECEIPT
     assert session.artifacts == "transcript"
     session.sandbox.stop.assert_not_awaited()

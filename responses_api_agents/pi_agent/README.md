@@ -131,10 +131,15 @@ configuration must not replace the agent's cap with a larger value. Enforcement 
 4. Environment Server calls the rollout-prefixed `/v1/responses` route with the agent-session cookie.
 5. Pi runs in the sandbox, uses its built-in tools, and sends Chat Completions to
    the rollout-prefixed Gym model-server URL. The sandbox must be able to reach that URL.
-6. Agent close confirms supervisor and descendant cleanup, returns observations,
+6. Agent close confirms harness termination, returns observations,
    removes session files, and disconnects. A failed or missing cleanup receipt blocks close.
 7. Environment Server asks Resources to verify and close the task session. The benchmark
    owns its verification procedure and sandbox teardown.
+
+After a successful harness exit in a borrowed sandbox, task processes remain alive
+for verification; Resources stops them when it destroys the sandbox. Services must
+not depend on the agent's temporary session files. Timeout, cancellation, failed exits,
+and agent-owned sandboxes retain full descendant cleanup.
 
 Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
 The adapter stages its worker input and collects its own output. The shared session

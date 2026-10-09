@@ -139,8 +139,11 @@ Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
 `worker_exit_code_unavailable` observation gaps. Positive cleanup confirmation remains
 required; the adapter validates the captured terminal events without inventing an exit code.
 
-One shared Linux supervisor per activation fences delayed launches and kills/reaps detached
-tool descendants. Close confirms its cleanup receipt before cancelling provider execution,
+One shared Linux supervisor per activation fences delayed launches. After a successful
+harness exit in a borrowed sandbox, task processes remain alive for verification;
+Resources stops them when it destroys the sandbox. Services must not depend on the
+agent's temporary session files. Timeout, cancellation, failed exits, and agent-owned
+sandboxes retain full descendant cleanup. Close confirms the receipt before cancelling provider execution,
 then removes adapter-owned files and disconnects. Missing/negative cleanup evidence blocks
 verification and retains state for retry. The borrowing agent never destroys the sandbox.
 Cleanup coordinates lifecycle; it is not a security boundary against hostile task code.

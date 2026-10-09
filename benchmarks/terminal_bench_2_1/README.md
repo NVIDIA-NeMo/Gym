@@ -130,9 +130,12 @@ Also inspect failure sidecars and confirm sandbox teardown. An incomplete evalua
 reward 0 is an infrastructure failure, not a valid model score. A successful collector exit
 alone does not establish a passing smoke; one task does not establish a benchmark baseline.
 
-The shared supervisor stops task processes started by the agent before verification.
-Tasks that require a service to remain running are not yet supported reliably;
-the file-producing smoke does not validate that case.
+After a successful harness exit, the shared supervisor preserves task processes in
+the Resources-owned sandbox so verification can inspect running services. Resources
+stops the sandbox after verification. Timeout, cancellation, and failed harness exits
+still stop descendants. Services must use task-owned files, not the agent's temporary
+session directory, which agent close removes. A file-producing smoke alone does not
+validate service-dependent tasks.
 
 ## Codex in a task sandbox
 
@@ -242,6 +245,9 @@ Also inspect failure sidecars and confirm sandbox teardown. An incomplete evalua
 reward 0 is an infrastructure failure, not a valid model score. A successful collector exit
 alone does not establish a passing smoke; one task does not establish a benchmark baseline.
 
-The inherited shared supervisor stops task processes started by the agent before
-verification. Tasks that require a service to remain running are not yet supported
-reliably; the file-producing smoke does not validate that case.
+After a successful harness exit, the shared supervisor preserves task processes in
+the Resources-owned sandbox so verification can inspect running services. Resources
+stops the sandbox after verification. Timeout, cancellation, and failed harness exits
+still stop descendants. Services must use task-owned files, not the agent's temporary
+session directory, which agent close removes. A file-producing smoke alone does not
+validate service-dependent tasks.

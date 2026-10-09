@@ -4,7 +4,9 @@
 """Standalone Linux process supervisor to upload beside a sandboxed harness.
 
 Uses only the standard library; Gym need not be installed in the task sandbox.
-The receipt confirms descendant cleanup independently of the harness result.
+The receipt confirms harness termination independently of its result. Borrowed
+sandboxes may retain descendants after success for Resources-owned verification;
+otherwise cleanup includes all descendants.
 """
 
 from __future__ import annotations
@@ -27,7 +29,11 @@ CLEANUP_PHASE_COUNT = 3
 
 
 class CleanupReceipt(TypedDict):
-    """Outcome written only after supervision and bounded cleanup finish."""
+    """Outcome after harness termination and the requested descendant policy finish.
+
+    ``cleanup_confirmed`` does not mean the task sandbox is empty: successful
+    borrowed executions can leave task processes for the owner's verifier.
+    """
 
     cleanup_confirmed: bool
     return_code: int | None
@@ -70,8 +76,14 @@ def _supervise(
     timeout: float,
     cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT,
     stop_path: Path | None = None,
+    preserve_descendants_on_success: bool = False,
 ) -> CleanupReceipt:
-    """Enforce a harness deadline, then acknowledge cleanup after all descendants exit."""
+    """Enforce a harness deadline and clean up according to sandbox ownership.
+
+    A Resources-owned sandbox can retain task services after a successful harness
+    exit. Failure, timeout, and cancellation always drain descendants. The sandbox
+    owner must tear down retained processes after verification.
+    """
     process = None
     subreaping = False
     stopping = False
@@ -115,13 +127,23 @@ def _supervise(
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
+            preserve_descendants = (
+                preserve_descendants_on_success
+                and process is not None
+                and process.poll() == 0
+                and receipt["error"] is None
+                and not receipt["timed_out"]
+                and not stopping
+                and not (stop_path is not None and stop_path.exists())
+            )
             if process is not None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                if not preserve_descendants:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                 receipt["return_code"] = process.wait(timeout=cleanup_timeout)
-            if subreaping:
+            if subreaping and not preserve_descendants:
                 # Popen can fail after creating a child, before returning its handle.
                 _drain_children(cleanup_timeout)
             receipt["cleanup_confirmed"] = True
@@ -144,12 +166,19 @@ def main() -> int:
     parser.add_argument("--cleanup-timeout", type=_positive_seconds, default=DEFAULT_CLEANUP_TIMEOUT)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--stop-file", type=Path)
+    parser.add_argument("--preserve-descendants-on-success", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("a harness command is required after --")
-    receipt = _supervise(command, timeout=args.timeout, cleanup_timeout=args.cleanup_timeout, stop_path=args.stop_file)
+    receipt = _supervise(
+        command,
+        timeout=args.timeout,
+        cleanup_timeout=args.cleanup_timeout,
+        stop_path=args.stop_file,
+        preserve_descendants_on_success=args.preserve_descendants_on_success,
+    )
     temporary = args.receipt.with_suffix(".tmp")
     temporary.write_text(json.dumps(receipt))
     temporary.replace(args.receipt)

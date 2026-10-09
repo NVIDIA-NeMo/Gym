@@ -39,8 +39,16 @@ def test_supervisor_rejects_invalid_deadlines(tmp_path: Path, timeout: str) -> N
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper and /proc are required")
-@pytest.mark.parametrize("ending", ["normal", "crash", "timeout", "cancel", "grace"])
-def test_supervisor_reaps_detached_tools_and_preserves_term_grace(tmp_path: Path, ending: str) -> None:
+@pytest.mark.parametrize(
+    "ending,preserve",
+    [
+        (ending, preserve)
+        for ending in ("normal", "crash", "timeout", "cancel", "grace")
+        for preserve in (False, True)
+        if not (ending == "normal" and preserve)
+    ],
+)
+def test_supervisor_reaps_detached_tools_and_preserves_term_grace(tmp_path: Path, ending: str, preserve: bool) -> None:
     uploaded = tmp_path / "process_supervisor.py"
     shutil.copyfile(SUPERVISOR, uploaded)
     worker = tmp_path / "worker.py"
@@ -70,6 +78,7 @@ def test_supervisor_reaps_detached_tools_and_preserves_term_grace(tmp_path: Path
             "0.5",
             "--receipt",
             str(tmp_path / "cleanup.json"),
+            *(["--preserve-descendants-on-success"] if preserve else []),
             "--",
             sys.executable,
             "-I",
@@ -111,6 +120,74 @@ def test_supervisor_reaps_detached_tools_and_preserves_term_grace(tmp_path: Path
                     os.kill(pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper and /proc are required")
+@pytest.mark.parametrize("detached", [False, True])
+def test_borrowed_sandbox_preserves_service_for_verification(tmp_path: Path, detached: bool) -> None:
+    # Use a parent subreaper to emulate Resources ownership without leaving orphans
+    # on the test host. Both ordinary background jobs and setsid services must survive.
+    driver = r"""
+import ctypes, json, os, pathlib, signal, subprocess, sys, time, urllib.request
+assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
+supervisor, root, detached = sys.argv[1], pathlib.Path(sys.argv[2]), sys.argv[3] == 'True'
+service = root / 'service.py'
+service.write_text("from http.server import HTTPServer, BaseHTTPRequestHandler\n"
+                  "from pathlib import Path\n"
+                  "class Handler(BaseHTTPRequestHandler):\n"
+                  "    def do_GET(self):\n"
+                  "        self.send_response(200); self.end_headers(); self.wfile.write(b'task solved')\n"
+                  "server = HTTPServer(('127.0.0.1', 0), Handler)\n"
+                  "Path('port').write_text(str(server.server_port))\n"
+                  "server.serve_forever()\n")
+worker = root / 'worker.py'
+worker.write_text("import pathlib, subprocess, sys, time\n"
+                 "child = subprocess.Popen([sys.executable, 'service.py'], "
+                 "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=" + str(detached) + ")\n"
+                 "pathlib.Path('service.pid').write_text(str(child.pid))\n"
+                 "deadline = time.monotonic() + 5\n"
+                 "while not pathlib.Path('port').exists():\n"
+                 "    assert child.poll() is None and time.monotonic() < deadline\n"
+                 "    time.sleep(0.01)\n")
+try:
+    result = subprocess.run([sys.executable, '-I', supervisor, '--timeout', '10',
+        '--cleanup-timeout', '1', '--preserve-descendants-on-success',
+        '--receipt', str(root / 'cleanup.json'), '--', sys.executable, str(worker)],
+        cwd=root, capture_output=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((root / 'cleanup.json').read_text())
+    assert receipt == {'cleanup_confirmed': True, 'return_code': 0, 'error': None, 'timed_out': False}
+    port = int((root / 'port').read_text())
+    with urllib.request.urlopen('http://127.0.0.1:%d/' % port, timeout=2) as response:
+        assert response.read() == b'task solved'
+finally:
+    children = pathlib.Path('/proc/self/task/%d/children' % os.getpid())
+    for pid in children.read_text().split():
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        while True:
+            os.waitpid(-1, 0)
+    except ChildProcessError:
+        pass
+if (root / 'service.pid').exists():
+    try:
+        os.kill(int((root / 'service.pid').read_text()), 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError('Resources teardown left the task service alive')
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", driver, str(SUPERVISOR), str(tmp_path), str(detached)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=25,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper contract")
