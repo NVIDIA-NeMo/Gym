@@ -1,12 +1,50 @@
 # NeMo multi-harness training: cross-cluster handoff
 
-Last reconciled: **2026-10-08 17:37 PDT**
+Last reconciled: **2026-10-08 19:18 PDT**
 
 This is the operational handoff for resuming the NeMo Gym + NeMo RL
 multi-harness work on another cluster. It records what is pushed, what has
 actually been validated, the remaining blocker, the source artifacts, and the
 exact acceptance gates. The longer design and code map are in
 [`fern/versions/latest/pages/training-tutorials/multi-harness-training-handoff.mdx`](fern/versions/latest/pages/training-tutorials/multi-harness-training-handoff.mdx).
+
+## Current live status
+
+- Gym branch tip `7f8454ac1` and RL branch tip `68ff2f02` are pushed to
+  `ehosseiniasl/multi-harness-training-routing` in their respective forks.
+- Gym commits `7c8e20775`, `0f474dc80`, and `7f8454ac1` address the token
+  lineage blocker exposed by OpenClaw: assistant reasoning normalization,
+  exact file-ledger mismatch diagnostics, and a fail-closed retry across the
+  ledger-publication race. The retry still requires both the assistant
+  fingerprint and context digest to match.
+- Focused coverage passes for the new behavior: 14 conversation/golden-vector
+  tests, two lineage reasoning tests, three file-ledger diagnostic tests, the
+  publication-race regression, Ruff, Ruff format, and `git diff --check`.
+- Nano job `2180210`, W&B run
+  [`2iseuhsj`](https://wandb.ai/adlr/multi-harness-RL/runs/2iseuhsj), is a
+  diagnostic failure. It proved 11/11 services, initial refit, and live
+  four-harness fan-out, then correctly rejected one OpenClaw sibling at step 0
+  because its response parent was unresolved. It did not perform an optimizer
+  step and is not acceptance evidence.
+- Replacement Nano job `2180348`, W&B run
+  [`ra55t6cy`](https://wandb.ai/adlr/multi-harness-RL/runs/ra55t6cy), is live on
+  two nodes with the pushed retry fix. As of 19:18 PDT it had loaded all 16
+  task-by-harness groups, brought up all services, completed the initial
+  policy-to-generation refit, and started rollouts. Its final result is not yet
+  known; do not count it as passing until the auditor and all gates below pass.
+- The exact live artifact directory is
+  `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/validation/anyterminal-p0/nano-omni-sync2-debug-grpo/run-nano-omni-sync2-debug-20261008-191036`.
+  The driver log is
+  `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/github_repos/nemorl-multi-harness/2180348-logs/ray-driver.log`.
+- Acceptance remains blocked on a complete Nano run followed by the requested
+  Super 8-node synchronous and Super 16-node asynchronous runs. Both Super
+  runs must use
+  `/lustre/fsw/portfolios/nemotron/users/ehosseiniasl/checkpoints/super35-journey-mopd2-identity-upsampling-from-my-step30-yifuw-001_boosted_mtp`
+  and online W&B project `adlr/multi-harness-RL`.
+
+The older evidence below is retained as failure history. When its wording says
+"newest," interpret that relative to its section; this live-status section is
+authoritative.
 
 ## Stop line
 
@@ -139,7 +177,7 @@ Use branch `ehosseiniasl/multi-harness-training-routing` in both repositories.
 
 | Repository | Pull request | Minimum implementation commit |
 |---|---|---|
-| NeMo Gym | [NVIDIA-NeMo/Gym#4082](https://github.com/NVIDIA-NeMo/Gym/pull/4082) | `845f13a1e` |
+| NeMo Gym | [NVIDIA-NeMo/Gym#4082](https://github.com/NVIDIA-NeMo/Gym/pull/4082) | `7f8454ac1` |
 | NeMo RL | [NVIDIA-NeMo/RL#4521](https://github.com/NVIDIA-NeMo/RL/pull/4521) | `68ff2f02` |
 
 The Gym branch tip will be newer after committing this handoff refresh. Fetch
@@ -152,7 +190,7 @@ git remote add contributor https://github.com/ehosseiniasl/Gym.git
 git fetch contributor ehosseiniasl/multi-harness-training-routing
 git switch -c ehosseiniasl/multi-harness-training-routing \
   --track contributor/ehosseiniasl/multi-harness-training-routing
-git merge-base --is-ancestor 845f13a1e HEAD
+git merge-base --is-ancestor 7f8454ac1 HEAD
 
 cd ..
 git clone https://github.com/NVIDIA-NeMo/RL.git nemorl-multi-harness
@@ -446,6 +484,8 @@ Do not accept a run unless all of these hold:
 
 | Slurm job | W&B | What it proves | Status |
 |---|---|---|---|
+| `2180348` | [`ra55t6cy`](https://wandb.ai/adlr/multi-harness-RL/runs/ra55t6cy) | Replacement Nano sync run on Gym `7f8454ac1`; loaded 16 groups, completed service/model initialization and initial refit, then began four-harness rollout collection. | Running at last reconciliation; audit before accepting |
+| `2180210` | [`2iseuhsj`](https://wandb.ai/adlr/multi-harness-RL/runs/2iseuhsj) | Confirmed real four-harness rollout and fail-closed rejection of an unresolved OpenClaw response parent; isolated reasoning normalization from a ledger-publication race. | Failed safely at step 0; no optimizer step |
 | `2179399` | [`plth7xte`](https://wandb.ai/adlr/multi-harness-RL/runs/plth7xte) | Real Nano sync launch with all 16 fan-out groups, healthy vLLM parser-plugin loading, initial refit, and all four harnesses on the same task. Exposed OpenClaw compaction request rejection plus unresolved token-capture parentage. | Diagnostic; first batch incomplete at reconciliation time |
 | `2179252` | none accepted | Reproduced Ray-worker cwd sensitivity in relative parser-plugin resolution. Led to RL commit `68ff2f02`. | Stopped; invalid for acceptance |
 | `2179143` | none | Superseded queued Nano attempt. | No acceptance evidence |
@@ -490,7 +530,8 @@ of reusing these IDs.
 
 ## Resume checklist
 
-1. Fetch both branch tips and pass the minimum-commit ancestry checks.
+1. Fetch both branch tips and verify Gym contains `7f8454ac1` and RL contains
+   `68ff2f02` with the minimum-commit ancestry checks.
 2. Copy/remap the validation bundle, outer container, caches, four task images,
    dataset, and model checkpoint.
 3. Restore secrets without printing them and confirm W&B is online at
@@ -514,6 +555,7 @@ of reusing these IDs.
 Until steps 8 and 9 pass, the correct project status is: **multi-harness fan-out
 implemented; Pi and OpenClaw runtime/config fixes committed and focused-tested;
 OpenClaw's exact standalone tool loop passes; the NeMo RL finalizer/replay race
-and vLLM parser-plugin path are fixed and regression-tested; live Nano fan-out
-reaches all four harnesses but OpenClaw compaction/parent linkage remains a
-TMPE blocker; Nano and Super training validation remain pending**.
+and vLLM parser-plugin path are fixed and regression-tested; OpenClaw token
+lineage normalization, diagnostics, and the ledger-publication retry are pushed;
+the replacement Nano validation is running; Nano and Super training validation
+remain pending**.
