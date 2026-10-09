@@ -86,6 +86,9 @@ class ResourcesSessionHooks(Protocol):
       are still running and can be stopped here.
     - ``retire_session_state`` runs when an attempt is discarded. Stop its sandbox. It runs again for the same
       session if a retire was cut short, so it must tolerate state it already freed.
+    - ``resume_session_states`` runs in the background when admission reopens after a commit, with the sessions
+      that commit exported. Resume their sandboxes there, so the first tool call after a checkpoint does not pay
+      for it. Optional and best effort: a failure is logged, and the sandbox must still resume on its next use.
 
     Whatever a checkpoint keeps outside Gym, such as snapshots, is the server's to delete once no checkpoint
     the controller may restore refers to it.
@@ -98,6 +101,8 @@ class ResourcesSessionHooks(Protocol):
         """Validate every state, then install all of them; never install a partial set."""
 
     async def retire_session_state(self, session_id: str) -> None: ...
+
+    async def resume_session_states(self, session_ids: list[str]) -> None: ...
 
 
 class ResourcesParticipant(CheckpointParticipant):
@@ -129,6 +134,9 @@ class ResourcesParticipant(CheckpointParticipant):
         self._owners: dict[str, Optional[str]] = {}
         # Restored sessions no request has used yet; a commit that no longer continues their episode retires them.
         self._restored_pending: set[str] = set()
+        # Sessions the last commit exported: the ones whose state outside the process a resume brings back.
+        self._exported: set[str] = set()
+        self._resume_task: Optional[asyncio.Task] = None
 
     def admit(self, session_id: Optional[str], path: str) -> None:
         # A close is never refused: it is how the server frees a session's state.
@@ -169,6 +177,16 @@ class ResourcesParticipant(CheckpointParticipant):
     async def open_admission(self) -> None:
         self.accepting = True
         self._open.set()
+        exported, self._exported = sorted(self._exported), set()
+        if exported and self.mode == "exported":
+            # In the background: resume must reopen admission within its deadline whatever the backend does.
+            self._resume_task = asyncio.create_task(self._resume_exported(exported))
+
+    async def _resume_exported(self, session_ids: list[str]) -> None:
+        try:
+            await self.hooks.resume_session_states([s for s in session_ids if s in self._sessions])
+        except Exception:
+            LOGGER.warning("resuming the exported sessions' state after the checkpoint failed", exc_info=True)
 
     def readiness(self) -> PrepareReport:
         restarts = (
@@ -249,6 +267,7 @@ class ResourcesParticipant(CheckpointParticipant):
                 for session_id, episode_id in sessions
             ]
         states = await self.hooks.export_session_states([session_id for session_id, _ in sessions])
+        self._exported = {session_id for session_id, _ in sessions if session_id in states}
         records = []
         for session_id, episode_id in sessions:
             if session_id not in states:

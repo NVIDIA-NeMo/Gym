@@ -859,6 +859,10 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
     async def retire_session_state(self, session_id: str) -> None:
         await self._cleanup_session(session_id, strict=True)
 
+    async def resume_session_states(self, session_ids: List[str]) -> None:
+        if self._sandboxes is not None:
+            await self._sandboxes.resume_paused([s for s in session_ids if s in self._sessions])
+
     async def _shutdown_all_sessions(self) -> None:
         for session_id in list(self._sessions):
             await self._cleanup_session(session_id)

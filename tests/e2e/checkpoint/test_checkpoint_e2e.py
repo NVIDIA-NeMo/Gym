@@ -1052,6 +1052,8 @@ async def test_a_sandbox_that_moved_on_after_the_checkpoint_is_rebuilt_from_its_
         # "two", which lands in the live sandbox; the call after that is held.
         participants = await deployment.participants()
         await coordination.resume(participants, "c1", deadline_ts=deadline())
+        # The resume phase itself resumes the paused sandbox, before any tool call needs it.
+        await wait_until(lambda: deployment.sandbox_state()["boxes"][snapshot["sandboxId"]]["state"] == "running")
         deployment.backend("/_ctl/hold", {"after_calls": 2, "release_held": True})
         await wait_until(lambda: len(deployment.backend_calls()) == 3)
         await wait_until(

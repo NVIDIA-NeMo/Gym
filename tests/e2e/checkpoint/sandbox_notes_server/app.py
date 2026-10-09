@@ -90,6 +90,9 @@ class SandboxNotesResourcesServer(SimpleResourcesServer):
     async def retire_session_state(self, session_id: str) -> None:
         await self._sandboxes.stop(session_id)
 
+    async def resume_session_states(self, session_ids: list[str]) -> None:
+        await self._sandboxes.resume_paused(session_ids)
+
 
 if __name__ == "__main__":
     SandboxNotesResourcesServer.run_webserver()
