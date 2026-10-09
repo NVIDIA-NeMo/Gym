@@ -1,6 +1,6 @@
 # NeMo multi-harness training: cross-cluster handoff
 
-Last reconciled: **2026-10-08 19:18 PDT**
+Last reconciled: **2026-10-08 19:55 PDT**
 
 This is the operational handoff for resuming the NeMo Gym + NeMo RL
 multi-harness work on another cluster. It records what is pushed, what has
@@ -10,16 +10,19 @@ exact acceptance gates. The longer design and code map are in
 
 ## Current live status
 
-- Gym branch tip `7f8454ac1` and RL branch tip `68ff2f02` are pushed to
+- Gym branch tip `739cfac02` and RL branch tip `68ff2f02` are pushed to
   `ehosseiniasl/multi-harness-training-routing` in their respective forks.
-- Gym commits `7c8e20775`, `0f474dc80`, and `7f8454ac1` address the token
-  lineage blocker exposed by OpenClaw: assistant reasoning normalization,
-  exact file-ledger mismatch diagnostics, and a fail-closed retry across the
-  ledger-publication race. The retry still requires both the assistant
-  fingerprint and context digest to match.
-- Focused coverage passes for the new behavior: 14 conversation/golden-vector
-  tests, two lineage reasoning tests, three file-ledger diagnostic tests, the
-  publication-race regression, Ruff, Ruff format, and `git diff --check`.
+- Gym commits `7c8e20775`, `0f474dc80`, `7f8454ac1`, and `739cfac02` address
+  the token-lineage blockers exposed by OpenClaw: assistant reasoning
+  normalization, exact file-ledger mismatch diagnostics, a fail-closed retry
+  across the ledger-publication race, and narrowly scoped normalization of
+  OpenClaw's rewritten `chatcmpl-tool-<hex>` IDs. Fingerprint version 4 treats
+  that form as equivalent to `chatcmpltool<hex>` while arbitrary IDs remain
+  byte-significant.
+- Focused coverage at `739cfac02` passes: 34 fingerprint/golden/staging tests,
+  six targeted resolver/tool tests, all 46 token-capture ledger tests, Ruff,
+  Ruff format, and `git diff --check`. A captured served/echoed OpenClaw pair
+  now has equal canonical IDs and equal fingerprints.
 - Nano job `2180210`, W&B run
   [`2iseuhsj`](https://wandb.ai/adlr/multi-harness-RL/runs/2iseuhsj), is a
   diagnostic failure. It proved 11/11 services, initial refit, and live
@@ -27,15 +30,31 @@ exact acceptance gates. The longer design and code map are in
   because its response parent was unresolved. It did not perform an optimizer
   step and is not acceptance evidence.
 - Replacement Nano job `2180348`, W&B run
-  [`ra55t6cy`](https://wandb.ai/adlr/multi-harness-RL/runs/ra55t6cy), is live on
-  two nodes with the pushed retry fix. As of 19:18 PDT it had loaded all 16
-  task-by-harness groups, brought up all services, completed the initial
-  policy-to-generation refit, and started rollouts. Its final result is not yet
-  known; do not count it as passing until the auditor and all gates below pass.
+  [`ra55t6cy`](https://wandb.ai/adlr/multi-harness-RL/runs/ra55t6cy), ended
+  failed before an optimizer update. It proved the publication retry was
+  active and isolated the remaining lineage error: vLLM served tool ID
+  `chatcmpl-tool-863127ed64b40525`, while OpenClaw echoed
+  `chatcmpltool863127ed64b40525`. Commit `739cfac02` is the tested fix.
+- Fresh Nano job `2180485`, W&B run
+  [`dv8ch7n8`](https://wandb.ai/adlr/multi-harness-RL/runs/dv8ch7n8), is live on
+  two nodes with exact Gym head `739cfac02` and RL head `68ff2f02`. As of 19:55
+  PDT it had loaded all 16 task-by-harness groups, started all services,
+  completed the initial refit, and completed two of four optimizer updates.
+  Token capture is healthy: fingerprint version 4 is active, invalid-row rate
+  and poisoned-rollout count are zero, and no `ledger_fingerprint_missing`
+  warnings have recurred. Step 1 had seven valid sequences, nonzero loss and
+  gradient (`loss=-0.1437`, `grad_norm=0.5619`), reward `0.2857`, and no TMPE
+  masking (`max_seq_mult_prob_error=1.0429`).
+- This live run also exposes a separate OpenClaw compaction compatibility gap.
+  Its native anchored-summary calls send `stream=true`, `stream_options`, and
+  `max_tokens=8192` to `/v1/chat/completions`; Gym's non-streaming request
+  schema rejects them with 18 validation errors. OpenClaw currently recovers
+  and the optimizer continues, but this remains a P0 issue to fix and retest.
+  A separate 16,385-token vLLM boundary rejection also remains visible.
 - The exact live artifact directory is
-  `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/validation/anyterminal-p0/nano-omni-sync2-debug-grpo/run-nano-omni-sync2-debug-20261008-191036`.
+  `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/validation/anyterminal-p0/nano-omni-sync2-debug-grpo/run-nano-omni-sync2-debug-20261008-192739`.
   The driver log is
-  `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/github_repos/nemorl-multi-harness/2180348-logs/ray-driver.log`.
+  `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/github_repos/nemorl-multi-harness/2180485-logs/ray-driver.log`.
 - Acceptance remains blocked on a complete Nano run followed by the requested
   Super 8-node synchronous and Super 16-node asynchronous runs. Both Super
   runs must use
@@ -177,7 +196,7 @@ Use branch `ehosseiniasl/multi-harness-training-routing` in both repositories.
 
 | Repository | Pull request | Minimum implementation commit |
 |---|---|---|
-| NeMo Gym | [NVIDIA-NeMo/Gym#4082](https://github.com/NVIDIA-NeMo/Gym/pull/4082) | `7f8454ac1` |
+| NeMo Gym | [NVIDIA-NeMo/Gym#4082](https://github.com/NVIDIA-NeMo/Gym/pull/4082) | `739cfac02` |
 | NeMo RL | [NVIDIA-NeMo/RL#4521](https://github.com/NVIDIA-NeMo/RL/pull/4521) | `68ff2f02` |
 
 The Gym branch tip will be newer after committing this handoff refresh. Fetch
@@ -190,7 +209,7 @@ git remote add contributor https://github.com/ehosseiniasl/Gym.git
 git fetch contributor ehosseiniasl/multi-harness-training-routing
 git switch -c ehosseiniasl/multi-harness-training-routing \
   --track contributor/ehosseiniasl/multi-harness-training-routing
-git merge-base --is-ancestor 7f8454ac1 HEAD
+git merge-base --is-ancestor 739cfac02 HEAD
 
 cd ..
 git clone https://github.com/NVIDIA-NeMo/RL.git nemorl-multi-harness
