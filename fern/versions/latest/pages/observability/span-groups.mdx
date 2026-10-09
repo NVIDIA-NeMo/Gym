@@ -19,13 +19,15 @@ telemetry:
 
 | Preset | Groups | Use When |
 | --- | --- | --- |
-| `default` | `job`, `server`, `http_client`, `rollout` | You want the shape of a run and the cross-process trace, without per-request detail. |
+| `default` | `job`, `startup`, `server`, `http_client`, `rollout` | You want the shape of a run and the cross-process trace, without per-request detail. |
 | `per_rollout` | `server`, `http_client`, `rollout`, `verify`, `agent`, `model_call` | You are debugging where a rollout spends its time. Each rollout is its own trace. |
 | `all` | Every group, including `sandbox` | You are debugging something specific and volume does not matter. |
 
 `default` is deliberately enough on its own to produce one trace per rollout across the
 agent, model, and resources server processes. You do not have to tune anything to get the
 headline behavior.
+
+`per_rollout` omits `startup` because startup happens once per run, not once per rollout.
 
 `per_rollout` omits `job` on purpose. `job` wraps a whole rollout-collection run, so
 including it nests every rollout of that run under one span. That is useful for seeing a
@@ -36,6 +38,7 @@ run's overall shape and unusable for a run with thousands of rollouts.
 | Group | Spans | Emitted By |
 | --- | --- | --- |
 | `job` | `gym.job` | Rollout collection, once per run |
+| `startup` | `gym.startup`, `gym.startup.server`, `gym.server.startup`, `gym.server.startup.worker` and one child span per stage | The supervisor and every server process, once per run |
 | `server` | `GET /...`, `POST /...` | FastAPI auto-instrumentation on every server |
 | `http_client` | `HTTP POST`, `HTTP GET` | `server_utils.request()`, once per outbound call |
 | `rollout` | `gym.rollout` | The agent server's `/run` endpoint |

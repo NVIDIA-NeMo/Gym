@@ -37,6 +37,17 @@ Retrying is provider-internal, so each provider that retries records it from its
 
 All four carry ``nemo.gym.sandbox.provider``.
 
+Server startup
+--------------
+``gym.server.startup_stage_duration_ms`` (histogram): one stage of one server's own startup, recorded by the process that ran it.
+``nemo.gym.startup.stage`` names the stage, and ``nemo.gym.server.worker`` marks a Uvicorn worker of a multi-worker server.
+Each point also carries ``nemo.gym.server.name`` and ``nemo.gym.server.type``.
+Stages are contiguous, so one process's stages add up to the time from its start until it accepts connections.
+A server process starts when the supervisor spawns it, and a worker starts when its main process hands off to Uvicorn.
+The same stages are spans under the ``startup`` span group.
+There is no supervisor-side total, because the supervisor only learns that a server is ready from a periodic health poll.
+That total would be these stages plus polling delay.
+
 HTTP connection pool
 --------------------
 ``gym.http.connection_pool.queue_duration_ms`` (histogram): connection-acquisition wait
@@ -63,6 +74,11 @@ SANDBOX_ACTIVE_INSTRUMENT = "gym.sandbox.active"
 SANDBOX_STARTUP_INSTRUMENT = "gym.sandbox.startup_duration_ms"
 SANDBOX_EXEC_INSTRUMENT = "gym.sandbox.exec_duration_ms"
 SANDBOX_CREATE_RETRY_INSTRUMENT = "gym.sandbox.create_retry_total"
+SERVER_STARTUP_STAGE_INSTRUMENT = "gym.server.startup_stage_duration_ms"
+SERVER_NAME_ATTRIBUTE = "nemo.gym.server.name"
+SERVER_TYPE_ATTRIBUTE = "nemo.gym.server.type"
+STARTUP_STAGE_ATTRIBUTE = "nemo.gym.startup.stage"
+WORKER_ATTRIBUTE = "nemo.gym.server.worker"
 HTTP_CONNECTION_POOL_QUEUE_DURATION_INSTRUMENT = "gym.http.connection_pool.queue_duration_ms"
 HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT = "gym.http.connection_pool.connect_total"
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
@@ -84,6 +100,26 @@ SANDBOX_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
     300_000,
     600_000,
     1_800_000,
+)
+
+#: Milliseconds.
+#: A cold venv install can run for minutes and a local model load for longer, so the boundaries run to an hour.
+#: Init stages of a warm server fall in the lowest buckets.
+SERVER_STARTUP_BOUNDARIES_MS: tuple[float, ...] = (
+    100,
+    250,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    10_000,
+    30_000,
+    60_000,
+    120_000,
+    300_000,
+    600_000,
+    1_800_000,
+    3_600_000,
 )
 
 HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
@@ -221,6 +257,31 @@ def record_sandbox_create_retry(*, provider: str) -> None:
         SANDBOX_CREATE_RETRY_INSTRUMENT,
         "Sandbox-create attempts a provider retried.",
         {SANDBOX_PROVIDER_ATTRIBUTE: provider},
+    )
+
+
+def _server_attributes(server_name: str, server_type: Optional[str]) -> dict[str, Any]:
+    attributes: dict[str, Any] = {SERVER_NAME_ATTRIBUTE: server_name}
+    if server_type:
+        attributes[SERVER_TYPE_ATTRIBUTE] = server_type
+    return attributes
+
+
+def record_server_startup_stage(
+    duration_ms: float, *, stage: str, server_name: str, server_type: Optional[str], worker: bool = False
+) -> None:
+    """Record one stage of one server's own startup, from the process that ran it.
+
+    ``worker`` is true for a Uvicorn worker of a multi-worker server.
+    A worker's stages are timed separately from its main process's.
+    """
+    _record_histogram(
+        SERVER_STARTUP_STAGE_INSTRUMENT,
+        "ms",
+        "Wall-clock time of one stage of a server process's startup.",
+        duration_ms,
+        _server_attributes(server_name, server_type) | {STARTUP_STAGE_ATTRIBUTE: stage, WORKER_ATTRIBUTE: worker},
+        boundaries=SERVER_STARTUP_BOUNDARIES_MS,
     )
 
 

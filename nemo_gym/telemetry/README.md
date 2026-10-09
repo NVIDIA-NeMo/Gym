@@ -25,7 +25,7 @@ Everything else here is supporting work for that.
 | Which processes export | rank filter | rank filter | **every server process** |
 | The hard part | where to put a span | driver/worker split | **cross-process context propagation** |
 
-Gym's servers share no memory and inherit no handle. The orchestrator
+Gym's servers share no memory and inherit no handle. The supervisor
 (`gym env start` / `gym env test`) translates the `telemetry:` config block into
 `NEMO_GYM_OTEL_*` environment variables *before* spawning anything, and each server
 process reads that environment back. That is the whole of the coordination.
@@ -43,8 +43,9 @@ to NeMo-RL.
 | File | Role |
 | --- | --- |
 | `config.py` | `TelemetryConfig` — the `telemetry:` block. Imports pydantic only. |
-| `setup.py` | Lifecycle: `configure_telemetry_env` (orchestrator), `init_telemetry` (per server process), `get_telemetry`, `shutdown_telemetry`. |
+| `setup.py` | Lifecycle: `configure_telemetry_env` (supervisor), `init_telemetry` (per server process), `get_telemetry`, `shutdown_telemetry`. |
 | `span_groups.py` | `GymSpanGroup` — Gym's groups and the `default` / `per_rollout` presets, registered with nemo-lens's `SpanRegistry` at import. |
+| `startup.py` | Server startup stages: per-server stage spans and histograms, and the supervisor spans that parent them. |
 | `metrics.py` | Wrapper over nemo-lens's `gym.*` instruments, with a stated position on each. |
 | `memory.py` | Centralized host and logical-server process-tree memory sampling. |
 | `_fallbacks.py` | The single import point for instrumentation primitives. |
@@ -87,9 +88,9 @@ nemo-lens's `record_gym_metrics` records **without attributes** at the pinned co
 `gym.server.request_duration_ms` is therefore deliberately unused — undimensioned, it
 would merge every endpoint of every server type into one histogram. The FastAPI
 instrumentor's `http.server.request.duration`, dimensioned by route/method/status, is used
-instead. `gym.servers.active` is a gauge and is written by the orchestrator only.
+instead. `gym.servers.active` is a gauge and is written by the supervisor only.
 
-Memory metrics are Gym-owned because nemo-lens has no instrument for a logical server and all of its descendants. The orchestrator owns the server root PIDs, so one sampler can report stable per-server RSS/PSS alongside host-wide capacity and pressure.
+Memory metrics are Gym-owned because nemo-lens has no instrument for a logical server and all of its descendants. The supervisor owns the server root PIDs, so one sampler can report stable per-server RSS/PSS alongside host-wide capacity and pressure.
 
 Reward and accuracy numbers do **not** belong here. They are experiment telemetry (W&B's
 job), not application telemetry — see
