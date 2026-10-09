@@ -471,6 +471,7 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     model: str = "nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct"
     env: dict[str, str] = Field(default_factory=dict)
     workspace_root: str = "outputs/pi_agent/workspaces"
+    repo_dir: Optional[str] = None
     thinking: Optional[str] = None
     system_prompt: Optional[str] = None
     timeout: int = Field(default=900, gt=0)
@@ -481,6 +482,8 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     max_output_tokens: int = 131072
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
     auto_compaction: bool = True
+    compaction_reserve_tokens: Optional[int] = Field(default=None, gt=0)
+    compaction_keep_recent_tokens: Optional[int] = Field(default=None, gt=0)
     pi_version: Optional[str] = None
     mcp_servers: dict[str, PiMCPServerConfig] = Field(default_factory=dict)
     sandbox_provider: str | None = None
@@ -903,6 +906,16 @@ class PiAgent(SimpleResponsesAPIAgent):
         root.mkdir(parents=True, exist_ok=True)
         return root
 
+    def _repo_dir(self, fallback: Path) -> Path:
+        """Return the environment-owned task directory or the temporary workspace."""
+        if not self.config.repo_dir:
+            return fallback
+        root = Path(self.config.repo_dir).expanduser()
+        if not root.is_absolute():
+            root = Path.cwd() / root
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
     def _env(self, home: Path) -> dict[str, str]:
         env = {**os.environ, "HOME": str(home), "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0"}
         env.update({k: v for k, v in self.config.env.items() if v})
@@ -920,8 +933,13 @@ class PiAgent(SimpleResponsesAPIAgent):
         # Gym buffers completions before replaying SSE. Pi's default five-minute
         # HTTP idle limit can otherwise retry a model call still generating.
         timeout_ms = self.config.timeout * 1000
+        compaction: dict[str, bool | int] = {"enabled": self.config.auto_compaction}
+        if self.config.compaction_reserve_tokens is not None:
+            compaction["reserveTokens"] = self.config.compaction_reserve_tokens
+        if self.config.compaction_keep_recent_tokens is not None:
+            compaction["keepRecentTokens"] = self.config.compaction_keep_recent_tokens
         return {
-            "compaction": {"enabled": self.config.auto_compaction},
+            "compaction": compaction,
             "httpIdleTimeoutMs": timeout_ms,
             "retry": {"provider": {"timeoutMs": timeout_ms}},
         }
@@ -976,6 +994,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         effective_model = self._effective_model()
         provider, _, model_id = effective_model.partition("/")
         work_dir = self._workspace_root()
+        project_dir = self._repo_dir(work_dir)
         home = work_dir / ".pi-home"
         (home / ".pi" / "agent").mkdir(parents=True, exist_ok=True)
         models_config = self._build_models_config(rollout_id)
@@ -1010,7 +1029,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                cwd=str(work_dir),
+                cwd=str(project_dir),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

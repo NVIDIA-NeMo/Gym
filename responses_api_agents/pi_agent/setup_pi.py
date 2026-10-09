@@ -27,7 +27,9 @@ from pathlib import Path
 LOG = logging.getLogger(__name__)
 
 _PI_PKG = "@earendil-works/pi-coding-agent"
-_NODE_VERSION = "22.15.0"
+# Pi 0.80.2 requires Node >=22.19.0. Keep the standalone bootstrap aligned
+# with the portable AnyTerminal runtime installer.
+_NODE_VERSION = "22.19.0"
 _NODE_ARCH = "arm64" if platform.machine().lower() in ("aarch64", "arm64") else "x64"
 _NODE_DIST_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-{_NODE_ARCH}.tar.xz"
 _LOCAL_PREFIX = Path(__file__).parent / ".pi_node"

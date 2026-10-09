@@ -31,7 +31,7 @@ from typing import Any, Dict, Optional
 import ray
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef
@@ -78,6 +78,36 @@ def _read_task_meta(task_dir: Path) -> dict:
                 if len(parts) > 1:
                     result["workdir"] = parts[1]
     return result
+
+
+def _ensure_agent_deps_archive(agent_deps_dir: Path) -> Path:
+    """Create the remote-sandbox runtime archive without cross-server temp-file races."""
+
+    archive_dir = CACHE_DIR / "anyterminal_agent" / "archives"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    agent_deps_archive = archive_dir / f"{agent_deps_dir.name}.tar.gz"
+    sentinel = agent_deps_dir / ".installed"
+    if agent_deps_archive.exists() and agent_deps_archive.stat().st_mtime >= sentinel.stat().st_mtime:
+        return agent_deps_archive
+
+    # Multiple AnyTerminal servers can share one harness runtime (for example,
+    # the neutral fan-out server and the explicitly configured Hermes server).
+    # Give every builder its own temporary file; publishing with replace() then
+    # remains atomic even when those servers start concurrently.
+    with tempfile.NamedTemporaryFile(
+        dir=archive_dir,
+        prefix=f".{agent_deps_dir.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as temporary_file:
+        temporary = Path(temporary_file.name)
+    try:
+        with tarfile.open(temporary, "w:gz", compresslevel=1) as archive:
+            archive.add(agent_deps_dir, arcname=".")
+        temporary.replace(agent_deps_archive)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return agent_deps_archive
 
 
 def _instruction_from_input(body: NeMoGymResponseCreateParamsNonStreaming) -> str:
@@ -215,6 +245,17 @@ MODEL_NAME   = os.environ["NGTB_MODEL_NAME"]
 INSTRUCTION  = Path("/trajectories_mount/instruction.txt").read_text()
 AGENT_KWARGS = json.loads(os.environ.get("NGTB_AGENT_KWARGS", "{{}}"))
 SAMPLING     = json.loads(os.environ.get("NGTB_SAMPLING", "{{}}"))
+REQUEST_SAMPLING_FIELDS = {request_sampling_fields!r}
+
+# AnyTerminal receives the already-correlated training URL because the agent
+# executes in the task container. Retain that exact URL for policy actions,
+# but also recover the model-server root for harness bookkeeping calls such as
+# native context compaction. Those summaries must not become rollout roots.
+_ROLLOUT_MARKER = "/ng-rollout/"
+_model_root, _has_rollout, _rollout_tail = MODEL_URL.partition(_ROLLOUT_MARKER)
+ROLLOUT_ID = _rollout_tail.split("/", 1)[0] if _has_rollout else ""
+CAPTURE_ENABLED = bool(_has_rollout and "/training-token-capture" in "/" + _rollout_tail)
+UNCORRELATED_MODEL_URL = _model_root.rstrip("/") if _has_rollout else MODEL_URL.rstrip("/")
 
 openclaw_defaults = AGENT_KWARGS.get("openclaw_config", {{}}).get("agents", {{}}).get("defaults", {{}})
 if openclaw_defaults.get("workspace") == ".":
@@ -228,7 +269,25 @@ from {agent_module} import {agent_class}, {agent_cfg_class}
 _mock_client = ServerClient.model_construct(global_config_dict={{}})
 _mock_client._build_server_base_url = lambda cfg: MODEL_URL
 
-_cfg_sampling = {{k: v for k, v in SAMPLING.items() if k in {agent_cfg_class}.model_fields}}
+_config_fields = {agent_cfg_class}.model_fields
+_cfg_sampling = {{k: v for k, v in SAMPLING.items() if k in _config_fields}}
+_request_sampling = {{
+    k: v for k, v in SAMPLING.items() if REQUEST_SAMPLING_FIELDS is None or k in REQUEST_SAMPLING_FIELDS
+}}
+# Some harnesses (for example Hermes) expose a per-model-call max_tokens
+# configuration instead of the Responses API's total max_output_tokens budget.
+# Adapt the limit at the AnyTerminal boundary so one training row can be routed
+# to either kind of harness without the latter rejecting an otherwise valid run.
+if "max_output_tokens" in SAMPLING and "max_tokens" in _config_fields and "max_output_tokens" not in _config_fields:
+    _cfg_sampling["max_tokens"] = SAMPLING["max_output_tokens"]
+    _request_sampling.pop("max_output_tokens", None)
+if CAPTURE_ENABLED and "token_id_capture" in _config_fields:
+    _cfg_sampling["token_id_capture"] = True
+if MODEL_URL and "compaction_base_url" in _config_fields:
+    AGENT_KWARGS.setdefault(
+        "compaction_base_url",
+        UNCORRELATED_MODEL_URL + ("" if UNCORRELATED_MODEL_URL.endswith("/v1") else "/v1"),
+    )
 
 _model_server = ModelServerRef(name="policy_model", type="responses_api_models") if MODEL_URL else None
 config = {agent_cfg_class}(
@@ -244,19 +303,29 @@ agent = {agent_class}(config=config, server_client=_mock_client)
 
 if MODEL_URL:
     _v1 = MODEL_URL if MODEL_URL.endswith("/v1") else MODEL_URL + "/v1"
+    _uncorrelated_v1 = (
+        UNCORRELATED_MODEL_URL
+        if UNCORRELATED_MODEL_URL.endswith("/v1")
+        else UNCORRELATED_MODEL_URL + "/v1"
+    )
     if hasattr(agent, "resolve_model_base_url"):
         object.__setattr__(agent, "resolve_model_base_url", lambda *args, **kwargs: _v1)
     if hasattr(agent, "_resolve_model_base_url"):
-        agent._resolve_model_base_url = lambda *args, **kwargs: _v1
+        agent._resolve_model_base_url = lambda rollout_id=None: _v1 if rollout_id else _uncorrelated_v1
     if hasattr(agent, "_resolve_base_url"):
         agent._resolve_base_url = lambda *args, **kwargs: MODEL_URL
 
 body = NeMoGymResponseCreateParamsNonStreaming(
     input=[NeMoGymEasyInputMessage(role="user", content=INSTRUCTION)],
     model=MODEL_NAME,
-    **SAMPLING,
+    **_request_sampling,
 )
-response = asyncio.run(agent.responses(request=Request({{"type": "http", "path_params": {{}}}}), body=body))
+response = asyncio.run(
+    agent.responses(
+        request=Request({{"type": "http", "path_params": {{"rollout_id": ROLLOUT_ID}} if ROLLOUT_ID else {{}}}}),
+        body=body,
+    )
+)
 Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
 print(f"agent finished: {{len(response.output)}} output items", flush=True)
 """
@@ -275,6 +344,13 @@ class GymAgentHarnessProcessor(BaseModel):
         return Path(__file__).parent
 
     @property
+    def _runtime_root(self) -> Path:
+        # Runtime prefixes contain complete Python/Node installations. Keep
+        # them outside the importable source tree so setuptools cannot walk or
+        # copy a live environment while another harness is being installed.
+        return CACHE_DIR / "anyterminal_agent"
+
+    @property
     def _agent_key(self) -> str:
         # responses_api_agents.hermes_agent.app -> hermes_agent
         return self.config.agent_server_module.split(".")[-2]
@@ -282,13 +358,30 @@ class GymAgentHarnessProcessor(BaseModel):
     def setup(self) -> Path:
         """Install agent deps into a portable prefix (idempotent, hash-keyed)."""
         agent_dir = PARENT_DIR / "responses_api_agents" / self._agent_key
-        deps_dir = self._parent / "deps" / f"anyterminal_{self._agent_key}_deps"
+        deps_root = self._runtime_root / "deps"
+        deps_dir = deps_root / f"anyterminal_{self._agent_key}_deps"
         sentinel = deps_dir / ".installed"
         script = agent_dir / "scripts" / f"{self._agent_key}_deps.sh"
         shared = self._parent / "setup_scripts" / "_portable_python.sh"
         reqs = agent_dir / "requirements.txt"
 
-        recipe_src = b"".join(p.read_bytes() for p in (script, shared, reqs) if p.exists()) or b"no-script"
+        # Remote providers run the installed package without the host source bind, so agent or
+        # runner changes must invalidate an otherwise complete-looking portable runtime too.
+        recipe_paths = {script, shared, reqs, self._parent / "app.py", PARENT_DIR / "pyproject.toml"}
+        recipe_paths.update(
+            path
+            for path in agent_dir.rglob("*")
+            if path.is_file()
+            and not any(part in {"__pycache__", "data", "node_modules", "results", "tests"} for part in path.parts)
+        )
+        recipe_src = (
+            b"".join(
+                str(path.relative_to(PARENT_DIR)).encode() + b"\0" + path.read_bytes()
+                for path in sorted(recipe_paths)
+                if path.exists()
+            )
+            or b"no-script"
+        )
         recipe = hashlib.sha256(recipe_src).hexdigest()
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
             print(f"Agent deps already at {deps_dir}", flush=True)
@@ -306,11 +399,16 @@ class GymAgentHarnessProcessor(BaseModel):
                 return deps_dir
 
             deps_dir.mkdir(parents=True, exist_ok=True)
-            proc = Popen(
-                f"PORTABLE_PYTHON_SH={shared} DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}",
-                shell=True,
-            )
-            assert proc.wait() == 0, f"Agent deps setup failed ({script})"
+            # Every harness installer builds Gym from the same source checkout. Setuptools writes
+            # into <checkout>/build, so concurrent first-time installs can corrupt one another even
+            # though their destination prefixes differ. Serialize that shared build across agents.
+            runtime_install_lock = deps_root / "runtime-install"
+            with _file_lock(runtime_install_lock, "shared Gym runtime install"):
+                proc = Popen(
+                    f"PORTABLE_PYTHON_SH={shared} DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}",
+                    shell=True,
+                )
+                assert proc.wait() == 0, f"Agent deps setup failed ({script})"
             sentinel.write_text(recipe)
             return deps_dir
 
@@ -324,6 +422,7 @@ class GymAgentHarnessProcessor(BaseModel):
             agent_class=cfg.agent_server_class,
             agent_cfg_class=cfg.agent_config_class,
             agent_class_lower=cfg.agent_server_class.lower(),
+            request_sampling_fields=cfg.agent_request_sampling_fields,
         )
         (cfg.persistent_dir / "agent_runner.py").write_text(runner)
         return "/agent_deps_mount/bin/python /trajectories_mount/agent_runner.py"
@@ -339,12 +438,16 @@ class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
     agent_server_class: str = Field(description="Agent class name")
     agent_config_class: str = Field(description="Agent config class name")
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
+    agent_request_sampling_fields: Optional[list[str]] = Field(
+        default=None,
+        description="Optional allowlist of sampling fields passed on the harness Responses API request.",
+    )
 
     container_formatter: str | list[str] = Field(
         default="docker://{docker_image}",
         description="Template for the task's image reference: use as a path if it ends with .sif or starts with / or ., else as a docker:// URI.",
     )
-    sandbox_provider: Dict[str, Any] = Field(default_factory=lambda: {"docker": {}})
+    sandbox_provider: str | Dict[str, Any] = Field(default_factory=lambda: {"docker": {}})
     sandbox_default_metadata: Dict[str, Any] = Field(default_factory=dict)
     # Docker network for the agent container. "host" lets the in-container agent reach a
     # model server on host loopback; None uses the docker default (e.g. for a remote server).
@@ -753,14 +856,8 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             if not agent_deps_archive.is_file():
                 raise ValueError(f"agent runtime archive not found: {agent_deps_archive}")
         if remote_provider and runtime_source == "auto":
-            agent_deps_archive = workspace / f".{agent_deps_dir.name}.tar.gz"
-            sentinel = agent_deps_dir / ".installed"
-            if not agent_deps_archive.exists() or agent_deps_archive.stat().st_mtime < sentinel.stat().st_mtime:
-                temporary = agent_deps_archive.with_suffix(".tmp")
-                with tarfile.open(temporary, "w:gz", compresslevel=1) as archive:
-                    archive.add(agent_deps_dir, arcname=".")
-                temporary.replace(agent_deps_archive)
-        results_dir = workspace / "results"
+            agent_deps_archive = _ensure_agent_deps_archive(agent_deps_dir)
+        results_dir = RESULTS_DIR / "anyterminal_agent"
         results_dir.mkdir(parents=True, exist_ok=True)
         base_results_dir = self.config.results_dir
         if base_results_dir is None:

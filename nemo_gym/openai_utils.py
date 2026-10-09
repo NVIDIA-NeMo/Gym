@@ -1205,6 +1205,10 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     content: Union[str, List[ContentArrayOfContentPart], None]
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
     # Some harnesses replay reasoning on assistant history in Chat Completions.
+    # vLLM >= 0.16 and OpenClaw use ``reasoning``; older vLLM-compatible
+    # clients use ``reasoning_content``. Preserve either spelling so native
+    # context-compaction requests can replay the exact assistant transcript.
+    reasoning: str | None
     reasoning_content: str | None
 
 

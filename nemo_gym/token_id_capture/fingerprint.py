@@ -45,7 +45,7 @@ import orjson
 
 # Increment when fingerprint canonicalization or hash layout changes.
 # Resolvers ignore entries stamped with a different version.
-FINGERPRINT_VERSION = 3
+FINGERPRINT_VERSION = 5
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
@@ -67,7 +67,7 @@ def assistant_fingerprint(messages: list[dict]) -> str:
         if not _is_assistant_authored(message):
             continue
         count += 1
-        for content_type, payload in _content_of(message.get("content")):
+        for content_type, payload in _lineage_content_of(message):
             _update_field(hasher, b"\x00", content_type)
             _update_field(hasher, b"\x01", payload)
         for call_id, name, arguments in _tools_of(message):
@@ -100,7 +100,7 @@ def conversation_digest(messages: list[dict]) -> str:
         _update_field(hasher, b"\x00", role)
         if _is_instruction_item(message):
             continue
-        for content_type, payload in _content_of(message.get("content")):
+        for content_type, payload in _lineage_content_of(message):
             _update_field(hasher, b"\x01", content_type)
             _update_field(hasher, b"\x02", payload)
         for call_id, name, arguments in _tools_of(message):
@@ -134,6 +134,31 @@ def canonicalize_tool_arguments(value: Any) -> str:
     return _canonical_json(parsed)
 
 
+def canonicalize_tool_call_id(value: Any) -> str:
+    """Normalize the one lossless tool-call ID rewrite used by OpenClaw.
+
+    vLLM emits IDs such as ``chatcmpl-tool-<hex>``. OpenClaw strips the two
+    separators and echoes ``chatcmpltool<hex>`` in both the assistant tool call
+    and its tool result. The suffix still identifies the exact call, so these
+    two spellings are equivalent lineage witnesses.
+
+    Keep this deliberately narrower than general punctuation stripping. IDs
+    outside this generated vLLM shape remain byte-for-byte significant.
+    """
+    call_id = str(value or "")
+    verbose_prefix = "chatcmpl-tool-"
+    compact_prefix = "chatcmpltool"
+    if call_id.startswith(verbose_prefix):
+        suffix = call_id[len(verbose_prefix) :]
+    elif call_id.startswith(compact_prefix):
+        suffix = call_id[len(compact_prefix) :]
+    else:
+        return call_id
+    if suffix and all(character in "0123456789abcdefABCDEF" for character in suffix):
+        return f"{compact_prefix}{suffix}"
+    return call_id
+
+
 def _is_instruction_item(message: dict) -> bool:
     """Return whether the harness, not the conversation, authored this item."""
     return message.get("role") in _INSTRUCTION_ROLES
@@ -154,7 +179,43 @@ def _is_assistant_authored(message: dict) -> bool:
     return message.get("type") == "function_call"
 
 
-def _content_of(content: Any) -> list[tuple[str, str]]:
+def _lineage_content_of(message: dict) -> list[tuple[str, str]]:
+    """Return content that a harness must echo to continue token lineage.
+
+    Parsed reasoning is not part of the continuation witness. Depending on its
+    API dialect, a harness may omit standalone reasoning blocks or a leading
+    ``<think>...</think>`` block synthesized by the vLLM model server. Visible
+    assistant text after those carriers remains part of the witness.
+    """
+    assistant_authored = _is_assistant_authored(message)
+    parts = _content_of(message.get("content"), exclude_reasoning=assistant_authored)
+    if not assistant_authored:
+        return parts
+
+    normalized: list[tuple[str, str]] = []
+    at_start = True
+    for content_type, payload in parts:
+        if at_start and content_type == "text":
+            payload = _strip_leading_think_blocks(payload)
+            if not payload:
+                continue
+        at_start = False
+        normalized.append((content_type, payload))
+    return normalized
+
+
+def _strip_leading_think_blocks(text: str) -> str:
+    """Remove complete leading reasoning wrappers emitted by the model server."""
+    remaining = text
+    while remaining.startswith("<think>"):
+        end = remaining.find("</think>", len("<think>"))
+        if end < 0:
+            break
+        remaining = remaining[end + len("</think>") :]
+    return remaining
+
+
+def _content_of(content: Any, *, exclude_reasoning: bool = False) -> list[tuple[str, str]]:
     """Return typed content parts without discarding prompt-shaping blocks.
 
     Tool calls are normalized separately by ``_tools_of``.
@@ -175,6 +236,8 @@ def _content_of(content: Any) -> list[tuple[str, str]]:
         if not isinstance(block, dict):
             raise ValueError(f"unsupported content block: {type(block).__name__}")
         block_type = str(block.get("type") or "")
+        if exclude_reasoning and block_type in {"reasoning", "thinking", "redacted_thinking"}:
+            continue
         if block_type in {"tool_use", "tool_result"}:
             continue
         if isinstance(block.get("text"), str) and block_type in {
@@ -209,7 +272,7 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
             name = f"{message['namespace']}__{name}"
         tools.append(
             (
-                str(message.get("call_id") or message.get("id") or ""),
+                canonicalize_tool_call_id(message.get("call_id") or message.get("id")),
                 name,
                 canonicalize_tool_arguments(message.get("arguments")),
             )
@@ -220,7 +283,7 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 tools.append(
                     (
-                        str(block.get("id") or ""),
+                        canonicalize_tool_call_id(block.get("id")),
                         str(block.get("name", "")),
                         canonicalize_tool_arguments(block.get("input")),
                     )
@@ -229,7 +292,7 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
         function = (call or {}).get("function") or {}
         tools.append(
             (
-                str((call or {}).get("id") or ""),
+                canonicalize_tool_call_id((call or {}).get("id")),
                 str(function.get("name", "")),
                 canonicalize_tool_arguments(function.get("arguments")),
             )
@@ -249,7 +312,7 @@ def _tool_results_of(message: dict) -> list[tuple[str, str]]:
         output = message.get("output")
         parts.append(
             (
-                str(message.get("call_id") or message.get("id") or ""),
+                canonicalize_tool_call_id(message.get("call_id") or message.get("id")),
                 output if isinstance(output, str) else _canonical_json(output),
             )
         )
@@ -257,7 +320,7 @@ def _tool_results_of(message: dict) -> list[tuple[str, str]]:
         content = message.get("content")
         parts.append(
             (
-                str(message.get("tool_call_id") or ""),
+                canonicalize_tool_call_id(message.get("tool_call_id")),
                 content if isinstance(content, str) else _canonical_json(content),
             )
         )
@@ -267,7 +330,7 @@ def _tool_results_of(message: dict) -> list[tuple[str, str]]:
             if isinstance(block, dict) and block.get("type") == "tool_result":
                 inner = block.get("content")
                 payload = inner if isinstance(inner, str) else _canonical_json(inner)
-                parts.append((str(block.get("tool_use_id") or block.get("id") or ""), payload))
+                parts.append((canonicalize_tool_call_id(block.get("tool_use_id") or block.get("id")), payload))
     return parts
 
 

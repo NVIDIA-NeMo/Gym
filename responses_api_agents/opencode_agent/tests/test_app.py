@@ -519,6 +519,24 @@ class TestEnv:
         assert provider["options"]["baseURL"] == "http://model/v1"
         assert provider["models"]["Qwen3.6-35B-A3B"]["limit"]["output"] == 131072
 
+    def test_model_server_emits_optional_input_limit_for_compaction(self) -> None:
+        agent = _make_agent(
+            model="model",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            context_window=16384,
+            max_input_tokens=11776,
+            max_output_tokens=4096,
+        )
+
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            config = agent._build_opencode_config()
+
+        assert config["provider"]["nemo"]["models"]["model"]["limit"] == {
+            "context": 16384,
+            "input": 11776,
+            "output": 4096,
+        }
+
     def test_model_server_replayed_reasoning_is_accepted_by_gym_chat_completions(self) -> None:
         agent = _make_agent(model="m", model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
         with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):

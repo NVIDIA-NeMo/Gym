@@ -546,6 +546,18 @@ nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "b0f977d414
 # Only nemo_gym's own non-package resource scripts need an explicit entry here.
 nemo_gym = ["resources/*.py", "token_id_capture/staging/conformance/golden_vectors.json"]
 
+[tool.setuptools.exclude-package-data]
+# Older AnyTerminal versions built portable Python/Node environments and result
+# archives next to the source package. Package discovery exclusions keep those
+# legacy directories out of the package list; these data exclusions also
+# protect wheel builds from stale egg-info manifests that still name them.
+"responses_api_agents.anyterminal_agent" = [
+    ".anyterminal_*_deps.tar.gz",
+    ".venv/*",
+    "deps/*",
+    "results/*",
+]
+
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -670,6 +682,11 @@ include = [
 # SWE harnesses create mutable runtime trees inside their package directory.
 # Package discovery must never race or ship those caches and rollout outputs.
 exclude = [
+    # Exclude portable Python/Node runtimes left by older AnyTerminal versions.
+    # Namespace-package discovery can otherwise ship their site-packages in the
+    # Gym wheel.
+    "responses_api_agents.anyterminal_agent.deps",
+    "responses_api_agents.anyterminal_agent.deps.*",
     "responses_api_agents.swe_agents.results",
     "responses_api_agents.swe_agents.results.*",
     "responses_api_agents.swe_agents.swe_openhands_setup",

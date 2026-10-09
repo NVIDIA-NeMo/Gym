@@ -16,6 +16,7 @@
 import io
 import shlex
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
@@ -69,10 +70,12 @@ class StartRecorder:
 
     def __init__(self, proc: FakeProc) -> None:
         self.calls: list[list[str]] = []
+        self.envs: list[Mapping[str, str] | None] = []
         self._proc = proc
 
-    async def __call__(self, argv: list[str]):
+    async def __call__(self, argv: list[str], *, env: Mapping[str, str] | None = None):
         self.calls.append(list(argv))
+        self.envs.append(env)
         return self._proc, io.BytesIO(), io.BytesIO()
 
 
@@ -221,8 +224,8 @@ def test_resolve_image(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_pa
 def test_resource_gpu_env() -> None:
     from nemo_gym.sandbox.providers.base import SandboxResources
 
-    assert enroot_provider._resource_gpu_env(SandboxResources()) == {}
-    assert enroot_provider._resource_gpu_env(SandboxResources(gpu=0)) == {}
+    assert enroot_provider._resource_gpu_env(SandboxResources()) == {"NVIDIA_VISIBLE_DEVICES": "void"}
+    assert enroot_provider._resource_gpu_env(SandboxResources(gpu=0)) == {"NVIDIA_VISIBLE_DEVICES": "void"}
     assert enroot_provider._resource_gpu_env(SandboxResources(gpu=2)) == {"NVIDIA_VISIBLE_DEVICES": "0,1"}
 
 
@@ -258,6 +261,21 @@ def test_constructor_requires_binary(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     monkeypatch.setattr(enroot_provider.shutil, "which", lambda _name: None)
     with pytest.raises(RuntimeError):
         enroot_provider.EnrootProvider(create={"base_dir": str(tmp_path)})
+
+
+def test_constructor_can_disable_pid_namespace_for_nested_runtime(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ENROOT_UNSHARE_PID", "yes")
+
+    isolated = enroot_provider.EnrootProvider(create={"base_dir": str(tmp_path / "isolated")})
+    nested = enroot_provider.EnrootProvider(create={"base_dir": str(tmp_path / "nested"), "unshare_pid": False})
+
+    assert isolated._enroot_env["ENROOT_UNSHARE_PID"] == "yes"
+    assert "ENROOT_UNSHARE_PID" not in nested._enroot_env
+    assert isolated._proc_scan_allowed(present=False) is False
+    assert isolated._proc_scan_allowed(present=True) is True
+    assert nested._proc_scan_allowed(present=False) is True
 
 
 def test_constructor_pins_enroot_env(fake_binary: str, tmp_path: Path) -> None:
@@ -330,6 +348,8 @@ async def test_create_builds_argv_and_runs_probe(
     assert _contains_seq(start_argv, ["-m", "/host/a:/code/a"])
     assert _contains_seq(start_argv, ["-e", "FOO=bar"])
     assert _contains_seq(start_argv, ["-e", "NVIDIA_VISIBLE_DEVICES=0"])
+    assert start_rec.envs[0] is not None
+    assert start_rec.envs[0]["NVIDIA_VISIBLE_DEVICES"] == "0"
     expected_init = f"{enroot_provider.DEFAULT_INIT_COMMAND}  # {handle.sandbox_id}"
     assert start_argv[-4:] == [handle.sandbox_id, "sh", "-c", expected_init]
     assert _contains_seq(start_argv, ["--rc", "/dev/null"])

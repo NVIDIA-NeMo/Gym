@@ -518,6 +518,44 @@ class TestChatDispatchRoute:
         assert len(usage_chunks) == 1
         assert usage_chunks[0]["usage"]["total_tokens"] == 10
 
+    def test_streaming_openclaw_compaction_preserves_reasoning_alias(self) -> None:
+        client, server = _client(_EchoChatModel)
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "model",
+                "max_tokens": 8192,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are an anchored context summarization assistant for coding sessions.",
+                    },
+                    {"role": "user", "content": "Inspect the workspace."},
+                    {
+                        "role": "assistant",
+                        "content": "<think>I should inspect git status.</think>",
+                        "reasoning": "",
+                        "tool_calls": [
+                            {
+                                "id": "chatcmpl-tool-a0",
+                                "type": "function",
+                                "function": {"name": "bash", "arguments": '{"command":"git status"}'},
+                            }
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "chatcmpl-tool-a0", "content": "On branch master"},
+                    {"role": "user", "content": "Create a new anchored summary."},
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert server.last_params.messages[2]["reasoning"] == ""
+        assert server.last_params.messages[2]["tool_calls"][0]["id"] == "chatcmpl-tool-a0"
+
     def test_streaming_request_invalid_params_returns_422(self) -> None:
         client, _ = _client(_EchoChatModel)
         resp = client.post(

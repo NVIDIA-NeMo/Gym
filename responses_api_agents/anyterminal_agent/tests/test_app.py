@@ -24,12 +24,16 @@ import hashlib
 import json
 import os
 import shutil
+import tarfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Lock
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
@@ -38,6 +42,7 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.sandbox.providers.docker import DockerProvider
+from nemo_gym.sandbox.providers.docker import provider as docker_provider
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.anyterminal_agent import app
 from responses_api_agents.anyterminal_agent.app import (
@@ -49,6 +54,7 @@ from responses_api_agents.anyterminal_agent.app import (
     GymAgentHarnessProcessor,
     RunTerminalAgent,
     _build_provider,
+    _ensure_agent_deps_archive,
     _file_lock,
     _format_container,
     _instruction_from_input,
@@ -56,6 +62,38 @@ from responses_api_agents.anyterminal_agent.app import (
     _safe_config_json,
     update_metrics,
 )
+
+
+def test_agent_deps_archive_creation_is_process_safe(tmp_path: Path) -> None:
+    deps_dir = tmp_path / "shared_agent_deps"
+    deps_dir.mkdir()
+    (deps_dir / ".installed").write_text("recipe-hash")
+    (deps_dir / "payload.txt").write_text("ready")
+
+    barrier = Barrier(2)
+    lock = Lock()
+    temporary_paths: list[Path] = []
+    real_tarfile_open = tarfile.open
+
+    def synchronized_tarfile_open(name, *args, **kwargs):
+        with lock:
+            temporary_paths.append(Path(name))
+        barrier.wait(timeout=10)
+        return real_tarfile_open(name, *args, **kwargs)
+
+    with (
+        patch.object(app, "CACHE_DIR", tmp_path / "cache"),
+        patch.object(app.tarfile, "open", side_effect=synchronized_tarfile_open),
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        archives = list(executor.map(_ensure_agent_deps_archive, (deps_dir, deps_dir)))
+
+    assert archives[0] == archives[1]
+    assert archives[0].is_file()
+    assert len(set(temporary_paths)) == 2
+    assert not list(archives[0].parent.glob("*.tmp"))
+    with real_tarfile_open(archives[0], "r:gz") as archive:
+        assert "./payload.txt" in archive.getnames()
 
 
 def _config(**overrides) -> AnyTerminalAgentConfig:
@@ -80,6 +118,7 @@ class TestRunnerTemplate:
             agent_class="HermesAgent",
             agent_cfg_class="HermesAgentConfig",
             agent_class_lower="hermesagent",
+            request_sampling_fields=["temperature"],
         )
 
     def test_renders_valid_python(self) -> None:
@@ -87,7 +126,7 @@ class TestRunnerTemplate:
         # Must be syntactically valid Python and reference the agent class.
         compile(rendered, "<runner>", "exec")
         assert "HermesAgent(config=config" in rendered
-        assert 'Request({"type": "http", "path_params": {}})' in rendered
+        assert '"path_params": {"rollout_id": ROLLOUT_ID} if ROLLOUT_ID else {}' in rendered
         assert 'object.__setattr__(agent, "resolve_model_base_url"' in rendered
 
     def test_response_is_written_back(self) -> None:
@@ -100,8 +139,27 @@ class TestRunnerTemplate:
         compile(rendered, "<runner>", "exec")
         # Read from env, forwarded onto the body, and filtered to the agent config's fields.
         assert "NGTB_SAMPLING" in rendered
-        assert "**SAMPLING," in rendered
+        assert "**_request_sampling," in rendered
         assert "HermesAgentConfig.model_fields" in rendered
+
+    def test_max_output_tokens_adapts_to_harness_max_tokens(self) -> None:
+        rendered = self._render()
+        assert '_cfg_sampling["max_tokens"] = SAMPLING["max_output_tokens"]' in rendered
+        # The request allowlist may already have omitted max_output_tokens. The
+        # adapter must still populate max_tokens without raising KeyError.
+        assert '_request_sampling.pop("max_output_tokens", None)' in rendered
+
+    def test_runner_splits_policy_and_compaction_model_urls(self) -> None:
+        rendered = self._render()
+        assert 'ROLLOUT_ID = _rollout_tail.split("/", 1)[0]' in rendered
+        assert 'AGENT_KWARGS.setdefault(\n        "compaction_base_url"' in rendered
+        assert "_v1 if rollout_id else _uncorrelated_v1" in rendered
+        assert '_cfg_sampling["token_id_capture"] = True' in rendered
+
+    def test_request_sampling_allowlist_omits_unsupported_fields(self) -> None:
+        rendered = self._render()
+        assert "REQUEST_SAMPLING_FIELDS = ['temperature']" in rendered
+        assert "k in REQUEST_SAMPLING_FIELDS" in rendered
 
 
 class TestAgentKey:
@@ -139,8 +197,37 @@ class TestFormatContainer:
 
 class TestSetupScriptsExist:
     def test_supported_agents_have_deps_scripts(self) -> None:
-        assert (PARENT_DIR / "responses_api_agents" / "hermes_agent" / "scripts" / "hermes_agent_deps.sh").exists()
+        for agent in ("hermes_agent", "openclaw_agent", "opencode_agent", "pi_agent"):
+            assert (PARENT_DIR / "responses_api_agents" / agent / "scripts" / f"{agent}_deps.sh").exists()
         assert (Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh").exists()
+
+    def test_openclaw_runtime_is_pinned_and_minimal(self) -> None:
+        config_path = Path(__file__).parent.parent / "configs" / "anyterminal_openclaw.yaml"
+        config = yaml.safe_load(config_path.read_text())
+        kwargs = config["anyterminal_openclaw"]["responses_api_agents"]["anyterminal_agent"]["agent_kwargs"]
+
+        assert kwargs["openclaw_version"] == "2026.6.35"
+        assert kwargs["openclaw_config"]["plugins"]["enabled"] is False
+
+    def test_hermes_health_check_ignores_caller_working_directory_and_retries(self) -> None:
+        script = PARENT_DIR / "responses_api_agents" / "hermes_agent" / "scripts" / "hermes_agent_deps.sh"
+        contents = script.read_text()
+
+        assert 'PYTHONPATH= "$DEPS_DIR/bin/python3" -P -c "import model_tools;' in contents
+        assert "for attempt in {1..12}" in contents
+        assert 'if [ "$hermes_health_ok" -ne 1 ]' in contents
+
+    def test_portable_runtime_repairs_interrupted_gym_install(self) -> None:
+        script = PARENT_DIR / "responses_api_agents" / "anyterminal_agent" / "setup_scripts" / "_portable_python.sh"
+        contents = script.read_text()
+
+        assert 'distribution("nemo-gym")' in contents
+        assert "installed.files is None" in contents
+        assert "pip install --ignore-installed --no-deps" in contents
+
+
+def test_named_sandbox_provider_reference_is_accepted() -> None:
+    assert _config(sandbox_provider="sandbox").sandbox_provider == "sandbox"
 
 
 class TestExampleData:
@@ -493,9 +580,10 @@ class TestInstanceConfigProperties:
 
 class TestBuildProvider:
     @pytest.fixture(autouse=True)
-    def _fake_apptainer_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Constructing ApptainerProvider hard-errors if the real binary isn't on PATH.
+    def _fake_local_provider_binaries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Constructing either provider hard-errors if its real binary isn't on PATH.
         monkeypatch.setattr(apptainer_provider, "_require_apptainer", lambda _bin_path=None: "/usr/bin/apptainer")
+        monkeypatch.setattr(docker_provider, "_require_docker", lambda: "/usr/bin/docker")
 
     def test_default_is_docker(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
@@ -586,7 +674,7 @@ class TestHarnessProcessorSetup:
 
     def test_no_script_creates_empty_deps(self, tmp_path: Path) -> None:
         proc = self._proc_no_script()
-        with patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=tmp_path):
+        with patch.object(type(proc), "_runtime_root", new_callable=PropertyMock, return_value=tmp_path):
             result = proc.setup()
         expected = tmp_path / "deps" / "anyterminal_no_such_agent_deps"
         assert result == expected
@@ -595,10 +683,44 @@ class TestHarnessProcessorSetup:
 
     def test_sentinel_match_skips_reinstall(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         proc = self._proc_no_script()
-        with patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=tmp_path):
+        with patch.object(type(proc), "_runtime_root", new_callable=PropertyMock, return_value=tmp_path):
             proc.setup()
             proc.setup()
         assert "already at" in capsys.readouterr().out
+
+    def test_installer_serializes_shared_source_build(self, tmp_path: Path) -> None:
+        root = tmp_path / "gym"
+        source_dir = root / "responses_api_agents" / "anyterminal_agent"
+        runtime_root = tmp_path / "cache" / "anyterminal_agent"
+        agent_dir = root / "responses_api_agents" / "fake_agent"
+        script = agent_dir / "scripts" / "fake_agent_deps.sh"
+        shared = source_dir / "setup_scripts" / "_portable_python.sh"
+        script.parent.mkdir(parents=True)
+        shared.parent.mkdir(parents=True)
+        script.write_text("#!/bin/bash\n")
+        shared.write_text("#!/bin/bash\n")
+        proc = GymAgentHarnessProcessor(
+            config=SimpleNamespace(agent_server_module="responses_api_agents.fake_agent.app")
+        )
+        lock_targets: list[Path] = []
+        original_file_lock = app._file_lock
+
+        def record_lock(target: Path, *args, **kwargs):
+            lock_targets.append(target)
+            return original_file_lock(target, *args, **kwargs)
+
+        with (
+            patch.object(app, "PARENT_DIR", root),
+            patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=source_dir),
+            patch.object(type(proc), "_runtime_root", new_callable=PropertyMock, return_value=runtime_root),
+            patch("responses_api_agents.anyterminal_agent.app._file_lock", side_effect=record_lock),
+            patch("responses_api_agents.anyterminal_agent.app.Popen") as popen,
+        ):
+            popen.return_value.wait.return_value = 0
+            proc.setup()
+
+        deps_dir = runtime_root / "deps" / "anyterminal_fake_agent_deps"
+        assert lock_targets == [deps_dir, runtime_root / "deps" / "runtime-install"]
 
     def test_rechecks_sentinel_after_acquiring_lock(self, tmp_path: Path) -> None:
         proc = self._proc_no_script()
@@ -612,7 +734,7 @@ class TestHarnessProcessorSetup:
             shutil.rmtree(lock_path)
 
         with (
-            patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=tmp_path),
+            patch.object(type(proc), "_runtime_root", new_callable=PropertyMock, return_value=tmp_path),
             patch("responses_api_agents.anyterminal_agent.app.time.sleep", side_effect=finish_other_install),
         ):
             assert proc.setup() == deps_dir

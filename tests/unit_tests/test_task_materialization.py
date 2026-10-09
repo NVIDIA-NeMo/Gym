@@ -8,7 +8,7 @@ import pytest
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
-from nemo_gym.global_config import GlobalConfigDictParser
+from nemo_gym.global_config import AGENT_POOL_INDEX_KEY_NAME, GlobalConfigDictParser
 from nemo_gym.rollout_collection import (
     RolloutCollectionConfig,
     RolloutCollectionHelper,
@@ -143,6 +143,8 @@ def test_collation_routes_declared_taskset_without_rewriting_shared_source(tmp_p
     assert native[0] == native[1]
     assert native[2] == native[3]
     assert native[2]["task_id"]["task_id"] == "1"
+    assert [native[0][AGENT_POOL_INDEX_KEY_NAME], native[2][AGENT_POOL_INDEX_KEY_NAME]] == [0, 1]
+    assert AGENT_POOL_INDEX_KEY_NAME not in native[0]["task_input"]
     assert "task_input" not in flat[0]
     assert flat[0]["task_source"] == "flat"
     assert source.read_bytes() == original
@@ -339,7 +341,12 @@ def test_custom_task_collation_metrics_validation_and_dispatch(tmp_path):
     assert metrics.metrics.number_of_examples == 2
     (path,) = processor._collate_samples_single_type("example", configs, task_data_validation="error")
     prepared = [json.loads(line) for line in path.read_text().splitlines()]
-    assert prepared == [{"task_id": {"taskset": "custom", "task_id": "0"}, "task_input": row}] * 2
+    expected = {
+        "task_id": {"taskset": "custom", "task_id": "0"},
+        "task_input": row,
+        AGENT_POOL_INDEX_KEY_NAME: 0,
+    }
+    assert prepared == [expected] * 2
     validator = TaskDataValidator("external_custom", TypeAdapter(CustomTaskInput), str(path))
     validator.validate_row(0, prepared[0])
     assert validator.report.clean

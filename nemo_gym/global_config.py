@@ -140,6 +140,7 @@ ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME = "NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING"
 ENVIRONMENT_SERVER_NAME_KEY_NAME = "environment_server_name"
 ENVIRONMENT_SERVER_ROUTES_KEY_NAME = "environment_server_routes"
 ENVIRONMENT_ROUTING_MODE_KEY_NAME = "environment_routing_mode"
+AGENT_POOL_KEY_NAME = "agent_pool"
 # When set, an agent without an environment server fails config validation.
 # When unset, Gym generates a legacy_agent relay for the agent and logs a deprecation warning.
 ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME = "error_on_agent_without_environment_server"
@@ -187,6 +188,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ENVIRONMENT_SERVER_NAME_KEY_NAME,
     ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
     ENVIRONMENT_ROUTING_MODE_KEY_NAME,
+    AGENT_POOL_KEY_NAME,
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
@@ -256,6 +258,14 @@ class _AgentInstance:
 # Data keys
 TASK_INDEX_KEY_NAME = "_ng_task_index"
 ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
+# Stable source-dataset ordinal used for deterministic multi-harness assignment.
+# Unlike TASK_INDEX_KEY_NAME, trainers do not replace this value with a run-local
+# admission index, so a task keeps its harness across batches and restarts.
+AGENT_POOL_INDEX_KEY_NAME = "_ng_agent_pool_index"
+# The concrete agent selected from a pool. Materialized inputs retain this
+# stamp so resume treats the recorded assignment as authoritative even if the
+# run config is later reordered.
+AGENT_POOL_ASSIGNMENT_KEY_NAME = "_ng_agent_pool_assignment"
 # Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
 # (task, rollout) so their captured model calls stay separable.
 ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
@@ -947,8 +957,9 @@ Duplicate config paths:
     def _raise_on_outdated_routing(global_config_dict: DictConfig, renames: Dict[str, str]) -> None:
         """Reject routing that sends rows to an instance the swap renamed away.
 
-        Destinations name a server that has to exist: `agent_name`, `agent_map` values and `fan_out`
-        entries. Their keys are matching bases read off the data, so those may name the old instance.
+        Destinations name a server that has to exist: `agent_name`, `agent_map` values, `agent_pool`
+        entries and `fan_out` entries. Their keys are matching bases read off the data, so those may
+        name the old instance.
         """
         outdated = []
         selected = global_config_dict.get("agent_name")
@@ -959,11 +970,15 @@ Duplicate config paths:
         if isinstance(declared, DictConfig):
             outdated += [(f"agent_map[{key}]", value) for key, value in declared.items() if value in renames]
 
-        listed = global_config_dict.get("fan_out")
-        if isinstance(listed, DictConfig):
-            outdated += [
-                (f"fan_out[{key}]", agent) for key, agents in listed.items() for agent in agents if agent in renames
-            ]
+        for field in ("agent_pool", "fan_out"):
+            listed = global_config_dict.get(field)
+            if isinstance(listed, DictConfig):
+                outdated += [
+                    (f"{field}[{key}]", agent)
+                    for key, agents in listed.items()
+                    for agent in agents
+                    if agent in renames
+                ]
         if not outdated:
             return
         listing = "\n".join(f"  - {where}: '{name}' is now '{renames[name]}'" for where, name in outdated)
@@ -1013,14 +1028,16 @@ Use the name the composed config reports."""
             routes.setdefault(legacy, destination)
         global_config_dict["agent_map"] = routes
 
-        fan_out = global_config_dict.get("fan_out")
-        if isinstance(fan_out, DictConfig):
-            for key, destinations in fan_out.items():
+        for field in ("agent_pool", "fan_out"):
+            routes_to_many = global_config_dict.get(field)
+            if not isinstance(routes_to_many, DictConfig):
+                continue
+            for key, destinations in routes_to_many.items():
                 if not isinstance(destinations, (list, ListConfig)):
                     continue
                 replacements = [active_aliases.get(destination, destination) for destination in destinations]
                 deprecated_uses.update(destination for destination in destinations if destination in active_aliases)
-                fan_out[key] = replacements
+                routes_to_many[key] = replacements
 
         if deprecated_uses:
             replacements = ", ".join(f"`{legacy}` -> `{active_aliases[legacy]}`" for legacy in sorted(deprecated_uses))
