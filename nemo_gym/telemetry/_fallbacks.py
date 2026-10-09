@@ -15,7 +15,8 @@
 """The single import point for nemo-lens instrumentation primitives.
 
 Every instrumentation site in ``nemo_gym`` imports ``managed_span`` / ``span_cm`` /
-``trace_fn`` / ``is_span_group_enabled`` / ``safe_set_span_attributes`` from here, never
+``trace_fn`` / ``is_span_group_enabled`` / ``safe_set_span_attributes`` /
+``span_attributes`` from here, never
 from ``nemo.lens`` directly. This module resolves them once:
 
 * nemo-lens installed -> the **real** implementations from ``nemo.lens.helpers`` and
@@ -30,7 +31,7 @@ while lens is present.
 
 The no-op branch below is one of the four places named in
 ``kb/knowledge/conventions/fallback-sync.md``. It mirrors ``nemo/lens/fallbacks.py`` at
-commit ``b0f977d4``; when a signature changes there, change it here in the same PR.
+commit ``7bcc03ce``; when a signature changes there, change it here in the same PR.
 ``tests/unit_tests/telemetry/test_fallbacks.py`` asserts the two agree parameter-for-
 parameter whenever lens is importable.
 """
@@ -39,6 +40,7 @@ try:
     from nemo.lens.helpers import (  # noqa: F401
         managed_span,
         safe_set_span_attributes,
+        span_attributes,
         span_cm,
         trace_fn,
     )
@@ -66,6 +68,11 @@ except ImportError:  # pragma: no cover - covered by test_fallbacks.py via a stu
     @contextmanager
     def span_cm(name, tracer=None, record_exception=True, **attributes):
         """No-op context manager — yields None."""
+        yield None
+
+    @contextmanager
+    def span_attributes(attributes):
+        """No-op attribute scope."""
         yield None
 
     def is_span_group_enabled(group):
