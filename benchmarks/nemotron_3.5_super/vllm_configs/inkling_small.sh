@@ -7,10 +7,6 @@
 export VLLM_USE_V2_MODEL_RUNNER=1
 export FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1
 
-# The complete-response parsers skip unused partial tool-argument processing. On any vLLM
-# other than the validated 0.29.0 they fall back to the stock Inkling parsers with a warning.
-inkling_plugin_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../vllm_plugins" && pwd)
-
 GYM_MODEL_PARAMS=(
     "++policy_model.responses_api_models.vllm_model.chat_template_kwargs.reasoning_effort=max"
 )
@@ -24,10 +20,8 @@ VLLM_COMMON_ARGS=(
     --tokenizer-mode inkling
     --kernel-config.enable_flashinfer_autotune=False
     --enable-auto-tool-choice
-    --tool-call-parser inkling_complete_fast
-    --reasoning-parser inkling_count_fast
-    --tool-parser-plugin "$inkling_plugin_dir/inkling_complete_tool_parser.py"
-    --reasoning-parser-plugin "$inkling_plugin_dir/inkling_complete_reasoning_parser.py"
+    --tool-call-parser inkling
+    --reasoning-parser inkling
     --enable-chunked-prefill
     --enable-prefix-caching
     --enable-expert-parallel
