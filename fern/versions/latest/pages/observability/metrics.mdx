@@ -28,7 +28,6 @@ would disagree the first time one dropped a sample.
 | `gym.verify.duration_ms` | Histogram | ms | Wall-clock duration of one verification. |
 | `gym.verify.success_rate` | Gauge | fraction | Cumulative fraction of verifications that completed. See below. |
 | `gym.servers.active` | Gauge | count | Number of servers the supervisor started. |
-| `gym.server.startup_duration_ms` | Histogram | ms | One server's wall-clock from the supervisor spawning it to its first answered health probe. Recorded by the supervisor, with a resolution of about three seconds. |
 | `gym.server.startup_stage_duration_ms` | Histogram | ms | One stage of one server's own startup, recorded by that server. The `nemo.gym.startup.stage` attribute names the stage. |
 | `gym.http.connection_pool.queue_duration_ms` | Histogram | ms | Time one queued connection acquisition waited for an aiohttp pool slot. |
 | `gym.http.connection_pool.connect_total` | Observable counter | count | All outbound aiohttp connection attempts (`connect()` calls), including attempts that later fail or are abandoned. |
@@ -45,9 +44,9 @@ wall-clock time, and dropping those samples would bias the histogram toward the 
 
 ### Startup Metrics
 
-Both startup histograms carry `nemo.gym.server.name` and `nemo.gym.server.type`. The stage histogram also
-carries `nemo.gym.startup.stage`. Stages are contiguous, so for one server they sum to the time from spawn to
-the server calling `uvicorn.run`:
+The stage histogram carries `nemo.gym.server.name`, `nemo.gym.server.type`, `nemo.gym.startup.stage`, and
+`nemo.gym.server.worker`. Stages are contiguous, so for one process they sum to the time from its start to the
+moment it accepts connections:
 
 | Stage | What it covers |
 | --- | --- |
@@ -68,8 +67,9 @@ stages, starting at `worker_start`, with `nemo.gym.server.worker` set to true. T
 reports the stages up to the hand-off, with the attribute false. For a single-process server the attribute is
 always false. Group by it, or filter on it, so a worker's `init_server` is not averaged with the main process's.
 
-Server-side stages are exact. The supervisor's `gym.server.startup_duration_ms` has a resolution of about three
-seconds, so use the stage histograms to attribute time within a server.
+There is no separate supervisor-side total. The supervisor learns that a server is ready from a health poll every
+few seconds, so its number would be the stages above plus polling delay. The per-server total is the
+`gym.startup.server` span in the startup trace.
 
 ### Memory Metrics
 

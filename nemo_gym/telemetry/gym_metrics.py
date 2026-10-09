@@ -39,15 +39,13 @@ All four carry ``nemo.gym.sandbox.provider``.
 
 Server startup
 --------------
-``gym.server.startup_duration_ms`` (histogram): one server's wall-clock from the supervisor spawning
-it to its first answered health probe. Recorded by the supervisor only, once per server, so its
-resolution is the supervisor's health-poll interval (about three seconds).
-
 ``gym.server.startup_stage_duration_ms`` (histogram): one stage of one server's own startup, recorded
 by that server's process. ``nemo.gym.startup.stage`` names the stage and ``nemo.gym.server.worker``
 marks a Uvicorn worker of a multi-worker server. Stages are contiguous, so a process's stages sum to
 the time from its start (spawn for a server, Uvicorn hand-off for a worker) until it accepts connections. The same stages are spans
-under the ``startup`` span group. Both carry ``nemo.gym.server.name`` and ``nemo.gym.server.type``.
+under the ``startup`` span group. It also carries ``nemo.gym.server.name`` and ``nemo.gym.server.type``.
+There is deliberately no supervisor-side total: the supervisor only learns readiness from a health poll
+every few seconds, so its number would be these stages plus polling noise.
 
 HTTP connection pool
 --------------------
@@ -75,7 +73,6 @@ SANDBOX_ACTIVE_INSTRUMENT = "gym.sandbox.active"
 SANDBOX_STARTUP_INSTRUMENT = "gym.sandbox.startup_duration_ms"
 SANDBOX_EXEC_INSTRUMENT = "gym.sandbox.exec_duration_ms"
 SANDBOX_CREATE_RETRY_INSTRUMENT = "gym.sandbox.create_retry_total"
-SERVER_STARTUP_INSTRUMENT = "gym.server.startup_duration_ms"
 SERVER_STARTUP_STAGE_INSTRUMENT = "gym.server.startup_stage_duration_ms"
 SERVER_NAME_ATTRIBUTE = "nemo.gym.server.name"
 SERVER_TYPE_ATTRIBUTE = "nemo.gym.server.type"
@@ -266,18 +263,6 @@ def _server_attributes(server_name: str, server_type: Optional[str]) -> dict[str
     if server_type:
         attributes[SERVER_TYPE_ATTRIBUTE] = server_type
     return attributes
-
-
-def record_server_startup(duration_ms: float, *, server_name: str, server_type: Optional[str]) -> None:
-    """Record one server's spawn-to-first-healthy-probe wall-clock. Supervisor only."""
-    _record_histogram(
-        SERVER_STARTUP_INSTRUMENT,
-        "ms",
-        "Wall-clock time from spawning one server to its first answered health probe.",
-        duration_ms,
-        _server_attributes(server_name, server_type),
-        boundaries=SERVER_STARTUP_BOUNDARIES_MS,
-    )
 
 
 def record_server_startup_stage(

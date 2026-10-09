@@ -49,7 +49,6 @@ from nemo_gym.telemetry.gym_metrics import (
     SERVER_NAME_ATTRIBUTE,
     SERVER_TYPE_ATTRIBUTE,
     WORKER_ATTRIBUTE,
-    record_server_startup,
     record_server_startup_stage,
 )
 from nemo_gym.telemetry.gym_metrics import (
@@ -319,9 +318,6 @@ class SupervisorStartup(StageTimeline):
         if record is None or record.ready_ns is not None:
             return
         record.ready_ns = time_ns()
-        record_server_startup(
-            (record.ready_ns - record.spawn_ns) / 1e6, server_name=server_name, server_type=record.server_type
-        )
         if record.span is not None:
             try:
                 record.span.end(end_time=record.ready_ns)
