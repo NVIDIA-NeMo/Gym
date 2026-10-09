@@ -33,6 +33,7 @@ from nemo_gym.task_materialization import materialize_task
 class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
     """Expose the old flat `/run` contract for one migrated pairing."""
 
+    ray_enabled = False
     config: SingleAgentTurnEnvironmentServerConfig
 
     def setup_webserver(self) -> FastAPI:

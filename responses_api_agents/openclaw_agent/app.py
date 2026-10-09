@@ -544,7 +544,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             if prepared.return_code != 0 or prepared.error_type:
                 raise RuntimeError(
                     f"OpenClaw sandbox preparation failed (exit {prepared.return_code}, error={prepared.error_type}): "
-                    f"stderr={prepared.stderr[-16000:]}; stdout={prepared.stdout[-16000:]}"
+                    f"stderr={(prepared.stderr or '')[-16000:]}; stdout={(prepared.stdout or '')[-16000:]}"
                 )
             prepared_directory = True
             # Install only the agent runtime in the existing task sandbox.
@@ -561,7 +561,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 raise RuntimeError(
                     f"OpenClaw runtime setup failed (exit {installed.return_code}, error={installed.error_type}): "
                     f"bash {directory}/{installer} {runtime} {self.config.openclaw_version}\n"
-                    f"stderr={installed.stderr[-16000:]}; stdout={installed.stdout[-16000:]}"
+                    f"stderr={(installed.stderr or '')[-16000:]}; stdout={(installed.stdout or '')[-16000:]}"
                 )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
         except BaseException as error:

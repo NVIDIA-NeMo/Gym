@@ -22,27 +22,15 @@ gym eval run --no-serve --agent openclaw_math_agent \
   --output openclaw_rollout.jsonl --limit 3
 ```
 
-## Model id
+## Model configuration
 
-OpenClaw drops the leading `<provider>/` to form the upstream id,
-so we include an extra prefix, such as for `nvidia/...` ids:
+The default config binds `model_server` to Gym's `policy_model` and uses
+`${policy_model_name}`. The adapter generates the OpenClaw provider configuration
+for both local CLI calls and native sessions. Configure the endpoint and API key
+on the Gym model server.
 
-```yaml
-model: nvinf/nvidia/meta/llama-3.3-70b-instruct
-openclaw_config:
-  models:
-    providers:
-      nvinf:
-        api: openai-completions
-        baseUrl: ${policy_base_url}
-        apiKey: ${policy_api_key}
-        models:
-        - {id: nvidia/meta/llama-3.3-70b-instruct, name: nvidia/meta/llama-3.3-70b-instruct, api: openai-completions}
-```
-
-Alternatively, set `model_server` to a Gym model server and set `model` to its served model id. The
-agent creates the OpenClaw provider entry automatically. Without `model_server`, the existing
-provider configuration is unchanged.
+Existing local callers may still supply their own OpenClaw provider configuration
+when `model_server` is unset.
 
 ## Config fields
 
@@ -94,8 +82,10 @@ The host installer settings above apply only to local CLI calls, with installati
 until the first call. Native sessions use their separate in-sandbox installer and the exact
 configured `openclaw_version`; host environment overrides do not change that runtime.
 
-Use `configs/openclaw_agent.yaml` for EnvironmentServer sessions and
-`configs/openclaw_local_agent.yaml` for the local CLI settings above.
+`configs/openclaw_agent.yaml` supports both paths: an agent session selects sandbox
+execution; no agent session selects the local CLI. Invalid or closed sessions are
+rejected, never retried on the host.
+Local `/run` requires a Resources binding; direct `/v1/responses` does not.
 
 
 ## Native EnvironmentServer sessions

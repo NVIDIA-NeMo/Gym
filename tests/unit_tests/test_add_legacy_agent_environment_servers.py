@@ -105,11 +105,48 @@ def test_native_capable_overlay_keeps_inherited_resources(tmp_path: Path, agent_
     overlay.write_text(
         f"renamed_agent:\n  _inherit_from: my_{agent_type}\n  responses_api_agents:\n    {agent_type}: {{}}\n"
     )
+    before = overlay.read_text()
     assert migration.main([str(base), str(overlay)]) == 0
+    # Gym follows the agent rename while preserving the source server's identity (#4141).
+    assert overlay.read_text() == before
+    assert _environment_servers(yaml.safe_load(base.read_text())) == {f"my_{agent_type}": ["my_environment_server"]}
     resolved = _parse(base, overlay, strict=True)
-    # Main retargets the agent reference while preserving the environment's public name.
     assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["my_environment_server"]}
     assert resolved.renamed_agent.responses_api_agents[agent_type].resources_server.name == "my_resources"
+
+
+def test_default_pi_composes_with_exactly_one_native_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/pi_agent/configs/pi_agent.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("pi_agent", name="native_environment", server_type="single_agent_turn_legacy")
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"pi_agent": ["native_environment"]}
+    assert resolved.pi_agent.responses_api_agents.pi_agent.resources_server is None
+
+
+def test_default_codex_composes_with_exactly_one_native_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/codex_agent/configs/codex_agent.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("codex_agent", name="native_environment", server_type="single_agent_turn_legacy")
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"codex_agent": ["native_environment"]}
+    assert resolved.codex_agent.responses_api_agents.codex_agent.resources_server is None
 
 
 def test_native_openclaw_template_composes_with_one_environment(tmp_path: Path) -> None:

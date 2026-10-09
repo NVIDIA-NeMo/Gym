@@ -18,7 +18,8 @@ from pydantic import ValidationError
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig, _unique_usage_messages
 
@@ -189,7 +190,11 @@ def setup():
 @pytest.mark.parametrize("stage", ["prepare", "install"])
 @pytest.mark.parametrize("error_type", ["timeout", "sandbox"])
 @pytest.mark.parametrize("owned", [False, True])
-async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage, error_type, owned):
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [("bootstrap output", "provider failed"), (None, "provider failed"), ("bootstrap output", None), (None, None)],
+)
+async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage, error_type, owned, stdout, stderr):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}})
     body = seed()
@@ -199,14 +204,17 @@ async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage
         body = body.model_copy(update={"sandbox_access": None})
         sandbox.start = AsyncMock()
     ok = SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
-    error = SimpleNamespace(return_code=0, error_type=error_type, stdout="bootstrap output", stderr="provider failed")
+    error = SandboxExecResult(return_code=0, error_type=error_type, stdout=stdout, stderr=stderr)
     sandbox.exec.side_effect = ([ok] if owned else []) + ([error, ok] if stage == "prepare" else [ok, error, ok])
     with patch("responses_api_agents.openclaw_agent.app.AsyncSandbox", return_value=sandbox) as sandbox_class:
         sandbox_class.connect = AsyncMock(return_value=sandbox)
         with pytest.raises(RuntimeError, match=f"error={error_type}") as failed:
             await agent.seed_agent_session(request, body)
-    assert "bootstrap output" in str(failed.value)
-    assert "provider failed" in str(failed.value)
+    assert "exit 0" in str(failed.value)
+    if stdout is not None:
+        assert stdout in str(failed.value)
+    if stderr is not None:
+        assert stderr in str(failed.value)
     assert not request.session
     sandbox.launch.assert_not_awaited()
     if owned:
@@ -411,6 +419,50 @@ def test_no_session_keeps_existing_local_path(setup):
             with pytest.raises(RuntimeError, match="legacy path reached"):
                 client.post("/v1/responses", json={"input": "task"})
         legacy.assert_awaited_once()
+    sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("path", ["/v1/responses", "/ng-rollout/local-smoke/v1/responses"])
+def test_default_config_unseeded_responses_run_local_cli(setup, path: str) -> None:
+    agent, sandbox = setup
+    config = OmegaConf.load(Path(__file__).parents[1] / "configs/openclaw_agent.yaml")
+    config.policy_model_name = "local-model"
+    agent.config = OpenClawAgentConfig.model_validate(
+        OmegaConf.to_container(config.openclaw_agent.responses_api_agents.openclaw_agent, resolve=True)
+        | {"host": "localhost", "port": 8001, "name": "openclaw"}
+    )
+    assert agent.config.resources_server is None
+    assert agent.config.sandbox_provider is None
+    message = NeMoGymResponseOutputMessage(
+        id="msg-local",
+        role="assistant",
+        type="message",
+        status="completed",
+        content=[{"type": "output_text", "text": "local result", "annotations": []}],
+    )
+    with (
+        patch.object(
+            agent,
+            "_run_openclaw",
+            AsyncMock(
+                return_value=(
+                    [message],
+                    {"input_tokens": 3, "output_tokens": 2},
+                    "local-model",
+                )
+            ),
+        ) as local,
+        patch("responses_api_agents.openclaw_agent.app.create_provider") as provider,
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        response = client.post(path, json={"input": "task", "temperature": 0.7})
+    assert response.status_code == 200, response.text
+    assert response.json()["output"][0]["content"][0]["text"] == "local result"
+    assert response.json()["usage"]["total_tokens"] == 5
+    local.assert_awaited_once()
+    assert local.call_args.args == ("task", "")
+    assert local.call_args.kwargs["rollout_id"] == ("local-smoke" if "ng-rollout" in path else None)
+    provider.assert_not_called()
     sandbox.launch.assert_not_awaited()
 
 

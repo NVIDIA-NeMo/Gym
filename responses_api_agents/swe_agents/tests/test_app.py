@@ -3416,3 +3416,98 @@ def test_merge_reparents_a_new_live_child_to_the_stable_recorded_root() -> None:
 
     merged = merge_replay_subagent_trajectories(manifest, captured)
     assert merged[0]["parent_session_id"] == "recorded_root"
+
+
+class TestEvaluatorLaunchFailure:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["launch_failure", "post_start_failure", "failed_tests"])
+    async def test_evaluator_failure_mask(self, tmp_path: Path, monkeypatch, outcome: str) -> None:
+        params = _make_instance_config(str(tmp_path), debug=False)
+        params.problem_info["dataset_name"] = "nv-internal-1"
+        params.problem_info["instance_dict"] = json.dumps({"fail_to_pass": ["test_regression"]})
+        params.metrics_fpath.write_text("{}")
+        params.generation_apptainer_spinup_timestamp_fpath.write_text(str(time.time()))
+        if outcome != "launch_failure":
+            params.final_eval_apptainer_spinup_timestamp_fpath.write_text(str(time.time()))
+
+        agent_output = tmp_path / "agent-output.json"
+        agent_output.write_text(
+            json.dumps(
+                {
+                    "instance_id": params.instance_id,
+                    "test_result": {"git_patch": "diff --git a/a.py b/a.py\n"},
+                    "metadata": {"llm_config": {"model": "test-model"}},
+                    "metrics": {},
+                }
+            )
+        )
+        report_path = tmp_path / "eval-output.json"
+        report_path.write_text(json.dumps({"tests": [{"name": "test_regression", "status": "FAILED"}]}))
+        eval_result = (
+            str(report_path)
+            if outcome == "failed_tests"
+            else RuntimeError("Command failed before producing an evaluation report")
+        )
+        agent = RunOpenHandsAgent(config=params)
+        active_command = MagicMock(watchdog_stats={})
+        with (
+            patch.object(agent, "_start_container_command", new_callable=AsyncMock, return_value=active_command),
+            patch.object(
+                agent,
+                "_finish_container_command",
+                new_callable=AsyncMock,
+                side_effect=[str(agent_output), eval_result],
+            ),
+            patch.object(agent, "_openhands_dir_copy_from_host", return_value=str(agent_output)),
+        ):
+            completed_report = await agent.process_single_datapoint()
+
+        metrics = SWEBenchMetrics.model_validate_json(params.metrics_fpath.read_text())
+        expected_mask = outcome == "launch_failure"
+        assert metrics.eval_launch_failed is expected_mask
+        assert not metrics.eval_timed_out
+        assert metrics.patch_exists is True
+        assert completed_report == (str(report_path) if outcome == "failed_tests" else None)
+
+        # Preserve a token-bearing completion through response assembly.
+        completions_dir = params.trajectories_root / "llm_completions" / params.instance_id
+        completions_dir.mkdir(parents=True)
+        (completions_dir / "001.json").write_text(
+            json.dumps(
+                {
+                    "messages": [{"role": "user", "content": "Fix the bug"}],
+                    "provider_specific_fields": {
+                        "prompt_token_ids": [1, 2],
+                        "generation_token_ids": [3, 4],
+                        "generation_log_probs": [-0.1, -0.2],
+                    },
+                    "response": {
+                        "id": "completion-1",
+                        "choices": [{"message": {"role": "assistant", "content": "Fixed"}}],
+                    },
+                    "kwargs": {"tools": []},
+                }
+            )
+        )
+        wrapper = _create_wrapper(monkeypatch)
+        wrapper._sem = asyncio.Semaphore(1)
+        wrapper._vllm_converter = swe_app.VLLMConverter(return_token_id_information=True)
+        processor = NVInternalDatasetProcessor(config=params)
+        with patch.object(swe_app.runner_ray_remote, "remote", new_callable=AsyncMock, return_value=completed_report):
+            response = await wrapper._inner_responses(params, processor)
+        with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=response):
+            result = await wrapper.run(swe_app.BaseRunRequest(responses_create_params=params.body))
+
+        assert result.reward == 0.0
+        assert result.mask_sample is expected_mask
+        assert result.instance_config.mask_sample is expected_mask
+        assert result.response.output[-1].generation_token_ids == [3, 4]
+        if outcome == "failed_tests":
+            # A completed negative verifier result is a valid policy outcome.
+            report = json.loads(report_path.read_text())[params.instance_id]
+            assert report["resolved"] is False
+            assert report["metadata"]["test_results"]["tests"][0]["status"] == "FAILED"
+
+    def test_legacy_metrics_do_not_imply_launch_failure(self) -> None:
+        metrics = SWEBenchMetrics.model_validate({"patch_exists": True, "eval_timed_out": False})
+        assert metrics.eval_launch_failed is False

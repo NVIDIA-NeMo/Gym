@@ -49,6 +49,7 @@ gym env schema                # print a resources server's task-data schema as J
 
 # Evaluation
 gym eval prepare              # prepare benchmark data and dump it to disk
+gym eval plan                 # write one benchmark's task list (stable ids, digests) to a plan file
 gym eval run                  # collate data, start servers, and collect rollouts
 gym eval submit               # submit a benchmark job to Slurm
 gym eval aggregate            # merge sharded rollout results
@@ -726,6 +727,27 @@ Prepare a benchmark's data by running its `prepare.py` script and dump the resul
 
 ```bash
 gym eval prepare --benchmark aime24
+```
+
+### `gym eval plan`
+
+Prepare one benchmark and write its plan: every task once, sorted by task id, with a digest of the exact input a run receives. The plan stores ids and digests, not the inputs themselves. The format is versioned (`"schema": "nemo-gym.eval-plan.v1"`), only changes additively within a version, and is printed as JSON Schema by `--schema`.
+
+Each task's id comes from its row's `task_id`, `problem_id` or `instance_id`, and its taskset is the dataset's declared `taskset` (the benchmark name when none is declared). Unlike `gym eval run`, there is no fallback to the row's position, so benchmarks without such a field are refused. Benchmarks with a prompt template (`prompt_config`) are not supported yet.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--benchmark NAME` | Load the named benchmark config. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+| `--out PATH` | Plan file to write. Required unless `--schema` is given. |
+| `--task-ids ID[,ID...]` | Only plan these task ids. |
+| `--schema` | Print the plan file's JSON Schema and exit. |
+
+```bash
+gym eval plan --benchmark swebench/verified/opencode --out plan.json
+gym eval plan --benchmark swebench/verified/opencode --task-ids astropy__astropy-12907 --out plan.json
+gym eval plan --schema
 ```
 
 ### `gym eval run`

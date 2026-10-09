@@ -966,13 +966,3 @@ class TestConfigYaml:
         assert inner["resources_server"] is None
         assert inner["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
         assert inner["model"] == "${policy_model_name}"
-
-    def test_local_config_yaml_parses(self) -> None:
-        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "openclaw_local_agent.yaml"
-        data = yaml.safe_load(cfg_path.read_text())
-        assert set(data) == {"openclaw_agent"}
-        inner = data["openclaw_agent"]["responses_api_agents"]["openclaw_agent"]
-        assert inner["entrypoint"] == "app.py"
-        assert inner["concurrency"] == 32
-        assert inner["command"] == "openclaw"
-        assert inner["resources_server"] == {"type": "resources_servers", "name": "???"}
