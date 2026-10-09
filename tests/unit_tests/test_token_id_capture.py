@@ -22,6 +22,7 @@ Consumers read records through ``TokenSource.freeze``.
 """
 
 import asyncio
+import errno
 import json
 import logging
 import multiprocessing
@@ -484,6 +485,81 @@ def test_token_store_delete_syncs_the_directory_only_when_it_removed_something(t
         # A retried batch, or IDs that never captured anything, change nothing on disk.
         assert store.delete_now(["r1", "never-captured"]) == {"removed": [], "absent": ["r1", "never-captured"]}
         assert fsync_root.call_count == 1
+
+
+def _fail_unlinking_records_of(store: TokenCaptureStore, rollout_id: str):
+    """Make removing one rollout's token records fail, as an I/O error would."""
+    target = store.path_for(rollout_id)
+    real_unlink = type(target).unlink
+
+    def unlink(path, missing_ok=False):
+        if path == target:
+            raise OSError(errno.EIO, "injected I/O error", str(path))
+        return real_unlink(path, missing_ok=missing_ok)
+
+    return patch.object(type(target), "unlink", unlink)
+
+
+@pytest.mark.parametrize("method", ["retire_now", "delete_now"])
+def test_token_store_batch_that_fails_part_way_still_syncs_what_it_changed(tmp_path, method):
+    store = TokenCaptureStore(tmp_path)
+    for rollout_id in ("r1", "r2", "r3"):
+        _store_entry(store, rollout_id)
+
+    with patch.object(store, "_fsync_root", wraps=store._fsync_root) as fsync_root:
+        with _fail_unlinking_records_of(store, "r3"), pytest.raises(OSError):
+            getattr(store, method)(["r1", "r2", "r3"])
+        # r1 and r2 changed before r3 failed; a retry over them finds nothing left to do.
+        getattr(store, method)(["r1", "r2"])
+
+    assert fsync_root.call_count >= 1
+
+
+def test_token_store_retire_that_fails_part_way_leaves_the_rollout_usable(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r1")
+
+    with _fail_unlinking_records_of(store, "r1"), pytest.raises(OSError):
+        store.retire_now(["r1"])
+
+    # The fence is written first, so the rollout already refuses late writes cleanly.
+    with pytest.raises(TokenCaptureRetiredError):
+        _store_entry(store, "r1")
+    with pytest.raises(TokenCaptureRetiredError):
+        store.freeze_now("r1")
+    # A retry finishes removing the records.
+    assert store.retire_now(["r1"]) == {"removed": ["r1"], "absent": []}
+    assert not store.path_for("r1").exists()
+
+
+def test_token_store_retire_that_cannot_write_its_fence_changes_nothing(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r1")
+
+    def no_space(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    with patch.object(store, "_write_state", no_space), pytest.raises(OSError):
+        store.retire_now(["r1"])
+
+    assert len(store.freeze_now("r1").entries) == 1
+
+
+def test_a_late_call_without_token_ids_after_retire_is_not_reported_as_a_failure(tmp_path, caplog):
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "abandoned")
+    store.retire_now(["abandoned"])
+
+    context = CaptureContext(rollout_id="abandoned", model_call_id="c2", token_sink=store)
+    token = set_token_sink(context)
+    try:
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(capture_tokens({"id": "resp-1", "output": []}))
+    finally:
+        reset_token_sink(token)
+
+    assert all(record.exc_info is None for record in caplog.records)
+    assert not any("Could not mark rollout" in record.getMessage() for record in caplog.records)
 
 
 def test_token_store_delete_removes_the_fence_so_the_rollout_id_can_be_reused(tmp_path):
