@@ -90,6 +90,16 @@ key, reasoning, and tool history. Codex sends `prompt_cache_key`, which some hos
 endpoints reject. A deployment that removes that option is a separate compatibility bridge,
 not evidence of direct endpoint compatibility.
 
+To record a session's model calls from inside the task sandbox, set `session_capture` (a
+`SessionCaptureConfig` naming a `SessionCapture` implementation) and `model_server: null`; a
+config with both is rejected. Each session starts its capture after the runtime is installed and
+points Codex at the endpoint it returns, which must serve the streaming Responses API on
+`<base_url>/responses`. When the capture names a model, Codex uses that model. Session close
+returns the capture as `token_capture`. If the capture does not start, Codex does not run: the
+activation returns a failed response with an empty assistant message and a `harness_not_run`
+observation gap, and close returns a masked `token_capture`, so the episode is still verified.
+`session_capture` applies only to sessions; the legacy direct-agent path rejects it.
+
 For custom models, set `model_context_window` to the served limit and optionally
 `model_auto_compact_token_limit` below it. Both must be positive integers; an explicit
 compaction threshold must not exceed 90% of the explicit window. The pinned CLI also clamps

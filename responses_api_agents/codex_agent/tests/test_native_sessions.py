@@ -19,10 +19,17 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
+from nemo_gym.agent_utils.session_capture import SessionCapture, SessionCaptureConfig
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+    ModelEndpoint,
+    TokenCapture,
+)
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig
 
@@ -1933,3 +1940,122 @@ async def test_missing_exit_and_empty_output_are_not_success(setup):
     assert state.session.cleanup["cleanup_confirmed"] is True
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     sandbox.disconnect.assert_awaited_once()
+
+
+# Lifecycle calls of FakeCapture, in order, for the current test.
+CAPTURE_EVENTS: list[str] = []
+CAPTURED = TokenCapture(atif_trajectories=[{"steps": []}], metrics={"calls": 1})
+
+
+class FakeCapture(SessionCapture):
+    """A session capture that serves a fixed endpoint, or fails to start when ``start`` is ``"raise"``."""
+
+    def __init__(self, *, start: str = "ok", model: str | None = "captured-model"):
+        self.start_mode, self.model = start, model
+
+    async def start(self, sandbox: AsyncSandbox) -> ModelEndpoint:
+        CAPTURE_EVENTS.append("start")
+        if self.start_mode == "raise":
+            raise RuntimeError("capture port is taken")
+        return ModelEndpoint(base_url="http://127.0.0.1:4000/v1", model=self.model)
+
+    async def collect(self, sandbox: AsyncSandbox) -> TokenCapture:
+        CAPTURE_EVENTS.append("collect")
+        return CAPTURED
+
+    async def abort(self, sandbox: AsyncSandbox) -> None:
+        CAPTURE_EVENTS.append("abort")
+
+
+def capture_config(**options) -> SessionCaptureConfig:
+    return SessionCaptureConfig(implementation=f"{__name__}:FakeCapture", options=options)
+
+
+def use_capture(agent: CodexAgent, **options) -> None:
+    CAPTURE_EVENTS.clear()
+    agent.config = CodexAgentConfig(
+        **(agent.config.model_dump() | {"model_server": None, "session_capture": capture_config(**options)})
+    )
+
+
+def test_config_rejects_model_server_with_session_capture(setup) -> None:
+    agent, _ = setup
+    with pytest.raises(ValidationError, match="set model_server: null to use session_capture"):
+        CodexAgentConfig(**(agent.config.model_dump() | {"session_capture": capture_config()}))
+
+
+@pytest.mark.parametrize("capture_model", ["captured-model", None])
+def test_session_capture_serves_codex_model_calls_and_returns_its_capture(setup, capture_model) -> None:
+    agent, sandbox = setup
+    use_capture(agent, model=capture_model)
+    expected_model = capture_model or "test-model"
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        session_id = created.json()["agent_session_id"]
+        # The capture starts at seed, after the runtime is installed and before any activation.
+        assert CAPTURE_EVENTS == ["start"]
+        assert not sandbox.launch.called
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        assert result.json()["status"] == "completed"
+        assert result.json()["model"] == expected_model
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        assert config["model_providers"]["gym"]["base_url"] == "http://127.0.0.1:4000/v1"
+        assert config["model_providers"]["gym"]["wire_api"] == "responses"
+        assert config["model"] == expected_model
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+        assert closed.json()["token_capture"] == CAPTURED.model_dump(mode="json")
+        observations = closed.json()["agent_observations"]
+        assert observations["records"][0]["status"] == "completed"
+        assert observations["records"][0]["model_calls"] == []
+    assert CAPTURE_EVENTS == ["start", "collect"]
+    sandbox.launch.assert_awaited_once()
+    sandbox.disconnect.assert_awaited_once()
+
+
+def test_session_capture_that_does_not_start_answers_without_running_codex(setup) -> None:
+    agent, sandbox = setup
+    use_capture(agent, start="raise")
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        session_id = created.json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        # The episode is not failed: the environment server still verifies and closes it.
+        assert result.status_code == 200, result.text
+        body = result.json()
+        assert body["status"] == "failed"
+        assert "capture did not start: RuntimeError: capture port is taken" in body["error"]["message"]
+        assert body["output"][0]["content"][0]["text"] == ""
+        assert not any(path.endswith("/config.toml") for path in sandbox.files)
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+        capture = closed.json()["token_capture"]
+        assert capture["masked"] is True
+        assert "capture port is taken" in capture["mask_reason"]
+        gaps = closed.json()["agent_observations"]["gaps"]
+        assert [gap["code"] for gap in gaps] == ["harness_not_run"]
+        assert "capture port is taken" in gaps[0]["detail"]
+    sandbox.launch.assert_not_awaited()
+    assert CAPTURE_EVENTS == ["start", "abort"]
+    sandbox.disconnect.assert_awaited_once()
+
+
+def test_session_close_without_capture_returns_no_token_capture(setup) -> None:
+    agent, _ = setup
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code == 200
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+        assert closed.json()["token_capture"] is None
+
+
+async def test_host_path_rejects_session_capture(setup) -> None:
+    agent, _ = setup
+    use_capture(agent)
+    with patch.object(agent, "_run_codex", AsyncMock(side_effect=AssertionError("host Codex must not run"))):
+        with pytest.raises(HTTPException, match="session_capture runs only in agent sessions"):
+            await agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="task"))
