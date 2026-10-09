@@ -655,7 +655,7 @@ async def _request_with_retries(
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                     print_exc()
 
-                # With `_max_num_tries`, the cap counts every attempt; otherwise it counts generic-error tries.
+                # num_tries only advances on the default path, so count explicit attempts when capped.
                 attempts = explicit_tries if _max_num_tries is not None else num_tries
                 if _max_connection_retries is not None and attempts >= _max_connection_retries:
                     raise
@@ -663,18 +663,19 @@ async def _request_with_retries(
                 if _max_num_tries is not None:
                     if explicit_tries >= _max_num_tries:
                         raise
-                # Internal calls skip this print and the MAX_NUM_TRIES limit, but still count tries so
-                # `_max_connection_retries` applies.
-                elif not _internal:
-                    print(
-                        f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
+                else:
+                    # Internal calls skip this print and the MAX_NUM_TRIES limit, but still count tries so
+                    # `_max_connection_retries` applies.
+                    if not _internal:
+                        print(
+                            f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
 Sleeping 0.5s and retrying...
 """
-                    )
-                    if num_tries >= MAX_NUM_TRIES:
-                        raise e
+                        )
+                        if num_tries >= MAX_NUM_TRIES:
+                            raise e
 
-                num_tries += 1
+                    num_tries += 1
 
                 await asyncio.sleep(0.5)
     finally:
