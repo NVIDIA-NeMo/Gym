@@ -33,6 +33,7 @@ import logging
 import os
 import tempfile
 import time
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,16 @@ def validate_rollout_id(rollout_id: str) -> str:
     if not rollout_id or any(not (char.isascii() and (char.isalnum() or char in "._-")) for char in rollout_id):
         raise ValueError(f"Invalid rollout id: {rollout_id!r}")
     return rollout_id
+
+
+def validate_rollout_ids(rollout_ids: Sequence[str]) -> list[str]:
+    """Validate a whole batch before anything changes, and drop duplicates.
+
+    A bare string is rejected: it is a sequence of one-character rollout IDs.
+    """
+    if isinstance(rollout_ids, str):
+        raise TypeError(f"expected a sequence of rollout ids, got the string {rollout_ids!r}")
+    return list(dict.fromkeys(validate_rollout_id(rollout_id) for rollout_id in rollout_ids))
 
 
 class TokenCaptureStore:

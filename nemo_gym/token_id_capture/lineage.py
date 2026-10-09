@@ -43,7 +43,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -64,6 +66,19 @@ from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
 
 if TYPE_CHECKING:
     from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
+
+
+logger = logging.getLogger(__name__)
+
+
+def _log_late_write_dropped(rollout_id: str, model_call_id: str) -> None:
+    # A call that finished after its rollout was retired, such as one from an abandoned attempt or a request
+    # the client had already retried. Nobody will read its row, so this is not an error.
+    logger.warning(
+        "Discarding the ledger row of model call %s: rollout %s is retired.",
+        model_call_id,
+        rollout_id,
+    )
 
 
 # Names of the token-free CallRecord custody columns a ledger row carries.
@@ -444,6 +459,7 @@ class InMemoryLineageStore:
     def __init__(self, max_rollouts: int = 512, max_tokens: int = 8_000_000) -> None:
         self.index = LineageIndex(max_rollouts=max_rollouts, max_tokens=max_tokens)
         self._ledgers: dict[str, list[dict]] = {}
+        self._retired: set[str] = set()
 
     async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
         return self.index.for_rollout(rollout_id).resolve(request_items)
@@ -460,6 +476,9 @@ class InMemoryLineageStore:
         # hash covers continuity, so the index keeps tokens only for
         # lineage-only local-capture rows that inject prompt prefixes.
         record = commit.record
+        if commit.rollout_id in self._retired:
+            _log_late_write_dropped(commit.rollout_id, record.model_call_id)
+            return
         rows = self._ledgers.setdefault(commit.rollout_id, [])
         row = {"model_call_id": record.model_call_id, **_custody_columns(record, commit.staging_chain)}
         # Write-once per model call (CaptureLedger contract): an identical
@@ -484,6 +503,9 @@ class InMemoryLineageStore:
         rows.append(row)
 
     async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
+        if rollout_id in self._retired:
+            _log_late_write_dropped(rollout_id, model_call_id)
+            return
         rows = self._ledgers.setdefault(rollout_id, [])
         row = {"model_call_id": model_call_id, "failure_reason": reason}
         if not any(existing == row for existing in rows):
@@ -497,9 +519,31 @@ class InMemoryLineageStore:
             return True
         return bool(self.index.for_rollout(rollout_id).by_call_id)
 
+    async def retire(self, rollout_ids: Sequence[str]) -> dict:
+        from nemo_gym.token_id_capture.store import validate_rollout_ids
+
+        rollout_ids = validate_rollout_ids(rollout_ids)
+        self._retired.update(rollout_ids)
+        return self._remove(rollout_ids)
+
+    async def delete(self, rollout_ids: Sequence[str]) -> dict:
+        from nemo_gym.token_id_capture.store import validate_rollout_ids
+
+        rollout_ids = validate_rollout_ids(rollout_ids)
+        self._retired.difference_update(rollout_ids)
+        return self._remove(rollout_ids)
+
+    def _remove(self, rollout_ids: list[str]) -> dict:
+        removed, absent = [], []
+        for rollout_id in rollout_ids:
+            (removed if self._ledgers.pop(rollout_id, None) is not None else absent).append(rollout_id)
+            self.index.drop(rollout_id)
+        return {"removed": removed, "absent": absent}
+
     async def close(self) -> None:
         self.index.clear()
         self._ledgers.clear()
+        self._retired.clear()
 
 
 class IncrementalLineageStore:
@@ -793,6 +837,19 @@ class FileLineageStore(IncrementalLineageStore):
 
         return self._ledger_root / f"{validate_rollout_id(rollout_id)}.lineage.jsonl"
 
+    def _retired_path(self, rollout_id: str) -> Path:
+        # Present while the rollout is retired: its writes are discarded. ``delete`` removes it.
+        from nemo_gym.token_id_capture.store import validate_rollout_id
+
+        return self._ledger_root / f"{validate_rollout_id(rollout_id)}.lineage.retired"
+
+    def _is_retired(self, rollout_id: str) -> bool:
+        # Call with the rollout's lock held, only when its ledger is empty or missing. ``retire`` writes every
+        # marker before it removes any ledger, so a rollout whose ledger still has rows was not retired when
+        # the ledger was read, or its retire failed partway and will be retried. Skipping the check
+        # otherwise saves a metadata lookup on every captured call.
+        return self._retired_path(rollout_id).exists()
+
     def _locked(self, rollout_id: str):
         # Ledger rows share the token store's per-rollout lock file. The two
         # record families are never both written for one rollout, so one lock
@@ -826,6 +883,13 @@ class FileLineageStore(IncrementalLineageStore):
         self._ledger_cache[rollout_id] = (inode, offset, records)
         return records
 
+    def _fsync_ledger_root(self) -> None:
+        directory_fd = os.open(self._ledger_root, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
     def _append(self, rollout_id: str, record: dict, records: list[dict]) -> None:
         path = self._ledger_path(rollout_id)
         created = not path.exists()
@@ -837,11 +901,7 @@ class FileLineageStore(IncrementalLineageStore):
             offset = handle.tell()
             inode = os.fstat(handle.fileno()).st_ino
         if created:
-            directory_fd = os.open(self._ledger_root, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            self._fsync_ledger_root()
         records.append(record)
         self._ledger_cache[rollout_id] = (inode, offset, records)
 
@@ -903,6 +963,9 @@ class FileLineageStore(IncrementalLineageStore):
         }
         with self._locked(commit.rollout_id):
             records = self._read(commit.rollout_id)
+            if not records and self._is_retired(commit.rollout_id):
+                _log_late_write_dropped(commit.rollout_id, model_call_id)
+                return
             matches = [existing for existing in records if existing["model_call_id"] == model_call_id]
             if matches:
                 if matches[0] != record:
@@ -919,6 +982,9 @@ class FileLineageStore(IncrementalLineageStore):
         record = {"model_call_id": model_call_id, "failure_reason": reason}
         with self._locked(rollout_id):
             records = self._read(rollout_id)
+            if not records and self._is_retired(rollout_id):
+                _log_late_write_dropped(rollout_id, model_call_id)
+                return
             if any(existing == record for existing in records):
                 return
             self._append(rollout_id, record, records)
@@ -937,3 +1003,43 @@ class FileLineageStore(IncrementalLineageStore):
     def _has_rows(self, rollout_id: str) -> bool:
         with self._locked(rollout_id):
             return bool(self._read(rollout_id))
+
+    async def retire(self, rollout_ids: Sequence[str]) -> dict:
+        return await asyncio.to_thread(self._retire, rollout_ids)
+
+    def _retire(self, rollout_ids: Sequence[str]) -> dict:
+        from nemo_gym.token_id_capture.store import validate_rollout_ids
+
+        rollout_ids = validate_rollout_ids(rollout_ids)
+        # Make every retired marker durable before deleting any ledger, so a crash in between leaves a fence.
+        for rollout_id in rollout_ids:
+            with self._locked(rollout_id):
+                self._retired_path(rollout_id).touch()
+        if rollout_ids:
+            self._fsync_ledger_root()
+        return self._remove(rollout_ids)
+
+    async def delete(self, rollout_ids: Sequence[str]) -> dict:
+        return await asyncio.to_thread(self._delete, rollout_ids)
+
+    def _delete(self, rollout_ids: Sequence[str]) -> dict:
+        from nemo_gym.token_id_capture.store import validate_rollout_ids
+
+        return self._remove(validate_rollout_ids(rollout_ids), unretire=True)
+
+    def _remove(self, rollout_ids: list[str], *, unretire: bool = False) -> dict:
+        removed, absent = [], []
+        for rollout_id in rollout_ids:
+            with self._locked(rollout_id):
+                try:
+                    self._ledger_path(rollout_id).unlink()
+                    removed.append(rollout_id)
+                except FileNotFoundError:
+                    absent.append(rollout_id)
+                if unretire:
+                    self._retired_path(rollout_id).unlink(missing_ok=True)
+                with self._cache_guard:
+                    self._ledger_cache.pop(rollout_id, None)
+        if rollout_ids:
+            self._fsync_ledger_root()
+        return {"removed": removed, "absent": absent}
