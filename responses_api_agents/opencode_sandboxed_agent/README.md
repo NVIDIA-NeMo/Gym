@@ -47,6 +47,14 @@ checksum before use. Gym uploads it through the sandbox file API and installs it
 alongside OpenCode before execution; no sandbox internet access or root package
 installation is needed. The default is `null`, preserving existing behavior.
 
+## Verbatim prompts
+
+By default the prompt is the last `opencode run` argument. `opencode run` wraps an argument containing
+spaces in double quotes and escapes inner quotes ([anomalyco/opencode#43923](https://github.com/anomalyco/opencode/issues/43923)),
+so the model sees `"<prompt>"` with every `"` as `\"`. Set `verbatim_prompt: true` to upload the prompt to the
+sandbox and pass it on stdin, which `opencode run` uses unchanged. It is off by default because it changes the
+model's input: results are not comparable with runs made without it.
+
 ## Offline scientific evaluation with OpenCode or Pi
 
 The dedicated `opencode_sandboxed_agent` and `pi_sandboxed_agent` run their native
