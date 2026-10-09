@@ -468,9 +468,9 @@ def test_notify_failure_uses_shared_ref_check_action() -> None:
         assert any(step.get("name") == "Checkout repository" for step in steps), workflow_file
 
 
-def test_notification_workflows_pin_slack_rejection_handling() -> None:
+def test_notification_workflows_pin_shared_failure_summary() -> None:
     expected_action = (
-        "NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@f07495d7a01aad5578a407db8e0c4f4e395375f6"
+        "NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@631c404d00a9e60afc591cd071d35d2e18f82fc6"
     )
     for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
         jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
@@ -480,15 +480,39 @@ def test_notification_workflows_pin_slack_rejection_handling() -> None:
         assert notify_step["uses"] == expected_action, workflow_file
 
 
-def test_notify_failure_message_reports_friendly_trigger_label() -> None:
-    # The Slack message renders a "• Trigger: <expr>" bullet; assert the full
-    # GitHub expression (encoding-independent of the bullet) is present.
-    expected_trigger_expr = (
-        "Trigger: ${{ github.event_name == 'schedule' && 'Nightly schedule' "
-        "|| github.event_name == 'workflow_dispatch' && 'Manual dispatch' || 'Push to main' }}"
-    )
+def test_notify_failure_passes_dependency_results_and_preserves_destination() -> None:
     for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
-        assert expected_trigger_expr in workflow_file.read_text(), workflow_file
+        jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
+        (notify_step,) = (
+            step for step in jobs["notify-failure"]["steps"] if step.get("name") == "Notify Gym alerts channel"
+        )
+
+        assert notify_step["with"] == {
+            "needs-json": "${{ toJSON(needs) }}",
+            "webhook": "${{ secrets.SLACK_WEBHOOK }}",
+        }, workflow_file
+        assert jobs["notify-failure"]["environment"] == "main", workflow_file
+
+
+def test_notify_failure_includes_preparation_and_matrix_jobs() -> None:
+    jobs = yaml.safe_load(CICD_MAIN_WORKFLOW.read_text())["jobs"]
+    assert set(jobs["notify-failure"]["needs"]) == {
+        "ephemeral-runner-routing",
+        "pre-flight",
+        "classify_changes",
+        "unit_tests",
+        "container_build",
+        "gpu_e2e_tests",
+        "provider_e2e_tests",
+        "Nemo_CICD_Test",
+    }
+    jobs = yaml.safe_load(FULL_TEST_WORKFLOW.read_text())["jobs"]
+    assert set(jobs["notify-failure"]["needs"]) == {
+        "full-test-suite",
+        "server-suite",
+        "server-suite-result",
+        "test-wheel-install",
+    }
 
 
 def test_full_test_suite_runs_on_schedule_and_dispatch_not_push() -> None:
