@@ -37,7 +37,7 @@ from nemo_gym.agent_utils.sandbox_session import (
     harness_not_run_observations,
     harness_not_run_response,
 )
-from nemo_gym.agent_utils.session_capture import SessionCaptureConfig
+from nemo_gym.agent_utils.sandbox_session_capture import SandboxSessionCaptureConfig
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -433,14 +433,15 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # them; the session close returns its token capture. Codex calls the streaming Responses API
     # (``POST <base_url>/responses`` with ``stream: true``), so the endpoint the capture returns must serve it.
     # A capture replaces the Gym model server for those calls, so model_server must be null.
-    session_capture: SessionCaptureConfig | None = None
+    sandbox_session_capture: SandboxSessionCaptureConfig | None = None
 
     @model_validator(mode="after")
     def validate_model_endpoint(self) -> "CodexAgentConfig":
-        """Reject a config that names both a Gym model server and a session capture."""
-        if self.model_server is not None and self.session_capture is not None:
+        """Reject a config that names both a Gym model server and a sandbox session capture."""
+        if self.model_server is not None and self.sandbox_session_capture is not None:
             raise ValueError(
-                "Codex takes model_server or session_capture, not both; set model_server: null to use session_capture"
+                "Codex takes model_server or sandbox_session_capture, not both; "
+                "set model_server: null to use sandbox_session_capture"
             )
         return self
 
@@ -524,7 +525,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "Codex runtime/session files must be outside SandboxAccess.workdir")
         if any(access.required for access in self.effective_tool_accesses(body)):
             raise HTTPException(422, "Native Codex supports its own sandbox tools, not required HTTP/MCP tools")
-        if self.config.model_server is None and self.config.session_capture is None:
+        if self.config.model_server is None and self.config.sandbox_session_capture is None:
             raise HTTPException(422, "Native Codex requires a sandbox-reachable Gym model_server")
         if not self.config.codex_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.codex_version):
             raise HTTPException(422, "Native Codex requires an exact codex_version, for example 0.144.4")
@@ -557,7 +558,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 workdir=workdir,
                 owns_sandbox=owns_sandbox,
                 harness="Codex",
-                session_capture=self.config.session_capture,
+                session_capture=self.config.sandbox_session_capture,
             ),
             runtime=runtime,
         )
@@ -1191,8 +1192,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
     ) -> NeMoGymResponse:
-        if self.config.session_capture is not None:
-            raise HTTPException(422, "session_capture runs only in agent sessions; the host path cannot capture calls")
+        if self.config.sandbox_session_capture is not None:
+            raise HTTPException(
+                422, "sandbox_session_capture runs only in agent sessions; the host path cannot capture calls"
+            )
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]

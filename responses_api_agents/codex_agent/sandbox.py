@@ -47,7 +47,7 @@ class CodexSandboxSession(AgentSessionState):
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
-    # The endpoint the session capture serves Codex's model calls on; None without a running capture.
+    # The endpoint the sandbox session capture serves Codex's model calls on; None without a running capture.
     capture_endpoint: ModelEndpoint | None = None
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:

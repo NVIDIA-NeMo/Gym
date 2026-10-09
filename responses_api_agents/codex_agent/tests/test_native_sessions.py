@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.session_capture import SessionCapture, SessionCaptureConfig
+from nemo_gym.agent_utils.sandbox_session_capture import SandboxSessionCapture, SandboxSessionCaptureConfig
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
@@ -1947,8 +1947,8 @@ CAPTURE_EVENTS: list[str] = []
 CAPTURED = TokenCapture(atif_trajectories=[{"steps": []}], metrics={"calls": 1})
 
 
-class FakeCapture(SessionCapture):
-    """A session capture that serves a fixed endpoint, or fails to start when ``start`` is ``"raise"``."""
+class FakeCapture(SandboxSessionCapture):
+    """A sandbox session capture that serves a fixed endpoint, or fails to start when ``start`` is ``"raise"``."""
 
     def __init__(self, *, start: str = "ok", model: str | None = "captured-model"):
         self.start_mode, self.model = start, model
@@ -1967,21 +1967,21 @@ class FakeCapture(SessionCapture):
         CAPTURE_EVENTS.append("abort")
 
 
-def capture_config(**options) -> SessionCaptureConfig:
-    return SessionCaptureConfig(implementation=f"{__name__}:FakeCapture", options=options)
+def capture_config(**options) -> SandboxSessionCaptureConfig:
+    return SandboxSessionCaptureConfig(implementation=f"{__name__}:FakeCapture", options=options)
 
 
 def use_capture(agent: CodexAgent, **options) -> None:
     CAPTURE_EVENTS.clear()
     agent.config = CodexAgentConfig(
-        **(agent.config.model_dump() | {"model_server": None, "session_capture": capture_config(**options)})
+        **(agent.config.model_dump() | {"model_server": None, "sandbox_session_capture": capture_config(**options)})
     )
 
 
 def test_config_rejects_model_server_with_session_capture(setup) -> None:
     agent, _ = setup
-    with pytest.raises(ValidationError, match="set model_server: null to use session_capture"):
-        CodexAgentConfig(**(agent.config.model_dump() | {"session_capture": capture_config()}))
+    with pytest.raises(ValidationError, match="set model_server: null to use sandbox_session_capture"):
+        CodexAgentConfig(**(agent.config.model_dump() | {"sandbox_session_capture": capture_config()}))
 
 
 @pytest.mark.parametrize("capture_model", ["captured-model", None])
@@ -2057,5 +2057,5 @@ async def test_host_path_rejects_session_capture(setup) -> None:
     agent, _ = setup
     use_capture(agent)
     with patch.object(agent, "_run_codex", AsyncMock(side_effect=AssertionError("host Codex must not run"))):
-        with pytest.raises(HTTPException, match="session_capture runs only in agent sessions"):
+        with pytest.raises(HTTPException, match="sandbox_session_capture runs only in agent sessions"):
             await agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="task"))
