@@ -1925,7 +1925,8 @@ class TestRunWebserverProxyKwargs:
     def test_proxy_headers_disabled_by_default_single_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
 
-        self.ray_loader_mock.assert_called_once()
+        # Servers that don't declare ray_enabled = True run without Ray.
+        self.ray_loader_mock.assert_not_called()
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
         # A single worker passes the app object itself rather than an import string.
@@ -1935,13 +1936,18 @@ class TestRunWebserverProxyKwargs:
     def test_proxy_headers_disabled_by_default_multi_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4)
 
-        self.ray_loader_mock.assert_called_once()
+        self.ray_loader_mock.assert_not_called()
         # Multi-worker launches re-import the app, so uvicorn receives an import string.
         assert isinstance(kwargs["app"], str)
         assert kwargs["app"].endswith(":app")
         assert 4 == kwargs["workers"]
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
+
+    def test_undeclared_server_does_not_join_a_configured_cluster(self, monkeypatch: MonkeyPatch) -> None:
+        self._capture_uvicorn_kwargs(monkeypatch, {"ray_head_node_address": "10.0.0.1:6379"}, num_workers=1)
+
+        self.ray_loader_mock.assert_not_called()
 
     def test_ray_disabled_skips_initialization(self, monkeypatch: MonkeyPatch) -> None:
         self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1, ray_enabled=False)

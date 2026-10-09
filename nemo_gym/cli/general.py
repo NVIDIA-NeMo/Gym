@@ -17,6 +17,7 @@ import json
 import os
 import platform
 import sys
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as md_version
 from subprocess import Popen
 
@@ -64,7 +65,13 @@ def version():  # pragma: no cover
         "ray",
     ]
 
-    dependencies = {dep: md_version(dep) for dep in key_deps}
+    dependencies = {}
+    for dep in key_deps:
+        try:
+            dependencies[dep] = md_version(dep)
+        except PackageNotFoundError:
+            # Ray is optional; report it rather than failing the whole command.
+            dependencies[dep] = "not installed"
 
     version_info["dependencies"] = dependencies
 

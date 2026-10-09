@@ -2,18 +2,27 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
+import re
 import warnings
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
+from omegaconf import OmegaConf
 
+import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
+from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 from nemo_gym.server_utils import (
-    _WARNED_IMPLICIT_RAY_SERVERS,
+    SimpleServer,
+    _connect_server_to_ray,
     _declared_ray_enabled,
-    _server_uses_ray,
-    entrypoint_may_use_ray,
+    entrypoint_ray_enabled,
 )
+
+
+WITH_CLUSTER = OmegaConf.create({"ray_head_node_address": "10.0.0.1:6379"})
+WITHOUT_CLUSTER = OmegaConf.create({})
 
 
 DIRECT_RAY_COMPONENTS = {
@@ -101,26 +110,53 @@ def _server_class_declarations(root: Path = PARENT_DIR) -> list[tuple[Path, ast.
     return declarations
 
 
-def test_omitted_ray_flag_preserves_compatibility(caplog) -> None:
-    class LegacyServer:
-        ray_enabled = None
-
-    _WARNED_IMPLICIT_RAY_SERVERS.clear()
-    assert _server_uses_ray(LegacyServer) is True
-    assert "Ray remains enabled for backward compatibility" in caplog.text
-    assert "future release will default it to false" in caplog.text
-
-
-def test_explicit_ray_declarations_do_not_warn(caplog) -> None:
+class TestConnectServerToRay:
     class RayServer:
         ray_enabled = True
 
     class NonRayServer:
         ray_enabled = False
 
-    assert _server_uses_ray(RayServer) is True
-    assert _server_uses_ray(NonRayServer) is False
-    assert caplog.text == ""
+    def _patch(self, monkeypatch: pytest.MonkeyPatch, *, launched_by_gym: bool) -> MagicMock:
+        initialize_ray = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "initialize_ray", initialize_ray)
+        if launched_by_gym:
+            monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "{}")
+        else:
+            monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        return initialize_ray
+
+    def test_joins_the_configured_cluster(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        initialize_ray = self._patch(monkeypatch, launched_by_gym=True)
+        _connect_server_to_ray(self.RayServer, WITH_CLUSTER)
+        initialize_ray.assert_called_once()
+
+    def test_non_ray_server_never_connects(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        initialize_ray = self._patch(monkeypatch, launched_by_gym=True)
+        _connect_server_to_ray(self.NonRayServer, WITH_CLUSTER)
+        initialize_ray.assert_not_called()
+
+    def test_undeclared_server_never_connects(self, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+        class UndeclaredServer(SimpleServer):
+            pass
+
+        initialize_ray = self._patch(monkeypatch, launched_by_gym=True)
+        _connect_server_to_ray(UndeclaredServer, WITH_CLUSTER)
+        initialize_ray.assert_not_called()
+        assert caplog.text == ""
+
+    def test_gym_launched_ray_server_without_a_cluster_fails_instead_of_starting_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        initialize_ray = self._patch(monkeypatch, launched_by_gym=True)
+        with pytest.raises(RuntimeError, match="no Ray cluster"):
+            _connect_server_to_ray(self.RayServer, WITHOUT_CLUSTER)
+        initialize_ray.assert_not_called()
+
+    def test_standalone_ray_server_may_start_its_own_cluster(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        initialize_ray = self._patch(monkeypatch, launched_by_gym=False)
+        _connect_server_to_ray(self.RayServer, WITHOUT_CLUSTER)
+        initialize_ray.assert_called_once()
 
 
 def test_ray_backed_inventory_matches_production_imports() -> None:
@@ -183,15 +219,15 @@ def test_shipped_server_classes_declare_ray_usage() -> None:
             True,
             id="declared-true",
         ),
-        pytest.param("class Server:\n    pass\nServer.run_webserver()\n", True, id="undeclared"),
+        pytest.param("class Server:\n    pass\nServer.run_webserver()\n", None, id="undeclared"),
         pytest.param(
             "from elsewhere import Server\nServer.run_webserver()\n",
-            True,
+            None,
             id="imported-class",
         ),
         pytest.param(
             "class Base:\n    ray_enabled = False\nclass Server(Base):\n    pass\nServer.run_webserver()\n",
-            True,
+            None,
             id="inherited-declaration",
         ),
         pytest.param(
@@ -200,19 +236,27 @@ def test_shipped_server_classes_declare_ray_usage() -> None:
             True,
             id="one-of-several-uses-ray",
         ),
-        pytest.param("import uvicorn\nuvicorn.run(app)\n", True, id="no-run-webserver"),
-        pytest.param("class Server(:\n", True, id="unparseable"),
+        pytest.param(
+            "class A:\n    ray_enabled = False\nfrom elsewhere import B\n"
+            "A.run_webserver() if flag else B.run_webserver()\n",
+            None,
+            id="one-of-several-unknown",
+        ),
+        pytest.param("import uvicorn\nuvicorn.run(app)\n", None, id="no-run-webserver"),
+        pytest.param("class Server(:\n", None, id="unparseable"),
     ],
 )
-def test_entrypoint_may_use_ray_reads_declarations_conservatively(tmp_path: Path, source: str, expected: bool) -> None:
+def test_entrypoint_ray_enabled_reads_only_literal_declarations(
+    tmp_path: Path, source: str, expected: bool | None
+) -> None:
     entrypoint = tmp_path / "app.py"
     entrypoint.write_text(source)
 
-    assert entrypoint_may_use_ray(entrypoint) is expected
+    assert entrypoint_ray_enabled(entrypoint) is expected
 
 
-def test_missing_entrypoint_may_use_ray(tmp_path: Path) -> None:
-    assert entrypoint_may_use_ray(tmp_path / "missing.py") is True
+def test_missing_entrypoint_has_unknown_ray_declaration(tmp_path: Path) -> None:
+    assert entrypoint_ray_enabled(tmp_path / "missing.py") is None
 
 
 def test_entrypoint_detection_matches_shipped_server_declarations() -> None:
@@ -223,6 +267,33 @@ def test_entrypoint_detection_matches_shipped_server_declarations() -> None:
     mismatches = [
         f"{path.relative_to(PARENT_DIR)}: expected {expected}"
         for path, expected in expected_by_path.items()
-        if entrypoint_may_use_ray(path) is not expected
+        if entrypoint_ray_enabled(path) is not expected
     ]
     assert not mismatches, "Orchestrator Ray detection disagrees with shipped declarations:\n" + "\n".join(mismatches)
+
+
+_NEMO_GYM_EXTRAS_RE = re.compile(r"nemo[-_]gym\[([^\]]*)\]")
+
+
+def _requested_nemo_gym_extras(component_dir: Path) -> set[str]:
+    extras: set[str] = set()
+    for manifest in ("requirements.txt", "pyproject.toml", "setup.py"):
+        manifest_path = component_dir / manifest
+        if manifest_path.exists():
+            for match in _NEMO_GYM_EXTRAS_RE.finditer(manifest_path.read_text()):
+                extras.update(extra.strip() for extra in match.group(1).split(","))
+    return extras
+
+
+def test_ray_servers_request_the_ray_extra() -> None:
+    # Ray is installed into a server venv only when that server asks for it, so every server that declares
+    # ray_enabled = True must request nemo-gym's `ray` extra in its manifest.
+    ray_components = {
+        Path(*path.relative_to(PARENT_DIR).parts[:2])
+        for path, _class_node, expected in _server_class_declarations()
+        if expected
+    }
+    assert ray_components
+
+    missing = sorted(str(c) for c in ray_components if "ray" not in _requested_nemo_gym_extras(PARENT_DIR / c))
+    assert not missing, "Servers declaring ray_enabled = True must request nemo-gym[ray]:\n" + "\n".join(missing)

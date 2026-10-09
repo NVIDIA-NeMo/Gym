@@ -64,7 +64,7 @@ When mixing named selectors and `--config`, the CLI uses a fixed flag-category o
 
 ### Phase 3: Initialize Ray
 
-The system initializes a Ray cluster for distributed coordination. If `ray_head_node_address` is specified, Ray-enabled servers connect to that cluster; otherwise, Gym starts a cluster. Server implementations declaring `ray_enabled = False` do not import or connect to Ray. For how this fits a training cluster, see [Deployment Topology](/infrastructure/deployment-topology).
+If any configured server needs Ray, the system initializes a Ray cluster for distributed coordination. A server needs Ray when it declares `ray_enabled = True`; the default is `False`. If `ray_head_node_address` is specified, Ray-enabled servers connect to that cluster; otherwise, Gym starts a cluster. When no configured server needs Ray, this phase is skipped. Server implementations declaring `ray_enabled = False` do not import or connect to Ray. For how this fits a training cluster, see [Deployment Topology](/infrastructure/deployment-topology).
 
 ### Phase 4: Start Servers
 
