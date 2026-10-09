@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import signal
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -817,23 +818,28 @@ def test_slurm_batch_command_preserves_status_and_stops_server(
     stubs = {
         "scontrol": "#!/bin/bash\nprintf 'node-a\\nnode-b\\n'\n",
         "python3": '#!/bin/bash\necho unexpected-parent-python >> "$EVENTS"\nexit 10\n',
+        # Each step signals readiness only after installing its TERM trap, and the step that ends first waits for it.
+        # The launcher then never signals a step before its trap exists, or while it is still being forked.
+        # A TERM in either window would end the step without recording the stop, or be lost.
         "srun": (
             "#!/bin/bash\n"
             'if [[ " $* " == *eval-container-on-node* ]]; then\n'
-            '    while [[ ! -f "$SERVER_READY" ]]; do sleep 0.01; done\n'
             '    if [[ "$FIRST_STEP" == eval ]]; then\n'
+            '        while [[ ! -f "$SERVER_READY" ]]; do sleep 0.01; done\n'
             '        if [[ "$EVAL_STATUS" == 143 ]]; then kill -TERM "$PPID"; fi\n'
             '        exit "$EVAL_STATUS"\n'
             "    fi\n"
             "    trap 'exit 0' TERM\n"
+            '    touch "$EVAL_READY"\n'
             "    while :; do sleep 0.1; done\n"
             "fi\n"
-            'touch "$SERVER_READY"\n'
             'if [[ "$FIRST_STEP" == server ]]; then\n'
+            '    while [[ ! -f "$EVAL_READY" ]]; do sleep 0.01; done\n'
             '    echo server-exit >> "$EVENTS"\n'
             '    exit "$SERVER_STATUS"\n'
             "fi\n"
             "trap 'echo server-stop >> \"$EVENTS\"; exit 0' TERM\n"
+            'touch "$SERVER_READY"\n'
             "while :; do sleep 0.1; done\n"
         ),
     }
@@ -842,13 +848,16 @@ def test_slurm_batch_command_preserves_status_and_stops_server(
         stub.write_text(contents)
         stub.chmod(0o755)
 
-    result = subprocess.run(
+    # The batch command gets its own process group so teardown can stop stub steps it leaves behind on failure.
+    batch = subprocess.Popen(
         ["bash", "-c", batch_command],
-        check=False,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
         env={
             **env,
             "EVENTS": str(events),
+            "EVAL_READY": str(tmp_path / "eval-ready"),
             "EVAL_STATUS": str(eval_status),
             "FIRST_STEP": first_step,
             "SERVER_STATUS": "41",
@@ -862,9 +871,16 @@ def test_slurm_batch_command_preserves_status_and_stops_server(
             "vllm_command": "server-command",
         },
         text=True,
-        timeout=10,
     )
-    assert result.returncode == expected_status
+    try:
+        batch.communicate(timeout=10)
+    finally:
+        try:
+            os.killpg(batch.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        batch.wait()
+    assert batch.returncode == expected_status
     assert events.read_text().splitlines() == (["server-stop"] if first_step == "eval" else ["server-exit"])
 
 

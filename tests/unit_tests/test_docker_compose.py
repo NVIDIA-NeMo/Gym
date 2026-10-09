@@ -121,8 +121,11 @@ class ShellProvider(Provider):
     async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
         import asyncio
         import os
+        import signal
 
         spec = self.created[int(handle.sandbox_id) - 1]
+        # A real sandbox ends every process inside it, so stop the whole group and not only the shell.
+        # Killing the shell alone would leave the service script and its children running after the test.
         process = await asyncio.create_subprocess_exec(
             "/bin/sh",
             "-c",
@@ -131,17 +134,23 @@ class ShellProvider(Provider):
             env={**os.environ, **spec.env, **(env or {})},
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
+
+        def kill_group():
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
         try:
             out, err = await asyncio.wait_for(process.communicate(), timeout_s)
         except asyncio.CancelledError:
-            if process.returncode is None:
-                process.kill()
+            kill_group()
             await process.wait()
             raise
         except TimeoutError:
-            if process.returncode is None:
-                process.kill()
+            kill_group()
             await process.wait()
             return SandboxExecResult("", "timeout", 124)
         return SandboxExecResult(out.decode(), err.decode(), process.returncode)

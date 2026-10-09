@@ -7,6 +7,7 @@ import os
 import runpy
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -26,16 +27,30 @@ SERVING = BENCHMARK / "vllm_configs/batched.sh"
 BUILDER = BENCHMARK / "build_eval_container.sh"
 
 
-def run_shell(script: str, root: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
-    """Run only local shell logic with a bounded lifetime."""
-    return subprocess.run(
+def run_shell(script: str, root: Path, env: dict[str, str], *, timeout: float = 30) -> subprocess.CompletedProcess:
+    """Run only local shell logic with a bounded lifetime.
+
+    The script runs in its own process group, and the whole group is killed when the call returns.
+    A timeout would otherwise kill only `bash` and leave its children running.
+    """
+    process = subprocess.Popen(
         ["bash", "--noprofile", "--norc", "-c", script],
         cwd=root,
         env=env,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=30,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
 def read_args(path: Path) -> list[str]:
@@ -325,7 +340,9 @@ def test_check_runs_real_preflight_without_submitting(checkout, batch: str, vali
         OPENSANDBOX_API_KEY="fixture-key" if valid else "dummy",
         NV_INFERENCE_API_KEY="fixture-key",
     )
-    result = run_shell(f"bash {SUBMIT} {batch} --check", root, env)
+    # The check imports Gym and resolves every benchmark config, which is CPU-bound and slows down in step with load.
+    # The bound only stops a hung check; the call returns as soon as the check exits.
+    result = run_shell(f"bash {SUBMIT} {batch} --check", root, env, timeout=300)
     assert (result.returncode == 0) is valid, result.stderr
     if valid:
         assert "PASS: Gym configuration resolves" in result.stdout
