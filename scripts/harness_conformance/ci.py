@@ -27,6 +27,7 @@ def select_harnesses(paths: list[str]) -> list[str]:
         elif path.startswith(("fern/", "docs/")) or ("/" not in path and path.endswith(".md")) or path == "LICENSE":
             continue
         else:
+            # Includes Gym health: scenario expectations depend on its verdicts.
             # Includes other servers: adapters/tests can import them dynamically.
             # Unknown code and dependency/configuration changes must not be skipped.
             return list(HARNESSES)

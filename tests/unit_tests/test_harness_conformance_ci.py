@@ -21,6 +21,10 @@ def test_adapter_changes_select_only_that_harness(harness):
 @pytest.mark.parametrize(
     "path",
     [
+        "nemo_gym/health/__init__.py",
+        "nemo_gym/health/checks.py",
+        "nemo_gym/health/types.py",
+        "nemo_gym/rollout_health.py",
         "nemo_gym/rollout_collection.py",
         "nemo_gym/prompts/system.md",
         "responses_api_agents/shared/prompts.md",
@@ -37,6 +41,7 @@ def test_adapter_changes_select_only_that_harness(harness):
     ],
 )
 def test_shared_or_unknown_dependencies_run_all(path):
+    assert select_harnesses([path]) == list(HARNESSES)
     assert select_harnesses(["responses_api_agents/pi_agent/app.py", path]) == list(HARNESSES)
 
 
