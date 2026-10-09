@@ -27,7 +27,7 @@ from datetime import timedelta
 from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
-from time import time
+from time import perf_counter_ns, time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
@@ -74,8 +74,10 @@ from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_pr
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     COMPACTION_PURPOSES,
+    MODEL_CALL_PURPOSES,
     AgentInvocation,
     AgentObservationBundle,
+    AgentPhaseObservation,
     ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,
@@ -170,6 +172,8 @@ class _CompletedRollout:
     # The duration stays rollout_latency_ms, measured in one process around the same call.
     rollout_started_at: Optional[float] = None
     rollout_completed_at: Optional[float] = None
+    # Monotonic duration of the same call, so the rollout bound does not depend on the wall clock.
+    rollout_duration_ms: Optional[float] = None
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -226,6 +230,36 @@ def _derive_model_response_kind(response: Any) -> Optional[str]:
     return None
 
 
+# Fields of a model call the harness owns when it recorded the call itself; the capture never overwrites them.
+_HARNESS_OWNED_CALL_FIELDS = (
+    "model_call_id",
+    "client_call_id",
+    "invocation_id",
+    "model_call_purpose",
+    "status",
+    "clock_domain",
+    "started_at",
+    "completed_at",
+    "duration_ms",
+    "processed_at",
+)
+
+
+def _step_tokens_match(step: TrajectoryTokenStats, captured: TrajectoryTokenStats) -> bool:
+    """OpenCode's step counts against the provider's usage: OpenCode's input excludes its cache reads and its
+    output excludes reasoning, so prompt = input + cached and completion = output + reasoning."""
+    if step.prompt_tokens is None or captured.prompt_tokens is None:
+        return True  # nothing to compare: the pairing is accepted as is
+    prompt = step.prompt_tokens + (step.cached_tokens or 0)
+    if prompt != captured.prompt_tokens:
+        return False
+    if step.completion_tokens is not None and captured.completion_tokens is not None:
+        reasoning = captured.reasoning_tokens or 0
+        if step.completion_tokens + (step.reasoning_tokens or 0) != captured.completion_tokens:
+            return step.completion_tokens == captured.completion_tokens - reasoning
+    return True
+
+
 def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> TrajectoryRecord:
     task_id, rollout_id = _trajectory_identity(row)
     gaps: list[ObservationGap] = []
@@ -234,6 +268,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     tools: list[TrajectoryToolCall] = []
     model_calls: list[TrajectoryModelCall] = []
     observed_compactions: list[ContextCompactionObservation] = []
+    phases: list[AgentPhaseObservation] = []
 
     raw_trajectory = result.get(NG_TRAJECTORY_KEY)
     if isinstance(raw_trajectory, dict):
@@ -258,6 +293,8 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             invocations = trajectory.invocations
             tools = trajectory.tool_calls
             model_calls = trajectory.model_calls
+            phases = list(trajectory.phases)
+            observed_compactions = list(trajectory.compactions)
         except Exception as exc:
             gaps.append(ObservationGap(code="producer_trajectory_invalid", detail=type(exc).__name__))
 
@@ -297,9 +334,14 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                         tools.append(projected)
                     else:
                         tools[position] = projected
-            observed_compactions = [
-                record for record in observations.records if isinstance(record, ContextCompactionObservation)
-            ]
+            known = {(c.invocation_id, c.observed_at) for c in observed_compactions}
+            observed_compactions.extend(
+                record
+                for record in observations.records
+                if isinstance(record, ContextCompactionObservation)
+                and (record.invocation_id, record.observed_at) not in known
+            )
+            phases.extend(record for record in observations.records if isinstance(record, AgentPhaseObservation))
         except Exception as exc:
             gaps.append(ObservationGap(code="agent_observations_invalid", detail=type(exc).__name__))
 
@@ -311,18 +353,29 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     model_call_positions = {
         call.model_call_id: index for index, call in enumerate(model_calls) if call.model_call_id is not None
     }
-    # A harness that records its own model calls mints its own model_call_id, and the model
-    # server mints another for the same request. The response id is the join key both saw, so
-    # fall back to it -- only when it points at exactly one producer call -- else the same call
-    # lands twice and every token sum doubles.
+    # Join keys, strongest first. A harness that sends its own id as x-ng-client-call-id is joined exactly on
+    # it. A harness that mints an id the server never saw falls back to the response id, only when it points at
+    # exactly one producer call -- else the same call lands twice and every token sum doubles. A harness that
+    # records steps without any id (OpenCode) has them paired with the session's captured calls in start order,
+    # verified by token counts.
+    client_positions = {
+        call.client_call_id: index for index, call in enumerate(model_calls) if call.client_call_id is not None
+    }
     response_id_positions: dict[str, Optional[int]] = {}
     for index, call in enumerate(model_calls):
         response_id = call.response_metadata.response_id
         if response_id:
             response_id_positions[response_id] = None if response_id in response_id_positions else index
-    for raw_call in raw_calls:
-        if not isinstance(raw_call, dict):
-            continue
+    unpaired_steps: dict[str, list[int]] = defaultdict(list)
+    for index, call in enumerate(model_calls):
+        if call.model_call_id is None and call.client_call_id is None and call.invocation_id is not None:
+            unpaired_steps[call.invocation_id].append(index)
+    for steps in unpaired_steps.values():
+        steps.sort(key=lambda i: (model_calls[i].started_at or model_calls[i].completed_at or 0.0))
+    for raw_call in sorted(
+        (c for c in raw_calls if isinstance(c, dict)),
+        key=lambda c: (c.get("started_at") if isinstance(c.get("started_at"), (int, float)) else float("inf")),
+    ):
         model_call_id = raw_call.get("model_call_id")
         metadata = {
             key: raw_call[key]
@@ -344,11 +397,22 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             metadata.setdefault("response_status", response["status"])
         if isinstance(raw_call.get("engine_metrics"), dict):
             metadata["engine"] = raw_call["engine_metrics"]
+        annotations = raw_call.get("annotations") if isinstance(raw_call.get("annotations"), dict) else {}
+        rejected_tokens = _nonnegative_int(annotations.get("rejected_request_tokens"))
+        client_purpose = raw_call.get("client_purpose")
         projected = TrajectoryModelCall(
             model_call_id=model_call_id,
-            started_at=raw_call.get("started_at"),
-            completed_at=raw_call.get("completed_at"),
-            duration_ms=raw_call.get("latency_total_ms"),
+            # The server's bounds are the server's: the harness's logical call keeps started_at/completed_at.
+            server_started_at=raw_call.get("started_at"),
+            server_completed_at=raw_call.get("completed_at"),
+            server_duration_ms=raw_call.get("latency_total_ms"),
+            client_call_id=raw_call.get("client_call_id") if isinstance(raw_call.get("client_call_id"), str) else None,
+            invocation_id=(
+                raw_call.get("client_session_id") if isinstance(raw_call.get("client_session_id"), str) else None
+            ),
+            model_call_purpose=client_purpose if client_purpose in MODEL_CALL_PURPOSES else None,
+            rejected_request_tokens=rejected_tokens,
+            context_overflow=True if rejected_tokens is not None else None,
             request=raw_call.get("request") if raw_call.get("request") is not None else raw_call.get("request_raw"),
             response=raw_call.get("response")
             if raw_call.get("response") is not None
@@ -362,13 +426,29 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 cached_tokens=_nonnegative_int(raw_call.get("cached_tokens")),
             ),
         )
-        position = model_call_positions.pop(model_call_id, None) if model_call_id is not None else None
+        position = client_positions.pop(projected.client_call_id, None) if projected.client_call_id else None
+        if position is None and model_call_id is not None:
+            position = model_call_positions.pop(model_call_id, None)
         if position is None and isinstance(metadata.get("response_id"), str):
             position = response_id_positions.pop(metadata["response_id"], None)
+        paired_by_order = False
+        if position is None and projected.invocation_id and unpaired_steps.get(projected.invocation_id):
+            position = unpaired_steps[projected.invocation_id].pop(0)
+            paired_by_order = True
         if position is None:
-            model_calls.append(projected)
+            # No harness record: the server's bounds are the only bounds this call has.
+            model_calls.append(
+                projected.model_copy(
+                    update={
+                        "started_at": projected.server_started_at,
+                        "completed_at": projected.server_completed_at,
+                        "duration_ms": projected.server_duration_ms,
+                    }
+                )
+            )
         else:
-            merged = model_calls[position].model_dump(mode="json")
+            existing = model_calls[position]
+            merged = existing.model_dump(mode="json")
             update = projected.model_dump(mode="json", exclude_none=True)
             for key in ("response_metadata", "token_stats"):
                 merged[key].update(update.pop(key))
@@ -376,7 +456,33 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             # producer's. Capture has no attempt visibility today; only let it add, never clear.
             if not update.get("attempts"):
                 update.pop("attempts", None)
+            # Harness evidence wins wherever both sides have a value: identity, purpose, status and the
+            # harness's own clock and bounds. The capture only fills what the harness left empty.
+            for key in _HARNESS_OWNED_CALL_FIELDS:
+                if merged.get(key) is not None:
+                    update.pop(key, None)
+            if paired_by_order:
+                sent_at_ms = raw_call.get("client_sent_at_ms")
+                if merged.get("started_at") is None and isinstance(sent_at_ms, (int, float)):
+                    # The plugin stamps the send time on its own (sandbox) clock, the same clock as the step.
+                    update["started_at"] = float(sent_at_ms) / 1000.0
+                if not _step_tokens_match(existing.token_stats, projected.token_stats):
+                    gaps.append(
+                        ObservationGap(
+                            code="model_call_join_unverified",
+                            invocation_id=projected.invocation_id,
+                            detail=model_call_id,
+                        )
+                    )
             merged.update(update)
+            # A harness record without its own bounds (it only named the call) takes the server's bounds.
+            for key, server_key in (
+                ("started_at", "server_started_at"),
+                ("completed_at", "server_completed_at"),
+                ("duration_ms", "server_duration_ms"),
+            ):
+                if merged.get(key) is None and merged.get(server_key) is not None:
+                    merged[key] = merged[server_key]
             projected = TrajectoryModelCall.model_validate(merged)
             model_calls[position] = projected
 
@@ -459,6 +565,18 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                     if next_agent is not None and next_agent.token_stats.prompt_tokens is not None:
                         observed_compactions[i].tokens_after = next_agent.token_stats.prompt_tokens
 
+    rejected_by_id = {
+        key: call.rejected_request_tokens
+        for call in model_calls
+        if call.rejected_request_tokens is not None
+        for key in (call.model_call_id, call.client_call_id)
+        if key
+    }
+    for compaction in observed_compactions:
+        ref = compaction.before_model_call
+        if compaction.rejected_request_tokens is None and ref is not None and ref.model_call_id in rejected_by_id:
+            compaction.rejected_request_tokens = rejected_by_id[ref.model_call_id]
+
     return TrajectoryRecord(
         task_id=task_id,
         rollout_id=rollout_id,
@@ -467,6 +585,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         model_calls=model_calls,
         tool_calls=tools,
         compactions=observed_compactions,
+        phases=phases,
         gaps=list({(gap.code, gap.invocation_id, gap.detail): gap for gap in gaps}.values()),
     )
 
@@ -541,6 +660,7 @@ def _build_ng_perf(
     rollout_latency_ms: Optional[float],
     rollout_started_at: Optional[float] = None,
     rollout_completed_at: Optional[float] = None,
+    rollout_duration_ms: Optional[float] = None,
 ) -> Optional[dict[str, Any]]:
     """Assemble the per-rollout ``ng_perf`` summary from ``ng_trajectory``.
 
@@ -665,6 +785,9 @@ def _build_ng_perf(
         ng_perf["rollout_started_at"] = rollout_started_at
     if isinstance(rollout_completed_at, (int, float)):
         ng_perf["rollout_completed_at"] = rollout_completed_at
+    if isinstance(rollout_duration_ms, (int, float)):
+        # The same interval as total_latency_ms, read from the monotonic clock.
+        ng_perf["rollout_duration_ms"] = rollout_duration_ms
 
     return ng_perf
 
@@ -676,6 +799,7 @@ def _attach_ng_perf(
     rollout_latency_ms: Optional[float] = None,
     rollout_started_at: Optional[float] = None,
     rollout_completed_at: Optional[float] = None,
+    rollout_duration_ms: Optional[float] = None,
 ) -> None:
     if not observability_enabled:
         # ng_perf stays absent entirely when observability is off (OQ4): a caller who
@@ -687,6 +811,7 @@ def _attach_ng_perf(
             rollout_latency_ms=rollout_latency_ms,
             rollout_started_at=rollout_started_at,
             rollout_completed_at=rollout_completed_at,
+            rollout_duration_ms=rollout_duration_ms,
         )
     except Exception:
         logger.warning("Could not assemble ng_perf for a rollout.", exc_info=True)
@@ -1577,6 +1702,7 @@ class RolloutCollectionHelper(BaseModel):
                 rollout_latency_ms=rollout_latency_ms,
                 rollout_started_at=completed.rollout_started_at,
                 rollout_completed_at=completed.rollout_completed_at,
+                rollout_duration_ms=completed.rollout_duration_ms,
             )
 
             # Freeze and rebuild tokens only for participating agents.
@@ -2071,6 +2197,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
             async with semaphore:
                 started_at = time()
+                started_ns = perf_counter_ns()
                 res = None
                 try:
                     res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
@@ -2078,6 +2205,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     result = await get_response_json(res)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
+                    duration_ns = perf_counter_ns() - started_ns
                     completed_at = time()
                     rollout_latency_ms = (completed_at - started_at) * 1000
                     return _CompletedRollout(
@@ -2086,6 +2214,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         rollout_latency_ms=rollout_latency_ms,
                         rollout_started_at=started_at,
                         rollout_completed_at=completed_at,
+                        rollout_duration_ms=duration_ns / 1e6,
                     )
                 except Exception as e:
                     print(

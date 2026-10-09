@@ -4299,3 +4299,179 @@ class TestHarnessAndCaptureRecordsMerge:
         )
         trajectory = _build_trajectory_record({TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}, result)
         assert len(trajectory.model_calls) == 3  # two producer calls + the unmatched capture record
+
+
+class TestLatencyMerge:
+    """The capture record joins the harness's record without overwriting the harness's view of the call."""
+
+    @staticmethod
+    def _row() -> dict:
+        return {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
+
+    @staticmethod
+    def _capture(**overrides) -> dict:
+        call = {
+            "model_call_id": "cap-1",
+            "response_id": "resp_1",
+            "client_call_id": "h-1",
+            "started_at": 10.5,
+            "completed_at": 14.5,
+            "latency_total_ms": 4000.0,
+            "tokens_in": 800,
+            "tokens_out": 50,
+            "tokens_reasoning": 20,
+            "cached_tokens": 100,
+            "response": {"id": "resp_1", "choices": [{"message": {"content": "x"}}]},
+        }
+        call.update(overrides)
+        return call
+
+    def test_capture_joins_by_client_call_id_and_keeps_the_harness_timing(self) -> None:
+        result = {
+            "ng_trajectory": {
+                "task_id": "2",
+                "rollout_id": "2-3",
+                "invocations": [{"invocation_id": "root"}],
+                "model_calls": [
+                    {
+                        "model_call_id": "h-1",
+                        "client_call_id": "h-1",
+                        "started_at": 10.0,
+                        "completed_at": 15.0,
+                        "duration_ms": 5000.0,
+                        "status": "ok",
+                        "model_call_purpose": "agent_step",
+                        "clock_domain": "node:a",
+                    }
+                ],
+            },
+            "ng_model_call_capture": {"calls": [self._capture()]},
+        }
+        [call] = _build_trajectory_record(self._row(), result).model_calls
+        assert (call.started_at, call.completed_at, call.duration_ms) == (10.0, 15.0, 5000.0)
+        assert (call.server_started_at, call.server_completed_at, call.server_duration_ms) == (10.5, 14.5, 4000.0)
+        assert call.token_stats.prompt_tokens == 800 and call.model_call_id == "h-1"
+        assert call.response_metadata.response_id == "resp_1" and call.status == "ok"
+
+    def test_opencode_steps_pair_with_capture_records_by_session_order(self) -> None:
+        """OpenCode mints no call ids: its steps (harness view, no ids) pair with the session's captured calls in
+        start order. The step keeps its first-part arrival as the end and gains the plugin's send time as the
+        start; a token mismatch is reported, never silently accepted."""
+        steps = [
+            {
+                "invocation_id": "ses",
+                "completed_at": 105.0,
+                "processed_at": 105.3,
+                "clock_domain": "sandbox:s",
+                "token_stats": {
+                    "prompt_tokens": 700,
+                    "completion_tokens": 50,
+                    "reasoning_tokens": 20,
+                    "cached_tokens": 100,
+                },
+            },
+            {
+                "invocation_id": "ses",
+                "completed_at": 125.0,
+                "processed_at": 125.2,
+                "clock_domain": "sandbox:s",
+                "token_stats": {
+                    "prompt_tokens": 900,
+                    "completion_tokens": 10,
+                    "reasoning_tokens": 0,
+                    "cached_tokens": 0,
+                },
+            },
+        ]
+        captures = [
+            self._capture(
+                model_call_id="c1",
+                response_id="r1",
+                client_call_id=None,
+                client_session_id="ses",
+                client_sent_at_ms=100_000.0,
+                started_at=100.2,
+                completed_at=104.8,
+                tokens_in=800,
+                tokens_out=70,
+                tokens_reasoning=20,
+                cached_tokens=100,
+            ),
+            self._capture(
+                model_call_id="c2",
+                response_id="r2",
+                client_call_id=None,
+                client_session_id="ses",
+                client_sent_at_ms=120_000.0,
+                started_at=120.2,
+                completed_at=124.8,
+                tokens_in=999,
+                tokens_out=10,
+                tokens_reasoning=0,
+                cached_tokens=0,
+            ),
+        ]
+        result = {
+            "ng_trajectory": {
+                "task_id": "2",
+                "rollout_id": "2-3",
+                "invocations": [{"invocation_id": "ses"}],
+                "model_calls": steps,
+            },
+            "ng_model_call_capture": {"calls": captures},
+        }
+        record = _build_trajectory_record(self._row(), result)
+        assert len(record.model_calls) == 2
+        first, second = record.model_calls
+        assert (first.started_at, first.completed_at, first.server_started_at) == (100.0, 105.0, 100.2)
+        assert first.model_call_id == "c1" and first.token_stats.prompt_tokens == 800
+        assert second.started_at == 120.0 and second.model_call_id == "c2"
+        codes = {gap.code for gap in record.gaps}
+        assert "model_call_join_unverified" in codes  # the second pair's tokens disagree (999 vs 900)
+
+    def test_header_purpose_wins_and_phases_are_copied_from_the_bundle(self) -> None:
+        result = {
+            "ng_trajectory": {"task_id": "2", "rollout_id": "2-3", "invocations": [{"invocation_id": "root"}]},
+            "ng_agent_observations": {
+                "source": "x",
+                "records": [
+                    {"kind": "agent_invocation", "invocation_id": "root"},
+                    {
+                        "kind": "agent_phase",
+                        "name": "verify",
+                        "started_at": 1.0,
+                        "completed_at": 2.0,
+                        "duration_ms": 1000.0,
+                        "status": "completed",
+                    },
+                ],
+            },
+            "ng_model_call_capture": {"calls": [self._capture(client_purpose="compaction_questions")]},
+        }
+        record = _build_trajectory_record(self._row(), result)
+        assert record.model_calls[0].model_call_purpose == "compaction_questions"
+        assert [phase.name for phase in record.phases] == ["verify"]
+
+    def test_rejected_request_tokens_reach_the_call_and_its_compaction(self) -> None:
+        result = {
+            "ng_trajectory": {
+                "task_id": "2",
+                "rollout_id": "2-3",
+                "invocations": [{"invocation_id": "root"}],
+                "model_calls": [{"model_call_id": "h-1", "client_call_id": "h-1", "context_overflow": True}],
+                "compactions": [
+                    {"invocation_id": "root", "trigger": "overflow", "before_model_call": {"model_call_id": "h-1"}}
+                ],
+            },
+            "ng_model_call_capture": {
+                "calls": [self._capture(annotations={"rejected_request_tokens": 150000, "upstream_status": 400})]
+            },
+        }
+        record = _build_trajectory_record(self._row(), result)
+        assert record.model_calls[0].rejected_request_tokens == 150000
+        assert record.compactions[0].rejected_request_tokens == 150000
+
+    def test_ng_perf_carries_the_collectors_monotonic_duration(self) -> None:
+        result = {NG_TRAJECTORY_KEY: {"task_id": "0", "rollout_id": "0-0", "invocations": [{"invocation_id": "r"}]}}
+        _attach_ng_perf(result, observability_enabled=True, rollout_latency_ms=1234.5, rollout_duration_ms=1234.4)
+        assert result["ng_perf"]["rollout_duration_ms"] == 1234.4
