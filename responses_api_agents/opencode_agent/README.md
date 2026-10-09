@@ -84,5 +84,10 @@ key, and provider configuration are unchanged.
 - `extra_args`: extra flags appended to `opencode run`
 - `opencode_config`: written to `opencode.json` in `repo_dir` when set, otherwise in the run dir
 - `opencode_version`: npm version to pin on install (null means latest)
+- `verbatim_prompt`: send the prompt on stdin instead of as the last `opencode run` argument (default false).
+  `opencode run` wraps an argument containing spaces in double quotes and escapes inner quotes
+  ([anomalyco/opencode#43923](https://github.com/anomalyco/opencode/issues/43923)), so by default the
+  model sees `"<prompt>"` with every `"` as `\"`. Enabling it changes the model's input, so results are not
+  comparable with runs made without it.
 
 See `configs/opencode_agent.yaml`.

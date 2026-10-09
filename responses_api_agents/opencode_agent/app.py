@@ -530,6 +530,15 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int = 262144
     max_output_tokens: int = 131072
     opencode_version: Optional[str] = None
+    verbatim_prompt: bool = Field(
+        default=False,
+        description=(
+            "Send the task prompt to `opencode run` on stdin instead of as a command-line argument. "
+            "OpenCode wraps an argument containing spaces in double quotes and escapes inner quotes "
+            "(anomalyco/opencode#43923), so the model otherwise sees an altered prompt. Off by default "
+            "so existing results stay comparable."
+        ),
+    )
 
     @property
     def command_parts(self) -> list[str]:
@@ -670,19 +679,22 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if self.config.thinking:
             cmd.append("--thinking")
         cmd.extend(self.config.extra_args)
-        cmd.append(prompt)
+        if not self.config.verbatim_prompt:
+            cmd.append(prompt)
 
         try:
             timed_out = False
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(project_dir),
+                stdin=asyncio.subprocess.PIPE if self.config.verbatim_prompt else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
+            prompt_input = prompt.encode() if self.config.verbatim_prompt else None
             try:
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                _, stderr = await asyncio.wait_for(proc.communicate(prompt_input), timeout=self.config.timeout)
             except asyncio.TimeoutError:
                 proc.kill()
                 _, stderr = await proc.communicate()
