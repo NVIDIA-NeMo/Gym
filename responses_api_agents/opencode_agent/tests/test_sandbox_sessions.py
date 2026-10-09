@@ -161,7 +161,9 @@ def setup():
     )
     module = "responses_api_agents.opencode_agent.app"
     with (
-        patch(f"{module}.ensure_opencode", side_effect=AssertionError("Native sessions must not install on the host")),
+        patch(
+            f"{module}.ensure_opencode", side_effect=AssertionError("Sandbox sessions must not install on the host")
+        ),
         patch(f"{module}.resolve_provider_config"),
         patch(f"{module}.get_global_config_dict", return_value={}),
         patch(f"{module}.create_provider"),
@@ -245,7 +247,7 @@ def capture_observations(sandbox, tmp_path):
 
 
 @pytest.mark.parametrize("output_budget", [4096, 32000])
-def test_http_native_flow_runs_opencode_in_borrowed_sandbox(setup, output_budget):
+def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budget):
     agent, sandbox = setup
     agent.config.max_output_tokens = output_budget
     with TestClient(agent.setup_webserver()) as client:
@@ -606,7 +608,7 @@ async def test_cancelled_install_never_publishes_session_or_launches_opencode(se
     sandbox.stop.assert_not_awaited()
 
 
-def test_native_usage_restores_cached_and_reasoning_tokens_across_subagents():
+def test_reported_usage_restores_cached_and_reasoning_tokens_across_subagents():
     export = {
         "usage_messages": [
             {
@@ -628,7 +630,7 @@ def test_native_usage_restores_cached_and_reasoning_tokens_across_subagents():
 
 @pytest.mark.parametrize("field", ["cache", "reasoning"])
 @pytest.mark.parametrize("value", [None, 0, -1, True, 1.5, "3", "bad"])
-def test_native_usage_does_not_treat_defaulted_or_invalid_details_as_measurements(field, value):
+def test_reported_usage_does_not_treat_defaulted_or_invalid_details_as_measurements(field, value):
     tokens = {"input": 10, "output": 3, "reasoning": 2, "cache": {"read": 4, "write": 1}}
     if field == "cache":
         tokens["cache"]["read"] = value
@@ -645,7 +647,7 @@ def test_native_usage_does_not_treat_defaulted_or_invalid_details_as_measurement
 
 @pytest.mark.parametrize("unknown_turn", [0, 1])
 @pytest.mark.parametrize("unknown_kind", ["zero", "absent", "missing_usage"])
-def test_native_optional_usage_stays_unknown_across_root_and_subagent_calls(unknown_turn, unknown_kind):
+def test_optional_reported_usage_stays_unknown_across_root_and_subagent_calls(unknown_turn, unknown_kind):
     infos = [
         {"role": "assistant", "tokens": {"input": 10, "output": 3, "reasoning": 2, "cache": {"read": 4, "write": 1}}},
         {"role": "assistant", "tokens": {"input": 7, "output": 5, "reasoning": 1, "cache": {"read": 2}}},
@@ -672,7 +674,7 @@ def test_native_optional_usage_stays_unknown_across_root_and_subagent_calls(unkn
 
 
 @pytest.mark.parametrize("cache,reasoning", [(0, 0), (4, 0), (0, 2), (4, 2)])
-def test_native_http_usage_gaps_follow_persisted_optional_counter_availability(setup, tmp_path, cache, reasoning):
+def test_session_http_usage_gaps_follow_persisted_optional_counter_availability(setup, tmp_path, cache, reasoning):
     agent, sandbox = setup
     export = json.loads(sandbox.events)
     tokens = export["messages"][1]["info"]["tokens"]
@@ -944,7 +946,7 @@ async def test_resolved_workdir_check_runs_before_session_files_are_created(setu
 
 
 @pytest.mark.parametrize("marker", [None, "", [], {}, 0, "closed-session"])
-async def test_native_markers_block_legacy_run_and_responses(setup, marker):
+async def test_stale_session_markers_block_legacy_run_and_responses(setup, marker):
     from responses_api_agents.opencode_agent.app import OpenCodeAgentRunRequest
 
     agent, sandbox = setup
@@ -1098,7 +1100,7 @@ async def test_failed_setup_cleanup_retains_state_for_cookieless_close(setup, fa
 
 
 @pytest.mark.parametrize("owned", [False, True])
-def test_sandbox_source_controls_ownership_and_native_routing(setup, owned):
+def test_sandbox_source_controls_ownership_and_session_routing(setup, owned):
     agent, sandbox = setup
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}

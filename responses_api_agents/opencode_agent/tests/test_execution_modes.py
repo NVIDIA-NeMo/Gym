@@ -14,7 +14,7 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoG
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, OpenCodeAgentRunRequest
-from responses_api_agents.opencode_agent.tests.test_native_sessions import seed
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed
 from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent
 
 
@@ -114,7 +114,7 @@ async def test_unseeded_run_requires_resources_not_a_session(mode: str) -> None:
 
 @pytest.mark.parametrize("mode", ["local", "sandbox", "legacy_sandbox"])
 @pytest.mark.parametrize("marker", [None, "closed-session"])
-async def test_native_markers_never_enter_other_modes(mode: str, marker: str | None) -> None:
+async def test_stale_session_markers_never_enter_other_modes(mode: str, marker: str | None) -> None:
     agent = make_agent(mode)
     request = Request({"type": "http", "session": {"nemo_gym_opencode_native_session": marker}})
     with patch.object(agent, "_create_episode", AsyncMock()) as local:
@@ -128,12 +128,12 @@ async def test_native_markers_never_enter_other_modes(mode: str, marker: str | N
 
 
 @pytest.mark.parametrize("mode", ["local", "sandbox", "legacy_sandbox"])
-async def test_native_seed_dispatch_is_independent_of_legacy_mode(mode: str) -> None:
+async def test_session_seed_dispatch_is_independent_of_legacy_mode(mode: str) -> None:
     agent = make_agent(mode)
     with patch.object(
-        agent, "_seed_agent_session_state", AsyncMock(side_effect=RuntimeError("native setup reached"))
+        agent, "_seed_agent_session_state", AsyncMock(side_effect=RuntimeError("session setup reached"))
     ) as initialize:
-        with pytest.raises(RuntimeError, match="native setup reached"):
+        with pytest.raises(RuntimeError, match="session setup reached"):
             await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
     initialize.assert_awaited_once()
     assert not agent._session_records

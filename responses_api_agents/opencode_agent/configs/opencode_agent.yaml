@@ -14,7 +14,6 @@ opencode_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      token_id_capture: true
 
       opencode_version: 1.17.11
       # Set this to the actual model context window; it is metadata, not an output-token limit.

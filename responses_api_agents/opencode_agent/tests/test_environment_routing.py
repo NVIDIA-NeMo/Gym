@@ -20,7 +20,7 @@ from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParse
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
-from responses_api_agents.opencode_agent.tests.test_native_sessions import seed, setup  # noqa: F401
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
 
 
 class _Response:
@@ -120,7 +120,7 @@ async def test_session_composition_routes_collector_through_environment_and_resp
                 assert response.status_code == 200, response.text
                 return _Response(response.json())
             if server_name == agent_name:
-                assert url_path != "/run", "Native collection must not call agent /run"
+                assert url_path != "/run", "Environment collection must not call agent /run"
                 agent_http.cookies.clear()
                 agent_http.cookies.update(cookies or {})
                 response = await asyncio.to_thread(agent_http.post, url_path, json=body)

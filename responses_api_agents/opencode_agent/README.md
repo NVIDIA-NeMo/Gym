@@ -1,6 +1,6 @@
 # OpenCode Agent
 
-`configs/opencode_agent.yaml` uses a Gym model server and supports native
+`configs/opencode_agent.yaml` uses a Gym model server and supports sandbox
 EnvironmentServer sessions and local CLI calls. An agent session selects the
 sandbox; without one, requests run locally. Invalid or closed sessions fail.
 Local `/run` requires a Resources binding; direct `/v1/responses` does not.

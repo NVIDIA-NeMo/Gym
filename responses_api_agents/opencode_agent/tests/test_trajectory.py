@@ -17,7 +17,7 @@ from responses_api_agents.opencode_agent.tests.test_app import _session_db
 
 @pytest.fixture(
     params=[_parse_opencode_session, partial(_parse_opencode_session, require_terminal_finish=True)],
-    ids=["local", "native"],
+    ids=["local", "sandbox"],
 )
 def parse(request):
     return request.param
@@ -84,7 +84,7 @@ def _health(tmp_path, trajectory, observations, **call_updates):
     ],
     ids=["answer", "reasoning-only", "tool-only"],
 )
-def test_native_turns_enable_content_health_without_call_references(tmp_path, parse, parts):
+def test_sandbox_turns_enable_content_health_without_call_references(tmp_path, parse, parts):
     db = _session_db(tmp_path, [_policy(*parts)])
     trajectory, observations = _trajectory(parse, db)
     [turn] = trajectory.turns
@@ -135,7 +135,7 @@ def test_finished_empty_response_is_a_hollow_turn(tmp_path, parse, parts):
     assert {"agent_turn_hollow", "rollout_missing_agent_turns"} <= {f["check"] for f in verdict["findings"]}
 
 
-def test_native_message_membership_numbering_and_synthetic_exclusion(tmp_path, parse):
+def test_sandbox_message_membership_numbering_and_synthetic_exclusion(tmp_path, parse):
     db = _session_db(
         tmp_path,
         [
@@ -196,7 +196,7 @@ def test_malformed_parts_do_not_discard_other_turns(tmp_path, parse, bad_part):
 @pytest.mark.parametrize(
     "timestamp,expected", [(None, 0.0), (False, 0.0), (-1, 0.0), ("bad", 0.0), (float("inf"), 0.0)]
 )
-def test_native_timestamp_falls_back_to_database(tmp_path, parse, timestamp, expected):
+def test_sandbox_timestamp_falls_back_to_database(tmp_path, parse, timestamp, expected):
     db = _session_db(tmp_path, [_policy(time={"created": timestamp})])
     trajectory, _ = _trajectory(parse, db)
     assert trajectory.turns[0].timestamp == expected

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import Request
 
-from responses_api_agents.opencode_agent.tests.test_native_sessions import seed, setup  # noqa: F401
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
 
 
 async def session(setup):

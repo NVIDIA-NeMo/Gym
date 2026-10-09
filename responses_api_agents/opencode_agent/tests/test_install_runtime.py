@@ -11,7 +11,7 @@ import pytest
 
 
 INSTALLER = Path(__file__).parents[1] / "install_opencode_runtime.sh"
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Native OpenCode requires Linux")
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="OpenCode sandbox installer requires Linux")
 
 
 @pytest.fixture
