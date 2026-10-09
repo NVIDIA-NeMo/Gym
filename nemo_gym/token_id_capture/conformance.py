@@ -30,7 +30,7 @@ from __future__ import annotations
 from typing import Awaitable, Callable
 
 from nemo_gym.token_id_capture.lineage import stamp_continuation
-from nemo_gym.token_id_capture.protocols import LineageResolver, TokenCaptureFrozenError, TokenSink, TokenSource
+from nemo_gym.token_id_capture.protocols import LineageResolver, TokenCaptureRetiredError, TokenSink, TokenSource
 from nemo_gym.token_id_capture.records import (
     ParentResolutionStatus,
     TokenEntry,
@@ -269,15 +269,18 @@ async def _visible_entries(src: TokenSource, rollout_id: str) -> int:
     """Entries a consumer could build from; a retired rollout may refuse to freeze instead."""
     try:
         return len((await src.freeze(rollout_id)).entries)
-    except TokenCaptureFrozenError:
+    except TokenCaptureRetiredError:
         return 0
 
 
 async def _require_fenced(name: str, call: Awaitable[object], what: str) -> None:
-    """A write to a retired rollout must fail with the error the capture sink treats as a late write."""
+    """A write to a retired rollout must fail with ``TokenCaptureRetiredError``, as ``TokenSource.retire`` requires.
+
+    The capture sink treats that error as a late write; any other error would be reported as a capture failure.
+    """
     try:
         await call
-    except TokenCaptureFrozenError:
+    except TokenCaptureRetiredError:
         return
     except Exception as error:  # noqa: BLE001 - any other error is reported as a capture failure.
         raise ConformanceError(
