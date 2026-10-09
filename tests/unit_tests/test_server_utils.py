@@ -415,13 +415,7 @@ class TestServerUtils:
         error_type: type[Exception],
     ) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
-        client = MagicMock()
-        client.request = AsyncMock(side_effect=error_type("transport failed"))
-        monkeypatch.setattr(
-            nemo_gym.server_utils,
-            "get_global_aiohttp_client",
-            lambda: client,
-        )
+        client = self._mock_global_client(monkeypatch, error_type("transport failed"), failures=None)
 
         with raises(error_type, match="transport failed"):
             await nemo_gym.server_utils.request(
@@ -1655,9 +1649,8 @@ class TestServerUtils:
     def _mock_global_client(self, monkeypatch: MonkeyPatch, error: Exception, failures: int | None) -> MagicMock:
         """Global-client stand-in whose request() raises `error` `failures` times, then succeeds (never if None).
 
-        request() and the retry sleep both fail the test once called more often than any test needs, so a retry
-        loop that never stops fails fast. request() uses `fail()`, whose BaseException the loop's `except Exception`
-        cannot catch, so this also stops a loop that never sleeps.
+        request() fails the test once called more often than any test needs, so a retry loop that never stops fails
+        fast instead of hanging. It uses `fail()`, whose BaseException the loop's `except Exception` cannot catch.
         """
         client = MagicMock()
         allowed_calls = nemo_gym.server_utils.MAX_NUM_TRIES + 6
@@ -1674,11 +1667,7 @@ class TestServerUtils:
 
         client.request = AsyncMock(side_effect=request)
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
-        monkeypatch.setattr(
-            nemo_gym.server_utils.asyncio,
-            "sleep",
-            AsyncMock(side_effect=[None] * allowed_calls + [AssertionError("retry loop did not stop")]),
-        )
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
         return client
 
     @mark.parametrize("tracing_enabled", [False, True])
@@ -1687,7 +1676,7 @@ class TestServerUtils:
         self, monkeypatch: MonkeyPatch, tracing_enabled: bool, attempt_cap: int | None, expected_attempts: int
     ) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
-        client = self._mock_global_client(monkeypatch, ClientOSError(), failures=10)
+        client = self._mock_global_client(monkeypatch, ClientOSError(), failures=None)
         with raises(ClientOSError):
             await nemo_gym.server_utils.request(
                 "POST", "http://dead-host:1/v1", _max_num_tries=attempt_cap, _max_connection_retries=3
@@ -1715,7 +1704,11 @@ class TestServerUtils:
         assert response is client.success_response
         assert client.request.await_count == 5
 
-    async def test_request_retry_cap_bounds_internal_callers(self, monkeypatch: MonkeyPatch) -> None:
+    @mark.parametrize("tracing_enabled", [False, True])
+    async def test_request_retry_cap_bounds_internal_callers(
+        self, monkeypatch: MonkeyPatch, tracing_enabled: bool
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
         client = self._mock_global_client(monkeypatch, RuntimeError("boom"), failures=None)
         # Above MAX_NUM_TRIES, so the test can tell the cap apart from MAX_NUM_TRIES.
         cap = nemo_gym.server_utils.MAX_NUM_TRIES + 2
