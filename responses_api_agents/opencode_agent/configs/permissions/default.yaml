@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Included permission profile, not a standalone agent config or sandbox security boundary.
-# Taken from https://github.com/sdevare-nv/nv-opencode/blob/f261004b4e4269a6e193fd242e5ec8ced9a7aec0/packages/opencode/src/bench/cli.ts#L198-L325
+# Default command restrictions for both local calls and sandbox sessions; not isolation.
+# Adapted from NVIDIA's OpenCode benchmark runner: deny destructive shell commands,
+# Git network/history mining and online solution lookups. These are Gym policy,
+# not upstream OpenCode defaults. Tool availability (including subagents) is separate.
 opencode_agent:
   responses_api_agents:
     opencode_agent:

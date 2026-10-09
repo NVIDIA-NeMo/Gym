@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import time
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -79,7 +79,11 @@ from responses_api_agents.opencode_agent.artifacts import (
     parse_opencode_session,
 )
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
-from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION, apply_observability_patch
+from responses_api_agents.opencode_agent.runtime import (
+    OBSERVABILITY_PATCH,
+    OPENCODE_VERSION,
+    apply_observability_patch,
+)
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 
@@ -87,8 +91,6 @@ from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
-# Reject the original cookie key so stale sessions cannot fall back to local execution.
-_OBSOLETE_SESSION_KEY = "nemo_gym_opencode_native_session"
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -157,9 +159,6 @@ fi
 
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
-    # Session state selects sandbox vs local execution. Keep the old values as
-    # config aliases; only legacy_sandbox explicitly opts into the old bridge.
-    execution_mode: Literal["local", "sandbox", "legacy_sandbox"] = "local"
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 8
     command: str = "opencode"
@@ -172,7 +171,6 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     repo_dir: Optional[str] = None
     thinking: bool = True
     system_prompt: Optional[str] = None
-    setup_timeout: int = 900
     timeout: int = 900
     extra_args: list[str] = []
     opencode_config: dict[str, Any] = Field(default_factory=dict)
@@ -180,18 +178,11 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     max_output_tokens: int = 131072
     opencode_version: str = OPENCODE_VERSION
 
-    # Sandbox session setup and lifecycle. Resources owns the sandbox itself.
-    remote_opencode_install_script_path: str | None = None
-    remote_opencode_binary_path: str | None = None
-    remote_opencode_musl_binary_path: str | None = None
-    session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
-
-    # Temporary legacy_sandbox compatibility; unused by sandbox sessions.
-    opencode_max_context_window: int = 262144
-    sandbox_provider: str = "sandbox"
+    # Used only when Resources does not supply a borrowed sandbox.
+    sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
-    sandbox_timeout: float = 10800
-    debug: bool = False
+    sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
     @property
     def command_parts(self) -> list[str]:
@@ -217,8 +208,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ray_enabled = False
 
     config: OpenCodeAgentConfig
-    _local_runtime_ready: bool = PrivateAttr(default=False)
-    _legacy_agent: SimpleResponsesAPIAgent | None = PrivateAttr(default=None)
+    _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -226,38 +216,20 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         super().model_post_init(__context)
         self.sem = Semaphore(self.config.concurrency)
 
-    def _ensure_local_runtime(self) -> None:
-        if self.config.execution_mode != "local":
-            raise RuntimeError("Host OpenCode execution requires execution_mode=local")
-        if self._local_runtime_ready:
-            return
-        ensure_opencode(self.config.opencode_version)
-        command = self.config.command_parts[0] if self.config.command_parts else ""
-        if not command or shutil.which(command) is None:
-            LOG.warning("opencode command %r is not on PATH yet", self.config.command)
-        self._local_runtime_ready = True
-
-    def _legacy(self) -> SimpleResponsesAPIAgent:
-        if self.config.execution_mode != "legacy_sandbox":
-            raise RuntimeError("The legacy sandbox bridge requires execution_mode=legacy_sandbox")
-        if self.config.resources_server is None:
-            raise HTTPException(422, "Legacy OpenCode requires resources_server")
-        if self._legacy_agent is None:
-            from responses_api_agents.opencode_sandboxed_agent.app import (
-                OpenCodeSandboxedAgent,
-                OpenCodeSandboxedAgentConfig,
+    async def _ensure_local_runtime(self) -> None:
+        if self._local_setup_task is None:
+            self._local_setup_task = asyncio.create_task(
+                asyncio.to_thread(ensure_opencode, self.config.opencode_version)
             )
-
-            values = self.config.model_dump()
-            if values["opencode_version"] is None:
-                # The unchanged sandboxed config class requires an explicit version.
-                # Preserve the bridge's default, matching the shipped sandboxed YAML.
-                values["opencode_version"] = "1.17.11"
-            config = OpenCodeSandboxedAgentConfig(
-                **{key: value for key, value in values.items() if key in OpenCodeSandboxedAgentConfig.model_fields}
-            )
-            self._legacy_agent = OpenCodeSandboxedAgent(config=config, server_client=self.server_client)
-        return self._legacy_agent
+        setup = self._local_setup_task
+        try:
+            await asyncio.shield(setup)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if self._local_setup_task is setup:
+                self._local_setup_task = None
+            raise
 
     @staticmethod
     def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -354,7 +326,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         trajectory: Optional[TrajectoryRecord] = None,
     ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
         """Run one headless OpenCode session and read its persisted artifact."""
-        self._ensure_local_runtime()
+        await self._ensure_local_runtime()
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
         project_dir = self._repo_dir(work_dir)
@@ -515,8 +487,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
         session_id = self._agent_session_id_from_request(request)
-        if self._obsolete_session_marker(request) is not None:
-            raise HTTPException(409, "Obsolete OpenCode session cookie; seed a new agent session")
         if session_id is not None:
             state = self._require_agent_session(session_id)
             assert isinstance(state, OpenCodeSandboxSession)
@@ -531,8 +501,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             elif body != state.activation_request:
                 raise HTTPException(409, "OpenCode sandbox sessions support one activation; retry the same request")
             return (await asyncio.shield(state.task)).model_copy(deep=True)
-        if self.config.execution_mode == "legacy_sandbox":
-            return await self._legacy().responses(request, body)
         # Only genuinely unseeded calls reach local execution; invalid or closed
         # session markers are rejected above, never retried on the host.
         path_params = getattr(request, "path_params", None)
@@ -549,13 +517,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
 
     async def run(self, request: Request, body: OpenCodeAgentRunRequest) -> OpenCodeAgentVerifyResponse:
-        if (
-            self._agent_session_id_from_request(request) is not None
-            or self._obsolete_session_marker(request) is not None
-        ):
+        if self._agent_session_id_from_request(request) is not None:
             raise HTTPException(409, "OpenCode sandbox sessions must use EnvironmentServer /run")
-        if self.config.execution_mode == "legacy_sandbox":
-            return await self._legacy().run(request, body)
         if self.config.resources_server is None:
             raise HTTPException(422, "Local OpenCode /run requires resources_server")
         async with self.sem:
@@ -618,18 +581,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 | ({"ng_trajectory": trajectory.model_dump(mode="json")} if trajectory is not None else {})
             )
 
-    def _obsolete_session_marker(self, request: Request) -> str | None:
-        try:
-            session = request.session
-        except (AssertionError, AttributeError):
-            return None
-        if not isinstance(session, Mapping) or _OBSOLETE_SESSION_KEY not in session:
-            return None
-        marker = session[_OBSOLETE_SESSION_KEY]
-        if not isinstance(marker, str) or not marker:
-            raise HTTPException(409, "Invalid OpenCode session marker")
-        return marker
-
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
         """Prepare only the harness runtime; Resources owns borrowed task setup."""
         if self.config.model_server is None:
@@ -667,7 +618,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             r"\d+\.\d+\.\d+", self.config.opencode_version
         ):
             raise HTTPException(422, "OpenCode sandbox execution requires an exact opencode_version")
-        if self.config.context_window <= 0 or self.config.timeout <= 0 or self.config.setup_timeout <= 0:
+        if self.config.context_window <= 0 or self.config.timeout <= 0:
             raise HTTPException(422, "OpenCode context window and execution timeout must be positive")
         if not 0 < self.config.max_output_tokens <= self.config.context_window:
             raise HTTPException(
@@ -678,10 +629,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
             )
-        if self.config.remote_opencode_install_script_path and not self.config.remote_opencode_binary_path:
-            raise HTTPException(422, "A staged OpenCode installer requires remote_opencode_binary_path")
-        if self.config.remote_opencode_musl_binary_path and not self.config.remote_opencode_install_script_path:
-            raise HTTPException(422, "A staged musl binary requires a compatible staged installer")
+        if self.config.env or self.config.extra_args or self.config.command != "opencode":
+            raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
             sandbox = AsyncSandbox(provider)
@@ -713,7 +662,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
             command = _sandbox_prepare_command(workdir, directory, runtime)
-            result = await sandbox.exec(command, timeout_s=self.config.setup_timeout)
+            result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
             prepared_directory = True
             installer = "install_opencode_runtime.sh"
@@ -724,14 +673,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     f"{directory}/{installer}",
                     runtime,
                     self.config.opencode_version,
-                    self.config.remote_opencode_binary_path or "",
-                    self.config.remote_opencode_install_script_path or "",
-                    self.config.remote_opencode_musl_binary_path or "",
                 )
             )
-            result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.setup_timeout)
+            result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+            if self._model_call_capture_enabled():
+                await sandbox.upload(OBSERVABILITY_PATCH, f"{directory}/{OBSERVABILITY_PATCH.name}")
         except BaseException as error:
             try:
                 if prepared_directory or owns_sandbox:
@@ -919,11 +867,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     },  # pragma: allowlist secret
                     "models": {
                         "dummy_model": {
+                            "interleaved": {"field": "reasoning_content"},
                             "limit": {
                                 "context": self.config.context_window,
                                 "input": self.config.context_window,
                                 "output": self.config.max_output_tokens,
-                            }
+                            },
                         }
                     },
                 }
@@ -933,11 +882,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # System instructions are separate from the user's task and applied to every OpenCode model turn.
         if system:
             config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
+        if self._model_call_capture_enabled():
+            apply_observability_patch(config, plugin_path=Path(state.session.session_dir) / OBSERVABILITY_PATCH.name)
+        command = [f"{state.runtime}/opencode", "run", "--format", "json", "--title", "NeMo Gym"]
+        if self.config.thinking:
+            command.append("--thinking")
         payload = {
             "instructions": system,
             "directory": state.session.session_dir,
             "cwd": state.session.workdir,
-            "command": [f"{state.runtime}/opencode", "run", "--format", "json", "--thinking", "--title", "NeMo Gym"],
+            "command": command,
             "prompt": prompt,
             "env": {
                 "HOME": f"{state.session.session_dir}/home",
@@ -948,35 +902,39 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
                 "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
+                "OPENCODE_DISABLE_MODELS_FETCH": "true",
                 "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
             },
         }
         error = None
         export = {}
-        cancelled = False
+        failure = None
         try:
             async with self.sem:
-                export = json.loads(
-                    await state.execute(
-                        payload,
-                        timeout=self.config.timeout,
-                        close_timeout=self.config.session_close_timeout_seconds,
-                    )
+                await state.execute(
+                    payload,
+                    timeout=self.config.timeout,
+                    close_timeout=self.config.session_close_timeout_seconds,
                 )
-        except asyncio.CancelledError:
-            cancelled = True
-            raise
-        finally:
-            if state.observations is None:
-                state.observations = AgentObservationBundle(
-                    source="opencode",
-                    gaps=[ObservationGap(code="observation_capture_failed")],
-                )
-            if cancelled:
-                for record in state.observations.records:
-                    if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
-                        record.status = "incomplete"
-                        record.error_type = "cancelled"
+        except BaseException as exc:
+            failure = exc
+        if state.observations is None:
+            state.observations = AgentObservationBundle(
+                source="opencode", gaps=[ObservationGap(code="observation_capture_failed")]
+            )
+        if state.session.artifacts is not None:
+            try:
+                parsed = json.loads(state.session.artifacts)
+                if not isinstance(parsed, dict) or not isinstance(parsed.get("messages", []), list):
+                    raise ValueError("expected a session object with a messages list")
+                if any(
+                    not isinstance(message, dict) or not isinstance(message.get("info"), dict)
+                    for message in parsed.get("messages", [])
+                ):
+                    raise ValueError("expected message info objects")
+                export = parsed
+            except (ValueError, TypeError) as exc:
+                error = f"OpenCode output parse failed: {exc}"
         output = []
         usage = None
         if export.get("messages"):
@@ -1022,12 +980,20 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 incomplete = True
             elif finish != "stop" or not last.get("time", {}).get("completed"):
                 error = error or f"OpenCode ended without a successful terminal assistant result (finish={finish!r})"
-        status = "failed" if error else "incomplete" if incomplete else "completed"
+        status = "failed" if error or failure else "incomplete" if incomplete else "completed"
         # Artifact message completion records a model turn, not the entire invocation.
         for record in state.observations.records:
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
-                record.status = status
-                record.error_type = "server_error" if error else "timeout" if result and result["timed_out"] else None
+                record.status = "incomplete" if isinstance(failure, asyncio.CancelledError) else status
+                record.error_type = (
+                    "cancelled"
+                    if isinstance(failure, asyncio.CancelledError)
+                    else "server_error"
+                    if error or failure
+                    else "timeout"
+                    if result and result["timed_out"]
+                    else None
+                )
         if result is not None:
             state.observations.records.append(
                 SandboxObservation(
@@ -1042,7 +1008,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         if state.session.owns_sandbox
                         else str(state.request.sandbox_access.connection.descriptor.get("sandbox_id", "unknown"))
                     ),
-                    outcome="timeout" if result["timed_out"] else "failed" if error else "completed",
+                    outcome="timeout" if result["timed_out"] else "failed" if error or failure else "completed",
                     exit_code=result["return_code"],
                 )
             )
@@ -1052,8 +1018,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 detail="Usage comes from OpenCode persisted assistant messages; compare against captured Gym model calls.",
             )
         )
+        if failure is not None:
+            raise failure
         if error:
-            raise HTTPException(502, error)
+            raise HTTPException(502, f"{error}; stderr: {state.stderr}" if state.stderr else error)
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),

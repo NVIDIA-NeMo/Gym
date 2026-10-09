@@ -48,6 +48,7 @@ def _resolved_config():
                         "environment_servers/single_agent_turn/configs/single_agent_turn.yaml",
                     ],
                     "policy_model": {"responses_api_models": {"dummy_model": {"entrypoint": "app.py"}}},
+                    "policy_model_name": "test-model",
                     "environment_routing_mode": "taskset",
                     "environment_server_routes": {"swebench_pro:smoke": "swebench_pro_opencode"},
                     "swebench_pro_opencode_resources_server": {"_inherit_from": "swebench_pro_resources_server"},
@@ -89,7 +90,7 @@ async def test_session_composition_routes_collector_through_environment_and_resp
         OmegaConf.to_container(get_first_server_config_dict(config, agent_name), resolve=True) | {"name": agent_name}
     )
     # Session routing must not require an execution-mode override.
-    assert agent.config.execution_mode == "local"
+    assert "execution_mode" not in type(agent.config).model_fields
     assert agent.config.opencode_config["permission"]["bash"]["*git submodule update*"] == "deny"
     agent.server_client.global_config_dict = config
     client = MagicMock(spec=ServerClient)

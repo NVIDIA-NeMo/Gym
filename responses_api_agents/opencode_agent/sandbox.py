@@ -52,6 +52,7 @@ class OpenCodeSandboxSession(AgentSessionState):
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
+    stderr: str = ""
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
@@ -109,18 +110,29 @@ class OpenCodeSandboxSession(AgentSessionState):
 
     async def collect_artifacts(self, *, timeout: float) -> str:
         """Snapshot only after cleanup; keep observations before sandbox release."""
-        await self.snapshot(timeout)
+        try:
+            self.stderr = (await self.read_text("stderr.log"))[-16000:]
+        except Exception:
+            LOG.warning("OpenCode stderr log unavailable", exc_info=True)
+        try:
+            await self.snapshot(timeout)
+        except Exception as error:
+            if self.stderr:
+                raise RuntimeError(f"{error}; OpenCode stderr: {self.stderr}") from error
+            raise
         try:
             with tempfile.TemporaryDirectory(prefix="opencode-observations-") as directory:
                 path = Path(directory) / "observations.db"
                 await self.session.sandbox.download(f"{self.session.session_dir}/observations.db", path)
-                self.observations = parse_opencode_observations(
+                self.observations = await asyncio.to_thread(
+                    parse_opencode_observations,
                     path,
                     self.request.episode_id.capture_key,
                     require_terminal_finish=True,
                     model_ref=self.model_ref,
                 )
         except Exception:
+            LOG.exception("Failed to parse OpenCode observations")
             self.observations = AgentObservationBundle(
                 source="opencode",
                 gaps=[
@@ -131,13 +143,16 @@ class OpenCodeSandboxSession(AgentSessionState):
         try:
             runtime = json.loads(await self.read_text("runtime.json"))
         except Exception:
+            LOG.exception("Failed to read OpenCode runtime metadata")
             runtime = None
         self.runtime_info = parse_runtime_info(runtime)
         try:
             return await self.read_text("export.json")
         except Exception as error:
             logs = await self.session.read_output_log()
-            raise RuntimeError(f"OpenCode sandbox runner returned no valid result: {logs}") from error
+            raise RuntimeError(
+                f"OpenCode sandbox runner returned no valid result: {logs[-16000:]}; stderr: {self.stderr}"
+            ) from error
 
     async def snapshot(self, timeout: float) -> None:
         """Copy SQLite output after all harness database writers have stopped."""

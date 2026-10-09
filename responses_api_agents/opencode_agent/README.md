@@ -8,10 +8,14 @@ Local `/run` requires a Resources binding; direct `/v1/responses` does not.
 Training token-ID capture is off by default. Enable the agent's `token_id_capture`
 only when explicitly collecting training data; evaluation observability remains independent.
 
-The main config loads `configs/permissions/benchmark.yaml` through `config_paths`.
+The main config loads `configs/permissions/default.yaml` through `config_paths`.
 It preserves the existing command restrictions; run configs can override individual
 permissions under `opencode_agent.responses_api_agents.opencode_agent.opencode_config.permission`.
 These command filters are not network or filesystem isolation.
+They are adapted from Gym's benchmark runner restrictions, not OpenCode defaults,
+and apply to local calls too. Subagents (`task`) are intentionally enabled for this
+general-purpose integration; the separate `opencode_sandboxed_agent` benchmark
+profile still disables them. Use explicit tool overrides when comparing scores.
 
 Existing flat-row benchmarks keep the `opencode_sandboxed_agent` entrypoint
 and configuration for their Resources-owned lifecycle.
@@ -71,8 +75,15 @@ error, never a fallback to local execution.
 Session setup installs the pinned OpenCode runtime inside the sandbox. The image
 needs Linux, Python 3.8+ with SQLite and `fcntl`, and Bash. Missing Python/Bash can
 be installed with apt-get or apk when running as root; otherwise preinstall them.
-Online installation needs GitHub access. `remote_opencode_binary_path` can select
-a staged binary matching `opencode_version`. Task tools and dependencies are preserved.
+Online installation needs GitHub access, curl, tar, gzip and a Debian or RHEL CA
+bundle. The installer also ensures `rg` is on PATH so `glob`/`grep` do not download
+ripgrep into every session. Missing packages are installed with apt-get or apk as
+root; non-root images must preinstall them. Cached matching runtimes need no
+download. Task dependencies are preserved.
+
+Local and sandbox execution share `runtime.OPENCODE_VERSION` and the model-call
+correlation plugin. The plugin is uploaded into each sandbox when model-call
+observability is enabled. Sessions disable automatic updates and models.dev fetches.
 
 The runner uses ordinary sandbox `exec`, with an internal deadline and a Linux
 subreaper to clean detached tool processes. Close succeeds only after confirmed
@@ -94,8 +105,32 @@ gaps. Runtime/model errors fail before verification; explicit limits can retain
 gradable partial output. This path is eval-only; working inference does not establish
 training token-ID/logprob support or benchmark accuracy.
 
-For local calls, OpenCode is installed on first use. A configured `repo_dir` is
+For local calls, OpenCode is installed on first use in a shared background-thread
+task, without blocking the event loop. Failed installs can be retried. A configured `repo_dir` is
 preserved; otherwise the temporary workspace is removed after the call. A local
-working directory is not filesystem isolation. The optional `legacy_sandbox` mode
-delegates to the existing old package; benchmarks can keep using that
-package directly.
+working directory is not filesystem isolation. Existing sandboxed benchmarks keep
+using `opencode_sandboxed_agent` directly; there is no bridge or execution-mode flag.
+
+## Configuration compatibility
+
+The shipped YAML now uses `model: ${policy_model_name}`, `thinking: true` (the class
+default), a 10,800-second run timeout, and no Resources binding. Local `/run` callers
+must supply `resources_server`; direct `/v1/responses` callers do not need one.
+Class defaults and explicit local overrides remain available. Sandbox creation
+requires an explicit provider when Resources supplies no sandbox. Installation and
+close timeouts use `sandbox_install_timeout_seconds` (600) and
+`session_close_timeout_seconds` (60).
+
+Local request handling is preserved for existing callers; session requests use the
+stricter, single-activation contract described above. The intentional differences are:
+
+| Setting | Local CLI | Sandbox session |
+| --- | --- | --- |
+| System text | Prepended to the user prompt; request `instructions` is not applied | Config/system/developer text and request `instructions` form an instructions file |
+| Provider name | `nemo` | `nemo_gym` (internal alias for the same Gym model server) |
+| `env`, `extra_args`, custom `command` | Applied | Rejected at seed, not silently ignored |
+| Request controls | Existing local compatibility behavior | Unsupported controls rejected explicitly |
+
+Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
+Different prompt placement can affect results; this integration does not establish
+local/session score parity or migrate existing benchmark defaults.

@@ -144,7 +144,6 @@ def setup():
     client._build_server_base_url.return_value = "http://model.example:9000"
     config = OpenCodeAgentConfig(
         name="opencode",
-        execution_mode="sandbox",
         host="localhost",
         port=8001,
         entrypoint="app.py",
@@ -945,22 +944,6 @@ async def test_resolved_workdir_check_runs_before_session_files_are_created(setu
     assert list(sessions.iterdir()) == []
 
 
-@pytest.mark.parametrize("marker", [None, "", [], {}, 0, "closed-session"])
-async def test_stale_session_markers_block_legacy_run_and_responses(setup, marker):
-    from responses_api_agents.opencode_agent.app import OpenCodeAgentRunRequest
-
-    agent, sandbox = setup
-    request = Request({"type": "http", "session": {"nemo_gym_opencode_native_session": marker}})
-    with pytest.raises(HTTPException) as error:
-        await agent.run(request, OpenCodeAgentRunRequest(responses_create_params={"input": "task"}))
-    assert error.value.status_code == 409
-    with pytest.raises(HTTPException) as error:
-        await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    assert error.value.status_code == 409
-    agent.server_client.post.assert_not_called()
-    sandbox.launch.assert_not_awaited()
-
-
 def test_close_response_cookie_blocks_legacy_run(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
@@ -1105,7 +1088,6 @@ def test_sandbox_source_controls_ownership_and_session_routing(setup, owned):
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}
     sandbox.expected_workdir = "/agent-workspace" if owned else "/app"
-    agent.config.execution_mode = "local"
     body = seed()
     if owned:
         body.sandbox_access = None
@@ -1228,13 +1210,14 @@ def test_owned_setup_failure_preserves_error_and_retryable_cleanup(setup, stage)
         sandbox.disconnect.assert_not_awaited()
 
 
-def test_borrow_connection_failure_never_creates_replacement(setup):
+def test_failed_connection_closes_provider_without_publishing_session(setup):
     agent, sandbox = setup
     agent.config.sandbox_provider = "fallback-must-not-be-used"
     module = "responses_api_agents.opencode_agent.app"
+    provider = SimpleNamespace(aclose=AsyncMock())
     with (
         patch(f"{module}.AsyncSandbox") as factory,
-        patch(f"{module}.create_provider", return_value=SimpleNamespace(aclose=AsyncMock())),
+        patch(f"{module}.create_provider", return_value=provider),
         TestClient(agent.setup_webserver()) as client,
     ):
         factory.connect = AsyncMock(side_effect=RuntimeError("borrow failed"))
@@ -1242,6 +1225,8 @@ def test_borrow_connection_failure_never_creates_replacement(setup):
             client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         factory.assert_not_called()
         sandbox.stop.assert_not_awaited()
+        provider.aclose.assert_awaited_once()
+        assert not active_sessions(agent)
 
 
 @pytest.mark.parametrize("workdir", [None, "relative"])
@@ -1262,7 +1247,7 @@ def test_owned_workdir_is_validated_before_creation(setup, workdir):
 
 @pytest.mark.parametrize("owned", [False, True])
 @pytest.mark.parametrize("invalid_runtime", [False, True])
-async def test_close_retains_capture_after_provider_release(setup, tmp_path, owned, invalid_runtime):
+async def test_close_keeps_captured_events_after_sandbox_release(setup, tmp_path, owned, invalid_runtime):
     agent, sandbox = setup
     body = seed()
     if owned:

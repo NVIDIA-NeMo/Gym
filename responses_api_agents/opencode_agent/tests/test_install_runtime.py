@@ -26,6 +26,7 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         (bindir / name).symlink_to(executable)
     (bindir / "python3").symlink_to(sys.executable)
     scripts = {
+        "rg": '#!/bin/bash\necho "ripgrep test fixture"\n',
         "id": '#!/bin/bash\necho "${TEST_UID:-0}"\n',
         "apt-get": """#!/bin/bash
 echo "$*" >> "$TEST_ROOT/packages.log"
@@ -42,12 +43,19 @@ fi
     curl = tmp_path / "curl"
     curl.write_text('#!/bin/bash\necho "$*" > "$TEST_ROOT/download.log"\nexit 19\n')
     curl.chmod(0o755)
+    # Isolate certificate locations without touching the machine's trust store.
+    (tmp_path / "debian-ca.crt").write_text("test certificate bundle")
+    (tmp_path / "install.sh").write_text(
+        INSTALLER.read_text()
+        .replace("/etc/ssl/certs/ca-certificates.crt", str(tmp_path / "debian-ca.crt"))
+        .replace("/etc/pki/tls/certs/ca-bundle.crt", str(tmp_path / "rhel-ca.crt"))
+    )
     return tmp_path, os.environ | {"PATH": str(bindir), "TEST_ROOT": str(tmp_path)}
 
 
 def run_installer(root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(root / "bin/bash"), str(INSTALLER), str(root / "runtime"), "1.17.11"],
+        [str(root / "bin/bash"), str(root / "install.sh"), str(root / "runtime"), "1.17.11"],
         env=env,
         capture_output=True,
         text=True,
@@ -62,7 +70,7 @@ def test_missing_curl_is_installed_before_downloading_opencode(sandbox: tuple[Pa
     assert result.returncode == 19, result.stderr
     assert (root / "packages.log").read_text().splitlines() == [
         "update",
-        "install -y --no-install-recommends curl ca-certificates",
+        "install -y --no-install-recommends curl",
     ]
     assert (
         "https://github.com/anomalyco/opencode/releases/download/v1.17.11/opencode-linux-"
@@ -115,33 +123,63 @@ def test_cached_runtime_needs_no_package_installation(sandbox: tuple[Path, dict[
     assert not (root / "download.log").exists()
 
 
-def test_staged_binary_is_checked_without_downloading(sandbox):
+def test_wrong_cached_version_is_not_reused(sandbox):
     root, env = sandbox
-    binary = root / "staged-opencode"
-    binary.write_text("#!/bin/bash\necho 1.17.11\n")
-    binary.chmod(0o755)
-    result = subprocess.run(
-        [str(root / "bin/bash"), str(INSTALLER), str(root / "runtime"), "1.17.11", str(binary)],
-        env=env,
-        capture_output=True,
-        text=True,
-        errors="replace",
-        timeout=10,
-    )
-    assert result.returncode == 0, result.stderr
-    assert not (root / "download.log").exists()
+    (root / "runtime").mkdir()
+    binary = root / "runtime/opencode"
     binary.write_text("#!/bin/bash\necho 1.17.10\n")
-    (root / "runtime/opencode").unlink()
-    result = subprocess.run(
-        [str(root / "bin/bash"), str(INSTALLER), str(root / "runtime"), "1.17.11", str(binary)],
-        env=env,
-        capture_output=True,
-        text=True,
-        errors="replace",
-        timeout=10,
-    )
+    binary.chmod(0o755)
+    result = run_installer(root, env)
+    assert result.returncode == 19, result.stderr
+    assert (root / "download.log").exists()
+
+
+def test_rhel_certificate_bundle_does_not_require_root_or_package_manager(sandbox):
+    root, env = sandbox
+    (root / "debian-ca.crt").unlink()
+    (root / "rhel-ca.crt").write_text("test RHEL bundle")
+    (root / "bin/apt-get").unlink()
+    shutil.copy(root / "curl", root / "bin/curl")
+    result = run_installer(root, env | {"TEST_UID": "1000"})
+    assert result.returncode == 19, result.stderr
+    assert (root / "download.log").exists()
+    assert not (root / "packages.log").exists()
+
+
+@pytest.mark.parametrize("tool", ["tar", "gzip"])
+def test_missing_archive_tool_is_installed(sandbox, tool):
+    root, env = sandbox
+    (root / "bin" / tool).unlink()
+    result = run_installer(root, env)
+    assert result.returncode == 19, result.stderr
+    assert f"install -y --no-install-recommends curl {tool}" in (root / "packages.log").read_text()
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_ripgrep_is_provisioned_even_with_a_cached_opencode(sandbox, cached):
+    root, env = sandbox
+    (root / "bin/rg").unlink()
+    if cached:
+        (root / "runtime").mkdir()
+        binary = root / "runtime/opencode"
+        binary.write_text("#!/bin/bash\necho 1.17.11\n")
+        binary.chmod(0o755)
+    result = run_installer(root, env)
+    assert result.returncode == (0 if cached else 19), result.stderr
+    expected = "ripgrep" if cached else "ripgrep curl"
+    assert (root / "packages.log").read_text().splitlines() == [
+        "update",
+        f"install -y --no-install-recommends {expected}",
+    ]
+
+
+def test_missing_ripgrep_without_root_explains_remedy(sandbox):
+    root, env = sandbox
+    (root / "bin/rg").unlink()
+    result = run_installer(root, env | {"TEST_UID": "1000"})
     assert result.returncode == 1
-    assert "version mismatch" in result.stderr
+    assert "ripgrep" in result.stderr and "preinstall" in result.stderr
+    assert not (root / "download.log").exists()
 
 
 @pytest.mark.skipif(shutil.which("python3.8") is None, reason="Python 3.8 is not installed")
@@ -166,6 +204,6 @@ def test_musl_bootstraps_with_apk_and_downloads_matching_binary(sandbox: tuple[P
         (root / "bin" / name).chmod(0o755)
     result = run_installer(root, env)
     assert result.returncode == 19, result.stderr
-    assert (root / "packages.log").read_text().splitlines() == ["add --no-cache curl ca-certificates"]
+    assert (root / "packages.log").read_text().splitlines() == ["add --no-cache curl"]
     arch = {"x86_64": "x64-baseline", "aarch64": "arm64"}[os.uname().machine]
     assert f"opencode-linux-{arch}-musl.tar.gz" in (root / "download.log").read_text()

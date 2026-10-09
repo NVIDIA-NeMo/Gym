@@ -5,9 +5,6 @@ set -Eeuo pipefail
 trap 'status=$?; printf "OpenCode setup failed: command=%s exit=%s\n" "$BASH_COMMAND" "$status" >&2; exit "$status"' ERR
 runtime=$1
 version=$2
-staged_binary=${3:-}
-installer=${4:-}
-musl_binary=${5:-}
 
 require() {
   command -v "$1" >/dev/null 2>&1 || { echo "OpenCode sandbox execution requires $1 in the task image" >&2; exit 1; }
@@ -34,41 +31,41 @@ else
 fi
 mkdir -p "$runtime/home" "$runtime/cache" "$runtime/data" "$runtime/config"
 export HOME="$runtime/home" XDG_CACHE_HOME="$runtime/cache" XDG_DATA_HOME="$runtime/data" XDG_CONFIG_HOME="$runtime/config"
+cached=false
 if [ -x "$runtime/opencode" ] && [ "$("$runtime/opencode" --version)" = "$version" ]; then
-  exit 0
+  cached=true
 fi
-if [ -n "$staged_binary" ]; then
-  if [ -n "$installer" ]; then
-    if [ -n "$musl_binary" ]; then
-      bash "$installer" --glibc-binary "$staged_binary" --musl-binary "$musl_binary"
-    else
-      bash "$installer" --binary "$staged_binary"
-    fi
-    cp "$HOME/.opencode/bin/opencode" "$runtime/opencode"
-  else
-    cp "$staged_binary" "$runtime/opencode"
+missing=()
+# Stock OpenCode uses rg on PATH before trying a per-session download.
+command -v rg >/dev/null 2>&1 || missing+=(ripgrep)
+if [ "$cached" = false ]; then
+  for tool in curl tar gzip; do
+    command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+  done
+  if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/pki/tls/certs/ca-bundle.crt ]; then
+    missing+=(ca-certificates)
   fi
-else
-  if ! command -v curl >/dev/null 2>&1 || [ ! -s /etc/ssl/certs/ca-certificates.crt ]; then
+fi
+if [ "${#missing[@]}" -gt 0 ]; then
     if [ "$(id -u)" != 0 ]; then
-      echo 'OpenCode sandbox execution needs curl and ca-certificates; preinstall them in the task image (automatic installation requires root)' >&2
+      echo "OpenCode sandbox execution needs ${missing[*]}; preinstall them in the task image (automatic installation requires root)" >&2
       exit 1
     fi
     if command -v apk >/dev/null 2>&1; then
-      apk add --no-cache curl ca-certificates
+      apk add --no-cache "${missing[@]}"
     elif command -v apt-get >/dev/null 2>&1; then
       apt-get update
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
     else
-      echo 'OpenCode sandbox execution needs curl and ca-certificates; preinstall them in the task image (automatic installation requires apt-get or apk)' >&2
+      echo "OpenCode sandbox execution needs ${missing[*]}; preinstall them in the task image (automatic installation requires apt-get or apk)" >&2
       exit 1
     fi
-  fi
-  require tar
-  require gzip
-  curl -fSL --retry 3 "https://github.com/anomalyco/opencode/releases/download/v${version}/opencode-linux-${arch}.tar.gz" -o "$runtime/opencode.tar.gz"
-  tar -xzf "$runtime/opencode.tar.gz" -C "$runtime" opencode
 fi
+if [ "$cached" = true ]; then
+  exit 0
+fi
+curl -fSL --retry 3 "https://github.com/anomalyco/opencode/releases/download/v${version}/opencode-linux-${arch}.tar.gz" -o "$runtime/opencode.tar.gz"
+tar -xzf "$runtime/opencode.tar.gz" -C "$runtime" opencode
 chmod +x "$runtime/opencode"
 actual=$("$runtime/opencode" --version)
 if [ "$actual" != "$version" ]; then

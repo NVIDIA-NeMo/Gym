@@ -76,7 +76,7 @@ def _compactions(bundle: AgentObservationBundle) -> list[ContextCompactionObserv
 
 def _make_agent(**kwargs) -> OpenCodeAgent:
     agent = OpenCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent._local_runtime_ready = True
+    agent._ensure_local_runtime = AsyncMock()
     return agent
 
 
@@ -724,16 +724,20 @@ class TestConfigYaml:
         monkeypatch.chdir(Path(__file__).resolve().parents[3])
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "opencode_agent.yaml"
         _, configs = GlobalConfigDictParser().load_extra_config_paths([str(cfg_path)])
-        data = OmegaConf.to_container(OmegaConf.merge(*configs), resolve=True)
+        data = OmegaConf.to_container(OmegaConf.merge(*configs, {"policy_model_name": "test-model"}), resolve=True)
         assert "opencode_agent" in data
         inner = data["opencode_agent"]["responses_api_agents"]["opencode_agent"]
         if training_capture is not None:
             inner["token_id_capture"] = training_capture
         config = OpenCodeAgentConfig.model_validate(inner | {"host": "localhost", "port": 8000, "name": "opencode"})
         assert config.entrypoint == "app.py"
-        assert config.concurrency == 8
-        assert config.command == "opencode"
-        assert config.execution_mode == "local"
+        assert "execution_mode" not in type(config).model_fields
+        assert config.thinking is True
+        assert config.timeout == 10800
+        assert config.model == "test-model"
+        assert config.sandbox_provider is None
+        assert config.sandbox_install_timeout_seconds == 600
+        assert config.session_close_timeout_seconds == 60
         assert config.resources_server is None
         assert config.model_server.name == "policy_model"
         assert config.opencode_config["permission"]["bash"]["*"] == "allow"

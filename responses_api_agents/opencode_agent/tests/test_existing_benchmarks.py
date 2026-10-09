@@ -57,7 +57,7 @@ def test_permission_profile_loads_with_cli_override(override: bool, monkeypatch:
     ):
         assert permissions.bash[command] == "deny"
     assert settings.opencode_config.tools.webfetch is False
-    assert settings.opencode_version == "1.17.11"
+    assert "opencode_version" not in settings
 
 
 def test_permission_profile_is_not_a_standalone_agent_variant(monkeypatch: pytest.MonkeyPatch) -> None:
