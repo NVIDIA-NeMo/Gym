@@ -3,7 +3,7 @@ name: pr-review
 description: Prompt asset for the Claude Code Review GitHub Action. It is read as a file by .github/workflows/claude-review.yml and is not an interactive skill — do not load it to answer questions or to review code outside that workflow.
 license: Apache-2.0
 disable-model-invocation: true
-user_invocable: false
+user-invocable: false
 ---
 
 # Claude PR Review
@@ -19,8 +19,8 @@ evolved like code instead of being buried in YAML, but it is deliberately
 inert: the frontmatter carries `disable-model-invocation: true`, so Claude Code drops it
 from the advertised skill list and refuses to auto-invoke it. Reading it by
 path, which is exactly what the workflow does, still works. Do not add trigger
-text to the description or a `when_to_use:` field — that is what would make it
-activate on its own.
+text to the `description` field — that is what would make it activate on its
+own.
 
 ## Review workflow — never skip or reorder
 
