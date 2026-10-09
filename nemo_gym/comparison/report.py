@@ -287,9 +287,7 @@ def render_markdown(result: ComparisonResult) -> str:
             label = f" — {candidate_labels[index]}" if len(comparison.flips) > 1 else ""
             lines += _flip_section(summary, label)
 
-        one_sided = [
-            row for row in comparison.metrics if row.present_in and len(row.present_in) < 1 + len(result.candidates)
-        ]
+        one_sided = [row for row in comparison.metrics if len(row.present_in) < 1 + len(result.candidates)]
         if one_sided:
             lines += [
                 "### Metrics present in only one run",

@@ -540,6 +540,18 @@ class TestMetricRows:
             warnings.simplefilter("error")
             build_metric_rows(baseline, [])
 
+    def test_compare_ignores_token_only_repeat_for_quality_coverage_warning(self, tmp_path):
+        repeats = [
+            {"sample_count": 2, "missing_count": 0},
+            {"_ng_rollout_index": 1, "mean_completion_tokens": 30.0, "mean_tokens_per_turn": 10.0},
+        ]
+        baseline = _load(tmp_path, "base", [_entry(repeat_level_metrics=repeats)])
+        candidate = _load(tmp_path, "candidate", [_entry()], role="candidate")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            compare_runs(baseline, [candidate])
+
     def test_welch_delta_ci_supports_unequal_variance_and_repeat_counts(self, tmp_path):
         baseline_values = [0.0, 0.1, 0.2]
         candidate_values = [0.1, 0.5, 0.9, 1.3]
@@ -1246,13 +1258,10 @@ class TestEndToEnd:
             "Candidate",
             "Candidate 95% CI",
         ]
-        # Token metrics stay visible when observability did not provide values.
-        assert list(table.columns[0].cells) == [
-            "pass@1\\[avg-of-2]/accuracy",
-            "mean_completion_tokens",
-            "mean_tokens_per_turn",
-        ]
-        assert list(table.columns[2].cells) == ["—", "—", "—"]
+        # Only key metrics get a row, and `[avg-of-k]` survives Rich markup escaping.
+        assert table.row_count == 1
+        assert "pass@1\\[avg-of-2]/accuracy" in list(table.columns[0].cells)
+        assert list(table.columns[2].cells) == ["—"]
 
     @pytest.mark.parametrize(
         "groups, expected",
@@ -1374,9 +1383,9 @@ class TestReportEdgeCases:
 
         (table,) = render_key_metrics_tables(result)
         table_values = {column.header: list(column.cells) for column in table.columns}
-        assert table_values["Δ (cand − base)"][0] == expected_delta
-        assert table_values["Baseline"][0] == "0.5000"
-        assert table_values["Candidate"][0] == expected_candidate
+        assert table_values["Δ (cand − base)"] == [expected_delta]
+        assert table_values["Baseline"] == ["0.5000"]
+        assert table_values["Candidate"] == [expected_candidate]
 
     def test_missing_values_and_zero_baseline_render_placeholders(self, tmp_path):
         baseline = _entry(
@@ -1390,30 +1399,14 @@ class TestReportEdgeCases:
             groups=[_group(0, [0.0])],
         )
         markdown = render_markdown(self._result(tmp_path, baseline, candidate))
-        # The one-sided metric has no delta; missing token metrics have no invented values.
-        assert "| `mean_completion_tokens` | — | — | — | — | — | — |" in markdown
-        assert "| `mean_tokens_per_turn` | — | — | — | — | — | — |" in markdown
+        # No key metrics were recorded, and the one-sided metric has no delta to show.
+        assert "No key metrics were recorded for this agent." in markdown
+        assert "mean_completion_tokens" not in markdown
+        assert "mean_tokens_per_turn" not in markdown
         assert "| `pass@1/accuracy` | — | — | 10.00 | — | — | — |" in markdown
         # A zero baseline has no meaningful relative change.
         assert "| `mean/reward` | +0.5000 (n/a) |" in markdown
         assert "### Metrics present in only one run" in markdown
-
-    def test_token_rows_with_no_observations_do_not_claim_one_sided_metrics(self, tmp_path):
-        baseline = _entry(agent_metrics={"mean/reward": 0.5}, key_metrics={"mean/reward": 0.5})
-        candidate = _entry(agent_metrics={"mean/reward": 0.6}, key_metrics={"mean/reward": 0.6})
-        result = self._result(tmp_path, baseline, candidate)
-
-        markdown = render_markdown(result)
-        for name in ("mean_completion_tokens", "mean_tokens_per_turn"):
-            assert f"| `{name}` | — | — | — | — | — | — |" in markdown
-        assert "### Metrics present in only one run" not in markdown
-        assert "metric(s) were reported by only one of the runs" not in " ".join(result.comparisons[0].notes)
-
-        rows = {row.metric: row for row in result.comparisons[0].metrics}
-        for name in ("mean_completion_tokens", "mean_tokens_per_turn"):
-            assert rows[name].is_key_metric
-            assert rows[name].baseline is None
-            assert rows[name].candidates == [None]
 
     def test_token_rows_use_existing_repeat_intervals_and_welch_delta(self, tmp_path):
         def token_entry(completion, per_turn, completion_ci, per_turn_ci):

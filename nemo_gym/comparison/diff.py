@@ -95,7 +95,9 @@ def _repeat_metric_values(run: LoadedRun, name: str) -> List[float]:
 
 def _warn_if_repeat_samples_differ(run: LoadedRun, label: str) -> None:
     """Warn when repeat estimates cover incomplete or unequal task samples."""
-    sample_counts = {entry.get("sample_count") for entry in run.repeat_level_metrics}
+    sample_counts = {
+        entry["sample_count"] for entry in run.repeat_level_metrics if entry.get("sample_count") is not None
+    }
     if any(entry.get("missing_count", 0) > 0 for entry in run.repeat_level_metrics) or len(sample_counts) > 1:
         warnings.warn(
             f"{label} agent {run.agent_name!r} has incomplete or unequal task coverage across repeats; "
@@ -381,13 +383,6 @@ def compare_runs(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> AgentC
             "Runs collected with different --num-repeats produce different pass@k metric names."
         )
 
-    reported = {row.metric for row in rows}
-    rows.extend(
-        MetricRow(metric=name, is_key_metric=True, present_in=[], candidates=[None] * len(candidates))
-        for name in COMPLETION_TOKEN_METRIC_NAMES
-        if name not in reported
-    )
-
     notes: List[str] = []
     repeat_counts = [run.num_repeats for run in candidates]
     if baseline.num_repeats is not None and any(
@@ -403,7 +398,7 @@ def compare_runs(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> AgentC
             "Neither run recorded per-run cross-repeat confidence intervals, so every baseline/candidate "
             "CI cell is empty. They are written for repeat-aggregated metrics when a run has 2 or more repeats."
         )
-    one_sided = [row.metric for row in rows if row.present_in and len(row.present_in) < 1 + len(candidates)]
+    one_sided = [row.metric for row in rows if len(row.present_in) < 1 + len(candidates)]
     if one_sided:
         notes.append(f"{len(one_sided)} metric(s) were reported by only one of the runs.")
 
