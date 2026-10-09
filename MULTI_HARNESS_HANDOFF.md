@@ -1,6 +1,6 @@
 # NeMo multi-harness training: cross-cluster handoff
 
-Last reconciled: **2026-10-08 19:55 PDT**
+Last reconciled: **2026-10-09 10:43 PDT**
 
 This is the operational handoff for resuming the NeMo Gym + NeMo RL
 multi-harness work on another cluster. It records what is pushed, what has
@@ -10,54 +10,45 @@ exact acceptance gates. The longer design and code map are in
 
 ## Current live status
 
-- Gym implementation head `739cfac02` and RL branch tip `68ff2f02` are pushed to
-  `ehosseiniasl/multi-harness-training-routing` in their respective forks.
-- Gym commits `7c8e20775`, `0f474dc80`, `7f8454ac1`, and `739cfac02` address
-  the token-lineage blockers exposed by OpenClaw: assistant reasoning
-  normalization, exact file-ledger mismatch diagnostics, a fail-closed retry
-  across the ledger-publication race, and narrowly scoped normalization of
-  OpenClaw's rewritten `chatcmpl-tool-<hex>` IDs. Fingerprint version 4 treats
-  that form as equivalent to `chatcmpltool<hex>` while arbitrary IDs remain
-  byte-significant.
-- Focused coverage at `739cfac02` passes: 34 fingerprint/golden/staging tests,
-  six targeted resolver/tool tests, all 46 token-capture ledger tests, Ruff,
-  Ruff format, and `git diff --check`. A captured served/echoed OpenClaw pair
-  now has equal canonical IDs and equal fingerprints.
-- Nano job `2180210`, W&B run
-  [`2iseuhsj`](https://wandb.ai/adlr/multi-harness-RL/runs/2iseuhsj), is a
-  diagnostic failure. It proved 11/11 services, initial refit, and live
-  four-harness fan-out, then correctly rejected one OpenClaw sibling at step 0
-  because its response parent was unresolved. It did not perform an optimizer
-  step and is not acceptance evidence.
-- Replacement Nano job `2180348`, W&B run
-  [`ra55t6cy`](https://wandb.ai/adlr/multi-harness-RL/runs/ra55t6cy), ended
-  failed before an optimizer update. It proved the publication retry was
-  active and isolated the remaining lineage error: vLLM served tool ID
-  `chatcmpl-tool-863127ed64b40525`, while OpenClaw echoed
-  `chatcmpltool863127ed64b40525`. Commit `739cfac02` is the tested fix.
-- Fresh Nano job `2180485`, W&B run
-  [`dv8ch7n8`](https://wandb.ai/adlr/multi-harness-RL/runs/dv8ch7n8), is live on
-  two nodes with exact Gym head `739cfac02` and RL head `68ff2f02`. As of 19:55
-  PDT it had loaded all 16 task-by-harness groups, started all services,
-  completed the initial refit, and completed two of four optimizer updates.
-  Token capture is healthy: fingerprint version 4 is active, invalid-row rate
-  and poisoned-rollout count are zero, and no `ledger_fingerprint_missing`
-  warnings have recurred. Step 1 had seven valid sequences, nonzero loss and
-  gradient (`loss=-0.1437`, `grad_norm=0.5619`), reward `0.2857`, and no TMPE
-  masking (`max_seq_mult_prob_error=1.0429`).
-- This live run also exposes a separate OpenClaw compaction compatibility gap.
-  Its native anchored-summary calls send `stream=true`, `stream_options`, and
-  `max_tokens=8192` to `/v1/chat/completions`; Gym's non-streaming request
-  schema rejects them with 18 validation errors. OpenClaw currently recovers
-  and the optimizer continues, but this remains a P0 issue to fix and retest.
-  A separate 16,385-token vLLM boundary rejection also remains visible.
-- The exact live artifact directory is
-  `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/validation/anyterminal-p0/nano-omni-sync2-debug-grpo/run-nano-omni-sync2-debug-20261008-192739`.
-  The driver log is
-  `/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_omni/users/ehosseiniasl/github_repos/nemorl-multi-harness/2180485-logs/ray-driver.log`.
-- Acceptance remains blocked on a complete Nano run followed by the requested
-  Super 8-node synchronous and Super 16-node asynchronous runs. Both Super
-  runs must use
+- The current implementation commits are Gym `dda31404b` and NeMo RL
+  `02936d5f` on branch `ehosseiniasl/multi-harness-training-routing`. They are
+  the commits that must be present before the next runtime validation.
+- Nano job `2180485`, W&B run
+  [`dv8ch7n8`](https://wandb.ai/adlr/multi-harness-RL/runs/dv8ch7n8), completed
+  all four optimizer updates available in its one-epoch configuration. The
+  final reported reward was `0.625`, gradient norm was approximately `0.6386`,
+  maximum TMPE was approximately `1.0351`, and token capture reported zero
+  masked samples, zero invalid rows, and zero poisoned rows. Its Slurm state is
+  `FAILED` only because the old post-run auditor required nonzero response-level
+  usage, while all eight OpenClaw response objects reported zero usage.
+- The same run exposed two remaining harness issues. OpenClaw's native
+  compaction requests used the `reasoning` assistant field that Gym did not
+  accept, so all OpenClaw trajectories likely ended through the harness salvage
+  path. Hermes learned the real 16K limit only after a 16,385-token backend
+  rejection.
+- Gym `dda31404b` fixes those issues. The chat schema now preserves both
+  `reasoning` and `reasoning_content`; AnyTerminal keeps policy calls on the
+  correlated token-capture URL while routing native compaction to the
+  uncorrelated model endpoint; Hermes receives the real 15,872-token context
+  and uses the uncorrelated endpoint for compression.
+- RL `02936d5f` fixes observability lost during token-capture reassembly.
+  Scalar and numeric-histogram rollout metrics now survive the finalizer and
+  are mirrored into the resolved harness namespace. W&B should receive keys
+  such as `train/anyterminal_openclaw/total_reward/mean`,
+  `train/anyterminal_pi/turns_per_sample/mean`, and equivalent OpenCode and
+  Hermes token/success/masking/termination metrics. Full-result W&B Tables are
+  deliberately not sent through the metadata-only finalizer sidecar.
+- The Qwen, Nano, and Super recipes now set both `max_num_epochs` and
+  `max_num_steps` to `1000000`; the scheduler allocation is the practical run
+  boundary. Do not override either field to four or one. W&B is enabled for
+  entity/project `adlr/multi-harness-RL`.
+- Focused validation for the new commits passes: 9 Gym schema/streaming/runner
+  tests, 3 RL rollout/finalizer metric tests, 5 RL recipe-resolution tests, and
+  Ruff formatting/lint checks. A fresh four-harness Nano W&B run is still
+  required to prove that the new per-harness series populate with real data.
+- Acceptance remains blocked on that clean Nano rerun followed by the requested
+  Super 8-node synchronous and Super 16-node asynchronous runs. Both Super runs
+  must use
   `/lustre/fsw/portfolios/nemotron/users/ehosseiniasl/checkpoints/super35-journey-mopd2-identity-upsampling-from-my-step30-yifuw-001_boosted_mtp`
   and online W&B project `adlr/multi-harness-RL`.
 
@@ -196,8 +187,8 @@ Use branch `ehosseiniasl/multi-harness-training-routing` in both repositories.
 
 | Repository | Pull request | Minimum implementation commit |
 |---|---|---|
-| NeMo Gym | [NVIDIA-NeMo/Gym#4082](https://github.com/NVIDIA-NeMo/Gym/pull/4082) | `739cfac02` |
-| NeMo RL | [NVIDIA-NeMo/RL#4521](https://github.com/NVIDIA-NeMo/RL/pull/4521) | `68ff2f02` |
+| NeMo Gym | [NVIDIA-NeMo/Gym#4082](https://github.com/NVIDIA-NeMo/Gym/pull/4082) | `dda31404b` |
+| NeMo RL | [NVIDIA-NeMo/RL#4521](https://github.com/NVIDIA-NeMo/RL/pull/4521) | `02936d5f` |
 
 The Gym branch tip also contains documentation commits newer than the
 implementation hash. Fetch the branch tip and use the hashes above only as
@@ -210,7 +201,7 @@ git remote add contributor https://github.com/ehosseiniasl/Gym.git
 git fetch contributor ehosseiniasl/multi-harness-training-routing
 git switch -c ehosseiniasl/multi-harness-training-routing \
   --track contributor/ehosseiniasl/multi-harness-training-routing
-git merge-base --is-ancestor 739cfac02 HEAD
+git merge-base --is-ancestor dda31404b HEAD
 
 cd ..
 git clone https://github.com/NVIDIA-NeMo/RL.git nemorl-multi-harness
@@ -219,7 +210,7 @@ git remote add contributor https://github.com/ehosseiniasl/NeMo-RL.git
 git fetch contributor ehosseiniasl/multi-harness-training-routing
 git switch -c ehosseiniasl/multi-harness-training-routing \
   --track contributor/ehosseiniasl/multi-harness-training-routing
-git merge-base --is-ancestor 68ff2f02 HEAD
+git merge-base --is-ancestor 02936d5f HEAD
 ```
 
 After cloning, both ancestry commands must exit zero. Also run `git status
@@ -258,13 +249,17 @@ it is not expanded again inside Gym.
 
 NeMo Gym:
 
+- `nemo_gym/openai_utils.py`
 - `nemo_gym/rollout_collection.py`
 - `nemo_gym/global_config.py`
 - `nemo_gym/train_data_utils.py`
+- `responses_api_agents/anyterminal_agent/app.py`
 - `responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness.yaml`
 - `responses_api_agents/anyterminal_agent/configs/anyterminal_multi_harness_enroot.yaml`
 - `responses_api_agents/anyterminal_agent/configs/anyterminal_openclaw.yaml`
 - `responses_api_agents/anyterminal_agent/configs/anyterminal_pi.yaml`
+- `responses_api_agents/anyterminal_agent/configs/anyterminal_hermes.yaml`
+- `responses_api_agents/hermes_agent/app.py`
 - `responses_api_agents/opencode_agent/app.py`
 - `responses_api_agents/pi_agent/app.py`
 - `tests/unit_tests/test_anyterminal_multi_harness.py`
@@ -274,7 +269,10 @@ NeMo RL:
 - `nemo_rl/data/datasets/response_datasets/nemogym_dataset.py`
 - `nemo_rl/environments/nemo_gym.py`
 - `nemo_rl/environments/nemo_gym_shards.py`
+- `nemo_rl/experience/rollout_manager.py`
+- `nemo_rl/experience/rollout_reassembler_actor.py`
 - `nemo_rl/experience/rollouts.py`
+- `nemo_rl/algorithms/single_controller.py`
 - `nemo_rl/models/generation/vllm/vllm_worker_async.py`
 - `examples/nemo_gym/grpo_anyterminal_multi_harness_qwen3_0_6b_single_controller.yaml`
 - `examples/nemo_gym/grpo_anyterminal_multi_harness_nemotron_nano_omni_sync_2n_debug_single_controller.yaml`
@@ -371,37 +369,37 @@ uv run pytest -q tests/unit_tests/test_anyterminal_multi_harness.py
 uv run pytest -q responses_api_agents/openclaw_agent/tests/test_app.py
 uv run pytest -q responses_api_agents/pi_agent/tests/test_app.py \
   -k test_run_stages_private_mcp_config_and_cleans_workspace
+uv run pytest -q tests/unit_tests/test_openai_utils.py \
+  tests/unit_tests/test_chat_completions_streaming.py \
+  responses_api_agents/anyterminal_agent/tests/test_app.py
 uv run ruff check responses_api_agents/pi_agent/app.py \
   responses_api_agents/pi_agent/tests/test_app.py \
   tests/unit_tests/test_anyterminal_multi_harness.py
 git diff --check
 ```
 
-At commit `845f13a1e`, **66 focused Gym tests pass**, covering the OpenClaw
-application/observability paths and the AnyTerminal multi-harness/runtime
-configuration. Ruff `0.9.9`, Ruff format check, and `git diff --check` pass.
-A broader combined invocation encounters a pre-existing stale assertion in
-`TestRunnerTemplate.test_sampling_is_forwarded`: the test expects
-`**_request_sampling` while the current template uses `_cfg_sampling` plus
-`AGENT_KWARGS`. It is unrelated to the multi-harness/OpenClaw changes.
+At commit `dda31404b`, the nine newly relevant Gym
+schema/streaming/AnyTerminal runner tests pass together. The two Hermes config
+tests also passed in the extracted Hermes dependency environment. Focused Ruff,
+Ruff format, and `git diff --check` pass.
 
 From the RL checkout:
 
 ```bash
 uv run pytest -q tests/unit/environments/test_anyterminal_multi_harness_recipe.py
+uv run pytest -q \
+  tests/unit/experience/test_rollout_manager.py::test_capture_metrics_are_mirrored_into_the_resolved_harness_namespace \
+  tests/unit/experience/test_rollout_manager.py::TestGenerateForFinalizationFlow::test_request_preserves_per_harness_scalar_metrics \
+  tests/unit/single_controller/test_finalizer_lifecycle.py::test_successful_actor_finalization_returns_actor_and_transfers_ownership
 uv run pytest -q tests/unit/models/generation/test_vllm_generation.py \
   -k reasoning_parser_plugin
 git diff --check
 ```
 
-On the source login node, the RL pytest suite could not initialize its autouse
-Ray fixture because GCS was unavailable. That is an infrastructure limitation,
-not a passing test. The direct config-resolution assertions did pass for the
-Qwen, Nano, and Super recipes, including OpenClaw context `15872` and output
-limit `4096`. For commit `58d1b148`, the focused atomic rejection regression
-passes without the parent Ray fixture; Ruff, Ruff format, `git diff --check`,
-and targeted Pyrefly pass with zero errors. Re-run the fixture-backed file on a
-compute node with working Ray.
+At commit `02936d5f`, all five multi-harness recipe tests and all three focused
+rollout/finalizer metric tests pass with a working Ray cluster. Focused Ruff,
+Ruff format, and `git diff --check` also pass. The source login sandbox cannot
+start Ray GCS, so run those tests outside the sandbox or on a compute node.
 
 ## Implemented OpenClaw runtime and prompt fix
 
@@ -454,27 +452,32 @@ token.
 
 ## Validation order
 
-1. Fetch Gym commit `845f13a1e` or newer and RL commit `68ff2f02` or newer,
+1. Fetch Gym commit `dda31404b` or newer and RL commit `02936d5f` or newer,
    then rerun their focused tests.
 2. Run the two-node synchronous Nano recipe:
    `grpo_anyterminal_multi_harness_nemotron_nano_omni_sync_2n_debug_single_controller.yaml`.
-3. Let the four-row epoch finish naturally. Do not lower or otherwise use
-   `grpo.max_num_steps` to truncate it.
-4. Check the full local artifacts and W&B tables, not just the process exit
-   code or `mask_sample`.
+3. Leave `grpo.max_num_epochs` and `grpo.max_num_steps` at `1000000`. Let the
+   job run until the scheduler allocation or an explicit operator stop; never
+   cap it at four optimizer steps or one dataset epoch.
+4. After at least one complete 16-group cycle, check local artifacts and W&B,
+   including all four `train/anyterminal_<harness>/...` namespaces, rather than
+   relying only on process state or `mask_sample`.
 5. After Nano passes, run the requested Super checkpoint with the 8-node sync
    and 16-node async recipes. They may run in parallel after the Nano gate.
 6. Add the passing W&B links and score/TMPE/refit summary to both PRs.
 
-The expected full-run shape is:
+The expected shape of each complete dataset cycle is:
 
 ```text
 4 source tasks x 4 harnesses = 16 prompt groups
 16 prompt groups x 2 siblings = 32 rollouts
-32 rollouts / train batch 8 = 4 optimizer steps
+32 rollouts / train batch 8 = 4 optimizer updates per cycle
+cycles repeat until the scheduler or operator ends the run
 ```
 
-Run the bundled auditor after a completed run:
+Run the bundled auditor against a completed window. The auditor must accept
+`>=4` optimizer updates and must not require the training process to stop at
+four:
 
 ```bash
 python /path/to/validation/anyterminal-p0/validate_super_run.py \
@@ -493,8 +496,9 @@ Do not accept a run unless all of these hold:
    no `no_records`, incomplete, or ambiguous capture chains.
 5. TMPE is finite, every optimizer step has eight valid samples, and no sample
    is masked for log-probability error.
-6. Four optimizer steps complete and W&B contains the complete Gym result
-   tables.
+6. At least four consecutive optimizer updates complete, training remains able
+   to continue, and W&B contains per-harness metric series plus the configured
+   Gym result tables.
 7. Reward and advantages are finite and have non-zero variance. Loss and
    gradient norm are finite, and gradient norm is not identically zero.
 8. Policy-to-generation refit completes initially and after every optimizer
@@ -550,8 +554,8 @@ of reusing these IDs.
 
 ## Resume checklist
 
-1. Fetch both branch tips and verify Gym contains `7f8454ac1` and RL contains
-   `68ff2f02` with the minimum-commit ancestry checks.
+1. Fetch both branch tips and verify Gym contains `dda31404b` and RL contains
+   `02936d5f` with the minimum-commit ancestry checks.
 2. Copy/remap the validation bundle, outer container, caches, four task images,
    dataset, and model checkpoint.
 3. Restore secrets without printing them and confirm W&B is online at
@@ -564,7 +568,8 @@ of reusing these IDs.
 7. Verify RL commits `58d1b148` and `68ff2f02` are active: rejected groups
    never appear in a selected training batch, and relative parser plugins load
    independently of Ray worker cwd.
-8. Run Nano sync and audit all 32 rollouts plus four optimizer steps.
+8. Run uncapped Nano sync and audit the first complete 32-rollout/four-update
+   cycle while the run continues.
 9. Run Super 8-node sync and Super 16-node async with the specified Super
    checkpoint.
 10. Record per-harness scores, TMPE, reward/advantage/loss/gradient metrics,
@@ -573,9 +578,8 @@ of reusing these IDs.
    remote branches.
 
 Until steps 8 and 9 pass, the correct project status is: **multi-harness fan-out
-implemented; Pi and OpenClaw runtime/config fixes committed and focused-tested;
-OpenClaw's exact standalone tool loop passes; the NeMo RL finalizer/replay race
-and vLLM parser-plugin path are fixed and regression-tested; OpenClaw token
-lineage normalization, diagnostics, and the ledger-publication retry are pushed;
-the replacement Nano validation is running; Nano and Super training validation
-remain pending**.
+implemented; OpenCode, OpenClaw, Pi, and Hermes are routed for every task;
+native compaction and token-lineage fixes are focused-tested; per-harness W&B
+metrics survive token-capture finalization in unit tests; the prior Nano run
+completed four optimizer updates but predates the compaction/metrics fixes; a
+clean uncapped Nano rerun and both Super training validations remain pending**.
