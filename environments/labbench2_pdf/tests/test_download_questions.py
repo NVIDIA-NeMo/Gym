@@ -53,19 +53,41 @@ def test_download_questions_writes_valid_minimal_pinned_snapshot(monkeypatch, tm
 def test_matching_question_snapshot_is_reused_without_network(monkeypatch, tmp_path: Path) -> None:
     output_dir = tmp_path / "questions"
     options = QuestionDownloadOptions(output_dir=output_dir, benchmarks=("litqa3",))
-    monkeypatch.setattr(
-        download_questions_module,
-        "_load_hf_rows",
-        lambda repo_id, benchmark, revision: [_row("litqa3-id", benchmark)],
-    )
+
+    def load_main(repo_id: str, benchmark: str, revision: str | None) -> list[dict]:
+        assert revision == "main"
+        return [_row("litqa3-id", benchmark)]
+
+    monkeypatch.setattr(download_questions_module, "_load_hf_rows", load_main)
     first_manifest = download_questions(options)
+    assert first_manifest["revision"] == "main"
 
     def unexpected_load(repo_id: str, benchmark: str, revision: str | None) -> list[dict]:
-        raise AssertionError("a valid pinned snapshot should be reused")
+        raise AssertionError("a valid cached snapshot should be reused")
 
     monkeypatch.setattr(download_questions_module, "_load_hf_rows", unexpected_load)
 
     assert download_questions(options) == first_manifest
+
+
+def test_refresh_downloads_current_main_snapshot(monkeypatch, tmp_path: Path) -> None:
+    output_dir = tmp_path / "questions"
+    calls = []
+
+    def load_main(repo_id: str, benchmark: str, revision: str | None) -> list[dict]:
+        assert revision == "main"
+        calls.append(revision)
+        return [_row(f"snapshot-{len(calls)}", benchmark)]
+
+    monkeypatch.setattr(download_questions_module, "_load_hf_rows", load_main)
+    download_questions(QuestionDownloadOptions(output_dir=output_dir, benchmarks=("litqa3",)))
+    manifest = download_questions(
+        QuestionDownloadOptions(output_dir=output_dir, benchmarks=("litqa3",), overwrite=True)
+    )
+
+    assert calls == ["main", "main"]
+    assert manifest["revision"] == "main"
+    assert json.loads((output_dir / "litqa3.jsonl").read_text())["id"] == "snapshot-2"
 
 
 def test_failed_refresh_preserves_existing_question_snapshot(monkeypatch, tmp_path: Path) -> None:

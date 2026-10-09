@@ -28,8 +28,8 @@ from environments.labbench2_pdf.data_utils import (
 
 
 DEFAULT_HF_REPO_ID = "EdisonScientific/labbench2"
-# The revision used by the standalone direct-PDF benchmark snapshot.
-DEFAULT_HF_REVISION = "27d12d72af24e3f70db8a99df63e567366cbdb80"
+# Follow upstream by default; callers can still request a specific revision.
+DEFAULT_HF_REVISION = "main"
 
 
 @dataclass(frozen=True, slots=True)

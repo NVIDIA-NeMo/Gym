@@ -36,7 +36,7 @@ From the repository root:
 gym eval prepare --benchmark labbench2_pdf
 ```
 
-Preparation downloads the pinned LabBench2 question snapshot, attempts to
+Preparation downloads LabBench2 questions from Hugging Face's `main` branch, attempts to
 resolve its DOI papers from public open-access sources, builds the Docker
 runtime, skips questions missing any required PDF, and creates the Harbor task
 registry. It writes Gym's generated index to
@@ -62,6 +62,17 @@ Preparation is deliberately repeatable: cached downloads are reused and the
 generated task registry is replaced. Use
 `+use_cached_prepared_benchmarks=true` to skip preparation when the generated
 benchmark index already exists.
+
+Cached questions are reused even when upstream `main` changes. To fetch the
+latest questions before preparing the benchmark again, run:
+
+```bash
+python environments/labbench2_pdf/download_questions.py --overwrite
+gym eval prepare --benchmark labbench2_pdf
+```
+
+Upstream question changes can affect task identities, PDF coverage, and scores.
+Use a supplied question snapshot when comparing runs on a fixed dataset.
 
 ## Run
 

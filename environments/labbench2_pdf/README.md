@@ -35,11 +35,10 @@ python environments/labbench2_pdf/prepare_data.py \
   --overwrite
 ```
 
-This is the reproducible default path. It:
+This is the default acquisition path. It:
 
 1. downloads the three question configs from
-   `EdisonScientific/labbench2` at the pinned revision recorded in
-   `download_questions.py`;
+   `EdisonScientific/labbench2` on Hugging Face's `main` branch;
 2. resolves and downloads every distinct source DOI it can find into the
    gitignored `data/source/papers` cache;
 3. audits PDF coverage and skips questions that do not have every listed
@@ -47,9 +46,12 @@ This is the reproducible default path. It:
 4. materializes the remaining questions as a Harbor registry and Gym input
    JSONL files under `data/tasks_docker`.
 
-Both download caches are validated and reused on subsequent runs. Task names
-contain the original position in each upstream benchmark, so a newly available
-PDF cannot silently renumber existing task IDs.
+Both download caches are validated and reused on subsequent runs. Add
+`--refresh-questions` to fetch the latest upstream questions again, or
+`--hf-revision <revision>` to select a specific dataset revision. Within a
+question snapshot, task names contain the original position in each benchmark,
+so a newly available PDF cannot silently renumber existing task IDs. Upstream
+question updates can change task identities and benchmark results.
 
 ### Use an existing local snapshot
 
@@ -67,7 +69,7 @@ python environments/labbench2_pdf/prepare_data.py \
 The supplied directories are read-only inputs: the preparation command neither
 writes to them nor invokes a question or DOI downloader. To supply only the
 paper snapshot, omit `--questions-dir`; preparation then downloads or reuses the
-pinned question snapshot before checking the PDFs and filtering the generated
+question snapshot before checking the PDFs and filtering the generated
 tasks.
 
 The strict default is `--source-policy all`: every DOI listed for a question
