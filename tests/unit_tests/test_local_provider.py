@@ -16,15 +16,73 @@
 import asyncio
 import contextlib
 import logging
+import os
+import signal
+import sys
+from json import loads
 from pathlib import Path
+from shlex import join
 
 import pytest
 
+from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, SandboxStatus, create_provider
 from nemo_gym.sandbox.providers.local import LocalProvider
 
 
 pytestmark = pytest.mark.sandbox
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper and /proc are required")
+async def test_supervisor_deadline_finishes_before_provider_hard_timeout(tmp_path: Path) -> None:
+    provider = LocalProvider()
+    handle = await provider.create(SandboxSpec(workdir=str(tmp_path)))
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "import pathlib, signal, subprocess, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+        "pathlib.Path('child.pid').write_text(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+    receipt_path = tmp_path / "cleanup.json"
+    command = join(
+        [
+            sys.executable,
+            "-I",
+            process_supervisor.__file__,
+            "--timeout",
+            "1",
+            "--cleanup-timeout",
+            "0.5",
+            "--receipt",
+            str(receipt_path),
+            "--",
+            sys.executable,
+            "-I",
+            str(worker),
+        ]
+    )
+    try:
+        result = await provider.exec(
+            handle, command, timeout_s=process_supervisor.exec_timeout(timeout=1, cleanup_timeout=0.5)
+        )
+        assert result.error_type is None, result.stderr
+        assert result.return_code == 0
+        receipt = loads(receipt_path.read_text())
+        assert receipt["cleanup_confirmed"] is True
+        assert receipt["timed_out"] is True
+        assert receipt["return_code"] == -signal.SIGKILL
+        assert receipt["error"] is None
+        with pytest.raises(ProcessLookupError):
+            os.kill(int((tmp_path / "child.pid").read_text()), 0)
+    finally:
+        if (tmp_path / "child.pid").exists():
+            try:
+                os.kill(int((tmp_path / "child.pid").read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        await provider.close(handle)
 
 
 async def test_exec_runs_in_the_workspace_with_layered_env(tmp_path: Path) -> None:

@@ -66,6 +66,7 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
 class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequest, SingleAgentTurnResponse]):
     """Run one agent turn followed by Resources verification and cleanup."""
 
+    ray_enabled = False
     config: SingleAgentTurnEnvironmentServerConfig
     request_model = SingleAgentTurnRequest
     response_model = SingleAgentTurnResponse
@@ -104,7 +105,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
         # Register cleanup before seed so a lost seed response cannot hide the caller-assigned session ID.
         # Final cleanup closes this session after run() returns, outside the episode deadline.
-        cleanup.register_cleanup("resources session", close_resources)
+        resources_cleanup = cleanup.register_cleanup("resources session", close_resources)
 
         try:
             seed_http_response = await self.server_client.post(
@@ -127,7 +128,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="seed",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -146,13 +147,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             if seed.resources_tools is None:
                 raise self._failure(
                     stage="seed",
-                    message="Resources seed did not return requested MCP metadata",
+                    failure_reason="Resources seed did not return requested MCP metadata",
                     terminal=True,
                 )
             if seed.resources_tools.transport != "http":
                 raise self._failure(
                     stage="seed",
-                    message=f"Unsupported resources MCP transport: {seed.resources_tools.transport}",
+                    failure_reason=f"Unsupported resources MCP transport: {seed.resources_tools.transport}",
                     terminal=True,
                 )
             url_path = seed.resources_tools.url_path.lstrip("/")
@@ -218,7 +219,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="agent",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -240,18 +241,18 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="agent",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
         # Verification needs this close response: it carries the Agent's observations and final Resources cookies.
-        # A repeated close cannot return them, so a transient failure retries the whole episode instead.
+        # Session-capable agents replay this receipt when ServerClient retries a lost reply.
         try:
             await agent_cleanup.close()
         except Exception as error:
             raise self._failure(
                 stage="cleanup",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
             ) from error
@@ -275,11 +276,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="verification",
-                message=str(error),
+                failure_reason=str(error),
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
             ) from error
 
+        # Keep one bounded retry in final unwind without erasing a completed verdict.
+        cleanup.register_cleanup("post-verification resources session", resources_cleanup.close)
         return SingleAgentTurnResponse(
             episode_id=request.episode_id,
             task_id=request.task.task_id,
@@ -308,14 +311,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     def _failure(
         *,
         stage: str,
-        message: str,
+        failure_reason: str,
         terminal: bool,
         partial_response: Any = None,
     ) -> HandledEpisodeError:
         return HandledEpisodeError(
             SingleAgentTurnFailure(
                 stage=stage,
-                message=message[:2000],
+                failure_reason=failure_reason[:2000],
                 terminal=terminal,
                 partial_response=partial_response,
             )

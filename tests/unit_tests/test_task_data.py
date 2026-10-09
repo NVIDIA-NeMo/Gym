@@ -197,6 +197,35 @@ class TestTaskDataValidator:
         )
         assert v.report.error_rows == 1
 
+    def test_generic_materialized_task_validates_flat_fields(self):
+        v = self._validator()
+        v.validate_row(
+            0, {"task_id": {"taskset": "t", "task_id": "0"}, "task_input": {"question": "q", "expected_answer": "a"}}
+        )
+        assert v.report.clean
+        v.validate_row(1, {"task_id": {"taskset": "t", "task_id": "1"}, "task_input": {"question": "q"}})
+        assert v.report.error_rows == 1
+
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_materialized_verifier_metadata_preserves_schema_normalization(self, nested):
+        fields = {"verifier_metadata": {"question": "q", "expected_answer": "a"}}
+        task_input = {"responses_create_params": {}, **({"task_data": fields} if nested else fields)}
+        v = self._validator()
+        v.validate_row(0, {"task_id": {"taskset": "t", "task_id": "0"}, "task_input": task_input})
+        assert v.report.clean
+
+    def test_mixed_materialized_task_reports_conflicting_fields(self):
+        v = self._validator()
+        v.validate_row(
+            0,
+            {
+                "task_id": {"taskset": "t", "task_id": "0"},
+                "task_input": {"task_data": {"question": "q", "expected_answer": "a"}, "question": "different"},
+            },
+        )
+        assert v.report.conflicting_keys == {"question": 1}
+        assert not v.report.clean
+
     def test_materialized_task_data_that_is_not_an_object_is_an_invalid_row(self):
         v = self._validator()
         v.validate_row(0, {"task_id": {"taskset": "t", "task_id": "0"}, "task_input": {"task_data": "bad"}})

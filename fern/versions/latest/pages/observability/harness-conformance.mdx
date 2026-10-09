@@ -1,0 +1,161 @@
+---
+title: "Harness Conformance"
+description: "Check P0 trajectory evidence and compare harness artifact coverage."
+position: 3
+---
+
+# Harness Conformance
+
+Check the evidence retained by a harness/benchmark pair after collecting an evaluation:
+
+```bash
+python scripts/inspect_harness_conformance.py \
+    --bundle results/my-harness/rollouts.jsonl \
+    --output results/my-harness/evidence
+```
+
+The `gym-p0/v1` profile checks trajectory evidence across TE-1–TE-9. Each check
+declares `tier`: `P0`, `P1` or `P2`. Every applicable P0 check must pass on every rollout.
+All current checks are P0, including ownership and call-to-step attribution.
+TE labels group results for reporting; they do not determine priority or schedule checks.
+This guide and the check definitions maintain the implemented requirements.
+
+| Evidence | Persisted contract |
+| --- | --- |
+| TE-1: model call status | Nonblank call/model identity, protocol, required call clocks and explicit response or error outcome. |
+| TE-2: token counts | Nonnegative integer prompt, completion, reasoning, total and cached counts when populated. Missing/null metrics remain unavailable and are counted separately. |
+| TE-3: steps | Container task/rollout identity, invocation reference, step number, timestamp and explicit boolean/null resolution. Content belongs to TE-4/TE-7. |
+| TE-4: history | Ordered saved model inputs and outputs, including tool results and changed context. Missing media, opaque content and unavailable prior-response history fail. |
+| TE-5: tool record | Execution id/name/status, originating request with dispatched arguments, and saved output. Tool clocks are outside P0. A tool request alone does not prove execution. |
+| TE-6: verifier outcome | Numeric rollout reward and required boolean `evaluation_completed` and `mask_sample`. Saved sandbox IDs, outcomes and failure categories are also checked. `mask_sample=true` excludes the reward from scores. Masked or explicitly incomplete verification requires nonblank `failure_kind` and `failure_reason`. Extended verifier scope/version and judge provenance are not certified by this profile. |
+| TE-7: payloads | Saved request and response/error bodies. Empty returned bodies and explicit no-response transport failures remain distinct. |
+| TE-8: run join | Exactly one explicit invocation owner per captured attempt, including attempts without response ids; exact references. |
+| TE-9: step join | Every retained policy attempt belongs to exactly one identified step, except HTTP-error attempts may have zero or one step reference. Every attempt still requires invocation ownership. Explicit compaction-helper refs are excluded from policy steps. |
+
+Checks do not repeat Gym's unit tests for ID uniqueness, timestamp ordering or
+usage normalization.
+
+The profile covers retained artifacts. It does not certify live failure/retry
+scenario coverage, closed-run completeness, health, accuracy, or deployment
+readiness. Independent completeness required by some health consumers is separate
+from TE-9's retained reference check. Only the saved sandbox rows of TE-10 are included. P1 efficiency requirements
+remain outside this profile.
+
+## Applicability and delivery
+
+By default the pair has policy steps, tools, and a verifier. Use `--no-tools`,
+`--no-verifier`, or `--no-steps` only when that feature does not apply to the
+pair. These flags select checks; they are not inferred from the artifacts.
+With `--no-steps`, step checks are excluded; invocation ownership checks still apply.
+
+`--bundle` accepts a JSONL file, or a directory with exactly one `rollouts.jsonl`
+or `evaluator_rollouts.jsonl`, at its root or under `artifacts/`.
+
+Each evidence check uses one designated location: `$.ng_trajectory` for model
+calls, steps, invocations and tool executions; rollout fields for grades;
+`$.ng_agent_observations.records` for sandbox outcomes and compaction helper
+references. Tool arguments currently live in the canonical invocation conversation.
+Missing canonical evidence is not repaired from duplicate capture/observation
+attachments, and those copies are not compared for consistency.
+
+`--capture-dir` retains capture sidecars in input provenance only. It cannot
+supply or invalidate evidence at the designated locations. `--require-sandbox`
+requires a saved sandbox record; sandbox records are checked whenever present.
+
+Each inspection atomically publishes an immutable directory containing:
+
+- `evidence_summary.json`: gate, per-TE counts, token availability, applicability,
+  source/checker hashes and qualification limits.
+- `evidence_results.jsonl`: individual checks with ID, kind, priority tier, status, JSONPath,
+  reason and blocking prerequisite; TE labels and failure findings for reporting.
+- `evidence_report.md`: evidence table.
+
+Exit codes are **0** for a met gate, **1** for unmet evidence, and **2** for an
+input/checker error. An empty input is an error. Reports omit payload contents.
+Identical inputs and checker versions reuse the same report directory.
+
+## Read individual results
+
+- **Schema:** saved fields have the required structure, types and values.
+- **Semantic:** references resolve to unambiguous saved targets.
+- **Behavioral:** harness behavior and saved evidence match the controlled test's
+  model, tool and verifier observations.
+- **Health:** each rollout health result matches its scenario's expected
+  `healthy`, `unhealthy` or `unobserved` outcome. A pass means the expected outcome
+  occurred, not necessarily that the rollout was healthy.
+
+The standalone inspector runs schema and semantic checks; the conformance runner
+also runs behavioral and health checks.
+
+Health checks are generated from Gym's registered rollout checks and are all P0.
+The runner calls the same top-level health engine as `gym eval health-check` once
+on the saved rollout and failure files, retaining its reports under `health/`.
+Each scenario's `health_expectations` overrides the default `healthy` expectation;
+unknown check IDs are configuration errors. New registered rollout checks default
+to `healthy`. Task-level checks requiring repeated executions are outside this suite.
+
+Each check reports `pass` (✓), `fail` (✗: requirement not demonstrated), or
+`not_applicable` (—: excluded by the check's applicability condition).
+Missing required input and blocked prerequisites fail the check; the result retains
+the reason and `blocked_by` IDs. Blocked checks do not evaluate their input.
+An unrelated malformed step does not invalidate model-call checks.
+A behavioral failure does not erase artifact passes.
+
+The runner writes `conformance_report.md` with one table per harness: check IDs as
+rows and scenarios as columns. Process return codes and timeouts stay in
+`scenario_result.json` as execution status, outside the evidence checks. A failure
+sidecar without a normal rollout fails applicable artifact checks. Missing check
+results also display ✗; execution details retain any runner/checker error.
+
+## Compare harnesses
+
+Use the same task and capture settings when comparing harnesses:
+
+```bash
+python scripts/inspect_harness_conformance.py matrix \
+    --harness opencode=results/opencode/rollouts.jsonl \
+    --harness pi=results/pi/rollouts.jsonl \
+    --harness codex=results/codex/rollouts.jsonl \
+    --harness hermes=results/hermes/rollouts.jsonl \
+    --output results/harness-evidence
+```
+
+The command writes per-harness reports plus `harness_evidence.md` and
+`harness_evidence.json`. Applicability flags apply to every input pair in that
+comparison. A matrix FAIL identifies missing or inconsistent evidence; it is not
+a benchmark accuracy result.
+
+Checker unit tests use hand-authored synthetic evidence contracts, independent of
+harness implementations. Mutations verify missing, conflicting, and malformed
+evidence without prescribing which checks a real harness should pass.
+
+The [Trajectory Capability Matrix](/main/reference/trajectory-capabilities) is
+generated separately from fresh scripted harness runs. Its regeneration command
+requires passing runner, harness adapter, and checker unit tests at a specific
+Gym commit before replacing the table.
+
+## Onboard a producer
+
+Enable `observability_enabled: true` and set `model_call_capture_dir` to a shared
+absolute directory. Route requests through Gym's correlated model URL and retain
+all attempts. See [Model-call Capture](/main/model-server/model-call-capture).
+
+Return `ng_agent_observations` with `AgentInvocation` and exact `ModelCallRef`
+keys (`model_call_id`, or unique `model_ref` plus `response_id`). Forward the
+invocation id as `x-session-id` for failed-call joins through the collector.
+A timestamp or shared model name never establishes ownership.
+
+Supply explicit `TrajectoryTurn` records with the actual prompt and decision
+boundaries. Preserve tool request/result pairs and `ToolCallObservation` outcomes,
+including failures and terminal submission. Keep resolution unknown on
+intermediate steps. Retain the resources server's verification response.
+See [Rollout Evidence](/main/observability/rollout-evidence).
+
+Inspect a small collected evaluation, fix producer gaps, and collect again.
+Run [rollout health checks](/main/evaluation/rollout-health) separately. Evidence
+checks neither rewrite `quality_summary.json` nor treat a truthfully recorded
+failed model call as missing evidence.
+
+```bash
+python -m pytest tests/unit_tests/harness_capabilities -q
+```

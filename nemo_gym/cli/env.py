@@ -26,7 +26,7 @@ from subprocess import Popen, TimeoutExpired
 from tempfile import TemporaryDirectory
 from threading import Thread
 from time import monotonic, sleep, time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
 
 import requests
 import rich
@@ -71,6 +71,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
 from nemo_gym.registry import (
     EnvironmentCatalogEntry,
     RegistryError,
@@ -85,6 +86,7 @@ from nemo_gym.server_utils import (
     ServerClient,
     ServerInstanceDisplayConfig,
     ServerStatus,
+    entrypoint_may_use_ray,
     initialize_ray,
 )
 from nemo_gym.telemetry.config import MemoryProfilingConfig
@@ -119,10 +121,15 @@ _ENDPOINT_POLL_INTERVAL_SEC: float = 3.0
 
 # What a probe found. The distinction that matters is whether waiting could change the answer: a
 # name that does not resolve will not start resolving, while a refused connection may be a server
-# that is still coming up.
+# that is still coming up, and so may a gateway status from a proxy or load balancer in front of it.
 _ENDPOINT_ANSWERING = "answering"
 _ENDPOINT_REFUSED = "refused"
+_ENDPOINT_STARTING = "starting"
 _ENDPOINT_UNRESOLVABLE = "unresolvable"
+
+# A proxy or load balancer answers these while nothing healthy is behind it yet, for example in
+# front of vLLM replicas that are still loading weights, so they mean "not yet" rather than "here".
+_ENDPOINT_STARTING_STATUS_CODES = frozenset({502, 503, 504})
 
 
 def _collect_model_endpoints(global_config_dict: DictConfig) -> List[Tuple[str, str]]:
@@ -177,8 +184,9 @@ def _endpoint_probe_url(base_url: str) -> str:
     """What to GET to find out whether `base_url` is being served.
 
     `GET /v1/models` is part of the OpenAI API, so most endpoints behind a `/v1` base URL answer it,
-    but nothing here depends on that: any HTTP response counts as answering, so an endpoint without
-    it replies 404 and still passes. URLs that do not end in `/v1` are probed at their root.
+    but nothing here depends on that: any HTTP response other than a gateway status counts as
+    answering, so an endpoint without it replies 404 and still passes. URLs that do not end in `/v1`
+    are probed at their root.
     """
     trimmed = base_url.rstrip("/")
     return f"{trimmed}/models" if trimmed.endswith("/v1") else trimmed
@@ -204,12 +212,22 @@ def _probe_endpoint(base_url: str, timeout_seconds: float = _ENDPOINT_PROBE_TIME
     """Whether anything answers at `base_url`, and if not, whether waiting could help.
 
     Answering is the bar, not healthy: a 401 or 404 means something is there, and requiring a 200
-    would reject endpoints that need auth. A completed TLS handshake counts too, even against a
-    certificate this process does not trust, which is why `SSLError` is checked before
-    `ConnectionError` it inherits from.
+    would reject endpoints that need auth. The exception is 502, 503 and 504, which a proxy or load
+    balancer returns while the server behind it is still starting; those are waited on like a
+    refused connection. A completed TLS handshake counts too, even against a certificate this
+    process does not trust, which is why `SSLError` is checked before `ConnectionError` it inherits
+    from.
+
+    The probe connects directly, ignoring `HTTP_PROXY` and the like, because model requests go
+    through Gym's aiohttp client, which ignores them too. Through a proxy, an endpoint the proxy
+    cannot reach would come back as 502 or 504 and be waited on until the timeout.
     """
     try:
-        requests.get(_endpoint_probe_url(base_url), timeout=timeout_seconds)
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(_endpoint_probe_url(base_url), timeout=timeout_seconds)
+        if response.status_code in _ENDPOINT_STARTING_STATUS_CODES:
+            return _ENDPOINT_STARTING
         return _ENDPOINT_ANSWERING
     except requests.exceptions.SSLError:
         return _ENDPOINT_ANSWERING
@@ -230,9 +248,9 @@ def _wait_for_model_endpoints(
 ) -> List[Tuple[str, str]]:
     """Wait for every endpoint to answer. Returns the ones that never did.
 
-    Unresolvable names are reported once and not waited on. Refused connections are waited on,
-    because an inference server can take minutes to load weights and someone who starts thirty
-    seconds early should not have to start over.
+    Unresolvable names are reported once and not waited on. Refused connections and gateway
+    statuses are waited on, because an inference server can take minutes to load weights and
+    someone who starts thirty seconds early should not have to start over.
     """
     if timeout_seconds <= 0 or not endpoints:
         return []
@@ -249,7 +267,7 @@ def _wait_for_model_endpoints(
             print(
                 f"Model endpoint {url} ({key}) does not resolve. Waiting cannot fix a hostname, so it is not retried."
             )
-        elif result == _ENDPOINT_REFUSED:
+        elif result in (_ENDPOINT_REFUSED, _ENDPOINT_STARTING):
             waiting.append((key, url))
     if not waiting:
         return []
@@ -340,6 +358,47 @@ def _resolve_server_dir(rel_path: Path) -> Path:
     )
 
 
+class _ConfiguredServer(NamedTuple):
+    top_level_path: str
+    server_type: str
+    name: str
+    config: DictConfig
+    entrypoint_fpath: Path
+    dir_path: Path
+
+
+def _configured_servers(global_config_dict: DictConfig) -> Iterator[_ConfiguredServer]:
+    """Yield each server instance in the config that has an entrypoint to launch."""
+    top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
+
+    # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
+    for top_level_path in top_level_paths:
+        server_config_dict = global_config_dict[top_level_path]
+        if not isinstance(server_config_dict, DictConfig):
+            continue
+
+        first_key = list(server_config_dict)[0]
+        server_config_dict = server_config_dict[first_key]
+        if not isinstance(server_config_dict, DictConfig):
+            continue
+        second_key = list(server_config_dict)[0]
+        server_config_dict = server_config_dict[second_key]
+        if not isinstance(server_config_dict, DictConfig):
+            continue
+
+        if "entrypoint" not in server_config_dict:
+            continue
+
+        # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
+        entrypoint_fpath = Path(server_config_dict.entrypoint)
+        assert not entrypoint_fpath.is_absolute()
+
+        # Resolve cwd-first (a local server), else the install location for built-ins.
+        dir_path = _resolve_server_dir(Path(first_key, second_key))
+
+        yield _ConfiguredServer(top_level_path, first_key, second_key, server_config_dict, entrypoint_fpath, dir_path)
+
+
 def _server_launch_command(
     dir_path: Path,
     global_config_dict: DictConfig,
@@ -424,6 +483,7 @@ class RunHelper:  # pragma: no cover
     _memory_profiler: MemoryProfiler | None
     _memory_profiling_config: MemoryProfilingConfig
     _telemetry_metrics_enabled: bool
+    _h2_ping_sidecar: H2PingSidecarManager | None
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         """Start the head server and every configured server, and wait until all of them are ready.
@@ -434,6 +494,7 @@ class RunHelper:  # pragma: no cover
         """
         self._processes = dict()
         self._head_server = None
+        self._h2_ping_sidecar = None
         try:
             self._start(global_config_dict_parser_config)
         except BaseException:
@@ -459,9 +520,25 @@ class RunHelper:  # pragma: no cover
         self._memory_profiling_config = memory_profiling_config_from_env(telemetry_config.memory_profiling)
         self._telemetry_metrics_enabled = is_telemetry_metrics_enabled()
 
-        # Initialize Ray cluster in the main process
-        # Note: This function will modify the global config dict - update `ray_head_node_address`
-        initialize_ray()
+        configured_servers = list(_configured_servers(global_config_dict))
+
+        # Start or join Ray only when a configured server may use it. Servers inherit the cluster address through
+        # the config dict below, so this has to happen before any of them are spawned.
+        # Note: initialize_ray modifies the global config dict - updates `ray_head_node_address`
+        ray_server_names = [
+            server.top_level_path
+            for server in configured_servers
+            if entrypoint_may_use_ray(server.dir_path / server.entrypoint_fpath)
+        ]
+        if ray_server_names:
+            print(f"Initializing Ray for servers that may use it: {', '.join(ray_server_names)}")
+            initialize_ray()
+
+        # Start the HTTP/2 PING sidecar (if `sidecar.enabled`) and point model URLs at it. This
+        # must come before the config is serialized below, which is how every server learns its URLs.
+        # A dry run only builds venvs and talks to no model, so it starts nothing.
+        if not global_config_dict[DRY_RUN_KEY_NAME]:
+            self._h2_ping_sidecar = start_h2_ping_sidecar(global_config_dict)
 
         # Assume Nemo Gym Run is for a single agent.
         config_dict_yaml_str = OmegaConf.to_yaml(global_config_dict)
@@ -469,37 +546,18 @@ class RunHelper:  # pragma: no cover
         # We always run the head server in this `run` command.
         self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
 
-        top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
-
         self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
 
         start_time = time()
 
-        # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
-        for top_level_path in top_level_paths:
-            server_config_dict = global_config_dict[top_level_path]
-            if not isinstance(server_config_dict, DictConfig):
-                continue
-
-            first_key = list(server_config_dict)[0]
-            server_config_dict = server_config_dict[first_key]
-            if not isinstance(server_config_dict, DictConfig):
-                continue
-            second_key = list(server_config_dict)[0]
-            server_config_dict = server_config_dict[second_key]
-            if not isinstance(server_config_dict, DictConfig):
-                continue
-
-            if "entrypoint" not in server_config_dict:
-                continue
-
-            # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
-            entrypoint_fpath = Path(server_config_dict.entrypoint)
-            assert not entrypoint_fpath.is_absolute()
-
-            # Resolve cwd-first (a local server), else the install location for built-ins.
-            dir_path = _resolve_server_dir(Path(first_key, second_key))
-
+        for (
+            top_level_path,
+            first_key,
+            second_key,
+            server_config_dict,
+            entrypoint_fpath,
+            dir_path,
+        ) in configured_servers:
             # Name the venv in the logs: the server runs that venv's interpreter (see _server_launch_command).
             print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
             command = _server_launch_command(dir_path, global_config_dict, top_level_path, entrypoint_fpath)
@@ -598,6 +656,9 @@ class RunHelper:  # pragma: no cover
     def poll(self) -> None:
         if not self._head_server_thread.is_alive():
             raise RuntimeError("Head server finished unexpectedly!")
+
+        if self._h2_ping_sidecar is not None:
+            self._h2_ping_sidecar.check()
 
         for process_name, process in self._processes.items():
             if process.poll() is not None:
@@ -743,6 +804,14 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
             )
         self._processes = dict()
 
+        # After the servers, so requests they were still finishing can drain through it. It gets its
+        # own, longer grace period (`sidecar.shutdown_grace`).
+        h2_ping_sidecar = getattr(self, "_h2_ping_sidecar", None)
+        if h2_ping_sidecar is not None:
+            print("Stopping h2-ping-sidecar...")
+            h2_ping_sidecar.stop()
+            self._h2_ping_sidecar = None
+
         # None before the head server starts and after an earlier shutdown.
         if self._head_server is not None:
             self._head_server.should_exit = True
@@ -791,11 +860,12 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
             f"""{len(unreachable)} model endpoint(s) never answered within {timeout_seconds:.0f}s:
 {listed}
 
-Nothing accepted a connection there. The server was never started, is still starting up, or the URL
-in your config does not match where it is listening.
+Nothing accepted a connection there, or only a proxy or load balancer answered with 502, 503 or 504.
+The server was never started, is still starting up, or the URL in your config does not match where
+it is listening.
   - Check the config key named beside each URL. Verify with `curl -i <base_url>/models` for a
     `/v1` endpoint, or `curl -i <base_url>` otherwise.
-  - Any response, including 401 or 404, means something is listening.
+  - Any other response, including 401 or 404, means something is listening.
   - Raise `{MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}` to wait longer, or set it to 0 to skip this check."""
         )
 
@@ -1059,6 +1129,14 @@ def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Pop
     return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
 
 
+def _setup_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:
+    """Install one server's venv exactly as `_test_single` does, without running its tests."""
+    prefix = test_config.entrypoint.replace("/", "\\/")
+    resolved_dir = test_config.resolved_dir_path
+    command = setup_env_command(resolved_dir, global_config_dict, prefix)
+    return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
+
+
 def test():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_config = TestConfig.model_validate(global_config_dict)
@@ -1120,6 +1198,11 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
         ge=0,
         description="Which shard (0-based) this invocation runs; must be < num_shards (default: 0).",
     )
+    setup_only: bool = Field(
+        default=False,
+        description="Only install each selected server's venv; run no tests and validate no data (default: False). "
+        "Seeds `uv_cache_dir` so the server suite can later install the same venvs offline.",
+    )
 
 
 def _select_shard(dir_paths: List[Path], shard_index: int, num_shards: int) -> List[Path]:
@@ -1140,6 +1223,29 @@ def _delete_server_venv(dir_path: Path, global_config_dict: DictConfig) -> None:
     venv_path = get_venv_path(dir_path, global_config_dict)
     print(f"Deleting {venv_path} since `delete_venvs_after_each_test=true`")
     rmtree(venv_path, ignore_errors=True)
+
+
+def _setup_all(dir_paths: List[Path], test_all_config: TestAllConfig, global_config_dict: DictConfig) -> None:
+    """Install every selected server's venv the way the suite would, then exit non-zero if any failed.
+
+    The container build runs this to seed its uv cache, so `scripts/ci/server_tests.sh` can create the same
+    per-server venvs offline. Every server is attempted before failing, so one run reports every gap.
+    """
+    setup_failed: List[Path] = []
+    for dir_path in tqdm(dir_paths, desc="Setting up server venvs"):
+        proc = _setup_single(TestConfig(entrypoint=str(dir_path)), global_config_dict)
+        if proc.wait() != 0:
+            setup_failed.append(dir_path)
+        if test_all_config.delete_venvs_after_each_test:
+            _delete_server_venv(_resolve_server_dir(dir_path), global_config_dict)
+
+    set_up = len(dir_paths) - len(setup_failed)
+    print(f"""Server venvs set up {_format_pct(set_up, len(dir_paths))}
+
+Server venv setup failed {_format_pct(len(setup_failed), len(dir_paths))}:{_display_list_of_paths(setup_failed)}
+""")
+    if setup_failed:
+        exit(1)
 
 
 def test_all():  # pragma: no cover
@@ -1176,6 +1282,10 @@ def test_all():  # pragma: no cover
             f"Shard {test_all_config.shard_index + 1}/{test_all_config.num_shards}: "
             f"testing {len(dir_paths)} of {len(full_dir_paths)} modules:{_display_list_of_paths(dir_paths)}\n"
         )
+
+    if test_all_config.setup_only:
+        _setup_all(dir_paths, test_all_config, global_config_dict)
+        return
 
     tests_passed: List[Path] = []
     tests_failed: List[Path] = []

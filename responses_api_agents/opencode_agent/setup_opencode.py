@@ -22,6 +22,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
+
 
 LOG = logging.getLogger(__name__)
 
@@ -71,15 +73,38 @@ def _install_node_locally() -> Path:
     return _LOCAL_PREFIX / "bin"
 
 
-def ensure_opencode(version: str | None = None) -> None:
-    """Ensure ``opencode`` is on PATH, installing it via npm if necessary."""
+def installed_opencode_version() -> str | None:
+    """Return the ``opencode --version`` output, or ``None`` when it cannot be determined."""
+    exe = shutil.which("opencode")
+    if not exe:
+        return None
+    try:
+        out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=60)  # noqa: S603
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    lines = (out.stdout.strip() or out.stderr.strip()).splitlines()
+    return lines[-1].strip() if lines else None
+
+
+def _require_version(version: str) -> None:
+    found = installed_opencode_version()
+    if found != version:
+        raise RuntimeError(f"Expected OpenCode {version}, found {found!r}; install opencode-ai@{version}")
+
+
+def ensure_opencode(version: str = OPENCODE_VERSION) -> None:
+    """Install OpenCode if absent and require the configured release."""
     if shutil.which("opencode"):
+        _require_version(version)
         return
 
     # Check ~/.local/bin
     local_bin = Path.home() / ".local" / "bin"
     if (local_bin / "opencode").is_file():
         os.environ["PATH"] = str(local_bin) + os.pathsep + os.environ.get("PATH", "")
+        _require_version(version)
         return
 
     npm = shutil.which("npm")
@@ -106,4 +131,5 @@ def ensure_opencode(version: str | None = None) -> None:
     if not shutil.which("opencode"):
         raise RuntimeError("opencode install appeared to succeed but 'opencode' is still not on PATH")
 
+    _require_version(version)
     LOG.info("opencode is ready at %s", shutil.which("opencode"))

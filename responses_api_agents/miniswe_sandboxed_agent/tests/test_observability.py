@@ -231,6 +231,8 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         assert response.usage.total_tokens == 30
         assert response.usage.input_tokens_details.cached_tokens == 2
         assert trajectory["tool_calls"][0]["status"] == ("failed" if scenario == "tool_error" else "completed")
+    if scenario != "http_error":
+        # Submission exits before saving the final tool observation.
         assert trajectory["tool_calls"][-1]["output"] is None
         assert trajectory["tool_calls"][-1]["status"] == "incomplete"
     path = tmp_path / "evaluator_rollouts.jsonl"
@@ -240,11 +242,11 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
     for key in (
         "model_call_zero_completion_tokens",
         "model_call_missing_token_counts",
-        "model_call_failed",
+        "rollout_ended_on_failed_model_call",
         "model_call_runaway_generation",
         "rollout_missing_agent_turns",
         "agent_turn_hollow",
     ):
         assert coverage[key]["evaluated"] == 1, (key, result.summary)
     if scenario == "http_error":
-        assert result.summary["run"]["issues"]["model_call_failed"] == 1
+        assert result.summary["run"]["issues"]["rollout_ended_on_failed_model_call"] == 1

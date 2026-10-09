@@ -23,11 +23,12 @@ strict-validation behavior.
 
 import json
 from time import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import Body, Request
+from aiohttp import ClientResponseError
+from fastapi import Body, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
 
@@ -327,6 +328,106 @@ NAMESPACE_TOOL = {
 
 
 class TestSanitizeStreamingBody:
+    @pytest.mark.parametrize("missing_id", [False, True])
+    @pytest.mark.parametrize("missing_annotations", [False, True])
+    def test_codex_compacted_message_replay_keeps_text_and_order(self, missing_id, missing_annotations) -> None:
+        text = "Summary line 1\n\n  Keep indentation, Unicode 雪, and literal \\n.\n"
+        message = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text}],
+        }
+        if not missing_id:
+            message["id"] = "msg_original"
+        if not missing_annotations:
+            message["content"][0]["annotations"] = []
+        body = {
+            "stream": True,
+            "input": [
+                {"role": "user", "content": "before"},
+                message,
+                {"role": "user", "content": "after"},
+            ],
+        }
+        original = json.loads(json.dumps(body))
+        cleaned, _ = sanitize_streaming_responses_body(body)
+        assert len(cleaned["input"]) == 3
+        actual = cleaned["input"][1]
+        assert actual == {**message, "id": actual["id"], "content": [{**message["content"][0], "annotations": []}]}
+        assert actual["id"].startswith("msg_") if missing_id else actual["id"] == "msg_original"
+        assert body == original
+        params = validate_streaming_responses_params(cleaned)
+        converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
+            params
+        )
+        assert converted.messages == [
+            {"role": "user", "content": "before"},
+            {"role": "assistant", "content": text},
+            {"role": "user", "content": "after"},
+        ]
+
+    @pytest.mark.parametrize("phase", ["commentary", "final_answer"])
+    def test_message_replay_keeps_supplied_id_annotations_and_phase(self, phase) -> None:
+        message = _message_item("Keep every character.\n")
+        message["phase"] = phase
+        message["content"][0]["annotations"] = [
+            {"type": "url_citation", "start_index": 0, "end_index": 4, "title": "Source", "url": "https://example.com"}
+        ]
+        cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [message]})
+        assert cleaned["input"] == [message]
+        params = validate_streaming_responses_params(cleaned)
+        actual = params.input[0].model_dump(mode="json", exclude_none=True)
+        assert actual == message
+        # Chat cannot express phase; preserving it must keep that explicit error.
+        with pytest.raises(NotImplementedError, match="phase has no Chat Completions representation"):
+            ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(params)
+
+    @pytest.mark.parametrize("provided_id", [None, "rs_original"])
+    def test_codex_reasoning_replay_survives_validation_and_chat_conversion(self, provided_id) -> None:
+        summary = "Inspect /app/arithmetic.py, fix multiply, and run Python checks.\n"
+        reasoning = {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": summary}],
+            "content": None,
+            "encrypted_content": None,
+        }
+        if provided_id is not None:
+            reasoning["id"] = provided_id
+        call = _function_call_item("exec_command")
+        result = {"type": "function_call_output", "call_id": call["call_id"], "output": "6"}
+        body = {"stream": True, "input": [{"role": "user", "content": "fix multiply"}, reasoning, call, result]}
+        original = json.loads(json.dumps(body))
+        cleaned, _ = sanitize_streaming_responses_body(body)
+        item_id = cleaned["input"][1]["id"]
+        assert item_id == provided_id if provided_id is not None else item_id.startswith("rs_")
+        assert cleaned["input"][1] == {**reasoning, "id": item_id}
+        assert body == original
+        params = validate_streaming_responses_params(cleaned)
+        assert params.input[1].summary[0].text == summary
+        converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
+            params
+        )
+        assert [message["role"] for message in converted.messages] == ["user", "assistant", "tool"]
+        assert converted.messages[1]["content"] == f"<think>{summary}</think>"
+        assert converted.messages[1]["tool_calls"][0]["id"] == call["call_id"]
+        assert converted.messages[1]["tool_calls"][0]["function"] == {
+            "name": call["name"],
+            "arguments": call["arguments"],
+        }
+        assert converted.messages[2] == {"role": "tool", "tool_call_id": call["call_id"], "content": "6"}
+
+    def test_reasoning_content_remains_available_for_responses_backends(self) -> None:
+        reasoning = {
+            "type": "reasoning",
+            "summary": [],
+            "content": [{"type": "reasoning_text", "text": "Known reasoning text"}],
+            "encrypted_content": "opaque-content",
+        }
+        cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [reasoning]})
+        params = validate_streaming_responses_params(cleaned)
+        actual = params.input[0].model_dump(mode="json")
+        assert actual == {**reasoning, "id": actual["id"]}
+
     def test_drops_unknown_top_level_fields(self) -> None:
         cleaned, _ = sanitize_streaming_responses_body(
             {"input": [], "stream": True, "client_metadata": {"x": 1}, "prompt_cache_key": "abc", "store": False}
@@ -335,6 +436,20 @@ class TestSanitizeStreamingBody:
         # `client_metadata` is not part of the schema and is removed.
         assert set(cleaned) == {"input", "store", "prompt_cache_key"}
         # the cleaned body validates against the strict params model
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_keeps_replayed_assistant_message_without_annotations(self) -> None:
+        # A client replaying an output message it received may omit the annotations list (the
+        # Codex CLI does); the item must survive as the assistant turn it is, not be dropped.
+        item = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Let me inspect the workload first."}],
+        }
+        cleaned, _ = sanitize_streaming_responses_body({"input": [item], "stream": True})
+        assert cleaned["input"] == [{**item, "content": [{**item["content"][0], "annotations": []}]}]
+        assert "annotations" not in item["content"][0]
         NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
 
     def test_flattens_namespace_tools(self) -> None:
@@ -366,6 +481,64 @@ class TestSanitizeStreamingBody:
             {"input": [], "stream": True, "tools": [{"type": "totally_unknown_tool_kind", "config": 1}]}
         )
         assert cleaned["tools"] == []
+
+    HOSTED_TOOL_BODY = {
+        "input": [],
+        "stream": True,
+        "tools": [
+            {"type": "web_search"},
+            {"type": "function", "name": "exec_command", "parameters": {"type": "object"}, "strict": False},
+        ],
+    }
+
+    def test_keeps_hosted_tools_by_default(self) -> None:
+        # A hosted tool spec is a valid Responses tool, so it reaches a provider that serves it.
+        cleaned, _ = sanitize_streaming_responses_body(self.HOSTED_TOOL_BODY)
+
+        assert [tool["type"] for tool in cleaned["tools"]] == ["web_search", "function"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_drops_hosted_tools_when_asked(self) -> None:
+        # Only the provider executes a hosted tool. With the switch on it is dropped, so a backend
+        # that serves none of them offers the model only the tools the client executes.
+        cleaned, _ = sanitize_streaming_responses_body(self.HOSTED_TOOL_BODY, drop_hosted_tools=True)
+
+        assert [tool["type"] for tool in cleaned["tools"]] == ["function"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+    def test_drops_hosted_tools_keeps_custom_tools(self) -> None:
+        """The two tool switches are independent: a client-executed custom tool is not hosted."""
+        body = {
+            "input": [],
+            "stream": True,
+            "tools": [
+                {"type": "web_search"},
+                {"type": "custom", "name": "apply_patch", "description": "Apply a patch."},
+            ],
+        }
+
+        cleaned, _ = sanitize_streaming_responses_body(body, drop_hosted_tools=True)
+
+        assert [tool["type"] for tool in cleaned["tools"]] == ["custom"]
+
+    def test_drops_custom_tools_only_when_asked(self) -> None:
+        # A free-form custom tool converts to a Chat Completions custom tool, which a backend
+        # that expresses function tools only refuses; with the switch on it is dropped and the
+        # functions stay, and by default it is kept for backends that support it.
+        body = {
+            "input": [],
+            "stream": True,
+            "tools": [
+                {"type": "custom", "name": "apply_patch", "description": "Apply a patch."},
+                {"type": "function", "name": "exec_command", "parameters": {"type": "object"}, "strict": False},
+            ],
+        }
+        cleaned, _ = sanitize_streaming_responses_body(body, drop_custom_tools=True)
+        assert [tool["type"] for tool in cleaned["tools"]] == ["function"]
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
+
+        kept, _ = sanitize_streaming_responses_body(body)
+        assert [tool["type"] for tool in kept["tools"]] == ["custom", "function"]
 
     def test_rewrites_namespaced_calls_in_input_history(self) -> None:
         cleaned, _ = sanitize_streaming_responses_body(
@@ -539,6 +712,103 @@ class TestSynthesizeSSE:
         assert completed["usage"]["input_tokens"] == 7
         assert len(completed["output"]) == 1
 
+    @pytest.mark.parametrize(
+        "status,details,error",
+        [
+            ("incomplete", {"reason": "max_output_tokens"}, None),
+            ("incomplete", {"reason": "content_filter"}, None),
+            ("failed", None, {"code": "server_error", "message": "Backend failed"}),
+        ],
+    )
+    def test_unsuccessful_terminal_preserves_partial_reasoning_and_usage(self, status, details, error) -> None:
+        partial = {**_message_item("Partial answer"), "status": "incomplete"}
+        response = _build_response([ITEM_FIXTURES["reasoning"], partial]).model_dump(mode="json")
+        response.update(status=status, incomplete_details=details, error=error)
+        original = json.loads(json.dumps(response))
+        events = self._events("".join(synthesize_responses_sse(response)))
+        assert [event["type"] for event in events] == [
+            "response.created",
+            "response.output_item.done",
+            "response.output_item.done",
+            f"response.{status}",
+        ]
+        assert events[1]["item"] == response["output"][0]
+        assert events[2]["item"]["status"] == "incomplete"
+        assert events[-1]["response"] == response
+        assert response == original
+
+    @pytest.mark.parametrize(
+        "details,expected",
+        [
+            (
+                {"input_tokens_details": {"cached_tokens": None}, "output_tokens_details": {"reasoning_tokens": None}},
+                {},
+            ),
+            ({"input_tokens_details": None, "output_tokens_details": None}, {}),
+            ({"input_tokens_details": {}, "output_tokens_details": {}}, {}),
+            (
+                {"input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": None}},
+                {"input_tokens_details": {"cached_tokens": 0}},
+            ),
+            (
+                {"input_tokens_details": {"cached_tokens": 4}, "output_tokens_details": {"reasoning_tokens": 2}},
+                {"input_tokens_details": {"cached_tokens": 4}, "output_tokens_details": {"reasoning_tokens": 2}},
+            ),
+        ],
+    )
+    def test_unknown_usage_details_use_wire_defaults_without_mutating_internal_counts(self, details, expected) -> None:
+        response = _build_response(
+            [ITEM_FIXTURES["reasoning"], _function_call_item("exec_command"), _message_item("done")]
+        ).model_dump(mode="json")
+        response["usage"].update(details)
+        original = json.loads(json.dumps(response))
+        events = self._events("".join(synthesize_responses_sse(response)))
+        expected_usage = {
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "total_tokens": 10,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+            **expected,
+        }
+        assert events[0]["response"]["usage"] == expected_usage
+        assert events[-1]["response"]["usage"] == expected_usage
+        assert events[-1]["response"]["output"] == response["output"]
+        assert [event["item"] for event in events if event["type"] == "response.output_item.done"] == response[
+            "output"
+        ]
+        assert response == original
+
+    @pytest.mark.parametrize("usage", [None, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}])
+    def test_usage_without_details_is_preserved(self, usage) -> None:
+        response = _build_response([_message_item("done")]).model_dump(mode="json")
+        response["usage"] = usage
+        events = self._events("".join(synthesize_responses_sse(response)))
+        expected = (
+            usage
+            if usage is None
+            else {
+                **usage,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            }
+        )
+        assert events[-1]["response"]["usage"] == expected
+
+    def test_unknown_usage_details_are_integers_on_the_wire(self) -> None:
+        # Gym keeps an unreported cache/reasoning breakdown as None to tell unknown from zero, but
+        # the Responses wire schema types these counts as integers; a strict client (the Codex CLI)
+        # fails to parse a null in response.completed and re-sends the request.
+        response = _build_response([_message_item("hello")]).model_dump(mode="json")
+        response["usage"]["input_tokens_details"] = {"cached_tokens": None}
+        response["usage"]["output_tokens_details"] = None
+        events = self._events("".join(synthesize_responses_sse(response)))
+        for event in (events[0], events[-1]):
+            usage = event["response"]["usage"]
+            assert usage["input_tokens_details"]["cached_tokens"] == 0
+            assert usage["output_tokens_details"]["reasoning_tokens"] == 0
+            assert usage["input_tokens"] == 7
+
     def test_namespaced_call_names_restored(self) -> None:
         response = _build_response([_function_call_item("mcp__weather__get_weather")]).model_dump(mode="json")
         ns_map = {"mcp__weather__get_weather": ("mcp__weather", "get_weather")}
@@ -619,6 +889,18 @@ class _FailingModel(_EchoModel):
         raise RuntimeError("backend exploded")
 
 
+class _IncompleteModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        response = _build_response([ITEM_FIXTURES["reasoning"]]).model_dump(mode="json")
+        response.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+        return NeMoGymResponse.model_validate(response)
+
+
+class _HTTPErrorModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        raise HTTPException(status_code=400, detail={"error": {"code": "context_length_exceeded"}})
+
+
 def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
     server = model_cls(
         config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name=""),
@@ -628,6 +910,87 @@ def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
 
 
 class TestResponsesDispatchRoute:
+    @pytest.mark.parametrize("phase", ["commentary", "final_answer"])
+    def test_streaming_message_keeps_id_annotations_and_phase(self, phase) -> None:
+        client, server = _client(_EchoModel)
+        message = _message_item("Keep this exact replay.\n")
+        message["phase"] = phase
+        message["content"][0]["annotations"] = [
+            {"type": "url_citation", "start_index": 0, "end_index": 4, "title": "Source", "url": "https://example.com"}
+        ]
+        response = client.post("/v1/responses", json={"stream": True, "input": [message]})
+        assert response.status_code == 200
+        assert "event: response.completed" in response.text
+        assert server.last_params.input[0].model_dump(mode="json", exclude_none=True) == message
+
+    @pytest.mark.parametrize(
+        "changes",
+        [
+            {"id": None},
+            {"id": []},
+            {"content": [{"type": "output_text", "text": "keep", "annotations": None}]},
+            {"content": [{"type": "output_text", "text": None}]},
+            {"content": [{"type": "output_text"}]},
+            {"content": [{"type": "unknown", "text": "keep"}]},
+            {"phase": "unknown"},
+            {"status": "unknown"},
+            {"role": "developer", "content": [{"type": "input_text", "text": None}]},
+            {"role": "user", "content": None},
+        ],
+    )
+    def test_malformed_streaming_message_fails_before_backend(self, changes) -> None:
+        client, server = _client(_EchoModel)
+        message = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "keep"}]}
+        response = client.post("/v1/responses", json={"stream": True, "input": [{**message, **changes}]})
+        assert response.status_code == 422
+        assert server.last_params is None
+        assert response.json()["detail"][0]["loc"][0] == "body"
+
+    def test_streaming_model_length_limit_is_not_a_completed_event(self) -> None:
+        client, _ = _client(_IncompleteModel)
+        response = client.post("/v1/responses", json={"stream": True, "input": "task"})
+        assert response.status_code == 200
+        assert "event: response.completed" not in response.text
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        assert events[-1]["type"] == "response.incomplete"
+        terminal = events[-1]["response"]
+        assert terminal["status"] == "incomplete"
+        assert terminal["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert terminal["usage"]["total_tokens"] == 10
+        assert terminal["output"][0]["summary"][0]["text"] == "thinking"
+
+    def test_streaming_codex_reasoning_replay_keeps_history(self) -> None:
+        client, server = _client(_EchoModel)
+        reasoning = {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "Inspect multiply"}],
+            "content": None,
+            "encrypted_content": None,
+        }
+        response = client.post("/v1/responses", json={"stream": True, "input": [reasoning]})
+        assert response.status_code == 200
+        assert len(server.last_params.input) == 1
+        assert server.last_params.input[0].summary[0].text == "Inspect multiply"
+        assert server.last_params.input[0].id.startswith("rs_")
+
+    @pytest.mark.parametrize(
+        "reasoning",
+        [
+            {"summary": None},
+            {},
+            {"summary": [{"type": "unknown", "text": "Do not drop this"}]},
+            {"summary": [], "id": None},
+            {"summary": [], "content": ["Do not drop this"]},
+            {"summary": [], "encrypted_content": {"opaque": "Do not drop this"}},
+        ],
+    )
+    def test_malformed_streaming_reasoning_fails_before_backend(self, reasoning) -> None:
+        client, server = _client(_EchoModel)
+        response = client.post("/v1/responses", json={"stream": True, "input": [{"type": "reasoning", **reasoning}]})
+        assert response.status_code == 422
+        assert server.last_params is None
+        assert response.json()["detail"][0]["loc"][0] == "body"
+
     def test_non_streaming_request_returns_plain_json(self) -> None:
         client, server = _client(_EchoModel)
         resp = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})
@@ -677,8 +1040,7 @@ class TestResponsesDispatchRoute:
         assert resp.status_code == 422
 
     def test_streaming_backend_error_yields_response_failed(self) -> None:
-        # A responses() failure after the streaming contract is committed becomes a terminal
-        # response.failed event (HTTP 200 SSE), not a broken-stream HTTP 500.
+        # Non-HTTP failures retain the terminal response.failed fallback.
         client, _ = _client(_FailingModel)
         resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
         assert resp.status_code == 200
@@ -689,6 +1051,37 @@ class TestResponsesDispatchRoute:
         payload = json.loads(failed[0][len("data: ") :])
         assert payload["response"]["status"] == "failed"
         assert "backend exploded" in payload["response"]["error"]["message"]
+
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize(
+        "status,content_type,content",
+        [
+            (400, "application/json", b'{"error":{"code":"context_length_exceeded"}}'),
+            (429, "application/json", b'{"error":{"code":"rate_limit_exceeded"}}'),
+            (502, "text/plain", b"Upstream unavailable"),
+        ],
+    )
+    def test_upstream_http_error_is_preserved_before_stream_starts(
+        self, stream: bool, status: int, content_type: str, content: bytes
+    ) -> None:
+        error = ClientResponseError(
+            MagicMock(), (), status=status, message="upstream failed", headers={"Content-Type": content_type}
+        )
+        error.response_content = content
+        with patch.object(_EchoModel, "responses", AsyncMock(side_effect=error)):
+            client, _ = _client(_EchoModel)
+            response = client.post("/v1/responses", json={"input": "task", "stream": stream})
+        assert response.status_code == status
+        assert response.headers["content-type"].split(";")[0] == content_type
+        assert response.content == content
+
+    def test_streaming_http_exception_keeps_its_status(self) -> None:
+        # An HTTPException is a status the server chose to return; it is raised before the
+        # stream is committed, so it is not converted into a response.failed event.
+        client, _ = _client(_HTTPErrorModel)
+        resp = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+        assert resp.status_code == 400
+        assert resp.json() == {"detail": {"error": {"code": "context_length_exceeded"}}}
 
     def test_non_streaming_backend_error_still_raises(self) -> None:
         # Without the streaming contract, a backend failure is a normal exception (HTTP 500), not a

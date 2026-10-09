@@ -5,7 +5,10 @@ set -euo pipefail
 # Input arguments and validation
 # PD (default): NUM_PREFILL_NODES=<P> NUM_DECODE_NODES=<D>
 # Aggregated: VLLM_MODE=aggregated NUM_NODES=<replicas> (defaults to one)
+# Four TP1 replicas per node: VLLM_MODE=aggregated VLLM_ENGINES_PER_NODE=4 NUM_NODES=1
+# Disaggregated TP1 pools: VLLM_ENGINES_PER_NODE=4 NUM_PREFILL_NODES=1 NUM_DECODE_NODES=1
 VLLM_MODE="${VLLM_MODE:-pd}"
+VLLM_ENGINES_PER_NODE="${VLLM_ENGINES_PER_NODE:-1}"
 case "$VLLM_MODE" in
     pd)
         NUM_PREFILL_NODES=${NUM_PREFILL_NODES:?Required in PD mode}
@@ -22,6 +25,13 @@ case "$VLLM_MODE" in
         exit 1
         ;;
 esac
+case "$VLLM_ENGINES_PER_NODE" in
+    1 | 4) ;;
+    *)
+        echo "ERROR: VLLM_ENGINES_PER_NODE must be 1 or 4." >&2
+        exit 1
+        ;;
+esac
 MODEL=$MODEL
 MODEL_NAME="${MODEL_NAME:-$MODEL}"
 CONTAINER=$CONTAINER
@@ -32,7 +42,7 @@ if [[ "$VLLM_MODE" == aggregated && "$ENABLE_MOONCAKE" != 0 ]]; then
     echo "ENABLE_MOONCAKE requires VLLM_MODE=pd" >&2
     exit 1
 fi
-# Independent mode starts one complete TP model replica per node. Coupled mode
+# Independent mode starts one TP replica or four TP1 replicas per node. Coupled mode
 # forms one multi-node DP/EP engine per tier for models that cannot fit per node.
 VLLM_PD_DEPLOYMENT_MODE="${VLLM_PD_DEPLOYMENT_MODE:-independent}"
 SLURM_COMMENT="${SLURM_COMMENT:-}"
@@ -51,6 +61,10 @@ esac
 
 if [[ "$VLLM_MODE" == aggregated && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
     echo "ERROR: VLLM_MODE=aggregated does not support VLLM_PD_DEPLOYMENT_MODE=coupled." >&2
+    exit 1
+fi
+if [[ "$VLLM_ENGINES_PER_NODE" == 4 && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
+    echo "ERROR: VLLM_ENGINES_PER_NODE=4 requires VLLM_PD_DEPLOYMENT_MODE=independent." >&2
     exit 1
 fi
 
@@ -82,7 +96,18 @@ ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
 ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
 ROUTER_POLICY="${ROUTER_POLICY:-cache_aware}"
 ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
+if [[ "$VLLM_ENGINES_PER_NODE" == 4 && "$ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE" != 1 ]]; then
+    echo "ERROR: Four independent TP1 engines require ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE=1." >&2
+    exit 1
+fi
 # Optional whitespace-separated flags, e.g. ROUTER_ARGS="--balance-abs-threshold 32 --balance-rel-threshold 1.1".
+
+# The generated command is parsed by Bash again on the evaluation node.
+# Preserve each argument, including Hydra dictionaries, as literal shell data.
+eval_arguments=""
+if (( should_run_eval )); then
+    printf -v eval_arguments '%q ' "$@"
+fi
 
 eval_command=$(cat <<EOF
 set -euo pipefail
@@ -96,7 +121,7 @@ export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
 
 source "$VLLM_CONFIG"
 
-gym eval prepare $@ +use_cached_prepared_benchmarks=true
+gym eval prepare $eval_arguments +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
 # export_to_csv.py derives <base>_aggregate_metrics.json from this, so the
@@ -120,8 +145,12 @@ read -r -a nodes <<< "\$ALL_NODES"
             (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
             continue
         fi
-        printf '    node%s: "http://%s:$WORKER_SERVER_PORT/metrics"\n' \
-            "\$node_index" "\${nodes[node_index]}"
+        for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
+            replica_index=\$(( node_index * $VLLM_ENGINES_PER_NODE + engine_index ))
+            worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
+            printf '    node%s: "http://%s:%s/metrics"\n' \
+                "\$replica_index" "\${nodes[node_index]}" "\$worker_port"
+        done
     done
     printf '  router_endpoints:\n    main: "http://%s:$ROUTER_METRICS_PORT/metrics"\n' "\$ROUTER_NODE"
     if (( $ENABLE_MOONCAKE )); then
@@ -138,7 +167,7 @@ gym_config_args+=(--config "\$inference_metrics_config")
 # port_range_low, port_range_high: Move into ephemeral ports
 # We add the sandbox_utils and policy_model_override yamls so users don't need to add them on every invocation
 gym eval run \
-    $@ \
+    $eval_arguments \
     "\${gym_config_args[@]}" \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
@@ -193,7 +222,8 @@ export VLLM_HTTP_TIMEOUT_KEEP_ALIVE=180
 export UCX_TLS=rc_x,rc,dc_x,dc,cuda_copy,cuda_ipc
 export UCX_RNDV_SCHEME=get_zcopy
 export UCX_RNDV_THRESH=0
-export UCX_NET_DEVICES=all
+# On OCI-HSG, only these NICs are available
+export UCX_NET_DEVICES=mlx5_0,mlx5_1,mlx5_3,mlx5_4
 
 # Helpful NCCL env vars to set on modern clusters.
 export NCCL_CUMEM_ENABLE=1
@@ -202,67 +232,6 @@ export NCCL_NVLS_ENABLE=1
 
 export ENABLE_MOONCAKE=$ENABLE_MOONCAKE
 source "$VLLM_CONFIG"
-
-if (( ENABLE_MOONCAKE )); then
-    kv_load_failure_policy=fail
-    mooncake_kv_role=kv_consumer
-    if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
-        kv_load_failure_policy=recompute
-        mooncake_kv_role=kv_both
-    fi
-    # Preserve each model's connector settings while adding the shared KV store.
-    add_mooncake_to_args() {
-        mooncake_args=()
-        local arg config
-        while (( \$# )); do
-            arg=\$1
-            shift
-            if [[ "\$arg" == --kv-transfer-config ]]; then
-                config=\${1:?Missing value for --kv-transfer-config}
-                shift
-            elif [[ "\$arg" == --kv-transfer-config=* ]]; then
-                config=\${arg#*=}
-            else
-                mooncake_args+=("\$arg")
-                continue
-            fi
-            config=\$(python3 - "\$config" "\$kv_load_failure_policy" "\$mooncake_kv_role" <<'MOONCAKE_CONNECTOR'
-import json
-import sys
-
-config = json.loads(sys.argv[1])
-if config["kv_connector"] != "MultiConnector":
-    config = {
-        "kv_connector": "MultiConnector",
-        "kv_role": "kv_both",
-        "kv_connector_extra_config": {"connectors": [config]},
-    }
-config["kv_load_failure_policy"] = sys.argv[2]
-connectors = config["kv_connector_extra_config"]["connectors"]
-if not any(connector["kv_connector"] == "MooncakeStoreConnector" for connector in connectors):
-    connectors.append({
-        "kv_connector": "MooncakeStoreConnector",
-        "kv_role": "kv_both",
-        "kv_connector_extra_config": {"load_async": True, "lookup_async": True},
-    })
-for connector in connectors:
-    if connector["kv_connector"] == "MooncakeStoreConnector":
-        connector["kv_role"] = sys.argv[3]
-        if sys.argv[3] == "kv_consumer":
-            connector.setdefault("kv_connector_extra_config", {})["save_decode_cache"] = False
-print(json.dumps(config))
-MOONCAKE_CONNECTOR
-)
-            mooncake_args+=(--kv-transfer-config "\$config")
-        done
-    }
-    add_mooncake_to_args "\${VLLM_COMMON_ARGS[@]}"
-    VLLM_COMMON_ARGS=("\${mooncake_args[@]}")
-    add_mooncake_to_args "\${VLLM_PREFILL_ARGS[@]}"
-    VLLM_PREFILL_ARGS=("\${mooncake_args[@]}")
-    add_mooncake_to_args "\${VLLM_DECODE_ARGS[@]}"
-    VLLM_DECODE_ARGS=("\${mooncake_args[@]}")
-fi
 
 # Increase the number of file descriptors to 65k
 if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
@@ -319,7 +288,7 @@ MOONCAKE_CONFIG
             -eviction_ratio=0.1 \
             -minloglevel=1 \
             -enable_metric_reporting=false \
-            -default_kv_lease_ttl=120000 \
+            -default_kv_lease_ttl=180000 \
             -logtostderr &
         mooncake_pid=\$!
     fi
@@ -463,17 +432,88 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
     fi
 else
     router_pid=""
+    worker_pids=()
 
     cleanup_vllm() {
-        if [[ -n "\$router_pid" ]]; then
-            kill "\$router_pid" 2>/dev/null || true
-            wait "\$router_pid" 2>/dev/null || true
+        local status=\$? child_pid
+        local -a child_pids=()
+        trap - EXIT INT TERM
+        # A signal can arrive after a child starts but before its PID is recorded.
+        # Bash's job table includes that child, as well as the router and Mooncake.
+        while IFS= read -r child_pid; do
+            child_pids+=("\$child_pid")
+        done < <(jobs -p)
+        if (( \${#child_pids[@]} )); then
+            kill "\${child_pids[@]}" 2>/dev/null || true
+            wait "\${child_pids[@]}" 2>/dev/null || true
         fi
         cleanup_mooncake
+        exit "\$status"
     }
     trap cleanup_vllm EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
+
+    serve_tp1_engines() {
+        local nixl_base_port=\$1
+        shift
+        local arg skip_value engine_index worker_port service_pid failed_status
+        local -a visible_gpus tp1_args service_pids
+        # Respect the allocation's GPU order, including UUID-based masks.
+        IFS=',' read -r -a visible_gpus <<< "\${CUDA_VISIBLE_DEVICES-0,1,2,3}"
+        if (( \${#visible_gpus[@]} < 4 )); then
+            echo "ERROR: Four TP1 engines require at least four visible GPUs." >&2
+            exit 1
+        fi
+
+        # Model configs may specify TP/PP/DP for a full-node replica. Replace
+        # those settings in both CLI forms, retaining unrelated model tuning.
+        tp1_args=()
+        skip_value=0
+        for arg in "\$@"; do
+            if (( skip_value )); then
+                skip_value=0
+                continue
+            fi
+            case "\$arg" in
+                (--tensor-parallel-size|--pipeline-parallel-size|--data-parallel-size|--data-parallel-size-local|--api-server-count|-tp|-pp|-dp)
+                    skip_value=1 ;;
+                (--tensor-parallel-size=*|--pipeline-parallel-size=*|--data-parallel-size=*|--data-parallel-size-local=*|--api-server-count=*|-tp=*|-pp=*|-dp=*)
+                    ;;
+                (*) tp1_args+=("\$arg") ;;
+            esac
+        done
+        tp1_args+=(--tensor-parallel-size 1 --pipeline-parallel-size 1
+            --data-parallel-size 1 --data-parallel-size-local 1 --api-server-count 1)
+        for (( engine_index = 0; engine_index < 4; engine_index++ )); do
+            worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
+            echo "Starting TP1 engine \$engine_index on GPU \${visible_gpus[engine_index]}, port \$worker_port"
+            CUDA_VISIBLE_DEVICES="\${visible_gpus[engine_index]}" \
+            VLLM_NIXL_SIDE_CHANNEL_HOST="\$this_node_hostname" \
+            VLLM_NIXL_SIDE_CHANNEL_PORT=\$(( nixl_base_port + engine_index )) \
+            vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${tp1_args[@]}" \
+                --host "\$this_node_hostname" --port "\$worker_port" &
+            worker_pids+=("\$!")
+        done
+
+        # Detect even an immediate successful exit, and stop all local peers.
+        service_pids=("\${worker_pids[@]}")
+        if [[ -n "\$router_pid" ]]; then
+            service_pids+=("\$router_pid")
+        fi
+        while true; do
+            for service_pid in "\${service_pids[@]}"; do
+                if ! kill -0 "\$service_pid" 2>/dev/null; then
+                    failed_status=0
+                    wait "\$service_pid" || failed_status=\$?
+                    (( failed_status != 0 )) || failed_status=1
+                    echo "ERROR: TP1 engine or router process \$service_pid exited (status=\$failed_status)." >&2
+                    exit "\$failed_status"
+                fi
+            done
+            sleep 1
+        done
+    }
 
     if (( SLURM_PROCID == 0 )); then
 
@@ -496,16 +536,25 @@ else
                 --vllm-pd-disaggregation
             )
             for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
-                router_args+=(--prefill "http://\${nodes[i]}:$WORKER_SERVER_PORT")
+                for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
+                    worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
+                    router_args+=(--prefill "http://\${nodes[i]}:\$worker_port")
+                done
             done
             for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
                 node_idx=\$(( $NUM_PREFILL_NODES + i ))
-                router_args+=(--decode "http://\${nodes[node_idx]}:$WORKER_SERVER_PORT")
+                for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
+                    worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
+                    router_args+=(--decode "http://\${nodes[node_idx]}:\$worker_port")
+                done
             done
         else
             router_args+=(--policy $ROUTER_POLICY --worker-urls)
             for node in "\${nodes[@]}"; do
-                router_args+=("http://\$node:$WORKER_SERVER_PORT")
+                for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
+                    worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
+                    router_args+=("http://\$node:\$worker_port")
+                done
             done
         fi
 
@@ -543,9 +592,21 @@ else
                 aggregated_args+=("\$arg")
             fi
         done
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${aggregated_args[@]}" \
-            --host \$this_node_hostname \
-            --port $WORKER_SERVER_PORT
+        if (( $VLLM_ENGINES_PER_NODE == 4 )); then
+            serve_tp1_engines $PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT "\${aggregated_args[@]}"
+        else
+            vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${aggregated_args[@]}" \
+                --host \$this_node_hostname \
+                --port $WORKER_SERVER_PORT
+        fi
+    elif (( $VLLM_ENGINES_PER_NODE == 4 )); then
+        if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+            serve_tp1_engines $PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
+                "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}"
+        else
+            serve_tp1_engines $DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
+                "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}"
+        fi
     elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
         # Prefill
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
