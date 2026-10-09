@@ -91,12 +91,30 @@ def local_ip_toward(host: str, port: int = 80) -> str:
 
 
 @dataclass
+class SessionTrace:
+    """One OpenCode session (the parent, or a depth-one child) within an episode."""
+
+    session_id: str
+    role: str  # "parent" | "child"
+    parent_session_id: str | None = None
+    spawn_call_id: str | None = None
+    response_ids: list = field(default_factory=list)
+    turns: list = field(default_factory=list)
+
+
+@dataclass
 class EpisodeRoute:
     upstream: str
     record_dir: Path
     local_step_cap_reply: bool = False
     turn: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Stock OpenCode sends no session header; sessions are keyed by the leading
+    # context of each request (see ``session_key``). The first session is the
+    # parent; a session whose opening user turn repeats the ``prompt`` argument of
+    # a ``task`` tool call served earlier in this episode is that call's child.
+    sessions: dict = field(default_factory=dict)
+    task_prompts: dict = field(default_factory=dict)  # prompt text -> (parent session id, tool call id)
 
 
 class CaptureProxy:
@@ -210,11 +228,13 @@ class CaptureProxy:
                     body=events.encode(), content_type="text/event-stream", headers={"Cache-Control": "no-cache"}
                 )
             return web.Response(body=json.dumps(completion).encode(), content_type="application/json")
-        # OpenCode is sequential within a session; the lock also keeps a stray
-        # overlapping side call from racing the ledger's sequential admission.
+        # Calls are serialized per episode: Gym's capture ledger admits one call
+        # at a time per rollout ("Cannot admit a call after incomplete capture"),
+        # so parallel child sessions overlap on tool execution, not model calls.
         async with route.lock:
             turn = route.turn
             route.turn += 1
+            session = observe_session(route, body)
             async with self._session.post(
                 f"{route.upstream}/v1/chat/completions", json=body, headers=self._upstream_headers(request)
             ) as upstream:
@@ -225,6 +245,10 @@ class CaptureProxy:
                 "turn": turn,
                 "agent": agent,
                 "session": request.headers.get("x-opencode-session"),
+                "session_id": session.session_id,
+                "session_role": session.role,
+                "parent_session_id": session.parent_session_id,
+                "spawn_call_id": session.spawn_call_id,
                 "streamed": streamed,
                 "status": status,
                 "elapsed_seconds": round(time.time() - started, 3),
@@ -233,6 +257,11 @@ class CaptureProxy:
             if status == 200:
                 completion = json.loads(payload)
                 record["response"] = completion
+                session.turns.append(turn)
+                if isinstance(completion.get("id"), str):
+                    session.response_ids.append(completion["id"])
+                for call_id, prompt in task_tool_prompts(completion):
+                    route.task_prompts[prompt.strip()] = (session.session_id, call_id)
             else:
                 record["error"] = payload.decode(errors="replace")[:4000]
             (route.record_dir / f"{turn:04d}.json").write_text(json.dumps(record))
@@ -275,6 +304,63 @@ def classify_agent(header_agent: str | None, body: dict) -> str | None:
     return None
 
 
+def _first_user_text(body: dict) -> str:
+    for message in body.get("messages") or []:
+        if isinstance(message, dict) and message.get("role") == "user":
+            return _message_text(message)
+    return ""
+
+
+def session_key(body: dict) -> str:
+    """Identify an OpenCode session by its leading context.
+
+    OpenCode replays the full history on every call, so the system prompt plus
+    the opening user turn is stable within a session and differs between the
+    parent (the benchmark prompt) and each child (its ``task`` prompt).
+    """
+    system = "\n".join(
+        _message_text(m) for m in body.get("messages") or [] if isinstance(m, dict) and m.get("role") == "system"
+    )
+    digest = hashlib.sha256()
+    digest.update(system.encode())
+    digest.update(b"\x00")
+    digest.update(_first_user_text(body).encode())
+    return digest.hexdigest()[:16]
+
+
+def task_tool_prompts(completion: dict) -> list[tuple[str, str]]:
+    """``(tool_call_id, prompt)`` for every ``task`` tool call in a served completion."""
+    prompts = []
+    for choice in completion.get("choices") or []:
+        for call in (choice.get("message") or {}).get("tool_calls") or []:
+            function = call.get("function") or {}
+            if function.get("name") != "task":
+                continue
+            try:
+                arguments = json.loads(function.get("arguments") or "{}")
+            except ValueError:
+                continue
+            prompt = arguments.get("prompt") if isinstance(arguments, dict) else None
+            if isinstance(prompt, str) and prompt and isinstance(call.get("id"), str):
+                prompts.append((call["id"], prompt))
+    return prompts
+
+
+def observe_session(route: EpisodeRoute, body: dict) -> SessionTrace:
+    """Return the session a request belongs to, registering it on first sight."""
+    key = session_key(body)
+    trace = route.sessions.get(key)
+    if trace is None:
+        if not route.sessions:
+            trace = SessionTrace(session_id=key, role="parent")
+        else:
+            spawn = route.task_prompts.get(_first_user_text(body).strip())
+            parent_id, call_id = spawn if spawn else (next(iter(route.sessions)), None)
+            trace = SessionTrace(session_id=key, role="child", parent_session_id=parent_id, spawn_call_id=call_id)
+        route.sessions[key] = trace
+    return trace
+
+
 def is_step_cap_request(body: dict) -> bool:
     """True for OpenCode's text-only turn after its step budget is spent."""
     messages = body.get("messages") or []
@@ -305,6 +391,36 @@ def step_cap_completion(model: str | None) -> dict:
     }
 
 
+def session_traces(records: list[dict]) -> list[dict]:
+    """Collapse per-call session tags into one ownership entry per session.
+
+    Entries carry the served response ids each session owns (parent first, then
+    children in order of first appearance) so the trainer can attribute capture
+    chains to sessions. Records without session tags (older proxies) yield [].
+    """
+    traces: dict[str, dict] = {}
+    for record in records:
+        if record.get("status", 200) != 200 or "response" not in record or record.get("local"):
+            continue
+        session_id = record.get("session_id")
+        if not session_id:
+            continue
+        trace = traces.setdefault(
+            session_id,
+            {
+                "session_id": session_id,
+                "session_role": record.get("session_role"),
+                "parent_session_id": record.get("parent_session_id"),
+                "spawn_call_id": record.get("spawn_call_id"),
+                "response_ids": [],
+            },
+        )
+        response_id = record["response"].get("id")
+        if isinstance(response_id, str):
+            trace["response_ids"].append(response_id)
+    return list(traces.values())
+
+
 def load_records(record_dir: Path) -> list[dict]:
     records = sorted((json.loads(p.read_text()) for p in record_dir.glob("*.json")), key=lambda r: r["turn"])
     if not records:
@@ -321,6 +437,8 @@ class CaptureStats:
     generated_tokens: int = 0
     terminal_response_id: str | None = None
     complete: bool = False
+    # Per-session ownership of the served calls (parent first), for subagent training.
+    session_traces: list = field(default_factory=list)
 
 
 def capture_output(
@@ -360,6 +478,7 @@ def capture_output(
         )
         stats.generated_tokens += (response.get("usage") or {}).get("completion_tokens") or 0
         last = record
+    stats.session_traces = session_traces(records)
     if last is not None:
         response = last["response"]
         terminal = response.get("id")

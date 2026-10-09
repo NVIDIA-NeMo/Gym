@@ -133,6 +133,9 @@ class AgenticVBenchVerifyResponse(BaseVerifyResponse):
     # Token-capture runs: served id of the last accepted model call and call statistics.
     terminal_response_id: str | None = None
     model_calls: int = 0
+    # Subagent training: served response ids owned by each OpenCode session
+    # (parent first, then depth-one children with their spawn tool-call ids).
+    session_traces: list[dict[str, Any]] = []
     compaction_summaries: int = 0
     generated_tokens: int = 0
     capture_records: str | None = None
@@ -363,6 +366,7 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 extra = {
                     "terminal_response_id": stats.terminal_response_id,
                     "model_calls": stats.model_calls,
+                    "session_traces": stats.session_traces,
                     "compaction_summaries": stats.compaction_summaries,
                     "generated_tokens": stats.generated_tokens,
                     "capture_records": str(record_dir),

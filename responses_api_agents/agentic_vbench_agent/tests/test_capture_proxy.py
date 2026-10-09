@@ -274,3 +274,61 @@ def test_step_cap_request_detection_and_local_completion() -> None:
     records = [{"turn": 0, "agent": STEP_CAP_AGENT, "status": 200, "response": completion}]
     items, stats = capture_output(records)
     assert items == [] and stats.ignored_calls == 1
+
+
+def test_sessions_are_keyed_by_leading_context_and_children_attributed_to_task_calls(tmp_path: Path) -> None:
+    from responses_api_agents.agentic_vbench_agent.capture_proxy import (
+        EpisodeRoute,
+        observe_session,
+        session_key,
+        session_traces,
+        task_tool_prompts,
+    )
+
+    system = {"role": "system", "content": "You are OpenCode."}
+    parent_open = {"role": "user", "content": "Assemble the video"}
+    spawn = completion(
+        1,
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call_task_1", "type": "function", "function": {"name": "task", "arguments": json.dumps({"description": "probe", "prompt": "Inspect clip A", "subagent_type": "general"})}},
+                {"id": "call_bash", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ],
+        },
+        "tool_calls",
+    )
+    assert task_tool_prompts(spawn) == [("call_task_1", "Inspect clip A")]
+
+    route = EpisodeRoute(upstream="http://u", record_dir=tmp_path)
+    parent_first = {"messages": [system, parent_open]}
+    parent_later = {"messages": [system, parent_open, {"role": "assistant", "content": "ok"}, {"role": "user", "content": "go on"}]}
+    child_first = {"messages": [system, {"role": "user", "content": "Inspect clip A"}]}
+
+    parent = observe_session(route, parent_first)
+    assert parent.role == "parent" and parent.session_id == session_key(parent_first)
+    # Same session on later calls: history grows, leading context does not.
+    assert observe_session(route, parent_later) is parent
+    for call_id, prompt in task_tool_prompts(spawn):
+        route.task_prompts[prompt.strip()] = (parent.session_id, call_id)
+    child = observe_session(route, child_first)
+    assert child.role == "child" and child.parent_session_id == parent.session_id and child.spawn_call_id == "call_task_1"
+    assert child.session_id != parent.session_id
+    # A child whose opening turn matches no task prompt still hangs off the parent.
+    orphan = observe_session(route, {"messages": [system, {"role": "user", "content": "unrelated"}]})
+    assert orphan.role == "child" and orphan.parent_session_id == parent.session_id and orphan.spawn_call_id is None
+
+    records = [
+        {"turn": 0, "agent": "build", "status": 200, "session_id": parent.session_id, "session_role": "parent", "parent_session_id": None, "spawn_call_id": None, "response": completion(0, {"role": "assistant", "content": "a"}, "stop")},
+        {"turn": 1, "agent": "build", "status": 200, "session_id": parent.session_id, "session_role": "parent", "parent_session_id": None, "spawn_call_id": None, "response": spawn},
+        {"turn": 2, "agent": "build", "status": 200, "session_id": child.session_id, "session_role": "child", "parent_session_id": parent.session_id, "spawn_call_id": "call_task_1", "response": completion(2, {"role": "assistant", "content": "b"}, "stop")},
+        {"turn": 3, "agent": "build", "status": 500, "session_id": child.session_id, "session_role": "child", "error": "boom"},
+        {"turn": 4, "agent": "build", "status": 200, "response": completion(4, {"role": "assistant", "content": "untagged"}, "stop")},
+    ]
+    traces = session_traces(records)
+    assert [t["session_role"] for t in traces] == ["parent", "child"]
+    assert traces[0]["response_ids"] == ["chatcmpl-0", "chatcmpl-1"]
+    assert traces[1]["response_ids"] == ["chatcmpl-2"] and traces[1]["spawn_call_id"] == "call_task_1"
+    _, stats = capture_output(records[:3])
+    assert stats.session_traces == session_traces(records[:3])
