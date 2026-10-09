@@ -36,6 +36,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.sandbox.access import SandboxAccess
+from nemo_gym.sandbox.rollout_sidecars import SeedSessionMiddleware, register_rollout_sidecars
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 
@@ -245,6 +246,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        app.add_middleware(SeedSessionMiddleware)
+        # Registered here rather than on import, so processes that import this module but serve no resources server
+        # pass provider_options["sidecars"] to their providers unchanged.
+        register_rollout_sidecars(scoped=True)
         app.add_middleware(RolloutContextMiddleware)
 
         app.post("/seed_session")(self.seed_session)

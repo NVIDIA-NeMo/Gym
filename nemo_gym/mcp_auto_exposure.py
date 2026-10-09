@@ -441,6 +441,8 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             continue  # Gym's SessionMiddleware — replaced by a materialized session on direct dispatch
         if f"{cls.__module__}.{cls.__name__}" == "nemo_gym.rollout_correlation.RolloutContextMiddleware":
             continue  # Correlation prefixes are handled before resource routes; direct MCP dispatch has no prefix.
+        if f"{cls.__module__}.{cls.__name__}" == "nemo_gym.sandbox.rollout_sidecars.SeedSessionMiddleware":
+            continue  # Only scopes /seed_session, a reserved name that is never an MCP tool.
         if f"{cls.__module__}.{cls.__name__}" == ("nemo_gym.server_utils.ClientDisconnectCancellationMiddleware"):
             continue  # Direct MCP dispatch has no client connection to monitor.
         dispatch = m.kwargs.get("dispatch")

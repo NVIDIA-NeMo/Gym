@@ -386,6 +386,19 @@ def _sandbox_id(handle: Any) -> str | None:
     return getattr(handle, "sandbox_id", None)
 
 
+_SPEC_TRANSFORMS: list[Callable[[SandboxSpec], SandboxSpec]] = []
+
+
+def register_spec_transform(transform: Callable[[SandboxSpec], SandboxSpec]) -> None:
+    """Apply ``transform`` to every spec in ``AsyncSandbox.start`` before the provider creates the sandbox.
+
+    Lets code outside the sandbox API and the providers adjust what gets created, for example from request context.
+    Transforms run in registration order, process-wide. Registering the same transform again has no effect.
+    """
+    if transform not in _SPEC_TRANSFORMS:
+        _SPEC_TRANSFORMS.append(transform)
+
+
 class AsyncSandbox:
     """Async sandbox object backed by a runtime provider.
 
@@ -432,6 +445,8 @@ class AsyncSandbox:
         requested_spec = spec if spec is not None else self._spec
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
+        for transform in _SPEC_TRANSFORMS:
+            requested_spec = transform(requested_spec)
         if requested_spec.sidecars and not isinstance(self._provider, SupportsSandboxSidecars):
             provider_name = getattr(self._provider, "name", type(self._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
