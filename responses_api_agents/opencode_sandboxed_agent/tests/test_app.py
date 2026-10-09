@@ -44,6 +44,8 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
+    AgentPhaseObservation,
+    ContextCompactionObservation,
     SandboxObservation,
     ToolCallObservation,
 )
@@ -388,11 +390,13 @@ class TestOpenCodeSandboxedAgent:
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
 
+    @mark.parametrize("latency_metrics", [False, True])
     async def test_run_builds_observations_from_live_wal_snapshot(
         self,
         tmp_path: Path,
         opencode_export_test_data: Dict[str, Any],
         monkeypatch: MonkeyPatch,
+        latency_metrics: bool,
     ) -> None:
         class Response:
             ok = True
@@ -466,18 +470,21 @@ class TestOpenCodeSandboxedAgent:
             "observability_enabled": True,
             "token_id_capture": {"enabled": False, "all_agents": False},
         }
-        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
+        config = self._create_config()
+        config.latency_metrics = latency_metrics
+        server = OpenCodeSandboxedAgent(config=config, server_client=server_client)
         server._create_opencode_config = AsyncMock(return_value={})
 
+        run_stdout = "Shell: /bin/bash\nOpenCode run finished"
+        if latency_metrics:
+            run_stdout = "Shell: /bin/bash\nNG_T_LAUNCH=1700000000100000000\nNG_T_EXIT=1700000000900000000\nOpenCode run finished"
         sandbox = MagicMock()
         sandbox._handle = SandboxHandle(sandbox_id="connected-sandbox", provider_name="opensandbox", raw=None)
         sandbox.exec = AsyncMock(
             side_effect=[
                 # clock probe at sandbox start (date +%s.%N)
                 SimpleNamespace(stdout="1700000000.250000000\n", stderr="", return_code=0, error_type=None),
-                SimpleNamespace(
-                    stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
-                ),
+                SimpleNamespace(stdout=run_stdout, stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
@@ -555,7 +562,8 @@ class TestOpenCodeSandboxedAgent:
         [tool] = [record for record in result.ng_agent_observations.records if isinstance(record, ToolCallObservation)]
         assert tool.tool_call_id == "call-1"
         assert tool.sandbox_id == "connected-sandbox"
-        assert tool.duration_ms == 1_000
+        # The tool starts when its part was persisted (the request), not at the state start OpenCode rewrites.
+        assert (tool.started_at, tool.completed_at, tool.duration_ms) == (0.001, 2.0, 1_999.0)
         assert tool.tool_name == "bash"
         assert tool.operation == "true"
         sandbox_records = [
@@ -588,6 +596,32 @@ class TestOpenCodeSandboxedAgent:
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
+
+        run_command = sandbox.exec.await_args_list[1].kwargs["command"]
+        phases = {r.name: r for r in result.ng_agent_observations.records if isinstance(r, AgentPhaseObservation)}
+        assert set(phases) >= {
+            "seed_session",
+            "start_sandbox",
+            "agent_sandbox_exec",
+            "agent_export",
+            "verify",
+            "sandbox_stop",
+        }
+        assert phases["sandbox_stop"].status == "failed" and all(p.duration_ms is not None for p in phases.values())
+        assert phases["seed_session"].completed_at <= phases["start_sandbox"].started_at
+        assert (
+            tool.clock_domain == "sandbox:connected-sandbox" and invocation.clock_domain == "sandbox:connected-sandbox"
+        )
+        # The harness's view of each step rides along as a trajectory record the collector merges with the capture.
+        assert result.ng_trajectory is not None and result.ng_trajectory.rollout_id == "7-2"
+        [step] = result.ng_trajectory.model_calls
+        assert (step.invocation_id, step.completed_at, step.processed_at) == ("root", 0.001, 0.003)
+        if latency_metrics:
+            assert "NG_T_LAUNCH=" in run_command and ".config/opencode/plugins" in run_command
+            assert (invocation.process_started_at, invocation.process_exited_at) == (1700000000.1, 1700000000.9)
+        else:
+            assert "NG_T_LAUNCH=" not in run_command and "plugins" not in run_command
+            assert invocation.process_started_at is None
 
 
 class TestSqliteSnapshotScript:
@@ -790,7 +824,8 @@ class TestInvocationSpans:
             connection.close()
         bundle = parse_opencode_observations(db, "fallback")
         [tool] = [r for r in bundle.records if isinstance(r, ToolCallObservation)]
-        assert (tool.requested_at, tool.started_at, tool.completed_at) == (2.0, 2.5, 4.0)
+        # started_at is the request too: OpenCode rewrites the state start while a streaming tool runs.
+        assert (tool.requested_at, tool.started_at, tool.completed_at) == (2.0, 2.0, 4.0)
         # No later assistant message: nothing bounds when the result reached the next prompt.
         assert tool.response_received_at is None
         assert "tool_response_boundary_approximate" not in {g.code for g in bundle.gaps}
@@ -867,3 +902,221 @@ class TestSandboxClockProbe:
             raise RuntimeError("sandbox gone")
 
         assert await _probe_sandbox_clock(SimpleNamespace(exec=exec)) == (None, None)
+
+
+class TestLatencyEvidence:
+    """What OpenCode's own artifacts say about steps, tools, compactions and sub-agents, in the schema."""
+
+    @staticmethod
+    def _ms(seconds: float) -> int:
+        return int(round(seconds * 1000))
+
+    def _database(self, tmp_path: Path) -> Path:
+        ms = self._ms
+        path = tmp_path / "opencode.db"
+        con = sqlite3.connect(path)
+        con.execute("create table session (id text, parent_id text, time_created integer)")
+        con.execute("create table message (id text, session_id text, data text, time_created integer)")
+        con.execute("create table part (id text, message_id text, session_id text, data text, time_created integer)")
+
+        def message(id_, session_id, data, t):
+            con.execute("insert into message values (?,?,?,?)", (id_, session_id, json.dumps(data), ms(t)))
+
+        def part(id_, message_id, session_id, data, t):
+            con.execute("insert into part values (?,?,?,?,?)", (id_, message_id, session_id, json.dumps(data), ms(t)))
+
+        def tokens(input_, output, reasoning, cached=0):
+            return {"input": input_, "output": output, "reasoning": reasoning, "cache": {"read": cached, "write": 0}}
+
+        con.execute("insert into session values ('root', null, ?)", (ms(100.0),))
+        message("u1", "root", {"role": "user", "time": {"created": ms(100.05)}}, 100.05)
+        # step 1: reasoning, a bash tool whose state start was rewritten while it streamed, a task tool spawning
+        # a sub-agent, then step-finish with the step's token counts
+        message(
+            "a1",
+            "root",
+            {
+                "role": "assistant",
+                "parentID": "u1",
+                "time": {"created": ms(100.1), "completed": ms(130.0)},
+                "tokens": tokens(1000, 50, 20, 300),
+            },
+            100.1,
+        )
+        part("ss1", "a1", "root", {"type": "step-start"}, 100.1)
+        part(
+            "r1",
+            "a1",
+            "root",
+            {"type": "reasoning", "text": "think", "time": {"start": ms(105.0), "end": ms(105.02)}},
+            105.0,
+        )
+        part(
+            "t1",
+            "a1",
+            "root",
+            {
+                "type": "tool",
+                "tool": "bash",
+                "callID": "chatcmpl-tool-1",
+                "state": {
+                    "status": "completed",
+                    "input": {"command": "pytest -q"},
+                    "output": "ok",
+                    "title": "pytest",
+                    "time": {"start": ms(161.0), "end": ms(161.01)},
+                },
+            },
+            105.05,
+        )
+        part(
+            "t2",
+            "a1",
+            "root",
+            {
+                "type": "tool",
+                "tool": "task",
+                "callID": "chatcmpl-tool-2",
+                "state": {
+                    "status": "error",
+                    "input": {"description": "explore"},
+                    "error": "boom",
+                    "title": "explore",
+                    "metadata": {"sessionId": "child"},
+                    "time": {"start": ms(106.5), "end": ms(129.0)},
+                },
+            },
+            105.06,
+        )
+        part(
+            "sf1",
+            "a1",
+            "root",
+            {"type": "step-finish", "reason": "tool-calls", "tokens": tokens(1000, 50, 20, 300)},
+            130.0,
+        )
+        con.execute("insert into session values ('child', 'root', ?)", (ms(106.6),))
+        message("cu1", "child", {"role": "user", "time": {"created": ms(106.7)}}, 106.7)
+        message(
+            "ca1",
+            "child",
+            {
+                "role": "assistant",
+                "parentID": "cu1",
+                "time": {"created": ms(106.8), "completed": ms(128.0)},
+                "tokens": tokens(300, 10, 5),
+            },
+            106.8,
+        )
+        part("css", "ca1", "child", {"type": "step-start"}, 106.8)
+        part(
+            "ctx",
+            "ca1",
+            "child",
+            {"type": "text", "text": "found it", "time": {"start": ms(120.0), "end": ms(128.0)}},
+            120.0,
+        )
+        part("csf", "ca1", "child", {"type": "step-finish", "reason": "stop", "tokens": tokens(300, 10, 5)}, 128.0)
+        # compaction after step 1, then the summary message, then the next agent step
+        message("u2", "root", {"role": "user", "time": {"created": ms(131.0)}}, 131.0)
+        part("cp", "u2", "root", {"type": "compaction", "auto": True}, 131.0)
+        message(
+            "s1",
+            "root",
+            {
+                "role": "assistant",
+                "parentID": "u2",
+                "summary": True,
+                "time": {"created": ms(131.1), "completed": ms(140.0)},
+                "tokens": tokens(1100, 200, 0),
+            },
+            131.1,
+        )
+        part(
+            "st",
+            "s1",
+            "root",
+            {"type": "text", "text": "summary", "time": {"start": ms(135.0), "end": ms(140.0)}},
+            135.0,
+        )
+        message(
+            "a2",
+            "root",
+            {
+                "role": "assistant",
+                "parentID": "u2",
+                "time": {"created": ms(141.0), "completed": ms(150.0)},
+                "tokens": tokens(400, 30, 10),
+            },
+            141.0,
+        )
+        part("ss2", "a2", "root", {"type": "step-start"}, 141.0)
+        part(
+            "tx2",
+            "a2",
+            "root",
+            {"type": "text", "text": "done", "time": {"start": ms(145.0), "end": ms(150.0)}},
+            145.0,
+        )
+        part("sf2", "a2", "root", {"type": "step-finish", "reason": "stop", "tokens": tokens(400, 30, 10)}, 150.0)
+        con.commit()
+        con.close()
+        return path
+
+    def test_steps_become_harness_model_calls(self, tmp_path: Path) -> None:
+        steps = app_module.parse_opencode_steps(self._database(tmp_path), sandbox_id="sb-1")
+        assert [(s.invocation_id, s.model_call_purpose) for s in steps] == [
+            ("root", "agent_step"),
+            ("child", "subagent_step"),
+            ("root", "compaction_summary"),
+            ("root", "agent_step"),
+        ]
+        first = steps[0]
+        assert first.started_at is None  # the plugin's send time comes from the capture record
+        assert (first.completed_at, first.processed_at) == (105.0, 130.0)  # first part arrival; step finished
+        assert first.clock_domain == "sandbox:sb-1"
+        assert (first.token_stats.prompt_tokens, first.token_stats.completion_tokens) == (1000, 50)
+        assert (first.token_stats.reasoning_tokens, first.token_stats.cached_tokens) == (20, 300)
+        assert steps[2].completed_at == 135.0 and steps[2].processed_at == 140.0
+
+    def test_tool_starts_when_requested_and_statuses_map(self, tmp_path: Path) -> None:
+        bundle = parse_opencode_observations(self._database(tmp_path), "fallback")
+        tools = {t.tool_call_id: t for t in bundle.records if isinstance(t, ToolCallObservation)}
+        bash = tools["chatcmpl-tool-1"]
+        # OpenCode rewrites the state's start while a streaming tool runs: a 56 s pytest looked like a 10 ms tool.
+        assert bash.started_at == bash.requested_at == 105.05 and bash.completed_at == 161.01
+        assert bash.duration_ms == pytest.approx(55_960.0, abs=1.0) and bash.status == "completed"
+        assert tools["chatcmpl-tool-2"].status == "failed"
+
+    def test_compaction_gets_its_end_and_token_counts_from_the_messages(self, tmp_path: Path) -> None:
+        bundle = parse_opencode_observations(self._database(tmp_path), "fallback")
+        [compaction] = [r for r in bundle.records if isinstance(r, ContextCompactionObservation)]
+        assert (compaction.observed_at, compaction.completed_at) == (131.0, 140.0)
+        assert compaction.trigger == "automatic" and compaction.outcome == "completed"
+        assert compaction.tokens_before == 1000 + 50 + 20 and compaction.tokens_after == 400
+        assert "compaction_token_counts_unavailable" not in {g.code for g in bundle.gaps}
+
+    def test_subagent_carries_requested_and_observed_times(self, tmp_path: Path) -> None:
+        bundle = parse_opencode_observations(self._database(tmp_path), "fallback")
+        child = next(r for r in bundle.records if isinstance(r, AgentInvocation) and r.invocation_id == "child")
+        assert child.spawned_by_tool_call_id == "chatcmpl-tool-2"
+        assert (child.requested_at, child.response_observed_at) == (105.06, 129.0)
+        assert (child.started_at, child.completed_at) == (106.7, 128.0)
+
+    def test_process_marks_plugin_command_and_exec_outcome(self) -> None:
+        wrapped = app_module.wrap_run_command("false")
+        completed = subprocess.run(
+            ["bash", "-c", wrapped + ' && echo "OpenCode run finished"'], capture_output=True, text=True
+        )
+        assert completed.returncode == 1 and "OpenCode run finished" not in completed.stdout
+        launch, exit_ = app_module.parse_marks(completed.stdout)
+        assert launch is not None and exit_ is not None and exit_ >= launch
+        assert app_module.parse_marks("garbage") == (None, None)
+        install = app_module.plugin_install_command()
+        assert '"$HOME/.config/opencode/plugins"' in install and "/testbed" not in install
+        for header in ("x-session-id", "x-ng-agent", "x-ng-client-call-id", "x-ng-client-sent-at"):
+            assert header in app_module.PLUGIN_SOURCE
+        assert app_module._exec_outcome(0, None, True) == "completed"
+        assert app_module._exec_outcome(-1, "timeout", False) == "timeout"
+        assert app_module._exec_outcome(1, None, False) == "failed"
+        assert app_module._exec_outcome(None, "SandboxError", False) == "sandbox_error"

@@ -14,11 +14,13 @@
 # limitations under the License.
 
 import json
+import re
+import socket
 import sqlite3
 import sys
 from pathlib import Path
 from shlex import quote
-from time import time
+from time import monotonic, perf_counter, time
 from traceback import format_exc
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -54,10 +56,14 @@ from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
+    AgentPhaseObservation,
     ContextCompactionObservation,
     ObservationGap,
     SandboxObservation,
     ToolCallObservation,
+    TrajectoryModelCall,
+    TrajectoryRecord,
+    TrajectoryTokenStats,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
@@ -106,6 +112,181 @@ async def _probe_sandbox_clock(sandbox: AsyncSandbox) -> tuple[Optional[float], 
     except ValueError:
         return None, None
     return sandbox_now - (sent_at + received_at) / 2, (received_at - sent_at) / 2
+
+
+# --- latency evidence: header plugin, process marks, exec outcome, steps --------------------------------------------
+
+PLUGIN_FILENAME = "nemo-gym-latency.js"
+PLUGIN_SOURCE = (Path(__file__).parent / "nemo_gym_latency_plugin.js").read_text()
+PLUGIN_DIR = '"$HOME/.config/opencode/plugins"'
+LAUNCH_MARK = "NG_T_LAUNCH="
+EXIT_MARK = "NG_T_EXIT="
+_MARK_RE = {mark: re.compile(re.escape(mark) + r"(\d+)") for mark in (LAUNCH_MARK, EXIT_MARK)}
+
+
+def plugin_install_command() -> str:
+    """Shell snippet that writes the header plugin into the user config dir, never into the task repository
+    (a resources server extracts the model patch with ``git diff``, which would sweep a file in the repo in)."""
+    return f"mkdir -p {PLUGIN_DIR} && printf %s {quote(PLUGIN_SOURCE)} > {PLUGIN_DIR}/{PLUGIN_FILENAME}"
+
+
+def wrap_run_command(run_cmd: str) -> str:
+    """Surround the OpenCode process with sandbox-clock nanosecond marks while preserving its exit code."""
+    return (
+        f'echo "{LAUNCH_MARK}$(date +%s%N)" && '
+        f'{{ {run_cmd}; ng_rc=$?; echo "{EXIT_MARK}$(date +%s%N)"; (exit "$ng_rc"); }}'
+    )
+
+
+def parse_marks(stdout: str) -> tuple[Optional[float], Optional[float]]:
+    values = []
+    for mark in (LAUNCH_MARK, EXIT_MARK):
+        match = _MARK_RE[mark].search(stdout or "")
+        values.append(int(match.group(1)) / 1e9 if match else None)
+    return values[0], values[1]
+
+
+def _exec_outcome(return_code: Any, error_type: Any, finished: bool) -> str:
+    """Classify the agent sandbox exec: completed / timeout / sandbox_error / failed / unknown."""
+    normalized_error = error_type.lower() if isinstance(error_type, str) else ""
+    if "timeout" in normalized_error:
+        return "timeout"
+    if normalized_error:
+        return "sandbox_error"
+    if return_code == 0 and finished:
+        return "completed"
+    if isinstance(return_code, int):
+        return "failed" if return_code != 0 else "unknown"
+    return "unknown"
+
+
+def _phase(name: str, started_at: float, started_perf: float, status: str = "completed") -> AgentPhaseObservation:
+    return AgentPhaseObservation(
+        name=name,
+        started_at=started_at,
+        completed_at=time(),
+        duration_ms=(perf_counter() - started_perf) * 1000,
+        status=status,
+        clock_domain=f"node:{socket.gethostname()}",
+    )
+
+
+def _time_field(data: dict[str, Any], key: str) -> Optional[float]:
+    time_info = data.get("time") if isinstance(data.get("time"), dict) else {}
+    return _milliseconds(time_info.get(key))
+
+
+def _token_stats(raw: Any) -> TrajectoryTokenStats:
+    """OpenCode's own counts: input excludes its cache reads and output excludes reasoning."""
+    if not isinstance(raw, dict):
+        return TrajectoryTokenStats()
+    cache = raw.get("cache") if isinstance(raw.get("cache"), dict) else {}
+
+    def count(value: Any) -> Optional[int]:
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+    return TrajectoryTokenStats(
+        prompt_tokens=count(raw.get("input")),
+        completion_tokens=count(raw.get("output")),
+        reasoning_tokens=count(raw.get("reasoning")),
+        cached_tokens=count(cache.get("read")),
+    )
+
+
+def _steps_of_message(message: dict[str, Any], parts: list[tuple[sqlite3.Row, dict[str, Any]]]) -> list[dict]:
+    """Split an assistant message into steps on step-start / step-finish; a message without them is one step."""
+    groups: list[dict[str, Any]] = []
+    current: Optional[dict[str, Any]] = None
+    for row, part in parts:
+        ptype = part.get("type")
+        if ptype == "step-start" or not groups:
+            current = {"start": _milliseconds(row["time_created"]), "end": None, "parts": [], "tokens": None}
+            groups.append(current)
+            if ptype == "step-start":
+                continue
+        # OpenCode writes some parts (the file patch) after step-finish: they belong to the step just closed.
+        target = current if current is not None else groups[-1]
+        if ptype == "step-finish":
+            target["end"] = _milliseconds(row["time_created"])
+            target["tokens"] = part.get("tokens")
+            current = None
+            continue
+        target["parts"].append((row, part))
+    if not groups:
+        groups.append({"start": None, "end": None, "parts": [], "tokens": None})
+    for group in groups:
+        if group["start"] is None:
+            group["start"] = _time_field(message, "created")
+        if group["end"] is None:
+            group["end"] = _time_field(message, "completed")
+        if group["tokens"] is None:
+            group["tokens"] = message.get("tokens")
+    return groups
+
+
+def _first_part_arrival(parts: list[tuple[sqlite3.Row, dict[str, Any]]]) -> Optional[float]:
+    first = None
+    for row, part in parts:
+        candidate = _time_field(part, "start") if part.get("type") in ("text", "reasoning") else None
+        if candidate is None:
+            candidate = _milliseconds(row["time_created"])
+        if candidate is not None and (first is None or candidate < first):
+            first = candidate
+    return first
+
+
+def parse_opencode_steps(db_path: Path, *, sandbox_id: Optional[str]) -> list[TrajectoryModelCall]:
+    """The harness's view of every model call, one per OpenCode step, from its SQLite snapshot.
+
+    OpenCode mints no call id, so a step carries none: the collector pairs it with the model server's capture
+    record of the same session in start order. ``completed_at`` is the first response part's arrival, which is
+    the whole response within milliseconds because Gym's model server replays the buffered stream at once;
+    ``processed_at`` is the step's end, so the gap between them is OpenCode's own processing.
+    """
+    if not Path(db_path).is_file():
+        return []
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        sessions = con.execute("select id, parent_id from session").fetchall()
+        messages = con.execute("select id, session_id, data from message order by time_created, id").fetchall()
+        parts = con.execute(
+            "select id, message_id, session_id, data, time_created from part order by time_created, id"
+        ).fetchall()
+    finally:
+        con.close()
+    parent_of = {row["id"]: row["parent_id"] for row in sessions}
+    parts_by_message: dict[str, list[tuple[sqlite3.Row, dict[str, Any]]]] = {}
+    for row in parts:
+        parts_by_message.setdefault(row["message_id"], []).append((row, _load_json(row["data"])))
+    clock_domain = f"sandbox:{sandbox_id or 'unknown'}"
+    steps: list[TrajectoryModelCall] = []
+    for row in messages:
+        message = _load_json(row["data"])
+        if message.get("role") != "assistant":
+            continue
+        session_id = row["session_id"]
+        if message.get("summary") is True:
+            purpose = "compaction_summary"
+        else:
+            purpose = "subagent_step" if parent_of.get(session_id) else "agent_step"
+        for group in _steps_of_message(message, parts_by_message.get(row["id"], [])):
+            arrival = _first_part_arrival(group["parts"])
+            completed_at = arrival if arrival is not None else group["end"]
+            processed_at = group["end"]
+            if completed_at is not None and processed_at is not None and processed_at < completed_at:
+                processed_at = completed_at
+            steps.append(
+                TrajectoryModelCall(
+                    invocation_id=session_id,
+                    clock_domain=clock_domain,
+                    completed_at=completed_at,
+                    processed_at=processed_at,
+                    token_stats=_token_stats(group["tokens"]),
+                    model_call_purpose=purpose,
+                )
+            )
+    return steps
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -160,9 +341,13 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
     # Creation times of assistant messages per session: the model call issued after a tool ran is
     # the only artifact signal for when that tool's result was in the prompt.
     assistant_created: dict[str, list[float]] = {}
+    # (created, message id) of assistant messages per session, for compaction token counts.
+    assistant_messages: dict[str, list[tuple[float, str]]] = {}
     tools: list[ToolCallObservation] = []
     child_tools: dict[str, set[str]] = {}
     child_status: dict[str, str] = {}
+    # child session -> (spawning tool part created, spawning tool state end)
+    child_spawn: dict[str, tuple[Optional[float], Optional[float]]] = {}
     compaction_parts: list[tuple[str, str, float | None, dict[str, Any]]] = []
     gaps: list[ObservationGap] = []
     summary_text: dict[str, list[str]] = {}
@@ -184,6 +369,7 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
             if message.get("role") == "assistant":
                 if created is not None:
                     assistant_created.setdefault(session_id, []).append(created)
+                    assistant_messages.setdefault(session_id, []).append((created, row["id"]))
                 if isinstance(message.get("error"), dict):
                     invocation_status[session_id] = "failed"
                 completed = _milliseconds(message_time.get("completed"))
@@ -284,9 +470,20 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
                 and not isinstance(native_end, bool)
                 and native_end >= native_start
             )
-            started_at = _milliseconds(native_start) if valid_interval else None
-            completed_at = _milliseconds(native_end) if valid_interval else None
-            duration_ms = float(native_end - native_start) if valid_interval else None
+            # OpenCode rewrites state.time.start while a streaming tool (bash) runs, so for a 56 s pytest the state
+            # says it started 10 ms before it ended. The tool starts when its part was persisted, the request,
+            # and ends at the state's end; queueing before execution is not separable from execution.
+            requested_at = _milliseconds(row["time_created"])
+            state_end = _milliseconds(native_end) if valid_interval else None
+            started_at = (
+                requested_at if requested_at is not None else (_milliseconds(native_start) if valid_interval else None)
+            )
+            completed_at = (
+                state_end if state_end is not None and started_at is not None and state_end >= started_at else None
+            )
+            duration_ms = (
+                (completed_at - started_at) * 1000 if completed_at is not None and started_at is not None else None
+            )
             status = {
                 "completed": "completed",
                 "error": "failed",
@@ -296,10 +493,7 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
             tool_name_str = part.get("tool") if isinstance(part.get("tool"), str) else None
             bash_command = tool_input.get("command") if tool_name_str == "bash" else None
             operation = bash_command[:512] if isinstance(bash_command, str) else None
-            # OpenCode inserts the tool part when the model emits the call (state "pending") and only
-            # later stamps state.time.start when it runs, so the row's creation time is the harness
-            # holding the parsed call. response_received_at is bounded after all parts are read.
-            requested_at = _milliseconds(row["time_created"])
+            # response_received_at is bounded after all parts are read.
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
@@ -341,6 +535,7 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
             if isinstance(child_id, str) and observed_call_id is not None:
                 child_tools.setdefault(child_id, set()).add(observed_call_id)
                 child_status[child_id] = status
+                child_spawn[child_id] = (requested_at, state_end)
             continue
         if ptype == "compaction":
             compaction_parts.append((session_id, message_id, _milliseconds(row["time_created"]), part))
@@ -350,6 +545,27 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
     for session_id, message_id, observed_at, part in compaction_parts:
         summary_ids = summaries_by_parent.get(message_id, [])
         summary = "\n".join(summary_text.get(summary_ids[0], [])) if len(summary_ids) == 1 else None
+        # The summary message's completion ends the compaction; the assistant message before it says how large
+        # the context was, the first agent step after it how large it became.
+        completed_at = _time_field(messages.get(summary_ids[0], {}), "completed") if len(summary_ids) == 1 else None
+        tokens_before = tokens_after = None
+        ordered = sorted(assistant_messages.get(session_id, []))
+        if observed_at is not None:
+            before = [
+                mid for created, mid in ordered if created < observed_at and messages[mid].get("summary") is not True
+            ]
+            if before:
+                counts = _token_stats(messages[before[-1]].get("tokens"))
+                parts_sum = [c for c in (counts.prompt_tokens, counts.completion_tokens, counts.reasoning_tokens) if c]
+                tokens_before = sum(parts_sum) if parts_sum else None
+            after_from = completed_at if completed_at is not None else observed_at
+            after = [
+                mid
+                for created, mid in ordered
+                if created >= after_from and mid not in summary_ids and messages[mid].get("summary") is not True
+            ]
+            if after:
+                tokens_after = _token_stats(messages[after[0]].get("tokens")).prompt_tokens
         if len(summary_ids) > 1:
             gaps.append(
                 ObservationGap(
@@ -366,10 +582,15 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
             ContextCompactionObservation(
                 invocation_id=session_id,
                 observed_at=observed_at,
+                completed_at=completed_at
+                if observed_at is None or completed_at is None or completed_at >= observed_at
+                else None,
                 trigger=trigger,
                 outcome="completed" if summary else "unknown",
                 summary=summary,
                 first_kept_item_id=first_kept_item_id,
+                tokens_before=tokens_before,
+                tokens_after=tokens_after,
             )
         )
         if tail_start_id is not None and first_kept_item_id is None:
@@ -382,7 +603,8 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
             )
         if not summary:
             gaps.append(ObservationGap(code="compaction_summary_unavailable", invocation_id=session_id))
-        gaps.append(ObservationGap(code="compaction_token_counts_unavailable", invocation_id=session_id))
+        if tokens_before is None or tokens_after is None:
+            gaps.append(ObservationGap(code="compaction_token_counts_unavailable", invocation_id=session_id))
         gaps.append(
             ObservationGap(
                 code="compaction_model_call_boundary_unavailable",
@@ -426,12 +648,15 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
             # Never let inconsistent artifact timestamps fail validation and cost the whole bundle.
             gaps.append(ObservationGap(code="agent_span_timing_inconsistent", invocation_id=invocation_id))
             completed_at = None
+        requested_at, response_observed_at = child_spawn.get(invocation_id, (None, None))
         invocations.append(
             AgentInvocation(
                 invocation_id=invocation_id,
                 parent_invocation_id=parent_id,
                 started_at=started_at,
                 completed_at=completed_at,
+                requested_at=requested_at if len(spawn_candidates) == 1 else None,
+                response_observed_at=response_observed_at if len(spawn_candidates) == 1 else None,
                 spawned_by_tool_call_id=next(iter(spawn_candidates)) if len(spawn_candidates) == 1 else None,
                 status=(
                     invocation_status.get(invocation_id, "unknown")
@@ -489,6 +714,9 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_timeout: float
 
     debug: bool = False
+    # Latency evidence that changes what runs in the sandbox: the header plugin that lets the model server join
+    # each captured call to the OpenCode session, and launch / exit marks around the OpenCode process.
+    latency_metrics: bool = False
 
 
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
@@ -539,6 +767,8 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
         default=None,
         exclude_if=lambda value: value is None,
     )
+    # The harness's view of each model call (one per OpenCode step), merged by the collector with the capture.
+    ng_trajectory: Optional[TrajectoryRecord] = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
@@ -607,16 +837,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         handle_provider = getattr(handle, "provider_name", None)
         handle_sandbox_id = getattr(handle, "sandbox_id", None)
         normalized_error = error_type.lower() if isinstance(error_type, str) else ""
-        if "timeout" in normalized_error:
-            outcome = "timeout"
-        elif normalized_error:
-            outcome = "sandbox_error"
-        elif return_code == 0 and finished:
-            outcome = "completed"
-        elif isinstance(return_code, int):
-            outcome = "failed" if return_code != 0 else "unknown"
-        else:
-            outcome = "unknown"
+        outcome = _exec_outcome(return_code, error_type, finished)
         return SandboxObservation(
             role="agent",
             provider=handle_provider if isinstance(handle_provider, str) else None,
@@ -804,13 +1025,21 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # and there is no way to set it to null.
         # Here, we set an exorbitantly high number that cannot ever be reached.
         # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
+        run_cmd = (
+            f"OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 "
+            f'{xdg_home_str} opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} '
+            f"-- {quote(query)}"
+        )
+        plugin_str = ""
+        if self.config.latency_metrics:
+            run_cmd = wrap_run_command(run_cmd)
+            plugin_str = f"&& {plugin_install_command()} \\\n        "
         command = f"""
         echo "Shell: $SHELL" \
         && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
-        && OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+        {plugin_str}&& {run_cmd} \
         && echo "OpenCode run finished"
         """
 
@@ -818,7 +1047,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
             print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
 
+        phases: list[AgentPhaseObservation] = []
         run_error_type = None
+        phase_started_at, phase_perf = time(), perf_counter()
+        exec_started = monotonic()
         try:
             result = await sandbox.exec(
                 command=command,
@@ -828,6 +1060,31 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             result = None
             run_error_type = type(exc).__name__
             print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
+        exec_elapsed_s = monotonic() - exec_started
+        result_stdout = (result.stdout if result else "") or ""
+        std_out_split = result_stdout.rsplit("Shell: ", maxsplit=1)
+        opencode_finished = len(std_out_split) > 1 and "OpenCode run finished" in std_out_split[1]
+        exec_error = getattr(result, "error_type", None) or run_error_type
+        if (
+            exec_error is None
+            and not opencode_finished
+            and getattr(result, "return_code", None) == -1
+            and exec_elapsed_s >= float(self.config.sandbox_timeout)
+        ):
+            # The OpenSandbox server kills a command that reaches its timeout and reports exit -1 with no error
+            # type; without this the kill would be classified as a plain failure.
+            exec_error = "timeout"
+        exec_outcome = _exec_outcome(getattr(result, "return_code", None), exec_error, opencode_finished)
+        phases.append(
+            _phase(
+                "agent_sandbox_exec",
+                phase_started_at,
+                phase_perf,
+                status={"completed": "completed", "timeout": "timeout", "unknown": "unknown"}.get(
+                    exec_outcome, "failed"
+                ),
+            )
+        )
 
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
@@ -838,6 +1095,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # to the git repo, and resources servers extract the model patch with `git add -N . && git
         # diff`, which would sweep this transcript into the patch.
         export_remote_fpath = f"/tmp/opencode_{export_fname}"
+        phase_started_at, phase_perf = time(), perf_counter()
         try:
             session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
             session_list_result = await sandbox.exec(
@@ -873,8 +1131,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
                 print("Export stdout:\n", export_result.stdout, file=sys.stderr)
                 print("Export stderr:\n", export_result.stderr, file=sys.stderr)
+        phases.append(
+            _phase(
+                "agent_export", phase_started_at, phase_perf, "completed" if export_result is not None else "failed"
+            )
+        )
 
         observations = None
+        steps: list[TrajectoryModelCall] = []
+        handle_sandbox_id = getattr(getattr(sandbox, "_handle", None), "sandbox_id", None)
+        phase_started_at, phase_perf = time(), perf_counter()
         if collect_observations:
             assert remote_data_home is not None
             observations_remote_fpath = f"{remote_data_home}/opencode/opencode.db"
@@ -896,6 +1162,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     )
                 await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
                 observations = parse_opencode_observations(observations_local_fpath, observation_invocation_id)
+                try:
+                    steps = parse_opencode_steps(
+                        observations_local_fpath,
+                        sandbox_id=handle_sandbox_id if isinstance(handle_sandbox_id, str) else None,
+                    )
+                except Exception:
+                    print("Failed to derive OpenCode steps", format_exc(), file=sys.stderr)
+                    observations.gaps.append(ObservationGap(code="model_steps_unavailable"))
             except Exception:
                 print("Failed to capture OpenCode observations", format_exc(), file=sys.stderr)
                 observations = AgentObservationBundle(
@@ -910,6 +1184,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 )
             finally:
                 observations_local_fpath.unlink(missing_ok=True)
+            phases.append(_phase("agent_observations_snapshot", phase_started_at, phase_perf))
 
         opencode_export = dict()
         if results_local_fpath.exists():
@@ -924,25 +1199,26 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             output = self._opencode_export_to_output_items(opencode_export)[1:]
             usage = NeMoGymResponseUsage.sum_from_list(self._opencode_export_to_usages(opencode_export))
 
-        result_stdout = (result.stdout if result else "") or ""
         result_stderr = (result.stderr if result else "") or ""
-        opencode_finished = False
-        std_out_split = result_stdout.rsplit("Shell: ", maxsplit=1)
-        if len(std_out_split) > 1:
-            opencode_finished = "OpenCode run finished" in std_out_split[1]
 
         if collect_observations and observations is not None:
             agent_sandbox_observation = self._agent_sandbox_observation(
                 sandbox=sandbox,
                 return_code=getattr(result, "return_code", None),
-                error_type=getattr(result, "error_type", None) or run_error_type,
+                error_type=exec_error,
                 finished=opencode_finished,
                 clock=self._sandbox_id_to_clock.get(request.cookies["sandbox_id"], (None, None)),
             )
+            launch_s, exit_s = parse_marks(result_stdout)
+            clock_domain = f"sandbox:{agent_sandbox_observation.sandbox_id or 'unknown'}"
             for record in observations.records:
+                if isinstance(record, (ToolCallObservation, AgentInvocation, ContextCompactionObservation)):
+                    record.clock_domain = clock_domain
                 if isinstance(record, ToolCallObservation):
                     record.sandbox_id = agent_sandbox_observation.sandbox_id
                 elif isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
+                    record.process_started_at = launch_s
+                    record.process_exited_at = exit_s
                     status = {
                         "completed": "completed",
                         "failed": "failed",
@@ -964,6 +1240,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations
+            run_result["_ng_steps"] = steps
+            run_result["_ng_phases"] = phases
         self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = run_result
 
         return NeMoGymResponse(
@@ -984,22 +1262,28 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         cookies = request.cookies
         session_key = request.session[SESSION_ID_KEY]
         rollout_id = self.rollout_id_from_run(body)
+        body_dict = body.model_dump()
 
+        phases: list[AgentPhaseObservation] = []
+        phase_started_at, phase_perf = time(), perf_counter()
         seed_session_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/seed_session",
-            json=body.model_dump(),
+            json=body_dict,
             cookies=cookies,
         )
         await raise_for_status(seed_session_response)
         cookies = cookies | seed_session_response.cookies
+        phases.append(_phase("seed_session", phase_started_at, phase_perf))
 
         # @bxyu-nvidia: "sandbox_handle" comes from resources_servers/swebench/app.py
         # Once we graduate to use the sandbox server, this will be in a generic seed_session type that can be model validated.
         seed_session_result = await seed_session_response.json()
+        phase_started_at, phase_perf = time(), perf_counter()
         sandbox = await self._start_sandbox(
             sandbox_id=seed_session_result.get("sandbox_handle"),
         )
+        phases.append(_phase("start_sandbox", phase_started_at, phase_perf))
         self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
         if rollout_id is not None:  # same condition under which observations are collected
             self._sandbox_id_to_clock[session_key] = await _probe_sandbox_clock(sandbox)
@@ -1017,8 +1301,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             run_result = self._sandbox_id_to_run_result.get(session_key, {})
             observations = run_result.pop("_ng_agent_observations", None)
 
-        verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
+        verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(body_dict | {"response": response})
 
+        phase_started_at, phase_perf = time(), perf_counter()
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
@@ -1026,10 +1311,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(verify_response)
+        phases.append(_phase("verify", phase_started_at, phase_perf))
 
+        phase_started_at, phase_perf = time(), perf_counter()
         try:
             await sandbox.stop()
+            phases.append(_phase("sandbox_stop", phase_started_at, phase_perf))
         except Exception:
+            phases.append(_phase("sandbox_stop", phase_started_at, phase_perf, status="failed"))
             print("Failed to stop sandbox", format_exc(), file=sys.stderr)
 
         self._sandbox_id_to_sandbox.pop(session_key, None)
@@ -1040,6 +1329,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         response_dict = await get_response_json(verify_response)
         run_result = self._sandbox_id_to_run_result.pop(session_key)
+        steps = run_result.pop("_ng_steps", [])
+        phases = [*run_result.pop("_ng_phases", []), *phases]
         response_dict |= run_result
         raw_verifier_sandbox_observation = response_dict.pop("verifier_sandbox_observation", None)
         response_dict["responses_create_params"]["input"].insert(
@@ -1063,7 +1354,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_invalid"))
             else:
                 observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_unavailable"))
+            observations.records.extend(phases)
             response_dict["ng_agent_observations"] = observations.model_dump(mode="json")
+            task_id = next(
+                (
+                    str(body_dict[key])
+                    for key in ("task_id", "problem_id", "instance_id")
+                    if body_dict.get(key) is not None
+                ),
+                str(body_dict.get("_ng_task_index", rollout_id)),
+            )
+            response_dict["ng_trajectory"] = TrajectoryRecord(
+                task_id=task_id, rollout_id=rollout_id, model_calls=steps
+            ).model_dump(mode="json")
         return OpenCodeSandboxedAgentVerifyResponse.model_validate(response_dict)
 
 
