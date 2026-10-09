@@ -9,12 +9,21 @@
 # Optional: FLASHINFER_REPO, EXPECTED_FLASHINFER_SHA, SLURM_PARTITION,
 # SLURM_QOS, SLURM_TIME (default 04:00:00), MAX_JOBS (default 4),
 # FLASHINFER_NVCC_THREADS (default 1), FLASHINFER_CUDA_ARCH_LIST (10.0a or 10.0f).
-# Build the fork's full SM100 JIT-cache provider plus the FP16 ReplaySSM variants.
+# FLASHINFER_BUILD_MODE=auto (default), reuse (require compatible official
+# binaries), or source (rebuild everything); FLASHINFER_CUBIN_DOWNLOAD_THREADS=32.
+# Reuse official binaries for checked ReplaySSM-only changes; otherwise build
+# the fork's full SM100 provider. Always rebuild the custom FP16 ReplaySSM variants.
 # Keep the CUDA toolkit in the image for other kernels' runtime JIT.
 set -Eeuo pipefail
 
 export FLASHINFER_REPO="${FLASHINFER_REPO:-https://github.com/bxyu-nvidia/flashinfer.git}"
 export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-10.0a}"
+export FLASHINFER_BUILD_MODE="${FLASHINFER_BUILD_MODE:-auto}"
+export FLASHINFER_CUBIN_DOWNLOAD_THREADS="${FLASHINFER_CUBIN_DOWNLOAD_THREADS:-32}"
+case "${FLASHINFER_BUILD_MODE}" in
+    auto|reuse|source) ;;
+    *) echo "ERROR: FLASHINFER_BUILD_MODE must be auto, reuse, or source." >&2; exit 2 ;;
+esac
 case "${FLASHINFER_CUDA_ARCH_LIST}" in
     10.0a|10.0f) ;;
     *) echo "ERROR: FLASHINFER_CUDA_ARCH_LIST must be 10.0a or 10.0f for this SM100 image." >&2; exit 2 ;;
@@ -52,11 +61,49 @@ if [[ "${1:-}" == __inside_build ]]; then
         exit 1
     fi
 
+    # Reuse requires a diff against the actual upstream release, not a tag from
+    # the fork. These source files affect only the two Mamba module families
+    # rebuilt below. Any other runtime/build change selects a full source build.
+    export FLASHINFER_RELEASE_VERSION="$(cat version.txt)"
+    export FLASHINFER_RELEASE_SHA=""
+    export FLASHINFER_INSTALL_MODE=source
+    if [[ "${FLASHINFER_BUILD_MODE}" != source && "${FLASHINFER_CUDA_ARCH_LIST}" == 10.0a ]]; then
+        if git fetch --depth=1 https://github.com/flashinfer-ai/flashinfer.git \
+            "refs/tags/v${FLASHINFER_RELEASE_VERSION}"; then
+            FLASHINFER_RELEASE_SHA=$(git rev-parse 'FETCH_HEAD^{commit}')
+            git diff --name-only --no-renames -z "${FLASHINFER_RELEASE_SHA}" HEAD -- > "${BUILD_DIR}/changed-files"
+            reuse_compatible=1
+            while IFS= read -r -d '' changed_file; do
+                case "${changed_file}" in
+                    csrc/replayssm_materialize.cu|\
+                    include/flashinfer/mamba/kernel_checkpointing_ssu.cuh|\
+                    include/flashinfer/mamba/kernel_checkpointing_ssu_common.cuh|\
+                    include/flashinfer/mamba/kernel_checkpointing_ssu_main.cuh|tests/*) ;;
+                    *) echo "Source build required by change: ${changed_file}"; reuse_compatible=0 ;;
+                esac
+            done < "${BUILD_DIR}/changed-files"
+            if [[ "${reuse_compatible}" == 1 ]]; then
+                FLASHINFER_INSTALL_MODE=reuse
+            fi
+        else
+            echo "Could not resolve the upstream release; selecting a full source build."
+        fi
+    fi
+    if [[ "${FLASHINFER_BUILD_MODE}" == reuse && "${FLASHINFER_INSTALL_MODE}" != reuse ]]; then
+        echo "ERROR: official binary reuse requires SM100a and a compatible diff against the upstream release." >&2
+        exit 1
+    fi
+    echo ">>> FlashInfer binary installation mode: ${FLASHINFER_INSTALL_MODE}"
+    export FLASHINFER_CACHE_VERSION="${FLASHINFER_RELEASE_VERSION}+$(python3 -c \
+        'import torch; print("cu" + "".join(torch.version.cuda.split(".")[:2]))')"
+
     # Prevent dependency resolution from replacing the image's CUDA/PyTorch stack.
     # Other FlashInfer dependencies can be installed/upgraded as the branch requires.
     python3 - "${BUILD_DIR}" <<'PY'
 import importlib.metadata as metadata
+import os
 import re
+import shutil
 import sys
 import tomllib
 from pathlib import Path
@@ -71,7 +118,17 @@ preserve = {"torch", "torchvision", "torchaudio", "vllm", "triton", "numpy", "cu
 for dist in metadata.distributions():
     name = re.sub(r"[-_.]+", "-", dist.metadata["Name"]).lower()
     if name.startswith("flashinfer-"):
-        remove.append(dist.metadata["Name"])
+        keep = os.environ["FLASHINFER_INSTALL_MODE"] == "reuse" and (
+            (name == "flashinfer-cubin" and dist.version == os.environ["FLASHINFER_RELEASE_VERSION"])
+            or (name in {"flashinfer-jit-cache", "flashinfer-jit-cache-sm100a"}
+                and dist.version == os.environ["FLASHINFER_CACHE_VERSION"])
+        )
+        if not keep:
+            remove.append(dist.metadata["Name"])
+        if name == "flashinfer-python":
+            # Earlier image builds may have added AOT overrides outside the
+            # wheel RECORD; uninstall alone would leave those stale binaries.
+            shutil.rmtree(dist.locate_file("flashinfer/data/aot"), ignore_errors=True)
     elif name in preserve or name.startswith("nvidia-"):
         constraints.append(f"{dist.metadata['Name']}=={dist.version}")
 (build_dir / "constraints.txt").write_text("\n".join(constraints) + "\n")
@@ -83,39 +140,72 @@ requirements.update(get_build_dependency_requirements(torch.version.cuda.split("
 (build_dir / "build-requirements.txt").write_text("\n".join(sorted(requirements)) + "\n")
 PY
 
-    # Remove both the old cubins and every JIT-cache provider. An old precompiled
-    # kernel can otherwise bypass the CUDA sources we are trying to change.
+    # Keep matching official binary packages in reuse mode. uv also reuses
+    # installed wheels, so a matching base image needs no cubin/provider download.
     if [[ -s "${BUILD_DIR}/uninstall.txt" ]]; then
         uv pip uninstall --system -r "${BUILD_DIR}/uninstall.txt"
     fi
     uv pip install --system --constraint "${BUILD_DIR}/constraints.txt" \
         -r "${BUILD_DIR}/build-requirements.txt" -r requirements.txt
 
-    # A commit-specific version also isolates runtime JIT caches from older builds.
-    export FLASHINFER_LOCAL_VERSION="g${FLASHINFER_HEAD_SHA}"
+    # Official cubins require the public release version. The actual fork SHA
+    # remains in _build_meta and our image manifest; version checks stay enabled.
+    if [[ "${FLASHINFER_INSTALL_MODE}" == reuse ]]; then
+        unset FLASHINFER_LOCAL_VERSION
+    else
+        export FLASHINFER_LOCAL_VERSION="g${FLASHINFER_HEAD_SHA}"
+    fi
     unset FLASHINFER_DEV_RELEASE_SUFFIX FLASHINFER_DISABLE_JIT FLASHINFER_DISABLE_VERSION_CHECK
     unset FLASHINFER_CUBIN_DIR
     # Keep build hooks from silently replacing runtime dependencies outside uv's
     # constrained resolution above (supported by newer FlashInfer branches).
     export FLASHINFER_BUILD_NO_PIP=1
     uv pip install --system --no-deps --no-build-isolation .
-    # This packages the branch's downloaded cubin artifacts; it does not rebuild
-    # proprietary precompiled kernels. Editable CUDA sources use runtime JIT.
-    uv pip install --system --no-deps --no-build-isolation ./flashinfer-cubin
-
-    # Build the broad AOT kernel set from the same pinned source and version as
-    # flashinfer-python. --no-deps prevents the shim from fetching stock providers.
     export FLASHINFER_JIT_CACHE_PROVIDER_ARCH="${FLASHINFER_CUDA_ARCH_LIST}"
     export FLASHINFER_JIT_CACHE_PROVIDER_ARCHS="${FLASHINFER_CUDA_ARCH_LIST}"
     export MAX_JOBS="${MAX_JOBS:-4}"
     export FLASHINFER_NVCC_THREADS="${FLASHINFER_NVCC_THREADS:-1}"
-    echo ">>> Build FlashInfer JIT-cache provider for ${FLASHINFER_JIT_CACHE_PROVIDER_ARCH}"
-    uv pip install --system --no-deps --no-build-isolation --verbose ./flashinfer-jit-cache-provider
-    uv pip install --system --no-deps --no-build-isolation ./flashinfer-jit-cache
+    if [[ "${FLASHINFER_INSTALL_MODE}" == reuse ]]; then
+        echo ">>> Reuse official cubins and SM100a JIT-cache wheels"
+        uv pip install --system --no-deps --only-binary=:all: \
+            "flashinfer-cubin==${FLASHINFER_RELEASE_VERSION}" --index-url https://flashinfer.ai/whl
+        uv pip install --system --no-deps --only-binary=:all: \
+            "flashinfer-jit-cache==${FLASHINFER_CACHE_VERSION}" \
+            "flashinfer-jit-cache-sm100a==${FLASHINFER_CACHE_VERSION}" \
+            --index-url "https://flashinfer.ai/whl/${FLASHINFER_CACHE_VERSION##*+}"
+    else
+        # Cubins are downloaded/packaged; the provider compiles the broad AOT set.
+        uv pip install --system --no-deps --no-build-isolation ./flashinfer-cubin
+        echo ">>> Build FlashInfer JIT-cache provider for ${FLASHINFER_JIT_CACHE_PROVIDER_ARCH}"
+        uv pip install --system --no-deps --no-build-isolation --verbose ./flashinfer-jit-cache-provider
+        uv pip install --system --no-deps --no-build-isolation ./flashinfer-jit-cache
+    fi
+
+    cd /
+    if [[ "${FLASHINFER_INSTALL_MODE}" == reuse ]]; then
+        # Invalidate every affected cached specialization, including shapes we
+        # do not explicitly warm. Those shapes must JIT from the patched source.
+        python3 - <<'PY'
+import json
+import shutil
+from pathlib import Path
+
+from flashinfer_jit_cache.providers import sm100a
+
+manifest_path = Path(sm100a.__file__).with_name("manifest.json")
+manifest = json.loads(manifest_path.read_text())
+affected = [name for name in manifest["modules"]
+            if name.startswith(("checkpointing_ssu_", "replayssm_materialize_"))]
+for name in affected:
+    shutil.rmtree(manifest_path.parent / "jit_cache" / name)
+manifest["modules"] = [name for name in manifest["modules"] if name not in affected]
+manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+print(f"Invalidated {len(affected)} official ReplaySSM specializations")
+PY
+    fi
 
     # Verify discovery, provenance, and a real GPU operation from the installed
     # provider outside the checkout, with an empty workspace and JIT disabled.
-    cd /
     FLASHINFER_WORKSPACE_BASE="${BUILD_DIR}/smoke-cache" FLASHINFER_DISABLE_JIT=1 \
         python3 - "${BUILD_DIR}/jit-cache.env" <<'PY'
 import importlib
@@ -133,15 +223,20 @@ from flashinfer.jit import env as jit_env
 from flashinfer.jit.norm import gen_norm_module
 
 assert __git_commit__ == os.environ["FLASHINFER_HEAD_SHA"], __git_commit__
-assert flashinfer.__version__ == flashinfer_cubin.__version__ == flashinfer_jit_cache.__version__
-assert flashinfer_jit_cache.__git_version__ == __git_commit__
+assert flashinfer.__version__ == flashinfer_cubin.__version__
+reuse = os.environ["FLASHINFER_INSTALL_MODE"] == "reuse"
+binary_sha = os.environ["FLASHINFER_RELEASE_SHA"] if reuse else __git_commit__
+cache_version = os.environ["FLASHINFER_CACHE_VERSION"] if reuse else flashinfer.__version__
+assert flashinfer_cubin.__git_version__ == binary_sha
+assert flashinfer_jit_cache.__version__ == cache_version
+assert flashinfer_jit_cache.__git_version__ == binary_sha
 provider_id = "sm" + os.environ["FLASHINFER_JIT_CACHE_PROVIDER_ARCH"].replace(".", "")
 providers = jit_env.FLASHINFER_AOT_PROVIDERS
 assert len(providers) == 1 and providers[0].provider_id == provider_id, providers
 provider = providers[0]
 package = importlib.import_module(f"flashinfer_jit_cache.providers.{provider_id}")
-assert package.__git_version__ == __git_commit__, package.__git_version__
-assert provider.version == package.__version__ == flashinfer.__version__
+assert package.__git_version__ == binary_sha, package.__git_version__
+assert provider.version == package.__version__ == cache_version
 assert {"norm", "fmha_gen", "fused_moe_trtllm_sm100"} <= provider.modules, provider.modules
 for name in provider.modules:
     library = provider.jit_cache_dir / name / f"{name}.so"
@@ -178,6 +273,7 @@ PY
     # Keep one module list for compilation and verification in a fresh process.
     cat > "${BUILD_DIR}/warmup.py" <<'PY'
 import hashlib
+import os
 import shutil
 import sys
 from functools import partial
@@ -254,6 +350,21 @@ for label, generate_spec, artifact, expected_sha in modules:
 
     spec = generate_spec()
     destination = jit_env.FLASHINFER_AOT_DIR / spec.name / f"{spec.name}.so"
+    reuse_binary = os.environ["FLASHINFER_INSTALL_MODE"] == "reuse" and artifact is not None
+    if reuse_binary:
+        # FMHA and fused MoE are unchanged in the checked diff. Load the official
+        # provider instead of recompiling or copying its dispatchers.
+        destination = spec.aot_path
+        assert destination.is_file(), f"Missing official module: {destination}"
+        if not verify_only:
+            assert artifact.encode() in destination.read_bytes(), f"Wrong artifact in {destination}"
+            digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+            records.append(
+                f"{label}_MODULE_NAME={spec.name}\n{label}_DISPATCHER_PATH={destination}\n"
+                f"{label}_DISPATCHER_SHA256={digest}\n"
+            )
+            print(f"Reusing official module: {destination}")
+            continue
     if verify_only:
         assert spec.aot_path == destination and destination.is_file(), f"Missing warmed module: {destination}"
         spec.build_and_load()
@@ -292,6 +403,8 @@ PY
     {
         printf 'BASE_IMAGE=%s\nFLASHINFER_REPO=%s\nFLASHINFER_BRANCH=%s\nFLASHINFER_SHA=%s\n' \
             "${BASE_IMAGE}" "${FLASHINFER_REPO}" "${FLASHINFER_BRANCH}" "${FLASHINFER_HEAD_SHA}"
+        printf 'FLASHINFER_INSTALL_MODE=%s\nFLASHINFER_RELEASE_SHA=%s\n' \
+            "${FLASHINFER_INSTALL_MODE}" "${FLASHINFER_RELEASE_SHA}"
         python3 -c 'import flashinfer; print(f"FLASHINFER_VERSION={flashinfer.__version__}")'
         cat "${BUILD_DIR}/jit-cache.env"
         cat "${BUILD_DIR}/warmup.env"
