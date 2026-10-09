@@ -44,15 +44,13 @@ wall-clock time, and dropping those samples would bias the histogram toward the 
 
 ### Startup Metrics
 
-The stage histogram carries `nemo.gym.server.name`, `nemo.gym.server.type`, `nemo.gym.startup.stage`, and
-`nemo.gym.server.worker`. Stages are contiguous, so for one process they sum to the time from its start to the
-moment it accepts connections:
+The stage histogram carries `nemo.gym.server.name`, `nemo.gym.server.type`, `nemo.gym.startup.stage`, and `nemo.gym.server.worker`. Stages are contiguous, so one process's stages add up to the time from its start to the moment it accepts connections.
 
 | Stage | What it covers |
 | --- | --- |
 | `venv_setup` | Venv creation and dependency installation in the launch shell. Near zero when `skip_venv_if_present` reuses a venv. |
 | `interpreter_start` | The server's interpreter starting and importing the server module and its dependencies. |
-| `worker_start` | Workers only: the main process handing off to Uvicorn to the worker entering `run_webserver`, which covers spawning the worker process and importing the server module. |
+| `worker_start` | Workers only. Runs from the main process handing off to Uvicorn to the worker entering `run_webserver`, which covers spawning the worker process and importing the server module. |
 | `load_config` | Loading the merged config and this server's section of it. |
 | `init_ray` | Starting or joining Ray, for servers that use it. |
 | `init_server` | Constructing the server object, including its `model_post_init` (external tool installs, model clients, caches). |
@@ -62,14 +60,9 @@ moment it accepts connections:
 | `configure_app` | Liveness routes, middleware, instrumentation, and profiling. |
 | `uvicorn_startup` | From the end of app configuration to Uvicorn running the app's startup, just before it accepts connections. Not recorded by the main process of a multi-worker server, which does not serve requests. |
 
-A server with `num_workers` above 1 runs `run_webserver` again in every Uvicorn worker. Each worker reports its own
-stages, starting at `worker_start`, with `nemo.gym.server.worker` set to true. The main process of that server
-reports the stages up to the hand-off, with the attribute false. For a single-process server the attribute is
-always false. Group by it, or filter on it, so a worker's `init_server` is not averaged with the main process's.
+A server with `num_workers` above 1 runs `run_webserver` again in every Uvicorn worker. Each worker reports its own stages, starting at `worker_start`, with `nemo.gym.server.worker` set to true. The main process of that server reports the stages up to the hand-off to Uvicorn, with the attribute set to false. Filter or group by this attribute, so that a worker's `init_server` is not averaged with the main process's.
 
-There is no separate supervisor-side total. The supervisor learns that a server is ready from a health poll every
-few seconds, so its number would be the stages above plus polling delay. The per-server total is the
-`gym.startup.server` span in the startup trace.
+There is no supervisor-side total. The supervisor learns that a server is ready from a health poll every few seconds, so its total would be the stages above plus polling delay. The total for each server is the `gym.startup.server` span in the startup trace.
 
 ### Memory Metrics
 

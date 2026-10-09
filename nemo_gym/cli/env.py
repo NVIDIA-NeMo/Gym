@@ -436,9 +436,9 @@ def _server_launch_command(
     puts on PATH: a venv copied or moved after creation still names its original prefix in `bin/activate`,
     so activating it would silently run a different interpreter than `uv_venv_dir` selected.
 
-    The middle line stamps when venv setup finished, so the server can tell setup time from interpreter
-    start and import time in its startup timing (see `nemo_gym.telemetry.startup`). It uses the venv's
-    own interpreter because `date +%s%N` is not portable to macOS.
+    The middle line records when venv setup finished.
+    The server uses it to separate venv setup from interpreter start and import time in its startup stages (see `nemo_gym.telemetry.startup`).
+    It reads the clock with the venv's own interpreter because `date +%s%N` does not work on macOS.
     """
     venv_python_fpath = get_venv_path(dir_path, global_config_dict) / "bin" / "python"
     return f"""{setup_env_command(dir_path, global_config_dict, server_name)} \\

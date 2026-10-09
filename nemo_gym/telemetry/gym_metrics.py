@@ -39,13 +39,14 @@ All four carry ``nemo.gym.sandbox.provider``.
 
 Server startup
 --------------
-``gym.server.startup_stage_duration_ms`` (histogram): one stage of one server's own startup, recorded
-by that server's process. ``nemo.gym.startup.stage`` names the stage and ``nemo.gym.server.worker``
-marks a Uvicorn worker of a multi-worker server. Stages are contiguous, so a process's stages sum to
-the time from its start (spawn for a server, Uvicorn hand-off for a worker) until it accepts connections. The same stages are spans
-under the ``startup`` span group. It also carries ``nemo.gym.server.name`` and ``nemo.gym.server.type``.
-There is deliberately no supervisor-side total: the supervisor only learns readiness from a health poll
-every few seconds, so its number would be these stages plus polling noise.
+``gym.server.startup_stage_duration_ms`` (histogram): one stage of one server's own startup, recorded by the process that ran it.
+``nemo.gym.startup.stage`` names the stage, and ``nemo.gym.server.worker`` marks a Uvicorn worker of a multi-worker server.
+Each point also carries ``nemo.gym.server.name`` and ``nemo.gym.server.type``.
+Stages are contiguous, so one process's stages add up to the time from its start until it accepts connections.
+A server process starts when the supervisor spawns it, and a worker starts when its main process hands off to Uvicorn.
+The same stages are spans under the ``startup`` span group.
+There is no supervisor-side total, because the supervisor only learns that a server is ready from a periodic health poll.
+That total would be these stages plus polling delay.
 
 HTTP connection pool
 --------------------
@@ -101,8 +102,9 @@ SANDBOX_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
     1_800_000,
 )
 
-#: Milliseconds. A cold venv install runs for minutes and a local model load can take far longer, so the
-#: boundaries run to an hour; a warm server is up in a second or two.
+#: Milliseconds.
+#: A cold venv install can run for minutes and a local model load for longer, so the boundaries run to an hour.
+#: Init stages of a warm server fall in the lowest buckets.
 SERVER_STARTUP_BOUNDARIES_MS: tuple[float, ...] = (
     100,
     250,
@@ -268,15 +270,15 @@ def _server_attributes(server_name: str, server_type: Optional[str]) -> dict[str
 def record_server_startup_stage(
     duration_ms: float, *, stage: str, server_name: str, server_type: Optional[str], worker: bool = False
 ) -> None:
-    """Record one stage of one server's own startup, from that server's process.
+    """Record one stage of one server's own startup, from the process that ran it.
 
-    ``worker`` is true for a Uvicorn worker of a multi-worker server, whose stages are timed apart
-    from the main process's.
+    ``worker`` is true for a Uvicorn worker of a multi-worker server.
+    A worker's stages are timed separately from its main process's.
     """
     _record_histogram(
         SERVER_STARTUP_STAGE_INSTRUMENT,
         "ms",
-        "Wall-clock time of one stage of a server's startup, from spawn to the call to uvicorn.run.",
+        "Wall-clock time of one stage of a server process's startup.",
         duration_ms,
         _server_attributes(server_name, server_type) | {STARTUP_STAGE_ATTRIBUTE: stage, WORKER_ATTRIBUTE: worker},
         boundaries=SERVER_STARTUP_BOUNDARIES_MS,

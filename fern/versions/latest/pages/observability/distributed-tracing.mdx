@@ -140,14 +140,13 @@ omits `job`, so each rollout becomes its own bounded root trace. See
 
 ### Startup Traces
 
-Startup is its own trace, separate from the `gym.job` run trace, and both carry the same `run_id`. The
-supervisor opens `gym.startup` with one child per supervisor stage (`load_config`, `init_telemetry`,
-`init_ray`, `start_head_server`, `spawn_servers`, `wait_for_head_server`, `wait_for_servers`,
-`wait_for_model_endpoints`) and one `gym.startup.server` span per server, from spawn to first healthy probe.
-Each server parents its own `gym.server.startup` span, with one child per stage, to that span through a
-`traceparent` passed in its environment. The Uvicorn workers of a multi-worker server inherit the same
-`traceparent` and add a `gym.server.startup.worker` span each, as siblings of the main process's span. Enable it with the `startup` span group, which is in the `default`
-preset.
+Server startup is its own trace, separate from the `gym.job` trace of the run. Both traces carry the same `run_id`, so a backend can group them.
+
+The supervisor, which is the process running `gym env start` or `gym eval run`, opens a `gym.startup` span. Under it, the supervisor adds one span per stage of its own work, such as `spawn_servers` and `wait_for_servers`. It also adds one `gym.startup.server` span per server, which runs from spawning the server to the server's first answered health probe.
+
+Each server receives a `traceparent` for its `gym.startup.server` span in its environment. The server parents its own `gym.server.startup` span to it, with one child span per startup stage. In a multi-worker server, every Uvicorn worker inherits the same `traceparent` and adds its own `gym.server.startup.worker` span next to the main process's span.
+
+These spans belong to the `startup` span group, which is in the `default` preset.
 
 ### Only the Supervisor Emits Spans
 

@@ -14,28 +14,25 @@
 # limitations under the License.
 """Where server startup time goes, per server, exported through nemo-lens.
 
-Startup is split between two kinds of process, and neither can see the whole of it:
+Startup is split between two kinds of process, and neither can see all of it.
+The supervisor is the process running ``gym env start`` or ``gym eval run``.
+It knows when it spawned each server and when that server first answered a health probe, but not what happened in between.
+Each server knows what it did after its interpreter started.
+It cannot see the venv setup that ran before the server process existed.
 
-* The **supervisor** (the process running ``gym env start`` / ``gym eval run``) knows when it
-  spawned each server and when that server first answered a health probe. It cannot see inside
-  the gap.
-* Each **server** knows what it did between starting its interpreter and calling
-  ``uvicorn.run``. It cannot see the venv setup that ran before it existed.
+The two halves meet through environment variables set when the supervisor spawns a server.
+The supervisor sets the spawn time and a W3C ``traceparent`` that names its span for that server.
+The launch shell adds the time venv setup finished.
+The server turns those into its first two stages, ``venv_setup`` and ``interpreter_start``, and times the rest itself.
+When the server starts accepting connections, it exports its stages as spans under the supervisor's span, so one startup is one trace.
+The Uvicorn workers of a multi-worker server are separate processes that import the server again, and each reports its own stages the same way.
 
-The two halves meet through environment variables set at spawn. The supervisor stamps the spawn
-time and a W3C ``traceparent`` naming its per-server span. The launch shell stamps the time venv
-setup finished. The server turns those into its first two stages (``venv_setup``,
-``interpreter_start``), times the rest itself, and exports spans and metrics just before serving,
-so a server's spans nest under the supervisor's span for it in one trace. A multi-worker server's
-workers, which are separate processes that import the server again, report their own spans the same way.
+Each call to :meth:`StageTimeline.mark` closes the stage that began at the previous call.
+Stages are therefore contiguous and add up to the process's total, and call sites need no extra indentation.
+Spans are created after the fact with explicit timestamps, because telemetry is only initialised partway through startup.
 
-Stages are recorded with :meth:`StageTimeline.mark`: each mark closes the stage that began at the
-previous one, so stages are contiguous and sum to the total, and call sites need no extra
-indentation. Spans are emitted retroactively with explicit timestamps, because telemetry is not
-initialised until partway through startup.
-
-Nothing here may fail a server or the supervisor: every telemetry step is guarded, and with
-telemetry off every method is a cheap no-op.
+Nothing here may fail a server or the supervisor.
+Every telemetry step is guarded, and with telemetry off every method returns without exporting anything.
 """
 
 import logging
@@ -65,10 +62,10 @@ PROCESS_PID_ATTRIBUTE = "process.pid"
 #: Wall-clock nanoseconds at which the supervisor spawned this server's launch shell.
 STARTUP_SPAWN_NS_ENV = "NEMO_GYM_STARTUP_SPAWN_NS"
 #: Wall-clock nanoseconds at which venv setup finished and the server's interpreter was about to launch.
-#: Set by the launch shell, so it is absent when a server is started some other way.
+#: The launch shell sets it, so it is absent when a server is started some other way.
 STARTUP_SETUP_DONE_NS_ENV = "NEMO_GYM_STARTUP_SETUP_DONE_NS"
-#: Wall-clock nanoseconds at which a multi-worker server's main process handed off to Uvicorn. Set in
-#: the main process's environment just before ``uvicorn.run``, so the workers it spawns inherit it.
+#: Wall-clock nanoseconds at which a multi-worker server's main process handed off to Uvicorn.
+#: The main process sets it in its own environment just before ``uvicorn.run``, so the workers it spawns inherit it.
 STARTUP_SERVE_NS_ENV = "NEMO_GYM_STARTUP_SERVE_NS"
 #: W3C ``traceparent`` of the supervisor's span for this server.
 STARTUP_TRACEPARENT_ENV = "NEMO_GYM_STARTUP_TRACEPARENT"
@@ -76,8 +73,9 @@ STARTUP_TRACEPARENT_ENV = "NEMO_GYM_STARTUP_TRACEPARENT"
 #: Stages recorded before the server's own code runs, in launch order.
 VENV_SETUP_STAGE = "venv_setup"
 INTERPRETER_START_STAGE = "interpreter_start"
-#: A worker's equivalent of the two stages above: from the main process handing off to Uvicorn to the
-#: worker entering ``run_webserver``. It covers spawning the process and importing the server module.
+#: A worker's equivalent of the two stages above.
+#: It runs from the main process handing off to Uvicorn to the worker entering ``run_webserver``.
+#: It covers spawning the worker process and importing the server module.
 WORKER_START_STAGE = "worker_start"
 #: From the end of app configuration to Uvicorn running the app's startup, just before it accepts connections.
 UVICORN_STARTUP_STAGE = "uvicorn_startup"
@@ -105,7 +103,10 @@ class StageTimeline:
         self._cursor_ns = self.start_ns
 
     def mark(self, name: str) -> None:
-        """End the current stage here and name it. A repeated name adds a second stage."""
+        """End the current stage here and name it.
+
+        A repeated name adds a second stage.
+        """
         now = time_ns()
         self.stages.append(Stage(name, self._cursor_ns, now))
         self._cursor_ns = now
@@ -157,11 +158,12 @@ def _stage_spans(
 class ServerStartupTimeline(StageTimeline):
     """A server process's own startup stages.
 
-    A multi-worker server runs ``run_webserver`` in its main process and again in every Uvicorn
-    worker. The main process times the stages up to the hand-off to Uvicorn; each worker times its
-    own spawn, import and setup. Each reports its own spans and metrics, marked by ``worker``.
-    Only a process that serves requests reports at Uvicorn's startup, so the last stage
-    (``uvicorn_startup``) is timed to the moment it starts accepting connections.
+    A multi-worker server runs ``run_webserver`` in its main process and again in every Uvicorn worker.
+    The main process times the stages up to the hand-off to Uvicorn.
+    Each worker times its own spawn, import, and setup.
+    Each process reports its own spans and metrics, with ``worker`` telling them apart.
+    A process that serves requests reports when Uvicorn runs the app's startup.
+    Its last stage, ``uvicorn_startup``, therefore ends when it starts accepting connections.
     """
 
     def __init__(
@@ -181,8 +183,8 @@ class ServerStartupTimeline(StageTimeline):
             if serve_ns is not None and serve_ns <= entered_ns:
                 self.add(WORKER_START_STAGE, serve_ns, entered_ns)
             return
-        # Stages that happened before this process could time itself. Both stamps are optional so a
-        # server started by hand (no supervisor, no launch shell) still reports its own stages.
+        # These stages happened before this process could time itself.
+        # Both stamps are optional, so a server started by hand, without the supervisor or the launch shell, still reports its own stages.
         spawn_ns = _env_ns(STARTUP_SPAWN_NS_ENV)
         setup_done_ns = _env_ns(STARTUP_SETUP_DONE_NS_ENV)
         if spawn_ns is not None and setup_done_ns is not None and spawn_ns <= setup_done_ns <= entered_ns:
@@ -203,7 +205,7 @@ class ServerStartupTimeline(StageTimeline):
     def report_when_serving(self, app: Any) -> None:
         """Report when ``app``'s startup runs, adding the ``uvicorn_startup`` stage.
 
-        Wraps the app's lifespan, so a lifespan the server already set keeps running inside it.
+        This wraps the app's lifespan, so a lifespan the server already set keeps running inside it.
         """
         if not self.enabled:
             return
@@ -221,7 +223,10 @@ class ServerStartupTimeline(StageTimeline):
         app.router.lifespan_context = lifespan
 
     def report(self) -> None:
-        """Emit spans and metrics, once. Safe to call from a process that never finishes starting."""
+        """Emit spans and metrics once.
+
+        Later calls do nothing.
+        """
         if not self.enabled or not self.stages or self._reported:
             return
         self._reported = True
@@ -267,7 +272,10 @@ class _ServerRecord:
 
 
 class SupervisorStartup(StageTimeline):
-    """The supervisor's view of one startup: its own stages, plus spawn and ready time per server."""
+    """The supervisor's view of one startup.
+
+    It records the supervisor's own stages and, for each server, when it was spawned and when it first answered a health probe.
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -276,7 +284,10 @@ class SupervisorStartup(StageTimeline):
         self._root_span: Any = None
 
     def begin_trace(self) -> None:
-        """Open the ``gym.startup`` span. Call once telemetry has been initialised."""
+        """Open the ``gym.startup`` span.
+
+        Call this once telemetry has been initialised.
+        """
         telemetry = _exporting_telemetry()
         if telemetry is None or not is_span_group_enabled(GymSpanGroup.STARTUP):
             return
@@ -287,7 +298,10 @@ class SupervisorStartup(StageTimeline):
             logger.debug("nemo-lens: could not open the startup span", exc_info=True)
 
     def server_env(self, server_name: str, server_type: str) -> Dict[str, str]:
-        """Environment for one server about to be spawned. Records its spawn time."""
+        """Return the environment for one server about to be spawned.
+
+        This also records the server's spawn time.
+        """
         record = _ServerRecord(server_type=server_type, spawn_ns=time_ns())
         env = {STARTUP_SPAWN_NS_ENV: str(record.spawn_ns)}
         if self._root_span is not None:
@@ -313,7 +327,10 @@ class SupervisorStartup(StageTimeline):
         return env
 
     def server_ready(self, server_name: str) -> None:
-        """Record that ``server_name`` first answered a health probe. Later calls are ignored."""
+        """Record that ``server_name`` first answered a health probe.
+
+        Later calls for the same server are ignored.
+        """
         record = self._servers.get(server_name)
         if record is None or record.ready_ns is not None:
             return
