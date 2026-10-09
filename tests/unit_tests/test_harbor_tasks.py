@@ -858,6 +858,10 @@ class TestInstruction:
         assert read_instruction(path) == "Do the thing.\n\nKeep  spacing.\n"
         path.write_text("Plain task\n")
         assert read_instruction(path) == "Plain task\n"
+        # No canary: the file is the prompt verbatim, a leading blank line included (Terminal-Bench 2.1's
+        # query-optimize starts that way, and the legacy server passed it through).
+        path.write_text("\nStarts after a blank line.\n")
+        assert read_instruction(path) == "\nStarts after a blank line.\n"
 
 
 class TestCli:

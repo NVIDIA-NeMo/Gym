@@ -78,9 +78,13 @@ def read_instruction(path: Path) -> str:
     always did; everything after it is kept byte for byte.
     """
     lines = path.read_text().split("\n")
+    removed_canary = False
     while lines and _CANARY_LINE.match(lines[0].strip()):
         lines.pop(0)
-    while lines and not lines[0].strip():
+        removed_canary = True
+    # Only the blank lines that separated the canary from the task go with it. A file with no canary is
+    # the author's prompt byte for byte, leading newline included, as the legacy servers passed it.
+    while removed_canary and lines and not lines[0].strip():
         lines.pop(0)
     return "\n".join(lines)
 
