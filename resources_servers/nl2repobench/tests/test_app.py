@@ -184,6 +184,7 @@ async def test_seed_session_creates_agent_sandbox(task_assets: Path, monkeypatch
     server = NL2RepoBenchResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
     sandbox = AsyncMock()
     sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox", "workdir": "/workspace"}
+    sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
     monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
     monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
@@ -197,7 +198,10 @@ async def test_seed_session_creates_agent_sandbox(task_assets: Path, monkeypatch
     assert response.sandbox_descriptor == {"sandbox_id": "agent-sandbox", "workdir": "/workspace"}
     assert "test-session" in server._agent_sessions
     spec = sandbox.start.await_args.args[0]
-    assert spec.image == UPSTREAM_IMAGE
+    # Default agent_network_mode is "official", which boots the agent from the generic,
+    # task-agnostic sandbox image (not the task's own pinned grading image) - see
+    # _AGENT_SANDBOX_IMAGE in app.py.
+    assert spec.image == app_module._AGENT_SANDBOX_IMAGE
     assert spec.workdir == "/workspace"
 
 

@@ -97,6 +97,7 @@ _GUARD_SCRIPT_TEMPLATE_MODULE_AWARE = """#!/usr/bin/env bash
 set -euo pipefail
 TARGET="{target}"
 REAL="{real_path}"
+TOOL_NAME="{tool_name}"
 norm() {{ echo "$1" | tr 'A-Z_' 'a-z-'; }}
 args=("$@")
 is_pkg_fetch=false
@@ -106,7 +107,7 @@ for i in "${{!args[@]}}"; do
     is_pkg_fetch=true
     break
   fi
-  if [[ "$a" == "pip" && "$(basename "$REAL")" == uv ]]; then
+  if [[ "$a" == "pip" && "$TOOL_NAME" == uv ]]; then
     is_pkg_fetch=true
     break
   fi
@@ -295,6 +296,7 @@ def _compute_reward(tests_passed: int, test_case_count: int) -> float:
 
 
 class NL2RepoBenchResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: NL2RepoBenchResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -445,9 +447,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 # this can't lose them. Must happen before the agent's session is usable
                 # (seed_session can't return until this function returns, so there's no window
                 # where the agent could read any of it first).
-                wipe_result = await sandbox.exec(
-                    command="find /workspace -mindepth 1 -delete", cwd="/", timeout_s=60
-                )
+                wipe_result = await sandbox.exec(command="find /workspace -mindepth 1 -delete", cwd="/", timeout_s=60)
                 if wipe_result.return_code != 0:
                     raise RuntimeError(
                         f"Failed to wipe pre-existing /workspace contents in agent sandbox for {task_id(task)!r}: "
@@ -508,7 +508,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             (self._MODULE_AWARE_GUARD_TOOLS, _GUARD_SCRIPT_TEMPLATE_MODULE_AWARE),
         )
         for tool_names, template in tool_groups:
-            discover_cmd = "; ".join(f'command -v "{n}" || echo \'\'' for n in tool_names)
+            discover_cmd = "; ".join(f"command -v \"{n}\" || echo ''" for n in tool_names)
             discover = await sandbox.exec(command=discover_cmd, cwd="/", timeout_s=30)
             if discover.return_code != 0:
                 raise RuntimeError(
@@ -529,7 +529,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                         f"Failed to back up real {name!r} for guard install on {current_task_id!r}: "
                         f"{move_result.stderr or move_result.stdout or '(no output)'}"
                     )
-                script = template.format(target=target, real_path=backup_path)
+                script = template.format(target=target, real_path=backup_path, tool_name=name)
                 with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
                     f.write(script)
                     local_script_path = Path(f.name)
