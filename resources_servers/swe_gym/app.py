@@ -46,7 +46,8 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    SimpleResourcesServer,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
 )
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
@@ -72,6 +73,7 @@ from resources_servers.swebench.patch_capture import (
     capture_model_patch,
     prepare_git_for_commits,
 )
+from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 
 
 # The image's default PATH points at the conda *base* interpreter (Python 3.11 without the repo's
@@ -156,7 +158,7 @@ class SWEGymVerifyResponse(BaseVerifyResponse):
     model_patch_sha256: str = ""
 
 
-class SWEGymResourcesServer(SimpleResourcesServer):
+class SWEGymResourcesServer(SandboxSessionResourcesServer):
     ray_enabled = False
     config: SWEGymResourcesServerConfig
 
@@ -246,19 +248,36 @@ class SWEGymResourcesServer(SimpleResourcesServer):
                 drop_sections=drop_patch_sections,
             )
         finally:
-            await self._stop_sandbox(original_sandbox)
+            await self._release_task_sandbox(session_id, original_sandbox)
 
-    async def seed_session(self, request: Request, body: SWEGymSeedSessionRequest) -> SWEGymSeedSessionResponse:
+    async def seed_session(
+        self, request: Request, body: SWEGymSeedSessionRequest | ResourcesSeedSessionRequest
+    ) -> SWEGymSeedSessionResponse | ResourcesSeedSessionResponse:
         """Start the instance's image so an agent can work in it.
+
+        An Environment Server seeds a typed session and gets the sandbox back as ``sandbox_access``; an
+        agent's ``/run`` seeds with the row and gets the sandbox handle.
+        """
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return await self.seed_task_sandbox_session(request, body, SWEGymInstanceRequest)
+        session_id = request.session[SESSION_ID_KEY]
+        await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
+        await self._start_task_sandbox(session_id, body)
+        return SWEGymSeedSessionResponse(
+            sandbox_handle=str(self._session_id_to_sandbox[session_id]._handle.sandbox_id), workdir=REPO_DIRECTORY
+        )
+
+    async def _start_task_sandbox(self, session_id: str, body: SWEGymInstanceRequest) -> str:
+        """Start the task sandbox for ``session_id`` and return the directory the agent works in.
 
         The sandbox gets no files from the row. The git scrub drops every ref but HEAD and prunes the
         objects behind them: SWE-bench images clone the whole upstream history, so without it the fix
         commit and every later release tag sit in ``.git`` within a ``git log --all`` of the agent.
         """
-        session_id = request.session[SESSION_ID_KEY]
-        await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
-        self._session_id_to_pristine_untracked.pop(session_id, None)
+        self._forget_task_sandbox_state(session_id)
         sandbox = await self._create_sandbox(body)
+        # Own the sandbox before preparing it, so a failed seed can still stop it.
+        self._session_id_to_sandbox[session_id] = sandbox
         if self.config.apply_anti_cheating:
             await apply_anti_cheat_setup(sandbox, REPO_DIRECTORY, body.instance_id, "swe_gym")
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
@@ -266,8 +285,10 @@ class SWEGymResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
             sandbox, REPO_DIRECTORY
         )
-        self._session_id_to_sandbox[session_id] = sandbox
-        return SWEGymSeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id), workdir=REPO_DIRECTORY)
+        return REPO_DIRECTORY
+
+    def _forget_task_sandbox_state(self, session_id: str) -> None:
+        self._session_id_to_pristine_untracked.pop(session_id, None)
 
     def _response(self, body: SWEGymVerifyRequest, **fields: Any) -> SWEGymVerifyResponse:
         # Spread the request: BaseVerifyResponse extends BaseVerifyRequest, so responses_create_params
@@ -290,6 +311,7 @@ class SWEGymResourcesServer(SimpleResourcesServer):
         if self.config.is_verifying_golden_patch:
             capture = PatchCapture.static(body.patch, mode, "golden")
         else:
+            self._claim_task_sandbox(session_id)
             try:
                 capture = await self._extract_model_patch(session_id, REPO_DIRECTORY, body.base_commit)
             except Exception as exc:
