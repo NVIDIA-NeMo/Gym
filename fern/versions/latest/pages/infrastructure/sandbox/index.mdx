@@ -266,6 +266,14 @@ spec = SandboxSpec(
 
 Unknown resource keys raise a `ValueError`, which catches config drift early.
 
+### Sidecars for the Rollout Sandbox
+
+`provider_options.sidecars` lists sidecar containers, each a mapping with at least `name` and `image`, that only the sandbox an agent's harness runs in gets. It needs a provider with sidecar support, and the key itself never reaches the provider:
+
+- In a resources server, only sandboxes started while serving `/seed_session` get the sidecars. Sandboxes started elsewhere, such as in `/verify`, do not. Tasks spawned during `/seed_session` keep this scope for their whole lifetime.
+- In an agent server, every sandbox the agent starts gets the sidecars. An agent that also starts helper sandboxes should declare sidecars in `SandboxSpec.sidecars` instead.
+- In any other process, the key is passed to the provider unchanged. A provider that validates its options rejects it; no sidecar is started either way.
+
 ## Startup Files and File Transfer
 
 Use `files` for small text files that should exist before the first command runs:
