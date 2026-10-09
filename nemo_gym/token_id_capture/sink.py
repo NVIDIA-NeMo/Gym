@@ -540,5 +540,13 @@ async def _mark_incomplete(context: CaptureContext) -> None:
         return
     try:
         await mark(context.rollout_id, context.model_call_id)
+    except TokenCaptureFrozenError:
+        # The rollout was frozen or retired while this call was in flight, for example an abandoned attempt's
+        # late call. Its verdict is sealed, or nobody will read it, so there is nothing to mark.
+        logger.warning(
+            "Model call %s of rollout %s finished after the capture was frozen or retired; not marking it incomplete.",
+            context.model_call_id,
+            context.rollout_id,
+        )
     except Exception:
         logger.warning("Could not mark rollout %s incomplete.", context.rollout_id, exc_info=True)

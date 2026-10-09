@@ -30,7 +30,7 @@ from __future__ import annotations
 from typing import Awaitable, Callable
 
 from nemo_gym.token_id_capture.lineage import stamp_continuation
-from nemo_gym.token_id_capture.protocols import LineageResolver, TokenSink, TokenSource
+from nemo_gym.token_id_capture.protocols import LineageResolver, TokenCaptureFrozenError, TokenSink, TokenSource
 from nemo_gym.token_id_capture.records import (
     ParentResolutionStatus,
     TokenEntry,
@@ -269,8 +269,21 @@ async def _visible_entries(src: TokenSource, rollout_id: str) -> int:
     """Entries a consumer could build from; a retired rollout may refuse to freeze instead."""
     try:
         return len((await src.freeze(rollout_id)).entries)
-    except Exception:
+    except TokenCaptureFrozenError:
         return 0
+
+
+async def _require_fenced(name: str, call: Awaitable[object], what: str) -> None:
+    """A write to a retired rollout must fail with the error the capture sink treats as a late write."""
+    try:
+        await call
+    except TokenCaptureFrozenError:
+        return
+    except Exception as error:  # noqa: BLE001 - any other error is reported as a capture failure.
+        raise ConformanceError(
+            f"{name}: {what} after retirement raised {type(error).__name__}, not TokenCaptureRetiredError"
+        ) from error
+    raise ConformanceError(f"{name}: {what} after retirement was accepted")
 
 
 async def _check_unconditional_retirement(sink: TokenSink, src: TokenSource, rollout_id: str) -> None:
@@ -283,10 +296,13 @@ async def _check_unconditional_retirement(sink: TokenSink, src: TokenSource, rol
     late = _make_entry(
         rollout_id, "call-2", prompt=[11, 12, 13, 14], generation=[15], request_items=_REQUEST, text="b"
     )
-    try:
-        await sink.put(late)
-    except Exception:
-        pass  # Rejecting the late write is the expected fence.
+    await _require_fenced(name, sink.put(late), "a late put")
+    mark = getattr(sink, "mark_incomplete", None)
+    if mark is not None:
+        await _require_fenced(name, mark(rollout_id, "call-3"), "a late mark_incomplete")
+    begin = getattr(sink, "begin_call", None)
+    if begin is not None:
+        await _require_fenced(name, begin(rollout_id, "call-4"), "a late begin_call")
     _require(await _visible_entries(src, rollout_id) == 0, name, "a write after retirement became visible")
     again = await src.retire([rollout_id])
     _require(again.get("absent") == [rollout_id], name, f"retiring again was not a no-op: {again}")
