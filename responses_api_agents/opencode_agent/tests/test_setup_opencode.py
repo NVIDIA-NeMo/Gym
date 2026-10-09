@@ -56,3 +56,20 @@ def test_installed_version_timeout_is_unavailable() -> None:
         ),
     ):
         assert installed_opencode_version() is None
+
+
+def test_opencode_install_uses_shared_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.harness_conformance.ci import install_runtime
+
+    from responses_api_agents.opencode_agent import setup_opencode
+    from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
+    from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
+    from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
+
+    versions = []
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(setup_opencode, "_npm_install", lambda npm, version: versions.append(version))
+    install_runtime("opencode")
+    assert versions == [OPENCODE_VERSION]
+    assert OpenCodeAgentConfig.model_fields["opencode_version"].default == OPENCODE_VERSION
+    assert OpenCodeSandboxedAgentConfig.model_fields["opencode_version"].default == OPENCODE_VERSION
