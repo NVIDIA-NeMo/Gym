@@ -27,6 +27,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxPtySession,
     SandboxPtySpec,
     SandboxResources,
+    SandboxSidecarSpec,
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxBackgroundServices,
@@ -38,6 +39,7 @@ from nemo_gym.sandbox.providers.base import (
     SupportsSandboxPtyAttach,
     SupportsSandboxRuntimeRequirements,
     SupportsSandboxSharedStorage,
+    SupportsSandboxSidecars,
 )
 from nemo_gym.sandbox.providers.registry import (
     create_provider,
@@ -60,6 +62,7 @@ __all__ = [
     "SandboxPtySession",
     "SandboxPtySpec",
     "SandboxResources",
+    "SandboxSidecarSpec",
     "SandboxSpec",
     "SandboxStatus",
     "SupportsSandboxBackgroundServices",
@@ -69,6 +72,7 @@ __all__ = [
     "SupportsSandboxPortForwarding",
     "SupportsSandboxRuntimeRequirements",
     "SupportsSandboxSharedStorage",
+    "SupportsSandboxSidecars",
     "SupportsSandboxPty",
     "SupportsSandboxPtyAttach",
     "create_provider",
