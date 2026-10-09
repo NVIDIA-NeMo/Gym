@@ -16,7 +16,7 @@ import pytest
 
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, _custody_columns
-from nemo_gym.token_id_capture.protocols import CaptureLedger
+from nemo_gym.token_id_capture.protocols import CaptureLedger, RolloutRemovalPayload, RolloutRetiredError
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, compute_digest
 from nemo_gym.token_id_capture.sink import (
     UNRESOLVED_PARENT_REASON,
@@ -495,8 +495,8 @@ async def test_retire_removes_ledgers_and_reports_absent_rollouts(store):
     assert result.absent == ["r-none"]
     for rollout_id in ("r1", "r2"):
         assert not await store.has_rows(rollout_id)
-        manifest = RolloutManifest.model_validate(await store.manifest(rollout_id))
-        assert manifest.records == [] and manifest.failures == []
+        with pytest.raises(RolloutRetiredError):
+            await store.manifest(rollout_id)
     # The retired call can no longer anchor a continuation.
     assert (await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])).match is None
 
@@ -605,3 +605,80 @@ async def test_file_store_rejects_the_whole_batch_on_an_invalid_rollout_id(tmp_p
         await getattr(store, method)(["r1", "../escape"])
     assert await store.has_rows("r1")
     assert not (tmp_path / "r1.lineage.retired").exists()
+
+
+@pytest.mark.asyncio
+async def test_retiring_again_does_not_touch_fences_or_sync_the_directory(tmp_path):
+    store = FileLineageStore(tmp_path)
+    await _record_call_1(store)
+    await store.retire(["r1"])
+    fence = tmp_path / "r1.lineage.retired"
+    fence_mtime = fence.stat().st_mtime_ns
+
+    with patch.object(store, "_fsync_ledger_root", wraps=store._fsync_ledger_root) as fsync_root:
+        result = await store.retire(["r1"])
+        await store.delete(["never-recorded"])
+
+    # A retried batch changes nothing on disk, so it writes no metadata and syncs nothing.
+    assert result == {"removed": [], "absent": ["r1"]}
+    assert fence.stat().st_mtime_ns == fence_mtime
+    assert fsync_root.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_retire_syncs_an_existing_fence_before_deleting_the_ledger(tmp_path):
+    """A crashed retire can leave a fence that was never synced next to a ledger that was never deleted."""
+    store = FileLineageStore(tmp_path)
+    await _record_call_1(store)
+    (tmp_path / "r1.lineage.retired").touch()
+    events = []
+    real_fsync, real_unlink = store._fsync_ledger_root, type(tmp_path).unlink
+
+    def fsync_root():
+        events.append("fsync")
+        real_fsync()
+
+    def unlink(path, *args, **kwargs):
+        if path.name == "r1.lineage.jsonl":
+            events.append("unlink ledger")
+        return real_unlink(path, *args, **kwargs)
+
+    with patch.object(store, "_fsync_ledger_root", fsync_root), patch.object(type(tmp_path), "unlink", unlink):
+        result = await store.retire(["r1"])
+
+    assert result == {"removed": ["r1"], "absent": []}
+    assert events[:2] == ["fsync", "unlink ledger"]
+
+
+@pytest.mark.asyncio
+async def test_a_discarded_late_row_names_its_staging_key(tmp_path, caplog):
+    """The worker staged the late call's tokens; the warning is the only remaining pointer to them."""
+    store = FileLineageStore(tmp_path)
+    await _record_call_1(store)
+    await store.retire(["r1"])
+
+    with caplog.at_level("WARNING"):
+        await store.record(_commit(_call_record("c2"), [USER_1], [ASSISTANT_1], staging_chain=("r1/c1", "r1/c2")))
+
+    assert any("r1/c2" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_reading_a_retired_rollouts_manifest_fails(store):
+    """An empty manifest would look like a rollout that made no calls."""
+    await _record_call_1(store)
+    await store.retire(["r1", "never-recorded"])
+
+    for rollout_id in ("r1", "never-recorded"):
+        with pytest.raises(RolloutRetiredError):
+            await store.manifest(rollout_id)
+    # Delete removes the fence, so the ID reads as unused again.
+    await store.delete(["r1"])
+    assert RolloutManifest.model_validate(await store.manifest("r1")).records == []
+
+
+def test_retire_and_delete_declare_their_result_shape():
+    import typing
+
+    for method in (CaptureLedger.retire, CaptureLedger.delete, FileLineageStore.retire, InMemoryLineageStore.delete):
+        assert typing.get_type_hints(method)["return"] is RolloutRemovalPayload

@@ -60,7 +60,12 @@ from nemo_gym.token_id_capture.fingerprint import (
 from nemo_gym.token_id_capture.fingerprint import (
     canonicalize_tool_arguments as canonicalize_tool_arguments,
 )
-from nemo_gym.token_id_capture.protocols import LineageMatch, LineageResolution
+from nemo_gym.token_id_capture.protocols import (
+    LineageMatch,
+    LineageResolution,
+    RolloutRemovalPayload,
+    RolloutRetiredError,
+)
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, cumulative_tokens
 
 
@@ -71,13 +76,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _log_late_write_dropped(rollout_id: str, model_call_id: str) -> None:
+def _log_late_write_dropped(rollout_id: str, model_call_id: str, staging_key: str | None = None) -> None:
     # A call that finished after its rollout was retired, such as one from an abandoned attempt or a request
     # the client had already retried. Nobody will read its row, so this is not an error.
+    # The worker staged the call's tokens before the ledger refused the row, so no manifest names them;
+    # the warning carries the staging key for the framework that has to remove them.
+    if staging_key is None:
+        logger.warning("Discarding the ledger row of model call %s: rollout %s is retired.", model_call_id, rollout_id)
+        return
     logger.warning(
-        "Discarding the ledger row of model call %s: rollout %s is retired.",
+        "Discarding the ledger row of model call %s: rollout %s is retired. "
+        "Its staged tokens (staging key %s) are in no manifest, so the framework must remove them.",
         model_call_id,
         rollout_id,
+        staging_key,
     )
 
 
@@ -477,7 +489,7 @@ class InMemoryLineageStore:
         # lineage-only local-capture rows that inject prompt prefixes.
         record = commit.record
         if commit.rollout_id in self._retired:
-            _log_late_write_dropped(commit.rollout_id, record.model_call_id)
+            _log_late_write_dropped(commit.rollout_id, record.model_call_id, record.staging_key)
             return
         rows = self._ledgers.setdefault(commit.rollout_id, [])
         row = {"model_call_id": record.model_call_id, **_custody_columns(record, commit.staging_chain)}
@@ -512,6 +524,8 @@ class InMemoryLineageStore:
             rows.append(row)
 
     async def manifest(self, rollout_id: str) -> dict:
+        if rollout_id in self._retired:
+            raise RolloutRetiredError(f"rollout {rollout_id} is retired")
         return _manifest_from_rows(rollout_id, list(self._ledgers.get(rollout_id) or []))
 
     async def has_rows(self, rollout_id: str) -> bool:
@@ -519,21 +533,21 @@ class InMemoryLineageStore:
             return True
         return bool(self.index.for_rollout(rollout_id).by_call_id)
 
-    async def retire(self, rollout_ids: Sequence[str]) -> dict:
+    async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.token_id_capture.store import validate_rollout_ids
 
         rollout_ids = validate_rollout_ids(rollout_ids)
         self._retired.update(rollout_ids)
         return self._remove(rollout_ids)
 
-    async def delete(self, rollout_ids: Sequence[str]) -> dict:
+    async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.token_id_capture.store import validate_rollout_ids
 
         rollout_ids = validate_rollout_ids(rollout_ids)
         self._retired.difference_update(rollout_ids)
         return self._remove(rollout_ids)
 
-    def _remove(self, rollout_ids: list[str]) -> dict:
+    def _remove(self, rollout_ids: list[str]) -> RolloutRemovalPayload:
         removed, absent = [], []
         for rollout_id in rollout_ids:
             (removed if self._ledgers.pop(rollout_id, None) is not None else absent).append(rollout_id)
@@ -964,7 +978,7 @@ class FileLineageStore(IncrementalLineageStore):
         with self._locked(commit.rollout_id):
             records = self._read(commit.rollout_id)
             if not records and self._is_retired(commit.rollout_id):
-                _log_late_write_dropped(commit.rollout_id, model_call_id)
+                _log_late_write_dropped(commit.rollout_id, model_call_id, commit.record.staging_key)
                 return
             matches = [existing for existing in records if existing["model_call_id"] == model_call_id]
             if matches:
@@ -995,6 +1009,8 @@ class FileLineageStore(IncrementalLineageStore):
     def _manifest(self, rollout_id: str) -> dict:
         with self._locked(rollout_id):
             rows = list(self._read(rollout_id))
+            if not rows and self._is_retired(rollout_id):
+                raise RolloutRetiredError(f"rollout {rollout_id} is retired")
         return _manifest_from_rows(rollout_id, rows)
 
     async def has_rows(self, rollout_id: str) -> bool:
@@ -1004,42 +1020,55 @@ class FileLineageStore(IncrementalLineageStore):
         with self._locked(rollout_id):
             return bool(self._read(rollout_id))
 
-    async def retire(self, rollout_ids: Sequence[str]) -> dict:
+    async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         return await asyncio.to_thread(self._retire, rollout_ids)
 
-    def _retire(self, rollout_ids: Sequence[str]) -> dict:
+    def _retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.token_id_capture.store import validate_rollout_ids
 
         rollout_ids = validate_rollout_ids(rollout_ids)
-        # Make every retired marker durable before deleting any ledger, so a crash in between leaves a fence.
+        created_fence = has_ledger = False
         for rollout_id in rollout_ids:
             with self._locked(rollout_id):
-                self._retired_path(rollout_id).touch()
-        if rollout_ids:
+                fence = self._retired_path(rollout_id)
+                if not fence.exists():
+                    fence.touch()
+                    created_fence = True
+                has_ledger = has_ledger or self._ledger_path(rollout_id).exists()
+        # Make every fence durable before deleting any ledger, so a crash in between leaves a fence. That
+        # includes fences that already existed: a retire that crashed earlier may have created them without
+        # syncing. A retried batch with nothing left to delete changes nothing, so it syncs nothing.
+        if created_fence or has_ledger:
             self._fsync_ledger_root()
         return self._remove(rollout_ids)
 
-    async def delete(self, rollout_ids: Sequence[str]) -> dict:
+    async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         return await asyncio.to_thread(self._delete, rollout_ids)
 
-    def _delete(self, rollout_ids: Sequence[str]) -> dict:
+    def _delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.token_id_capture.store import validate_rollout_ids
 
         return self._remove(validate_rollout_ids(rollout_ids), unretire=True)
 
-    def _remove(self, rollout_ids: list[str], *, unretire: bool = False) -> dict:
+    def _remove(self, rollout_ids: list[str], *, unretire: bool = False) -> RolloutRemovalPayload:
         removed, absent = [], []
+        changed = False
         for rollout_id in rollout_ids:
             with self._locked(rollout_id):
                 try:
                     self._ledger_path(rollout_id).unlink()
                     removed.append(rollout_id)
+                    changed = True
                 except FileNotFoundError:
                     absent.append(rollout_id)
                 if unretire:
-                    self._retired_path(rollout_id).unlink(missing_ok=True)
+                    try:
+                        self._retired_path(rollout_id).unlink()
+                        changed = True
+                    except FileNotFoundError:
+                        pass
                 with self._cache_guard:
                     self._ledger_cache.pop(rollout_id, None)
-        if rollout_ids:
+        if changed:
             self._fsync_ledger_root()
         return {"removed": removed, "absent": absent}

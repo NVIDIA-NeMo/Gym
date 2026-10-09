@@ -19,7 +19,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.token_id_capture.protocols import CaptureLedger
+from nemo_gym.token_id_capture.protocols import CaptureLedger, RolloutRemovalPayload, RolloutRetiredError
 from nemo_gym.token_id_capture.staging.records import RolloutManifest, RolloutRemoval
 
 
@@ -64,6 +64,9 @@ def install_rollout_control_routes(
         check_auth(authorization)
         try:
             return await lineage_store.manifest(rollout_id)
+        except RolloutRetiredError as error:
+            # Gone, not empty: an empty manifest would read as a rollout that made no calls.
+            raise HTTPException(status_code=410, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -71,7 +74,7 @@ def install_rollout_control_routes(
     async def retire_rollouts(
         body: LedgerBatchRequest,
         authorization: str | None = Header(default=None),
-    ) -> dict:
+    ) -> RolloutRemovalPayload:
         check_auth(authorization)
         try:
             return await lineage_store.retire(body.rollout_ids)
@@ -82,7 +85,7 @@ def install_rollout_control_routes(
     async def delete_rollouts(
         body: LedgerBatchRequest,
         authorization: str | None = Header(default=None),
-    ) -> dict:
+    ) -> RolloutRemovalPayload:
         check_auth(authorization)
         try:
             return await lineage_store.delete(body.rollout_ids)
@@ -125,7 +128,12 @@ class RolloutControlClient:
         return await self._remove("delete", rollout_ids)
 
     async def _remove(self, action: str, rollout_ids: Sequence[str]) -> RolloutRemoval:
-        rollout_ids = list(rollout_ids)
+        from nemo_gym.token_id_capture.store import validate_rollout_ids
+
+        # Validate and deduplicate the whole list before the first request. Batch by batch, a bare string
+        # would become one-character IDs, an invalid ID in a later batch would fail after earlier batches
+        # had changed state, and an ID repeated across batches would be reported both removed and absent.
+        rollout_ids = validate_rollout_ids(rollout_ids)
         result = RolloutRemoval()
         for start in range(0, len(rollout_ids), MAX_LEDGER_BATCH):
             batch = rollout_ids[start : start + MAX_LEDGER_BATCH]

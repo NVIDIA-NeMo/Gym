@@ -139,3 +139,62 @@ async def test_client_raises_on_a_failed_request(monkeypatch):
 
     with pytest.raises(RuntimeError, match="HTTP 400"):
         await client.retire(["r1"])
+
+
+def _client_over(client_app, monkeypatch) -> RolloutControlClient:
+    """A control client whose requests reach the real routes and ledger."""
+
+    async def request(method, path, **kwargs):
+        response = client_app.request(method, f"{CONTROL_ROUTE_PREFIX}{path}", json=kwargs.get("json"), headers=AUTH)
+        return _Response(response.status_code, response.json())
+
+    control = RolloutControlClient("http://model", auth_token=TOKEN, request_timeout_s=1.0)
+    monkeypatch.setattr(control, "_request", request)
+    return control
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["retire", "delete"])
+async def test_client_rejects_a_bare_rollout_id_before_sending_anything(client, ledger, monkeypatch, action):
+    await _record_failure(ledger, "r")
+    control = _client_over(client, monkeypatch)
+
+    # A string is a sequence of one-character IDs: "rollout-abc" would remove rollouts "r", "o", "l", ...
+    with pytest.raises(TypeError, match="sequence of rollout ids"):
+        await getattr(control, action)("rollout-abc")
+    assert await ledger.has_rows("r")
+
+
+@pytest.mark.asyncio
+async def test_client_validates_every_batch_before_changing_anything(client, ledger, monkeypatch):
+    monkeypatch.setattr(control_routes, "MAX_LEDGER_BATCH", 2)
+    await _record_failure(ledger, "r1")
+    control = _client_over(client, monkeypatch)
+
+    with pytest.raises(ValueError, match="Invalid rollout id"):
+        await control.retire(["r1", "r2", "a/b"])
+    assert await ledger.has_rows("r1")
+
+
+@pytest.mark.asyncio
+async def test_client_reports_an_id_repeated_across_batches_once(client, ledger, monkeypatch):
+    monkeypatch.setattr(control_routes, "MAX_LEDGER_BATCH", 2)
+    await _record_failure(ledger, "r1")
+    control = _client_over(client, monkeypatch)
+
+    result = await control.retire(["r1", "r2", "r1"])
+
+    assert result.removed == ["r1"]
+    assert result.absent == ["r2"]
+
+
+@pytest.mark.asyncio
+async def test_manifest_route_reports_a_retired_rollout_as_gone(client, ledger, monkeypatch):
+    await _record_failure(ledger, "r1")
+    client.post(RETIRE, json={"rollout_ids": ["r1"]}, headers=AUTH)
+
+    response = client.get(f"{CONTROL_ROUTE_PREFIX}/rollouts/r1/manifest", headers=AUTH)
+
+    assert response.status_code == 410
+    with pytest.raises(RuntimeError, match="HTTP 410"):
+        await _client_over(client, monkeypatch).manifest("r1")

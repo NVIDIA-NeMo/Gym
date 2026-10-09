@@ -43,10 +43,31 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TypedDict, runtime_checkable
 
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
 from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
+
+
+class RolloutRemovalPayload(TypedDict):
+    """The result of retiring or deleting rollouts, as plain wire data.
+
+    It validates as ``staging.records.RolloutRemoval``.
+    """
+
+    # Rollouts whose captured data existed and was removed.
+    removed: list[str]
+    # Rollouts with no captured data: already removed, or never recorded a call.
+    absent: list[str]
+
+
+class RolloutRetiredError(LookupError):
+    """Reject reading the ledger of a rollout that was retired.
+
+    A retired rollout's ledger is gone, so an empty manifest would look like a rollout that made no calls.
+    Reading it is a framework error, such as fetching a manifest after retiring the rollout.
+    Deleting the rollout removes its fence, after which the ID reads as unused again.
+    """
 
 
 class TokenCaptureFrozenError(RuntimeError):
@@ -175,6 +196,7 @@ class CaptureLedger(LineageResolver, Protocol):
         committed rows under ``records`` (each a ``CallRecord`` payload) and
         poison rows under ``failures``.
         Cumulative token IDs never appear in the manifest.
+        A retired rollout raises ``RolloutRetiredError`` instead of returning an empty manifest.
         """
         ...
 
@@ -182,23 +204,21 @@ class CaptureLedger(LineageResolver, Protocol):
         """Return whether any ledger row (committed or failed) exists."""
         ...
 
-    async def retire(self, rollout_ids: Sequence[str]) -> dict:
+    async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         """Remove the ledgers of rollouts the framework is done with, and fence them.
 
-        Retire a finished rollout once its manifest has been read and the receipt built from it is
-        durable, and an abandoned rollout as soon as the framework gives up on it. Like
+        Retire a finished rollout once its manifest has been read and the receipt built from it,
+        and an abandoned rollout as soon as the framework gives up on it. Like
         ``TokenSource.drop`` on the complete-record store, retiring keeps a fence: later ``record`` and
         ``record_failure`` calls for the rollout are discarded instead of starting a new ledger. Even a
         finished rollout can still write: a client retry can run it twice, and the second execution
         writes after the first one returned.
         Retiring again is a no-op, so retrying a batch is safe.
         Staged token data is untouched: the framework that staged it also removes it.
-
-        The result validates as ``staging.records.RolloutRemoval``.
         """
         ...
 
-    async def delete(self, rollout_ids: Sequence[str]) -> dict:
+    async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         """Remove the ledgers and fences of rollouts, as ``TokenCaptureStore.delete`` does.
 
         Delete retired rollouts once nothing of those attempts can still write, for example after every
@@ -206,8 +226,6 @@ class CaptureLedger(LineageResolver, Protocol):
         ID before reusing it, so the new execution starts from an empty ledger. Deleting again is a
         no-op.
         Staged token data is untouched: the framework that staged it also removes it.
-
-        The result validates as ``staging.records.RolloutRemoval``.
         """
         ...
 
