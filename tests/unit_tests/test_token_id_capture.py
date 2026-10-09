@@ -28,6 +28,7 @@ import logging
 import multiprocessing
 import subprocess
 import sys
+import threading
 from time import time
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -455,24 +456,24 @@ def test_token_store_retire_fences_a_rollout_whatever_its_state(tmp_path):
     assert asyncio.run(store.retire(["live"])) == {"removed": [], "absent": ["live"]}
 
 
-def test_token_store_retire_syncs_the_directory_once_per_batch(tmp_path):
+def test_token_store_retire_syncs_fences_then_removals_once_per_batch(tmp_path):
     store = TokenCaptureStore(tmp_path)
     for rollout_id in ("r1", "r2", "r3"):
         _store_entry(store, rollout_id)
 
     with patch.object(store, "_fsync_root", wraps=store._fsync_root) as fsync_root:
         store.retire_now(["r1", "r2", "r3"])
-        assert fsync_root.call_count == 1
+        # One sync makes every fence durable, a second one the removed records.
+        assert fsync_root.call_count == 2
         # Nothing changed, so a repeat does not sync at all.
         store.retire_now(["r1", "r2", "r3"])
-        assert fsync_root.call_count == 1
+        assert fsync_root.call_count == 2
 
     _store_entry(store, "r4")
     snapshot = store.freeze_now("r4")
     with patch.object(store, "_fsync_root", wraps=store._fsync_root) as fsync_root:
         assert asyncio.run(store.drop("r4", snapshot_id=snapshot.snapshot_id, version=snapshot.version))
-    # The state replace's directory fsync also covers the payload unlinks before it.
-    assert fsync_root.call_count == 1
+    assert fsync_root.call_count == 2
 
 
 def test_token_store_delete_syncs_the_directory_only_when_it_removed_something(tmp_path):
@@ -560,6 +561,74 @@ def test_a_late_call_without_token_ids_after_retire_is_not_reported_as_a_failure
 
     assert all(record.exc_info is None for record in caplog.records)
     assert not any("Could not mark rollout" in record.getMessage() for record in caplog.records)
+
+
+def test_token_store_overlapping_retire_returns_only_once_the_fence_is_durable(tmp_path):
+    """A second retire of the same ID must not report success before the first one has synced the fence."""
+    store = TokenCaptureStore(tmp_path)
+    for rollout_id in ("r1", "r2"):
+        _store_entry(store, rollout_id)
+    events = []
+    real_fsync, real_write_state = store._fsync_root, store._write_state
+
+    def fsync_root():
+        events.append("fsync")
+        real_fsync()
+
+    def write_state(rollout_id, state, **kwargs):
+        real_write_state(rollout_id, state, **kwargs)
+        if rollout_id == "r2" and state.get("retired"):
+            # The first retire has handled r1 but not finished its batch: a second retire of r1 overlaps here.
+            second = threading.Thread(target=lambda: (store.retire_now(["r1"]), events.append("second returned")))
+            second.start()
+            second.join()
+
+    with patch.object(store, "_fsync_root", fsync_root), patch.object(store, "_write_state", write_state):
+        store.retire_now(["r1", "r2"])
+
+    assert "fsync" in events[: events.index("second returned")]
+
+
+def test_token_store_sync_failure_after_an_error_does_not_hide_the_error(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    for rollout_id in ("r1", "r2"):
+        _store_entry(store, rollout_id)
+
+    real_fsync = store._fsync_root
+    syncs = []
+
+    def sync_that_fails_after_the_first():
+        syncs.append(1)
+        if len(syncs) > 1:
+            raise OSError(errno.EIO, "sync failed")
+        real_fsync()
+
+    with patch.object(store, "_fsync_root", sync_that_fails_after_the_first), _fail_unlinking_records_of(store, "r2"):
+        with pytest.raises(OSError, match="injected I/O error"):
+            store.retire_now(["r1", "r2"])
+
+
+def test_a_late_build_failure_after_retire_is_not_counted_as_a_capture_failure(tmp_path, caplog):
+    from nemo_gym.token_id_capture import sink as sink_module
+
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "abandoned")
+    store.retire_now(["abandoned"])
+    context = CaptureContext(rollout_id="abandoned", model_call_id="c2", token_sink=store)
+    failures_before = sink_module._CAPTURE_FAILURES[0]
+
+    async def build_fails():
+        try:
+            raise ValueError("bad payload")
+        except ValueError:
+            await sink_module._capture_failed(context, "build")
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(build_fails())
+
+    assert sink_module._CAPTURE_FAILURES[0] == failures_before
+    assert not any("failed to build" in record.getMessage() for record in caplog.records)
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 def test_token_store_delete_removes_the_fence_so_the_rollout_id_can_be_reused(tmp_path):

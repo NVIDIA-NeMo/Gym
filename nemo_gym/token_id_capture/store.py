@@ -367,20 +367,21 @@ class TokenCaptureStore:
                 or int(state.get("version", 0)) != version
             ):
                 return False
-            self._retire_unlocked(rollout_id, state)
+            # The same two phases as ``retire_now``: a durable fence first, then the records.
+            self._write_fence_unlocked(rollout_id, state)
+            self._fsync_root()
+            if self._remove_record_files(rollout_id):
+                self._fsync_root()
             return True
 
-    def _retire_unlocked(self, rollout_id: str, state: dict[str, Any], *, sync_root: bool = True) -> None:
-        # Write the fence before removing anything, and keep it until ``delete``: a late writer from this attempt
-        # must still observe it. If removing a record then fails, the rollout is already fenced, so late writes
-        # fail cleanly instead of finding an index that points past missing records, and a retry finishes the job.
+    def _write_fence_unlocked(self, rollout_id: str, state: dict[str, Any]) -> None:
+        # The fence stays until ``delete``: a late writer from this attempt must still observe it. It is written,
+        # and synced by the caller, before any record is removed, so a rollout is never left without records and
+        # without a fence, and a late writer never finds an index that points past missing records.
         state["indexed_size"] = 0
         state["entry_digests"] = {}
         state["retired"] = True
         self._write_state(rollout_id, state, sync_root=False)
-        self._remove_record_files(rollout_id)
-        if sync_root:
-            self._fsync_root()
 
     def _remove_record_files(self, rollout_id: str) -> bool:
         """Remove a rollout's records, intents, and incomplete marker; return whether any existed."""
@@ -409,28 +410,49 @@ class TokenCaptureStore:
         return await asyncio.to_thread(self.retire_now, rollout_ids)
 
     def retire_now(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
-        """Synchronous ``retire``."""
-        removed, absent = [], []
-        changed = False
+        """Synchronous ``retire``.
+
+        Two phases, each ending in one directory sync: write every missing fence, then remove the records. The
+        first sync also runs when the batch only has records left to remove, because their fences may have been
+        written by an overlapping or crashed retire that has not synced yet, and a removal must never become
+        durable before its fence. A batch with no fence to write and nothing to remove changes nothing and
+        syncs nothing.
+        """
+        removed, absent, to_clear = [], [], []
+        unsynced = False
         try:
             for rollout_id in validate_rollout_ids(rollout_ids):
                 with self._locked(rollout_id):
                     had_records = self._has_records(rollout_id)
                     state = self._read_state(rollout_id)
                     if not state.get("retired", False):
-                        self._retire_unlocked(rollout_id, state, sync_root=False)
-                        changed = True
-                    elif had_records:
-                        # An earlier retire wrote the fence but failed before removing every record.
-                        self._remove_record_files(rollout_id)
-                        changed = True
+                        self._write_fence_unlocked(rollout_id, state)
+                        unsynced = True
                     (removed if had_records else absent).append(rollout_id)
-        finally:
-            # One directory fsync for the whole batch, also when a rollout fails part way, so the changes made
-            # before the failure are durable even if a retry finds nothing left to change.
-            if changed:
+                    if had_records:
+                        to_clear.append(rollout_id)
+            if unsynced or to_clear:
                 self._fsync_root()
+                unsynced = False
+            for rollout_id in to_clear:
+                with self._locked(rollout_id):
+                    if self._remove_record_files(rollout_id):
+                        unsynced = True
+            if unsynced:
+                self._fsync_root()
+                unsynced = False
+        finally:
+            if unsynced:
+                self._sync_after_error()
         return {"removed": removed, "absent": absent}
+
+    def _sync_after_error(self) -> None:
+        # Make what a failed batch already changed durable, since a retry may find nothing left to change.
+        # A failing sync is logged, not raised, so that it does not hide the error that failed the batch.
+        try:
+            self._fsync_root()
+        except OSError:
+            logger.warning("Could not sync capture directory %s after a failed batch.", self._root, exc_info=True)
 
     async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         """Remove rollouts' records and fences.
@@ -456,11 +478,14 @@ class TokenCaptureStore:
                         changed = True
                     except FileNotFoundError:
                         pass
-        finally:
-            # A repeated or empty delete changes nothing on disk, so it syncs nothing. A batch that fails part way
-            # still syncs what it removed, since a retry would find nothing left to change.
+        except BaseException:
+            # A batch that fails part way still syncs what it removed, since a retry would find nothing left.
             if changed:
-                self._fsync_root()
+                self._sync_after_error()
+            raise
+        # A repeated or empty delete changes nothing on disk, so it syncs nothing.
+        if changed:
+            self._fsync_root()
         return {"removed": removed, "absent": absent}
 
     def _has_records(self, rollout_id: str) -> bool:

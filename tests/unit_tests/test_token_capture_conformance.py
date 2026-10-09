@@ -15,6 +15,7 @@ import pytest
 from nemo_gym.token_id_capture import (
     FileLineageStore,
     InMemoryLineageStore,
+    TokenCaptureFrozenError,
     TokenCaptureRetiredError,
     TokenCaptureSnapshot,
     TokenCaptureStore,
@@ -234,3 +235,33 @@ def test_conformance_rejects_a_backend_that_does_not_fence_late_writes(sink_type
     backend = _MemoryBackend()
     with pytest.raises(ConformanceError, match="unconditional_retirement"):
         asyncio.run(run_conformance(lambda: sink_type(backend), lambda: _MemorySource(backend)))
+
+
+class _FrozenNotRetiredSink(_MemorySink):
+    """Rejects a late write as frozen, not retired, contrary to ``TokenSource.retire``."""
+
+    async def put(self, entry: TokenEntry) -> None:
+        if entry.rollout_id in self.backend.retired:
+            raise TokenCaptureFrozenError("frozen")
+        await super().put(entry)
+
+
+class _BrokenFreezeAfterRetireSource(_MemorySource):
+    """A source whose freeze fails for an unrelated reason once a rollout is retired."""
+
+    async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot:
+        if rollout_id in self.backend.retired:
+            raise ConnectionError("backend unreachable")
+        return await super().freeze(rollout_id)
+
+
+def test_conformance_requires_the_retired_error_for_late_writes():
+    backend = _MemoryBackend()
+    with pytest.raises(ConformanceError, match="unconditional_retirement"):
+        asyncio.run(run_conformance(lambda: _FrozenNotRetiredSink(backend), lambda: _MemorySource(backend)))
+
+
+def test_conformance_does_not_treat_a_broken_freeze_as_an_empty_rollout():
+    backend = _MemoryBackend()
+    with pytest.raises(ConformanceError, match="unconditional_retirement"):
+        asyncio.run(run_conformance(lambda: _MemorySink(backend), lambda: _BrokenFreezeAfterRetireSource(backend)))
