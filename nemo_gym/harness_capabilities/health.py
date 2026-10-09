@@ -9,7 +9,7 @@ from pathlib import Path
 from nemo_gym.health.types import CheckInput, CheckScope, Verdict
 from nemo_gym.rollout_health import CHECK_REGISTRY, run_health_checks
 
-from .checks import HealthCheck
+from .checks import HealthCheck, HealthExpectation
 from .results import Results
 
 
@@ -17,7 +17,7 @@ def inspect_health(
     rollout_paths: Sequence[Path],
     *,
     output: Path,
-    expectations: Mapping[str, Verdict],
+    expectations: Mapping[str, HealthExpectation],
     steps: bool = True,
 ) -> list[dict]:
     """Run health once on saved artifacts and compare each rollout's check results.
@@ -30,13 +30,16 @@ def inspect_health(
     unknown = expectations.keys() - {spec.id for spec in specs}
     if unknown:
         raise ValueError(f"unknown rollout health expectations: {', '.join(sorted(unknown))}")
-    if any(value not in ("healthy", "unhealthy", "unobserved") for value in expectations.values()):
-        raise ValueError("health expectations must be healthy, unhealthy or unobserved")
+    for value in expectations.values():
+        allowed = (value,) if isinstance(value, str) else value
+        if not allowed or any(verdict not in ("healthy", "unhealthy", "unobserved") for verdict in allowed):
+            raise ValueError("health expectations must name healthy, unhealthy or unobserved")
     report = run_health_checks(rollout_paths, output_dir=output, workers=1) if rollout_paths else None
     coverage = report.summary["run"]["artifacts"]["coverage"] if report else {}
     results = Results()
     for spec in specs:
         expected = expectations.get(spec.id, "healthy")
+        expected_label = expected if isinstance(expected, str) else " or ".join(expected)
         # A terminal rejection has no model-driven decision; respect the same
         # explicit step scope used by the artifact checks, never infer it from data.
         applies = steps or CheckInput.AGENT_TURNS not in spec.reads
@@ -56,7 +59,7 @@ def inspect_health(
                     tier="P0",
                     evidence=(),
                     location=f"{output / 'rollout_verdicts.jsonl'}:{index + 1}",
-                    reason=f"expected {expected}; observed {actual or 'no health result'}",
+                    reason=f"expected {expected_label}; observed {actual or 'no health result'}",
                     expected=expected,
                     actual=actual,
                     applies=applies,

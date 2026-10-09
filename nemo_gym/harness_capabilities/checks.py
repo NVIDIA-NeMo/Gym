@@ -13,6 +13,7 @@ from jsonschema import Draft202012Validator
 from nemo_gym.health.types import Verdict
 
 
+HealthExpectation = Verdict | tuple[Verdict, ...]
 PriorityTier = Literal["P0", "P1", "P2"]
 Kind = Literal["schema", "semantic", "behavioral", "health"]
 
@@ -93,9 +94,10 @@ class BehavioralCheck(_PredicateCheck):
 class HealthCheck(Check):
     """Match an individual Gym health result against the scenario's expectation."""
 
-    expected: Verdict
+    expected: HealthExpectation
     actual: Verdict | None
     kind: ClassVar[Kind] = "health"
 
     def evaluate(self) -> Evaluation:
-        return Evaluation(self.actual is not None and self.actual == self.expected)
+        allowed = (self.expected,) if isinstance(self.expected, str) else self.expected
+        return Evaluation(self.actual is not None and self.actual in allowed)

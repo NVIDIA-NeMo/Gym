@@ -5,7 +5,7 @@
 
 from dataclasses import asdict, dataclass, field
 
-from nemo_gym.health.types import Verdict
+from nemo_gym.harness_capabilities.checks import HealthExpectation
 
 
 SUITE = "harness-p0-probes/v1"
@@ -24,7 +24,7 @@ class Scenario:
     terminal_error: bool = False
     expected_reward: float = 1.0
     steps: bool = True
-    health_expectations: dict[str, Verdict] = field(default_factory=dict)
+    health_expectations: dict[str, HealthExpectation] = field(default_factory=dict)
 
     def task(self) -> dict:
         """Only the task reaches the harness; expectations stay in the runner."""
@@ -74,8 +74,8 @@ SCENARIOS = (
         steps=False,  # The first request fails permanently; no model decision is returned.
         health_expectations={
             "rollout_ended_on_failed_model_call": "unhealthy",
-            # No successful decision or provider usage exists to reconcile.
-            "rollout_token_count_mismatch": "unobserved",
+            # No generation: aggregate usage may be zero (reconciles) or unavailable.
+            "rollout_token_count_mismatch": ("healthy", "unobserved"),
         },
     ),
     Scenario("verifier_failure", "A completed trajectory receives a known zero reward.", expected_reward=0.0),
