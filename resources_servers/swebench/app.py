@@ -14,15 +14,16 @@
 # limitations under the License.
 
 import sys
+from collections.abc import Mapping
 from glob import glob
 from pathlib import Path
 from shutil import rmtree
 from time import monotonic, time
 from traceback import format_exc
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from fastapi import Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue, PrivateAttr
 from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
@@ -37,8 +38,10 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.rollout_observability import SandboxObservation
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSessionCheckpointer, SandboxSpec, create_provider
+from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.providers.base import SandboxProvider
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench.swebench_patches import (
@@ -50,6 +53,13 @@ from resources_servers.swebench.swebench_patches import (
 )
 
 
+class SandboxCheckpointConfig(BaseModel):
+    """How this server checkpoints the sandboxes its sessions own; see ``nemo_gym.sandbox.checkpoint``."""
+
+    # Concurrent pause, resume, and re-create calls against the sandbox backend during a commit or restore.
+    parallelism: int = 16
+
+
 class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     apply_anti_cheating: bool = True
@@ -59,6 +69,7 @@ class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     # Sandbox config
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
+    sandbox_checkpoint: SandboxCheckpointConfig = SandboxCheckpointConfig()
 
     clear_swebench_debug_logs: bool = True
 
@@ -241,16 +252,35 @@ class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
 class SwebenchResourcesServer(SimpleResourcesServer):
     ray_enabled = False
     config: SwebenchResourcesServerConfig
+    # Each session owns the sandbox the agent works in, from /seed_session until /verify extracts the patch.
+    # A partial-rollout checkpoint pauses those sandboxes and a restore resumes them in place; see
+    # nemo_gym.sandbox.checkpoint for what that means on each backend.
+    checkpoint_mode: ClassVar[str] = "exported"
+    _provider: Optional[SandboxProvider] = PrivateAttr(default=None)
+    _sandboxes: Optional[SandboxSessionCheckpointer] = PrivateAttr(default=None)
+    # The repository checkout directory of each session's sandbox, for borrowers and the patch extraction.
+    _workdirs: Dict[str, str] = PrivateAttr(default_factory=dict)
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
+    def _sandbox_provider(self) -> SandboxProvider:
+        """The provider every sandbox of this server shares; built from the config on first use."""
+        if self._provider is None:
+            resolved = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
+            self._provider = create_provider(resolved) if isinstance(resolved, Mapping) else resolved
+        return self._provider
 
-        self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+    def _checkpointer(self) -> SandboxSessionCheckpointer:
+        if self._sandboxes is None:
+            self._sandboxes = SandboxSessionCheckpointer(
+                self._sandbox_provider(), parallelism=self.config.sandbox_checkpoint.parallelism
+            )
+        return self._sandboxes
 
     async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
+        return await self._start_sandbox(self._sandbox_spec(test_spec), test_spec)
+
+    def _sandbox_spec(self, test_spec: TestSpec) -> SandboxSpec:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         global_config_dict = get_global_config_dict()
-        resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
         resources = dict(self.config.sandbox_config.get("resources", {}))
 
@@ -280,12 +310,15 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
-        eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
+        return eval_sandbox_spec
+
+    async def _start_sandbox(self, spec: SandboxSpec, test_spec: TestSpec) -> AsyncSandbox:
+        eval_sandbox = AsyncSandbox(self._sandbox_provider(), spec, owns_provider=False)
 
         async def _run_setup(sandbox: AsyncSandbox) -> None:
             await patch_swebench_multilingual_sandbox(test_spec.repo, test_spec.instance_id, sandbox)
 
-        await eval_sandbox.start_with_setup(eval_sandbox_spec, _run_setup)
+        await eval_sandbox.start_with_setup(spec, _run_setup)
 
         return eval_sandbox
 
@@ -299,13 +332,22 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         )
 
     async def seed_session(self, request: Request, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        sandboxes = self._checkpointer()
+        if session_id in sandboxes:
+            # A replacement attempt re-seeds the session a checkpoint restored: it continues in the same sandbox.
+            existing = await sandboxes.ensure_running(session_id)
+            return SWEBenchSeedSessionResponse(sandbox_handle=existing.handle.sandbox_id)
+
         test_spec = self._make_test_spec(body)
-        eval_sandbox = await self._create_sandbox(test_spec)
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
+        spec = self._sandbox_spec(test_spec)
+        eval_sandbox = await self._start_sandbox(spec, test_spec)
+        sandboxes.add(session_id, eval_sandbox, spec)
+        wd = (await eval_sandbox.exec("pwd")).stdout.strip()
+        self._workdirs[session_id] = wd
 
         if self.config.apply_anti_cheating:
             # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
-            wd = (await eval_sandbox.exec("pwd")).stdout.strip()
             anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
             await eval_sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
             result = await eval_sandbox.exec(
@@ -318,7 +360,56 @@ Stdout:
 Stderr:
 {result.stderr}""")
 
-        return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
+        return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox.handle.sandbox_id)
+
+    # -- partial-rollout checkpoints ---------------------------------------------------------------------------
+
+    async def export_session_states(self, session_ids: List[str]) -> dict[str, JsonValue]:
+        """Pause each session's sandbox; the state is the paused sandbox and the checkout directory."""
+        sandboxes = await self._checkpointer().export(session_ids)
+        return {
+            session_id: {"sandbox": state, "workdir": self._workdirs.get(session_id)}
+            for session_id, state in sandboxes.items()
+        }
+
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        parsed: dict[str, dict[str, Any]] = {}
+        for session_id, state in states.items():
+            if not isinstance(state, dict) or not isinstance(state.get("sandbox"), dict):
+                raise ValueError(f"invalid swebench session state for {session_id!r}: {state!r}")
+            parsed[session_id] = state
+        # Validates every sandbox state, then resumes all of them or none.
+        await self._checkpointer().restore({session_id: state["sandbox"] for session_id, state in parsed.items()})
+        for session_id, state in parsed.items():
+            if isinstance(state.get("workdir"), str):
+                self._workdirs[session_id] = state["workdir"]
+
+    async def retire_session_state(self, session_id: str) -> None:
+        await self._checkpointer().stop(session_id)
+        self._workdirs.pop(session_id, None)
+
+    async def resume_session_states(self, session_ids: List[str]) -> None:
+        if self._sandboxes is not None:
+            await self._sandboxes.resume_paused(session_ids)
+
+    async def current_sandbox_access(self, session_id: str) -> SandboxAccess | None:
+        """Access to the session's sandbox for the agent, which runs its harness inside it."""
+        sandboxes = self._checkpointer()
+        if session_id not in sandboxes:
+            return None
+        workdir = self._workdirs.get(session_id)
+        if workdir is None:
+            workdir = (await (await sandboxes.ensure_running(session_id)).exec("pwd")).stdout.strip()
+            self._workdirs[session_id] = workdir
+        return await sandboxes.access(session_id, provider_config_ref=self.config.sandbox_provider, workdir=workdir)
+
+    async def _release_agent_sandbox(self, session_id: str) -> None:
+        """Stop the agent's sandbox once the patch is extracted; a failure is logged, as the episode is over."""
+        try:
+            await self._checkpointer().stop(session_id)
+        except Exception:
+            print("Failed to stop original sandbox", format_exc(), file=sys.stderr)
+        self._workdirs.pop(session_id, None)
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
         """
@@ -352,17 +443,16 @@ Stderr:
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
-            original_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
+            session_id = request.session[SESSION_ID_KEY]
             try:
+                # Resumed first: a checkpoint may have left it paused.
+                original_sandbox = await self._checkpointer().ensure_running(session_id)
                 original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
                 model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
                 model_patch = model_patch_result.stdout
-            except:
+            except Exception:
                 print("Failed to extract patch from container", format_exc(), file=sys.stderr)
-            try:
-                await original_sandbox.stop()
-            except:
-                print("Failed to stop original sandbox", format_exc(), file=sys.stderr)
+            await self._release_agent_sandbox(session_id)
 
         run_id = request.session[SESSION_ID_KEY]
         mock_container = DockerContainer(id=run_id, instance_id=test_spec.instance_id)
