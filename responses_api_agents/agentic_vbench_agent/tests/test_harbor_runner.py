@@ -422,3 +422,20 @@ def test_hub_post_persistent_request_error_raises_without_rejecting_verification
     with pytest.raises(RuntimeError, match="HTTP 429"):
         module.real_post("/v1beta/models/m:generateContent", {"contents": []})
     assert len(module.FAILURES) == 2  # rate limiting is transport, not this request's content
+
+
+def test_subagent_modes_shape_the_opencode_config() -> None:
+    default = make_job()["agents"][0]["kwargs"]["opencode_config"]
+    assert "tools" not in default and "agent" not in default
+
+    off = make_job(opencode_subagents="off")["agents"][0]["kwargs"]["opencode_config"]
+    assert off["tools"]["task"] is False
+    assert all(off["agent"][name]["disable"] for name in harbor_runner.OPENCODE_BUILTIN_SUBAGENTS)
+
+    on = make_job(opencode_subagents="on", max_turns=5)["agents"][0]["kwargs"]["opencode_config"]
+    assert on["agent"]["media-analyst"]["mode"] == "subagent"
+    assert on["agent"]["build"]["steps"] == 5  # the mode never clobbers other agent settings
+    assert "tools" not in on
+
+    with pytest.raises(ValueError, match="subagent mode"):
+        make_job(opencode_subagents="sometimes")

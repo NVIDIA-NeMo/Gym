@@ -34,6 +34,7 @@ agentic_vbench_agent:
       model_context_tokens: ${oc.select:agentic_vbench_context_tokens,262144}
       model_output_capability_tokens: ${oc.select:agentic_vbench_output_tokens,100000}
       model_call_timeout_ms: ${oc.select:agentic_vbench_model_call_timeout_ms,3600000}
+      opencode_subagents: ${oc.select:agentic_vbench_opencode_subagents,default}
       datasets:
         - name: agentic_vbench
           type: benchmark

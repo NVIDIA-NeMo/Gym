@@ -45,6 +45,7 @@ def job_config(
     max_turns: int | None = None,
     verifier_timeout_multiplier: float = 1.0,
     model_timeout_ms: int | None = None,
+    opencode_subagents: str = "default",
 ) -> dict:
     """Create a single-attempt Harbor job using OpenCode's compatible provider.
 
@@ -71,6 +72,8 @@ def job_config(
         raise ValueError("Verifier timeout multiplier must not shorten the task's own budget")
     if model_timeout_ms is not None and model_timeout_ms < 1:
         raise ValueError("Model call timeout must be positive")
+    if opencode_subagents not in OPENCODE_SUBAGENT_MODES:
+        raise ValueError(f"Unknown OpenCode subagent mode: {opencode_subagents!r}")
     provider_options = {
         "baseURL": endpoint.rstrip("/") if backend == "remote" else container_endpoint(endpoint),
         "apiKey": "unused",
@@ -94,6 +97,7 @@ def job_config(
     }
     if max_turns is not None:
         opencode_config["agent"] = {"build": {"steps": max_turns}}
+    apply_subagent_mode(opencode_config, opencode_subagents)
     return {
         "job_name": "trial",
         "jobs_dir": str(output / "jobs"),
@@ -121,6 +125,38 @@ def job_config(
             }
         ],
     }
+
+
+# OpenCode lets the primary ("build") agent delegate to subagents through its ``task`` tool;
+# the built-in subagents (general, explore, scout) are available by default, so every run
+# without an explicit mode is "default". "off" removes the task tool and disables the built-in
+# subagents (primary agent only). "on" keeps the built-ins and registers a media-analysis
+# subagent whose description makes delegation an explicit option; the task prompt and the
+# primary agent's system prompt are unchanged in every mode.
+OPENCODE_SUBAGENT_MODES = ("default", "off", "on")
+OPENCODE_BUILTIN_SUBAGENTS = ("general", "explore", "scout")
+OPENCODE_MEDIA_SUBAGENT = {
+    "mode": "subagent",
+    "description": (
+        "Media analysis helper for video and audio editing tasks: inspects clips with ffprobe/ffmpeg, "
+        "extracts frames, contact sheets, audio and transcripts, measures loudness, noise, blur, cuts "
+        "or duplicated segments, and reports findings with timestamps. Delegate independent analysis "
+        "subtasks to it (several can run in parallel); it must not write the final deliverables."
+    ),
+}
+
+
+def apply_subagent_mode(opencode_config: dict, mode: str) -> None:
+    """Mutate the OpenCode config for the requested subagent mode."""
+    if mode == "default":
+        return
+    agents = opencode_config.setdefault("agent", {})
+    if mode == "off":
+        opencode_config["tools"] = {**opencode_config.get("tools", {}), "task": False}
+        for name in OPENCODE_BUILTIN_SUBAGENTS:
+            agents[name] = {**agents.get(name, {}), "disable": True}
+    elif mode == "on":
+        agents["media-analyst"] = dict(OPENCODE_MEDIA_SUBAGENT)
 
 
 JUDGE_PROTOCOLS = {
@@ -235,6 +271,11 @@ def main() -> None:
         default=_env_default("AGENTIC_VBENCH_VERIFIER_TIMEOUT_MULTIPLIER", float, 1.0),
     )
     parser.add_argument("--model-timeout-ms", type=int, default=None)
+    parser.add_argument(
+        "--opencode-subagents",
+        choices=OPENCODE_SUBAGENT_MODES,
+        default=os.environ.get("AGENTIC_VBENCH_OPENCODE_SUBAGENTS", "default"),
+    )
     args = parser.parse_args()
     if importlib.metadata.version("harbor") != "0.6.6":
         raise RuntimeError("AgenticVBench requires upstream harbor==0.6.6")
@@ -274,6 +315,7 @@ def main() -> None:
             max_turns=args.max_turns,
             verifier_timeout_multiplier=args.verifier_timeout_multiplier,
             model_timeout_ms=args.model_timeout_ms,
+            opencode_subagents=args.opencode_subagents,
         )
     )
     config_path = args.output / "harbor_job.json"

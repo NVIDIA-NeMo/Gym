@@ -69,6 +69,8 @@ class AgenticVBenchConfig(BaseResponsesAPIAgentConfig):
     model_context_tokens: int = Field(default=262144, gt=0)
     model_output_capability_tokens: int = Field(default=100000, gt=0)
     model_call_timeout_ms: int = Field(default=3_600_000, gt=0)
+    # OpenCode subagent policy: default (built-ins available), off (primary agent only), on (built-ins + media-analyst)
+    opencode_subagents: Literal["default", "off", "on"] = "default"
 
 
 class AgenticVBenchRunRequest(BaseRunRequest):
@@ -233,6 +235,8 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 str(self.config.verifier_timeout_multiplier),
                 "--model-timeout-ms",
                 str(self.config.model_call_timeout_ms),
+                "--opencode-subagents",
+                self.config.opencode_subagents,
             ]
             if self.config.judge_protocol:
                 command.extend(["--judge-protocol", self.config.judge_protocol])
