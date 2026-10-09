@@ -12,9 +12,7 @@ biomnibench_da:
       datasets:
         - name: biomnibench_da
           type: benchmark
-          ## FIXME: Use this once Gym resolves dataset interpolations before converting paths.
-          # jsonl_fpath: ${prepare_script_args.output_dir}/gym.jsonl
-          jsonl_fpath: benchmarks/biomnibench_da/data/gym.jsonl
+          jsonl_fpath: ${prepare_script_args.output_dir}/gym.jsonl
           prepare_script: benchmarks/biomnibench_da/harbor/adapter.py
           prepare_dependencies:
             - huggingface_hub
@@ -25,19 +23,18 @@ biomnibench_da:
 
       harbor_max_retries: 3
 
-      ## TIP: Auto-resolves to a sibling harbor folder.
-      harbor_jobs_dir: ${output_jsonl_fpath}
+      ## TIP: Auto-resolves to a sibling harbor folder when set.
+      harbor_jobs_dir: ${oc.select:output_jsonl_fpath,''}
 
       harbor_dataset:
-        path: ${harbor_dataset_path}
+        path: ${prepare_script_args.output_dir}
 
       harbor_environment:
         type: singularity
         kwargs:
           singularity_image_cache_dir: ${oc.env:SINGULARITY_CACHEDIR}/harbor
           singularity_force_pull: false
-          ## TIP: Skip bind-paths if broken network access.
-          # singularity_no_mount: home,tmp
+          singularity_no_mount: home,tmp
 
       harbor_agent:
         name: opencode

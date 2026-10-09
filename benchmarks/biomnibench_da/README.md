@@ -16,16 +16,17 @@ docker build --file benchmarks/biomnibench_da/Dockerfile --tag benchmarks/biomni
 Prepare the benchmark dataset using the task environment image:
 ```shell
 gym eval prepare --benchmark biomnibench_da \
-  ++prepare_script_args.docker_image=benchmarks/biomnibench_da:latest \
-  ++prepare_script_args.output_dir=benchmarks/biomnibench_da/data
+  ++prepare_script_args.output_dir="${PWD}/benchmarks/biomnibench_da/data" \
+  ++prepare_script_args.docker_image=benchmarks/biomnibench_da:latest
 ```
 
 > [!tip]
-> Use `++prepare_script_args.<name>=<value>` to set or override preparation script arguments (see the adapter's [`prepare` function](./harbor/adapter.py#L144)).
+> Use `++prepare_script_args.<name>=<value>` to set or override preparation script arguments (see the adapter's [`prepare` function](./harbor/adapter.py#L146)).
 > Add `++prepare_script_args.overwrite=true` to overwrite existing generated tasks.
 
 > [!warning]
-> This preparation is a large download. Use `++prepare_script_args.limit=1` to prepare one task for debugging.
+> Preparation downloads the full dataset, which is large. `++prepare_script_args.limit=1` can prepare only one task
+> for debugging, but does not limit the download; the full dataset is always downloaded.
 
 Singularity must be installed; set `SINGULARITY_CACHEDIR` and `SINGULARITY_TMPDIR` to existing host directories,
 and export `NVINF_API_KEY` for the NVIDIA Inference example below.
@@ -35,26 +36,19 @@ Run the benchmark evaluation:
 JUDGE_MODEL=openai/nvidia/zai-org/glm-5.2 \
 JUDGE_MODEL_API_BASE=https://inference-api.nvidia.com/v1 \
 JUDGE_MODEL_API_KEY="${NVINF_API_KEY}" \
-gym eval run \
+gym eval run --resume --concurrency 8 \
   --benchmark biomnibench_da \
   --split benchmark \
   --model nvinf/nvidia/nvidia/nemotron-3-ultra \
   --output "${PWD}/benchmarks/biomnibench_da/logs/rollouts.jsonl" \
-  --concurrency 8 \
-  --resume \
-  ++harbor_dataset_path="${PWD}/benchmarks/biomnibench_da/data"
+  ++prepare_script_args.output_dir="${PWD}/benchmarks/biomnibench_da/data"
 ```
-
-> [!tip]
-> If you override `prepare_script_args.output_dir` during preparation, set `harbor_dataset_path` to its absolute path
-> and update the dataset's `jsonl_fpath` in `config.yaml` to match.
-> Add `--limit 1` for a small debugging run.
 
 ## Configuration
 
 | Variable | Type | Description |
 | --- | --- | --- |
-| `harbor_dataset_path` | Hydra value | Absolute path to the generated Harbor dataset. Set with `++harbor_dataset_path=...` on `gym eval run`. |
+| `prepare_script_args.output_dir` | Hydra value | Absolute directory path for generated Harbor tasks and `gym.jsonl`. |
 | `output_jsonl_fpath` | Hydra value | Absolute rollout output path. Set by `-o/--output` on `gym eval run`. |
 | `policy_model_name` | Hydra value | Model name passed to the OpenCode agent. Must use OpenCode provider in [opencode.json](./harbor/task-template/environment/opencode.json). Automatically set when using `-m/--model` flag in the script above. |
 | `SINGULARITY_CACHEDIR` | Environment variable | Singularity image cache directory; `/harbor` is appended. |
