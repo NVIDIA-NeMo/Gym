@@ -1081,6 +1081,9 @@ class FileLineageStore(IncrementalLineageStore):
                     except FileNotFoundError:
                         pass
                 self._ledger_cache_pop(rollout_id)
-        if changed:
+        # A retire with nothing left to remove syncs nothing, since its fences are already durable. A delete
+        # always syncs a non-empty batch: an overlapping delete may have removed the files without syncing yet,
+        # and a caller that reuses the rollout ID must not see the old fence or ledger come back after a crash.
+        if changed or (unretire and rollout_ids):
             self._fsync_ledger_root()
         return {"removed": removed, "absent": absent}

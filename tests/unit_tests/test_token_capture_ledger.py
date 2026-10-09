@@ -619,9 +619,8 @@ async def test_retiring_again_does_not_touch_fences_or_sync_the_directory(tmp_pa
 
     with patch.object(store, "_fsync_ledger_root", wraps=store._fsync_ledger_root) as fsync_root:
         result = await store.retire(["r1"])
-        await store.delete(["never-recorded"])
 
-    # A retried batch changes nothing on disk, so it writes no metadata and syncs nothing.
+    # A retried retire changes nothing on disk, so it writes no metadata and syncs nothing.
     assert result == {"removed": [], "absent": ["r1"]}
     assert fence.stat().st_mtime_ns == fence_mtime
     assert fsync_root.call_count == 0
@@ -712,3 +711,16 @@ async def test_removing_ledgers_forgets_their_cached_rows(tmp_path, method):
     assert store._ledger_cache == {}
     # A cache that also tracks its size must account for every removal, or it slowly fills with nothing.
     assert getattr(store, "_ledger_cache_weight", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_file_store_delete_syncs_every_non_empty_batch(tmp_path):
+    """An overlapping delete may have removed the files without syncing yet, so a delete that finds nothing still syncs."""
+    store = FileLineageStore(tmp_path)
+    await _record_call_1(store)
+
+    with patch.object(store, "_fsync_ledger_root", wraps=store._fsync_ledger_root) as fsync_root:
+        await store.delete(["r1"])
+        await store.delete(["r1", "never-recorded"])
+
+    assert fsync_root.call_count == 2
