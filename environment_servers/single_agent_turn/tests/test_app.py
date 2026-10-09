@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextlib
 import runpy
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,8 +57,9 @@ class _Response:
     ok = True
     cookies = {"session": _Cookie()}
 
-    def __init__(self, body: dict) -> None:
+    def __init__(self, body: dict, headers: dict | None = None) -> None:
         self.body = orjson.dumps(body)
+        self.headers = headers or {}
 
     async def read(self) -> bytes:
         return self.body
@@ -125,7 +127,7 @@ class _Client(ServerClient):
             payload["agent_session_id"] = body["agent_session_id"]
         elif url_path == "/close_session":
             payload["resources_session_id"] = body["resources_session_id"]
-        return _Response(payload)
+        return _Response(payload, response.headers)
 
     def _resolve_base_url(self, server_name: str) -> str:
         return f"http://{server_name}:8000"
@@ -560,3 +562,48 @@ async def test_interrupted_activation_closes_agent_before_resources(
         "/close_session",
     ]
     assert not client.responses
+
+
+def test_checkpointing_refuses_more_than_one_worker() -> None:
+    environment_server, client = _environment_server()
+    client.global_config_dict["checkpoint"] = {"enabled": True, "control_auth_token": "t"}
+    config = environment_server.config.model_copy(update={"num_workers": 2})
+    server = SingleAgentTurnEnvironmentServer(config=config, server_client=client)
+
+    with pytest.raises(ValueError, match="num_workers=1"):
+        server.setup_webserver()
+
+
+@pytest.mark.parametrize("reported, expected", [({"x-ng-checkpoint-verify": "replay"}, "replay"), ({}, "wait")])
+async def test_verify_step_mode_comes_from_the_resources_seed_reply(reported: dict, expected: str) -> None:
+    environment_server, client = _environment_server()
+    client.responses[0] = _Response({"resources_session_id": "resources-session"}, reported)
+    modes: list[str] = []
+
+    def record_step(request: object, mode: str) -> contextlib.AbstractAsyncContextManager[None]:
+        modes.append(mode)
+        return contextlib.nullcontext()
+
+    object.__setattr__(environment_server, "checkpoint_step", record_step)
+    await environment_server.run_request(_request())
+
+    # Seeding and the agent invocation replay; closing the agent waits; verification follows the seed reply.
+    assert modes == ["replay", "replay", "wait", expected]
+
+
+@pytest.mark.parametrize("restarting_seed", [None, 0, 1], ids=["neither", "resources", "agent"])
+async def test_a_seed_reply_that_cannot_be_captured_makes_the_episode_a_restart(restarting_seed: int | None) -> None:
+    environment_server, client = _environment_server()
+    if restarting_seed is not None:
+        # Response 0 answers the resources seed, response 1 the agent seed.
+        reply = client.responses[restarting_seed]
+        client.responses[restarting_seed] = _Response(orjson.loads(reply.body), {"x-ng-checkpoint-restart": "1"})
+    restarts: list[object] = []
+
+    async def record_restart(request: object) -> None:
+        restarts.append(request)
+
+    object.__setattr__(environment_server, "checkpoint_restart", record_restart)
+    await environment_server.run_request(_request())
+
+    assert len(restarts) == (0 if restarting_seed is None else 1)

@@ -38,6 +38,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
+        # Legacy rows still run the native protocol through run_request, so its episodes checkpoint too.
+        self.setup_environment_checkpoint(app)
         app.post("/run")(self.run_legacy)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
