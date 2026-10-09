@@ -1687,6 +1687,23 @@ def test_config_takes_model_server_or_session_capture_not_both():
     assert PiAgentConfig(**fields, model_server=model_server).session_capture is None
 
 
+@pytest.mark.parametrize("endpoint", ["responses", "run"])
+async def test_session_capture_refuses_the_local_path(setup, endpoint):
+    agent, sandbox = setup
+    capturing(agent)
+    request = Request({"type": "http", "session": {}})
+    with patch.object(agent, "_create_episode", AsyncMock()) as host:
+        with pytest.raises(HTTPException, match="session_capture runs only in agent sessions") as raised:
+            if endpoint == "responses":
+                await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+            else:
+                await agent.run(request, PiAgentRunRequest(responses_create_params={"input": "task"}))
+        host.assert_not_awaited()
+    assert raised.value.status_code == 422
+    assert CAPTURE_EVENTS == []
+    sandbox.launch.assert_not_awaited()
+
+
 @pytest.mark.parametrize("served_model", ["served-model", None])
 def test_session_capture_serves_sandboxed_pi_and_close_returns_its_capture(setup, served_model):
     agent, sandbox = setup

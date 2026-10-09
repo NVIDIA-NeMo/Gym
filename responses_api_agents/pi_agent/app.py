@@ -1198,6 +1198,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 raise HTTPException(409, "Pi sandbox sessions support one activation; retry the same request")
             # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
+        self._refuse_local_path_with_session_capture()
         # AnySWE, AnyTerminal and HarnessAgent pass generic Responses fields here.
         # Preserve their local CLI contract; only native sessions enforce the new
         # request boundary. Legacy model selection and caps remain config-owned.
@@ -1214,9 +1215,21 @@ class PiAgent(SimpleResponsesAPIAgent):
             update={_INTERNAL_OBSERVATIONS_KEY: episode.observations.model_dump(mode="json")}
         )
 
+    def _refuse_local_path_with_session_capture(self) -> None:
+        """Refuse work outside an agent session when a session capture is configured.
+
+        Only sandbox sessions run the capture. The local CLI path would call the model directly and record nothing,
+        so it fails before any work instead of silently producing uncaptured rollouts.
+        """
+        if self.config.session_capture is not None:
+            raise HTTPException(
+                422, "session_capture runs only in agent sessions; the local path cannot capture calls"
+            )
+
     async def run(self, request: Request, body: PiAgentRunRequest) -> PiAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
             raise HTTPException(409, "Pi sessions require EnvironmentServer /run")
+        self._refuse_local_path_with_session_capture()
         if self.config.resources_server is None:
             raise HTTPException(
                 422, "Pi /run requires resources_server; use EnvironmentServer /run for sandbox sessions"
