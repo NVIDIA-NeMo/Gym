@@ -87,6 +87,34 @@ async def test_local_install_does_not_block_loop_or_cancel_shared_attempt() -> N
         ensure.assert_called_once()
 
 
+async def test_failed_install_retries_after_all_waiters_cancel() -> None:
+    started, release = threading.Event(), threading.Event()
+
+    def fail_install(version: str) -> None:
+        started.set()
+        assert release.wait(3)
+        raise RuntimeError("install failed after cancellation")
+
+    with patch("responses_api_agents.opencode_agent.app.ensure_opencode", side_effect=fail_install) as install:
+        agent = make_agent()
+        waiter = asyncio.create_task(agent._ensure_local_runtime())
+        try:
+            async with asyncio.timeout(2):
+                while not started.is_set():
+                    await asyncio.sleep(0.01)
+            setup = agent._local_setup_task
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+        finally:
+            release.set()
+        with pytest.raises(RuntimeError, match="after cancellation"):
+            await setup
+        install.side_effect = None
+        await agent._ensure_local_runtime()
+        assert install.call_count == 2
+
+
 @pytest.mark.parametrize("shipped_config", [False, True])
 @pytest.mark.parametrize("path", ["/v1/responses", "/ng-rollout/local-smoke/v1/responses"])
 def test_unseeded_responses_run_local_cli(shipped_config: bool, path: str, monkeypatch: pytest.MonkeyPatch) -> None:

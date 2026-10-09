@@ -76,10 +76,11 @@ Session setup installs the pinned OpenCode runtime inside the sandbox. The image
 needs Linux, Python 3.8+ with SQLite and `fcntl`, and Bash. Missing Python/Bash can
 be installed with apt-get or apk when running as root; otherwise preinstall them.
 Online installation needs GitHub access, curl, tar, gzip and a Debian or RHEL CA
-bundle. The installer also ensures `rg` is on PATH so `glob`/`grep` do not download
-ripgrep into every session. Missing packages are installed with apt-get or apk as
-root; non-root images must preinstall them. Cached matching runtimes need no
-download. Task dependencies are preserved.
+bundle. Missing required packages are installed with apt-get or apk as root;
+non-root images must preinstall them. System `rg` is a best-effort optimization:
+setup tries apt-get or apk as root, but only warns if it is unavailable. OpenCode
+can then download ripgrep on demand; offline images should preinstall it.
+Cached matching OpenCode runtimes need no runtime download. Task dependencies are preserved.
 
 Local and sandbox execution share `runtime.OPENCODE_VERSION` and the model-call
 correlation plugin. The plugin is uploaded into each sandbox when model-call

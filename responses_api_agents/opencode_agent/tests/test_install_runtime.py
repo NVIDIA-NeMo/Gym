@@ -30,15 +30,22 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "id": '#!/bin/bash\necho "${TEST_UID:-0}"\n',
         "apt-get": """#!/bin/bash
 echo "$*" >> "$TEST_ROOT/packages.log"
+if [ "$1" = update ]; then
+  [ "${TEST_UPDATE_FAIL:-0}" = 0 ] || exit 100
+fi
 if [ "$1" = install ]; then
   [ "${TEST_INSTALL_FAIL:-0}" = 0 ] || exit 100
   cp "$TEST_ROOT/curl" "$TEST_ROOT/bin/curl"
+  if [ "${@: -1}" = ripgrep ]; then
+    cp "$TEST_ROOT/ripgrep" "$TEST_ROOT/bin/rg"
+  fi
 fi
 """,
     }
     for name, script in scripts.items():
         (bindir / name).write_text(script)
         (bindir / name).chmod(0o755)
+    shutil.copy(bindir / "rg", tmp_path / "ripgrep")
     # Stop at the first download: neither apt nor external network requests are real in these tests.
     curl = tmp_path / "curl"
     curl.write_text('#!/bin/bash\necho "$*" > "$TEST_ROOT/download.log"\nexit 19\n')
@@ -139,11 +146,13 @@ def test_rhel_certificate_bundle_does_not_require_root_or_package_manager(sandbo
     (root / "debian-ca.crt").unlink()
     (root / "rhel-ca.crt").write_text("test RHEL bundle")
     (root / "bin/apt-get").unlink()
+    (root / "bin/rg").unlink()
     shutil.copy(root / "curl", root / "bin/curl")
     result = run_installer(root, env | {"TEST_UID": "1000"})
     assert result.returncode == 19, result.stderr
     assert (root / "download.log").exists()
     assert not (root / "packages.log").exists()
+    assert "OpenCode can download it on demand" in result.stderr
 
 
 @pytest.mark.parametrize("tool", ["tar", "gzip"])
@@ -166,20 +175,45 @@ def test_ripgrep_is_provisioned_even_with_a_cached_opencode(sandbox, cached):
         binary.chmod(0o755)
     result = run_installer(root, env)
     assert result.returncode == (0 if cached else 19), result.stderr
-    expected = "ripgrep" if cached else "ripgrep curl"
-    assert (root / "packages.log").read_text().splitlines() == [
+    expected = [] if cached else ["update", "install -y --no-install-recommends curl"]
+    assert (root / "packages.log").read_text().splitlines() == expected + [
         "update",
-        f"install -y --no-install-recommends {expected}",
+        "install -y --no-install-recommends ripgrep",
     ]
+    assert (root / "bin/rg").exists()
+    assert "OpenCode can download it on demand" not in result.stderr
 
 
-def test_missing_ripgrep_without_root_explains_remedy(sandbox):
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("unavailable", ["nonroot", "no_manager", "apt_update", "apt_install", "apk"])
+def test_optional_ripgrep_failure_does_not_block_runtime(sandbox, cached, unavailable):
     root, env = sandbox
     (root / "bin/rg").unlink()
-    result = run_installer(root, env | {"TEST_UID": "1000"})
-    assert result.returncode == 1
-    assert "ripgrep" in result.stderr and "preinstall" in result.stderr
-    assert not (root / "download.log").exists()
+    shutil.copy(root / "curl", root / "bin/curl")
+    if cached:
+        (root / "runtime").mkdir()
+        binary = root / "runtime/opencode"
+        binary.write_text("#!/bin/bash\necho 1.17.11\n")
+        binary.chmod(0o755)
+    if unavailable == "nonroot":
+        env["TEST_UID"] = "1000"
+    elif unavailable == "no_manager":
+        (root / "bin/apt-get").unlink()
+        (root / "debian-ca.crt").unlink()
+        (root / "rhel-ca.crt").write_text("test RHEL bundle")
+    elif unavailable == "apt_update":
+        env["TEST_UPDATE_FAIL"] = "1"
+    elif unavailable == "apt_install":
+        env["TEST_INSTALL_FAIL"] = "1"
+    else:
+        (root / "bin/apk").write_text("#!/bin/bash\nexit 100\n")
+        (root / "bin/apk").chmod(0o755)
+    result = run_installer(root, env)
+    assert result.returncode == (0 if cached else 19), result.stderr
+    assert "OpenCode can download it on demand" in result.stderr
+    assert (root / "download.log").exists() is not cached
+    if unavailable in {"nonroot", "no_manager"}:
+        assert not (root / "packages.log").exists()
 
 
 @pytest.mark.skipif(shutil.which("python3.8") is None, reason="Python 3.8 is not installed")

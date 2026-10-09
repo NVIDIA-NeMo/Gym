@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
+from responses_api_agents.opencode_agent.sandbox import format_sandbox_error
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
     active_sessions,
     capture_observations,
@@ -109,6 +110,8 @@ def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp
     async def read(source, destination):
         if source.endswith("/stderr.log"):
             Path(destination).write_text("x" * 18000 + "ROOT CAUSE")
+        elif source.endswith("/output.log"):
+            Path(destination).write_text("output" * 6000 + "OUTPUT TAIL")
         elif failure == "missing_export" and source.endswith("/export.json"):
             raise FileNotFoundError("missing export")
         else:
@@ -138,9 +141,10 @@ def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp
             assert invocation.conversation[-1].content[0].text == "Fixed"
         else:
             assert "ROOT CAUSE" in str(error.value)
-            assert len(str(error.value)) < 17000
+            assert len(str(error.value)) <= 16000
             if failure == "missing_export":
                 assert "returned no valid result" in str(error.value)
+                assert "OUTPUT TAIL" in str(error.value)
         assert len(state.stderr) == 16000
         assert state.session.cleanup["cleanup_confirmed"] is True
         assert any(record.kind == "sandbox" for record in state.observations.records)
@@ -195,3 +199,41 @@ def test_malformed_capture_never_replaces_provider_failure(setup, artifact):
             client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         assert any(record.kind == "sandbox" for record in state.observations.records)
         client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
+
+
+@pytest.mark.parametrize("stderr_already_in_error", [False, True])
+def test_combined_diagnostics_are_bounded_and_stderr_is_not_duplicated(stderr_already_in_error):
+    stderr = "e" * 16000 + "STDERR TAIL"
+    message = "OpenCode failed" + (f": {stderr}" if stderr_already_in_error else "")
+    result = format_sandbox_error(message, output="o" * 16000 + "OUTPUT TAIL", stderr=stderr)
+    assert len(result) <= 16000
+    assert result.startswith("OpenCode failed")
+    assert "OUTPUT TAIL" in result
+    assert result.count("STDERR TAIL") == 1
+
+
+def test_model_error_502_uses_the_same_combined_diagnostic_bound(setup):
+    agent, sandbox = setup
+    artifact = json.loads(sandbox.events)
+    assistant = next(message["info"] for message in artifact["messages"] if message["info"]["role"] == "assistant")
+    assistant["error"] = {"name": "APIError", "message": "e" * 20000 + "MODEL ERROR TAIL"}
+    sandbox.events = json.dumps(artifact)
+    download = sandbox.download
+
+    async def read(source, destination):
+        if source.endswith("/stderr.log"):
+            Path(destination).write_text("s" * 20000 + "STDERR TAIL")
+        else:
+            await download(source, destination)
+
+    sandbox.download = read
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 502
+        detail = response.json()["detail"]
+        assert len(detail) <= 16000
+        assert "MODEL ERROR TAIL" in detail
+        assert detail.count("STDERR TAIL") == 1
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()

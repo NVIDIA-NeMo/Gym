@@ -84,7 +84,7 @@ from responses_api_agents.opencode_agent.runtime import (
     OPENCODE_VERSION,
     apply_observability_patch,
 )
-from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
+from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, format_sandbox_error
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 
 
@@ -221,6 +221,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             self._local_setup_task = asyncio.create_task(
                 asyncio.to_thread(ensure_opencode, self.config.opencode_version)
             )
+            self._local_setup_task.add_done_callback(self._clear_failed_local_setup)
         setup = self._local_setup_task
         try:
             await asyncio.shield(setup)
@@ -230,6 +231,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if self._local_setup_task is setup:
                 self._local_setup_task = None
             raise
+
+    def _clear_failed_local_setup(self, task: asyncio.Task[None]) -> None:
+        # All shielded waiters may have gone away before the installer fails.
+        failed = task.cancelled() or task.exception() is not None
+        if failed and self._local_setup_task is task:
+            self._local_setup_task = None
 
     @staticmethod
     def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -999,7 +1006,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if failure is not None:
             raise failure
         if error:
-            raise HTTPException(502, f"{error}; stderr: {state.stderr}" if state.stderr else error)
+            raise HTTPException(502, format_sandbox_error(error, stderr=state.stderr))
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),

@@ -24,6 +24,20 @@ from responses_api_agents.opencode_agent.artifacts import parse_opencode_observa
 LOG = logging.getLogger(__name__)
 
 
+def format_sandbox_error(message: str, *, output: str = "", stderr: str = "") -> str:
+    """Bound the combined error to 16k characters, preserving context and log tails."""
+    parts = [message]
+    if output:
+        parts.append(f"output: {output}")
+    if stderr and stderr not in message and stderr not in output:
+        parts.append(f"stderr: {stderr}")
+    budget = 16000 // len(parts) - 1
+    marker = "\n...[truncated]...\n"
+    return "\n".join(
+        part if len(part) <= budget else part[:256] + marker + part[-(budget - 256 - len(marker)) :] for part in parts
+    )
+
+
 class HarnessProcessInfo(BaseModel):
     """Optional OpenCode shim identity, independent of supervisor cleanup."""
 
@@ -118,7 +132,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             await self.snapshot(timeout)
         except Exception as error:
             if self.stderr:
-                raise RuntimeError(f"{error}; OpenCode stderr: {self.stderr}") from error
+                raise RuntimeError(format_sandbox_error(str(error), stderr=self.stderr)) from error
             raise
         try:
             with tempfile.TemporaryDirectory(prefix="opencode-observations-") as directory:
@@ -151,7 +165,9 @@ class OpenCodeSandboxSession(AgentSessionState):
         except Exception as error:
             logs = await self.session.read_output_log()
             raise RuntimeError(
-                f"OpenCode sandbox runner returned no valid result: {logs[-16000:]}; stderr: {self.stderr}"
+                format_sandbox_error(
+                    "OpenCode sandbox runner returned no valid result", output=logs, stderr=self.stderr
+                )
             ) from error
 
     async def snapshot(self, timeout: float) -> None:

@@ -36,8 +36,6 @@ if [ -x "$runtime/opencode" ] && [ "$("$runtime/opencode" --version)" = "$versio
   cached=true
 fi
 missing=()
-# Stock OpenCode uses rg on PATH before trying a per-session download.
-command -v rg >/dev/null 2>&1 || missing+=(ripgrep)
 if [ "$cached" = false ]; then
   for tool in curl tar gzip; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
@@ -60,6 +58,18 @@ if [ "${#missing[@]}" -gt 0 ]; then
       echo "OpenCode sandbox execution needs ${missing[*]}; preinstall them in the task image (automatic installation requires apt-get or apk)" >&2
       exit 1
     fi
+fi
+# Stock OpenCode can download ripgrep itself. A system copy avoids per-session
+# downloads, but must not make cached runtimes or non-root/RHEL images unusable.
+if ! command -v rg >/dev/null 2>&1; then
+  if [ "$(id -u)" = 0 ]; then
+    if command -v apk >/dev/null 2>&1; then
+      apk add --no-cache ripgrep || true
+    elif command -v apt-get >/dev/null 2>&1; then
+      (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ripgrep) || true
+    fi
+  fi
+  command -v rg >/dev/null 2>&1 || echo 'Warning: optional ripgrep is unavailable; OpenCode can download it on demand' >&2
 fi
 if [ "$cached" = true ]; then
   exit 0
