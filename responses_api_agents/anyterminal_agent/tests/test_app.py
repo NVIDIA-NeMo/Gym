@@ -173,10 +173,13 @@ class TestSetupScriptsExist:
         assert kwargs["openclaw_version"] == "2026.6.35"
         assert kwargs["openclaw_config"]["plugins"]["enabled"] is False
 
-    def test_hermes_health_check_ignores_caller_working_directory(self) -> None:
+    def test_hermes_health_check_ignores_caller_working_directory_and_retries(self) -> None:
         script = PARENT_DIR / "responses_api_agents" / "hermes_agent" / "scripts" / "hermes_agent_deps.sh"
+        contents = script.read_text()
 
-        assert '"$DEPS_DIR/bin/python3" -P -c "import model_tools;' in script.read_text()
+        assert '"$DEPS_DIR/bin/python3" -P -c "import model_tools;' in contents
+        assert "for attempt in {1..12}" in contents
+        assert 'if [ "$hermes_health_ok" -ne 1 ]' in contents
 
 
 def test_named_sandbox_provider_reference_is_accepted() -> None:

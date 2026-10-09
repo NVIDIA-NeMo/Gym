@@ -23,8 +23,22 @@ echo "Installing hermes-agent ($HERMES_SPEC)"
 
 # ``python -c`` normally prepends the caller's working directory to sys.path.
 # NeMo RL has its own top-level ``tools`` package, which can shadow Hermes'
-# ``tools.registry`` when Gym is launched from the RL checkout.  Safe-path mode
-# makes this health check resolve imports only from the portable runtime.
-"$DEPS_DIR/bin/python3" -P -c "import model_tools; from run_agent import AIAgent; print('hermes-agent OK')"
+# ``tools.registry`` when Gym is launched from the RL checkout. Safe-path mode
+# makes this health check resolve imports only from the portable runtime. A
+# freshly installed package on shared NFS can also be briefly invisible to a
+# new process, so retry the import before declaring the runtime unusable.
+hermes_health_ok=0
+for attempt in {1..12}; do
+    if "$DEPS_DIR/bin/python3" -P -c "import model_tools; from run_agent import AIAgent; print('hermes-agent OK')"; then
+        hermes_health_ok=1
+        break
+    fi
+    echo "Hermes import health check failed (attempt $attempt/12); retrying in 5s" >&2
+    sleep 5
+done
+if [ "$hermes_health_ok" -ne 1 ]; then
+    echo "Hermes import health check failed after 12 attempts" >&2
+    exit 1
+fi
 
 echo "hermes_agent deps ready at $DEPS_DIR"
