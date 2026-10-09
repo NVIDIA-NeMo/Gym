@@ -17,8 +17,14 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
+from nemo_gym.agent_utils.session_capture import SessionCapture, SessionCaptureConfig
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+    ModelEndpoint,
+    TokenCapture,
+)
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
@@ -233,6 +239,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             assert models["providers"]["nemo"]["baseUrl"] == "http://model.example:9000/ng-rollout/pi-smoke-a2/v1"
             closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
             assert closed.status_code == 200, closed.text
+            assert closed.json()["token_capture"] is None
             observations = closed.json()["agent_observations"]
             assert observations["source"] == "pi"
             assert "no_sandbox_runtime" not in [gap["code"] for gap in observations["gaps"]]
@@ -1635,4 +1642,106 @@ async def test_missing_exit_and_empty_output_are_not_success(setup):
     state = agent._session_records[session_id].state
     assert state.session.cleanup["cleanup_confirmed"] is True
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
+
+
+CAPTURE_EVENTS: list[str] = []
+CAPTURED = TokenCapture(atif_trajectories=[{"steps": []}], metrics={"calls": 2})
+
+
+class FakeCapture(SessionCapture):
+    """A session capture that serves a fixed endpoint, or fails to start when its options say so."""
+
+    def __init__(self, *, start: str = "ok", model: str | None = "served-model"):
+        self.start_mode, self.model = start, model
+
+    async def start(self, sandbox) -> ModelEndpoint:
+        # Pi's runtime and runner are staged before the capture starts.
+        assert any(path.endswith("/sandbox_runner.py") for path in sandbox.files)
+        CAPTURE_EVENTS.append("start")
+        if self.start_mode == "raise":
+            raise RuntimeError("capture sidecar unavailable")
+        return ModelEndpoint(base_url="http://127.0.0.1:4321/v1", model=self.model)
+
+    async def collect(self, sandbox) -> TokenCapture:
+        CAPTURE_EVENTS.append("collect")
+        return CAPTURED
+
+    async def abort(self, sandbox) -> None:
+        CAPTURE_EVENTS.append("abort")
+
+
+def capturing(agent, **options) -> None:
+    CAPTURE_EVENTS.clear()
+    agent.config.model_server = None
+    agent.config.session_capture = SessionCaptureConfig(implementation=f"{__name__}:FakeCapture", options=options)
+
+
+def test_config_takes_model_server_or_session_capture_not_both():
+    capture = {"implementation": f"{__name__}:FakeCapture"}
+    fields = {"name": "pi", "host": "localhost", "port": 8001, "entrypoint": "app.py", "pi_version": "0.80.2"}
+    model_server = {"type": "responses_api_models", "name": "policy"}
+    with pytest.raises(ValidationError, match="set model_server: null to use session_capture"):
+        PiAgentConfig(**fields, model_server=model_server, session_capture=capture)
+    assert PiAgentConfig(**fields, session_capture=capture).model_server is None
+    assert PiAgentConfig(**fields, model_server=model_server).session_capture is None
+
+
+@pytest.mark.parametrize("served_model", ["served-model", None])
+def test_session_capture_serves_sandboxed_pi_and_close_returns_its_capture(setup, served_model):
+    agent, sandbox = setup
+    capturing(agent, model=served_model)
+    model = served_model or agent.config.model
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        assert CAPTURE_EVENTS == ["start"]
+        session_id = created.json()["agent_session_id"]
+        result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        assert result.json()["status"] == "completed"
+        assert result.json()["model"] == model
+        provider = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])["providers"]["nemo"]
+        assert provider["baseUrl"] == "http://127.0.0.1:4321/v1"
+        assert provider["models"][0]["id"] == model
+        command = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])["command"]
+        assert command[command.index("--model") + 1] == model
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+    assert CAPTURE_EVENTS == ["start", "collect"]
+    assert closed.json()["token_capture"] == CAPTURED.model_dump(mode="json")
+    observations = closed.json()["agent_observations"]
+    # The capture served the calls, so none is attributed to a Gym model server.
+    assert observations["records"][0]["model_calls"] == []
+    assert "model_call_ownership_unavailable" in [gap["code"] for gap in observations["gaps"]]
+    agent.server_client._build_server_base_url.assert_not_called()
+
+
+def test_failed_capture_start_answers_the_activation_without_running_pi(setup):
+    agent, sandbox = setup
+    capturing(agent, start="raise")
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        session_id = created.json()["agent_session_id"]
+        result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        response = result.json()
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+    reason = "capture did not start: RuntimeError: capture sidecar unavailable"
+    assert response["status"] == "failed"
+    assert response["error"]["message"] == reason
+    assert response["output"][0]["content"][0]["text"] == ""
+    sandbox.launch.assert_not_awaited()
+    assert not any(path.endswith("/input.json") or path.endswith("/models.json") for path in sandbox.files)
+    assert CAPTURE_EVENTS == ["start", "abort"]
+    assert closed.json()["token_capture"] == {
+        "atif_trajectories": [],
+        "metrics": {},
+        "masked": True,
+        "mask_reason": reason,
+    }
+    gaps = closed.json()["agent_observations"]["gaps"]
+    assert [(gap["code"], gap["detail"]) for gap in gaps] == [("harness_not_run", reason)]
     sandbox.disconnect.assert_awaited_once()

@@ -29,9 +29,14 @@ from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import (
+    SandboxSession,
+    harness_not_run_observations,
+    harness_not_run_response,
+)
+from nemo_gym.agent_utils.session_capture import SessionCaptureConfig
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -488,6 +493,17 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     sandbox_bash_timeout_seconds: int = Field(default=900, gt=0)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    # Capture each sandbox session's model calls with a component in the task sandbox. The sandboxed Pi then calls
+    # the capture's endpoint instead of a Gym model server, and the session close returns what it captured.
+    session_capture: Optional[SessionCaptureConfig] = None
+
+    @model_validator(mode="after")
+    def _one_sandbox_model_endpoint(self) -> "PiAgentConfig":
+        if self.model_server is not None and self.session_capture is not None:
+            raise ValueError(
+                "Pi takes model_server or session_capture, not both; set model_server: null to use session_capture"
+            )
+        return self
 
     @property
     def command_parts(self) -> list[str]:
@@ -536,8 +552,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "Pi sandbox workdir must be absolute")
         if any(access.required for access in self.effective_tool_accesses(body)):
             raise HTTPException(422, "Pi supports its own sandbox tools, not required HTTP/MCP tools")
-        if self.config.model_server is None:
-            raise HTTPException(422, "Pi requires a sandbox-reachable Gym model_server")
+        if self.config.model_server is None and self.config.session_capture is None:
+            raise HTTPException(422, "Pi requires a sandbox-reachable Gym model_server or a session_capture")
         if not self.config.pi_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.pi_version):
             raise HTTPException(422, "Pi requires an exact pi_version, for example 0.80.2")
         if self.config.command != "pi" or self.config.extra_args or self.config.env:
@@ -557,7 +573,12 @@ class PiAgent(SimpleResponsesAPIAgent):
         state = PiSandboxSession(
             request=body,
             session=SandboxSession(
-                sandbox=sandbox, session_dir=directory, workdir=workdir, owns_sandbox=owns_sandbox, harness="Pi"
+                sandbox=sandbox,
+                session_dir=directory,
+                workdir=workdir,
+                owns_sandbox=owns_sandbox,
+                harness="Pi",
+                session_capture=self.config.session_capture,
             ),
             runtime=runtime,
         )
@@ -598,6 +619,8 @@ class PiAgent(SimpleResponsesAPIAgent):
                     f"error_type={installed.error_type}): {details[-16000:]}"
                 )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+            # Started at seed so the activation knows the endpoint when it writes Pi's provider config.
+            state.model_endpoint = await state.session.start_session_capture()
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -615,6 +638,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             agent_session_id=state.request.agent_session_id,
             agent_observations=state.observations
             or AgentObservationBundle(source="pi", gaps=[ObservationGap(code="observation_capture_failed")]),
+            token_capture=state.session.token_capture(),
         )
 
     def _validate_request(
@@ -668,10 +692,20 @@ class PiAgent(SimpleResponsesAPIAgent):
         prompt: str,
         system: str,
     ) -> NeMoGymResponse:
+        if state.session.session_capture_failed:
+            # Nothing would be captured, so Pi does not run; close returns the masked capture.
+            reason = state.session.token_capture().mask_reason
+            state.observations = harness_not_run_observations(source="pi", reason=reason)
+            return harness_not_run_response(body, model=self.config.model, reason=reason)
+        rollout_id = state.request.episode_id.capture_key
+        endpoint = self.model_endpoint(
+            model_server=self.config.model_server, rollout_id=rollout_id, session_endpoint=state.model_endpoint
+        )
+        model = endpoint.model or self.config.model
         # Sandbox sessions use only Gym's provider; do not copy credentials for
         # unrelated direct providers from the host configuration into the sandbox.
         models = {
-            "providers": {"nemo": self._build_models_config(state.request.episode_id.capture_key)["providers"]["nemo"]}
+            "providers": {"nemo": self._nemo_provider(base_url=endpoint.base_url, model=model, rollout_id=rollout_id)}
         }
         await state.upload_json("home/.pi/agent/models.json", models)
         await state.upload_json("home/.pi/agent/settings.json", self._build_settings_config())
@@ -697,7 +731,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             "--provider",
             "nemo",
             "--model",
-            self.config.model,
+            model,
             "--no-extensions",
             "--extension",
             f"{state.session.session_dir}/{output_limit_extension}",
@@ -833,7 +867,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
-            model=self.config.model,
+            model=model,
             object="response",
             output=output,
             status="failed" if error else "incomplete" if incomplete else "completed",
@@ -930,15 +964,20 @@ class PiAgent(SimpleResponsesAPIAgent):
         config = copy.deepcopy(self.config.models_config)
         if self.config.model_server is None:
             return config
-        providers = config.setdefault("providers", {})
-        providers["nemo"] = {
-            "baseUrl": self._resolve_model_base_url(rollout_id),
+        config.setdefault("providers", {})["nemo"] = self._nemo_provider(
+            base_url=self._resolve_model_base_url(rollout_id), model=self.config.model, rollout_id=rollout_id
+        )
+        return config
+
+    def _nemo_provider(self, *, base_url: str, model: str, rollout_id: Optional[str]) -> dict[str, Any]:
+        provider = {
+            "baseUrl": base_url,
             "api": "openai-completions",
             "apiKey": "EMPTY",  # pragma: allowlist secret
             "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},
             "models": [
                 {
-                    "id": self.config.model,
+                    "id": model,
                     "reasoning": True,
                     "input": ["text"],
                     "contextWindow": self.config.context_window,
@@ -949,8 +988,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         if rollout_id is not None:
             # Response IDs do not exist for HTTP errors; correlate every retry
             # with the same invocation used by _build_pi_observations.
-            providers["nemo"]["headers"] = {"x-session-id": rollout_id}
-        return config
+            provider["headers"] = {"x-session-id": rollout_id}
+        return provider
 
     async def _run_pi(
         self,

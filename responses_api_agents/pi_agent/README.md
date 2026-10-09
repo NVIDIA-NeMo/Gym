@@ -163,6 +163,9 @@ detail, not a separate endpoint or a setup step users must run.
 - `sandbox_bash_timeout_seconds`: maximum runtime of each sandbox bash tool call (default 900);
   shorter tool-requested deadlines are preserved
 - `session_close_timeout_seconds`: sandbox process cleanup timeout (default 60)
+- `session_capture`: a component in each task sandbox that records Pi's model calls; sandbox sessions call its
+  endpoint (and its model name, when it supplies one) instead of a Gym `model_server`, which must then be `null`.
+  The session close returns its capture, and Pi does not run when the capture did not start.
 
 ## Results and limits
 
