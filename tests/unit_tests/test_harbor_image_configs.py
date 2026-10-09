@@ -14,7 +14,9 @@ from nemo_gym.tasks.harbor.image_configs import (
     ImageConfigError,
     RegistryClient,
     compose_image_references,
+    dockerfile_base_images,
     parse_image_ref,
+    record_base_images,
     record_compose_images,
 )
 from nemo_gym.tasks.harbor.task import discover_tasks
@@ -24,15 +26,25 @@ MAIN_IMAGE = "harborframework/terminal-bench:ctr-environment-abc@sha256:" + "a" 
 SIDECAR_IMAGE = "harborframework/terminal-bench:ctr-sidecar-api-def@sha256:" + "b" * 64
 
 
-def write_task(root: Path, name: str, *, image: str = MAIN_IMAGE, compose: str | None = None) -> Path:
+def write_task(
+    root: Path,
+    name: str,
+    *,
+    image: str | None = MAIN_IMAGE,
+    compose: str | None = None,
+    dockerfile: str | None = None,
+) -> Path:
     task = root / name
     (task / "environment").mkdir(parents=True)
     (task / "tests").mkdir()
-    (task / "task.toml").write_text(f'schema_version = "1.4"\n\n[environment]\ndocker_image = "{image}"\n')
+    declared = f'docker_image = "{image}"\n' if image else ""
+    (task / "task.toml").write_text(f'schema_version = "1.4"\n\n[environment]\n{declared}')
     (task / "instruction.md").write_text("Do the thing.\n")
     (task / "tests" / "test.sh").write_text("#!/bin/bash\necho 1 > /logs/verifier/reward.txt\n")
     if compose is not None:
         (task / "environment" / "docker-compose.yaml").write_text(compose)
+    if dockerfile is not None:
+        (task / "environment" / "Dockerfile").write_text(dockerfile)
     return task
 
 
@@ -183,7 +195,12 @@ class TestRegistryClient:
         entry = RegistryClient().image_config("redis:7-alpine")
         assert entry == {
             "architecture": "amd64",
-            "config": {"Cmd": ["python", "server.py"], "ExposedPorts": {"5000/tcp": {}}, "WorkingDir": "/app"},
+            "config": {
+                "Cmd": ["python", "server.py"],
+                "Env": ["A=1"],
+                "ExposedPorts": {"5000/tcp": {}},
+                "WorkingDir": "/app",
+            },
             "config_digest": "sha256:cfg-amd64",
             "image": "library/redis@sha256:m-amd64",
             "os": "linux",
@@ -310,4 +327,102 @@ class TestRecordComposeImages:
     def test_nothing_is_written_without_compose_tasks(self, tmp_path):
         write_task(tmp_path, "plain")
         assert record_compose_images(discover_tasks(tmp_path), tmp_path, client=FakeClient()) is None
+        assert not (tmp_path / "compose-images.json").exists()
+
+
+class TestDockerfileBaseImages:
+    def test_lists_the_base_image_of_every_dockerfile_the_loader_resolves(self, tmp_path):
+        write_task(tmp_path, "pull", image=None, dockerfile="FROM ubuntu:24.04\nWORKDIR /app\n")
+        write_task(tmp_path, "overlay", image=None, dockerfile="FROM ubuntu:24.04\nRUN true\n")
+        write_task(tmp_path, "settings-next-to-image", dockerfile="FROM python:3.12\nENV A=1\n")
+        # A prebuilt image is the build's result: its overlay Dockerfile is not resolved, so no base image.
+        write_task(tmp_path, "prebuilt", dockerfile="FROM python:3.12-slim\nRUN true\n")
+        # Dockerfiles that need a build and tasks that do not parse are the loader's to report.
+        write_task(tmp_path, "needs-build", image=None, dockerfile="FROM ubuntu\nCOPY . /app\n")
+        write_task(tmp_path, "plain")
+        broken = write_task(tmp_path, "broken", image=None, dockerfile="FROM alpine\n")
+        (broken / "task.toml").write_text("not = [toml")
+        assert dockerfile_base_images(tmp_path) == {
+            "ubuntu:24.04": ["overlay", "pull"],
+            "python:3.12": ["settings-next-to-image"],
+        }
+
+    def test_a_single_task_folder_is_scanned_as_one_task(self, tmp_path):
+        task = write_task(tmp_path, "one", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n")
+        assert dockerfile_base_images(task) == {"redis:7-alpine": ["one"]}
+
+    def test_a_dataset_toml_docker_image_override_makes_the_dockerfile_prebuilt(self, tmp_path):
+        (tmp_path / "dataset.toml").write_text(
+            '[gym.tasks."t".environment]\ndocker_image = "ghcr.io/org/t:prebuilt"\n'
+            '[gym.tasks."pull".environment]\ndocker_image = "ghcr.io/org/pull:img"\n'
+        )
+        # The override declares a prebuilt image, so the Dockerfile's RUN lines are already applied and the
+        # loader never resolves its FROM: no base image to record, whether the scan starts at the dataset
+        # or at the task folder (whose dataset.toml sits beside it).
+        write_task(tmp_path, "t", image=None, dockerfile="FROM localbuild/base:dev\nRUN make\n")
+        # A pull-mode Dockerfile next to an overridden image still contributes its ENV, so its base is recorded.
+        write_task(tmp_path, "pull", image=None, dockerfile="FROM redis:7\nENV A=1\n")
+        assert dockerfile_base_images(tmp_path) == {"redis:7": ["pull"]}
+        assert dockerfile_base_images(tmp_path / "t") == {}
+
+    def test_the_deprecated_image_alias_counts_as_the_declared_image(self, tmp_path):
+        task = write_task(tmp_path, "t", image=None, dockerfile="FROM localbuild/base:dev\nRUN make\n")
+        (task / "task.toml").write_text('schema_version = "1.4"\n\n[environment]\nimage = "ghcr.io/org/t:prebuilt"\n')
+        assert dockerfile_base_images(tmp_path) == {}
+
+    def test_select_limits_the_scan_to_the_chosen_tasks(self, tmp_path):
+        write_task(tmp_path, "a", image=None, dockerfile="FROM ubuntu:24.04\nRUN true\n")
+        write_task(tmp_path, "z", image=None, dockerfile="FROM internal.registry/base:dev\nRUN true\n")
+        assert dockerfile_base_images(tmp_path, select=lambda task_id: task_id == "a") == {"ubuntu:24.04": ["a"]}
+
+    def test_a_broken_dataset_toml_records_nothing(self, tmp_path):
+        # Every task fails to load with the dataset.toml error, which the loader reports; no image is fetched for it.
+        write_task(tmp_path, "a", image=None, dockerfile="FROM ubuntu:24.04\nRUN true\n")
+        (tmp_path / "dataset.toml").write_text("not = [toml")
+        assert dockerfile_base_images(tmp_path) == {}
+
+
+class TestRecordBaseImages:
+    def test_records_next_to_the_task_folders_with_the_image_environment(self, tmp_path, registry):
+        write_task(tmp_path, "overlay", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n")
+        path = record_base_images(tmp_path)
+        assert path == tmp_path / "compose-images.json"
+        recorded = json.loads(path.read_text())["redis:7-alpine"]
+        assert recorded["config"]["Env"] == ["A=1"] and recorded["config"]["WorkingDir"] == "/app"
+        assert recorded["image"] == "library/redis@sha256:m-amd64"
+
+    def test_a_single_task_folder_records_into_its_parent(self, tmp_path, registry):
+        task = write_task(tmp_path, "one", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n")
+        assert record_base_images(task) == tmp_path / "compose-images.json"
+
+    def test_nothing_is_written_without_dockerfiles_to_resolve(self, tmp_path):
+        write_task(tmp_path, "plain")
+        assert record_base_images(tmp_path, client=FakeClient()) is None
+        assert not (tmp_path / "compose-images.json").exists()
+
+    def test_a_prebuilt_override_does_not_touch_the_registry(self, tmp_path):
+        (tmp_path / "dataset.toml").write_text(
+            '[gym.tasks."t".environment]\ndocker_image = "ghcr.io/org/t:prebuilt"\n'
+        )
+        write_task(tmp_path, "t", image=None, dockerfile="FROM localbuild/base:dev\nRUN make\n")
+
+        class FailingClient(RegistryClient):
+            def image_config(self, reference):
+                raise ImageConfigError(f"{reference}: registry returned HTTP 404")
+
+        assert record_base_images(tmp_path, client=FailingClient()) is None
+        assert not (tmp_path / "compose-images.json").exists()
+        # The loader agrees: the task runs the prebuilt image with no overlay.
+        (task,) = discover_tasks(tmp_path)
+        assert task.image == "ghcr.io/org/t:prebuilt" and task.overlay == ()
+
+    def test_an_unresolvable_base_image_names_the_image_the_tasks_and_the_registry_answer(self, tmp_path, registry):
+        write_task(tmp_path, "a", image=None, dockerfile="FROM redis:missing\nRUN true\n")
+        write_task(tmp_path, "b", image=None, dockerfile="FROM redis:missing\nENV X=$Y\n")
+        with pytest.raises(ImageConfigError) as excinfo:
+            record_base_images(tmp_path)
+        message = str(excinfo.value)
+        assert "base image 'redis:missing'" in message
+        assert "task(s) a, b" in message
+        assert "library/redis: registry returned HTTP 404 for manifests/missing" in message
         assert not (tmp_path / "compose-images.json").exists()

@@ -15,8 +15,15 @@ format; Gym owns execution. Hub tasks run unchanged.
 Reward rule: when `test.sh` ran, the sample counts. A missing or invalid reward file scores 0 with a
 `failure_kind`. Only a Gym-side failure (sandbox lost, transfer failed) sets `mask_sample`.
 
-Supported today: single-step tasks with a prebuilt `docker_image` or a base-image-only Dockerfile
-(`FROM` plus `WORKDIR`/`ENV`/`USER`/`LABEL`); shared verifier mode, and separate verifier mode when
+Supported today: single-step tasks with a prebuilt `docker_image`, a pull-mode Dockerfile (`FROM` plus
+`WORKDIR`/`ENV`/`USER`/`LABEL`) or an overlay-mode Dockerfile (the same plus `RUN` lines, which the server
+runs in the pulled base image at seed, before the healthcheck and the agent, each with the `ENV`, `WORKDIR`
+and `USER` in effect at that line; `ENV`, `WORKDIR` and `USER` resolve at prepare from the base image's
+recorded configuration the way `docker build` resolves them, so preparing fails when the registry cannot
+resolve the base image. A `RUN` line that exits non-zero or outruns `[environment].build_timeout_sec` is a
+422 with the command and the tail of its output; a provider that cannot run one is a 503, and in a separate
+verifier's sandbox either masks the sample with `harbor:overlay_failed`); shared verifier mode, and
+separate verifier mode when
 `[verifier.environment]` names a prebuilt image (the agent's `/logs/artifacts` and `artifacts` entries are
 copied into the verifier sandbox first, sidecar hooks and artifacts included). Compose environments start as
 a sandbox group when a `compose-images.json` with the sidecar images' recorded OCI configuration sits next to

@@ -8,8 +8,11 @@ task folders in Gym's shared datasets folder plus the digest every task had when
 rows were materialized (see ``nemo_gym.tasks.harbor``).
 
 - ``/seed_session`` checks the row's digest against the mapping and the folder,
-  starts the task's image as a sandbox, creates the working directory, and hands the
-  agent a ``SandboxAccess``.
+  starts the task's image as a sandbox, runs the ``RUN`` lines of an overlay-mode
+  Dockerfile with the ``ENV``, ``WORKDIR`` and ``USER`` the loader resolved for each (see
+  ``nemo_gym.tasks.harbor.dockerfile``), creates the working directory, and hands the
+  agent a ``SandboxAccess``. A ``RUN`` line that fails is a 422 (the task's Dockerfile
+  does not apply); a provider that cannot run one is a 503 (retried elsewhere).
 - ``/verify`` runs ``tests/test.sh`` inside that same sandbox (Harbor's shared
   verifier mode), then reads ``/logs/verifier/reward.json`` or ``reward.txt``.
 - ``/close_session`` stops the sandbox.
@@ -25,6 +28,7 @@ import logging
 import math
 import shlex
 import sys
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -55,6 +59,7 @@ from nemo_gym.sandbox.compose_config import adapt_non_root_sidecars, opensandbox
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
+from nemo_gym.tasks.harbor.dockerfile import OverlayRun
 from nemo_gym.tasks.harbor.models import HarborArtifact, HarborEnvironment
 from nemo_gym.tasks.harbor.task import HarborTaskError
 from resources_servers.harbor.sandbox_io import (
@@ -81,6 +86,19 @@ VERIFIER_STDOUT = f"{VERIFIER_LOGS_DIR}/test-stdout.txt"
 VERIFIER_TIMEOUT_KIND = "harbor:verifier_timeout"
 MISSING_REWARD_KIND = "harbor:missing_reward"
 INVALID_REWARD_KIND = "harbor:invalid_reward"
+# The separate verifier's sandbox could not take the task's Dockerfile overlay after the rollout ran.
+OVERLAY_FAILED_KIND = "harbor:overlay_failed"
+
+# How much of a failed overlay RUN line's output the seed error carries.
+OVERLAY_OUTPUT_TAIL = 1500
+
+
+class HarborOverlayError(RuntimeError):
+    """A ``RUN`` line of the task's overlay-mode Dockerfile failed; the task cannot be set up."""
+
+
+class HarborOverlayUnavailable(RuntimeError):
+    """The sandbox provider could not run an overlay step at all (not the step failing): retry elsewhere."""
 
 
 class HarborVerifyRequest(BaseVerifyRequest):
@@ -231,12 +249,65 @@ async def _exec_as_root_user(
 ):
     """Run ``command`` as root.
 
-    ``configured_user`` is the user the sandbox runs commands as by default (the image's
-    ``USER`` or ``[agent].user``). Only a non-root default needs the ``user="root"``
-    override; root images keep the plain exec path every provider supports.
+    ``configured_user`` is the user the sandbox runs commands as by default: the OCI ``User``
+    of the image the sandbox started from (``HarborTask.sandbox_user``), which is not the
+    Dockerfile's final ``USER`` or ``[agent].user``. Only a non-root default needs the
+    ``user="root"`` override; root images keep the plain exec path every provider supports.
     """
     user = None if _is_root(configured_user) else "root"
     return await sandbox.exec(command, cwd=cwd, timeout_s=timeout_s, user=user)
+
+
+def overlay_shell_command(step: OverlayRun, sandbox_env: Mapping[str, str] | None = None) -> str:
+    """The shell line that runs one Dockerfile ``RUN`` with its ``ENV`` and ``WORKDIR`` in effect.
+
+    The step's environment is already resolved to literals by the loader, so every value is
+    exported quoted (nothing expands again here). ``sandbox_env`` is what the sandbox was
+    created with (the Dockerfile's final ``ENV`` plus ``task.toml``); a key of it the step does
+    not have yet is unset first, so the line sees the environment of its point in the Dockerfile,
+    as a build step would, not the finished image's. The working directory exists by the time
+    the line runs (see :func:`overlay_workdir_command`), so the line only enters it. The
+    command's own exit status is the line's.
+    """
+    parts = [f"unset {shlex.quote(key)}" for key in sorted(set(sandbox_env or ()) - set(step.env))]
+    parts += [f"export {key}={shlex.quote(value)}" for key, value in step.env.items()]
+    if step.workdir:
+        parts.append(f"cd {shlex.quote(step.workdir)} || exit 1")
+    parts.append(step.command)
+    return "; ".join(parts)
+
+
+def overlay_workdir_command(workdir: str, user: str | None) -> str:
+    """Create a ``WORKDIR`` as root the way BuildKit does: missing directories are made and owned by the user."""
+    quoted = shlex.quote(workdir)
+    if _is_root(user):
+        return f"mkdir -p {quoted}"
+    return f"test -d {quoted} || (mkdir -p {quoted} && chown {shlex.quote(user)} {quoted})"
+
+
+def _is_numeric_user(user: str | None) -> bool:
+    return user is not None and str(user).split(":")[0].isdigit() and not _is_root(user)
+
+
+def _output_tail(result: SandboxExecResult, limit: int = OVERLAY_OUTPUT_TAIL) -> str:
+    text = "\n".join(part.rstrip() for part in (result.stdout, result.stderr) if part and part.strip())
+    return text[-limit:] if text else "(no output)"
+
+
+def _check_overlay_result(result: SandboxExecResult, label: str, what: str | None, budget: float) -> None:
+    """Classify one overlay exec: the task's fault (:class:`HarborOverlayError`) or the provider's."""
+    subject = f"{label}: {what}" if what else label
+    if result.error_type == "timeout":
+        raise HarborOverlayError(f"{subject} exceeded [environment].build_timeout_sec={budget}")
+    if result.error_type is not None:
+        raise HarborOverlayUnavailable(f"{subject} could not run in the sandbox: {result.error_type}")
+    if result.return_code != 0:
+        raise HarborOverlayError(f"{subject} exited {result.return_code}; output tail: {_output_tail(result)}")
+
+
+def _verifier_gets_overlay(task: HarborTask) -> bool:
+    """A separate verifier that runs in the task's own image needs the same Dockerfile overlay as the agent."""
+    return bool(task.overlay) and not task.config.is_shared_verifier and task.config.verifier.environment is None
 
 
 def _verifier_image(task: HarborTask) -> str | None:
@@ -364,6 +435,9 @@ class HarborResourcesServer(SimpleResourcesServer):
         )
         if ttl is None:
             ttl = task.config.agent.timeout_sec + task.config.verifier.timeout_sec + self.config.sandbox_ttl_slack_s
+            if task.overlay:
+                # The Dockerfile overlay runs inside this sandbox before the agent's clock starts.
+                ttl += task.config.environment.build_timeout_sec
         # The override replaces only the keys it names, so a GPU task routed to the GPU provider keeps `gpu`.
         resources = _sandbox_resources(environment, request_gpu_type=self.config.request_gpu_type) | (
             self.config.sandbox_resources_override or {}
@@ -441,6 +515,64 @@ class HarborResourcesServer(SimpleResourcesServer):
         await compose.start()
         return compose
 
+    async def _apply_overlay(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
+        """Run the Dockerfile ``RUN`` lines the loader recorded, in order, before anything else uses the sandbox.
+
+        Each line runs with the ``ENV``, ``WORKDIR`` and ``USER`` the loader resolved for it, the
+        way ``docker build`` would: the directory is created as root first (owned by the line's
+        user when that is not root), a numeric ``USER`` is mapped to its name in the image, then
+        the line runs. The whole overlay shares ``[environment].build_timeout_sec``, as a build
+        would. A line that exits non-zero, runs out of budget or names a user the image does not
+        have raises :class:`HarborOverlayError` with the command and the tail of its output: the
+        task's Dockerfile does not apply, so retrying would not help. A provider that cannot run a
+        step at all raises :class:`HarborOverlayUnavailable` instead, so the seed is retried.
+        """
+        if not task.overlay:
+            return
+        budget = task.config.environment.build_timeout_sec
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + budget
+        total = len(task.overlay)
+        prepared_workdirs: set[str] = {"/"}  # the root always exists; every other WORKDIR is made on first use
+        user_names: dict[str, str] = {}
+
+        async def as_root(command: str, label: str, what: str) -> SandboxExecResult:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise HarborOverlayError(f"{label} not run: [environment].build_timeout_sec={budget} is used up")
+            result = await _exec_as_root_user(sandbox, command, configured_user=task.sandbox_user, timeout_s=remaining)
+            _check_overlay_result(result, label, what, budget)
+            return result
+
+        for index, step in enumerate(task.overlay, 1):
+            label = f"RUN line {index}/{total} {step.command!r}"
+            user = step.user
+            if _is_numeric_user(user):
+                uid, _, group = str(user).partition(":")
+                if uid not in user_names:
+                    lookup = await as_root(
+                        f"getent passwd {shlex.quote(uid)} | cut -d: -f1", label, f"USER {uid} lookup"
+                    )
+                    name = (lookup.stdout or "").strip().splitlines()
+                    if not name or not name[-1]:
+                        raise HarborOverlayError(f"{label}: USER {uid} names no user in {task.image}")
+                    user_names[uid] = name[-1]
+                user = user_names[uid] + (f":{group}" if group else "")
+            if step.workdir not in prepared_workdirs:
+                await as_root(overlay_workdir_command(step.workdir, user), label, f"WORKDIR {step.workdir}")
+                prepared_workdirs.add(step.workdir)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise HarborOverlayError(f"{label} not run: [environment].build_timeout_sec={budget} is used up")
+            command = overlay_shell_command(step, task.env)
+            if _is_root(user):
+                result = await _exec_as_root_user(
+                    sandbox, command, configured_user=task.sandbox_user, timeout_s=remaining
+                )
+            else:
+                result = await sandbox.exec(command, cwd="/", timeout_s=remaining, user=user)
+            _check_overlay_result(result, label, None, budget)
+
     async def _wait_healthy(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
         """Poll the task's ``[environment.healthcheck]`` until it passes or its retries run out."""
         check = task.config.environment.healthcheck
@@ -486,15 +618,21 @@ class HarborResourcesServer(SimpleResourcesServer):
             raise RuntimeError(f"Could not write {TASK_CONTEXT_FILE}: {result.stderr or result.stdout}")
 
     async def _create_verifier_sandbox(self, task: HarborTask) -> AsyncSandbox:
-        """A separate verifier runs in its own sandbox, sized by ``[verifier.environment]``."""
-        environment = task.config.verifier.environment or task.config.environment
+        """A separate verifier runs in its own sandbox, sized by ``[verifier.environment]``.
+
+        Without a ``[verifier.environment]`` the verifier runs in the task's own image, so it is
+        created like the agent's sandbox: the Dockerfile's resolved ``ENV`` under ``task.toml``'s.
+        """
+        ttl = task.config.verifier.timeout_sec + self.config.sandbox_ttl_slack_s
+        if _verifier_gets_overlay(task):
+            ttl += task.config.environment.build_timeout_sec
         spec = self._sandbox_spec(
             task,
             None,
-            environment=environment,
+            environment=task.config.verifier.environment,
             image=_verifier_image(task),
             role="verifier",
-            ttl=task.config.verifier.timeout_sec + self.config.sandbox_ttl_slack_s,
+            ttl=ttl,
         )
         provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         sandbox = AsyncSandbox(provider_config)
@@ -509,9 +647,9 @@ class HarborResourcesServer(SimpleResourcesServer):
                 raise RuntimeError(f"Could not resolve the image working directory: {result.stderr or result.stdout}")
             workdir = (result.stdout or "").strip().splitlines()[-1]
         commands = [f"mkdir -p {shlex.quote(workdir)}"]
-        if task.user:
+        if not _is_root(task.user) and workdir != "/":
             commands.append(f"chown {shlex.quote(task.user)} {shlex.quote(workdir)}")
-        result = await _exec_as_root_user(sandbox, " && ".join(commands), configured_user=task.user)
+        result = await _exec_as_root_user(sandbox, " && ".join(commands), configured_user=task.sandbox_user)
         if result.return_code != 0:
             raise RuntimeError(f"Could not prepare {workdir}: {result.stderr or result.stdout}")
         # Harbor mounts /logs into the agent's container; tasks may write to /logs/artifacts during the
@@ -588,10 +726,16 @@ class HarborResourcesServer(SimpleResourcesServer):
                 compose=compose,
             )
             try:
+                await self._apply_overlay(sandbox, task)
                 session.workdir = await self._prepare_workdir(sandbox, task, task.workdir)
                 await self._wait_healthy(sandbox, task)
                 await self._write_task_context(sandbox, task)
                 access = await self._sandbox_access(session)
+            except HarborOverlayError as exc:
+                # The task's own Dockerfile failed to apply: a task error, not a sandbox one.
+                await session.stop_agent_side()
+                LOGGER.error(f"Dockerfile overlay failed for {task.task_id}: {exc}")
+                raise HTTPException(422, f"Dockerfile overlay failed for {task.task_id!r}: {exc}") from exc
             except Exception as exc:
                 await session.stop_agent_side()
                 LOGGER.exception(f"Sandbox setup failed for {task.task_id}")
@@ -674,6 +818,9 @@ class HarborResourcesServer(SimpleResourcesServer):
             await session.stop_agent_side()
 
             verifier = await self._create_verifier_sandbox(task)
+            if _verifier_gets_overlay(task):
+                # The verifier runs in the task's own image, so it needs the same overlay as the agent did.
+                await self._apply_overlay(verifier, task)
             prepare = await verifier.exec(
                 f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR} && chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR}",
                 cwd="/",
@@ -700,6 +847,10 @@ class HarborResourcesServer(SimpleResourcesServer):
             await download_dir(verifier, VERIFIER_LOGS_DIR, logs_dir)
         except HTTPException:
             raise
+        except HarborOverlayError as exc:
+            # The rollout is complete; losing the verifier's sandbox to its overlay must not discard it.
+            LOGGER.error(f"Dockerfile overlay failed in the verifier sandbox for {task.task_id}: {exc}")
+            return self._masked(OVERLAY_FAILED_KIND, f"Dockerfile overlay failed in the verifier sandbox: {exc}")
         except Exception as exc:
             LOGGER.exception(f"Separate verification infrastructure failed for {task.task_id}")
             return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
@@ -729,7 +880,7 @@ class HarborResourcesServer(SimpleResourcesServer):
                         f"chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
                     ]
                 ),
-                configured_user=task.user,
+                configured_user=task.sandbox_user,
             )
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")

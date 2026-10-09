@@ -1,14 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Record the OCI configuration of every image a Compose task starts.
+"""Record the OCI configuration of the images a task runs.
 
-Docker Compose reads a service's entrypoint, command, user, working directory and
-exposed ports from the image itself. A sandbox platform without Docker cannot, so
-the harbor resources server reads them from ``compose-images.json`` next to the task
-folders (see ``nemo_gym.sandbox.compose_config.resolve_compose``). This module writes
-that file from the registry, one entry per image reference exactly as the task wrote
-it, pinned to the linux/amd64 manifest digest it resolved to.
+Docker reads an image's environment, user, working directory, entrypoint, command and
+exposed ports from the image itself. A sandbox platform without Docker cannot, so Gym
+records them from the registry into ``compose-images.json`` next to the task folders,
+one entry per image reference exactly as the task wrote it, pinned to the linux/amd64
+manifest digest it resolved to. Two readers depend on the file:
+
+- the harbor resources server, for the sidecar images a Compose task starts (see
+  ``nemo_gym.sandbox.compose_config.resolve_compose``);
+- the task loader, for the base image of a pull-mode or overlay-mode Dockerfile, whose
+  ``ENV``, ``WORKDIR`` and ``USER`` lines resolve from the base image's own configuration
+  the way ``docker build`` resolves them (see ``nemo_gym.tasks.harbor.dockerfile``).
 """
 
 import base64
@@ -17,24 +22,28 @@ import json
 import logging
 import re
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
-from nemo_gym.tasks.harbor.task import HarborTask
+from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
+from nemo_gym.tasks.harbor.models import HarborTaskConfig
+from nemo_gym.tasks.harbor.task import IMAGE_CONFIGS_FILE, TASK_FILE, HarborTask, dockerfile_base_image, is_task_folder
 
 
 LOGGER = logging.getLogger(__name__)
 
-COMPOSE_IMAGES_FILE = "compose-images.json"
+COMPOSE_IMAGES_FILE = IMAGE_CONFIGS_FILE
 COMPOSE_FILE_NAMES = ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
-# The startup fields Compose would read from the image; the rest of the config is not recorded.
-RECORDED_CONFIG_KEYS = ("Cmd", "Entrypoint", "ExposedPorts", "Healthcheck", "User", "WorkingDir")
+# The fields Compose would read from the image to start it, plus the build-time state (environment,
+# user, working directory) a Dockerfile's instructions resolve from; the rest of the config is not recorded.
+RECORDED_CONFIG_KEYS = ("Cmd", "Entrypoint", "Env", "ExposedPorts", "Healthcheck", "User", "WorkingDir")
 MANIFEST_ACCEPT = ", ".join(
     [
         "application/vnd.oci.image.index.v1+json",
@@ -238,26 +247,99 @@ def compose_image_references(task: HarborTask) -> list[str]:
     return list(dict.fromkeys(references))
 
 
-def record_compose_images(
-    tasks: list[HarborTask], folder: Path, *, client: RegistryClient | None = None
+def dockerfile_base_images(folder: Path, *, select: Callable[[str], bool] | None = None) -> dict[str, list[str]]:
+    """The base image of every task Dockerfile the loader resolves under ``folder``, with the tasks using it.
+
+    ``folder`` is a task folder or a folder of task folders, as ``discover_tasks`` reads it; with
+    ``select``, only the tasks whose folder name it accepts count. The image a task declares is the
+    effective one, exactly as ``load_task`` sees it: ``task.toml`` after the dataset's ``[gym]``
+    overrides, with the deprecated ``image`` alias resolved. A per-task ``docker_image`` override
+    thus turns a Dockerfile with ``RUN`` lines into a prebuilt image whose ``FROM`` is never
+    resolved, so there is nothing to record for it. Tasks whose ``task.toml`` does not load, and a
+    dataset whose ``dataset.toml`` does not load (which fails every task), are left for the loader
+    to report.
+    """
+    # Resolved like load_task does: overrides are keyed by the task folder's name and dataset.toml
+    # sits beside the task folders.
+    folder = Path(folder).resolve()
+    single = is_task_folder(folder)
+    children = [folder] if single else sorted(child for child in folder.iterdir() if child.is_dir())
+    try:
+        dataset = read_dataset_config(folder.parent if single else folder)
+    except ValueError:
+        return {}
+    images: dict[str, list[str]] = {}
+    for child in children:
+        if not is_task_folder(child) or (select is not None and not select(child.name)):
+            continue
+        try:
+            config = HarborTaskConfig.model_validate(tomllib.loads((child / TASK_FILE).read_text()))
+            config = apply_dataset_config(config, child.name, dataset)
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError):
+            continue
+        image = dockerfile_base_image(child, config.environment.docker_image or None)
+        if image is not None:
+            images.setdefault(image, []).append(child.name)
+    return images
+
+
+def record_image_configs(
+    references: dict[str, list[str]], folder: Path, *, client: RegistryClient | None = None, what: str = "image"
 ) -> Path | None:
-    """Write ``compose-images.json`` in ``folder`` for the Compose tasks among ``tasks``.
+    """Record the configuration of ``references`` (image reference to the tasks using it) into ``folder``.
 
     Entries already recorded are kept as they are, so a pinned recording never changes
     under a completed run; only references missing from the file are resolved. Returns
-    the file's path, or ``None`` when no task uses Compose.
+    the file's path, or ``None`` when there is nothing to record. A reference the registry
+    cannot resolve raises :class:`ImageConfigError` naming the image, the tasks and the
+    registry's answer.
     """
-    references = list(dict.fromkeys(ref for task in tasks for ref in compose_image_references(task)))
     if not references:
         return None
-    path = Path(folder) / COMPOSE_IMAGES_FILE
+    path = Path(folder) / IMAGE_CONFIGS_FILE
     recorded: dict[str, Any] = json.loads(path.read_text()) if path.is_file() else {}
     missing = [ref for ref in references if ref not in recorded]
     if not missing:
         return path
     client = client or RegistryClient()
-    LOGGER.info(f"Recording the configuration of {len(missing)} Compose image(s) into {path}")
+    LOGGER.info(f"Recording the configuration of {len(missing)} {what}(s) into {path}")
     for reference in missing:
-        recorded[reference] = client.image_config(reference)
+        try:
+            recorded[reference] = client.image_config(reference)
+        except ImageConfigError as exc:
+            tasks = ", ".join(references[reference][:5]) or "-"
+            raise ImageConfigError(
+                f"Could not record the configuration of {what} {reference!r} (used by task(s) {tasks}): {exc}"
+            ) from exc
     path.write_text(json.dumps(dict(sorted(recorded.items())), indent=2, sort_keys=True) + "\n")
     return path
+
+
+def record_compose_images(
+    tasks: list[HarborTask], folder: Path, *, client: RegistryClient | None = None
+) -> Path | None:
+    """Write ``compose-images.json`` in ``folder`` for the Compose tasks among ``tasks``.
+
+    Returns the file's path, or ``None`` when no task uses Compose.
+    """
+    references: dict[str, list[str]] = {}
+    for task in tasks:
+        for reference in compose_image_references(task):
+            references.setdefault(reference, []).append(task.task_id)
+    return record_image_configs(references, folder, client=client, what="Compose image")
+
+
+def record_base_images(
+    folder: Path, *, client: RegistryClient | None = None, select: Callable[[str], bool] | None = None
+) -> Path | None:
+    """Record the base image of every Dockerfile under ``folder`` next to the task folders, before they load.
+
+    ``select`` limits the scan to the tasks whose folder name it accepts (see
+    :func:`dockerfile_base_images`). Returns the file's path, or ``None`` when no task has a
+    Dockerfile the loader resolves.
+    """
+    folder = Path(folder).resolve()
+    parent = folder.parent if is_task_folder(folder) else folder
+    return record_image_configs(
+        dockerfile_base_images(folder, select=select), parent, client=client, what="base image"
+    )
