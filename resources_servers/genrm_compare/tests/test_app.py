@@ -48,6 +48,7 @@ from resources_servers.genrm_compare.app import (
     _input_to_conversation_history,
     _output_budget_exhausted,
 )
+from resources_servers.genrm_compare.tests.test_cohort_lifecycle import collected_comparisons
 from resources_servers.genrm_compare.utils import get_prompt_key_from_input
 
 
@@ -340,7 +341,7 @@ class TestGenRMCompareResourcesServer:
             # Make each pair deterministic and distinguishable.
             scores = (5 * (i + 1 / 16), 5 * (j + 1 / 16), 2 if i % 2 else 5)
             # Selected scores, overall scores, unavailable token metrics, and failure flags.
-            return (*scores, *scores, -1.0, -1.0, -1.0, 0.0, 0.0, 0.0)
+            return (*scores, *scores, -1.0, -1.0, -1.0, 0.0, 0.0)
 
         monkeypatch.setattr(server, "_run_single_comparison", run_single_comparison_mock)
 
@@ -480,8 +481,8 @@ class TestGenRMCompareResourcesServer:
                 rollout_index=rollout_index,
             )
 
-        run_compare = AsyncMock(return_value=([10.0, 20.0, 30.0], None, None, None))
-        monkeypatch.setattr(server, "_run_compare", run_compare)
+        run_compare = AsyncMock(return_value=collected_comparisons([10.0, 20.0, 30.0]))
+        monkeypatch.setattr(server, "_collect_comparisons", run_compare)
 
         results = await asyncio.gather(*(server.verify(request(index)) for index in (2, 0, 1)))
 
@@ -513,8 +514,8 @@ class TestGenRMCompareResourcesServer:
                 rollout_index=rollout_index,
             )
 
-        run_compare = AsyncMock(return_value=([1.0, 2.0], None, None, None))
-        monkeypatch.setattr(server, "_run_compare", run_compare)
+        run_compare = AsyncMock(return_value=collected_comparisons([1.0, 2.0]))
+        monkeypatch.setattr(server, "_collect_comparisons", run_compare)
         first = request(0)
 
         results = await asyncio.gather(server.verify(first), server.verify(first), server.verify(request(1)))
@@ -546,8 +547,8 @@ class TestGenRMCompareResourcesServer:
                 rollout_index=rollout_index,
             )
 
-        run_compare = AsyncMock(return_value=([1.0, 2.0], None, None, None))
-        monkeypatch.setattr(server, "_run_compare", run_compare)
+        run_compare = AsyncMock(return_value=collected_comparisons([1.0, 2.0]))
+        monkeypatch.setattr(server, "_collect_comparisons", run_compare)
         original = asyncio.create_task(server.verify(request(0, "original")))
         await asyncio.sleep(0)
 
@@ -564,8 +565,8 @@ class TestGenRMCompareResourcesServer:
     async def test_verify_supports_legacy_prompt_only_cohort(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
-        run_compare = AsyncMock(return_value=([1.0, 2.0], None, None, None))
-        monkeypatch.setattr(server, "_run_compare", run_compare)
+        run_compare = AsyncMock(return_value=collected_comparisons([1.0, 2.0]))
+        monkeypatch.setattr(server, "_collect_comparisons", run_compare)
 
         results = await asyncio.gather(
             server.verify(self._verify_request(0, task_index=None)),
@@ -585,11 +586,11 @@ class TestGenRMCompareResourcesServer:
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
         run_compare = AsyncMock(
             side_effect=[
-                ([1.0, 2.0], None, None, None),
-                ([3.0, 4.0], None, None, None),
+                collected_comparisons([1.0, 2.0]),
+                collected_comparisons([3.0, 4.0]),
             ]
         )
-        monkeypatch.setattr(server, "_run_compare", run_compare)
+        monkeypatch.setattr(server, "_collect_comparisons", run_compare)
 
         first = await asyncio.gather(
             server.verify(self._verify_request(0, response_id="first-0")),
@@ -621,8 +622,8 @@ class TestGenRMCompareResourcesServer:
     async def test_late_identical_duplicate_receives_cached_reward(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
-        run_compare = AsyncMock(return_value=([1.0, 2.0], None, None, None))
-        monkeypatch.setattr(server, "_run_compare", run_compare)
+        run_compare = AsyncMock(return_value=collected_comparisons([1.0, 2.0]))
+        monkeypatch.setattr(server, "_collect_comparisons", run_compare)
         first = self._verify_request(0, task_index=None, group_id="legacy-21")
 
         await asyncio.gather(
@@ -641,11 +642,11 @@ class TestGenRMCompareResourcesServer:
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
         run_compare = AsyncMock(
             side_effect=[
-                ([1.0, 2.0], None, None, None),
-                ([3.0, 4.0], None, None, None),
+                collected_comparisons([1.0, 2.0]),
+                collected_comparisons([3.0, 4.0]),
             ]
         )
-        monkeypatch.setattr(server, "_run_compare", run_compare)
+        monkeypatch.setattr(server, "_collect_comparisons", run_compare)
 
         first_attempt = await asyncio.gather(
             server.verify(self._verify_request(0, task_index=None, group_id="completed-group", response_id="old-0")),
@@ -682,8 +683,8 @@ class TestGenRMCompareResourcesServer:
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
         monkeypatch.setattr(
             server,
-            "_run_compare",
-            AsyncMock(return_value=([3.0, 4.0], None, None, None)),
+            "_collect_comparisons",
+            AsyncMock(return_value=collected_comparisons([3.0, 4.0])),
         )
 
         old_waiter = asyncio.create_task(
@@ -737,8 +738,8 @@ class TestGenRMCompareResourcesServer:
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
         monkeypatch.setattr(
             server,
-            "_run_compare",
-            AsyncMock(return_value=([3.0, 4.0], None, None, None)),
+            "_collect_comparisons",
+            AsyncMock(return_value=collected_comparisons([3.0, 4.0])),
         )
 
         replacement = await asyncio.gather(
@@ -888,7 +889,7 @@ class TestGenRMCompareResourcesServer:
     async def test_evaluation_failure_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
-        monkeypatch.setattr(server, "_run_compare", AsyncMock(side_effect=ValueError("judge failed")))
+        monkeypatch.setattr(server, "_collect_comparisons", AsyncMock(side_effect=ValueError("judge failed")))
 
         results = await asyncio.gather(
             server.verify(self._verify_request(0, task_index=23)),
@@ -909,7 +910,7 @@ class TestGenRMCompareResourcesServer:
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
         run_compare = AsyncMock()
-        monkeypatch.setattr(server, "_run_compare", run_compare)
+        monkeypatch.setattr(server, "_collect_comparisons", run_compare)
         monkeypatch.setattr(server, "_response_digest", lambda response: response.id)
 
         def fail_model_dump(*args, **kwargs):
@@ -943,7 +944,7 @@ class TestGenRMCompareResourcesServer:
             comparison_started.set()
             await never_finish.wait()
 
-        monkeypatch.setattr(server, "_run_compare", blocked_compare)
+        monkeypatch.setattr(server, "_collect_comparisons", blocked_compare)
         waiters = [
             asyncio.create_task(server.verify(self._verify_request(0, task_index=24))),
             asyncio.create_task(server.verify(self._verify_request(1, task_index=24))),
@@ -989,7 +990,7 @@ class TestGenRMCompareResourcesServer:
             }
         )
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
-        monkeypatch.setattr(server, "_run_compare", AsyncMock(return_value=([1.0, 2.0], None, None, None)))
+        monkeypatch.setattr(server, "_collect_comparisons", AsyncMock(return_value=collected_comparisons([1.0, 2.0])))
 
         for task_index in (30, 31, 32):
             await asyncio.gather(
@@ -1022,7 +1023,7 @@ class TestFixedBaseline:
         )
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
         server._run_single_comparison = AsyncMock(
-            return_value=(5.0, 1.0, 1.0, 5.0, 1.0, 1.0, -1.0, -1.0, -1.0, 0.0, 0.0, 0.0)
+            return_value=(5.0, 1.0, 1.0, 5.0, 1.0, 1.0, -1.0, -1.0, -1.0, 0.0, 0.0)
         )
         request = GenRMCompareVerifyRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
@@ -1077,8 +1078,8 @@ class TestFixedBaseline:
             second = response_2["output"][0]["content"][0]["text"]
             seen_pairs.append((first, second))
             if first == "rollout":
-                return 5.0, 1.0, 1.0, 4.0, 2.0, 2.0, 100.0, 20.0, 0.0, 0.0, 0.0, 0.0
-            return 1.0, 4.0, 6.0, 2.0, 3.0, 5.0, 200.0, 40.0, 1.0, 0.0, 0.0, 0.0
+                return 5.0, 1.0, 1.0, 4.0, 2.0, 2.0, 100.0, 20.0, 0.0, 0.0, 0.0
+            return 1.0, 4.0, 6.0, 2.0, 3.0, 5.0, 200.0, 40.0, 1.0, 0.0, 0.0
 
         monkeypatch.setattr(server, "_run_single_comparison", compare)
         (
@@ -1128,7 +1129,7 @@ class TestFixedBaseline:
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
 
         async def failed(*_args, **_kwargs):
-            return 3.0, 3.0, 3.5, 4.0, 2.0, 2.0, -1.0, -1.0, -1.0, 0.0, 1.0, 0.0
+            return 3.0, 3.0, 3.5, 4.0, 2.0, 2.0, -1.0, -1.0, -1.0, 0.0, 1.0
 
         monkeypatch.setattr(server, "_run_single_comparison", failed)
         response_objs = [{"output": [{"type": "message", "content": [{"type": "output_text", "text": "rollout"}]}]}]
@@ -1265,7 +1266,7 @@ class TestRunSingleComparison:
             )
         )
 
-        assert result == approx((4.0, 3.0, 3.0, 2.0, 5.0, 6.0, -1.0, -1.0, -1.0, 0.0, 0.0, 0.0))
+        assert result == approx((4.0, 3.0, 3.0, 2.0, 5.0, 6.0, -1.0, -1.0, -1.0, 0.0, 0.0))
 
     def test_rubric_parse_failure_keeps_valid_overall_diagnostic(self):
         server, _ = self._make_server()
@@ -1281,7 +1282,7 @@ class TestRunSingleComparison:
             )
         )
 
-        assert result == approx((3.0, 3.0, 3.5, 4.0, 2.0, 2.0, -1.0, -1.0, -1.0, 0.0, 1.0, 0.0))
+        assert result == approx((3.0, 3.0, 3.5, 4.0, 2.0, 2.0, -1.0, -1.0, -1.0, 0.0, 1.0))
 
     def test_usage_is_recorded(self):
         server, mock_client = self._make_server()
@@ -1379,7 +1380,7 @@ class TestRunSingleComparison:
             )
         )
 
-        assert result == (4.0, 2.0, 2.0, 4.0, 2.0, 2.0, -1.0, -1.0, -1.0, 0.0, 0.0, 0.0)
+        assert result == (4.0, 2.0, 2.0, 4.0, 2.0, 2.0, -1.0, -1.0, -1.0, 0.0, 0.0)
 
     def test_empty_completed_answer_keeps_generic_judge_error(self):
         """A completed but empty answer is not budget exhaustion; the message stays generic."""

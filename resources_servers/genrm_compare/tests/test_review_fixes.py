@@ -16,26 +16,33 @@
 import asyncio
 import json
 import warnings
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError, RequestInfo
 from fastapi import HTTPException
 from multidict import CIMultiDict, CIMultiDictProxy
+from pydantic import ValidationError
 from yarl import URL
 
 import resources_servers.genrm_compare.app as genrm
 from nemo_gym.judge import judge_failsafe
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import (
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+)
 from nemo_gym.reward_profile import RewardProfiler
 from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
-from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
+from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+from resources_servers.genrm_compare.tests.test_cohort_lifecycle import collected_comparisons, member
 
 
 def comparison_result(score_1=4.0, score_2=2.0, ranking=1.0, *, overall_parse_failed=0.0):
     """Build the full comparison result expected by the server."""
     scores = (score_1, score_2, ranking)
-    return (*scores, *scores, -1.0, -1.0, -1.0, overall_parse_failed, 0.0, 0.0)
+    return (*scores, *scores, -1.0, -1.0, -1.0, overall_parse_failed, 0.0)
 
 
 def failing_judge(status):
@@ -62,10 +69,10 @@ async def test_judge_http_failure_never_completes_cohort(server, status):
     calls_after_failure = server.server_client.post.await_count
     max_calls = 2 * (1 if status == 401 else server.config.genrm_parse_retries + 1)
     assert 1 <= calls_after_failure <= max_calls
-    server._run_compare = AsyncMock(return_value=([1.0, 2.0], {}, [], []))
+    server._collect_comparisons = AsyncMock(return_value=collected_comparisons([1.0, 2.0]))
     recovered = await asyncio.gather(*(server.verify(member(i, attempt=1)) for i in range(2)))
     assert [result.reward for result in recovered] == [1.0, 2.0]
-    server._run_compare.assert_awaited_once()
+    server._collect_comparisons.assert_awaited_once()
 
 
 @pytest.mark.parametrize("error", [ConnectionError("offline"), TimeoutError("judge timeout")])
@@ -295,7 +302,7 @@ async def test_late_member_receives_original_timeout_failure(server, index):
 
 
 async def test_judge_failure_preserves_existing_instance_config_and_masks_all_members(server):
-    server._run_compare = AsyncMock(side_effect=genrm.JudgeError("judge offline"))
+    server._collect_comparisons = AsyncMock(side_effect=genrm.JudgeError("judge offline"))
     bodies = [member(i) for i in range(2)]
     bodies[0].instance_config = {"task": "keep", "mask_sample": False}
     results = await asyncio.gather(*(judge_failsafe(server.verify)(body) for body in bodies))
@@ -432,3 +439,73 @@ async def test_parse_and_http_failures_share_one_budget(server):
     with pytest.raises(genrm.JudgeError, match="judge offline"):
         await server._run_single_comparison([], {}, {})
     assert server.server_client.post.await_count == 2
+
+
+async def test_verify_maps_selected_and_overall_diagnostics(server: genrm.GenRMCompareResourcesServer) -> None:
+    server.config.score_source = "rubric_mean"
+    server.config.answer_bonus = 1.0
+    server.config.top_percentile = 0.5
+    server.config.group_answer_length_penalty_coeff = 0.4
+    rows = [member(i) for i in range(2)]
+    for row, answer in zip(rows, ["short", "a much longer answer"]):
+        row.expected_rubric_ids = (1,)
+        row.response.output = [
+            NeMoGymResponseOutputMessage(
+                id="msg",
+                role="assistant",
+                status="completed",
+                type="message",
+                content=[NeMoGymResponseOutputText(text=answer, type="output_text", annotations=[])],
+            )
+        ]
+    # The shortest answer wins on rubrics but loses on overall scores.
+    verdict = (5.0, 2.0, 1.0, 1.0, 4.0, 6.0, -1.0, -1.0, -1.0, 0.0, 0.0)
+    server._collect_comparisons = AsyncMock(return_value=([verdict], [(0, 1, 0)]))
+    results = await asyncio.gather(*(server.verify(row) for row in rows))
+    assert [r.reward for r in results] == pytest.approx([6.2, 1.8])
+    assert [r.reward_score_raw for r in results] == [5.0, 2.0]
+    assert [r.reward_rubric_aggregate_valid for r in results] == [5.0, 2.0]
+    assert [r.reward_overall_score_raw for r in results] == [1.0, 4.0]
+    assert [r.reward_overall_score for r in results] == pytest.approx([1.2, 3.8])
+    assert [r.reward_length_adjustment for r in results] == pytest.approx([1.2, -0.2])
+    assert all(r.reward == pytest.approx(r.reward_score_raw + r.reward_length_adjustment) for r in results)
+
+
+async def test_reordered_rubric_ids_share_cohort_and_completed_replay(
+    server: genrm.GenRMCompareResourcesServer,
+) -> None:
+    server.config.score_source = "rubric_mean"
+    server._run_single_comparison = AsyncMock(return_value=comparison_result())
+    rows = [
+        genrm.GenRMCompareVerifyRequest.model_validate(member(i).model_dump() | {"expected_rubric_ids": ids})
+        for i, ids in enumerate([[2, 1], [1, 2]])
+    ]
+    results = await asyncio.gather(*(server.verify(row) for row in rows))
+    assert [result.reward for result in results] == [3.0, 3.0]
+    replay = genrm.GenRMCompareVerifyRequest.model_validate(rows[0].model_dump() | {"expected_rubric_ids": [1, 2]})
+    assert (await server.verify(replay)).model_dump() == results[0].model_dump()
+    assert server._run_single_comparison.await_count == 2
+    different = genrm.GenRMCompareVerifyRequest.model_validate(rows[0].model_dump() | {"expected_rubric_ids": [1, 3]})
+    with pytest.raises(HTTPException) as error:
+        await server.verify(different)
+    assert error.value.status_code == 409
+
+
+@pytest.mark.parametrize("mode,allowed", [("fixed_baseline", False), ("rollout_cohort", True)])
+def test_singleton_worker_guard(config: genrm.GenRMCompareConfig, mode: str, allowed: bool) -> None:
+    values = config.model_dump() | {"comparison_mode": mode, "num_rollouts_per_prompt": 1, "num_workers": 2}
+    if allowed:
+        assert genrm.GenRMCompareConfig.model_validate(values).num_workers == 2
+    else:
+        with pytest.raises(ValidationError, match="one HTTP worker"):
+            genrm.GenRMCompareConfig.model_validate(values)
+
+
+@pytest.mark.parametrize("ids,clean", [([1, 2], True), ("1,2", False)])
+def test_expected_rubric_ids_are_declared_in_task_data_schema(ids: list[int] | str, clean: bool) -> None:
+    adapter = load_task_data_schema(Path(genrm.__file__).parent)
+    assert adapter is not None
+    validator = TaskDataValidator(server_name="genrm_compare", adapter=adapter, dataset_fpath="tasks.jsonl")
+    validator.validate_row(0, {"responses_create_params": {"input": "prompt"}, "expected_rubric_ids": ids})
+    assert validator.report.clean is clean
+    assert validator.report.error_rows == (0 if clean else 1)

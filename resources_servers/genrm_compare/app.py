@@ -43,7 +43,7 @@ from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -75,9 +75,8 @@ logger = logging.getLogger(__name__)
 
 # Tuple layout: selected (score_1, score_2, ranking), overall (score_1, score_2, ranking),
 # token metrics (input_tokens, output_tokens, max_output_tokens_hit), and failure flags
-# (overall_parse_failed, rubric_parse_failed, api_error).
+# (overall_parse_failed, rubric_parse_failed).
 ComparisonResult = Tuple[
-    float,
     float,
     float,
     float,
@@ -194,9 +193,8 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     genrm_model_server: ModelServerRef  # Default: genrm_model (see config)
     genrm_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
-    # Cohort-based verify: number of rollouts per prompt before running comparison (Difference 1)
-    # When > 1, verify() buffers by prompt and runs comparison when cohort is full; rewards are relative to cohort.
-    # When <= 1, verify() returns default_score (no comparison).
+    # Verification waits for this many rollouts in either comparison mode.
+    # A singleton rollout_cohort returns default_score; fixed_baseline still calls the judge.
     num_rollouts_per_prompt: int = Field(default=1, ge=1)
     cohort_collection_timeout_s: float = Field(default=1800.0, gt=0, allow_inf_nan=False)
     cohort_evaluation_timeout_s: float = Field(default=1800.0, gt=0, allow_inf_nan=False)
@@ -251,7 +249,9 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
 
     @model_validator(mode="after")
     def _validate_cohort_workers(self):
-        if self.num_rollouts_per_prompt > 1 and (self.num_workers or 1) > 1:
+        if (self.comparison_mode == "fixed_baseline" or self.num_rollouts_per_prompt > 1) and (
+            self.num_workers or 1
+        ) > 1:
             raise ValueError("GenRM cohort verification requires one HTTP worker because group state is process-local")
         return self
 
@@ -268,6 +268,12 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
     group_attempt: int = Field(default=0, alias=GROUP_ATTEMPT_KEY_NAME, ge=0)
     rollout_index: Optional[int] = Field(default=None, alias=ROLLOUT_INDEX_KEY_NAME)
     prompt_id: Optional[str] = None  # Optional stable prompt identifier from the caller
+
+    @field_validator("expected_rubric_ids")
+    @classmethod
+    def _canonicalize_rubric_ids(cls, value: Optional[Tuple[int, ...]]) -> Optional[Tuple[int, ...]]:
+        """Rubric contracts are sets; ordering must not split cohorts or replay keys."""
+        return tuple(sorted(set(value))) if value is not None else None
 
     @model_validator(mode="before")
     @classmethod
@@ -293,13 +299,14 @@ class GenRMCompareVerifyResponse(BaseVerifyResponse):
     reasoning_text: str
     answer_text: str
     reward_score_raw: float
-    reward_rubric_mean_clean: Optional[float] = None
-    reward_overall_raw: float
-    reward_overall_len_adjusted: float
+    # Rubric aggregate including the tiebreaker, before length/style adjustments.
+    # None outside rubric_mean mode or if any comparison for this rollout failed rubric parsing.
+    reward_rubric_aggregate_valid: Optional[float] = None
+    reward_overall_score_raw: float
+    reward_overall_score: float
     reward_length_adjustment: float
     genrm_parse_failure_rate_per_group: float = 0.0
     genrm_rubric_parse_failure_rate_per_group: float = 0.0
-    genrm_api_error_rate_per_group: float = 0.0
     genrm_input_tokens_per_comparison_mean: Optional[float] = None
     genrm_input_tokens_per_comparison_p50: Optional[float] = None
     genrm_input_tokens_per_comparison_p95: Optional[float] = None
@@ -388,8 +395,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 {
                     "reward": cfg.default_score,
                     "reward_score_raw": cfg.default_score,
-                    "reward_overall_raw": cfg.default_score,
-                    "reward_overall_len_adjusted": cfg.default_score,
+                    "reward_overall_score_raw": cfg.default_score,
+                    "reward_overall_score": cfg.default_score,
                     "reward_length_adjustment": 0.0,
                 },
             )
@@ -716,30 +723,17 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                         first_body.expected_rubric_ids,
                     )
                 else:
-                    compare_result = await self._run_compare(
+                    raw_results, metadata = await self._collect_comparisons(
                         conversation_history=conversation_history,
                         response_objs=response_objs,
                         principle=first_body.principle,
                         expected_rubric_ids=first_body.expected_rubric_ids,
-                        include_details=True,
                     )
-                    # Keep compatibility with tests and integrations that mock the legacy four-item result.
-                    if len(compare_result) == 4:
-                        rewards = compare_result[0]
-                        compare_result = (
-                            rewards,
-                            list(rewards),
-                            [None] * len(rewards),
-                            {},
-                            compare_result[2],
-                            list(rewards),
-                            list(rewards),
-                            [0.0] * len(rewards),
-                        )
+                    compare_result = self._aggregate_results(response_objs, raw_results, metadata)
             (
                 rewards,
                 raw_scores,
-                clean_scores,
+                valid_rubric_scores,
                 metrics,
                 _,
                 overall_raw,
@@ -754,9 +748,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 index: {
                     "reward": rewards[position],
                     "reward_score_raw": raw_scores[position],
-                    "reward_rubric_mean_clean": clean_scores[position],
-                    "reward_overall_raw": overall_raw[position],
-                    "reward_overall_len_adjusted": overall_adjusted[position],
+                    "reward_rubric_aggregate_valid": valid_rubric_scores[position],
+                    "reward_overall_score_raw": overall_raw[position],
+                    "reward_overall_score": overall_adjusted[position],
                     "reward_length_adjustment": length_adjustments[position],
                     **metrics,
                 }
@@ -985,32 +979,33 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 adjustment_count=count,
             )
 
-        rewards, aggregation_metrics, raw_scores, _ = aggregate(comparisons, metadata, adjust=True)
-        overall_adjusted, _, overall_raw, length_adjustments = aggregate(overall_comparisons, metadata, adjust=True)
+        rewards, aggregation_metrics, raw_scores, length_adjustments = aggregate(comparisons, metadata, adjust=True)
+        overall_adjusted, _, overall_raw, _ = aggregate(overall_comparisons, metadata, adjust=True)
         rewards, raw_scores = rewards[:count], raw_scores[:count]
         overall_raw, overall_adjusted = overall_raw[:count], overall_adjusted[:count]
         length_adjustments = length_adjustments[:count]
 
-        clean_scores: List[Optional[float]] = [None] * count
+        valid_rubric_scores: List[Optional[float]] = [None] * count
         if cfg.score_source == "rubric_mean":
-            # A clean rubric metric requires every comparison touching that response to parse.
-            valid = [not result[-2] and not result[-1] for result in raw_results]
+            # A valid rubric metric requires every comparison touching that response to parse.
+            valid = [not result[-1] for result in raw_results]
             valid_results = [comparison for comparison, keep in zip(comparisons, valid) if keep]
             valid_metadata = [item for item, keep in zip(metadata, valid) if keep]
             failed_indices = {index for item, keep in zip(metadata, valid) if not keep for index in item[:2]}
             if valid_results:
-                clean_values = aggregate(valid_results, valid_metadata)[2]
-                clean_scores = [clean_values[index] if index not in failed_indices else None for index in range(count)]
+                valid_values = aggregate(valid_results, valid_metadata)[2]
+                valid_rubric_scores = [
+                    valid_values[index] if index not in failed_indices else None for index in range(count)
+                ]
 
         total = max(1, len(raw_results))
         # Preserve the existing score metrics and add GenRM diagnostics alongside them.
         metrics = {
             **aggregation_metrics,
-            "genrm_parse_failure_rate_per_group": sum(result[-3] for result in raw_results) / total,
+            "genrm_parse_failure_rate_per_group": sum(result[-2] for result in raw_results) / total,
             "genrm_rubric_parse_failure_rate_per_group": (
-                sum(result[-2] for result in raw_results) / total if cfg.score_source == "rubric_mean" else 0.0
+                sum(result[-1] for result in raw_results) / total if cfg.score_source == "rubric_mean" else 0.0
             ),
-            "genrm_api_error_rate_per_group": sum(result[-1] for result in raw_results) / total,
         }
         token_usage = [result[6:9] for result in raw_results if result[6] >= 0 and result[7] >= 0]
         if token_usage:
@@ -1041,7 +1036,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         return (
             rewards,
             raw_scores,
-            clean_scores,
+            valid_rubric_scores,
             metrics,
             comparisons,
             overall_raw,
@@ -1089,7 +1084,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         response_objs: List[Dict[str, Any]],
         principle: Optional[str] = None,
         expected_rubric_ids: Optional[Tuple[int, ...]] = None,
-        include_details: bool = False,
     ) -> tuple:
         """Run pairwise comparison; return (rewards, metrics, comparison_results, comparison_metadata)."""
         cfg = self.config
@@ -1104,8 +1098,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             expected_rubric_ids,
         )
         aggregate_result = self._aggregate_results(response_objs, raw_results, comparison_metadata)
-        if include_details:
-            return aggregate_result
         rewards, _, _, metrics, comparison_results, _, _, _ = aggregate_result
         return rewards, metrics, comparison_results, comparison_metadata
 
@@ -1370,7 +1362,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     selected = overall
                     selected_failed = overall_failed
                 if not selected_failed:
-                    return (*selected, *overall, *token_metrics, overall_failed, rubric_failed, 0.0)
+                    return (*selected, *overall, *token_metrics, overall_failed, rubric_failed)
             else:
                 overall = (cfg.default_score, cfg.default_score, cfg.default_ranking)
                 selected = overall
@@ -1397,7 +1389,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 pair_idx,
                 max_attempts,
             )
-            return (*selected, *overall, *token_metrics, overall_failed, rubric_failed, 0.0)
+            return (*selected, *overall, *token_metrics, overall_failed, rubric_failed)
 
 
 if __name__ == "__main__":

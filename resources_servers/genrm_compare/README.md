@@ -167,9 +167,47 @@ for the input format, explicit group IDs, and recovery limits.
 
 ### Fixed-baseline and rubric-mean scoring
 
-Set `comparison_mode: fixed_baseline` to compare every rollout with a fixed reference instead of other rollouts in its cohort. Each request must provide the reference as `responses_create_params.metadata.baseline_response`.
+Set `comparison_mode: fixed_baseline` to compare each rollout with the reference in
+`responses_create_params.metadata.baseline_response`. Set `num_rollouts_per_prompt` to the actual
+rollouts per group and admit all members concurrently; a singleton still calls the judge.
 
-Set `score_source: rubric_mean` to reward the equal-weight mean of the GenRM rubric scores instead of its overall score. Each request must provide `expected_rubric_ids`; parsing fails if the returned rubric IDs do not match this set. The two options can be enabled independently or together. Their defaults preserve the existing cohort comparison and overall-score behavior.
+Set `score_source: rubric_mean` to use equal-weight rubric scores. Each task row must provide a
+top-level `expected_rubric_ids` list, and the prompt or principle must define the rubrics.
+All group members must share the same baseline and rubric ID set; ID order does not matter.
+
+These options work independently or together. Defaults use rollout-cohort comparisons and overall
+scores. `/compare` ignores `comparison_mode` and always compares the submitted responses with each
+other; it still requires `expected_rubric_ids` when using rubric scoring.
+
+For example, with `expected_rubric_ids: [1, 2]`, the judge must return:
+
+```json
+{"rubric_evaluations": [
+  {"rubric_id": 1, "score_1": 5, "score_2": 3, "ranking": 1},
+  {"rubric_id": 2, "score_1": 4, "score_2": 2, "ranking": 2}
+]}
+```
+
+Each expected ID must appear exactly once. IDs must be integer-valued, with finite scores in 1-5
+and rankings in 1-6. One invalid rubric rejects the whole rubric verdict.
+After exhausted parse retries, that comparison uses `default_score` and `default_ranking`.
+With neutral `default_ranking: 3.5`, its fallback aggregate is `default_score`
+before length/style adjustments; a nonneutral ranking can also affect the tiebreaker.
+Judge API failures retain the masked-failure handling described below.
+
+### Verification reward diagnostics
+
+All score aggregates include the existing tiebreaker. `/verify` returns:
+
+| Field | Meaning |
+| --- | --- |
+| `reward`, `reward_score_raw` | Selected score-source aggregate after and before length/style adjustments. |
+| `reward_length_adjustment` | Adjustment applied to the selected score source: `reward - reward_score_raw`. |
+| `reward_rubric_aggregate_valid` | Rubric aggregate before adjustments; null in overall mode or if any comparison for this rollout failed rubric parsing. |
+| `reward_overall_score_raw`, `reward_overall_score` | Overall aggregates before and after length/style adjustments. |
+| `genrm_parse_failure_rate_per_group` | Fraction of final comparison verdicts that failed overall parsing. |
+| `genrm_rubric_parse_failure_rate_per_group` | Fraction that failed rubric parsing; zero in overall mode. |
+| `reasoning_text`, `answer_text` | Reasoning and final answer extracted from the rollout. |
 
 ### Token-usage metrics
 
@@ -179,7 +217,8 @@ When the GenRM response includes usage data, `/verify` reports:
 - Total output tokens per group
 - Fraction of comparisons that reached `max_output_tokens`
 
-The metrics are omitted when usage data is unavailable.
+Counts include reported usage from retry attempts. Unavailable usage fields are null in `/verify`
+and omitted from `/compare` metrics. Skip null values when averaging usage and valid-rubric metrics.
 
 ## Comparison Strategies
 

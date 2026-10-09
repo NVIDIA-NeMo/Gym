@@ -29,7 +29,14 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 def comparison_result(score_1=4.0, score_2=2.0, ranking=1.0):
     """Build the full comparison result expected by the server."""
     scores = (score_1, score_2, ranking)
-    return (*scores, *scores, -1.0, -1.0, -1.0, 0.0, 0.0, 0.0)
+    return (*scores, *scores, -1.0, -1.0, -1.0, 0.0, 0.0)
+
+
+def collected_comparisons(scores: list[float]) -> tuple[list[genrm.ComparisonResult], list[tuple[int, int, int]]]:
+    """Use actual aggregation in lifecycle tests while controlling judge scores."""
+    pairs = [(i, i + 1, 0) for i in range(len(scores) - 1)]
+    results = [comparison_result(scores[i], scores[j], 3.5) for i, j, _ in pairs]
+    return results, pairs
 
 
 def member(index, *, group="group", attempt=0, response_id=None):
@@ -79,9 +86,9 @@ async def test_disconnect_reattaches_without_replacing_answer(server, during_jud
     async def compare(*args, **kwargs):
         started.set()
         await release.wait()
-        return [1.0, 2.0], {}, [], []
+        return collected_comparisons([1.0, 2.0])
 
-    server._run_compare = AsyncMock(side_effect=compare)
+    server._collect_comparisons = AsyncMock(side_effect=compare)
     first = asyncio.create_task(server.verify(member(0)))
     await asyncio.sleep(0)
     second = asyncio.create_task(server.verify(member(1))) if during_judging else None
@@ -99,7 +106,7 @@ async def test_disconnect_reattaches_without_replacing_answer(server, during_jud
         second = asyncio.create_task(server.verify(member(1)))
     release.set()
     assert [r.reward for r in await asyncio.gather(retry, second)] == [1.0, 2.0]
-    server._run_compare.assert_awaited_once()
+    server._collect_comparisons.assert_awaited_once()
 
 
 async def test_judge_has_separate_deadline_and_drains_comparisons(server):
@@ -190,10 +197,10 @@ async def test_late_judge_result_cannot_publish_after_supersession(server):
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 # A backend may already have produced a reply when cancellation arrives.
-                return [99.0, 99.0], {}, [], []
-        return [1.0, 2.0], {}, [], []
+                return collected_comparisons([99.0, 99.0])
+        return collected_comparisons([1.0, 2.0])
 
-    server._run_compare = compare
+    server._collect_comparisons = compare
     old = [asyncio.create_task(server.verify(member(i))) for i in range(2)]
     await asyncio.wait_for(started.wait(), 1)
     new = await asyncio.gather(*(server.verify(member(i, attempt=1)) for i in range(2)))

@@ -2,15 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the genrm_compare server.
 
-Task-owned data contains the optional provenance label ``dataset``. Multi-member
-verification requires ``_ng_rollout_index`` slots 0..N-1. Caller-owned
+Task-owned data contains the optional provenance label ``dataset``.
+``expected_rubric_ids`` is required only when ``score_source="rubric_mean"``.
+Multi-member verification requires ``_ng_rollout_index`` slots 0..N-1. Caller-owned
 ``_ng_group_id`` and shared ``_ng_group_attempt`` coordinates support isolated
 replacement attempts and completed reward replay. Legacy task/prompt grouping
 remains available for sequential runs, without reliable late-request isolation.
 See README.md's "GenRM comparison groups" section for the wire contract and retention limits.
 """
 
-from typing import Optional
+from typing import Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,4 +26,10 @@ class TaskData(BaseModel):
             "the wire only because GenRMCompareVerifyRequest sets extra='allow'."
         ),
         json_schema_extra={"consumed_by": ["provenance"]},
+    )
+
+    expected_rubric_ids: Optional[Tuple[int, ...]] = Field(
+        default=None,
+        description="Rubric IDs the judge must return exactly once each; required only when score_source=rubric_mean.",
+        json_schema_extra={"consumed_by": ["verify"]},
     )

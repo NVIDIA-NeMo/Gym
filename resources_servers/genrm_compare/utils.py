@@ -238,18 +238,23 @@ def parse_genrm_output(
 ) -> Tuple[float, float, float]:
     """Parse GenRM output to extract scores from JSON format.
 
-    Searches for JSON in the output text, trying:
-    1. Fenced JSON blocks (```json {...} ```)
-    2. Any {...} JSON objects, taking the last valid one
+    Searches for JSON in fenced blocks or {...} objects.
 
-    Expected JSON format:
+    Overall format (flat or nested under ``overall``):
         {"score_1": <1-5>, "score_2": <1-5>, "ranking": <1-6>}
 
     Args:
         output: Raw text output from GenRM model
         default_score: Default score if parsing fails
         default_ranking: Default ranking if parsing fails
-        score_source: Use the overall score or the equal-weight mean of rubric scores
+        score_source: "overall" reads the scores above. "rubric_mean" averages
+            score_1, score_2 and ranking from a nonempty ``rubric_evaluations`` list.
+            Each item needs a unique integer-valued ``rubric_id`` (no bools or
+            fractional IDs) and all three finite values: scores 1-5, ranking 1-6.
+            One invalid item rejects the whole verdict; rubric mode never falls
+            back to overall scores.
+        expected_rubric_ids: Exact rubric ID set; order does not matter. None accepts
+            any valid set here, but server endpoints require IDs in rubric mode.
         raise_on_fail: If True, raise GenRMOutputParseError on failure
 
     Returns:
@@ -257,6 +262,7 @@ def parse_genrm_output(
 
     Raises:
         GenRMOutputParseError: If raise_on_fail=True and parsing fails
+        ValueError: If score_source is unsupported
     """
 
     def _try_parse(json_str: str) -> Optional[Tuple[float, float, float]]:
