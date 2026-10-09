@@ -4350,7 +4350,8 @@ class TestLatencyMerge:
         [call] = _build_trajectory_record(self._row(), result).model_calls
         assert (call.started_at, call.completed_at, call.duration_ms) == (10.0, 15.0, 5000.0)
         assert (call.server_started_at, call.server_completed_at, call.server_duration_ms) == (10.5, 14.5, 4000.0)
-        assert call.token_stats.prompt_tokens == 800 and call.model_call_id == "h-1"
+        assert call.token_stats.prompt_tokens == 800
+        assert (call.model_call_id, call.client_call_id) == ("cap-1", "h-1")  # server's id; harness's id kept
         assert call.response_metadata.response_id == "resp_1" and call.status == "ok"
 
     def test_opencode_steps_pair_with_capture_records_by_session_order(self) -> None:

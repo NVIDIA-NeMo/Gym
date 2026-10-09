@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import itertools
 import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -24,6 +25,7 @@ from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (
     NeMoGymLLM,
     NeMoGymSandboxEnvironment,
+    NeMoGymTerminus2,
     Terminus2Agent,
     Terminus2AgentConfig,
     _instruction,
@@ -140,7 +142,9 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
     assert first.usage.prompt_tokens == 10
     assert second.content == "answer 2"
     assert third.content == "answer 3"
-    assert client.requests == [
+    # The x-ng-* join headers ride along with every request; the body is unchanged.
+    assert all(request["extra_headers"]["x-ng-client-call-id"] for request in client.requests)
+    assert [{k: v for k, v in request.items() if k != "extra_headers"} for request in client.requests] == [
         {"model": "policy_model", "input": [{"content": "first", "role": "user", "type": "message"}]},
         {
             "model": "policy_model",
@@ -311,7 +315,8 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
     monkeypatch.setattr(app_module, "AgentContext", FakeContext)
     monkeypatch.setattr(Terminus2Agent, "base_url_for_run", lambda *_args, **_kwargs: "http://model")
     monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model")
-    elapsed_times = iter([10.0, 20.0])
+    # First read is _execute's start; every later read (phases, the invocation, the total) sees 20.0.
+    elapsed_times = itertools.chain([10.0], itertools.repeat(20.0))
     monkeypatch.setattr(app_module, "perf_counter", lambda: next(elapsed_times))
 
     async def request_json():
@@ -353,3 +358,227 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         ("tmux setup", {"timeout_s": None, "cwd": None, "user": None, "env": None}),
         ("tmux run", {"timeout_s": None, "cwd": None, "user": None, "env": None}),
     ]
+
+
+# --- latency records: what the harness itself measures ------------------------------------------------------------
+
+
+def _latency_response(index: int, *, text: str = "answer", input_tokens: int = 10) -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id=f"resp_{index}",
+        created_at=0,
+        model="policy_model",
+        object="response",
+        output=[
+            NeMoGymResponseOutputMessage(
+                id=f"msg_{index}",
+                role="assistant",
+                status="completed",
+                type="message",
+                content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
+            )
+        ]
+        if text
+        else [],
+        tool_choice="auto",
+        tools=[],
+        parallel_tool_calls=True,
+        usage=NeMoGymResponseUsage(
+            input_tokens=input_tokens,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=2),
+            output_tokens=3,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=1),
+            total_tokens=input_tokens + 3,
+        ),
+    )
+
+
+class _PlannedClient:
+    """Fake NeMoGymAsyncOpenAI: ``plan`` lists, per call, 'ok' | 'timeout' | 'empty'."""
+
+    def __init__(self, plan):
+        self.plan = list(plan)
+        self.requests = []
+
+    async def create_response(self, **kwargs):
+        self.requests.append(kwargs)
+        action = self.plan.pop(0)
+        if action == "timeout":
+            await asyncio.sleep(10)
+        return _latency_response(len(self.requests), text="" if action == "empty" else "answer")
+
+
+def _observed_llm(plan, timeout=1.0):
+    observations = TerminusObservations(
+        invocation_id="inv",
+        task_id="t",
+        rollout_id="t-0",
+        model_ref=ModelServerRef(type="responses_api_models", name="policy_model"),
+    )
+    client = _PlannedClient(plan)
+    llm = NeMoGymLLM(
+        client=client,
+        model_name="policy_model",
+        model_context_limit=32_000,
+        model_output_limit=4_000,
+        llm_request_timeout=timeout,
+        observations=observations,
+    )
+    return llm, observations, client
+
+
+@pytest.mark.asyncio
+async def test_logical_call_records_its_own_timing_status_purpose_and_sends_the_join_headers():
+    from harbor.llms.base import ContextLengthExceededError
+
+    llm, observations, client = _observed_llm(["ok", "empty"])
+    await llm.call("prompt", message_history=[])
+    [call] = observations.trajectory.model_calls
+    assert call.clock_domain.startswith("node:") and call.status == "ok" and call.model_call_purpose == "agent_step"
+    assert call.duration_ms is not None and 0 <= call.duration_ms <= (call.completed_at - call.started_at) * 1000 + 50
+    assert call.client_call_id == call.model_call_id and call.invocation_id == "inv"
+    headers = client.requests[0]["extra_headers"]
+    assert headers["x-ng-client-call-id"] == call.model_call_id and headers["x-ng-client-attempt"] == "1"
+    assert headers["x-ng-purpose"] == "agent_step" and headers["x-ng-client-sent-at"].isdigit()
+    # Gym answers an over-context request with an empty 200: the call is recorded as the rejection it is.
+    with pytest.raises(ContextLengthExceededError):
+        await llm.call("prompt", message_history=[])
+    rejected = observations.trajectory.model_calls[1]
+    assert rejected.status == "incomplete" and rejected.context_overflow is True
+
+
+@pytest.mark.asyncio
+async def test_a_call_whose_attempts_all_fail_is_still_recorded():
+    llm, observations, _ = _observed_llm(["timeout"] * 10, timeout=0.01)
+    with pytest.raises(TimeoutError):
+        await llm.call("prompt", message_history=[])
+    [call] = observations.trajectory.model_calls
+    assert call.status == "timeout" and len(call.attempts) == 10
+    assert all(a.status == "timeout" for a in call.attempts) and call.started_at <= call.completed_at
+
+
+class _FakeSession:
+    def __init__(self, timeout_on=None):
+        self.keys = []
+        self.timeout_on = timeout_on
+
+    async def send_keys(self, keys, block=False, min_timeout_sec=0.0):
+        self.keys.append((keys, block, min_timeout_sec))
+        if keys == self.timeout_on:
+            raise TimeoutError
+
+    async def get_incremental_output(self):
+        return f"screen after {len(self.keys)} commands"
+
+
+def _fake_terminus(observations):
+    return SimpleNamespace(
+        _timeout_template="TIMEOUT {timeout_sec} {command} {terminal_state}",
+        _limit_output_length=lambda text, max_bytes=10000: text,
+        _completed_command_batches=0,
+        _times_spent=[],
+        _n_episodes=3,
+        _nemo_gym_llm=SimpleNamespace(observations=observations),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout_on", [None, "sleep 9"])
+async def test_execute_commands_matches_harbor_and_records_each_command(timeout_on):
+    from harbor.agents.terminus_2 import Terminus2
+    from harbor.agents.terminus_2.terminus_2 import Command
+
+    commands = [
+        Command(keystrokes="ls\n", duration_sec=0.0),
+        Command(keystrokes="sleep 9", duration_sec=0.5),
+        Command(keystrokes="pwd\n", duration_sec=0.0),
+    ]
+    expected = await Terminus2._execute_commands(_fake_terminus(None), commands, _FakeSession(timeout_on))
+
+    observations = TerminusObservations("inv", "t", "t-0", ModelServerRef(type="responses_api_models", name="m"))
+    observations.decision_parsed_at = 123.0
+    fake = _fake_terminus(observations)
+    actual = await NeMoGymTerminus2._execute_commands(fake, commands, _FakeSession(timeout_on))
+    assert actual == expected  # same return value and side effects as harbor's own method
+    assert fake._completed_command_batches == 1 and len(fake._times_spent) == 1
+
+    tools = observations.trajectory.tool_calls
+    assert len(tools) == (2 if timeout_on else 3)
+    assert len({t.batch_id for t in tools}) == 1 and [t.batch_index for t in tools] == list(range(1, len(tools) + 1))
+    assert all(
+        t.requested_at == 123.0 and t.timing_source == "harness" and t.clock_domain.startswith("node:") for t in tools
+    )
+    assert tools[0].operation == "ls" and tools[1].requested_wait_s == 0.5
+    assert all(t.duration_ms is not None and t.started_at <= t.completed_at for t in tools)
+    assert tools[0].completed_at <= tools[1].started_at  # per command, not one batch interval copied onto each
+    assert all(t.output_chars == len(expected[1]) for t in tools)
+    assert [t.status for t in tools] == (["completed", "timeout"] if timeout_on else ["completed"] * 3)
+    assert all(t.response_received_at is None for t in tools)
+    observations.mark_tool_results_observed()
+    assert all(t.response_received_at is not None for t in tools)
+
+
+def _bare_terminus(llm):
+    """A NeMoGymTerminus2 without Harbor's constructor: enough for the wrapped hooks, whose super() calls the
+    tests replace on the Harbor base class."""
+    terminus = NeMoGymTerminus2.__new__(NeMoGymTerminus2)
+    terminus._nemo_gym_llm = llm
+    terminus._completed_command_batches = 0
+    terminus._is_check_proactive_summarization = False
+    terminus._num_proactive_compactions = 0
+    return terminus
+
+
+@pytest.mark.asyncio
+async def test_decision_results_and_subagent_purposes_land_on_the_calls(monkeypatch):
+    from harbor.agents.terminus_2 import Terminus2
+
+    llm, observations, _ = _observed_llm(["ok", "ok", "ok"])
+    terminus = _bare_terminus(llm)
+
+    async def fake_interaction(self, *_args, **_kwargs):
+        response = await llm.call("decide", message_history=[])
+        observations.decision_response = response
+        return ([object(), object()], False, "parsed")
+
+    monkeypatch.setattr(Terminus2, "_handle_llm_interaction", fake_interaction)
+    result = await terminus._handle_llm_interaction()
+    assert result[1] is False
+    [decision] = observations.trajectory.model_calls
+    assert decision.parsed_tool_calls == 2 and decision.task_complete is False
+    assert decision.processed_at is not None and decision.processed_at >= decision.completed_at
+    assert [t.model_calls[0].model_call_id for t in observations.trajectory.turns] == [decision.model_call_id]
+
+    # Harbor's compaction sub-agents are told apart by the filename suffix it passes to _run_subagent.
+    async def fake_subagent(self, *_args, **_kwargs):
+        await llm.call("questions", message_history=[])
+
+    monkeypatch.setattr(Terminus2, "_run_subagent", fake_subagent)
+    await terminus._run_subagent(filename_suffix="questions")
+    await llm.call("short summary")  # no message_history: Harbor's short-summary fallback
+    purposes = [c.model_call_purpose for c in observations.trajectory.model_calls]
+    assert purposes == ["agent_step", "compaction_questions", "compaction_fallback"]
+
+
+@pytest.mark.asyncio
+async def test_overflow_compaction_points_at_the_rejected_call_and_is_timed(monkeypatch):
+    from harbor.agents.terminus_2 import Terminus2
+    from harbor.llms.base import ContextLengthExceededError
+
+    llm, observations, _ = _observed_llm(["empty", "ok", "ok"])
+    terminus = _bare_terminus(llm)
+    with pytest.raises(ContextLengthExceededError):
+        await llm.call("too long", message_history=[])
+
+    async def fake_summarize(self, *_args, **_kwargs):
+        await llm.call("summarise", message_history=[])
+
+    monkeypatch.setattr(Terminus2, "_summarize", fake_summarize)
+    await terminus._summarize()
+    await llm.call("handoff", message_history=[])
+    [compaction] = observations.compactions
+    rejected, summary, handoff = observations.trajectory.model_calls
+    assert compaction.trigger == "overflow" and compaction.before_model_call.model_call_id == rejected.model_call_id
+    assert compaction.duration_ms is not None and compaction.clock_domain.startswith("node:")
+    assert compaction.tokens_before == 13 and compaction.tokens_after == 10  # last usage total; next step's input
+    assert summary.model_call_purpose == "compaction_summary" and handoff.model_call_purpose == "agent_step"

@@ -1324,11 +1324,14 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         await self._raise_for_status(response, request_kwargs)
         return await get_response_json(response)
 
-    async def create_response(self, **kwargs):
+    async def create_response(self, *, extra_headers: Optional[Dict[str, str]] = None, **kwargs):
         request_kwargs = dict(
             url=f"{self.base_url}/responses",
             json=kwargs,
         )
+        if extra_headers:
+            # Per-call headers (a harness's x-ng-* join headers); merged over default_headers by _request.
+            request_kwargs["headers"] = dict(extra_headers)
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)

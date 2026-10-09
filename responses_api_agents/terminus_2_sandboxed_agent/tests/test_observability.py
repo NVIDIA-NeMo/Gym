@@ -316,7 +316,9 @@ async def test_reused_response_id_is_not_arbitrarily_selected(execution, tmp_pat
     assert len(trajectory["turns"]) == 1
     assert "model_response_id_reused" in {gap["code"] for gap in trajectory["gaps"]}
     assert "rollout_token_count_mismatch" in health.unobserved
-    assert "trajectory_capture_mismatch" in {finding.check for finding in health.findings}
+    # Every call is joined by the id the harness sent with the request, so a reused response id no longer
+    # leaves a reference without its captured call.
+    assert "trajectory_capture_mismatch" not in {finding.check for finding in health.findings}
 
 
 @pytest.mark.asyncio

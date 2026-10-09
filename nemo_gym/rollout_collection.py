@@ -231,8 +231,9 @@ def _derive_model_response_kind(response: Any) -> Optional[str]:
 
 
 # Fields of a model call the harness owns when it recorded the call itself; the capture never overwrites them.
+# The record's model_call_id becomes the server's (the capture store's key); the harness's own id survives in
+# client_call_id, which is also what the harness sent as x-ng-client-call-id.
 _HARNESS_OWNED_CALL_FIELDS = (
-    "model_call_id",
     "client_call_id",
     "invocation_id",
     "model_call_purpose",
@@ -564,6 +565,29 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                     next_agent = next((c for c in agent_calls if c.started_at > cutoff), None)
                     if next_agent is not None and next_agent.token_stats.prompt_tokens is not None:
                         observed_compactions[i].tokens_after = next_agent.token_stats.prompt_tokens
+
+    # The merged call now carries the server's id; references the harness made by its own id (turns, compaction
+    # boundaries, invocation ownership) follow it, so every reference resolves to a captured call.
+    renamed = {
+        call.client_call_id: call.model_call_id
+        for call in model_calls
+        if call.client_call_id and call.model_call_id and call.client_call_id != call.model_call_id
+    }
+    if renamed:
+
+        def _follow(ref: Optional[ModelCallRef]) -> Optional[ModelCallRef]:
+            if ref is None or ref.model_call_id not in renamed:
+                return ref
+            return ref.model_copy(update={"model_call_id": renamed[ref.model_call_id]})
+
+        for turn in turns:
+            turn.model_calls = [_follow(ref) for ref in turn.model_calls]
+        for invocation in invocations:
+            invocation.model_calls = [_follow(ref) for ref in invocation.model_calls]
+        for compaction in observed_compactions:
+            compaction.model_calls = [_follow(ref) for ref in compaction.model_calls]
+            compaction.before_model_call = _follow(compaction.before_model_call)
+            compaction.after_model_call = _follow(compaction.after_model_call)
 
     rejected_by_id = {
         key: call.rejected_request_tokens

@@ -3,9 +3,11 @@
 
 """Evidence recorded at Terminus model-response and decision boundaries."""
 
+import socket
 from dataclasses import dataclass
-from time import time
+from time import perf_counter, time
 from typing import Any
+from uuid import uuid4
 
 from harbor.llms.base import LLMResponse
 
@@ -13,6 +15,7 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseFunctionToolCall, NeMoGymResponseOutputMessage
 from nemo_gym.rollout_observability import (
     COMPACTION_PURPOSES,
+    AgentPhaseObservation,
     ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,
@@ -49,6 +52,15 @@ class TerminusObservations:
         self.decision_parsed_at: float | None = None
         # Tool calls whose result has not yet been handed to a model call.
         self.pending_tool_calls: list[TrajectoryToolCall] = []
+        # The last command batch, until the model call that reads its observation names the prompt item.
+        self.last_batch_tools: list[TrajectoryToolCall] = []
+        self.phases: list[AgentPhaseObservation] = []
+        # Every timestamp here is read on this process's clock; durations come from perf_counter.
+        self.clock_domain = f"node:{socket.gethostname()}"
+        self.last_decision_call_id: str | None = None
+        self.last_rejected_call_id: str | None = None
+        self._compaction_started_perf: float | None = None
+        self._tokens_after_pending: ContextCompactionObservation | None = None
         self.selected_response_ids: set[str] = set()
         # The shared HTTP transport can retry after server admission without notifying
         # this adapter. Invocation ownership remains exact; full turn-call scope does not.
@@ -80,6 +92,7 @@ class TerminusObservations:
         *,
         model_call_id: str | None = None,
         started_at: float | None = None,
+        duration_ms: float | None = None,
         model_call_purpose: str | None = None,
         attempts: list[dict[str, Any]] | None = None,
     ) -> ObservedResponse:
@@ -123,9 +136,13 @@ class TerminusObservations:
             self.trajectory.model_calls.append(
                 TrajectoryModelCall(
                     model_call_id=model_call_id,
+                    client_call_id=model_call_id,
+                    invocation_id=self.invocation_id,
+                    clock_domain=self.clock_domain,
                     started_at=started_at,
                     completed_at=timestamp,
-                    duration_ms=(timestamp - started_at) * 1000,
+                    duration_ms=duration_ms if duration_ms is not None else (timestamp - started_at) * 1000,
+                    status="ok",
                     response_metadata=TrajectoryResponseMetadata(
                         response_id=response.id,
                         model_ref=self.model_ref,
@@ -133,13 +150,155 @@ class TerminusObservations:
                     token_stats=token_stats,
                     model_call_purpose=model_call_purpose,
                     model_response_kind=self._response_kind(response),
-                    attempts=[
-                        TrajectoryModelCallAttempt(attempt_index=index, **attempt)
-                        for index, attempt in enumerate(attempts or [], start=1)
-                    ],
+                    attempts=self._attempts(attempts),
                 )
             )
+            pending = self._tokens_after_pending
+            if pending is not None and model_call_purpose not in COMPACTION_PURPOSES:
+                if token_stats.prompt_tokens is not None:
+                    pending.tokens_after = token_stats.prompt_tokens
+                self._tokens_after_pending = None
         return observed
+
+    def _attempts(self, attempts: list[dict[str, Any]] | None) -> list[TrajectoryModelCallAttempt]:
+        return [
+            TrajectoryModelCallAttempt(attempt_index=index, clock_domain=self.clock_domain, **attempt)
+            for index, attempt in enumerate(attempts or [], start=1)
+        ]
+
+    def _call(self, model_call_id: str | None) -> TrajectoryModelCall | None:
+        return next((c for c in self.trajectory.model_calls if c.model_call_id == model_call_id), None)
+
+    def record_failed_call(
+        self,
+        *,
+        model_call_id: str,
+        started_at: float,
+        completed_at: float,
+        duration_ms: float,
+        status: str,
+        model_call_purpose: str,
+        attempts: list[dict[str, Any]],
+    ) -> None:
+        """A logical call that never produced a response is still a call the agent waited for."""
+        self.trajectory.model_calls.append(
+            TrajectoryModelCall(
+                model_call_id=model_call_id,
+                client_call_id=model_call_id,
+                invocation_id=self.invocation_id,
+                clock_domain=self.clock_domain,
+                started_at=started_at,
+                completed_at=completed_at,
+                duration_ms=duration_ms,
+                status=status,
+                model_call_purpose=model_call_purpose,
+                attempts=self._attempts(attempts),
+            )
+        )
+
+    def mark_rejected(self, model_call_id: str) -> None:
+        """Gym answered an over-context request with an empty response: the call was rejected, not answered."""
+        call = self._call(model_call_id)
+        if call is not None:
+            call.status = "incomplete"
+            call.context_overflow = True
+        self.last_rejected_call_id = model_call_id
+
+    def note_decision_result(self, parsed_tool_calls: int, task_complete: bool) -> None:
+        call = self._call(self.last_decision_call_id)
+        if call is not None:
+            call.parsed_tool_calls = parsed_tool_calls
+            call.task_complete = task_complete
+
+    def command_record(
+        self,
+        *,
+        batch_id: str,
+        batch_index: int,
+        keystrokes: str,
+        requested_wait_s: float,
+        started_at: float,
+        started_perf: float,
+        status: str,
+    ) -> TrajectoryToolCall:
+        """One terminal command, timed on its own: send_keys plus the wait the model asked for."""
+        return TrajectoryToolCall(
+            invocation_id=self.invocation_id,
+            tool_call_id=f"cmd_{uuid4().hex[:12]}",
+            tool_name="terminal",
+            operation=keystrokes.rstrip("\r\n")[:512] if keystrokes else None,
+            requested_at=self.decision_parsed_at,
+            started_at=started_at,
+            completed_at=time(),
+            duration_ms=(perf_counter() - started_perf) * 1000,
+            requested_wait_s=requested_wait_s,
+            batch_id=batch_id,
+            batch_index=batch_index,
+            timing_source="harness",
+            clock_domain=self.clock_domain,
+            status=status,
+        )
+
+    def record_command_batch(self, tools: list[TrajectoryToolCall], *, output_chars: int) -> None:
+        for tool in tools:
+            tool.output_chars = output_chars
+        self.trajectory.tool_calls.extend(tools)
+        self.pending_tool_calls.extend(tools)
+        self.last_batch_tools = tools
+
+    def note_observation_index(self, index: int) -> None:
+        """The prompt item at ``index`` carries the last batch's observation to the model."""
+        for tool in self.last_batch_tools:
+            tool.output_trajectory_index = index
+        self.last_batch_tools = []
+
+    def begin_compaction(self, *, trigger: str, tokens_before: int | None) -> ContextCompactionObservation:
+        rejected = self.last_rejected_call_id if trigger == "overflow" else None
+        self.compaction = ContextCompactionObservation(
+            invocation_id=self.invocation_id,
+            observed_at=time(),
+            trigger=trigger,
+            tokens_before=tokens_before,
+            clock_domain=self.clock_domain,
+            before_model_call=ModelCallRef(model_call_id=rejected) if rejected else None,
+        )
+        self._compaction_started_perf = perf_counter()
+        return self.compaction
+
+    def end_compaction(self, outcome: str) -> None:
+        compaction = self.compaction
+        if compaction is None:
+            return
+        compaction.outcome = outcome
+        compaction.completed_at = time()
+        if self._compaction_started_perf is not None:
+            compaction.duration_ms = (perf_counter() - self._compaction_started_perf) * 1000
+        self.compactions.append(compaction)
+        if outcome == "completed":
+            self._tokens_after_pending = compaction
+        self.compaction = None
+        self._compaction_started_perf = None
+
+    def record_phase(
+        self,
+        name: str,
+        *,
+        started_at: float,
+        started_perf: float,
+        status: str = "completed",
+        error_type: str | None = None,
+    ) -> None:
+        self.phases.append(
+            AgentPhaseObservation(
+                name=name,
+                started_at=started_at,
+                completed_at=time(),
+                duration_ms=(perf_counter() - started_perf) * 1000,
+                status=status,
+                error_type=error_type,
+                clock_domain=self.clock_domain,
+            )
+        )
 
     def mark_tool_results_observed(self) -> None:
         """The previous batch's output is in the prompt for the next model call.
@@ -172,6 +331,10 @@ class TerminusObservations:
             return
         observed = candidates[0]
         self.selected_response_ids.add(observed.response.id)
+        self.last_decision_call_id = observed.model_call_id
+        decision_call = self._call(observed.model_call_id)
+        if decision_call is not None:
+            decision_call.processed_at = self.decision_parsed_at
         ref = (
             ModelCallRef(
                 model_call_id=observed.model_call_id,

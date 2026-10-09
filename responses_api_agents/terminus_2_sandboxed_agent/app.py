@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import socket
 import sys
 import tempfile
 from copy import deepcopy
@@ -40,9 +41,13 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.rollout_observability import (
+    CLIENT_ATTEMPT_HEADER,
+    CLIENT_CALL_ID_HEADER,
+    CLIENT_PURPOSE_HEADER,
+    CLIENT_SENT_AT_HEADER,
     AgentInvocation,
     AgentObservationBundle,
-    ContextCompactionObservation,
+    AgentPhaseObservation,
     TrajectoryRecord,
     TrajectoryToolCall,
 )
@@ -164,6 +169,34 @@ def _instruction(input_value: Any) -> str:
     return "\n\n".join(messages)
 
 
+# Harbor's three compaction sub-agents, keyed by the `filename_suffix` it passes to `_run_subagent`.
+PURPOSE_BY_SUFFIX = {
+    "summary": "compaction_summary",
+    "questions": "compaction_questions",
+    "answers": "compaction_answers",
+}
+
+
+def tokens_before_from_usages(usages: list) -> int | None:
+    """Total tokens of the last call that reported usage (a rejected over-context call may report none)."""
+    for usage in reversed(usages):
+        total = getattr(usage, "total_tokens", None) if usage is not None else None
+        if total:
+            return int(total)
+    return None
+
+
+def _phase(name: str, started_at: float, started_perf: float, status: str = "completed") -> AgentPhaseObservation:
+    return AgentPhaseObservation(
+        name=name,
+        started_at=started_at,
+        completed_at=time(),
+        duration_ms=(perf_counter() - started_perf) * 1000,
+        status=status,
+        clock_domain=f"node:{socket.gethostname()}",
+    )
+
+
 def _harness_attempt(
     started_at: float, started_perf: float, status: str, error_type: str | None = None
 ) -> dict[str, Any]:
@@ -216,6 +249,8 @@ class NeMoGymLLM(BaseLLM):
 
         self._is_compacting = False
         self._just_compacted = False
+        # Set by NeMoGymTerminus2._run_subagent while one of Harbor's compaction sub-agents runs.
+        self._purpose_override: str | None = None
 
     @staticmethod
     def _input_items(message_history: list[dict[str, Any]], prompt: str) -> list[NeMoGymEasyInputMessage]:
@@ -237,6 +272,8 @@ class NeMoGymLLM(BaseLLM):
         return "".join(content), "\n".join(reasoning) or None
 
     async def call(self, prompt: str, **kwargs: Any) -> LLMResponse:
+        # Harbor's short-summary fallback is the only caller that omits message_history.
+        direct_call = "message_history" not in kwargs
         message_history = kwargs.pop("message_history", [])
         kwargs.pop("previous_response_id", None)
         kwargs.pop("logging_path", None)
@@ -249,14 +286,26 @@ class NeMoGymLLM(BaseLLM):
         response = None
         started_at = time()
         start_perf = perf_counter()
+        # The logical call: one id across every attempt, sent to the model server so its capture record joins
+        # this one exactly; the purpose names which of Harbor's loops is calling.
+        model_call_id = uuid4().hex
+        model_call_purpose = self._purpose_override or (
+            "compaction_fallback" if direct_call else ("compaction_summary" if self._is_compacting else "agent_step")
+        )
         # Every request attempt behind this logical call, retries included. The transport reports
         # its own HTTP attempts through observe_request_attempts(); this loop adds the timeout
         # that ended an iteration, since a cancelled request never reports a completion itself.
         attempts: list[dict[str, Any]] = []
         max_attempts = 10  # Harbor does 3 by default and Litellm does 3 by default. Hardcode 10 attempts for now.
-        for _ in range(max_attempts):
+        for attempt_no in range(1, max_attempts + 1):
             attempt_started_at = time()
             attempt_started_perf = perf_counter()
+            headers = {
+                CLIENT_CALL_ID_HEADER: model_call_id,
+                CLIENT_ATTEMPT_HEADER: str(attempt_no),
+                CLIENT_SENT_AT_HEADER: str(int(time() * 1000)),
+                CLIENT_PURPOSE_HEADER: model_call_purpose,
+            }
             with observe_request_attempts() as transport_attempts:
                 try:
                     async with asyncio.timeout(delay=self._llm_request_timeout):
@@ -264,6 +313,7 @@ class NeMoGymLLM(BaseLLM):
                             await self._client.create_response(
                                 model=self._model_name,
                                 input=request_input,
+                                extra_headers=headers,
                             )
                         )
                     attempts.extend(
@@ -282,15 +332,33 @@ class NeMoGymLLM(BaseLLM):
                     )
                     if self.observations is not None:
                         self.observations.gap("model_attempt_without_response", type(exc).__name__)
+                        self.observations.record_failed_call(
+                            model_call_id=model_call_id,
+                            started_at=started_at,
+                            completed_at=time(),
+                            duration_ms=(perf_counter() - start_perf) * 1000,
+                            status="cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
+                            model_call_purpose=model_call_purpose,
+                            attempts=attempts,
+                        )
                     raise
 
         self._times_spent.append(perf_counter() - start_perf)
         if not response:
+            if self.observations is not None:
+                self.observations.record_failed_call(
+                    model_call_id=model_call_id,
+                    started_at=started_at,
+                    completed_at=time(),
+                    duration_ms=(perf_counter() - start_perf) * 1000,
+                    status="timeout",
+                    model_call_purpose=model_call_purpose,
+                    attempts=attempts,
+                )
             raise TimeoutError(f"Failed to query model endpoint due to timeouts after {max_attempts} attempts!")
 
         completed_at = time()
-        model_call_id = uuid4().hex
-        model_call_purpose: str = "compaction_summary" if self._is_compacting else "agent_step"
+        duration_ms = (perf_counter() - start_perf) * 1000
         observed = (
             self.observations.record_response(
                 observed_input,
@@ -298,6 +366,7 @@ class NeMoGymLLM(BaseLLM):
                 completed_at,
                 model_call_id=model_call_id,
                 started_at=started_at,
+                duration_ms=duration_ms,
                 model_call_purpose=model_call_purpose,
                 attempts=attempts,
             )
@@ -306,13 +375,19 @@ class NeMoGymLLM(BaseLLM):
         )
 
         if self._is_compacting:
+            prompt_index = len(self.trajectory)
             self.trajectory.extend([input_items[-1], *response.output])
             self._just_compacted = True
         elif self._just_compacted:
+            prompt_index = len(self.trajectory) + len(input_items) - 1
             self.trajectory.extend([*input_items, *response.output])
             self._just_compacted = False
         else:
+            prompt_index = len(self.trajectory)
             self.trajectory.extend([input_items[-1], *response.output])
+        if self.observations is not None and model_call_purpose == "agent_step":
+            # The prompt item of an agent step is the observation of the previous command batch.
+            self.observations.note_observation_index(prompt_index)
 
         self.usages.append(response.usage)
         self._last_input_items = input_items.copy()
@@ -333,6 +408,7 @@ class NeMoGymLLM(BaseLLM):
             self._num_compactions += 1
             if self.observations is not None:
                 self.observations.gap("model_response_rejected", response.id)
+                self.observations.mark_rejected(model_call_id)
             raise ContextLengthExceededError
 
         result = LLMResponse(
@@ -378,10 +454,21 @@ class NeMoGymTerminus2(Terminus2):
             return await super()._handle_llm_interaction(*args, **kwargs)
         observations.begin_decision()
         try:
-            return await super()._handle_llm_interaction(*args, **kwargs)
+            result = await super()._handle_llm_interaction(*args, **kwargs)
         finally:
             # Record before terminal commands execute, including when parsing raises.
             observations.finish_decision(self._completed_command_batches)
+        # Harbor returns (commands, is_task_complete, ...): the parse result of the decision just recorded.
+        observations.note_decision_result(len(result[0]), bool(result[1]))
+        return result
+
+    async def _run_subagent(self, *args, **kwargs):
+        llm = self._nemo_gym_llm
+        llm._purpose_override = PURPOSE_BY_SUFFIX.get(kwargs.get("filename_suffix"), "compaction_summary")
+        try:
+            return await super()._run_subagent(*args, **kwargs)
+        finally:
+            llm._purpose_override = None
 
     async def _query_llm(self, *args, **kwargs):
         response = await super()._query_llm(*args, **kwargs)
@@ -390,40 +477,65 @@ class NeMoGymTerminus2(Terminus2):
         return response
 
     async def _execute_commands(self, commands, session):
+        # Re-implements harbor==0.22.0 Terminus2._execute_commands so that each command is timed on its own;
+        # the returned tuple and the side effects are identical (the tests assert parity with Harbor's method).
         observations = self._nemo_gym_llm.observations
-        batch_started_at = time() if (observations is not None and commands) else None
         start_time = perf_counter()
-        res = await super()._execute_commands(commands, session)
-        elapsed = perf_counter() - start_time
-        if commands:
-            self._completed_command_batches += 1
-        self._times_spent.append(elapsed)
-
-        if observations is not None and commands and batch_started_at is not None:
-            batch_completed_at = time()
-            timeout_occurred = res[0]
-            for command in commands:
-                tool_call = TrajectoryToolCall(
-                    invocation_id=observations.invocation_id,
-                    tool_call_id=f"cmd_{uuid4().hex[:12]}",
-                    tool_name="terminal",
-                    operation=command.keystrokes.rstrip("\r\n")[:512] if command.keystrokes else None,
-                    # The whole batch was parsed from one decision; its output goes back as one prompt.
-                    requested_at=observations.decision_parsed_at,
-                    started_at=batch_started_at,
-                    completed_at=batch_completed_at,
-                    duration_ms=(batch_completed_at - batch_started_at) * 1000,
-                    timing_source="harness",
-                    status="timeout" if timeout_occurred else "completed",
-                )
-                observations.trajectory.tool_calls.append(tool_call)
-                observations.pending_tool_calls.append(tool_call)
-
-        return res
+        batch_id = f"batch_{uuid4().hex[:12]}"
+        tools: list[TrajectoryToolCall] = []
+        timeout_occurred = False
+        terminal_output = None
+        finished = False
+        try:
+            for index, command in enumerate(commands, start=1):
+                tool_started_at = time()
+                tool_started_perf = perf_counter()
+                status = "cancelled"  # until send_keys returns or times out
+                try:
+                    await session.send_keys(command.keystrokes, block=False, min_timeout_sec=command.duration_sec)
+                    status = "completed"
+                except TimeoutError:
+                    status = "timeout"
+                    timeout_occurred = True
+                    terminal_output = self._timeout_template.format(
+                        timeout_sec=command.duration_sec,
+                        command=command.keystrokes,
+                        terminal_state=self._limit_output_length(await session.get_incremental_output()),
+                    )
+                finally:
+                    if observations is not None:
+                        tools.append(
+                            observations.command_record(
+                                batch_id=batch_id,
+                                batch_index=index,
+                                keystrokes=command.keystrokes,
+                                requested_wait_s=command.duration_sec,
+                                started_at=tool_started_at,
+                                started_perf=tool_started_perf,
+                                status=status,
+                            )
+                        )
+                if timeout_occurred:
+                    break
+            if terminal_output is None:
+                terminal_output = self._limit_output_length(await session.get_incremental_output())
+            finished = True
+            # Gym's own counters, updated exactly where the previous wrapper updated them: after a normal return
+            # (Harbor returns normally on a command timeout). A cancelled batch leaves them untouched.
+            if commands:
+                self._completed_command_batches += 1
+            self._times_spent.append(perf_counter() - start_time)
+            return timeout_occurred, terminal_output
+        finally:
+            if observations is not None and tools:
+                observations.record_command_batch(tools, output_chars=len(terminal_output or "") if finished else 0)
 
     def _count_total_tokens(self, *args, **kwargs):
-        if self._is_check_proactive_summarization and self._nemo_gym_llm.usages:
-            return self._nemo_gym_llm.usages[-1].total_tokens
+        if self._is_check_proactive_summarization:
+            # A rejected or failed response appends None to usages; use the last usage that carried a total.
+            usage = next((u for u in reversed(self._nemo_gym_llm.usages) if u is not None), None)
+            if usage is not None:
+                return usage.total_tokens
         return super()._count_total_tokens(*args, **kwargs)
 
     async def _check_proactive_summarization(self, *args, **kwargs):
@@ -443,38 +555,29 @@ class NeMoGymTerminus2(Terminus2):
     async def _summarize(self, *args, **kwargs):
         self._nemo_gym_llm._is_compacting = True
         observations = self._nemo_gym_llm.observations
+        outcome = "unknown"
         if observations is not None:
             observations.gap("compaction_outside_main_turns")
-            tokens_before = self._nemo_gym_llm.usages[-1].total_tokens if self._nemo_gym_llm.usages else None
-            observations.compaction = ContextCompactionObservation(
-                invocation_id=observations.invocation_id,
-                observed_at=time(),
+            observations.begin_compaction(
                 # Harbor summarizes from two places: the proactive check at the top of an iteration
                 # (our wrapper sets the flag around it) and _query_llm on a context-length error.
                 trigger="proactive" if self._is_check_proactive_summarization else "overflow",
-                tokens_before=tokens_before,
+                tokens_before=tokens_before_from_usages(self._nemo_gym_llm.usages),
             )
         try:
             res = await super()._summarize(*args, **kwargs)
-            if observations is not None:
-                observations.compaction.outcome = "completed"
-                observations.compaction.completed_at = time()
+            outcome = "completed"
             return res
         except asyncio.CancelledError:
-            if observations is not None:
-                observations.compaction.outcome = "aborted"
-                observations.compaction.completed_at = time()
+            outcome = "aborted"
             raise
         except BaseException:
-            if observations is not None:
-                observations.compaction.outcome = "failed"
-                observations.compaction.completed_at = time()
+            outcome = "failed"
             raise
         finally:
             self._nemo_gym_llm._is_compacting = False
             if observations is not None:
-                observations.compactions.append(observations.compaction)
-                observations.compaction = None
+                observations.end_compaction(outcome)
 
 
 class Terminus2Agent(SimpleResponsesAPIAgent):
@@ -499,9 +602,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         sandbox: AsyncSandbox,
     ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
         start_time = perf_counter()
-        # Wall clock alongside the monotonic start: durations stay monotonic, but the invocation
-        # also needs absolute bounds to sit on the same timeline as model and tool spans.
-        started_at = time()
+        execute_started_at = time()
         instruction = _instruction(body.input)
         run_body = await request.json()
         rollout_id = self.rollout_id_from_run(run_body)
@@ -552,6 +653,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 dump_trajectory=self.config.dump_trajectory,
             )
 
+            setup_started_at, setup_perf = time(), perf_counter()
             await environment.exec("mkdir -p /logs/agent", user="root")
             if self.config.remote_tmux_binary_path:
                 # We add the /usr/local/bin path at the end to not supersede and pre-existing orderings.
@@ -569,7 +671,12 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                     file=sys.stderr,
                 )
             await agent.setup(environment)
+            if observations is not None:
+                observations.record_phase("agent_setup", started_at=setup_started_at, started_perf=setup_perf)
 
+            # agent_start: the prompt reaches an initialized agent. Wall clock for placement, perf_counter for
+            # the duration, so the invocation's bounds do not depend on clock adjustments.
+            started_at, run_perf = time(), perf_counter()
             try:
                 async with asyncio.timeout(self.config.sandbox_timeout):
                     await agent.run(instruction, environment, context)
@@ -593,6 +700,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 invocation_status = "failed"
                 error_type = type(exc).__name__
                 print(f"Hit exception while running Terminus2: {format_exc()}", file=sys.stderr)
+            completed_at = time()
+            run_duration_ms = (perf_counter() - run_perf) * 1000
 
         usage = NeMoGymResponseUsage(
             input_tokens=context.n_input_tokens or 0,
@@ -614,7 +723,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         )
 
         total_time = perf_counter() - start_time
-        completed_at = time()
         total_command_exec_time = sum(agent._times_spent)
         total_model_call_time = sum(llm._times_spent)
         metrics = {
@@ -644,10 +752,20 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                         status=invocation_status,
                         started_at=started_at,
                         completed_at=completed_at,
-                        duration_ms=total_time * 1000,
+                        duration_ms=run_duration_ms,
                         error_type=error_type,
+                        clock_domain=observations.clock_domain,
                     ),
                     *observations.compactions,
+                    *observations.phases,
+                    AgentPhaseObservation(
+                        name="agent_execute",
+                        started_at=execute_started_at,
+                        completed_at=time(),
+                        duration_ms=total_time * 1000,
+                        status="completed",
+                        clock_domain=observations.clock_domain,
+                    ),
                 ],
             )
         return response, metrics
@@ -660,6 +778,10 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: Terminus2AgentRunRequest) -> Terminus2AgentVerifyResponse:
         cookies = request.cookies
+        # Lifecycle phases around the agent, so pre- and post-agent time can be placed; reported with the
+        # observations when the run collects them.
+        phases: list[AgentPhaseObservation] = []
+        phase_started_at, phase_perf = time(), perf_counter()
         seed_session_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/seed_session",
@@ -669,15 +791,19 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_session_response)
         cookies = cookies | seed_session_response.cookies
         seed_session_result = await seed_session_response.json()
+        phases.append(_phase("seed_session", phase_started_at, phase_perf))
 
         sandbox_id = seed_session_result["sandbox_handle"]
 
+        phase_started_at, phase_perf = time(), perf_counter()
         sandbox = await self._connect_sandbox(sandbox_id)
+        phases.append(_phase("connect_sandbox", phase_started_at, phase_perf))
         session_key = request.session[SESSION_ID_KEY]
         self._session_sandboxes[session_key] = sandbox
 
         response, metrics = await self._execute(request, body.responses_create_params, sandbox)
 
+        phase_started_at, phase_perf = time(), perf_counter()
         verification = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
@@ -685,12 +811,20 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(verification)
+        phases.append(_phase("verify", phase_started_at, phase_perf))
 
         self._session_sandboxes.pop(session_key)
+        phase_started_at, phase_perf = time(), perf_counter()
         try:
             await sandbox.stop()
+            phases.append(_phase("sandbox_stop", phase_started_at, phase_perf))
         except:
+            phases.append(_phase("sandbox_stop", phase_started_at, phase_perf, status="failed"))
             print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+
+        bundle = metrics.get("ng_agent_observations")
+        if isinstance(bundle, AgentObservationBundle):
+            bundle.records.extend(phases)
 
         result = await get_response_json(verification)
         result.update(metrics)
