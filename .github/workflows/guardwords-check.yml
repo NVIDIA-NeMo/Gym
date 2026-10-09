@@ -14,7 +14,6 @@
 # limitations under the License.
 
 name: Guardwords check
-# !guardwords-canary!
 
 on:
   push:
