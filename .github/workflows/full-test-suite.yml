@@ -73,7 +73,7 @@ jobs:
           # mlflow/wandb are optional extras; the core suite covers both their
           # installed- and missing-dependency paths, so they're synced here too.
           # Mirrors scripts/ci/core_unit_tests.sh, which syncs the same extras.
-          uv sync --extra dev --extra sandbox --extra openshell --extra telemetry --extra mlflow --extra wandb
+          uv sync --extra dev --extra ray --extra sandbox --extra openshell --extra telemetry --extra mlflow --extra wandb
 
       - name: Test
         run: |

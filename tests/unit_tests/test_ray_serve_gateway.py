@@ -18,7 +18,11 @@ from unittest.mock import call, patch
 
 import pytest
 
-from nemo_gym.orchestration.ray_serve_gateway import (
+
+# The gateway imports Ray Serve at module level, and Ray is an optional dependency.
+pytest.importorskip("ray")
+
+from nemo_gym.orchestration.ray_serve_gateway import (  # noqa: E402
     MAX_ONGOING_REQUESTS_PER_INSTANCE,
     PROXY_TIMEOUT,
     build_instance_command,

@@ -278,6 +278,8 @@ def test_prebuilt_check_uses_resolved_server_environments(
     checkout, monkeypatch, capsys, batch: str, expected_venvs: int, missing_file: str | None
 ) -> None:
     """Check the real recipes' deduplicated image paths, rejecting absent or incomplete venvs."""
+    # The generated dependency check imports Ray, which the evaluation image installs through the `ray` extra.
+    pytest.importorskip("ray")
     root, env = checkout
     result = run_shell(f"bash {SUBMIT} {batch}", root, env)
     assert result.returncode == 0, result.stderr

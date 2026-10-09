@@ -23,7 +23,7 @@ source "${ci_dir}/setup_dev.sh"
 # to keep a core install lean); this suite covers both their installed- and missing-dependency
 # paths (tests/unit_tests/test_exporters.py, tests/unit_tests/test_gitlab_utils.py), so both
 # extras must be present here.
-uv sync --extra dev --extra telemetry --extra mlflow --extra wandb
+uv sync --extra dev --extra ray --extra telemetry --extra mlflow --extra wandb
 pytest_addopts='-m "not sandbox" --cov-report= --cov-fail-under=0 --color=yes'
 if [[ -n "${GYM_CI_JUNIT_DIR:-}" ]]; then
     mkdir -p "${GYM_CI_JUNIT_DIR}"

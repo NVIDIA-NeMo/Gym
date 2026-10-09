@@ -26,6 +26,8 @@ uv pip install nemo-gym
 
 The package includes built-in environments and CLI commands. Config and data paths resolve against the package install location automatically. To pin a release: `python3.13 -m pip install nemo-gym==0.5.1`.
 
+Ray isn't included by default. To run environments that use Ray, such as `local_vllm_model` or the SWE agents, install the `ray` extra: `python3.13 -m pip install "nemo-gym[ray]"`.
+
 </Tab>
 <Tab title="Git">
 
@@ -35,6 +37,8 @@ cd Gym
 uv venv --python 3.13.14 && source .venv/bin/activate
 uv sync
 ```
+
+Add `--extra ray` to `uv sync` to run environments that use Ray.
 
 </Tab>
 <Tab title="Container">
