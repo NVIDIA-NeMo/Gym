@@ -1,0 +1,131 @@
+environment_server_routes:
+  "nemo_user_sim:example": nemo_user_sim_environment
+  "nemo_user_sim:validation": nemo_user_sim_environment
+
+user_model_base_url: ${policy_base_url}
+user_model_api_key: ${policy_api_key}
+user_model_name: ${policy_model_name}
+user_model_uses_reasoning_parser: false
+
+support_model_base_url: ${policy_base_url}
+support_model_api_key: ${policy_api_key}
+support_model_name: ${policy_model_name}
+support_model_uses_reasoning_parser: false
+
+embedding_model_base_url: ${support_model_base_url}
+embedding_model_api_key: ${support_model_api_key}
+embedding_model_name: ${support_model_name}
+
+user_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${user_model_base_url}
+      api_key: ${user_model_api_key}
+      model: ${user_model_name}
+      uses_reasoning_parser: ${user_model_uses_reasoning_parser}
+      return_token_id_information: false
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      uses_reasoning_parser: ${oc.select:policy_uses_reasoning_parser,false}
+      return_token_id_information: false
+
+support_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${support_model_base_url}
+      api_key: ${support_model_api_key}
+      model: ${support_model_name}
+      uses_reasoning_parser: ${support_model_uses_reasoning_parser}
+      return_token_id_information: false
+
+embedding_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${embedding_model_base_url}
+      api_key: ${embedding_model_api_key}
+      model: ${embedding_model_name}
+      uses_reasoning_parser: false
+      return_token_id_information: false
+
+nemo_user_sim_resources:
+  resources_servers:
+    nemo_user_sim:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Materialized-row validation and verification for Environment-owned UserSim.
+      usersim_revision: a5f676bf6dc5a73914c8a0860f97c10dd2c214ee  # pragma: allowlist secret
+      nemotron_personas_version: "0.0.2"
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/nemo_user_sim/data/example.jsonl
+          taskset: nemo_user_sim:example
+          num_repeats: 1
+          license: Apache 2.0
+      probe_scorer_model:
+        type: responses_api_models
+        name: support_model
+
+nemo_user_sim_user:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: user_model
+      resources_server:
+        type: resources_servers
+        name: nemo_user_sim_resources
+      max_steps: 1
+      execute_tools: false
+
+nemo_user_sim_assistant:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      resources_server:
+        type: resources_servers
+        name: nemo_user_sim_resources
+      max_steps: 1
+      execute_tools: false
+
+nemo_user_sim_environment:
+  environment_servers:
+    nemo_user_sim:
+      entrypoint: app.py
+      user_agent:
+        type: responses_api_agents
+        name: nemo_user_sim_user
+      assistant_agent:
+        type: responses_api_agents
+        name: nemo_user_sim_assistant
+      judge_model:
+        type: responses_api_models
+        name: support_model
+      summary_model:
+        type: responses_api_models
+        name: support_model
+      tool_simulation_model:
+        type: responses_api_models
+        name: support_model
+      embedding_model:
+        type: responses_api_models
+        name: embedding_model
+      resources_server:
+        type: resources_servers
+        name: nemo_user_sim_resources
+      default_episode_timeout_seconds: 1800
+      cleanup_timeout_seconds: 180
