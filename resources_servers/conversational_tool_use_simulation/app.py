@@ -455,6 +455,7 @@ class ConversationalToolUseVerifyResponse(BaseVerifyResponse):
 
 
 class ConversationalToolUseSimulationServer(SimpleResourcesServer):
+    ray_enabled = False
     USER_RESPONSE_PREFIX_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^\s*Customer:\s*", flags=re.IGNORECASE)
 
     USER_SIMULATOR_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = """# Instructions

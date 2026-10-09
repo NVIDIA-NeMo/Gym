@@ -472,6 +472,17 @@ class TestComputeAndKeyMetrics:
         # Score is a win-rate percentage, so 0-100.
         assert 0.0 <= metrics["arena_elo/score"] <= 100.0
 
+    def test_compute_metrics_takes_the_category_from_the_first_rollout_that_has_it(self) -> None:
+        """A row counted as zero for a rollout that never ran can come first and carries no category."""
+        server = ArenaJudgeServer(config=self._cfg(), server_client=MagicMock(spec=ServerClient))
+        verdicts = [("A>>B", "B>>A"), ("A=B", "A=B"), ("B>>A", "A>>B")]
+        tasks = [
+            [{"reward": 0.0}, {"verdict_gen_base": gen, "verdict_base_gen": base, "category": "hard_prompt"}]
+            for gen, base in verdicts
+        ]
+        metrics = server.compute_metrics(tasks)
+        assert metrics["arena_elo/hard_prompt/n"] == 3
+
     def test_compute_metrics_degenerate_sweep_all_losses(self) -> None:
         """Regression test: if every battle has the same winner,
         logistic regression can't fit — the server should return a

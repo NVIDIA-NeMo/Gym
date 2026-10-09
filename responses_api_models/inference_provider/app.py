@@ -40,6 +40,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -52,8 +53,16 @@ class InferenceProviderConfig(BaseResponsesAPIModelConfig):
     num_concurrent_requests: int = 1000
     extra_body: Dict[str, Any] = Field(default_factory=dict)
 
+    correlate_via_user_field: bool = False
+    """Forward the current rollout id (see ``nemo_gym.rollout_correlation``) as
+    the outbound request's standard OpenAI ``user`` field, so a downstream
+    provider that inspects it can correlate per-turn calls back to the same
+    rollout. A no-op for any provider that ignores ``user``. Never overrides
+    an explicit ``user`` already present on the request."""
+
 
 class InferenceProvider(SimpleResponsesAPIModel):
+    ray_enabled = False
     config: InferenceProviderConfig
 
     def model_post_init(self, context):
@@ -90,6 +99,11 @@ class InferenceProvider(SimpleResponsesAPIModel):
 
         if self.config.extra_body:
             body_dict = self.config.extra_body | body_dict
+
+        if self.config.correlate_via_user_field and "user" not in body_dict:
+            rollout_id = current_rollout_id()
+            if rollout_id is not None:
+                body_dict["user"] = rollout_id
 
         if self.config.uses_reasoning_parser:
             for message_dict in body_dict.get("messages", []):

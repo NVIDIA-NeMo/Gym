@@ -12,13 +12,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 from abc import abstractmethod
-from collections.abc import Mapping
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from functools import wraps
+from time import monotonic
 from typing import Any, Optional
 from warnings import warn
 
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -27,6 +33,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
@@ -38,6 +45,8 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -47,9 +56,74 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.tool_access import ToolAccess
+
+
+# Session cookie key that binds later activation and close requests to their agent session.
+AGENT_SESSION_COOKIE_KEY = "agent_session_id"
+
+
+class AgentSeedSessionRequest(BaseModel):
+    """Idempotently initialize agent-server state under a caller-assigned identifier.
+
+    Repeating the same identifier and episode must return the existing session.
+    Closing an unknown identifier must prevent a racing seed within the retry window.
+    The shared implementation retains close responses for session_close_retry_window_seconds;
+    callers must use unique IDs and finish retries within that window. External resources
+    should use provider TTLs when available; there is no active-session expiry timer.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_session_id: str = Field(min_length=1)
+    episode_id: EpisodeId
+    task_id: TaskId
+    tool_accesses: list[ToolAccess] = Field(default_factory=list)
+    sandbox_access: SandboxAccess | None = None
+
+    @field_validator("tool_accesses")
+    @classmethod
+    def require_unique_tool_names(cls, tool_accesses: list[ToolAccess]) -> list[ToolAccess]:
+        names = [access.name for access in tool_accesses]
+        if len(names) != len(set(names)):
+            raise ValueError("tool access names must be unique within an agent session")
+        return tool_accesses
+
+
+class AgentSeedSessionResponse(BaseModel):
+    """Confirm the caller-assigned agent session identifier."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_session_id: str
+
+
+class AgentCloseSessionRequest(BaseModel):
+    """Close agent-server state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_session_id: str
+    episode_id: EpisodeId
+
+
+class AgentCloseSessionResponse(BaseModel):
+    """Confirm closure and return captured observations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_session_id: str
+    agent_observations: AgentObservationBundle | None = None
+    resources_cookies: dict[str, str] | None = None
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
+    session_close_retry_window_seconds: float = Field(
+        default=300,
+        gt=0,
+        allow_inf_nan=False,
+        description="Retain close responses for this many seconds after cleanup; cover the caller's retry horizon.",
+    )
     skip_verification: bool = False
     skip_verification_reward: float = 0.0
     # Whether this agent's rollouts participate in training token capture.
@@ -58,14 +132,101 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
     # The run-level ``token_id_capture.enabled`` setting gates the capture infrastructure.
     # The run-level ``token_id_capture.all_agents`` setting overrides this agent-level choice.
     token_id_capture: bool = False
+    tool_accesses: list[ToolAccess] = Field(default_factory=list)
+
+    @field_validator("tool_accesses")
+    @classmethod
+    def require_unique_tool_names(cls, tool_accesses: list[ToolAccess]) -> list[ToolAccess]:
+        names = [access.name for access in tool_accesses]
+        if len(names) != len(set(names)):
+            raise ValueError("configured tool access names must be unique")
+        return tool_accesses
 
 
 class BaseResponsesAPIAgent(BaseServer):
     config: BaseResponsesAPIAgentConfig
 
 
+@dataclass
+class AgentSessionState:
+    """Harness-owned session state with the immutable caller-assigned seed binding."""
+
+    request: AgentSeedSessionRequest
+
+
+class AgentSessionSetupError(Exception):
+    """Retain incomplete setup for close while propagating the original setup error."""
+
+    def __init__(self, state: AgentSessionState, *, error: BaseException) -> None:
+        super().__init__(str(error))
+        self.state: AgentSessionState = state
+        self.error: BaseException = error
+
+
+@dataclass
+class _AgentSessionRecord:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    state: AgentSessionState | None = None
+    closing: bool = False
+    episode_id: EpisodeId | None = None
+    close_response: AgentCloseSessionResponse | None = None
+    expires_at: float = float("inf")
+
+
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
+    _session_records: dict[str, _AgentSessionRecord] = PrivateAttr(default_factory=dict)
+    _closed_session_records: OrderedDict[str, _AgentSessionRecord] = PrivateAttr(default_factory=OrderedDict)
+
+    @asynccontextmanager
+    async def _locked_agent_session(self, session_id: str) -> AsyncIterator[_AgentSessionRecord]:
+        now = monotonic()
+        while self._closed_session_records:
+            key, record = next(iter(self._closed_session_records.items()))
+            if record.expires_at > now:
+                break
+            self._closed_session_records.pop(key)
+            self._session_records.pop(key)
+        while True:
+            record = self._session_records.setdefault(session_id, _AgentSessionRecord())
+            async with record.lock:
+                # A waiter can outlive a failed seed or expired receipt. Never use its old lock
+                # to access a replacement record for the same ID.
+                if self._session_records.get(session_id) is not record:
+                    continue
+                try:
+                    yield record
+                finally:
+                    if record.state is None and record.close_response is None:
+                        self._session_records.pop(session_id)
+                return
+
+    @staticmethod
+    def _agent_session_id_from_request(request: Request | None) -> str | None:
+        if request is None:
+            return None
+        try:
+            session = request.session
+        except (AssertionError, AttributeError):
+            return None
+        if not isinstance(session, Mapping) or AGENT_SESSION_COOKIE_KEY not in session:
+            return None
+        marker = session[AGENT_SESSION_COOKIE_KEY]
+        if not isinstance(marker, str) or not marker:
+            raise HTTPException(409, "Invalid agent session marker")
+        return marker
+
+    def _require_agent_session(self, agent_session_id: str) -> AgentSessionState:
+        record = self._session_records.get(agent_session_id)
+        if record is None or record.state is None or record.closing:
+            raise HTTPException(409, "Unknown or closing agent_session_id")
+        return record.state
+
+    def effective_tool_accesses(self, request: AgentSeedSessionRequest) -> list[ToolAccess]:
+        """Overlay episode-scoped tool access onto configured declarations by name."""
+        accesses = {access.name: access for access in self.config.tool_accesses}
+        accesses.update((access.name, access) for access in request.tool_accesses)
+        return list(accesses.values())
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -98,8 +259,90 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         app.post("/run")(run_with_rollout_context)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
+        app.post("/v1/agent_sessions")(self.seed_agent_session)
+        app.post("/v1/agent_sessions/close")(self.close_agent_session)
 
         return app
+
+    async def seed_agent_session(
+        self,
+        request: Request,
+        body: AgentSeedSessionRequest,
+    ) -> AgentSeedSessionResponse:
+        """Seed once per caller ID; identical retries reuse the same harness state."""
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("Agent sessions require num_workers=1")
+        current = self._agent_session_id_from_request(request)
+        if current is not None and current != body.agent_session_id:
+            raise HTTPException(409, "agent_session_id does not match the session cookie")
+        async with self._locked_agent_session(body.agent_session_id) as record:
+            if record.close_response is not None:
+                raise HTTPException(409, "Agent session is already closed")
+            if record.closing:
+                raise HTTPException(409, "Agent session is closing")
+            if record.state is None:
+                if current is not None:
+                    raise HTTPException(409, "Agent session cookie has expired")
+                record.episode_id = body.episode_id
+                try:
+                    record.state = await self._seed_agent_session_state(body.model_copy(deep=True))
+                except AgentSessionSetupError as error:
+                    record.state = error.state
+                    record.closing = True
+                    raise error.error from None
+            elif record.state.request != body:
+                raise HTTPException(409, "agent_session_id is already bound to another seed request")
+            request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
+            return AgentSeedSessionResponse(agent_session_id=body.agent_session_id)
+
+    async def close_agent_session(
+        self,
+        request: Request,
+        body: AgentCloseSessionRequest,
+    ) -> AgentCloseSessionResponse:
+        """Retain successful close responses for a bounded retry window, including observations.
+
+        Failed cleanup keeps state for retry. Closing an unknown ID prevents a delayed seed
+        within the same window. No timer cancels active sessions: the episode owner and sandbox
+        provider retain responsibility for normal and crash cleanup.
+        """
+        if type(self)._close_agent_session_state is SimpleResponsesAPIAgent._close_agent_session_state:
+            raise NotImplementedError("This agent does not implement episode sessions")
+        current = self._agent_session_id_from_request(request)
+        if current is not None and current != body.agent_session_id:
+            raise HTTPException(409, "agent_session_id does not match the session cookie")
+        async with self._locked_agent_session(body.agent_session_id) as record:
+            if record.episode_id is not None and record.episode_id != body.episode_id:
+                raise HTTPException(409, "episode_id does not match the seeded agent session")
+            if record.close_response is not None:
+                return record.close_response.model_copy(deep=True)
+            if record.state is None:
+                if current is not None:
+                    raise HTTPException(409, "Agent close receipt has expired")
+                result = AgentCloseSessionResponse(agent_session_id=body.agent_session_id)
+            else:
+                record.closing = True
+                result = await self._close_agent_session_state(record.state)
+            record.state = None
+            record.episode_id = body.episode_id
+            record.close_response = result.model_copy(deep=True)
+            record.expires_at = monotonic() + self.config.session_close_retry_window_seconds
+            self._closed_session_records[body.agent_session_id] = record
+            # Keep the marker so a stale /responses request cannot fall back to the non-session path.
+            request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
+            return result
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
+        """Validate grants and initialize harness state.
+
+        If setup fails and cleanup cannot finish, raise AgentSessionSetupError with the
+        partial state and original error. The base retains it for close, never activation.
+        """
+        raise NotImplementedError("This agent does not implement episode sessions")
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        """Release harness state, or raise without losing the handle needed for another close."""
+        raise NotImplementedError("This agent does not implement episode sessions")
 
     def _capture_correlation_enabled(self) -> bool:
         """Return whether this agent needs rollout correlation.
@@ -208,4 +451,5 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             body.verify_responses,
             compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
+            compute_repeat_metrics_fn=self.compute_repeat_metrics,
         )

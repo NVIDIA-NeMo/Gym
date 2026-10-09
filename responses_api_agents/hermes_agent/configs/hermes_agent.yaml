@@ -2,16 +2,20 @@ hermes_agent:
   responses_api_agents:
     hermes_agent:
       entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: ???
+      resources_server: null
       model_server:
         type: responses_api_models
         name: policy_model
+      model: ${policy_model_name}
       concurrency: 32
       max_turns: 30
       enabled_toolsets: null
       temperature: 1.0
       terminal_backend: local
       terminal_timeout: 60
+      sandbox_provider: null
+      sandbox_config: {}
+      sandbox_install_timeout_seconds: 900
+      sandbox_runner_timeout_seconds: 21600
+      session_close_timeout_seconds: 30
       system_prompt: null
