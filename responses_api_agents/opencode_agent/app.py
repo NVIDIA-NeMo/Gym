@@ -63,6 +63,7 @@ from nemo_gym.rollout_observability import (
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
+from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION, apply_observability_patch
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 
 
@@ -427,7 +428,8 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
         if ptype == "step-finish":
             tokens = part.get("tokens") or {}
             cache = tokens.get("cache") or {}
-            input_tokens += int(tokens.get("input") or 0) + int(cache.get("read") or 0)
+            # OpenCode separates cache reads and writes from uncached input; Responses includes all three.
+            input_tokens += int(tokens.get("input") or 0) + int(cache.get("read") or 0) + int(cache.get("write") or 0)
             output_tokens += int(tokens.get("output") or 0) + int(tokens.get("reasoning") or 0)
             reasoning_tokens += int(tokens.get("reasoning") or 0)
         elif roles.get(row["message_id"]) == "assistant" and ptype == "text" and (part.get("text") or "").strip():
@@ -529,7 +531,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int = 262144
     max_input_tokens: Optional[int] = None
     max_output_tokens: int = 131072
-    opencode_version: Optional[str] = None
+    opencode_version: str = OPENCODE_VERSION
 
     @property
     def command_parts(self) -> list[str]:
@@ -623,11 +625,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 model,
                 {
                     "name": self.config.model,
-                    "interleaved": {"field": "reasoning"},
+                    # Gym model servers emit and accept `reasoning_content`; OpenCode replays assistant
+                    # history under this field, and Gym rejects an unknown `reasoning` key with a 422.
+                    "interleaved": {"field": "reasoning_content"},
                     "limit": limits,
                 },
             )
             nemo["models"] = {self.config.model: model}
+        if self._model_call_capture_enabled():
+            apply_observability_patch(config)
         return config
 
     def _write_opencode_config(self, work_dir: Path, rollout_id: Optional[str] = None) -> None:

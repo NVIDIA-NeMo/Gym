@@ -22,6 +22,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
 from importlib import import_module
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
 from os import environ, getenv
 from pathlib import Path
@@ -43,6 +44,7 @@ from nemo_gym.config_types import (
     AgentCompositionError,
     AgentWithoutEnvironmentServerError,
     AlmostServerError,
+    AmbiguousAgentRenameError,
     ConfigError,
     ConfigInterpolationError,
     ConfigMissingValuesError,
@@ -60,6 +62,7 @@ from nemo_gym.config_types import (
     maybe_get_server_instance_config,
 )
 from nemo_gym.exporters import setup_exporters
+from nemo_gym.h2_ping_sidecar.config import H2_PING_SIDECAR_KEY_NAME
 from nemo_gym.secret_utils import recursively_hide_secrets
 from nemo_gym.telemetry.setup import (
     TELEMETRY_KEY_NAME,
@@ -71,7 +74,17 @@ from nemo_gym.telemetry.setup import (
 
 logger = logging.getLogger(__name__)
 
-ray_version = distribution_version("ray")
+
+def _installed_version(distribution: str) -> Optional[str]:
+    """The installed version of a distribution, or None when it isn't installed."""
+    try:
+        return distribution_version(distribution)
+    except PackageNotFoundError:
+        return None
+
+
+# None when Ray isn't installed. Gym imports Ray only in processes that use it.
+ray_version = _installed_version("ray")
 
 _GLOBAL_CONFIG_DICT = None
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
@@ -82,6 +95,7 @@ DEFAULT_HOST_KEY_NAME = "default_host"
 HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
+HEAD_SERVER_CONSTRAINTS_KEY_NAME = "head_server_constraints"
 PYTHON_VERSION_KEY_NAME = "python_version"
 PIP_INSTALL_VERBOSE_KEY_NAME = "pip_install_verbose"
 USE_ABSOLUTE_IP = "use_absolute_ip"
@@ -137,6 +151,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     HEAD_SERVER_KEY_NAME,
     DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
+    HEAD_SERVER_CONSTRAINTS_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     USE_ABSOLUTE_IP,
@@ -168,6 +183,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
     TELEMETRY_KEY_NAME,
+    H2_PING_SIDECAR_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
     ENVIRONMENT_SERVER_NAME_KEY_NAME,
     ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
@@ -644,11 +660,10 @@ Duplicate config paths:
                         and server_instance_config.get_server_ref().type == ENVIRONMENT_SERVER_TYPE_KEY_NAME
                     ):
                         hint += (
-                            "\nIf the agent was renamed with `_inherit_from`, this environment server must reference "
-                            "the agent's new name."
-                            "\nTo fix this automatically, run "
-                            "`python scripts/add_legacy_agent_environment_servers.py <your config paths>` from a NeMo Gym checkout."
-                            f"\nOr point this server's {field_name}.name at the agent's new name."
+                            "\nGym follows top-level `_inherit_from` agent renames when there is one destination "
+                            "and it still defines exactly one agent."
+                            f"\nFor other inheritance patterns, point this server's {field_name}.name "
+                            "at an existing agent."
                         )
                     raise ServerRefNotFoundError(
                         f"""In server instance '{server_instance_config.name}', field '{field_name}' references {maybe_server_ref.type}/'{maybe_server_ref.name}', which is not defined in the merged config.
@@ -1227,8 +1242,76 @@ For example, on the command line:
 
     def _recursively_swap_keys(self, dict_config: DictConfig) -> None:
         frozen_dict_config = deepcopy(dict_config)
+        original_agents = {agent.name for agent in self._agent_instances(frozen_dict_config)}
+        destinations: dict[str, list[str]] = defaultdict(list)
+        # Only a top-level move of an agent can retarget its environment server. Copies and
+        # nested inheritance do not rename the instance, and multiple destinations are ambiguous.
+        for name, value in frozen_dict_config.items_ex(resolve=False):
+            source = None
+            if isinstance(value, str) and value.startswith("${inherit_from:"):
+                source = value.removeprefix("${inherit_from:").removesuffix("}")
+            elif isinstance(value, DictConfig) and not OmegaConf.is_missing(value, INHERIT_FROM_KEY_NAME):
+                source = value.get(INHERIT_FROM_KEY_NAME)
+            if isinstance(source, str) and source in original_agents:
+                destinations[source].append(name)
+
         with open_dict(dict_config):
             self._recursively_swap_keys_helper(dict_config, dict_config, frozen_dict_config)
+            final_agents = {agent.name for agent in self._agent_instances(dict_config)}
+            destinations = {
+                source: [target for target in targets if target in final_agents]
+                for source, targets in destinations.items()
+            }
+            renames = {
+                source: targets[0]
+                for source, targets in destinations.items()
+                if source not in dict_config and len(targets) == 1
+            }
+            ambiguous = {
+                source: targets
+                for source, targets in destinations.items()
+                if source not in dict_config and len(targets) > 1
+            }
+            if ambiguous:
+                self._raise_on_ambiguous_environment_agent_renames(dict_config, ambiguous)
+            if renames:
+                self._retarget_environment_servers(dict_config, renames)
+
+    @staticmethod
+    def _raise_on_ambiguous_environment_agent_renames(
+        dict_config: DictConfig, ambiguous: Dict[str, List[str]]
+    ) -> None:
+        # Several benchmarks may inherit the same agent. Only a reference still naming
+        # the removed source requires the user to choose a destination.
+        for name, instance in dict_config.items_ex(resolve=False):
+            if not isinstance(instance, DictConfig):
+                continue
+            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            if not isinstance(servers, DictConfig):
+                continue
+            for server_type, server in servers.items_ex(resolve=False):
+                if not isinstance(server, DictConfig):
+                    continue
+                for field, reference in server.items_ex(resolve=False):
+                    if not isinstance(reference, DictConfig):
+                        continue
+                    if OmegaConf.is_missing(reference, "type") or OmegaConf.is_missing(reference, "name"):
+                        continue
+                    if reference.get("type") != AGENT_SERVER_TYPE_KEY_NAME and not (
+                        field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None
+                    ):
+                        continue
+                    source = reference.get("name")
+                    if source in ambiguous:
+                        targets = ", ".join(repr(target) for target in ambiguous[source])
+                        path = f"{name}.{ENVIRONMENT_SERVER_TYPE_KEY_NAME}.{server_type}.{field}.name"
+                        raise AmbiguousAgentRenameError(
+                            f"Agent '{source}' was inherited into several names: {targets}. "
+                            f"'{path}' still references '{source}'. "
+                            f"Give each new agent its own environment server that inherits '{name}' "
+                            "and references that agent, or point this field at the one agent that should use "
+                            "this server and ensure the other agents also have environment servers."
+                        )
 
     def _recursively_swap_keys_helper(
         self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
@@ -1501,11 +1584,11 @@ Found global config dict yaml:
             global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
 
             # Constrain sensitive package versions
-            head_server_deps = [
-                # The ray version is very sensitive. The children ray versions must exactly match those of the parent ray.
-                # The ray extra [default] should also exactly match the extra in the top-level Gym pyproject.toml.
-                f"ray[default]=={ray_version}",
-            ]
+            head_server_deps = []
+            # The ray version is very sensitive: a server that joins this process's Ray cluster must run exactly
+            # the same version. Pin it as a constraint rather than a requirement, so a server venv gets Ray only
+            # when that server's own dependencies ask for it.
+            global_config_dict[HEAD_SERVER_CONSTRAINTS_KEY_NAME] = [f"ray=={ray_version}"] if ray_version else []
             # OpenAI version is also sensitive since it changes so often and may introduce subtle
             # incompatibilities — but only pin the parent's version when nemo-gym's own constraint
             # accepts it; otherwise the sub-venv resolutions are unsatisfiable and the venvs come
