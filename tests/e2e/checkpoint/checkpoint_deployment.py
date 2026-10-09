@@ -81,6 +81,13 @@ def free_port() -> int:
     raise RuntimeError("every test port has been handed out")
 
 
+def _pythonpath() -> str:
+    """The repository first, then whatever the environment already had, so a server imports this checkout's
+    packages even where another Gym checkout is installed."""
+    inherited = os.environ.get("PYTHONPATH", "")
+    return os.pathsep.join([str(REPO), inherited]) if inherited else str(REPO)
+
+
 def _server(server_type: str, implementation: str, **config: Any) -> dict:
     return {server_type: {implementation: {"entrypoint": "app.py", "host": "127.0.0.1", **config}}}
 
@@ -98,6 +105,16 @@ class Deployment:
     - ``legacy``: the legacy ``/run`` relay over Simple Agent and the weather resources server.
     - ``counter``: the legacy relay over Simple Agent and the stateful counter resources server.
     - ``slow``: ``single_agent_turn`` over Simple Agent and a resources server whose verify blocks.
+    - ``sandbox``: the legacy relay over Simple Agent and a resources server whose sessions each own a sandbox
+      in the fake sandbox backend, which outlives a Gym crash like the inference backend does.
+    - ``agent_sandbox``: ``single_agent_turn`` over an agent that owns a sandbox per session in the fake sandbox
+      backend, and a stateless resources server that verifies what the agent read back from it.
+    - ``borrowed_sandbox``: ``single_agent_turn`` over the sandboxed notes resources server, which hands the
+      agent access to its sandbox, and an agent that runs its tools there and refreshes that access after a
+      restore (``borrower_refreshes_access`` turns the refresh off, as a negative control).
+    - ``harness``: the legacy relay over an OpenCode-shaped agent that runs a long, interruptible harness command
+      inside the sandboxed notes server's sandbox, and continues it after a checkpoint (``harness_lines`` and
+      ``harness_interval_s`` size the run).
 
     With ``inference_url``, the policy model serves from that endpoint and the fake backend's control
     routes are unavailable. ``policy_workers`` sets the policy model server's uvicorn workers, and
@@ -117,6 +134,9 @@ class Deployment:
         policy_workers: int = 1,
         server_workers: int = 1,
         resources_mcp: bool = False,
+        borrower_refreshes_access: bool = True,
+        harness_lines: int = 6,
+        harness_interval_s: float = 0.5,
         extra_config: Optional[dict[str, Any]] = None,
     ) -> None:
         self.topology = topology
@@ -127,6 +147,7 @@ class Deployment:
         self.slow_verify_log = work_dir / "slow_verify.log"
         self.slow_verify_log.write_text("")
         self.backend_port = free_port()
+        self.sandbox_port = free_port()
         # An external OpenAI-compatible endpoint (a real vLLM server) replaces the fake backend.
         self.inference_url = inference_url or f"http://127.0.0.1:{self.backend_port}/v1"
         self.model_name = model_name
@@ -134,6 +155,9 @@ class Deployment:
         self.server_workers = server_workers
         # Expose the counter resources server's tools over MCP, as a CLI agent harness calls them.
         self.resources_mcp = resources_mcp
+        self.borrower_refreshes_access = borrower_refreshes_access
+        self.harness_lines = harness_lines
+        self.harness_interval_s = harness_interval_s
         self.external_inference = inference_url is not None
         self.procs: dict[str, subprocess.Popen] = {}
         self.dirs: dict[str, Path] = {}
@@ -162,6 +186,9 @@ class Deployment:
             # Log every request with its status, not only errors, so a failure can be traced in the logs.
             "uvicorn_logging_show_200_ok": True,
         }
+        if self.topology in ("sandbox", "agent_sandbox", "borrowed_sandbox", "harness"):
+            # The named sandbox block a borrower resolves a handed-out SandboxAccess through.
+            config["sandbox"] = {"fake_remote": {"base_url": f"http://127.0.0.1:{self.sandbox_port}"}}
         if token_capture:
             config["token_id_capture"] = {
                 "enabled": True,
@@ -211,6 +238,21 @@ class Deployment:
                 expose_tools_over_mcp=self.resources_mcp,
             )
             add("resources", "resources_servers/example_session_state_mgmt", resources)
+        elif self.topology in ("sandbox", "borrowed_sandbox", "harness"):
+            resources = _server(
+                "resources_servers",
+                "example_session_state_mgmt",
+                domain="agent",
+                verified=False,
+                description="sandbox notes",
+                sandbox_backend_url=f"http://127.0.0.1:{self.sandbox_port}",
+            )
+            add("resources", str(HERE / "sandbox_notes_server"), resources)
+        elif self.topology == "agent_sandbox":
+            resources = _server(
+                "resources_servers", "example_single_tool_call", domain="agent", verified=False, description="notes"
+            )
+            add("resources", str(HERE / "notes_verifier_server"), resources)
         elif self.topology == "slow":
             resources = _server(
                 "resources_servers",
@@ -226,15 +268,44 @@ class Deployment:
             )
             add("resources", "resources_servers/example_single_tool_call", resources)
 
-        agent = _server(
-            "responses_api_agents",
-            "simple_agent",
-            model_server=_ref("responses_api_models", "policy_model"),
-            resources_server=_ref("resources_servers", "resources"),
-        )
-        add("agent", "responses_api_agents/simple_agent", agent)
+        if self.topology == "agent_sandbox":
+            agent = _server(
+                "responses_api_agents",
+                "simple_agent",
+                model_server=_ref("responses_api_models", "policy_model"),
+                resources_server=_ref("resources_servers", "resources"),
+                sandbox_backend_url=f"http://127.0.0.1:{self.sandbox_port}",
+            )
+            add("agent", str(HERE / "sandbox_notes_agent"), agent)
+        elif self.topology == "borrowed_sandbox":
+            agent = _server(
+                "responses_api_agents",
+                "simple_agent",
+                model_server=_ref("responses_api_models", "policy_model"),
+                resources_server=_ref("resources_servers", "resources"),
+                refresh_access_after_restore=self.borrower_refreshes_access,
+            )
+            add("agent", str(HERE / "sandbox_notes_borrower"), agent)
+        elif self.topology == "harness":
+            agent = _server(
+                "responses_api_agents",
+                "simple_agent",
+                resources_server=_ref("resources_servers", "resources"),
+                sandbox_backend_url=f"http://127.0.0.1:{self.sandbox_port}",
+                lines=self.harness_lines,
+                interval_s=self.harness_interval_s,
+            )
+            add("agent", str(HERE / "fake_harness_agent"), agent)
+        else:
+            agent = _server(
+                "responses_api_agents",
+                "simple_agent",
+                model_server=_ref("responses_api_models", "policy_model"),
+                resources_server=_ref("resources_servers", "resources"),
+            )
+            add("agent", "responses_api_agents/simple_agent", agent)
 
-        if self.topology in ("native", "slow", "mixed"):
+        if self.topology in ("native", "slow", "mixed", "agent_sandbox", "borrowed_sandbox"):
             environment = _server(
                 "environment_servers",
                 "single_agent_turn",
@@ -272,7 +343,7 @@ class Deployment:
                     cleanup_timeout_seconds=30,
                 ),
             )
-        if self.topology in ("legacy", "counter"):
+        if self.topology in ("legacy", "counter", "sandbox", "harness"):
             environment = _server(
                 "environment_servers", "legacy_agent", agent_server=_ref("responses_api_agents", "agent")
             )
@@ -294,11 +365,20 @@ class Deployment:
         log = open(self.log_dir / "backend.log", "a")
         self.procs["backend"] = subprocess.Popen(
             [sys.executable, str(HERE / "fake_backend.py"), str(self.backend_port)],
-            env=os.environ | {"PYTHONPATH": str(REPO)},
+            env=os.environ | {"PYTHONPATH": _pythonpath()},
             stdout=log,
             stderr=subprocess.STDOUT,
         )
         self._wait_healthy("backend", f"http://127.0.0.1:{self.backend_port}/v1/models")
+        if self.topology in ("sandbox", "agent_sandbox", "borrowed_sandbox", "harness"):
+            log = open(self.log_dir / "sandbox_backend.log", "a")
+            self.procs["sandbox_backend"] = subprocess.Popen(
+                [sys.executable, str(HERE / "fake_sandbox_backend.py"), str(self.sandbox_port)],
+                env=os.environ | {"PYTHONPATH": _pythonpath()},
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+            self._wait_healthy("sandbox_backend", f"http://127.0.0.1:{self.sandbox_port}/health")
 
     def start_gym(self) -> None:
         for name in self.dirs:
@@ -318,10 +398,11 @@ class Deployment:
 
     def stop(self) -> None:
         self.crash_gym()
-        backend = self.procs.pop("backend", None)
-        if backend is not None:
-            backend.kill()
-            backend.wait()
+        for name in ("backend", "sandbox_backend"):
+            backend = self.procs.pop(name, None)
+            if backend is not None:
+                backend.kill()
+                backend.wait()
 
     def _start(self, name: str) -> None:
         env = os.environ | {
@@ -332,7 +413,7 @@ class Deployment:
             "SLOW_VERIFY_FLAG": str(self.slow_verify_flag),
             "SLOW_VERIFY_LOG": str(self.slow_verify_log),
             "SLOW_VERIFY_MODE": self.slow_verify_mode,
-            "PYTHONPATH": str(REPO),
+            "PYTHONPATH": _pythonpath(),
         }
         log = open(self.log_dir / f"{name}.log", "a")
         self.procs[name] = subprocess.Popen(
@@ -379,6 +460,10 @@ class Deployment:
 
     def backend_calls(self) -> list[dict]:
         return self.backend("/_ctl/calls")
+
+    def sandbox_state(self) -> dict:
+        """Every sandbox and snapshot in the fake sandbox backend."""
+        return requests.get(f"http://127.0.0.1:{self.sandbox_port}/_ctl/state", timeout=10).json()
 
     def verifications(self) -> int:
         return self.slow_verify_log.read_text().count("verify")
@@ -434,6 +519,77 @@ def counter_row(rollout_id: str, attempt: int = 0) -> dict:
         },
         "initial_count": 3,
         "expected_count": 6,
+        "_ng_rollout_id": rollout_id,
+        "_ng_attempt_index": attempt,
+    }
+
+
+NOTES_TOOL = {
+    "type": "function",
+    "name": "append_note",
+    "description": "",
+    "parameters": {
+        "type": "object",
+        "properties": {"line": {"type": "string", "description": ""}},
+        "required": ["line"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+NOTES_SCRIPT = {
+    "tool_calls": [
+        {"name": "append_note", "arguments": {"line": "one"}},
+        {"name": "append_note", "arguments": {"line": "two"}},
+    ]
+}
+READ_NOTES_TOOL = {
+    "type": "function",
+    "name": "read_notes",
+    "description": "",
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    "strict": True,
+}
+NOTES_SCRIPT_READ = {"tool_calls": [*NOTES_SCRIPT["tool_calls"], {"name": "read_notes", "arguments": {}}]}
+NOTES_SCRIPT_THREE = {
+    "tool_calls": [*NOTES_SCRIPT["tool_calls"], {"name": "append_note", "arguments": {"line": "three"}}]
+}
+
+
+def notes_episode(rollout_id: str, attempt: int = 0, expected: tuple[str, ...] = ("one", "two")) -> dict:
+    """A native ``single_agent_turn`` request whose agent takes notes in a sandbox it owns."""
+    return {
+        "episode_id": {"rollout_id": rollout_id, "attempt": attempt},
+        "task": {
+            "task_id": {"taskset": "sandbox_notes:e2e", "task_id": "notes"},
+            "task_input": {
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": "take notes, then read them back"}],
+                    "tools": [NOTES_TOOL, READ_NOTES_TOOL],
+                },
+                "task_data": {"expected_notes": list(expected)},
+            },
+        },
+    }
+
+
+def notes_row(rollout_id: str, attempt: int = 0, expected: tuple[str, ...] = ("one", "two")) -> dict:
+    """A legacy ``/run`` row that appends notes inside the session's sandbox; verify expects exactly ``expected``."""
+    return {
+        "responses_create_params": {
+            "input": [{"role": "user", "content": "take notes"}],
+            "tools": [NOTES_TOOL],
+        },
+        "expected_notes": list(expected),
+        "_ng_rollout_id": rollout_id,
+        "_ng_attempt_index": attempt,
+    }
+
+
+def harness_row(rollout_id: str, attempt: int = 0, lines: int = 6) -> dict:
+    """A legacy ``/run`` row for the harness agent; verify expects exactly ``line 1`` .. ``line <lines>``."""
+    return {
+        "responses_create_params": {"input": [{"role": "user", "content": "run the harness"}]},
+        "expected_notes": [f"line {index}" for index in range(1, lines + 1)],
         "_ng_rollout_id": rollout_id,
         "_ng_attempt_index": attempt,
     }
