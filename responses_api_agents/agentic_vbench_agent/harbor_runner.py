@@ -32,6 +32,9 @@ def container_endpoint(endpoint: str) -> str:
     return urlunsplit(parts).rstrip("/")
 
 
+TRAINING_MODES = ("plain", "compaction", "subagent")
+
+
 def job_config(
     *,
     task_path: Path,
@@ -49,6 +52,10 @@ def job_config(
     compaction_auto: bool | None = None,
     compaction_prune: bool | None = None,
     disable_title: bool = False,
+    training_mode: str | None = None,
+    subagents_enabled: bool = False,
+    subagent_max_depth: int = 1,
+    subagent_max_active: int | None = None,
 ) -> dict:
     """Create a single-attempt Harbor job using OpenCode's compatible provider.
 
@@ -106,10 +113,42 @@ def job_config(
             }
         },
     }
+    if training_mode is not None and training_mode not in TRAINING_MODES:
+        raise ValueError(f"Unknown training mode: {training_mode!r} (expected one of {TRAINING_MODES})")
+    if training_mode is not None and (training_mode == "subagent") != subagents_enabled:
+        raise ValueError("Fixed training mode and subagent tool configuration disagree")
+    if subagents_enabled:
+        if subagent_max_depth != 1:
+            raise ValueError("Subagent training requires depth-one delegation (subagent_max_depth=1)")
+        if subagent_max_active is not None and (type(subagent_max_active) is not int or subagent_max_active < 1):
+            raise ValueError("subagent_max_active must be null (native parallel children) or a positive int")
+        if compaction_auto or compaction_prune:
+            raise ValueError("Subagent training forbids OpenCode compaction and pruning")
+    agents: dict = {}
     if max_turns is not None:
-        opencode_config.setdefault("agent", {})["build"] = {"steps": max_turns}
+        agents["build"] = {"steps": max_turns}
     if disable_title:
-        opencode_config.setdefault("agent", {})["title"] = {"disable": True}
+        agents["title"] = {"disable": True}
+    # Delegation. OpenCode's primary agent owns a `task` tool that starts a child
+    # session (mode: subagent) with its own context. Without subagents the tool is
+    # denied so a rollout stays one session; with them the configured `general`
+    # child shares the parent's turn limit and permissions except for an explicit
+    # `task` deny (depth one), as in the reference subagent-training harness.
+    if subagents_enabled:
+        opencode_config["permission"] = {"task": "allow"}
+        agents["general"] = {
+            "mode": "subagent",
+            "permission": {"task": "deny"},
+            **({"steps": max_turns} if max_turns is not None else {}),
+        }
+    else:
+        opencode_config["permission"] = {"task": "deny"}
+    if agents:
+        opencode_config["agent"] = agents
+    if subagent_max_active is not None:
+        # Native OpenCode runs sibling task calls concurrently; a cap is applied by
+        # the capture proxy, which serializes admission per session regardless.
+        opencode_config.setdefault("experimental", {})["subagent_max_active"] = subagent_max_active
     compaction = {
         key: value for key, value in (("auto", compaction_auto), ("prune", compaction_prune)) if value is not None
     }
@@ -266,6 +305,10 @@ def main() -> None:
     parser.add_argument("--compaction-auto", choices=("true", "false"), default=None)
     parser.add_argument("--compaction-prune", choices=("true", "false"), default=None)
     parser.add_argument("--disable-title", action="store_true")
+    parser.add_argument("--training-mode", choices=TRAINING_MODES, default=None)
+    parser.add_argument("--subagents", action="store_true", help="Enable OpenCode's task tool (depth-one `general` children)")
+    parser.add_argument("--subagent-max-depth", type=int, default=1)
+    parser.add_argument("--subagent-max-active", type=int, default=None)
     args = parser.parse_args()
     if importlib.metadata.version("harbor") != "0.6.6":
         raise RuntimeError("AgenticVBench requires upstream harbor==0.6.6")
@@ -309,6 +352,10 @@ def main() -> None:
             compaction_auto=None if args.compaction_auto is None else args.compaction_auto == "true",
             compaction_prune=None if args.compaction_prune is None else args.compaction_prune == "true",
             disable_title=args.disable_title,
+            training_mode=args.training_mode,
+            subagents_enabled=args.subagents,
+            subagent_max_depth=args.subagent_max_depth,
+            subagent_max_active=args.subagent_max_active,
         )
     )
     config_path = args.output / "harbor_job.json"

@@ -41,6 +41,12 @@ agentic_vbench_agent:
       # default here: the framework-owned route roots that turn as its own segment.
       # Required (true) when token capture is the ordinary kind.
       local_step_cap_reply: ${oc.env:AGENTIC_VBENCH_LOCAL_STEP_CAP_REPLY,false}
+      # Fixed training mode (plain | compaction | subagent). Subagent mode enables
+      # OpenCode's task tool with depth-one `general` children; see the subagent guide.
+      opencode_training_mode: ${oc.env:AGENTIC_VBENCH_TRAINING_MODE,null}
+      opencode_subagents_enabled: ${oc.env:AGENTIC_VBENCH_SUBAGENTS_ENABLED,false}
+      opencode_subagent_max_depth: 1
+      opencode_subagent_max_active: ${oc.env:AGENTIC_VBENCH_SUBAGENT_MAX_ACTIVE,null}
       train_compaction_summaries: ${oc.env:AGENTIC_VBENCH_TRAIN_COMPACTION_SUMMARIES,true}
       capture_proxy_host: ${oc.env:AGENTIC_VBENCH_CAPTURE_PROXY_HOST,null}
       datasets:

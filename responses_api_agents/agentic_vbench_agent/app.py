@@ -97,6 +97,15 @@ class AgenticVBenchConfig(BaseResponsesAPIAgentConfig):
     # Under token capture, also return compaction summary generations so NeMo-RL
     # trains them in their own rewritten context.
     train_compaction_summaries: bool = True
+    # Fixed training mode of a run (plain | compaction | subagent), as in the
+    # reference subagent-training harness: subagent mode enables OpenCode's
+    # task tool (depth-one `general` children sharing the parent's permissions
+    # and turn limit) and forbids compaction/pruning; it is validated here and
+    # by the trainer. None keeps the current behaviour (task tool denied).
+    opencode_training_mode: Literal["plain", "compaction", "subagent"] | None = None
+    opencode_subagents_enabled: bool = False
+    opencode_subagent_max_depth: int = 1
+    opencode_subagent_max_active: int | None = None
     # Address the task container uses to reach this server's capture proxy; derived
     # from the route to the policy server when unset.
     capture_proxy_host: str | None = None
@@ -323,6 +332,12 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 command.extend(["--compaction-prune", str(self.config.opencode_compaction_prune).lower()])
             if self.config.opencode_disable_title:
                 command.append("--disable-title")
+            if self.config.opencode_training_mode is not None:
+                command.extend(["--training-mode", self.config.opencode_training_mode])
+            if self.config.opencode_subagents_enabled:
+                command.extend(["--subagents", "--subagent-max-depth", str(self.config.opencode_subagent_max_depth)])
+            if self.config.opencode_subagent_max_active is not None:
+                command.extend(["--subagent-max-active", str(self.config.opencode_subagent_max_active)])
             try:
                 exit_code = await run_process(command, output, runtime, self._env)
             except asyncio.CancelledError:
