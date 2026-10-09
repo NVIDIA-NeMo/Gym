@@ -51,10 +51,7 @@ def _config(**kwargs) -> KiloCodeAgentConfig:
 
 
 def _make_agent(**kwargs) -> KiloCodeAgent:
-    with patch("responses_api_agents.kilocode_agent.app.KiloCodeAgent.model_post_init"):
-        agent = KiloCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
-    return agent
+    return KiloCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 def _make_model_server_agent(**kwargs) -> KiloCodeAgent:
@@ -336,6 +333,7 @@ class TestModelServer:
         assert provider["options"] == {
             "apiKey": "EMPTY",  # pragma: allowlist secret
             "baseURL": "http://model-host:9000/v1",
+            "chunkTimeout": agent.config.timeout * 1000,
         }
         assert provider["models"] == {
             "Qwen/Qwen3-8B": {
@@ -371,6 +369,15 @@ class TestModelServer:
         assert model["limit"] == {"context": 262144, "output": 16384}
         assert "interleaved" not in model
 
+    def test_stream_watchdog_follows_run_timeout_unless_overridden(self) -> None:
+        # The model server replays a finished completion, so a 60s chunk watchdog would cancel long calls.
+        for options, expected in [({}, 21_600_000), ({"chunkTimeout": 5000}, 5000)]:
+            agent = _make_model_server_agent(
+                model="m", timeout=21600, kilo_config={"provider": {"nemo": {"options": options}}}
+            )
+            written = agent._build_kilo_config("http://model/v1")["provider"]["nemo"]["options"]
+            assert written["chunkTimeout"] == expected
+
     def test_rollout_prefix_applied_to_base_url(self, tmp_path) -> None:
         agent = _make_model_server_agent(model="m")
         agent._write_kilo_config(tmp_path, agent._resolve_model_base_url("task0-rollout1"))
@@ -389,9 +396,13 @@ class TestModelServer:
         proc = MagicMock()
         proc.returncode = 0
         proc.communicate = AsyncMock(return_value=(b"", b""))
-        with patch("responses_api_agents.kilocode_agent.app.asyncio.create_subprocess_exec") as spawn:
+        with (
+            patch("responses_api_agents.kilocode_agent.app.asyncio.create_subprocess_exec") as spawn,
+            patch("responses_api_agents.kilocode_agent.app.ensure_kilo") as install,
+        ):
             spawn.return_value = proc
             asyncio.run(agent._run_kilo("hi", None, "task0-rollout1"))
+        install.assert_called_once_with(agent.config.kilo_version)
 
         expected = "http://model-host:9000/ng-rollout/task0-rollout1/v1"
         written = json.loads((tmp_path / "kilo.json").read_text())

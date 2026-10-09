@@ -23,20 +23,26 @@ import shutil
 import signal
 from asyncio import Semaphore
 from pathlib import Path
-from time import time
+from time import perf_counter, time
 from typing import Any, Optional
 from uuid import uuid4
 
-from fastapi import Request
-from pydantic import ConfigDict, Field
+from fastapi import HTTPException, Request
+from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSessionSetupError,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -44,12 +50,18 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
+    NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession
 from responses_api_agents.kilocode_agent.setup_kilo import ensure_kilo
 
 
@@ -178,6 +190,44 @@ def parse_kilo_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
     return output_items, {"input_tokens": input_tokens, "output_tokens": output_tokens}
 
 
+def _scan_run_events(stdout: str) -> tuple[Any, bool]:
+    """Return the CLI's first `error` payload (or None) and whether a model step stopped on length."""
+    error, length_stop = None, False
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "error" and error is None:
+            error = event.get("error") or "unknown error"
+        elif event.get("type") == "step_finish":
+            length_stop = length_stop or (event.get("part") or {}).get("reason") == "length"
+    return error, length_stop
+
+
+def _error_name(error: Any) -> str:
+    name = error.get("name") if isinstance(error, dict) else None
+    return name if isinstance(name, str) and name else "kilo_api_error"
+
+
+def _run_outcome(artifacts: KiloArtifacts, *, timed_out: bool, cancelled: bool) -> tuple[str, str | None]:
+    """Classify one sandbox run as a SandboxObservation (outcome, error_type) pair."""
+    error, _ = _scan_run_events(artifacts.stdout)
+    if error is not None:
+        return "failed", _error_name(error)
+    if timed_out:
+        return "timeout", "agent_timeout"
+    if cancelled:
+        return "cancelled", "cancelled"
+    if artifacts.exit_code is None:
+        return "unknown", None
+    if artifacts.exit_code != 0:
+        return "failed", "agent_run_error"
+    return "completed", None
+
+
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     """Return (user_message, system_message) from a responses body input list."""
     items = list(body_input)
@@ -211,7 +261,7 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 
 
 class KiloCodeAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
+    resources_server: ResourcesServerRef | None = None
     # When set, kilo's model calls go through this Gym model server instead of straight to a provider,
     # so they are captured. `model` is then the bare model name; the agent registers it under a `nemo`
     # provider pointed at the server (see _build_kilo_config).
@@ -256,6 +306,9 @@ class KiloCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # named, so without this the reasoning channel is dropped. Null leaves kilo's default in place.
     reasoning_field: Optional[str] = "reasoning_content"
     kilo_version: Optional[str] = None
+    sandbox_provider: str | None = None
+    sandbox_config: dict[str, JsonValue] = Field(default_factory=dict)
+    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
     @property
     def command_parts(self) -> list[str]:
@@ -285,13 +338,120 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
     config: KiloCodeAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    _local_install_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
+    _local_runtime_ready: bool = PrivateAttr(default=False)
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
-        ensure_kilo(self.config.kilo_version)
-        command = self.config.command_parts[0] if self.config.command_parts else ""
-        if not command or shutil.which(command) is None:
-            LOG.warning("kilo command %r is not on PATH yet", self.config.command)
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> KiloSandboxSession:
+        if any(access.required for access in self.effective_tool_accesses(body)):
+            raise ValueError("Kilo sandbox sessions do not support required external tool grants")
+        if self.config.model_server is None:
+            raise ValueError("Kilo sandbox sessions require a Gym model_server")
+        if not self.config.kilo_version or self.config.command != "kilo":
+            raise ValueError("Kilo sandbox sessions require kilo_version and the default kilo command")
+        if self.config.repo_dir or self.config.extra_args or self.config.env:
+            raise ValueError("Kilo sandbox sessions do not support repo_dir, extra_args, or custom env overrides")
+        if self.config.timeout <= 0 or self.config.setup_timeout <= 0:
+            raise ValueError("Kilo sandbox installation and execution timeouts must be positive")
+        owns_sandbox = body.sandbox_access is None
+        if owns_sandbox:
+            if not self.config.sandbox_provider:
+                raise ValueError("Kilo requires sandbox_access or a configured sandbox_provider")
+            provider_ref = self.config.sandbox_provider
+            workdir = self.config.sandbox_config.get("workdir") or "/app"
+        else:
+            provider_ref = body.sandbox_access.connection.provider_config_ref
+            workdir = body.sandbox_access.workdir
+        if not isinstance(workdir, str) or not workdir.startswith("/") or ".." in workdir.split("/"):
+            raise ValueError("Kilo sandbox workdir must be an absolute path without '..'")
+        session_dir = f"/tmp/nemo-gym-kilo-sessions/{uuid4().hex}"
+        if session_dir.startswith(workdir.rstrip("/") + "/") or workdir.startswith("/tmp/nemo-gym-kilo-sessions"):
+            raise ValueError("Kilo task workdir must be disjoint from its session directory")
+        provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
+        try:
+            if owns_sandbox:
+                sandbox = AsyncSandbox(provider)
+                settings = self.config.sandbox_config.copy()
+                settings.setdefault("workdir", workdir)
+                settings.setdefault("ttl_s", self.config.setup_timeout + self.config.timeout + 600)
+                await sandbox.start(SandboxSpec(**settings))
+            else:
+                sandbox = await AsyncSandbox.connect(body.sandbox_access.connection.descriptor, provider=provider)
+        except BaseException:
+            await provider.aclose()
+            raise
+        state = KiloSandboxSession(
+            request=body,
+            provider_name=provider.name,
+            session=SandboxSession(
+                sandbox=sandbox,
+                session_dir=session_dir,
+                workdir=workdir,
+                owns_sandbox=owns_sandbox,
+                harness="KiloCode",
+            ),
+        )
+        try:
+            if owns_sandbox:
+                # Providers need not create the workdir; borrowed task preparation belongs to Resources.
+                workspace = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
+                if workspace.return_code != 0 or workspace.error_type:
+                    raise RuntimeError(f"Cannot create Kilo sandbox workdir: {workspace.stderr or workspace.stdout}")
+            await state.install_runtime(version=self.config.kilo_version, timeout=self.config.setup_timeout)
+        except BaseException as error:
+            try:
+                await state.close(timeout=self.config.session_close_timeout_seconds)
+            except BaseException:
+                LOG.exception("Kilo setup cleanup failed; retaining session for close")
+                raise AgentSessionSetupError(state, error=error) from error
+            raise
+        return state
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, KiloSandboxSession):
+            raise TypeError("Expected Kilo sandbox session")
+        await state.close(timeout=self.config.session_close_timeout_seconds)
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=self._sandbox_observations(state),
+        )
+
+    def _sandbox_observations(self, state: KiloSandboxSession) -> AgentObservationBundle:
+        """Annotate the persisted session tree with the root run's outcome and sandbox identity."""
+        artifacts = state.session.artifacts
+        sandbox = SandboxObservation(role="agent", provider=state.provider_name)
+        if artifacts is None:
+            sandbox.error_type = "artifact_capture_failed"
+            return AgentObservationBundle(
+                source="kilocode", records=[sandbox], gaps=[ObservationGap(code="observation_capture_failed")]
+            )
+        outcome, error_type = _run_outcome(
+            artifacts,
+            timed_out=bool(state.session.cleanup and state.session.cleanup["timed_out"]),
+            cancelled=state.task is not None and state.task.cancelled(),
+        )
+        sandbox.outcome, sandbox.error_type = outcome, error_type
+        sandbox.exit_code, sandbox.wall_time_s = artifacts.exit_code, artifacts.wall_time_s
+        _, length_stop = _scan_run_events(artifacts.stdout)
+        if artifacts.observations is None:
+            # The CLI stdout carries only the root session; without the database there is no session tree.
+            observations = AgentObservationBundle(
+                source="kilocode", gaps=[ObservationGap(code="agent_artifact_unavailable")]
+            )
+        else:
+            observations = artifacts.observations.model_copy(deep=True)
+        for record in observations.records:
+            if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
+                if outcome == "failed" or record.status == "failed":
+                    record.status = "failed"
+                elif outcome != "completed" or length_stop:
+                    record.status = "incomplete"
+                record.error_type = record.error_type or error_type
+                record.duration_ms = artifacts.wall_time_s * 1000 if artifacts.wall_time_s is not None else None
+        observations.records.append(sandbox)
+        return observations
 
     @staticmethod
     def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -350,6 +510,9 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             options = provider.setdefault("options", {})
             options.setdefault("apiKey", "EMPTY")  # pragma: allowlist secret
             options["baseURL"] = model_base_url
+            # The model server returns a completion only once it is finished, so Kilo's default 60s
+            # stream watchdog (keep-alives do not reset it) would cancel long calls. Match the run budget.
+            options.setdefault("chunkTimeout", self.config.timeout * 1000)
             model = provider.setdefault("models", {}).setdefault(self.config.model, {})
             model.setdefault("name", self.config.model)
             model.setdefault("limit", {"context": self.config.context_window, "output": self.config.max_output_tokens})
@@ -428,6 +591,10 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         self, instruction: str, system_prompt: Optional[str], rollout_id: Optional[str] = None
     ) -> tuple[list[Any], dict[str, int], str]:
         """Run one headless kilo run. Returns (output_items, usage, model_name)."""
+        async with self._local_install_lock:
+            if not self._local_runtime_ready:
+                await asyncio.to_thread(ensure_kilo, self.config.kilo_version)
+                self._local_runtime_ready = True
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
         project_dir = self._repo_dir(work_dir)
@@ -465,11 +632,104 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
+    @staticmethod
+    def _validate_sandbox_request(body: NeMoGymResponseCreateParamsNonStreaming) -> None:
+        """Reject request controls and conversation shapes this CLI cannot faithfully execute."""
+        unsupported = body.model_dump(exclude_defaults=True, exclude_none=True).keys() - {
+            "input",
+            "instructions",
+            "model",
+        }
+        if unsupported:
+            raise HTTPException(422, "Unsupported Kilo sandbox request fields: " + ", ".join(sorted(unsupported)))
+        if isinstance(body.input, str):
+            return
+        roles = [getattr(item, "role", None) for item in body.input]
+        if roles not in (["user"], ["system", "user"], ["developer", "user"]):
+            raise HTTPException(
+                422, "Kilo sandbox input must be one user message with optional system/developer prefix"
+            )
+        for item in body.input:
+            content = getattr(item, "content", None)
+            if not isinstance(content, str) and (
+                not isinstance(content, list)
+                or any(
+                    (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
+                    for part in content
+                )
+            ):
+                raise HTTPException(422, "Kilo sandbox input supports text only")
+
+    async def _sandbox_response(
+        self, state: KiloSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, *, rollout_id: str
+    ) -> NeMoGymResponse:
+        items = (
+            [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
+        )
+        # The legacy extractor recognizes system messages only. Normalize a developer prefix on this copy.
+        items = [
+            item.model_copy(update={"role": "system"}) if getattr(item, "role", None) == "developer" else item
+            for item in items
+        ]
+        user_message, input_system = _extract_instruction(items)
+        prompt = "\n\n".join(
+            p for p in [self.config.system_prompt, body.instructions, input_system, user_message] if p
+        )
+        command = self._build_command(Path(state.session.workdir), prompt)
+        command[:1] = state.kilo_argv
+        async with self.sem:
+            state.started_at = perf_counter()
+            artifacts = await state.session.execute(
+                stage_activation=lambda: state.stage_activation(
+                    command=command,
+                    config=json.dumps(self._build_kilo_config(self._resolve_model_base_url(rollout_id))),
+                ),
+                collect=state.collect_artifacts,
+                timeout=self.config.timeout,
+                close_timeout=self.config.session_close_timeout_seconds,
+            )
+        # API/CLI failures must remain execution failures, rather than reaching the verifier as zeros.
+        error, length_stop = _scan_run_events(artifacts.stdout)
+        if error is not None:
+            raise RuntimeError(f"Kilo reported an execution error: {error}; {artifacts.stderr[-4096:]}")
+        incomplete = artifacts.exit_code is None or length_stop
+        if artifacts.exit_code not in (None, 0):
+            raise RuntimeError(f"Kilo exited {artifacts.exit_code}: {artifacts.stderr}")
+        output_items, usage = parse_kilo_events(artifacts.stdout)
+        if not output_items and not incomplete:
+            raise RuntimeError("Kilo completed without any trajectory events")
+        response = self._build_response(body, output_items, usage, self.config.model, incomplete=incomplete)
+        if artifacts.usage is not None:
+            response.usage = artifacts.usage.model_copy(deep=True)
+        else:
+            response.usage.input_tokens_details.cached_tokens = None
+            response.usage.output_tokens_details.reasoning_tokens = None
+        return response
+
     async def responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is not None:
+            self._validate_sandbox_request(body)
+            if body.model is not None and body.model != self.config.model:
+                raise HTTPException(422, "Kilo request model must match the configured model")
+            state = self._require_agent_session(session_id)
+            if not isinstance(state, KiloSandboxSession):
+                raise TypeError("Expected Kilo sandbox session")
+            rollout_id = request.path_params.get("rollout_id")
+            if rollout_id != state.request.episode_id.capture_key:
+                raise HTTPException(409, "Kilo agent session requires its attempt-qualified rollout route")
+            if state.task is None:
+                state.activation_request = body.model_copy(deep=True)
+                state.task = asyncio.create_task(
+                    self._sandbox_response(state, state.activation_request, rollout_id=rollout_id)
+                )
+            elif body != state.activation_request:
+                raise HTTPException(409, "Kilo sandbox sessions support one activation; retry the same request")
+            return (await asyncio.shield(state.task)).model_copy(deep=True)
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -483,6 +743,17 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         rollout_id = request.path_params.get("rollout_id")
         output_items, usage, model_name = await self._run_kilo(user_message, system_prompt, rollout_id)
 
+        return self._build_response(body, output_items, usage, model_name)
+
+    def _build_response(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        output_items: list[NeMoGymResponseOutputItem],
+        usage: dict[str, int],
+        model_name: str,
+        *,
+        incomplete: bool = False,
+    ) -> NeMoGymResponse:
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
             for item in output_items
@@ -506,6 +777,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             created_at=int(time()),
             model=model_name,
             object="response",
+            status="incomplete" if incomplete else "completed",
             output=output_items,
             tool_choice=body.tool_choice,
             tools=body.tools,
@@ -520,6 +792,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         )
 
     async def run(self, request: Request, body: KiloCodeAgentRunRequest) -> KiloCodeAgentVerifyResponse:
+        if self.config.resources_server is None:
+            raise ValueError("Use EnvironmentServer /run for independently composed Kilo sandbox sessions")
         async with self.sem:
             cookies = request.cookies
 

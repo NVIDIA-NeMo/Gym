@@ -8,7 +8,7 @@ Minimal, meant to be extended, and currently eval-only: token IDs and logprobs a
 
 ## Quick start
 
-Kilo must be on PATH (auto-installed on first start, or `npm install -g @kilocode/cli`). Set
+For local execution, Kilo must be on PATH (auto-installed on first invocation, or `npm install -g @kilocode/cli`). Set
 `policy_base_url`, `policy_api_key`, and `policy_model_name` in `env.yaml`; the model server started
 by `--model-type` serves that backend and Kilo calls the model server.
 
@@ -115,3 +115,89 @@ a config that uses `_inherit_from` cannot add new keys to `models`.
   re-run the tests and the live eval, then commit). `null` installs `@latest`.
 
 See `configs/kilocode_agent.yaml`.
+
+## Task-sandbox integration
+
+[configs/kilocode_sandboxed.yaml](configs/kilocode_sandboxed.yaml) runs Kilo inside the task
+sandbox supplied by the benchmark's Resources Server. The Environment Server coordinates setup,
+agent execution, verification, and cleanup; Kilo runs its own model/tool loop in the sandbox while
+Gym stays on the agent-server host. The local configuration above is unchanged.
+
+### Configure and run
+
+The benchmark owns task data, preparation, verification, and task sandbox settings. The harness
+owns its runtime and model/tool loop. The Environment Server binds the two and closes the agent
+before verification. For SWE-bench Pro, save this composition as `run.yaml`:
+
+```yaml
+config_paths:
+  - resources_servers/swebench_pro/configs/swebench_pro.yaml
+  - responses_api_agents/kilocode_agent/configs/kilocode_sandboxed.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+single_agent_turn_legacy:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: swebench_pro_resources_server
+      agent_server:
+        name: kilocode_agent
+      resources_tool_transports: []
+```
+
+Supply the `policy_model` Gym Model Server, `policy_model_name`, and `sandbox` provider in
+`model-provider.yaml`. The sandbox must be able to reach the Model Server.
+
+```bash
+python benchmarks/swebench/pro/prepare.py
+
+gym env start --config run.yaml --config model-provider.yaml
+
+gym eval run --no-serve \
+  --config run.yaml --config model-provider.yaml \
+  --agent kilocode_agent \
+  -i benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
+  -o rollouts.jsonl --limit 3 --concurrency 3
+```
+
+Keep `resources_tool_transports: []`: Kilo provides its own sandbox tools and rejects required
+external tool grants. Collection calls the Environment Server's `/run`, never the agent's `/run`.
+
+Set `context_window` / `max_output_tokens` to the served model's limits and raise `timeout` for
+long-horizon benchmarks. `timeout` also sets Kilo's model-stream watchdog (`chunkTimeout`), because
+the Gym Model Server returns each completion only once it is finished.
+
+### Switch harness or benchmark
+
+To change a compatible harness, replace its config import, the Environment Server's
+`agent_server.name`, and the collection command's `--agent`. To change a compatible benchmark,
+replace its Resources config/reference and prepared input, keeping the harness definition
+unchanged. Check task-image support and the benchmark's `allowed_agents` before running a new pairing.
+
+### Runtime and ownership
+
+The task image must be Linux (x86_64 or aarch64, glibc or musl) with Python 3.8+, and the sandbox
+needs network access to nodejs.org, the npm registry, and the Gym Model Server. Task images need not
+ship Node: session setup runs [install_kilo_runtime.sh](install_kilo_runtime.sh), which downloads a
+checksum-verified Node 22 and installs the pinned `kilo_version` into a private directory under
+`/tmp/nemo-gym-kilo-sessions/<id>/`. Missing download tools (`curl`, CA certificates) are installed
+with apt-get or apk when running as root; otherwise they must be in the image. Kilo runs through
+that private Node, so the task's `PATH` and runtimes are untouched, and nothing is written into the
+task workdir except the agent's own edits. No Kilo CLI is installed on the agent-server host for
+sandbox sessions.
+
+Kilo borrows the sandbox when Resources passes `sandbox_access`, and never destroys it. Otherwise
+set `sandbox_provider` / `sandbox_config` for an agent-owned sandbox (default workdir `/app`); it
+is destroyed at close, so verifiers that inspect the repository need a Resources-owned sandbox.
+
+### Requests and results
+
+Requests carry one text user message, optionally preceded by a system/developer message. Other
+request fields, model overrides, `repo_dir`, `extra_args` and `env` are rejected. Identical
+activation retries join the running task; session close owns cancellation.
+
+CLI/API errors and nonzero exits raise, so the episode fails instead of scoring zero. A killed run
+or a `length` stop returns an `incomplete` response. Observations come from a snapshot of Kilo's
+SQLite database (root and child sessions, tool timing, usage), annotated with the root outcome and
+a sandbox record; if the snapshot is unavailable, a coverage gap is reported. Token IDs and
+logprobs are not available.

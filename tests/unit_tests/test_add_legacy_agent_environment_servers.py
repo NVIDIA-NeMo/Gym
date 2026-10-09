@@ -74,7 +74,8 @@ def test_migrates_a_config_outside_the_repository(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("resources", [None, {"type": "resources_servers", "name": "my_resources"}])
 @pytest.mark.parametrize(
-    "agent_type", ["hermes_agent", "pi_agent", "codex_agent", "openclaw_agent", "opencode_agent", "osworld_agent"]
+    "agent_type",
+    ["hermes_agent", "pi_agent", "codex_agent", "openclaw_agent", "opencode_agent", "kilocode_agent", "osworld_agent"],
 )
 def test_migration_respects_native_session_templates(
     tmp_path: Path, resources: dict[str, str] | None, agent_type: str
@@ -97,7 +98,9 @@ def test_migration_respects_native_session_templates(
         assert _environment_servers(yaml.safe_load(config.read_text())) == {"my_agent": ["my_environment_server"]}
 
 
-@pytest.mark.parametrize("agent_type", ["hermes_agent", "pi_agent", "codex_agent", "openclaw_agent", "opencode_agent"])
+@pytest.mark.parametrize(
+    "agent_type", ["hermes_agent", "pi_agent", "codex_agent", "openclaw_agent", "opencode_agent", "kilocode_agent"]
+)
 def test_native_capable_overlay_keeps_inherited_resources(tmp_path: Path, agent_type: str) -> None:
     base = tmp_path / "base.yaml"
     base.write_text(AGENT_CONFIG.replace("simple_agent", agent_type))
@@ -147,6 +150,23 @@ def test_default_codex_composes_with_exactly_one_native_environment(tmp_path: Pa
     resolved = _parse(config, composition, strict=True)
     assert _environment_servers_by_agent(resolved) == {"codex_agent": ["native_environment"]}
     assert resolved.codex_agent.responses_api_agents.codex_agent.resources_server is None
+
+
+def test_default_kilocode_composes_with_exactly_one_native_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/kilocode_agent/configs/kilocode_sandboxed.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("kilocode_agent", name="native_environment", server_type="single_agent_turn_legacy")
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"kilocode_agent": ["native_environment"]}
+    assert resolved.kilocode_agent.responses_api_agents.kilocode_agent.resources_server is None
 
 
 def test_hermes_overlay_keeps_its_inherited_resources_binding(tmp_path: Path) -> None:
