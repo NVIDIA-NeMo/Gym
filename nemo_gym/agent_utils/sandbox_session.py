@@ -7,7 +7,11 @@ import logging
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import time
 from typing import cast
+from uuid import uuid4
+
+from openai.types.responses import ResponseError
 
 from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
@@ -22,6 +26,13 @@ from nemo_gym.agent_utils.supervisor_client import (
     supervision_timeouts,
 )
 from nemo_gym.base_responses_api_agent import ModelEndpoint, TokenCapture
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+)
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.utils import read_text
@@ -36,6 +47,52 @@ def _reuse_or_start[T](
     if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
         return asyncio.create_task(factory())
     return task
+
+
+# Observation gap code for an activation answered without running its harness; the gap detail is the reason.
+HARNESS_NOT_RUN_GAP = "harness_not_run"
+
+
+def harness_not_run_response(
+    body: NeMoGymResponseCreateParamsNonStreaming, *, model: str, reason: str
+) -> NeMoGymResponse:
+    """A failed response with an empty assistant message, for an activation whose harness never ran.
+
+    An agent returns this instead of raising when the harness must not run, for example because its session
+    capture did not start, so the environment server still verifies and closes the episode. The reason is the
+    response's error message; pair it with :func:`harness_not_run_observations` for the close response::
+
+        if state.session.session_capture_failed:
+            reason = state.session.token_capture().mask_reason
+            state.observations = harness_not_run_observations(source="my_agent", reason=reason)
+            return harness_not_run_response(body, model=self.config.model, reason=reason)
+        return await state.session.execute(stage_activation=..., collect=...)
+    """
+    return NeMoGymResponse(
+        id=f"resp_{uuid4().hex}",
+        created_at=int(time()),
+        model=model,
+        object="response",
+        output=[
+            NeMoGymResponseOutputMessage(
+                id=f"msg_{uuid4().hex}",
+                content=[NeMoGymResponseOutputText(text="", annotations=[])],
+                role="assistant",
+                status="completed",
+                type="message",
+            )
+        ],
+        status="failed",
+        error=ResponseError(code="server_error", message=reason[:2000]),
+        tool_choice=body.tool_choice,
+        tools=body.tools,
+        parallel_tool_calls=body.parallel_tool_calls,
+    )
+
+
+def harness_not_run_observations(*, source: str, reason: str) -> AgentObservationBundle:
+    """The observations for an activation whose harness never ran: one ``harness_not_run`` gap with the reason."""
+    return AgentObservationBundle(source=source, gaps=[ObservationGap(code=HARNESS_NOT_RUN_GAP, detail=reason)])
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -70,7 +127,8 @@ class SandboxSession[Artifacts]:
     collects the capture after the harness has stopped and before the sandbox is released, at most once, and
     ``token_capture`` returns it for the agent's close response. A capture that did not start, failed or timed
     out becomes a masked ``TokenCapture`` instead of an error; when it did not start, ``execute`` refuses to run
-    and the adapter answers the activation without the harness (see ``session_capture_failed``).
+    and the adapter answers the activation without the harness (see ``session_capture_failed`` and
+    ``harness_not_run_response``).
     """
 
     sandbox: AsyncSandbox

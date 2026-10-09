@@ -9,9 +9,17 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym.agent_utils import supervisor_client
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import (
+    HARNESS_NOT_RUN_GAP,
+    SandboxCommand,
+    SandboxSession,
+    harness_not_run_observations,
+    harness_not_run_response,
+)
 from nemo_gym.agent_utils.session_capture import SessionCapture, SessionCaptureConfig
 from nemo_gym.base_responses_api_agent import ModelEndpoint, TokenCapture
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 
 
@@ -739,3 +747,54 @@ def test_capture_config_builds_a_new_component_per_session():
 def test_capture_config_rejects_an_unusable_implementation_at_load(implementation, options, message):
     with pytest.raises(ValidationError, match=message):
         SessionCaptureConfig(implementation=implementation, options=options)
+
+
+def test_harness_not_run_response_is_a_failed_empty_assistant_turn_for_the_request():
+    tool = {"type": "function", "name": "bash", "parameters": {"type": "object"}, "strict": True}
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="task", tools=[tool], tool_choice="required", parallel_tool_calls=False
+    )
+
+    response = harness_not_run_response(body, model="served", reason="capture did not start: boom")
+
+    assert (response.status, response.model, response.object) == ("failed", "served", "response")
+    assert (response.error.code, response.error.message) == ("server_error", "capture did not start: boom")
+    (message,) = response.output
+    assert (message.type, message.role, [part.text for part in message.content]) == ("message", "assistant", [""])
+    assert ([t.name for t in response.tools], response.tool_choice, response.parallel_tool_calls) == (
+        ["bash"],
+        "required",
+        False,
+    )
+    assert response.id != harness_not_run_response(body, model="served", reason="x").id
+
+
+def test_harness_not_run_response_bounds_the_reason():
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task")
+    assert harness_not_run_response(body, model="served", reason="x" * 5000).error.message == "x" * 2000
+
+
+def test_harness_not_run_observations_record_the_reason_as_a_gap():
+    observations = harness_not_run_observations(source="test", reason="capture did not start: boom")
+
+    assert observations == AgentObservationBundle(
+        source="test", gaps=[ObservationGap(code=HARNESS_NOT_RUN_GAP, detail="capture did not start: boom")]
+    )
+    assert HARNESS_NOT_RUN_GAP == "harness_not_run"
+
+
+async def test_failed_capture_start_is_answered_with_its_reason_without_running_the_harness(capturing):
+    session = capturing
+    session.session_capture = capture_config(start="raise")
+    assert await session.start_session_capture() is None
+    assert session.session_capture_failed
+
+    reason = session.token_capture().mask_reason
+    response = harness_not_run_response(
+        NeMoGymResponseCreateParamsNonStreaming(input="task"), model="served", reason=reason
+    )
+    observations = harness_not_run_observations(source="test", reason=reason)
+
+    assert response.error.message == "capture did not start: RuntimeError: capture.start broke"
+    assert [(gap.code, gap.detail) for gap in observations.gaps] == [(HARNESS_NOT_RUN_GAP, response.error.message)]
+    assert not session.launch_started
