@@ -36,10 +36,12 @@ verify() looks up the scorer in _SCORERS_BY_TYPE (raises on unknown). Rows
 without a `type` are treated as the default ("unnumbered_streaming_sum") so
 pre-typed rollouts continue to score.
 
-compute_metrics() reports per-difficulty, per-type, and per-(type, difficulty)
-accuracy. Difficulty for sum types = max_operands; for uuid_sort types =
-uuids_per_line; for csv_permutation types = perm_fraction; for csv_kv_lookup =
-vocab_fraction; for var_expand types = n_variables.
+compute_metrics() reports accuracy by type, difficulty, target_tokens, and
+type paired with difficulty or target_tokens. Difficulty for sum types =
+max_operands; for uuid_sort types = uuids_per_line; for csv_permutation types =
+perm_fraction; for csv_kv_lookup = vocab_fraction; for var_expand types = n_variables.
+Arithmetic aggregate accuracy requires both correct expression copying and a
+correct answer, matching gym-evals reporting. The reward remains answer-only.
 """
 
 from __future__ import annotations
@@ -128,6 +130,7 @@ _SCORERS_BY_TYPE = {
 }
 # Rows with no `type` set keep scoring against the legacy unnumbered parser.
 _DEFAULT_TYPE = "unnumbered_streaming_sum"
+_SUM_TYPES = {"unnumbered_streaming_sum", "streaming_sum", "shuffled_streaming_sum"}
 
 # CSV types all use score_csv_permutation (cell-level string equality).
 _CSV_TYPES = {
@@ -161,6 +164,8 @@ class LongTransductionRunRequest(BaseRunRequest):
     # Sample variant. None falls back to _DEFAULT_TYPE; recognized values are
     # the keys of _SCORERS_BY_TYPE.
     type: Optional[str] = None
+    # Approximate input-token budget used when generating the task.
+    target_tokens: Optional[int] = None
     max_operands: Optional[int] = None
     n_expressions: Optional[int] = None
     # Arithmetic-chain payload (sum types).
@@ -264,10 +269,12 @@ class LongTransductionServer(SimpleResourcesServer):
         )
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Average rollout accuracy overall, by type, and by difficulty."""
+        """Average accuracy by type, difficulty, and context; arithmetic requires copy AND answer correctness."""
         by_difficulty: Dict[Any, List[float]] = defaultdict(list)
         by_type: Dict[str, List[float]] = defaultdict(list)
         by_type_difficulty: Dict[tuple, List[float]] = defaultdict(list)
+        by_target_tokens: Dict[int, List[float]] = defaultdict(list)
+        by_type_target_tokens: Dict[tuple[str, int], List[float]] = defaultdict(list)
         for task_rollouts in tasks:
             for rollout in task_rollouts:
                 if rollout.get("answer_correct") is None:
@@ -286,9 +293,17 @@ class LongTransductionServer(SimpleResourcesServer):
                 if diff is None:
                     diff = "n/a"
                 acc = rollout["answer_correct"]
+                item_scores = rollout.get("item_scores")
+                # Match gym-evals plots; legacy rows without item scores retain answer-only accuracy.
+                if ttype in _SUM_TYPES and item_scores:
+                    acc = sum(bool(scores[0] and scores[1]) for scores in item_scores) / len(item_scores)
                 by_difficulty[diff].append(acc)
                 by_type[ttype].append(acc)
                 by_type_difficulty[(ttype, diff)].append(acc)
+                target_tokens = rollout.get("target_tokens")
+                if target_tokens is not None:
+                    by_target_tokens[target_tokens].append(acc)
+                    by_type_target_tokens[(ttype, target_tokens)].append(acc)
 
         metrics: Dict[str, Any] = {}
         all_vals: List[float] = []
@@ -312,6 +327,15 @@ class LongTransductionServer(SimpleResourcesServer):
             vals = by_type_difficulty[(ttype, diff)]
             metrics[f"type_{ttype}_difficulty_{diff}"] = {
                 "accuracy": sum(vals) / len(vals) if vals else None,
+                "n": len(vals),
+            }
+
+        for target_tokens, vals in sorted(by_target_tokens.items()):
+            metrics[f"target_tokens_{target_tokens}"] = {"accuracy": sum(vals) / len(vals), "n": len(vals)}
+
+        for (ttype, target_tokens), vals in sorted(by_type_target_tokens.items()):
+            metrics[f"type_{ttype}_target_tokens_{target_tokens}"] = {
+                "accuracy": sum(vals) / len(vals),
                 "n": len(vals),
             }
 

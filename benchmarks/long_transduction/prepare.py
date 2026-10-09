@@ -1142,6 +1142,7 @@ def generate(force: bool = False) -> None:
                         rng = _rng((target_tokens, max_operands, i, sample_type))
                         sample = _build_sum_sample(expressions, max_operands, sample_type, n_tokens, rng)
                         sample["target_tokens"] = target_tokens
+                        sample["responses_create_params"] = {"max_output_tokens": target_tokens * 3 // 2}
                         out.write(json.dumps(sample) + "\n")
                         total += 1
                     print(
@@ -1164,6 +1165,7 @@ def generate(force: bool = False) -> None:
                         rng = _rng((target_tokens, uuids_per_line, i, sample_type))
                         sample = _build_uuid_sample(uuid_lines, uuids_per_line, sample_type, n_tokens, rng)
                         sample["target_tokens"] = target_tokens
+                        sample["responses_create_params"] = {"max_output_tokens": target_tokens * 3 // 2}
                         out.write(json.dumps(sample) + "\n")
                         total += 1
                     print(
@@ -1193,6 +1195,7 @@ def generate(force: bool = False) -> None:
                         rng = _rng(("csv", cell_type, target_tokens, i, perm_fraction))
                         sample = _build_csv_sample(grid, perm_fraction, rng, n_tokens, type_name)
                         sample["target_tokens"] = target_tokens
+                        sample["responses_create_params"] = {"max_output_tokens": target_tokens * 3 // 2}
                         out.write(json.dumps(sample) + "\n")
                         total += 1
                     print(
@@ -1215,6 +1218,7 @@ def generate(force: bool = False) -> None:
                     rng = _rng(("csv_kv", target_tokens, i, vocab_fraction))
                     sample = _build_csv_kv_sample(M, vocab_fraction, sample_adjs, sample_nouns, rng, n_tokens)
                     sample["target_tokens"] = target_tokens
+                    sample["responses_create_params"] = {"max_output_tokens": target_tokens * 3 // 2}
                     out.write(json.dumps(sample) + "\n")
                     total += 1
                 print(
@@ -1244,6 +1248,7 @@ def generate(force: bool = False) -> None:
                             definitions, expressions, n_variables, sample_type, n_tokens, rng
                         )
                         sample["target_tokens"] = target_tokens
+                        sample["responses_create_params"] = {"max_output_tokens": target_tokens * 3 // 2}
                         out.write(json.dumps(sample) + "\n")
                         total += 1
                     print(
