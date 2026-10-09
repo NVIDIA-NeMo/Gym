@@ -28,7 +28,7 @@ from fastapi.exceptions import RequestValidationError
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from pydantic import ValidationError
-from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
+from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, fail, mark, raises
 from requests.exceptions import ProxyError
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from yarl import URL
@@ -1653,19 +1653,31 @@ class TestServerUtils:
         assert "ValueError: actionable inner failure" in captured
 
     def _mock_global_client(self, monkeypatch: MonkeyPatch, error: Exception, failures: int | None) -> MagicMock:
-        """Global-client stand-in whose request() raises `error` `failures` times, then succeeds (never if None)."""
+        """Global-client stand-in whose request() raises `error` `failures` times, then succeeds (never if None).
+
+        request() and the retry sleep both fail the test once called more often than any test needs, so a retry
+        loop that never stops fails fast. request() uses `fail()`, whose BaseException the loop's `except Exception`
+        cannot catch, so this also stops a loop that never sleeps.
+        """
         client = MagicMock()
-        if failures is None:
-            client.request = AsyncMock(side_effect=error)
-        else:
-            client.request = AsyncMock(side_effect=[error] * failures + [client.success_response])
+        allowed_calls = nemo_gym.server_utils.MAX_NUM_TRIES + 6
+        attempts = 0
+
+        def request(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts > allowed_calls:
+                fail("retry loop did not stop")
+            if failures is None or attempts <= failures:
+                raise error
+            return client.success_response
+
+        client.request = AsyncMock(side_effect=request)
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
-        # Allow more sleeps than any test needs, then raise, so a retry loop that never stops fails fast.
-        allowed_sleeps = nemo_gym.server_utils.MAX_NUM_TRIES + 6
         monkeypatch.setattr(
             nemo_gym.server_utils.asyncio,
             "sleep",
-            AsyncMock(side_effect=[None] * allowed_sleeps + [AssertionError("retry loop did not stop")]),
+            AsyncMock(side_effect=[None] * allowed_calls + [AssertionError("retry loop did not stop")]),
         )
         return client
 
@@ -1688,10 +1700,7 @@ class TestServerUtils:
     async def test_request_caps_generic_errors_at_the_lower_attempt_limit(
         self, monkeypatch: MonkeyPatch, attempt_cap: int, expected_attempts: int
     ) -> None:
-        client = MagicMock()
-        client.request = AsyncMock(side_effect=TimeoutError("upstream timed out"))
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
-        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        client = self._mock_global_client(monkeypatch, TimeoutError("upstream timed out"), failures=None)
 
         with raises(TimeoutError, match="upstream timed out"):
             await nemo_gym.server_utils.request(
