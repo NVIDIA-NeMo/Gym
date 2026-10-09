@@ -300,6 +300,7 @@ def test_prebuilt_world_selects_only_manifest_image(tmp_path: Path) -> None:
     assert runner["startup_timeout_seconds"] == 1800
     assert spec.files["/app/apex-gym/sandbox_entrypoint.py"] == load_prebuilt_runner_source()
     assert "secret rubric" not in json.dumps(runner)
+    assert spec.env["PYTHONDONTWRITEBYTECODE"] == "1"
 
 
 def test_prebuilt_world_passes_validated_startup_ownership(tmp_path: Path) -> None:
@@ -515,6 +516,7 @@ def test_sandbox_config_never_contains_verifier_secrets() -> None:
     assert "secret rubric" not in serialized
     assert "secret gold" not in serialized
     assert "CODE_EXEC_RUN_AS_USER" not in spec.env
+    assert "PYTHONDONTWRITEBYTECODE" not in spec.env
     assert "/app/apex-gym/stirrup_runtime.py" in spec.files
     assert "FOUNDRY_LOCAL_ROOT" not in spec.env
 
