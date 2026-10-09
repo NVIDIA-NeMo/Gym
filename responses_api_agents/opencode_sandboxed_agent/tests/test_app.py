@@ -63,13 +63,14 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 
 
 class TestOpenCodeSandboxedAgent:
-    def test_import_only_loads_shared_opencode_observability(self) -> None:
+    def test_import_only_loads_shared_opencode_modules(self) -> None:
         code = (
             f"import sys; import responses_api_agents; responses_api_agents.__path__ = [{str(Path(__file__).resolve().parents[2])!r}]; "
             "import responses_api_agents.opencode_sandboxed_agent.app; "
             "assert {name for name in sys.modules if name == 'responses_api_agents.opencode_agent' "
             "or name.startswith('responses_api_agents.opencode_agent.')} == "
-            "{'responses_api_agents.opencode_agent', 'responses_api_agents.opencode_agent.observability'}"
+            "{'responses_api_agents.opencode_agent', 'responses_api_agents.opencode_agent.observability', "
+            "'responses_api_agents.opencode_agent.runtime'}"
         )
         subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
 
@@ -385,7 +386,7 @@ class TestOpenCodeSandboxedAgent:
         assert plugins[0] == "file:///user-plugin.js"
         if observability_enabled:
             sandbox_mock.upload.assert_any_await(
-                app_module._ASSISTANT_MESSAGE_PLUGIN, app_module._REMOTE_ASSISTANT_MESSAGE_PLUGIN
+                app_module.OBSERVABILITY_PATCH, app_module._REMOTE_ASSISTANT_MESSAGE_PLUGIN
             )
             assert plugins == ["file:///user-plugin.js", f"file://{app_module._REMOTE_ASSISTANT_MESSAGE_PLUGIN}"]
         else:
@@ -480,9 +481,7 @@ class TestOpenCodeSandboxedAgent:
                 call(Path(app_module.__file__).with_name("remaining-context.js"), "/tmp/nemo-gym-remaining-context.js")
             )
         if observability_enabled:
-            expected_uploads.append(
-                call(app_module._ASSISTANT_MESSAGE_PLUGIN, app_module._REMOTE_ASSISTANT_MESSAGE_PLUGIN)
-            )
+            expected_uploads.append(call(app_module.OBSERVABILITY_PATCH, app_module._REMOTE_ASSISTANT_MESSAGE_PLUGIN))
         if stage_ripgrep:
             expected_uploads.append(call(binary, "/tmp/nemo-gym-ripgrep-"))
         assert sandbox_mock.upload.await_args_list == expected_uploads
@@ -530,6 +529,16 @@ class TestOpenCodeSandboxedAgent:
             assert installed.stat().st_mode & 0o777 == 0o755
             assert installed.stat().st_uid == os.getuid()
             assert (home / "agent-started").is_file()
+            (home / "agent-started").unlink()
+            opencode.write_bytes(opencode.read_bytes().replace(b"echo test", b"echo wrong-version"))
+            mismatched = subprocess.run(
+                ["sh", "-c", local_command],
+                env={"HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{os.defpath}"},
+                capture_output=True,
+                timeout=10,
+            )
+            assert mismatched.returncode != 0
+            assert not (home / "agent-started").is_file()
         else:
             assert "nemo-gym-ripgrep" not in command
 

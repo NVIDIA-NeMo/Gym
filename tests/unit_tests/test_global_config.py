@@ -84,7 +84,8 @@ class TestGlobalConfig:
             "port_range_low": 10_001,
             "port_range_high": 20_000,
             # From self._mock_versions_for_testing
-            "head_server_deps": ["ray[default]==test ray version", "openai==test openai version"],
+            "head_server_deps": ["openai==test openai version"],
+            "head_server_constraints": ["ray==test ray version"],
             "python_version": "test python version",
             "skip_venv_if_present": False,
             "dry_run": False,
@@ -227,6 +228,22 @@ class TestGlobalConfig:
         monkeypatch.setattr(nemo_gym.global_config, "ray_version", "test ray version")
         monkeypatch.setattr(nemo_gym.global_config, "python_version", MagicMock(return_value="test python version"))
         monkeypatch.setattr(importlib.metadata, "requires", lambda name: ["openai<=2.7.2"])
+
+    def test_ray_version_is_a_constraint_not_a_requirement(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+
+        global_config_dict = get_global_config_dict()
+        assert global_config_dict["head_server_constraints"] == ["ray==test ray version"]
+        assert not any(dep.startswith("ray") for dep in global_config_dict["head_server_deps"])
+
+    def test_config_parses_without_ray_installed(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
+        monkeypatch.setattr(nemo_gym.global_config, "ray_version", None)
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+
+        global_config_dict = get_global_config_dict()
+        assert global_config_dict["head_server_constraints"] == []
 
     def test_head_server_deps_pins_compatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.6.0")

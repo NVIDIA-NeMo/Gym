@@ -292,7 +292,7 @@ class LiteLLMModelServer(SimpleModelServer):
             return NeMoGymResponse.model_validate(_normalize_to_response(openai_response_dict))
 
         # Apply the inherited upstream retry policy, pool timeout, and status propagation.
-        return await self._serve_upstream(create_and_validate)
+        return await self._call_upstream(create_and_validate)
 
 
 if __name__ == "__main__":

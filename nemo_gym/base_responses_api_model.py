@@ -443,8 +443,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 except Exception as exc:
                     logger.exception("chat_completions() failed after streaming headers were sent")
                     status = getattr(exc, "status_code", None) or getattr(exc, "status", None) or 500
+                    detail = exc.detail if isinstance(exc, HTTPException) else "Model request failed"
+                    if isinstance(exc, ClientResponseError):
+                        # Headers are committed; apply the HTTP propagation policy to the SSE error instead.
+                        if self._should_propagate_upstream_http_error(exc):
+                            detail = getattr(exc, "response_content", None) or exc.message
+                            if isinstance(detail, bytes):
+                                detail = detail.decode(errors="replace")
+                        else:
+                            status = 500
                     error = {
-                        "message": f"HTTP {status}: {exc.detail if isinstance(exc, HTTPException) else 'Model request failed'}",
+                        "message": f"HTTP {status}: {detail}",
                         "type": "server_error" if status >= 500 else "invalid_request_error",
                         "code": status,
                     }

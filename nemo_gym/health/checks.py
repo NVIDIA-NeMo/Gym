@@ -317,11 +317,16 @@ def _is_context_overflow_rejection(call: dict[str, Any]) -> bool:
 
 
 def _is_failed_attempt(call: dict[str, Any]) -> bool:
-    """A failed model call that produced no generation, so it has no tokens to account for.
+    """A failed model call that returned no finished response, so it has no usage to account for.
 
-    Covers cancelled calls and HTTP error replies, whose saved body is an error and has no finish
-    reason. Whether the rollout recovered is `rollout_ended_on_failed_model_call`'s question.
-    A failed call that did generate (it has a finish reason) keeps the token checks, as does a
+    Covers HTTP error replies and calls cut by a cancellation or timeout. This does not mean
+    nothing was generated: the server may have spent tokens on a cut call, and a cut stream may
+    have delivered part of its output first. Gym cannot tell which from the capture (the first
+    streamed event can arrive before any token), so these calls are skipped rather than guessed
+    at; `run.stats.model_call_errors.usage_unknown` counts them. Whether the rollout recovered is
+    `rollout_ended_on_failed_model_call`'s question.
+
+    A failed call that did finish (it has a finish reason) keeps the token checks, as does a
     body capture could not parse, which is a capture defect rather than a failed call.
     """
     return (
