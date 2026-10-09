@@ -6,9 +6,12 @@ import json
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.agent_utils import supervisor_client
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.session_capture import SessionCapture, SessionCaptureConfig
+from nemo_gym.base_responses_api_agent import ModelEndpoint, TokenCapture
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 
 
@@ -411,3 +414,328 @@ async def test_missing_failure_log_does_not_mask_capture_failure(session, monkey
     assert session.cleanup == RECEIPT
     await session.close(timeout=1)
     assert session.closed
+
+
+# Lifecycle calls of FakeCapture and of the sandbox, in order, for the current test.
+EVENTS: list[str] = []
+ENDPOINT = ModelEndpoint(base_url="http://127.0.0.1:4321/v1", model="served")
+CAPTURED = TokenCapture(atif_trajectories=[{"steps": []}], metrics={"calls": 1})
+
+
+class FakeCapture(SessionCapture):
+    """A session capture whose start and collect succeed, raise, or hang, as its options say."""
+
+    def __init__(self, *, start: str = "ok", collect: str = "ok"):
+        self.start_mode, self.collect_mode = start, collect
+
+    async def _act(self, event: str, mode: str):
+        EVENTS.append(event)
+        if mode == "raise":
+            raise RuntimeError(f"{event} broke")
+        if mode == "hang":
+            await asyncio.Future()
+
+    async def start(self, sandbox: AsyncSandbox) -> ModelEndpoint:
+        await self._act("capture.start", self.start_mode)
+        return ENDPOINT
+
+    async def collect(self, sandbox: AsyncSandbox) -> TokenCapture:
+        await self._act("capture.collect", self.collect_mode)
+        if self.collect_mode == "masked":
+            return TokenCapture(masked=True, mask_reason="no calls recorded")
+        return CAPTURED
+
+    async def abort(self, sandbox: AsyncSandbox) -> None:
+        EVENTS.append("capture.abort")
+
+
+class IncompleteCapture(SessionCapture):
+    async def start(self, sandbox: AsyncSandbox) -> ModelEndpoint:
+        return ENDPOINT
+
+
+def capture_config(**options) -> SessionCaptureConfig:
+    timeout = options.pop("collect_timeout_seconds", 1)
+    return SessionCaptureConfig(
+        implementation=f"{__name__}:FakeCapture", options=options, collect_timeout_seconds=timeout
+    )
+
+
+@pytest.fixture
+def capturing(session):
+    EVENTS.clear()
+    session.session_capture = capture_config()
+    session.sandbox.stop.side_effect = lambda: EVENTS.append("sandbox.stop")
+    session.sandbox.disconnect.side_effect = lambda: EVENTS.append("sandbox.disconnect")
+    return session
+
+
+def artifacts_collector():
+    async def collect():
+        # Artifact collection runs only after the harness's cleanup is confirmed.
+        EVENTS.append("harness.stopped")
+        return "transcript"
+
+    return AsyncMock(side_effect=collect)
+
+
+def release_event(owned: bool) -> str:
+    return "sandbox.stop" if owned else "sandbox.disconnect"
+
+
+@pytest.mark.parametrize("owned", [False, True])
+async def test_capture_is_collected_once_after_the_harness_stops_and_before_release(capturing, owned):
+    session = capturing
+    session.owns_sandbox = owned
+    assert await session.start_session_capture() == ENDPOINT
+    assert not session.session_capture_failed
+    assert await execute(session, collect=artifacts_collector()) == "transcript"
+    # Collection waits for close: the session may still be answering the activation.
+    assert EVENTS == ["capture.start", "harness.stopped"] and session.token_capture() is None
+
+    await asyncio.gather(session.close(timeout=1), session.close(timeout=1))
+    await session.close(timeout=1)
+
+    assert EVENTS == ["capture.start", "harness.stopped", "capture.collect", release_event(owned)]
+    assert session.closed and session.token_capture() == CAPTURED
+
+
+async def test_session_without_capture_is_unchanged(session):
+    assert await session.start_session_capture() is None
+    assert await execute(session) == "transcript"
+    await session.close(timeout=1)
+    assert session.closed and session.token_capture() is None and not session.session_capture_failed
+
+
+@pytest.mark.parametrize("owned", [False, True])
+async def test_capture_start_failure_masks_the_capture_and_the_harness_never_runs(capturing, owned):
+    session = capturing
+    session.owns_sandbox = owned
+    session.session_capture = capture_config(start="raise")
+    stage = AsyncMock()
+
+    assert await session.start_session_capture() is None
+
+    assert session.session_capture_failed
+    expected = TokenCapture(masked=True, mask_reason="capture did not start: RuntimeError: capture.start broke")
+    assert session.token_capture() == expected
+    with pytest.raises(RuntimeError, match="capture is not running; the harness must not run"):
+        await execute(session, stage_activation=stage)
+    stage.assert_not_awaited()
+    assert not session.launch_started
+    await session.close(timeout=1)
+    assert session.closed and session.token_capture() == expected
+    assert EVENTS == ["capture.start", "capture.abort", release_event(owned)]
+
+
+async def test_cancelled_capture_start_aborts_the_component_and_propagates(capturing):
+    session = capturing
+    session.session_capture = capture_config(start="hang")
+    starting = asyncio.create_task(session.start_session_capture())
+    while EVENTS != ["capture.start"]:
+        await asyncio.sleep(0)
+    starting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+
+    assert EVENTS == ["capture.start", "capture.abort"]
+    assert session.token_capture() == TokenCapture(
+        masked=True, mask_reason="capture did not start: start was cancelled"
+    )
+    assert session.session_capture_failed
+
+
+async def test_capture_abort_survives_a_second_cancellation(capturing, monkeypatch):
+    session = capturing
+    session.session_capture = capture_config(start="raise")
+    aborting, finish = asyncio.Event(), asyncio.Event()
+
+    async def slow_abort(self, sandbox):
+        aborting.set()
+        await finish.wait()
+        EVENTS.append("capture.abort")
+
+    monkeypatch.setattr(FakeCapture, "abort", slow_abort)
+    starting = asyncio.create_task(session.start_session_capture())
+    await asyncio.wait_for(aborting.wait(), 2)
+    starting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+    finish.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert EVENTS == ["capture.start", "capture.abort"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "reason"),
+    [
+        ("raise", "capture collection failed: RuntimeError: capture.collect broke"),
+        ("hang", "capture collection exceeded 0.01s"),
+    ],
+)
+@pytest.mark.parametrize("owned", [False, True])
+async def test_failed_or_slow_collection_masks_the_capture_and_still_releases(capturing, owned, mode, reason):
+    session = capturing
+    session.owns_sandbox = owned
+    session.session_capture = capture_config(collect=mode, collect_timeout_seconds=0.01)
+    await session.start_session_capture()
+    await execute(session, collect=artifacts_collector())
+
+    await asyncio.wait_for(session.close(timeout=1), 2)
+
+    assert EVENTS == ["capture.start", "harness.stopped", "capture.collect", "capture.abort", release_event(owned)]
+    assert session.closed
+    assert session.token_capture() == TokenCapture(masked=True, mask_reason=reason)
+
+
+async def test_collect_timeout_error_raised_by_the_component_is_reported_as_a_failure(capturing, monkeypatch):
+    session = capturing
+
+    async def collect(self, sandbox):
+        raise TimeoutError("upstream read timed out")
+
+    monkeypatch.setattr(FakeCapture, "collect", collect)
+    await session.start_session_capture()
+    await execute(session)
+    await session.close(timeout=1)
+    assert session.token_capture().mask_reason == "capture collection failed: TimeoutError: upstream read timed out"
+
+
+async def test_masked_capture_from_the_component_is_returned_unchanged(capturing):
+    session = capturing
+    session.session_capture = capture_config(collect="masked")
+    await session.start_session_capture()
+    await execute(session)
+    await session.close(timeout=1)
+    assert session.token_capture() == TokenCapture(masked=True, mask_reason="no calls recorded")
+    assert "capture.abort" not in EVENTS
+
+
+@pytest.mark.parametrize("owned", [False, True])
+async def test_harness_failure_still_collects_the_capture_after_cleanup(capturing, owned):
+    session = capturing
+    session.owns_sandbox = owned
+    session.sandbox.exec.side_effect = [OSError("transport failed"), OK]
+    await session.start_session_capture()
+    with pytest.raises(OSError, match="transport failed"):
+        await execute(session, collect=artifacts_collector())
+    await session.close(timeout=1)
+    assert EVENTS == ["capture.start", "harness.stopped", "capture.collect", release_event(owned)]
+    assert session.token_capture() == CAPTURED
+
+
+@pytest.mark.parametrize("owned", [False, True])
+async def test_cancelled_execution_still_collects_the_capture_after_cleanup(capturing, owned):
+    session = capturing
+    session.owns_sandbox = owned
+    launched = asyncio.Event()
+
+    async def provider_exec(command, **kwargs):
+        if "trap '' TERM" in command:
+            launched.set()
+            await asyncio.Future()
+        return OK
+
+    session.sandbox.exec.side_effect = provider_exec
+    await session.start_session_capture()
+    running = asyncio.create_task(execute(session, collect=artifacts_collector()))
+    await asyncio.wait_for(launched.wait(), 2)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    await session.close(timeout=1)
+    assert EVENTS == ["capture.start", "harness.stopped", "capture.collect", release_event(owned)]
+    assert session.token_capture() == CAPTURED
+
+
+async def test_borrowed_cleanup_failure_defers_capture_collection_to_the_retried_close(capturing, receipt_reader):
+    session = capturing
+    await session.start_session_capture()
+    receipt_reader.return_value = json.dumps(RECEIPT | {"cleanup_confirmed": False})
+    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+        await execute(session)
+    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+        await session.close(timeout=1)
+    # The harness may still be calling the capture, so it keeps running.
+    assert EVENTS == ["capture.start"] and session.token_capture() is None
+
+    receipt_reader.return_value = json.dumps(RECEIPT)
+    await session.close(timeout=1)
+    await session.close(timeout=1)
+    assert session.closed and session.token_capture() == CAPTURED
+    assert EVENTS == ["capture.start", "capture.collect", "sandbox.disconnect"]
+
+
+async def test_owned_cleanup_failure_collects_the_capture_before_the_forced_stop(capturing, receipt_reader):
+    session = capturing
+    session.owns_sandbox = True
+    await session.start_session_capture()
+    receipt_reader.return_value = json.dumps(RECEIPT | {"cleanup_confirmed": False})
+    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+        await execute(session)
+    await session.close(timeout=1)
+    assert session.closed and session.token_capture() == CAPTURED
+    assert EVENTS == ["capture.start", "capture.collect", "sandbox.stop"]
+
+
+async def test_closing_without_starting_the_capture_masks_it(capturing):
+    session = capturing
+    with pytest.raises(RuntimeError, match="capture is not running"):
+        await execute(session)
+    await session.close(timeout=1)
+    assert session.token_capture() == TokenCapture(
+        masked=True, mask_reason="capture was not running when the session closed"
+    )
+    assert EVENTS == ["sandbox.disconnect"]
+    with pytest.raises(RuntimeError, match="must start its capture before activation"):
+        await session.start_session_capture()
+
+
+async def test_close_during_capture_start_masks_it_and_aborts_the_component_once_started(capturing, monkeypatch):
+    session = capturing
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def slow_start(self, sandbox):
+        EVENTS.append("capture.start")
+        started.set()
+        await finish.wait()
+        return ENDPOINT
+
+    monkeypatch.setattr(FakeCapture, "start", slow_start)
+    starting = asyncio.create_task(session.start_session_capture())
+    await asyncio.wait_for(started.wait(), 2)
+    await session.close(timeout=1)
+    finish.set()
+    assert await starting is None
+    assert EVENTS == ["capture.start", "sandbox.disconnect", "capture.abort"]
+    assert session.token_capture().mask_reason == "capture was not running when the session closed"
+
+
+async def test_capture_starts_once(capturing):
+    await capturing.start_session_capture()
+    with pytest.raises(RuntimeError, match="already started"):
+        await capturing.start_session_capture()
+
+
+def test_capture_config_builds_a_new_component_per_session():
+    config = capture_config(collect="hang")
+    first, second = config.build(), config.build()
+    assert isinstance(first, FakeCapture) and first is not second and first.collect_mode == "hang"
+
+
+@pytest.mark.parametrize(
+    ("implementation", "options", "message"),
+    [
+        ("FakeCapture", {}, "must look like 'package.module:ClassName'"),
+        ("nemo_gym.no_such_module:FakeCapture", {}, "cannot import session capture implementation"),
+        (f"{__name__}:Missing", {}, "is not a SessionCapture subclass"),
+        (f"{__name__}:ENDPOINT", {}, "is not a SessionCapture subclass"),
+        (f"{__name__}:TokenCapture", {}, "is not a SessionCapture subclass"),
+        (f"{__name__}:IncompleteCapture", {}, "does not implement every method"),
+        (f"{__name__}:FakeCapture", {"unknown": 1}, "invalid options for session capture"),
+    ],
+)
+def test_capture_config_rejects_an_unusable_implementation_at_load(implementation, options, message):
+    with pytest.raises(ValidationError, match=message):
+        SessionCaptureConfig(implementation=implementation, options=options)

@@ -11,6 +11,7 @@ from typing import cast
 
 from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
+from nemo_gym.agent_utils.session_capture import SessionCapture, SessionCaptureConfig
 from nemo_gym.agent_utils.supervisor_client import (
     OUTPUT_LOG_FILE,
     STOP_REQUEST_FILE,
@@ -20,6 +21,7 @@ from nemo_gym.agent_utils.supervisor_client import (
     supervised_launch_command,
     supervision_timeouts,
 )
+from nemo_gym.base_responses_api_agent import ModelEndpoint, TokenCapture
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.utils import read_text
@@ -62,6 +64,13 @@ class SandboxSession[Artifacts]:
     the timeout passed to ``close``). Failed cleanup/release retains the handle
     for retry. Failed capture is recorded separately and does not prevent release.
     HTTP request binding and activation retries belong to the agent session layer.
+
+    With ``session_capture`` configured, the adapter awaits ``start_session_capture`` after its runtime is
+    ready and before it builds the harness command, and points the harness at the returned endpoint. Close
+    collects the capture after the harness has stopped and before the sandbox is released, at most once, and
+    ``token_capture`` returns it for the agent's close response. A capture that did not start, failed or timed
+    out becomes a masked ``TokenCapture`` instead of an error; when it did not start, ``execute`` refuses to run
+    and the adapter answers the activation without the harness (see ``session_capture_failed``).
     """
 
     sandbox: AsyncSandbox
@@ -69,6 +78,7 @@ class SandboxSession[Artifacts]:
     workdir: str | None
     harness: str
     owns_sandbox: bool = False
+    session_capture: SessionCaptureConfig | None = None
     launch_started: bool = field(default=False, init=False)
     cleanup: CleanupReceipt | None = field(default=None, init=False)
     artifacts: Artifacts | None = field(default=None, init=False)
@@ -80,6 +90,9 @@ class SandboxSession[Artifacts]:
     _close_task: asyncio.Task[None] | None = field(default=None, init=False)
     _collect: Callable[[], Awaitable[Artifacts]] | None = field(default=None, init=False)
     _capture_attempted: bool = field(default=False, init=False)
+    _capture_component: SessionCapture | None = field(default=None, init=False)
+    _capture_endpoint: ModelEndpoint | None = field(default=None, init=False)
+    _token_capture: TokenCapture | None = field(default=None, init=False)
 
     @property
     def closing(self) -> bool:
@@ -96,6 +109,94 @@ class SandboxSession[Artifacts]:
     def stop_request_path(self) -> str:
         """Marker path an adapter may pass to its harness for cancellation diagnostics."""
         return f"{self.session_dir}/{STOP_REQUEST_FILE}"
+
+    @property
+    def session_capture_failed(self) -> bool:
+        """Whether a configured session capture cannot run, so the harness must not run either."""
+        return self.session_capture is not None and self._capture_endpoint is None and self._token_capture is not None
+
+    def token_capture(self) -> TokenCapture | None:
+        """The collected (or masked) session capture; None without a configured capture or before close."""
+        return self._token_capture
+
+    async def start_session_capture(self) -> ModelEndpoint | None:
+        """Start the configured capture once and return the endpoint the harness must call.
+
+        Returns None when no capture is configured or when it did not start; a failed or cancelled start is
+        recorded as a masked ``token_capture`` and the component is aborted. Cancellation still propagates.
+        """
+        if self.session_capture is None:
+            return None
+        if self._capture_component is not None:
+            raise RuntimeError(f"{self.harness} sandbox session capture was already started")
+        if self.closing or self._stage_task is not None:
+            raise RuntimeError(f"{self.harness} sandbox session must start its capture before activation")
+        self._capture_component = self.session_capture.build()
+        try:
+            endpoint = await self._capture_component.start(self.sandbox)
+        except BaseException as error:
+            if isinstance(error, asyncio.CancelledError):
+                reason = "start was cancelled"
+            else:
+                reason = f"{type(error).__name__}: {error}"
+                LOG.exception("%s session capture did not start; the harness will not run", self.harness)
+            self._token_capture = _masked(f"capture did not start: {reason}")
+            await self._abort_capture()
+            if not isinstance(error, Exception):
+                raise
+            return None
+        if self._token_capture is not None:
+            # Close ran while the capture was starting and has already recorded it as masked.
+            await self._abort_capture()
+            return None
+        self._capture_endpoint = endpoint
+        return endpoint
+
+    async def _collect_capture(self) -> None:
+        """Collect the running capture once, bounded by its collect timeout; masks instead of raising."""
+        if self.session_capture is None or self._token_capture is not None:
+            return
+        if self._capture_component is None or self._capture_endpoint is None:
+            # Never started, or still starting (start aborts it once it returns).
+            self._token_capture = _masked("capture was not running when the session closed")
+            return
+        timeout = self.session_capture.collect_timeout_seconds
+        deadline = asyncio.timeout(timeout)
+        try:
+            async with deadline:
+                self._token_capture = await self._capture_component.collect(self.sandbox)
+            return
+        except TimeoutError as error:
+            if not deadline.expired():
+                LOG.exception("Collecting the %s session capture failed", self.harness)
+                reason = f"capture collection failed: {type(error).__name__}: {error}"
+            else:
+                LOG.error("Collecting the %s session capture exceeded %ss", self.harness, timeout)
+                reason = f"capture collection exceeded {timeout}s"
+        except asyncio.CancelledError:
+            self._token_capture = _masked("capture collection was cancelled")
+            await self._abort_capture()
+            raise
+        except Exception as error:
+            LOG.exception("Collecting the %s session capture failed", self.harness)
+            reason = f"capture collection failed: {type(error).__name__}: {error}"
+        self._token_capture = _masked(reason)
+        await self._abort_capture()
+
+    async def _abort_capture(self) -> None:
+        """Abort the capture component, bounded and shielded so a cancelled caller cannot interrupt it."""
+        component, config = self._capture_component, self.session_capture
+        if component is None or config is None:
+            return
+
+        async def abort() -> None:
+            try:
+                async with asyncio.timeout(config.collect_timeout_seconds):
+                    await component.abort(self.sandbox)
+            except Exception:
+                LOG.exception("Aborting the %s session capture failed", self.harness)
+
+        await asyncio.shield(asyncio.create_task(abort()))
 
     async def read_output_log(self) -> str:
         """Read combined supervisor/harness diagnostics without masking the original failure."""
@@ -126,6 +227,8 @@ class SandboxSession[Artifacts]:
         """
         if self.closing or self._stage_task is not None:
             raise RuntimeError(f"{self.harness} sandbox session is closing or already activated")
+        if self.session_capture is not None and self._capture_endpoint is None:
+            raise RuntimeError(f"{self.harness} sandbox session capture is not running; the harness must not run")
         # Register both hooks before yielding, so close can fence preparation too.
         self._collect = collect
         self._stage_task = asyncio.create_task(self._stage(stage_activation))
@@ -236,11 +339,14 @@ class SandboxSession[Artifacts]:
             await self._finish(timeout=timeout)
         except Exception:
             if not self.owns_sandbox:
+                # The harness may still be calling the capture; a retried close collects once cleanup is confirmed.
                 raise
             # Container teardown remains the authority if graceful cleanup is unavailable.
             LOG.exception("%s graceful cleanup failed; stopping owned sandbox", self.harness)
             if not self._capture_attempted:
                 self.capture_error = RuntimeError(f"{self.harness} artifact capture unavailable during forced stop")
+        # The harness has stopped, or the owned sandbox is about to; the capture must be collected before release.
+        await self._collect_capture()
         if self.owns_sandbox:
             if not self.sandbox_stopped:
                 async with asyncio.timeout(timeout):
@@ -257,3 +363,7 @@ class SandboxSession[Artifacts]:
                     harness=self.harness,
                 )
                 await self.sandbox.disconnect()
+
+
+def _masked(reason: str) -> TokenCapture:
+    return TokenCapture(masked=True, mask_reason=reason)
