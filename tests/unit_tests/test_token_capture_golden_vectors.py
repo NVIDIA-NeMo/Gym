@@ -9,6 +9,8 @@ When an intentional encoding change alters a value, update the corresponding fin
 Do not regenerate the vectors to hide an unintended change.
 """
 
+import pytest
+
 from nemo_gym.token_id_capture.fingerprint import (
     assistant_fingerprint,
     canonicalize_tool_arguments,
@@ -111,6 +113,12 @@ VECTORS = {
             "expected": '{"n":1.5,"s":"caf\u00e9 \\"quoted\\""}',
         },
         "none": {"input": None, "expected": ""},
+        # Valid JSON that the fast encoder refuses (integers beyond the
+        # 64-bit range); a kernel task's tool arguments carry such masks.
+        "beyond_64_bit": {
+            "input": '{"mask": 340282366920938463463374607431768211455, "n": 1}',
+            "expected": '{"mask":340282366920938463463374607431768211455,"n":1}',
+        },
     },
     "compute_digest": {
         "empty": {
@@ -160,3 +168,22 @@ def test_tool_argument_canonicalization_vectors():
 def test_compute_digest_vectors():
     for name, vector in VECTORS["compute_digest"].items():
         assert compute_digest(_digest_input(vector["input"])) == vector["expected"], name
+
+
+@pytest.mark.parametrize("value", [{1: "x"}, {"nested": [{1: "x"}]}, {"large": 2**128, "bad": float("nan")}])
+def test_json_fallback_rejects_invalid_json(value):
+    with pytest.raises(ValueError, match="unsupported prompt content"):
+        canonicalize_tool_arguments(value)
+
+
+def test_large_nested_tool_arguments_agree_across_wire_shapes():
+    value = {"nested": [{"mask": 2**128, "label": "café"}]}
+    wire = '{"nested":[{"label":"café","mask":340282366920938463463374607431768211456}]}'
+    assert canonicalize_tool_arguments(value) == canonicalize_tool_arguments(wire) == wire
+
+
+def test_json_fallback_rejects_cycles():
+    value = {"mask": 2**128}
+    value["cycle"] = value
+    with pytest.raises(ValueError, match="unsupported prompt content"):
+        canonicalize_tool_arguments(value)

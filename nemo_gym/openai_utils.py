@@ -1385,6 +1385,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
 
+    retry_requests: bool = True
+
     default_headers: Dict[str, str] = Field(
         default_factory=dict,
         description="Extra headers to include in every request.",
@@ -1466,6 +1468,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             "_internal": self.internal,
             "_max_num_tries": self.max_num_tries,
             "_max_connection_retries": self.max_connection_retries,
+            "_retry": self.retry_requests,
         }
         if self.request_timeout_seconds is not None:
             request_kwargs["timeout"] = ClientTimeout(
@@ -1477,6 +1480,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
         if self._permanent_trip is not None:
             self._raise_permanent_error()
+        if not self.retry_requests:
+            return await request(**request_kwargs)
+
         max_num_tries = self.max_num_tries or self.max_http_attempts
         tries = 0
         while tries < max_num_tries:

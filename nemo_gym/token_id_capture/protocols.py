@@ -42,6 +42,7 @@ That closes the window where the final call's entry is lost without a trace.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Protocol, runtime_checkable
 
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
@@ -59,6 +60,12 @@ class TokenCaptureFrozenError(RuntimeError):
     The freeze already judged completeness from the durable intent ledger.
     A post-freeze mark would mutate the consumed snapshot and break its retirement.
     """
+
+
+class ParentSelection(Enum):
+    """Distinguish an omitted candidate hint from no accepted predecessor."""
+
+    INFER = auto()
 
 
 @dataclass(frozen=True)
