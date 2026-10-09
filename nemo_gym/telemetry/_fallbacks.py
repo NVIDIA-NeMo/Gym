@@ -15,8 +15,7 @@
 """The single import point for nemo-lens instrumentation primitives.
 
 Every instrumentation site in ``nemo_gym`` imports ``managed_span`` / ``span_cm`` /
-``trace_fn`` / ``is_span_group_enabled`` / ``safe_set_span_attributes`` /
-``span_attributes`` from here, never
+``trace_fn`` / ``is_span_group_enabled`` / ``safe_set_span_attributes`` from here, never
 from ``nemo.lens`` directly. This module resolves them once:
 
 * nemo-lens installed -> the **real** implementations from ``nemo.lens.helpers`` and
@@ -40,7 +39,6 @@ try:
     from nemo.lens.helpers import (  # noqa: F401
         managed_span,
         safe_set_span_attributes,
-        span_attributes,
         span_cm,
         trace_fn,
     )
@@ -68,11 +66,6 @@ except ImportError:  # pragma: no cover - covered by test_fallbacks.py via a stu
     @contextmanager
     def span_cm(name, tracer=None, record_exception=True, **attributes):
         """No-op context manager — yields None."""
-        yield None
-
-    @contextmanager
-    def span_attributes(attributes):
-        """No-op attribute scope."""
         yield None
 
     def is_span_group_enabled(group):

@@ -30,12 +30,13 @@ from tests.unit_tests.telemetry.conftest import import_without_lens
 #: Every name Gym's shim is required to provide. Adding a name to
 #: ``nemo/lens/fallbacks.py`` without adding it here fails ``test_shim_covers_every_lens_fallback``.
 EXPECTED_NAMES = frozenset(
-    {"trace_fn", "managed_span", "span_cm", "span_attributes", "is_span_group_enabled", "safe_set_span_attributes"}
+    {"trace_fn", "managed_span", "span_cm", "is_span_group_enabled", "safe_set_span_attributes"}
 )
 
 #: Lens fallbacks Gym deliberately does not mirror. ``SpanRegistry`` is only touched by
 #: ``nemo_gym.telemetry.span_groups``, which skips registration when lens is absent.
-NOT_MIRRORED = frozenset({"SpanRegistry"})
+#: ``span_attributes`` has no Gym call site yet; mirror it when one is added.
+NOT_MIRRORED = frozenset({"SpanRegistry", "span_attributes"})
 
 
 def signature_map(module, names):
