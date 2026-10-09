@@ -685,21 +685,24 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         session_key = request.session[SESSION_ID_KEY]
         self._session_sandboxes[session_key] = sandbox
 
-        response, metrics = await self._execute(request, body.responses_create_params, sandbox)
-
-        verification = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=body.model_dump() | {"response": response.model_dump()},
-            cookies=cookies,
-        )
-        await raise_for_status(verification)
-
-        self._session_sandboxes.pop(session_key)
+        # Any failure before grading (for example terminal setup) must still release the sandbox, because
+        # /verify, which normally stops it, never runs. The exception still propagates to the caller.
         try:
-            await sandbox.stop()
-        except:
-            print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+            response, metrics = await self._execute(request, body.responses_create_params, sandbox)
+
+            verification = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=body.model_dump() | {"response": response.model_dump()},
+                cookies=cookies,
+            )
+            await raise_for_status(verification)
+        finally:
+            self._session_sandboxes.pop(session_key, None)
+            try:
+                await sandbox.stop()
+            except Exception:
+                print("Failed to stop sandbox", format_exc(), file=sys.stderr)
 
         result = await get_response_json(verification)
         result.update(metrics)
