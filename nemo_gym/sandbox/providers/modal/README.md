@@ -50,8 +50,13 @@ owns the sandboxes and defaults to `nemo-gym-sandboxes`.
 | `resources.disk_gib` | Unsupported by the Modal Sandbox create API; warns, or raises with `create.strict_resources`. |
 | `ports` | Exposed with Modal TLS termination by default; resolved through `sandbox.endpoint(port)`. |
 
-CPU and memory values are Modal resource requests rather than hard usage caps. Configure limits
-outside this provider if the workload needs a stricter ceiling.
+CPU and memory values are scalar Modal resource requests, not hard usage caps. Modal supports
+request/limit pairs, but this provider does not yet expose them; workloads requiring enforced
+per-sandbox CPU or memory limits need that capability added before using this provider.
+
+When `SandboxSpec.entrypoint` is omitted, the provider clears the registry image's ENTRYPOINT
+before supplying its POSIX keepalive command. An explicit `SandboxSpec.entrypoint` retains the
+image ENTRYPOINT and replaces its CMD, following Modal's command semantics.
 
 ## Provider Options
 
@@ -77,12 +82,14 @@ The provider does not add retries to create or exec requests: a new request coul
 second sandbox or repeat a side effect. The Modal SDK may retry transient create failures
 internally using the same request idempotency key. Provider retries are limited to recognized
 transient failures on idempotent control-plane operations such as reconnecting, resolving
-tunnels, and cleanup.
+tunnels, and cleanup. `status()` polls once and returns unknown on transient failures.
 
 `ready_timeout_s` covers App lookup, image preparation/pull, scheduling, and the readiness probe.
 It overrides `probe.deadline_s` (180 seconds by default). `probe.command: null` disables only
 the exec probe. A failed probe reports the last completed attempt's stdout, stderr, and return
-code. Invalid exec configuration fails immediately instead of being polled.
+code. Invalid exec configuration and sandbox errors confirmed stopped by a status poll fail
+immediately. Running or unknown sandboxes may retry transient probe failures. With
+`probe.deadline_s: null`, the first failed probe raises rather than polling indefinitely.
 
 Failed or cancelled creation attempts cleanup before returning. Cleanup can extend the readiness
 deadline: each close attempt is bounded by `operations.close_timeout_s` (60 seconds by default).
@@ -91,26 +98,37 @@ id and terminate it. If no id arrives in time, it cancels the local request and 
 a remote allocation may still exist and its TTL is the final cleanup backstop. The TTL also
 protects against the client process being killed; it does not replace normal `stop()` calls.
 
-Command deadlines return `SandboxExecResult(error_type="timeout", return_code=125)`. A sandbox
-that disappears, rejects exec, or loses its client returns `error_type="sandbox"` with code 125.
-Both retain captured stdout and stderr. Ordinary nonzero and signal exits remain process
-results. Output is decoded with UTF-8 replacement. Exec closes and drains stdin immediately,
-so commands that read stdin receive EOF.
+SDK timeout exceptions and the SDK's `-1` exit sentinel return
+`SandboxExecResult(error_type="timeout", return_code=125)`. Worker-side deadlines can instead
+surface as signal exits (for example, 137). The provider classifies signal-range exit codes
+129–192 as timeouts when dispatch-to-wait-completion time meets the timeout passed to Modal
+(rounded up to whole seconds). This is a heuristic: a coincident explicit exit, OOM, unrelated
+signal, or delayed dispatch can be indistinguishable from a deadline. Live validation of this
+worker-timeout path is still pending. Early signals, signals without a deadline, and ordinary
+nonzero exits retain their process result. Slow output draining does not affect classification.
+
+A sandbox that disappears, rejects exec, or loses its client/transport returns
+`error_type="sandbox"` with code 125, without replaying the command. Both error types retain
+captured stdout and stderr, decoded with UTF-8 replacement. Exec sends EOF and drains stdin
+concurrently with output and process waiting, so stdin readers can finish. Expected stdin-close
+errors after confirmed process exit do not replace the exit result.
 
 Modal limits the combined exec argv to 65,536 characters, including the shell wrapper and any
 user rewrite. An oversized command returns a sandbox error before dispatch; upload a script
 and execute its path for large heredocs or generated programs.
 
-Modal has no public per-exec kill API. **Client-side cancellation destroys the sandbox**, including
-cancellation from `asyncio.wait_for` or `asyncio.timeout`. A verifier cannot then download logs
-or other diagnostics from that sandbox. Use exec's `timeout_s` when the caller needs to retain
-the sandbox and its files after a command deadline. The provider retains this cleanup policy to
-prevent cancelled commands from mutating later evaluation steps.
+Modal has no public per-exec kill API. Client cancellation (including `asyncio.timeout`) and
+interrupted file transfers attempt termination only for handles created by this provider.
+Handles obtained with `connect()` are borrowed: interruption logs a warning and preserves the
+sandbox so its owner can collect diagnostics and run verification before stopping it. A command
+on a borrowed handle may continue until its exec timeout; file writes may also remain in flight.
+Use an explicit exec timeout and let the owner coordinate cleanup before reusing the sandbox.
+On an owned handle, cancellation can remove logs; use exec's `timeout_s` to retain the sandbox
+and its files after a command deadline. Cleanup failures preserve the original interruption.
 
-File operations use Modal's streaming filesystem API. A cancelled or timed-out transfer also
-closes the sandbox. Missing remote files become `FileNotFoundError`; other SDK filesystem errors
-are preserved. Cleanup failures are logged without replacing the original cancellation or
-transfer timeout.
+
+File operations use Modal's streaming filesystem API. Reads have the SDK's 5 GB limit. Missing
+remote files become `FileNotFoundError`; other SDK filesystem errors are preserved.
 
 `close()` waits for remote termination and detaches the SDK connection within its cleanup
 budget. The handle is retained if cleanup fails so it can be retried. Serialized handles

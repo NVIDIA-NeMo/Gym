@@ -42,7 +42,8 @@ Two things are deliberately explicit rather than silent:
 
 **Keep-alive.** With no ``entrypoint`` the sandbox runs a POSIX-shell keep-alive
 loop so that ``exec`` has a live container to attach to, exactly like the Docker
-provider. Modal's own ``timeout`` still ends the sandbox at ``ttl_s``.
+provider, clearing the image ENTRYPOINT first. Modal's own ``timeout`` still ends
+the sandbox at ``ttl_s``.
 
 **Readiness.** ``create()`` returns only after a configurable exec probe passes,
 so ``upload_file``/``exec`` never race the container start. Failed or cancelled
@@ -62,6 +63,7 @@ import shlex
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from time import monotonic
 from typing import Any, TypeVar
 
 from nemo_gym.sandbox.providers.base import (
@@ -102,6 +104,7 @@ _PORT_MODES = ("unencrypted", "encrypted", "h2")
 # Modal 1.5.5 catches ExecTimeoutError in wait() and returns -1. The provider
 # also accepts a future SDK that raises ExecTimeoutError directly.
 _MODAL_EXEC_SENTINEL_RC = -1
+SANDBOX_RUNTIME_RETURN_CODE = 125
 
 
 class ModalCreateError(SandboxCreateError):
@@ -145,10 +148,17 @@ def _is_finite_number(value: Any) -> bool:
     )
 
 
-def _validate_optional_number(name: str, value: Any, *, positive: bool) -> None:
+def _validate_optional_number(name: str, value: Any, *, positive: bool, allow_none: bool = True) -> None:
     operator = "> 0" if positive else ">= 0"
-    if value is not None and (not _is_finite_number(value) or (value <= 0 if positive else value < 0)):
+    if value is None and allow_none:
+        return
+    if not _is_finite_number(value) or (value <= 0 if positive else value < 0):
         raise ValueError(f"{name} must be {operator}")
+
+
+def _validate_bool(name: str, value: Any) -> None:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
 
 
 def _validate_nonnegative_int(name: str, value: Any) -> None:
@@ -201,6 +211,7 @@ class ModalConnectionConfig:
     create_app_if_missing: bool = True
 
     def __post_init__(self) -> None:
+        _validate_bool("connection.create_app_if_missing", self.create_app_if_missing)
         if not isinstance(self.app_name, str) or not self.app_name.strip():
             raise ValueError("connection.app_name must be a non-empty string")
 
@@ -238,6 +249,8 @@ class ModalCreateConfig:
     default_gpu_type: str = "any"
 
     def __post_init__(self) -> None:
+        _validate_bool("create.block_network", self.block_network)
+        _validate_bool("create.strict_resources", self.strict_resources)
         _validate_optional_number("create.timeout_s", self.timeout_s, positive=True)
         _validate_optional_number("create.idle_timeout_s", self.idle_timeout_s, positive=True)
         if (
@@ -275,10 +288,10 @@ class ModalProbeConfig:
     def __post_init__(self) -> None:
         if self.command is not None and (not isinstance(self.command, str) or not self.command.strip()):
             raise ValueError("probe.command must be a non-empty string or null")
-        _validate_optional_number("probe.timeout_s", self.timeout_s, positive=True)
+        _validate_optional_number("probe.timeout_s", self.timeout_s, positive=True, allow_none=False)
         _validate_optional_number("probe.deadline_s", self.deadline_s, positive=True)
         _validate_positive_int("probe.stable_count", self.stable_count)
-        _validate_optional_number("probe.stable_delay_s", self.stable_delay_s, positive=False)
+        _validate_optional_number("probe.stable_delay_s", self.stable_delay_s, positive=False, allow_none=False)
 
 
 @dataclass(frozen=True)
@@ -303,6 +316,7 @@ class ModalExecConfig:
             or not all(isinstance(p, str) and p.strip() for p in self.shell)
         ):
             raise ValueError("exec.shell must be a non-empty list of strings")
+        _validate_bool("exec.allow_user_rewrite", self.allow_user_rewrite)
         _validate_exec_user(self.user, allow_user_rewrite=self.allow_user_rewrite)
 
 
@@ -329,10 +343,14 @@ class ModalOperationConfig:
 
     def __post_init__(self) -> None:
         _validate_nonnegative_int("operations.retries", self.retries)
-        _validate_optional_number("operations.retry_delay_s", self.retry_delay_s, positive=False)
-        _validate_optional_number("operations.retry_max_delay_s", self.retry_max_delay_s, positive=False)
-        _validate_optional_number("operations.tunnel_timeout_s", self.tunnel_timeout_s, positive=True)
-        _validate_optional_number("operations.close_timeout_s", self.close_timeout_s, positive=True)
+        _validate_optional_number("operations.retry_delay_s", self.retry_delay_s, positive=False, allow_none=False)
+        _validate_optional_number(
+            "operations.retry_max_delay_s", self.retry_max_delay_s, positive=False, allow_none=False
+        )
+        _validate_optional_number(
+            "operations.tunnel_timeout_s", self.tunnel_timeout_s, positive=True, allow_none=False
+        )
+        _validate_optional_number("operations.close_timeout_s", self.close_timeout_s, positive=True, allow_none=False)
 
 
 # ----------------------------------------------------------------------------
@@ -349,6 +367,7 @@ class _ModalSandbox:
     declared_ports: tuple[int, ...]
     app_name: str
     port_mode: str = "encrypted"
+    owns_sandbox: bool = True
 
 
 # ----------------------------------------------------------------------------
@@ -427,7 +446,17 @@ class ModalProvider:
             ),
             "exec_timeout": pick("ExecTimeoutError"),
             "sandbox_gone": pick("SandboxTimeoutError", "SandboxTerminatedError"),
-            "exec_sandbox": pick("NotFoundError", "ConflictError", "ClientClosed", "InvalidError"),
+            "exec_sandbox": pick(
+                "NotFoundError",
+                "ConflictError",
+                "ClientClosed",
+                "InvalidError",
+                "ConnectionError",
+                "InternalError",
+                "ServiceError",
+            )
+            + (ConnectionError,),
+            "stdin_closed": pick("ConflictError", "NotFoundError"),
             "retryable": pick("ConnectionError", "InternalError", "ServiceError"),
         }
 
@@ -662,6 +691,8 @@ class ModalProvider:
                 # All local validation precedes App lookup, which can allocate an App.
                 kwargs["app"] = await self._get_app()
                 kwargs["image"] = self._build_image(modal, spec.image, image_secret)
+                if not spec.entrypoint:
+                    kwargs["image"] = kwargs["image"].entrypoint([])
                 if secret_names:
                     kwargs["secrets"] = [self._secret(modal, n) for n in secret_names]
                 if volumes:
@@ -714,6 +745,12 @@ class ModalProvider:
             )
 
     async def _cleanup_after_error(self, handle: SandboxHandle) -> None:
+        if isinstance(handle.raw, _ModalSandbox) and not handle.raw.owns_sandbox:
+            LOGGER.warning(
+                "Leaving borrowed Modal sandbox %s alive after interruption; its owner retains cleanup responsibility",
+                handle.sandbox_id,
+            )
+            return
         try:
             await self.close(handle)
         except Exception as exc:  # noqa: BLE001 - preserve the original operation error
@@ -757,6 +794,10 @@ class ModalProvider:
                 f"return_code={result.return_code}, stdout={(result.stdout or '').strip()!r}, "
                 f"stderr={(result.stderr or '').strip()!r}"
             )
+            if result.error_type == "sandbox" and await self.status(handle) == SandboxStatus.STOPPED:
+                raise ModalCreateVerificationError(
+                    f"modal sandbox {handle.sandbox_id!r} stopped during readiness probe: {detail[0]}"
+                )
             if passed:
                 consecutive += 1
                 if consecutive >= probe.stable_count:
@@ -784,19 +825,31 @@ class ModalProvider:
 
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
         """Rebuild a live handle from ``Sandbox.from_id``."""
+        if not isinstance(descriptor, Mapping):
+            raise TypeError("modal descriptor must be a mapping")
+        sandbox_id = descriptor.get("sandbox_id")
+        if not isinstance(sandbox_id, str) or not sandbox_id.strip():
+            raise ValueError("modal descriptor sandbox_id must be a non-empty string")
+        port_mode = descriptor.get("port_mode", self._create.port_mode)
+        if port_mode not in _PORT_MODES:
+            raise ValueError(f"modal descriptor port_mode must be one of {', '.join(_PORT_MODES)}")
+        ports = descriptor.get("ports", ())
+        if not isinstance(ports, (list, tuple)) or any(
+            type(port) is not int or not 1 <= port <= 65535 for port in ports
+        ):
+            raise ValueError("modal descriptor ports must be a list of integers in 1..65535")
         modal = _require_modal()
-        sandbox_id = str(descriptor["sandbox_id"])
         sandbox = await self._with_retries(lambda: modal.Sandbox.from_id.aio(sandbox_id), operation="from_id")
-        ports = tuple(int(p) for p in descriptor.get("ports", ()) or ())
         return SandboxHandle(
             sandbox_id=sandbox_id,
             provider_name=self.name,
             raw=_ModalSandbox(
                 sandbox=sandbox,
                 image=descriptor.get("image"),
-                declared_ports=ports,
+                declared_ports=tuple(ports),
                 app_name=self._connection.app_name,
-                port_mode=descriptor.get("port_mode", self._create.port_mode),
+                port_mode=port_mode,
+                owns_sandbox=False,
             ),
         )
 
@@ -874,7 +927,7 @@ class ModalProvider:
             return SandboxExecResult(
                 stdout="",
                 stderr="Modal exec argv exceeds 65,536 characters; upload a script and execute its path",
-                return_code=125,
+                return_code=SANDBOX_RUNTIME_RETURN_CODE,
                 error_type="sandbox",
             )
 
@@ -886,22 +939,46 @@ class ModalProvider:
 
         error_type = None
         error_detail = None
+        wait_elapsed = 0.0
+        started = monotonic()
         try:
             process = await sandbox.exec.aio(*argv, **kwargs)
             # The provider has no stdin input parameter. Send EOF so commands
             # such as cat/read do not wait until their exec deadline.
             process.stdin.write_eof()
+
+            async def wait_for_exit() -> int:
+                nonlocal wait_elapsed
+                code = await process.wait.aio()
+                # Capture completion before stream draining can add unrelated delay.
+                wait_elapsed = monotonic() - started
+                return code
+
+            wait_task = asyncio.create_task(wait_for_exit())
+
+            async def drain_stdin() -> None:
+                try:
+                    await process.stdin.drain.aio()
+                except types["stdin_closed"]:
+                    # A short process may exit before EOF is acknowledged.
+                    if wait_task.done() and not wait_task.cancelled() and wait_task.exception() is None:
+                        return
+                    if await process.poll.aio() is None:
+                        raise
+
             tasks = [
-                asyncio.create_task(coro)
-                for coro in (
-                    collect(process.stdout, output[0]),
-                    collect(process.stderr, output[1]),
-                    process.wait.aio(),
-                    process.stdin.drain.aio(),
-                )
+                wait_task,
+                *[
+                    asyncio.create_task(coro)
+                    for coro in (
+                        collect(process.stdout, output[0]),
+                        collect(process.stderr, output[1]),
+                        drain_stdin(),
+                    )
+                ],
             ]
             try:
-                _, _, return_code, _ = await asyncio.gather(*tasks)
+                return_code, _, _, _ = await asyncio.gather(*tasks)
             finally:
                 for task in tasks:
                     if not task.done():
@@ -913,12 +990,17 @@ class ModalProvider:
             await asyncio.shield(self._cleanup_after_error(handle))
             raise
         except types["exec_timeout"] as exc:
-            return_code, error_type, error_detail = 125, "timeout", str(exc)
+            return_code, error_type, error_detail = SANDBOX_RUNTIME_RETURN_CODE, "timeout", str(exc)
         except types["exec_sandbox"] + types["sandbox_gone"] as exc:
-            return_code, error_type, error_detail = 125, "sandbox", str(exc)
+            return_code, error_type, error_detail = SANDBOX_RUNTIME_RETURN_CODE, "sandbox", str(exc)
 
-        if return_code == _MODAL_EXEC_SENTINEL_RC:
-            return_code, error_type = 125, "timeout"
+        # Worker-side deadlines can beat the SDK's later client deadline and
+        # surface as signal exits (typically 137). This is necessarily heuristic:
+        # a coincident explicit exit or unrelated signal is indistinguishable.
+        if return_code == _MODAL_EXEC_SENTINEL_RC or (
+            modal_timeout is not None and 128 < return_code <= 192 and wait_elapsed >= modal_timeout
+        ):
+            return_code, error_type = SANDBOX_RUNTIME_RETURN_CODE, "timeout"
         stdout, stderr = (bytes(part).decode("utf-8", "replace") for part in output)
         if error_detail:
             stderr = f"{stderr}\n{error_detail}" if stderr else error_detail
@@ -932,7 +1014,7 @@ class ModalProvider:
                 return await operation()
         except (TimeoutError, asyncio.CancelledError):
             # The SDK currently cannot kill an individual interrupted file writer.
-            # Discard this sandbox so it cannot keep modifying a later evaluation.
+            # Owned sandboxes are discarded; borrowed handles retain owner diagnostics.
             await asyncio.shield(self._cleanup_after_error(handle))
             raise
 
