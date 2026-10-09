@@ -21,6 +21,10 @@ echo "Installing hermes-agent ($HERMES_SPEC)"
 "$DEPS_DIR/bin/python3" -m pip install --force-reinstall --no-deps "$HERMES_SPEC"
 "$DEPS_DIR/bin/python3" -m pip install "$HERMES_SPEC"
 
-"$DEPS_DIR/bin/python3" -c "import model_tools; from run_agent import AIAgent; print('hermes-agent OK')"
+# ``python -c`` normally prepends the caller's working directory to sys.path.
+# NeMo RL has its own top-level ``tools`` package, which can shadow Hermes'
+# ``tools.registry`` when Gym is launched from the RL checkout.  Safe-path mode
+# makes this health check resolve imports only from the portable runtime.
+"$DEPS_DIR/bin/python3" -P -c "import model_tools; from run_agent import AIAgent; print('hermes-agent OK')"
 
 echo "hermes_agent deps ready at $DEPS_DIR"
