@@ -1,0 +1,93 @@
+[
+  {
+    "type": "function",
+    "name": "finish",
+    "description": "Signal task completion with a reason. Use when the task is finished or cannot proceed further. Note that you will need a separate turn to finish.",
+    "parameters": {
+      "description": "Same shape as stirrup.tools.finish.FinishParams, with ``paths`` coercion.",
+      "properties": {
+        "reason": {
+          "description": "Reason for finishing.",
+          "title": "Reason",
+          "type": "string"
+        },
+        "paths": {
+          "description": "List of file paths created or modified. Do not include directories, only files.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Paths",
+          "type": "array"
+        }
+      },
+      "required": [
+        "reason",
+        "paths"
+      ],
+      "title": "CoercingFinishParams",
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "type": "function",
+    "name": "abandon_task_finish",
+    "description": "Signal that you do not believe the task can be completed, with a brief reason, instead of submitting files. Use only when required inputs are missing, a hard dependency is unavailable, or the request is incoherent. Do not use it to escape difficulty. Note that you will need a separate turn to finish.",
+    "parameters": {
+      "description": "Early-exit finish tool: abandon the task without submitting deliverables.",
+      "properties": {
+        "reason": {
+          "description": "Brief reason the task cannot be completed.",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "title": "AbandonFinishParams",
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "type": "function",
+    "name": "web_search",
+    "description": "Search the web using Tavily. Returns top results with content snippets.",
+    "parameters": {
+      "properties": {
+        "query": {
+          "description": "Natural language search query.",
+          "title": "Query",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "_SearchParams",
+      "type": "object"
+    },
+    "strict": null
+  },
+  {
+    "type": "function",
+    "name": "fetch_web_page",
+    "description": "Fetch and extract the main content from a web page as markdown.",
+    "parameters": {
+      "properties": {
+        "url": {
+          "description": "Full HTTP or HTTPS URL of the web page to fetch.",
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "_FetchParams",
+      "type": "object"
+    },
+    "strict": null
+  }
+]

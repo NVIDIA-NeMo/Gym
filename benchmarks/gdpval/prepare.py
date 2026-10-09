@@ -30,6 +30,8 @@ from pathlib import Path
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "gdpval_benchmark.jsonl"
+# The task tools the GDPVal resources server serves.
+TOOLS_FPATH = BENCHMARK_DIR / "tools.json"
 
 HF_DATASET = "openai/gdpval"
 HF_SPLIT = "train"
@@ -48,6 +50,7 @@ def prepare() -> Path:
     # from the env, and GDPVal's bucket aggressively rate-limits anonymous IPs.
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     ds = load_dataset(HF_DATASET, split=HF_SPLIT, token=hf_token)
+    tools = json.loads(TOOLS_FPATH.read_text())
 
     with OUTPUT_FPATH.open("w") as f:
         for row in ds:
@@ -61,6 +64,7 @@ def prepare() -> Path:
                 "reference_file_urls": row.get("reference_file_urls", []),
                 "rubric_json": row.get("rubric_json", {}),
                 "rubric_pretty": row.get("rubric_pretty", ""),
+                "responses_create_params": {"tools": tools},
             }
             f.write(json.dumps(record) + "\n")
 
