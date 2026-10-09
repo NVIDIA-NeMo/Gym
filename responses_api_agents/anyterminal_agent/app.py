@@ -80,6 +80,36 @@ def _read_task_meta(task_dir: Path) -> dict:
     return result
 
 
+def _ensure_agent_deps_archive(agent_deps_dir: Path) -> Path:
+    """Create the remote-sandbox runtime archive without cross-server temp-file races."""
+
+    archive_dir = CACHE_DIR / "anyterminal_agent" / "archives"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    agent_deps_archive = archive_dir / f"{agent_deps_dir.name}.tar.gz"
+    sentinel = agent_deps_dir / ".installed"
+    if agent_deps_archive.exists() and agent_deps_archive.stat().st_mtime >= sentinel.stat().st_mtime:
+        return agent_deps_archive
+
+    # Multiple AnyTerminal servers can share one harness runtime (for example,
+    # the neutral fan-out server and the explicitly configured Hermes server).
+    # Give every builder its own temporary file; publishing with replace() then
+    # remains atomic even when those servers start concurrently.
+    with tempfile.NamedTemporaryFile(
+        dir=archive_dir,
+        prefix=f".{agent_deps_dir.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as temporary_file:
+        temporary = Path(temporary_file.name)
+    try:
+        with tarfile.open(temporary, "w:gz", compresslevel=1) as archive:
+            archive.add(agent_deps_dir, arcname=".")
+        temporary.replace(agent_deps_archive)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return agent_deps_archive
+
+
 def _instruction_from_input(body: NeMoGymResponseCreateParamsNonStreaming) -> str:
     """Extract the task prompt from the Responses-API input messages.
 
@@ -826,15 +856,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             if not agent_deps_archive.is_file():
                 raise ValueError(f"agent runtime archive not found: {agent_deps_archive}")
         if remote_provider and runtime_source == "auto":
-            archive_dir = CACHE_DIR / "anyterminal_agent" / "archives"
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            agent_deps_archive = archive_dir / f"{agent_deps_dir.name}.tar.gz"
-            sentinel = agent_deps_dir / ".installed"
-            if not agent_deps_archive.exists() or agent_deps_archive.stat().st_mtime < sentinel.stat().st_mtime:
-                temporary = agent_deps_archive.with_suffix(".tmp")
-                with tarfile.open(temporary, "w:gz", compresslevel=1) as archive:
-                    archive.add(agent_deps_dir, arcname=".")
-                temporary.replace(agent_deps_archive)
+            agent_deps_archive = _ensure_agent_deps_archive(agent_deps_dir)
         results_dir = RESULTS_DIR / "anyterminal_agent"
         results_dir.mkdir(parents=True, exist_ok=True)
         base_results_dir = self.config.results_dir
