@@ -46,11 +46,12 @@ gym eval run --no-serve \
   -o rollouts.jsonl --limit 3 --concurrency 3
 ```
 
-The collector calls Environment Server `/run`: seed Resources, seed the agent, call its
-rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
+Environment Server is the default entry point for rollout execution. With the single-agent
+session-based configuration, the collector calls Environment Server `/run`: seed Resources,
+seed the agent, call its rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
 flat rows use `single_agent_turn_legacy`, an input/output adapter over `single_agent_turn`.
-This is the same composition for SWE-bench Pro and Terminal-Bench 2.1: Resources owns the
-task sandbox, the harness borrows it, and EnvironmentServer owns the episode sequence.
+This composition is benchmark-independent: Environment Server owns the episode sequence.
+For tasks with a Resources-owned sandbox, the harness borrows that sandbox.
 The adapter converts row formats; execution uses Resources/Agent session APIs. Collection
 does not call the agent's compatibility `/run`. No additional materializer is needed.
 Pass the same configuration to startup and `--no-serve` collection; collection does not
@@ -293,7 +294,7 @@ When the resources server exposes Gym-owned MCP tools (an `MCPResourcesServer` r
 
 ## Skills evaluation
 
-Skills are evaluated as a run-level variable, not a dataset field — point `skills.path` at a directory of [Agent Skills standard](https://agentskills.io/specification) skill directories on `gym eval run`, and the agent stages them into each request's `CODEX_HOME/skills/`, where Codex's native skill discovery picks them up:
+Skills are evaluated as a run-level variable, not a dataset field — point `skills.path` at a directory of [Agent Skills standard](https://agentskills.io/specification) skill directories on `gym eval run`, and the agent stages them into each request's `CODEX_HOME/skills/`, where Codex's built-in skill discovery picks them up:
 
 ```bash
 gym eval run --agent reasoning_gym_codex_agent \

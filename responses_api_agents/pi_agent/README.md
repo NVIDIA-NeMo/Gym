@@ -51,11 +51,12 @@ gym eval run --no-serve \
   -o rollouts.jsonl --limit 3 --concurrency 3
 ```
 
-The collector calls Environment Server `/run`: seed Resources, seed the agent, call its
-rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
+Environment Server is the default entry point for rollout execution. With the single-agent
+session-based configuration, the collector calls Environment Server `/run`: seed Resources,
+seed the agent, call its rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
 flat rows use `single_agent_turn_legacy`, an input/output adapter over `single_agent_turn`.
-This is the same composition for SWE-bench Pro and Terminal-Bench 2.1: Resources owns the
-task sandbox, the harness borrows it, and EnvironmentServer owns the episode sequence.
+This composition is benchmark-independent: Environment Server owns the episode sequence.
+For tasks with a Resources-owned sandbox, the harness borrows that sandbox.
 The adapter converts row formats; execution uses Resources/Agent session APIs. Collection
 does not call the agent's compatibility `/run`. No additional materializer is needed.
 Pass the same configuration to startup and `--no-serve` collection; collection does not
@@ -81,7 +82,7 @@ Use one agent worker, an exact `pi_version` (default **0.80.2**), and a Gym `mod
 For a Resources-owned task sandbox, supply direct `SandboxAccess` with an absolute
 task working directory. Without access, configure agent-owned creation as noted below.
 Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is required
-only for its compatibility `/run`, not native sessions.
+only for its compatibility `/run`, not agent sessions.
 
 Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with Python 3.8+,
 bash, tar/gzip, and SHA-256 utilities. Session setup uses POSIX sh to install missing Python/Bash
@@ -109,15 +110,15 @@ extra-argument, and environment overrides; those remain available on the local p
 
 ## Requests and settings
 
-Native sandbox input is one text user message, optionally preceded by a system message. Both sandbox
+Sandbox session input is one text user message, optionally preceded by a system message. Both sandbox
 and local execution combine the configured system prompt, request `instructions`, and input
 system message in that order. Sampling and chat-template settings belong on the Gym Model Server.
-Native sandbox sessions reject unsupported request controls before execution.
+Sandbox sessions reject unsupported request controls before execution.
 
 Set the agent configuration's `max_output_tokens` for a per-model-call output cap, including
 reasoning tokens. An adapter-owned Pi extension applies it as `max_tokens`, preserving any
 smaller upstream cap. Limits must be positive JavaScript-safe integers. Request-level
-`max_output_tokens` is rejected in native sessions because a total-response budget is not implemented. Model Server
+`max_output_tokens` is rejected in sandbox sessions because a total-response budget is not implemented. Model Server
 configuration must not replace the agent's cap with a larger value. Enforcement is tested with Pi 0.80.2.
 
 ## Lifecycle and ownership
@@ -204,7 +205,7 @@ and blocks verification. Cleanup is cooperative, not a security boundary against
 Local settings retain `output_token_policy` (`fixed` or `remaining_context`),
 `auto_compaction`, and an optional per-call `bash_timeout`. The dedicated
 `pi_sandboxed_agent` also uses this local adapter inside its sandbox and supplies
-`mcp_servers` for authenticated Gym tools. Native sessions continue to reject
+`mcp_servers` for authenticated Gym tools. Sandbox sessions continue to reject
 required Resources tool access rather than silently ignoring it.
 
 Calls without an agent session retain local CLI compatibility. They do not use the

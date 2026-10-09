@@ -7,12 +7,14 @@ TODO: Describe this benchmark and replace the sample data.
 
 ## Harness and benchmark contract
 
-Use the same composition as SWE-bench Pro: import an independent Resources config,
-an independent harness config, and the single-agent EnvironmentServer config.
-The EnvironmentServer binds `resources_server` and `agent_server`; the harness does
-not need a benchmark-specific runner or another combined preset.
+Environment Server is the default entry point for rollout execution. For session-based
+integrations, compose independent Resources, harness, and Environment Server configs.
+The single-agent Environment Server binds `resources_server` and `agent_server` and
+coordinates setup, execution, verification, and cleanup. The harness does not need a
+benchmark-specific runner or another combined preset. For tasks with a Resources-owned
+sandbox, the agent borrows that sandbox.
 
-| Responsibility | SWE-bench Pro and Terminal-Bench 2.1 |
+| Responsibility | Session-based task-sandbox execution |
 | --- | --- |
 | Dataset | The benchmark prepares flat JSONL with `responses_create_params` and its task fields. |
 | Collection | `single_agent_turn_legacy` adapts flat request/result rows to the shared `single_agent_turn` execution. |
@@ -23,15 +25,14 @@ not need a benchmark-specific runner or another combined preset.
 
 Here `legacy` describes only the collector's flat-row input/output contract.
 It does not select the agent's old direct `/run` path. Moving to materialized taskset
-input and `single_agent_turn` is a separate migration for both benchmarks; changing
+input and `single_agent_turn` is a separate input-format migration; changing
 only the EnvironmentServer config is insufficient.
 
 TB's `_ResourcesSessionState` is private Resources bookkeeping for request identity
 and seed/verdict replay. Its state fields reflect TB's verification needs; the public
-session protocol and sandbox ownership match SWE-Pro. Harness process execution uses
-Gym's shared `SandboxSession` and `supervisor_client` in `nemo_gym.agent_utils`,
-as in Hermes #3961; Resources
-request/verdict bookkeeping remains benchmark-owned. These are separate responsibilities.
+session protocol defines the Resources/Agent boundary. Harness process execution uses
+Gym's shared `SandboxSession` and `supervisor_client` in `nemo_gym.agent_utils`;
+Resources request/verdict bookkeeping remains benchmark-owned. These are separate responsibilities.
 
 Choose either the [Pi](#pi-in-a-task-sandbox) or [Codex](#codex-in-a-task-sandbox)
 recipe below. Each recipe provides its own `run.yaml` and `model-provider.yaml`.
@@ -73,8 +74,8 @@ terminal_bench_2_1_resources_server:
       evaluation_timeout: 300
 ```
 
-Save the independent model/provider settings as `model-provider.yaml`, as in the
-SWE-Pro recipe. The task container must be able to reach the Gym Model Server.
+Save the independent model/provider settings as `model-provider.yaml`.
+The task container must be able to reach the Gym Model Server.
 
 ```yaml
 config_paths:
@@ -170,8 +171,8 @@ terminal_bench_2_1_resources_server:
       evaluation_timeout: 300
 ```
 
-Save the independent model/provider settings as `model-provider.yaml`, as in the
-SWE-Pro recipe. The task container must be able to reach the Gym Model Server.
+Save the independent model/provider settings as `model-provider.yaml`.
+The task container must be able to reach the Gym Model Server.
 
 ```yaml
 config_paths:
@@ -190,7 +191,7 @@ policy_model:
 
 This example uses a non-reasoning Chat Completions endpoint; the Gym vLLM Model
 Server adapts it to Codex's streaming Responses API. Configure the parser flags for
-your model, or use the OpenAI Model Server for a native Responses endpoint.
+your model, or use the OpenAI Model Server with a provider that serves the Responses API directly.
 These are single-task smoke limits, not full-benchmark settings. Set the context window
 to the served model limit. Keep sampling and per-call output limits on the Gym Model
 Server; Codex task-sandbox sessions reject request-level sampling/output overrides. Put `policy_base_url`,
