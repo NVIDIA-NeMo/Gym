@@ -107,6 +107,8 @@ class EpisodeSteps:
         self.closed = False
         self._open = asyncio.Event()
         self._open.set()
+        # Set while admission is closed, for a long wait step that can stop early at a safe point.
+        self.park_requested = asyncio.Event()
 
     def _set_state(self, episode: _Episode, state: _State) -> None:
         blocked = _blocks(episode)
@@ -224,6 +226,7 @@ class EpisodeSteps:
     def close(self) -> None:
         self.closed = True
         self._open.clear()
+        self.park_requested.set()
         for episode in self._episodes.values():
             if episode.state in ("parked", "replay_step"):
                 episode.suspend_deadline()
@@ -231,6 +234,7 @@ class EpisodeSteps:
     def open(self) -> None:
         self.closed = False
         self._open.set()
+        self.park_requested.clear()
         for episode in self._episodes.values():
             episode.resume_deadline()
             episode.resume.set()
