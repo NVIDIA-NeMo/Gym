@@ -294,6 +294,23 @@ def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
     return "sandbox_not_found" in message or ("sandbox" in message and "not found" in message)
 
 
+def _execution_outcome(execution: Any) -> tuple[int, str | None, str | None]:
+    """Map a streamed SDK execution to ``(return_code, error_type, stderr_note)``.
+
+    The SDK fills in ``exit_code=0`` itself once execd sends its completion
+    event, so no exit code, no error and no completion event means the stream
+    ended before the command did (sandbox deleted mid-command, connection
+    dropped). That is not a success: the command's outcome is unknown.
+    """
+    if execution.exit_code is not None:
+        return execution.exit_code, None, None
+    if execution.error is not None:
+        return 125, "sandbox", None
+    if execution.complete is not None:
+        return 0, None, None
+    return 125, "sandbox", "Command ended without a final status: no exit code, error or completion event"
+
+
 def _label_time_limit_stop(
     result: SandboxExecResult, *, timeout_s: int | float | None, elapsed_s: float, kill_detail: str | None
 ) -> SandboxExecResult:
@@ -1737,15 +1754,10 @@ class OpenSandboxProvider:
             stderr_parts = [msg.text for msg in execution.logs.stderr]
             if execution.error is not None:
                 stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
+            return_code, error_type, note = _execution_outcome(execution)
+            if note is not None:
+                stderr_parts.append(note)
             stderr = "\n".join(stderr_parts) or None
-            error_type = None
-            if execution.exit_code is not None:
-                return_code = execution.exit_code
-            elif execution.error is not None:
-                return_code = 125
-                error_type = "sandbox"
-            else:
-                return_code = 0
 
             return _label_time_limit_stop(
                 SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type),
@@ -2027,11 +2039,9 @@ class OpenSandboxProvider:
             return SandboxExecResult(stdout, "\n".join(stderr_parts), 124, error_type="timeout")
         if execution.error is not None:
             stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
-        return_code = execution.exit_code
-        error_type = None
-        if return_code is None:
-            return_code = 125 if execution.error is not None else 0
-            error_type = "sandbox" if execution.error is not None else None
+        return_code, error_type, note = _execution_outcome(execution)
+        if note is not None:
+            stderr_parts.append(note)
         return SandboxExecResult(stdout, "\n".join(stderr_parts) or None, return_code, error_type)
 
     def _pty_http_client(self) -> Any:

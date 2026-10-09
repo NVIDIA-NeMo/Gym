@@ -990,6 +990,7 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
                 logs=SimpleNamespace(stdout=[FakeLog("stdout")], stderr=[]),
                 error=None,
                 exit_code=None,
+                complete=SimpleNamespace(execution_time_in_millis=1),
             )
 
     class FakeFiles:
@@ -1179,6 +1180,51 @@ async def test_exec_labels_commands_ended_by_their_time_limit(
         assert len(stderr_lines) == 1
     else:
         assert note in stderr_lines[1]
+
+
+@pytest.mark.parametrize(
+    ("execution", "expected"),
+    [
+        (SimpleNamespace(exit_code=3, error=None, complete=None), (3, None, None)),
+        (SimpleNamespace(exit_code=None, error=SimpleNamespace(), complete=None), (125, "sandbox", None)),
+        (SimpleNamespace(exit_code=None, error=None, complete=SimpleNamespace()), (0, None, None)),
+    ],
+    ids=["exit-code", "error-without-code", "completed"],
+)
+def test_execution_outcome_maps_sdk_results(execution: Any, expected: tuple[int, str | None, str | None]) -> None:
+    assert opensandbox_provider._execution_outcome(execution) == expected
+
+
+async def test_exec_without_final_status_is_not_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stream cut short (no exit code, error or completion event) must not read as exit 0."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    async def run(_command: str, *, opts: FakeRunCommandOpts) -> Any:
+        return SimpleNamespace(
+            logs=SimpleNamespace(stdout=[SimpleNamespace(text="partial")], stderr=[]),
+            error=None,
+            exit_code=None,
+            complete=None,
+        )
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 5}, probe={"command": None})
+    raw = SimpleNamespace(commands=SimpleNamespace(run=run))
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=raw)
+
+    result = await provider.exec(handle, "pytest", timeout_s=30)
+
+    assert result.return_code == 125
+    assert result.error_type == "sandbox"
+    assert result.stdout == "partial"
+    assert result.stderr == "Command ended without a final status: no exit code, error or completion event"
 
 
 @pytest.mark.asyncio
