@@ -44,6 +44,7 @@ def job_config(
     backend: str = "podman",
     max_turns: int | None = None,
     verifier_timeout_multiplier: float = 1.0,
+    agent_timeout_multiplier: float | None = None,
     model_timeout_ms: int | None = None,
     compaction_auto: bool | None = None,
     compaction_prune: bool | None = None,
@@ -55,7 +56,10 @@ def job_config(
     after the cap OpenCode must give a final text-only response.
     ``verifier_timeout_multiplier`` scales only the task's verifier timeout: some
     single-threaded judges need longer than their 1800 s on this hardware. The agent's
-    budget and the scores are unaffected. ``model_timeout_ms`` is OpenCode's per-call
+    budget and the scores are unaffected. ``agent_timeout_multiplier`` scales the
+    task's agent wall-clock budget (1800 s on AgenticVBench); Harbor stops OpenCode at
+    the cap and still runs the verifier on what was delivered, so training can bound
+    episode time without changing the verifier. ``model_timeout_ms`` is OpenCode's per-call
     provider timeout; Gym's model proxy replays a streamed completion only once it is
     complete, so the timeout must cover a whole 100k-token generation.
     ``compaction_auto``/``compaction_prune`` pin OpenCode's context compaction
@@ -77,6 +81,8 @@ def job_config(
         raise ValueError("Maximum agent turns must be positive")
     if verifier_timeout_multiplier < 1.0:
         raise ValueError("Verifier timeout multiplier must not shorten the task's own budget")
+    if agent_timeout_multiplier is not None and not agent_timeout_multiplier > 0:
+        raise ValueError("Agent timeout multiplier must be positive")
     if model_timeout_ms is not None and model_timeout_ms < 1:
         raise ValueError("Model call timeout must be positive")
     provider_options = {
@@ -116,6 +122,7 @@ def job_config(
         "n_concurrent_trials": 1,
         "retry": {"max_retries": 0},
         "verifier_timeout_multiplier": verifier_timeout_multiplier,
+        **({"agent_timeout_multiplier": agent_timeout_multiplier} if agent_timeout_multiplier is not None else {}),
         "environment": {
             "import_path": "responses_api_agents.agentic_vbench_agent." + environment_class,
             "delete": True,
@@ -249,6 +256,12 @@ def main() -> None:
         type=float,
         default=_env_default("AGENTIC_VBENCH_VERIFIER_TIMEOUT_MULTIPLIER", float, 1.0),
     )
+    parser.add_argument(
+        "--agent-timeout-multiplier",
+        type=float,
+        default=None,
+        help="Scale the task's agent wall-clock budget; Harbor still verifies after the cap",
+    )
     parser.add_argument("--model-timeout-ms", type=int, default=None)
     parser.add_argument("--compaction-auto", choices=("true", "false"), default=None)
     parser.add_argument("--compaction-prune", choices=("true", "false"), default=None)
@@ -291,6 +304,7 @@ def main() -> None:
             backend=args.backend,
             max_turns=args.max_turns,
             verifier_timeout_multiplier=args.verifier_timeout_multiplier,
+            agent_timeout_multiplier=args.agent_timeout_multiplier,
             model_timeout_ms=args.model_timeout_ms,
             compaction_auto=None if args.compaction_auto is None else args.compaction_auto == "true",
             compaction_prune=None if args.compaction_prune is None else args.compaction_prune == "true",

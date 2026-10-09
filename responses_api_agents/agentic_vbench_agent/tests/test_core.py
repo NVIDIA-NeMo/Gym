@@ -145,3 +145,49 @@ def test_lock_falls_back_when_the_filesystem_refuses_flock(tmp_path, monkeypatch
     with core._locked(tmp_path / "x.lock"):
         pass
     assert (tmp_path / "x.lock").exists()
+
+
+def _write_trial_record(tmp_path, record):
+    (tmp_path / "jobs/trial/repair1/result.json").write_text(json.dumps(record))
+
+
+def test_judge_crash_on_model_deliverable_scores_zero(tmp_path):
+    task = fixture_result(tmp_path, reward="", status="FAIL")
+    stdout = tmp_path / "jobs/trial/repair1/steps/solve/verifier/test-stdout.txt"
+    stdout.write_text(
+        "Traceback (most recent call last):\n"
+        '  File "/tests/judge.py", line 182, in score\n'
+        '    segments = sol.get("segments")\n'
+        "AttributeError: 'list' object has no attribute 'get'\n"
+    )
+    result = core.read_result(tmp_path, task)
+    assert result["reward"] == 0.0 and result["status"] == "VERIFIER_CRASH"
+    assert result["verifier_error"].startswith("AttributeError")
+
+
+def test_verifier_stdout_without_traceback_is_still_an_infra_failure(tmp_path):
+    task = fixture_result(tmp_path, reward="", status="FAIL")
+    (tmp_path / "jobs/trial/repair1/steps/solve/verifier/test-stdout.txt").write_text("scoring...\n")
+    with pytest.raises(RuntimeError, match="Missing native verifier"):
+        core.read_result(tmp_path, task)
+
+
+def test_agent_timeout_keeps_the_verifier_score_without_a_trajectory(tmp_path):
+    task = fixture_result(tmp_path, reward="0", trajectory=False)
+    _write_trial_record(
+        tmp_path,
+        {
+            "task_name": "repair1",
+            "exception_info": None,
+            "step_results": [{"step_name": "solve", "exception_info": {"exception_type": "AgentTimeoutError"}}],
+        },
+    )
+    result = core.read_result(tmp_path, task)
+    assert result["reward"] == 0.0 and result["status"] == "AGENT_TIMEOUT" and result["trajectory"] == {"steps": []}
+
+
+def test_missing_trajectory_without_timeout_still_rejected(tmp_path):
+    task = fixture_result(tmp_path, trajectory=False)
+    _write_trial_record(tmp_path, {"task_name": "repair1", "step_results": [{"exception_info": None}]})
+    with pytest.raises(RuntimeError, match="one model trajectory"):
+        core.read_result(tmp_path, task)

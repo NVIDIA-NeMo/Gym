@@ -121,10 +121,21 @@ def read_result(output: Path, task: dict) -> dict:
     if task_name != task["task_id"]:
         raise ValueError(f"Harbor returned a mismatched task: {task_name}")
     trial_dir = task_results[0].parent
+    agent_timed_out = _agent_timed_out(trial)
     reward_files = list(trial_dir.glob("steps/solve/verifier/reward.json"))
-    if len(reward_files) != 1:
-        raise RuntimeError(f"Missing native verifier reward: {trial_dir}")
-    reward = json.loads(reward_files[0].read_text())["reward"]
+    status = "OK"
+    verifier_error = None
+    if len(reward_files) == 1:
+        reward = json.loads(reward_files[0].read_text())["reward"]
+    else:
+        # The judge is the benchmark's own script. When it ran but died on the
+        # model's deliverable (a malformed solution.json, a truncated mp4), the
+        # model failed the task: score 0, not an infrastructure error.
+        verifier_error = judge_crash(trial_dir)
+        if verifier_error is None:
+            raise RuntimeError(f"Missing native verifier reward: {trial_dir}")
+        reward = 0.0
+        status = "VERIFIER_CRASH"
     if (
         isinstance(reward, bool)
         or not isinstance(reward, (int, float))
@@ -133,17 +144,55 @@ def read_result(output: Path, task: dict) -> dict:
     ):
         raise ValueError(f"Invalid verifier reward: {reward}")
     trajectories = list(trial_dir.glob("steps/solve/agent/trajectory.json"))
-    if len(trajectories) != 1:
-        raise RuntimeError(f"Expected one model trajectory: {trial_dir}")
-    trajectory = json.loads(trajectories[0].read_text())
-    if not any(step.get("source") == "agent" for step in trajectory.get("steps", [])):
-        raise RuntimeError("No model trajectory: cannot count this episode as a model outcome")
+    if agent_timed_out and not trajectories:
+        # Harbor killed OpenCode at the agent time cap before it wrote its
+        # trajectory, then scored whatever the model had delivered. The model
+        # did act (its calls are in the capture records); the episode is a
+        # timed-out failure, not an infrastructure error.
+        trajectory = {"steps": []}
+        status = "AGENT_TIMEOUT"
+    else:
+        if len(trajectories) != 1:
+            raise RuntimeError(f"Expected one model trajectory: {trial_dir}")
+        trajectory = json.loads(trajectories[0].read_text())
+        if not any(step.get("source") == "agent" for step in trajectory.get("steps", [])):
+            raise RuntimeError("No model trajectory: cannot count this episode as a model outcome")
+        if agent_timed_out:
+            status = "AGENT_TIMEOUT"
     return {
         "reward": reward,
-        "status": "OK",
+        "status": status,
         "trajectory": trajectory,
         "artifacts": str(output),
+        "verifier_error": verifier_error,
     }
+
+
+_JUDGE_CRASH_MARKER = "Traceback (most recent call last):"
+
+
+def judge_crash(trial_dir: Path) -> str | None:
+    """Return the judge's final error line when it ran and raised, else ``None``.
+
+    Harbor leaves no reward file when the verifier script exits by exception.
+    Only an uncaught Python traceback in the verifier's own stdout counts: a
+    verifier that never ran (no stdout) or timed out is still an infrastructure
+    failure and must not be scored.
+    """
+    stdout = trial_dir / "steps/solve/verifier/test-stdout.txt"
+    if not stdout.is_file():
+        return None
+    text = stdout.read_text(errors="replace")
+    if _JUDGE_CRASH_MARKER not in text:
+        return None
+    lines = [line for line in text.rstrip().splitlines() if line.strip()]
+    return lines[-1].strip()[:500] if lines else "judge raised"
+
+
+def _agent_timed_out(trial: dict) -> bool:
+    infos = [trial.get("exception_info")]
+    infos.extend((step or {}).get("exception_info") for step in trial.get("step_results") or [])
+    return any(isinstance(info, dict) and info.get("exception_type") == "AgentTimeoutError" for info in infos)
 
 
 # --- Run-time inputs ---------------------------------------------------------------

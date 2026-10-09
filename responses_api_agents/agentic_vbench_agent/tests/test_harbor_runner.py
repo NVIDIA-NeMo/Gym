@@ -434,3 +434,10 @@ def test_compaction_and_title_knobs_reach_opencode_config() -> None:
     assert "compaction" not in default and "agent" not in default
     only_auto = make_job(compaction_auto=False)["agents"][0]["kwargs"]["opencode_config"]
     assert only_auto["compaction"] == {"auto": False}
+
+
+def test_agent_timeout_multiplier_is_optional_and_positive() -> None:
+    assert "agent_timeout_multiplier" not in make_job()
+    assert make_job(agent_timeout_multiplier=0.4)["agent_timeout_multiplier"] == 0.4
+    with pytest.raises(ValueError, match="Agent timeout multiplier"):
+        make_job(agent_timeout_multiplier=0.0)

@@ -27,6 +27,8 @@ agentic_vbench_agent:
       concurrency: ${oc.env:AGENTIC_VBENCH_CONCURRENCY,12}
       max_turns: ${oc.env:AGENTIC_VBENCH_MAX_TURNS,32}
       verifier_timeout_multiplier: ${oc.env:AGENTIC_VBENCH_VERIFIER_TIMEOUT_MULTIPLIER,3}
+      # Fraction of the task's 1800 s agent budget (0.4 = 12 min); null keeps the task's cap.
+      agent_timeout_multiplier: ${oc.env:AGENTIC_VBENCH_AGENT_TIMEOUT_MULTIPLIER,null}
       # Advertise the policy's real context so OpenCode compacts before the engine
       # overflows; the output capability is the per-call max_tokens OpenCode sends.
       model_context_tokens: ${oc.env:AGENTIC_VBENCH_CONTEXT_TOKENS,49152}

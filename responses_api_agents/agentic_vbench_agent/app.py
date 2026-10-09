@@ -78,6 +78,9 @@ class AgenticVBenchConfig(BaseResponsesAPIAgentConfig):
     concurrency: int = Field(default=12, ge=1)
     max_turns: int | None = Field(default=None, ge=1)
     verifier_timeout_multiplier: float = Field(default=3.0, ge=1.0)
+    # Bound episode wall time: Harbor stops OpenCode at task budget x multiplier and
+    # verifies what was delivered (a timed-out episode scores as the judge sees it).
+    agent_timeout_multiplier: float | None = Field(default=None, gt=0.0)
     model_context_tokens: int = Field(default=262144, gt=0)
     model_output_capability_tokens: int = Field(default=100000, gt=0)
     model_call_timeout_ms: int = Field(default=3_600_000, gt=0)
@@ -306,6 +309,8 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 "--model-timeout-ms",
                 str(self.config.model_call_timeout_ms),
             ]
+            if self.config.agent_timeout_multiplier is not None:
+                command.extend(["--agent-timeout-multiplier", str(self.config.agent_timeout_multiplier)])
             if self.config.judge_protocol:
                 command.extend(["--judge-protocol", self.config.judge_protocol])
             if self.config.max_turns is not None:
