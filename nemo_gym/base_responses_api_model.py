@@ -37,11 +37,12 @@ import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, ClassVar, Iterable, Literal, Mapping, Optional, TypedDict
+from typing import Any, AsyncIterator, ClassVar, Iterable, Literal, Mapping, NotRequired, Optional, TypedDict
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
+from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
@@ -65,7 +66,13 @@ from nemo_gym.responses_streaming import (
     validate_streaming_responses_params,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
+from nemo_gym.rollout_observability import (
+    AgentObservationBundle,
+    ObservationGap,
+    TrajectoryRecord,
+    join_assistant_message_calls,
+    join_model_call_observations,
+)
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -106,6 +113,7 @@ _ANTHROPIC_CONVERTER = AnthropicConverter()
 
 
 class ModelExecutionOutcome(TypedDict):
+    error_category: NotRequired[str]
     upstream_attempted: bool
     response_source: Literal["upstream", "local"] | None
     upstream_status_code: int | None
@@ -203,6 +211,25 @@ def _orjson_dispatch_response(content: Any) -> Any:
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     # Exact successful routes whose responses cannot contain policy-generated content.
     token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
+    drop_hosted_tools: bool = Field(
+        default=False,
+        description=(
+            "Drop every tool type other than ``function`` and ``custom`` from a streaming Responses "
+            "request instead of passing it to the backend. That covers the provider-hosted tools (web "
+            "search, file search, code interpreter, image generation, computer use, remote MCP), which a "
+            "backend that serves none of them cannot honor, and also client-executed built-in types such "
+            "as ``local_shell``. Off by default, which passes every valid tool spec through."
+        ),
+    )
+    drop_custom_tools: bool = Field(
+        default=False,
+        description=(
+            "Drop Responses ``custom`` (free-form) tools from streaming requests instead of converting "
+            "them. A backend that expresses function tools only (a vLLM chat route, for example) answers "
+            "a request carrying one with 422, and the client retries the whole request. Off by default "
+            "so a backend with free-form tool support keeps them."
+        ),
+    )
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -230,8 +257,24 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
+        """Allow adapters to retain an explicit upstream-status compatibility policy."""
+        return True
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
+
+        @app.exception_handler(ClientResponseError)
+        async def upstream_error(request: Request, error: ClientResponseError) -> Response:
+            if not self._should_propagate_upstream_http_error(error):
+                raise error
+            # Preserve the provider's structured error while the buffered response
+            # is still uncommitted, including context limits and rate limits.
+            return Response(
+                content=getattr(error, "response_content", error.message),
+                status_code=error.status,
+                media_type=(error.headers or {}).get("Content-Type", "application/json"),
+            )
 
         self.setup_session_middleware(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
@@ -239,6 +282,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             app,
             capture_config,
             model_server_name=self.config.name,
+            assistant_message_header=self.server_client.assistant_message_header(self.config.name),
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
             non_generating_requests=self.non_generating_model_routes
@@ -288,9 +332,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         always do), the request is first sanitized from the streaming wire dialect (extra
         bookkeeping fields, ``namespace`` tool specs — see ``nemo_gym.responses_streaming``),
         delegated to the same ``responses()``, and the complete response is re-emitted as a
-        synthesized Responses SSE event stream. A ``responses()`` failure on this path is turned
-        into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
-        still fails eagerly, before the stream is committed).
+        synthesized Responses SSE event stream. Upstream HTTP errors and ``HTTPException``
+        retain their status before the stream starts. Other ``responses()`` failures become terminal
+        ``response.failed`` events; bad-request validation still fails eagerly.
         """
         if not body.get("stream"):
             params = _validate_responses_params(body)
@@ -299,7 +343,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await self._finalize_served_response(response)
             return dispatched
 
-        cleaned, ns_map = sanitize_streaming_responses_body(body)
+        cleaned, ns_map = sanitize_streaming_responses_body(
+            body,
+            drop_custom_tools=self.config.drop_custom_tools,
+            drop_hosted_tools=self.config.drop_hosted_tools,
+        )
         try:
             params = validate_streaming_responses_params(cleaned)
         except ValidationError as exc:
@@ -313,12 +361,18 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """Serve the same converted response to capture and Responses SSE clients."""
         try:
             response = await self._invoke_responses(request, params)
-            response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
+            response_json = (
+                response.model_dump(mode="json", by_alias=True) if isinstance(response, BaseModel) else dict(response)
+            )
             response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
             return await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
+        except (ClientResponseError, HTTPException):
+            # Generation is buffered: no headers or SSE bytes have been sent yet.
+            # Let the shared HTTP handler retain the upstream error code and body.
+            raise
         except Exception as exc:
-            # The streaming contract is already the response's shape, so a backend failure must be a
-            # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.
+            # Keep the existing terminal-SSE fallback for failures without an
+            # upstream HTTP response to preserve.
             logger.exception("responses() failed while serving a streaming /v1/responses request")
             return StreamingResponse(
                 synthesize_responses_failure_sse(str(exc)),
@@ -800,6 +854,10 @@ class ModelCallRecord(BaseModel):
         default=None,
         description="Client-declared correlation identifier; evidence only, not a security boundary.",
     )
+    client_assistant_message_id: Optional[str] = Field(
+        default=None,
+        description="Persisted client assistant-message ID; retries may share it, model_call_id remains per attempt.",
+    )
 
     # Durable append order, not a causal or semantic order for concurrent calls.
     call_index: int
@@ -883,6 +941,11 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
         response_id=response.get("id") if isinstance(response.get("id"), str) else None,
         client_session_id=(
             exchange.get("client_session_id") if isinstance(exchange.get("client_session_id"), str) else None
+        ),
+        client_assistant_message_id=(
+            exchange.get("client_assistant_message_id")
+            if isinstance(exchange.get("client_assistant_message_id"), str)
+            else None
         ),
         call_index=call_index,
         model_ref=exchange.get("model_ref"),
@@ -1295,6 +1358,7 @@ def _record(
     request_bytes: bytes,
     *,
     client_session_id: Optional[str] = None,
+    client_assistant_message_id: Optional[str] = None,
     rollout_id: str,
     model_call_id: str,
     started_at: float,
@@ -1340,6 +1404,8 @@ def _record(
             exchange.update(execution)
             if execution["local_response_reason"] == "context_length_exceeded":
                 exchange["error_category"] = "context_length_exceeded"
+        if client_assistant_message_id is not None:
+            exchange["client_assistant_message_id"] = client_assistant_message_id
         if request_raw is not None:
             exchange["request_raw"] = request_raw
         if response_raw is not None:
@@ -1410,11 +1476,15 @@ class _CaptureMiddleware:
         delta_records: bool = False,
         external_staging: bool = False,
         token_capture_enabled: bool = False,
+        assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
     ) -> None:
         self._app = app
         self._store = store
         self._model_server_name = model_server_name
+        self._assistant_message_header: bytes | None = (
+            assistant_message_header.lower() if assistant_message_header else None
+        )
         # This store records training tokens for correlated training-capture calls.
         self._token_store = token_store
         # Built from token_id_capture.sink, once, in this process.
@@ -1529,6 +1599,11 @@ class _CaptureMiddleware:
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
+        client_assistant_message_id = (
+            _unique_request_header(scope.get("headers") or [], self._assistant_message_header)
+            if self._assistant_message_header is not None
+            else None
+        )
 
         # Give the model server a token sink keyed to this call.
         # The sink records token ids from the complete response.
@@ -1644,6 +1719,7 @@ class _CaptureMiddleware:
                     self._model_server_name,
                     bytes(request_body),
                     client_session_id=client_session_id,
+                    client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
                     model_call_id=model_call_id,
                     started_at=started_at,
@@ -1714,6 +1790,7 @@ class _CaptureMiddleware:
                 model_server_name,
                 request_bytes,
                 client_session_id=client_session_id,
+                client_assistant_message_id=client_assistant_message_id,
                 rollout_id=rollout_id,
                 model_call_id=model_call_id,
                 started_at=started_at,
@@ -1728,7 +1805,13 @@ class _CaptureMiddleware:
             )
 
         try:
-            await asyncio.to_thread(_parse_and_record)
+            # Shielded: cancellation here strands the queued write and the row is
+            # lost silently -- no log line, no incomplete marker. The error path
+            # above already treats CancelledError as recoverable; match it.
+            await asyncio.shield(asyncio.to_thread(_parse_and_record))
+        except asyncio.CancelledError:
+            logger.warning("Model-call capture finalization was cancelled; the write continues detached.")
+            raise
         except Exception:
             logger.warning("Model-call capture finalization failed.", exc_info=True)
         finally:
@@ -1740,6 +1823,7 @@ def install_model_call_capture(
     config: ModelCallCaptureConfig,
     *,
     model_server_name: str | None = None,
+    assistant_message_header: bytes | None = None,
     global_config_dict: Any = None,
     num_workers: int | None = None,
     non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -1824,6 +1908,7 @@ def install_model_call_capture(
     app.add_middleware(
         _CaptureMiddleware,
         store=make_capture_store(config),
+        assistant_message_header=assistant_message_header,
         model_server_name=model_server_name,
         token_store=token_store,
         configured_sink=configured_sink,
@@ -1937,6 +2022,23 @@ def merge_model_call_capture_into_record(
                     )
                     bundle.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
             bundle = join_model_call_observations(bundle, calls)
+            if any(call.client_assistant_message_id for call in calls):
+                try:
+                    raw_trajectory = record.get("ng_trajectory")
+                    trajectory = (
+                        TrajectoryRecord.model_validate(raw_trajectory) if raw_trajectory is not None else None
+                    )
+                    if trajectory is not None and trajectory.rollout_id != rollout_id:
+                        bundle.gaps.append(ObservationGap(code="assistant_message_call_rollout_mismatch"))
+                    else:
+                        bundle, trajectory = join_assistant_message_calls(bundle, trajectory, calls)
+                        if trajectory is not None:
+                            record["ng_trajectory"] = trajectory.model_dump(mode="json")
+                except Exception:
+                    logger.warning(
+                        "Could not associate assistant message calls for rollout %s.", rollout_id, exc_info=True
+                    )
+                    bundle.gaps.append(ObservationGap(code="assistant_message_call_join_failed"))
             record["ng_agent_observations"] = bundle.model_dump(mode="json")
         except Exception:
             logger.warning("Could not join agent observations for rollout %s.", rollout_id, exc_info=True)

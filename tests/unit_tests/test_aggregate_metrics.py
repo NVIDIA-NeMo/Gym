@@ -1115,6 +1115,8 @@ class TestPerfSummaryInAggregateMetrics:
         result = compute_aggregate_metrics(responses)
 
         assert result.perf_summary is None
+        assert "mean_completion_tokens" not in result.key_metrics
+        assert "mean_tokens_per_turn" not in result.key_metrics
 
     def test_present_when_a_rollout_carries_ng_perf(self) -> None:
         responses = [
@@ -1138,6 +1140,128 @@ class TestPerfSummaryInAggregateMetrics:
         # token_observability_coverage (hand-built dict), so it doesn't count as token-covered.
         assert result.perf_summary["overall_observability_coverage"] == 0.5
         assert result.perf_summary["token_observability_coverage"] == 0.0
+
+
+class TestCompletionTokenMetrics:
+    def test_ng_perf_repeat_means_have_intervals(self) -> None:
+        responses = [
+            {
+                TASK_INDEX_KEY_NAME: task_idx,
+                ROLLOUT_INDEX_KEY_NAME: repeat_idx,
+                "reward": 1.0,
+                "response": {"usage": {"output_tokens": 1000}},
+                "ng_perf": {"completion_tokens": tokens, "num_turns": turns},
+            }
+            for task_idx, repeat_idx, tokens, turns in (
+                (0, 0, 4, 1),
+                (1, 0, 8, 2),
+                (0, 1, 12, 2),
+                (1, 1, 20, 4),
+            )
+        ]
+
+        result = compute_aggregate_metrics(
+            responses,
+            get_key_metrics_fn=lambda metrics: {"mean/reward": metrics["mean/reward"]},
+        )
+
+        for name, value, repeat_values in (
+            ("mean_completion_tokens", 11.0, [6.0, 16.0]),
+            ("mean_tokens_per_turn", 4.75, [4.0, 5.5]),
+        ):
+            assert result.perf_summary[name] == pytest.approx(value)
+            assert name not in result.agent_metrics
+            assert name not in result.key_metrics
+            assert [row[name] for row in result.repeat_level_metrics] == pytest.approx(repeat_values)
+            assert result.agent_metrics[f"mean_across_repeats/{name}"] == pytest.approx(value)
+            assert result.agent_metrics[f"ci_low_95_across_repeats/{name}"] < value
+            assert result.agent_metrics[f"ci_high_95_across_repeats/{name}"] > value
+
+    def test_masked_only_repeat_contributes_usage_but_not_quality(self) -> None:
+        responses = [
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 1.0,
+                "ng_perf": {"completion_tokens": 10, "num_turns": 2},
+            },
+            {
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 0.0,
+                "mask_sample": True,
+                "ng_perf": {"completion_tokens": 20, "num_turns": 2},
+            },
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 1,
+                "reward": 0.0,
+                "mask_sample": True,
+                "ng_perf": {"completion_tokens": 30, "num_turns": 3},
+            },
+            {
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 1,
+                "reward": 0.0,
+                "mask_sample": True,
+            },
+        ]
+
+        result = compute_aggregate_metrics(responses)
+
+        assert result.key_metrics["mean/reward"] == 1.0
+        assert "mean_completion_tokens" not in result.key_metrics
+        assert "mean_tokens_per_turn" not in result.key_metrics
+        assert result.perf_summary["mean_completion_tokens"] == pytest.approx(20.0)
+        assert "mean_completion_tokens" not in result.agent_metrics
+        assert result.agent_metrics["mean_across_repeats/mean_completion_tokens"] == pytest.approx(22.5)
+        assert result.perf_summary["mean_tokens_per_turn"] == pytest.approx(25.0 / 3.0)
+        assert "mean_tokens_per_turn" not in result.agent_metrics
+        assert result.agent_metrics["mean_across_repeats/mean_tokens_per_turn"] == pytest.approx(8.75)
+        assert [row["mean_completion_tokens"] for row in result.repeat_level_metrics] == pytest.approx([15.0, 30.0])
+        assert [row[ROLLOUT_INDEX_KEY_NAME] for row in result.repeat_level_metrics] == [0, 1]
+        assert "mean/reward" not in result.repeat_level_metrics[1]
+        assert "ci_low_95_across_repeats/mean_completion_tokens" in result.agent_metrics
+        assert "ci_high_95_across_repeats/mean_tokens_per_turn" in result.agent_metrics
+
+    def test_single_observed_repeat_has_point_without_interval(self) -> None:
+        responses = [
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 1.0,
+                "ng_perf": {"completion_tokens": 12, "num_turns": 3},
+            }
+        ]
+
+        result = compute_aggregate_metrics(responses)
+
+        assert "mean_completion_tokens" not in result.agent_metrics
+        assert "mean_tokens_per_turn" not in result.agent_metrics
+        assert result.agent_metrics["mean_across_repeats/mean_completion_tokens"] == pytest.approx(12.0)
+        assert result.agent_metrics["mean_across_repeats/mean_tokens_per_turn"] == pytest.approx(4.0)
+        assert result.repeat_level_metrics[0]["mean_completion_tokens"] == pytest.approx(12.0)
+        assert "ci_low_95_across_repeats/mean_completion_tokens" not in result.agent_metrics
+        assert "ci_low_95_across_repeats/mean_tokens_per_turn" not in result.agent_metrics
+
+    def test_fully_masked_run_keeps_original_coverage_only_result(self) -> None:
+        responses = [
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: repeat_idx,
+                "reward": 0.0,
+                "mask_sample": True,
+                "ng_perf": {"completion_tokens": tokens, "num_turns": 2},
+            }
+            for repeat_idx, tokens in enumerate((10, 30))
+        ]
+
+        result = compute_aggregate_metrics(responses)
+
+        assert "mean_completion_tokens" not in result.agent_metrics
+        assert "mean_tokens_per_turn" not in result.key_metrics
+        assert result.repeat_level_metrics == []
+        assert result.perf_summary["mean_completion_tokens"] == pytest.approx(20.0)
 
 
 class TestMaskedSamplesAreNotScored:
