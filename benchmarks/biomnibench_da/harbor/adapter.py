@@ -67,7 +67,7 @@ class HarborBOBTask:
         task_config["verifier"]["env"] = {
             "JUDGE_MODEL": r"${JUDGE_MODEL}",
             "JUDGE_MODEL_API_BASE": r"${JUDGE_MODEL_API_BASE}",
-            "JUDGE_MODEL_API_KEY": r"${JUDGE_MODEL_API_KEY}",
+            "JUDGE_MODEL_API_KEY": r"${JUDGE_MODEL_API_KEY:-}",
         }
 
         return tomli_w.dumps(task_config)
