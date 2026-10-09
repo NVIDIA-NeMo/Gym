@@ -59,6 +59,9 @@ EMBEDDED_VERIFIER_FIELDS: tuple[str, ...] = ("test_output", "verifier_stdout", "
 # File read under a row's `verifier_logs_dir` (the Harbor resources server writes it there).
 VERIFIER_STDOUT_FILENAME = "test-stdout.txt"
 FAILURES_SUFFIX = "_failures.jsonl"
+# Set on rows folded in from a failures sidecar. A failure recorded before the task was known carries no task id;
+# such a row is listed as masked under an `unknown#<n>` label instead of breaking key detection for the side.
+SIDECAR_FLAG = "_ng_compare_sidecar"
 
 
 class CompareInputError(Exception):
@@ -225,6 +228,7 @@ def _row_task_label(row: dict[str, Any]) -> str:
 def _failure_as_masked_row(failure: dict[str, Any]) -> dict[str, Any]:
     """A `<name>_failures.jsonl` record becomes a masked row with no reward."""
     row = dict(failure)
+    row[SIDECAR_FLAG] = True
     row.setdefault("reward", None)
     row["mask_sample"] = True
     row.setdefault("failure_kind", failure.get("_ng_failure_class") or "failure")
@@ -257,10 +261,16 @@ def _lookup(row: dict[str, Any], dotted: str) -> Any:
     return value
 
 
+def _has_any_key(row: dict[str, Any]) -> bool:
+    return any(_lookup(row, candidate) is not None for candidate in TASK_KEY_CANDIDATES)
+
+
 def detect_task_key(rows: list[dict[str, Any]]) -> str:
-    """The first candidate field every row carries."""
+    """The first candidate field every row carries. Sidecar failure rows that name no task at all are left out
+    of the vote; they cannot be joined and are listed as masked under an `unknown#<n>` label."""
+    voters = [row for row in rows if not (row.get(SIDECAR_FLAG) and not _has_any_key(row))]
     for candidate in TASK_KEY_CANDIDATES:
-        if rows and all(_lookup(row, candidate) is not None for row in rows):
+        if voters and all(_lookup(row, candidate) is not None for row in voters):
             return candidate
     raise CompareInputError(
         "no task id field found; rows carry none of " + ", ".join(TASK_KEY_CANDIDATES) + " (use --key)"
@@ -289,15 +299,25 @@ def task_id_of(row: dict[str, Any], key: str, *, with_taskset: bool = False) -> 
     return f"{taskset}/{task_id}" if with_taskset and taskset else task_id
 
 
+def _unkeyed_sidecar(row: dict[str, Any], key: str) -> bool:
+    return bool(row.get(SIDECAR_FLAG)) and _lookup(row, key) is None
+
+
 def tasksets_of(rows: list[dict[str, Any]], key: str) -> set[str]:
-    return {taskset for taskset, _ in (_task_identity(row, key) for row in rows) if taskset}
+    identities = (_task_identity(row, key) for row in rows if not _unkeyed_sidecar(row, key))
+    return {taskset for taskset, _ in identities if taskset}
 
 
 def group_by_task(
     rows: list[dict[str, Any]], key: str, *, with_taskset: bool = False
 ) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
+    unknown = 0
     for row in rows:
+        if _unkeyed_sidecar(row, key):
+            unknown += 1
+            grouped.setdefault(f"unknown#{unknown}", []).append(row)
+            continue
         grouped.setdefault(task_id_of(row, key, with_taskset=with_taskset), []).append(row)
     return grouped
 
@@ -482,7 +502,9 @@ def compare_rollouts(
         if (old_side and old_side.repeated) or (new_side and new_side.repeated):
             repeated.append(task)
         if old_side is None or new_side is None:
-            tasks.append(TaskComparison(task, "missing", old_side, new_side))
+            # A sidecar failure that named no task has nothing to be missing from: it is a masked row.
+            one_sided_mask = task.startswith("unknown#") and (old_side or new_side).masked
+            tasks.append(TaskComparison(task, "masked" if one_sided_mask else "missing", old_side, new_side))
             continue
         if old_side.masked or new_side.masked:
             tasks.append(TaskComparison(task, "masked", old_side, new_side))

@@ -424,6 +424,21 @@ class TestTaskKey:
 
 
 class TestLoading:
+    def test_sidecar_failure_without_a_task_id_is_listed_as_masked_unknown(self, tmp_path: Path) -> None:
+        # A failure recorded before the task was known (prepare or seed) has no `_ng_task_id`. It must not
+        # break key detection for the side, and it is listed as masked under an `unknown#<n>` label.
+        path = write_jsonl(tmp_path / "new.jsonl", [new_row("ok", 1.0)])
+        write_jsonl(
+            tmp_path / "new_failures.jsonl",
+            [{"_ng_failure_class": "environment_server_failed", "_ng_failure_message": "seed never answered"}],
+        )
+        rows = load_rollouts(path)
+        assert detect_task_key(rows) == "_ng_task_id"
+        result = compare_rollouts([old_row("ok", 1.0)], rows)
+        assert result.counts()["identical"] == 1
+        masked = result.by_category("masked")
+        assert [task.task for task in masked] == ["unknown#1"]
+
     def test_failures_sidecar_rows_are_folded_in_as_masked(self, tmp_path: Path) -> None:
         # The Harbor path writes masked infrastructure failures next to the rollouts, not as rows.
         path = write_jsonl(tmp_path / "new.jsonl", [new_row("ok", 1.0)])
