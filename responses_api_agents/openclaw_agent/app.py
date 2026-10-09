@@ -359,6 +359,10 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     openclaw_config: dict[str, Any] = Field(default_factory=dict)
     context_window: Optional[int] = None
     max_output_tokens: Optional[int] = None
+    # Compaction summaries are harness bookkeeping, not policy actions. During training-token
+    # capture, send them through an uncorrelated provider so they do not create unrelated roots
+    # in the rollout ledger. The policy calls before and after compaction remain correlated.
+    route_compaction_outside_token_capture: bool = True
     # required: every config must pin an explicit version so runs are reproducible and cannot silently drift
     openclaw_version: str
 
@@ -444,6 +448,16 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     "models": [model_entry],
                 }
             )
+            if rollout_id and self.config.route_compaction_outside_token_capture and self._token_id_capture_enabled():
+                compaction = cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("compaction", {})
+                if "model" not in compaction:
+                    providers["nemo_compaction"] = {
+                        "api": "openai-completions",
+                        "baseUrl": self._resolve_model_base_url(),
+                        "apiKey": "EMPTY",  # pragma: allowlist secret
+                        "models": [copy.deepcopy(model_entry)],
+                    }
+                    compaction["model"] = f"nemo_compaction/{self.config.model}"
         self._merge_headless_tool_denies(cfg)
         return cfg
 
