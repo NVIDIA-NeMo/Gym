@@ -107,6 +107,8 @@ class Deployment:
     - ``slow``: ``single_agent_turn`` over Simple Agent and a resources server whose verify blocks.
     - ``sandbox``: the legacy relay over Simple Agent and a resources server whose sessions each own a sandbox
       in the fake sandbox backend, which outlives a Gym crash like the inference backend does.
+    - ``agent_sandbox``: ``single_agent_turn`` over an agent that owns a sandbox per session in the fake sandbox
+      backend, and a stateless resources server that verifies what the agent read back from it.
 
     With ``inference_url``, the policy model serves from that endpoint and the fake backend's control
     routes are unavailable. ``policy_workers`` sets the policy model server's uvicorn workers, and
@@ -224,6 +226,11 @@ class Deployment:
                 sandbox_backend_url=f"http://127.0.0.1:{self.sandbox_port}",
             )
             add("resources", str(HERE / "sandbox_notes_server"), resources)
+        elif self.topology == "agent_sandbox":
+            resources = _server(
+                "resources_servers", "example_single_tool_call", domain="agent", verified=False, description="notes"
+            )
+            add("resources", str(HERE / "notes_verifier_server"), resources)
         elif self.topology == "slow":
             resources = _server(
                 "resources_servers",
@@ -239,15 +246,25 @@ class Deployment:
             )
             add("resources", "resources_servers/example_single_tool_call", resources)
 
-        agent = _server(
-            "responses_api_agents",
-            "simple_agent",
-            model_server=_ref("responses_api_models", "policy_model"),
-            resources_server=_ref("resources_servers", "resources"),
-        )
-        add("agent", "responses_api_agents/simple_agent", agent)
+        if self.topology == "agent_sandbox":
+            agent = _server(
+                "responses_api_agents",
+                "simple_agent",
+                model_server=_ref("responses_api_models", "policy_model"),
+                resources_server=_ref("resources_servers", "resources"),
+                sandbox_backend_url=f"http://127.0.0.1:{self.sandbox_port}",
+            )
+            add("agent", str(HERE / "sandbox_notes_agent"), agent)
+        else:
+            agent = _server(
+                "responses_api_agents",
+                "simple_agent",
+                model_server=_ref("responses_api_models", "policy_model"),
+                resources_server=_ref("resources_servers", "resources"),
+            )
+            add("agent", "responses_api_agents/simple_agent", agent)
 
-        if self.topology in ("native", "slow", "mixed"):
+        if self.topology in ("native", "slow", "mixed", "agent_sandbox"):
             environment = _server(
                 "environment_servers",
                 "single_agent_turn",
@@ -312,7 +329,7 @@ class Deployment:
             stderr=subprocess.STDOUT,
         )
         self._wait_healthy("backend", f"http://127.0.0.1:{self.backend_port}/v1/models")
-        if self.topology == "sandbox":
+        if self.topology in ("sandbox", "agent_sandbox"):
             log = open(self.log_dir / "sandbox_backend.log", "a")
             self.procs["sandbox_backend"] = subprocess.Popen(
                 [sys.executable, str(HERE / "fake_sandbox_backend.py"), str(self.sandbox_port)],
@@ -484,9 +501,34 @@ NOTES_SCRIPT = {
         {"name": "append_note", "arguments": {"line": "two"}},
     ]
 }
+READ_NOTES_TOOL = {
+    "type": "function",
+    "name": "read_notes",
+    "description": "",
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    "strict": True,
+}
+NOTES_SCRIPT_READ = {"tool_calls": [*NOTES_SCRIPT["tool_calls"], {"name": "read_notes", "arguments": {}}]}
 NOTES_SCRIPT_THREE = {
     "tool_calls": [*NOTES_SCRIPT["tool_calls"], {"name": "append_note", "arguments": {"line": "three"}}]
 }
+
+
+def notes_episode(rollout_id: str, attempt: int = 0, expected: tuple[str, ...] = ("one", "two")) -> dict:
+    """A native ``single_agent_turn`` request whose agent takes notes in a sandbox it owns."""
+    return {
+        "episode_id": {"rollout_id": rollout_id, "attempt": attempt},
+        "task": {
+            "task_id": {"taskset": "sandbox_notes:e2e", "task_id": "notes"},
+            "task_input": {
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": "take notes, then read them back"}],
+                    "tools": [NOTES_TOOL, READ_NOTES_TOOL],
+                },
+                "task_data": {"expected_notes": list(expected)},
+            },
+        },
+    }
 
 
 def notes_row(rollout_id: str, attempt: int = 0, expected: tuple[str, ...] = ("one", "two")) -> dict:

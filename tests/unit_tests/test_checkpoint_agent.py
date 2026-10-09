@@ -131,6 +131,44 @@ async def test_legacy_run_steps_block_prepare_only_when_waited_on() -> None:
     assert record.episode == {"next": "verify"}
 
 
+async def test_a_legacy_wait_step_learns_that_a_checkpoint_wants_it_to_park() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    episode_id = EpisodeId(rollout_id="r")
+    interrupted: list[str] = []
+
+    async with participant.legacy_run("run:r", episode_id) as run:
+        assert not run.park_requested().is_set()
+
+        async def long_step() -> None:
+            async with run.step("wait"):
+                work = asyncio.create_task(asyncio.sleep(30))
+                park = asyncio.create_task(run.park_requested().wait())
+                done, _ = await asyncio.wait({work, park}, return_when=asyncio.FIRST_COMPLETED)
+                if park in done:
+                    work.cancel()
+                    interrupted.append("interrupted")
+            await run.boundary({"next": "work", "interrupted": True})
+
+        task = asyncio.create_task(long_step())
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert participant.readiness().blockers == ["r"], "inside the wait step the run blocks prepare"
+
+        await participant.close_admission(CLOSE)
+        for _ in range(100):
+            if participant.readiness().ready:
+                break
+            await participant.wait_changed(timeout=0.05)
+        assert interrupted == ["interrupted"]
+        assert participant.readiness().ready
+        [record] = await participant.export(None)
+        assert record.episode == {"next": "work", "interrupted": True}
+
+        await participant.open_admission()
+        assert not run.park_requested().is_set()
+        await asyncio.wait_for(task, timeout=5)
+
+
 async def test_retire_stops_the_activation_before_it_replies() -> None:
     hooks = Hooks()
     participant = AgentSessionParticipant(hooks)
