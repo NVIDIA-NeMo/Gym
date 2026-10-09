@@ -682,7 +682,19 @@ async def test_reading_a_retired_rollouts_manifest_fails(store):
 def test_retire_and_delete_declare_their_result_shape():
     import typing
 
-    for method in (CaptureLedger.retire, CaptureLedger.delete, FileLineageStore.retire, InMemoryLineageStore.delete):
+    from nemo_gym.token_id_capture.protocols import TokenSource
+    from nemo_gym.token_id_capture.store import TokenCaptureStore
+
+    for method in (
+        CaptureLedger.retire,
+        CaptureLedger.delete,
+        FileLineageStore.retire,
+        InMemoryLineageStore.delete,
+        TokenSource.retire,
+        TokenSource.delete,
+        TokenCaptureStore.retire_now,
+        TokenCaptureStore.delete_now,
+    ):
         assert typing.get_type_hints(method)["return"] is RolloutRemovalPayload
 
 
