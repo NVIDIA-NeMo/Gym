@@ -1064,6 +1064,30 @@ class TestNeMoGymChatCompletionSchemas:
             "Inspect the repository first."
         )
 
+    def test_assistant_reasoning_alias_round_trips_between_tool_calls(self) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning": "Inspect the repository first.",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "terminal", "arguments": '{"command":"ls"}'},
+                        }
+                    ],
+                }
+            ]
+        }
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+
+        assert params.model_dump(mode="json", exclude_unset=True)["messages"][0]["reasoning"] == (
+            "Inspect the repository first."
+        )
+
     def test_user_audio_and_file_content_parts_round_trip(self) -> None:
         payload = {
             "messages": [

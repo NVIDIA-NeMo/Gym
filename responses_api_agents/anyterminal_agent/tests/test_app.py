@@ -90,7 +90,7 @@ class TestRunnerTemplate:
         # Must be syntactically valid Python and reference the agent class.
         compile(rendered, "<runner>", "exec")
         assert "HermesAgent(config=config" in rendered
-        assert 'Request({"type": "http", "path_params": {}})' in rendered
+        assert '"path_params": {"rollout_id": ROLLOUT_ID} if ROLLOUT_ID else {}' in rendered
         assert 'object.__setattr__(agent, "resolve_model_base_url"' in rendered
 
     def test_response_is_written_back(self) -> None:
@@ -112,6 +112,13 @@ class TestRunnerTemplate:
         # The request allowlist may already have omitted max_output_tokens. The
         # adapter must still populate max_tokens without raising KeyError.
         assert '_request_sampling.pop("max_output_tokens", None)' in rendered
+
+    def test_runner_splits_policy_and_compaction_model_urls(self) -> None:
+        rendered = self._render()
+        assert 'ROLLOUT_ID = _rollout_tail.split("/", 1)[0]' in rendered
+        assert 'AGENT_KWARGS.setdefault(\n        "compaction_base_url"' in rendered
+        assert "_v1 if rollout_id else _uncorrelated_v1" in rendered
+        assert '_cfg_sampling["token_id_capture"] = True' in rendered
 
     def test_request_sampling_allowlist_omits_unsupported_fields(self) -> None:
         rendered = self._render()

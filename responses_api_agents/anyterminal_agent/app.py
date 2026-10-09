@@ -217,6 +217,16 @@ AGENT_KWARGS = json.loads(os.environ.get("NGTB_AGENT_KWARGS", "{{}}"))
 SAMPLING     = json.loads(os.environ.get("NGTB_SAMPLING", "{{}}"))
 REQUEST_SAMPLING_FIELDS = {request_sampling_fields!r}
 
+# AnyTerminal receives the already-correlated training URL because the agent
+# executes in the task container. Retain that exact URL for policy actions,
+# but also recover the model-server root for harness bookkeeping calls such as
+# native context compaction. Those summaries must not become rollout roots.
+_ROLLOUT_MARKER = "/ng-rollout/"
+_model_root, _has_rollout, _rollout_tail = MODEL_URL.partition(_ROLLOUT_MARKER)
+ROLLOUT_ID = _rollout_tail.split("/", 1)[0] if _has_rollout else ""
+CAPTURE_ENABLED = bool(_has_rollout and "/training-token-capture" in "/" + _rollout_tail)
+UNCORRELATED_MODEL_URL = _model_root.rstrip("/") if _has_rollout else MODEL_URL.rstrip("/")
+
 openclaw_defaults = AGENT_KWARGS.get("openclaw_config", {{}}).get("agents", {{}}).get("defaults", {{}})
 if openclaw_defaults.get("workspace") == ".":
     openclaw_defaults["workspace"] = str(Path.cwd())
@@ -241,6 +251,13 @@ _request_sampling = {{
 if "max_output_tokens" in SAMPLING and "max_tokens" in _config_fields and "max_output_tokens" not in _config_fields:
     _cfg_sampling["max_tokens"] = SAMPLING["max_output_tokens"]
     _request_sampling.pop("max_output_tokens", None)
+if CAPTURE_ENABLED and "token_id_capture" in _config_fields:
+    _cfg_sampling["token_id_capture"] = True
+if MODEL_URL and "compaction_base_url" in _config_fields:
+    AGENT_KWARGS.setdefault(
+        "compaction_base_url",
+        UNCORRELATED_MODEL_URL + ("" if UNCORRELATED_MODEL_URL.endswith("/v1") else "/v1"),
+    )
 
 _model_server = ModelServerRef(name="policy_model", type="responses_api_models") if MODEL_URL else None
 config = {agent_cfg_class}(
@@ -256,10 +273,15 @@ agent = {agent_class}(config=config, server_client=_mock_client)
 
 if MODEL_URL:
     _v1 = MODEL_URL if MODEL_URL.endswith("/v1") else MODEL_URL + "/v1"
+    _uncorrelated_v1 = (
+        UNCORRELATED_MODEL_URL
+        if UNCORRELATED_MODEL_URL.endswith("/v1")
+        else UNCORRELATED_MODEL_URL + "/v1"
+    )
     if hasattr(agent, "resolve_model_base_url"):
         object.__setattr__(agent, "resolve_model_base_url", lambda *args, **kwargs: _v1)
     if hasattr(agent, "_resolve_model_base_url"):
-        agent._resolve_model_base_url = lambda *args, **kwargs: _v1
+        agent._resolve_model_base_url = lambda rollout_id=None: _v1 if rollout_id else _uncorrelated_v1
     if hasattr(agent, "_resolve_base_url"):
         agent._resolve_base_url = lambda *args, **kwargs: MODEL_URL
 
@@ -268,7 +290,12 @@ body = NeMoGymResponseCreateParamsNonStreaming(
     model=MODEL_NAME,
     **_request_sampling,
 )
-response = asyncio.run(agent.responses(request=Request({{"type": "http", "path_params": {{}}}}), body=body))
+response = asyncio.run(
+    agent.responses(
+        request=Request({{"type": "http", "path_params": {{"rollout_id": ROLLOUT_ID}} if ROLLOUT_ID else {{}}}}),
+        body=body,
+    )
+)
 Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
 print(f"agent finished: {{len(response.output)}} output items", flush=True)
 """
