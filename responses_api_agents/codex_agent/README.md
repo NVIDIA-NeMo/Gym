@@ -48,10 +48,15 @@ gym eval run --no-serve \
 
 The collector calls Environment Server `/run`: seed Resources, seed the agent, call its
 rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
-flat rows use `single_agent_turn_legacy` with this native session lifecycle; no additional
-materialization script is needed. Collection does not call the agent's compatibility `/run`.
+flat rows use `single_agent_turn_legacy`, an input/output adapter over `single_agent_turn`.
+This is the same composition for SWE-bench Pro and Terminal-Bench 2.1: Resources owns the
+task sandbox, the harness borrows it, and EnvironmentServer owns the episode sequence.
+The adapter converts row formats; execution uses Resources/Agent session APIs. Collection
+does not call the agent's compatibility `/run`. No additional materializer is needed.
 Pass the same configuration to startup and `--no-serve` collection; collection does not
 inherit routing settings from the running servers.
+
+For Terminal-Bench 2.1, use the [task-sandbox recipe](../../benchmarks/terminal_bench_2_1/README.md#codex-in-a-task-sandbox).
 
 ### Switch harness or benchmark
 
@@ -120,6 +125,18 @@ not cancel the invocation. Session close owns cancellation. Shared successful cl
 last `session_close_retry_window_seconds` (default 300 seconds) without renewal on retries.
 Stale cookies never fall back to host execution. State is process-local; Resources/provider
 own sandbox expiry and crash recovery. There is no separate per-agent session-expiry timer.
+
+Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
+The adapter stages its worker input and collects its own output. The shared session
+uploads the supervisor at activation and owns its control files and log access; the common lifecycle
+confirms process cleanup, captures artifacts, then releases the provider connection or
+owned sandbox. Concurrent closes share that work, failed cleanup remains retryable,
+and interrupted activations keep captured observations after session files are removed.
+`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.py`
+runs inside the sandbox. Benchmark Resources session identity/verdict state stays separate.
+Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
+`worker_exit_code_unavailable` observation gaps. Positive cleanup confirmation remains
+required; the adapter validates the captured terminal events without inventing an exit code.
 
 One shared Linux supervisor per activation fences delayed launches and kills/reaps detached
 tool descendants. Close confirms its cleanup receipt before cancelling provider execution,
