@@ -728,6 +728,10 @@ class OpenSandboxProvider:
     """Provider backed by the OpenSandbox SDK/server API."""
 
     name = "opensandbox"
+    # The BatchSandbox controller consumes the pause snapshot when the sandbox resumes, so a checkpoint can
+    # restore a sandbox only while it is still paused; see nemo_gym.sandbox.checkpoint. The snapshot listing
+    # is served per replica and may be partial, which is another reason it is never a correctness input.
+    snapshot_survives_resume = False
 
     def __init__(
         self,
@@ -1050,6 +1054,58 @@ class OpenSandboxProvider:
         lease concept of its own.
         """
         return {"sandbox_id": handle.sandbox_id}
+
+    async def latest_snapshot_id(self, handle: SandboxHandle) -> str | None:
+        """The newest snapshot of a sandbox, which ``pause()`` leaves behind, or ``None`` when it has none.
+
+        Reads the management API's snapshot listing over Gym's shared aiohttp client, as
+        ``snapshots.py`` does, because the SDK handle exposes no snapshot query.
+        """
+        import aiohttp
+
+        from nemo_gym.server_utils import request
+
+        if self._connection.domain is None:
+            raise RuntimeError("OpenSandbox snapshot lookup requires connection.domain")
+        base_url = self._connection.domain.rstrip("/")
+        if "://" not in base_url:
+            base_url = f"{self._connection.protocol or 'https'}://{base_url}"
+        headers = {"OPEN-SANDBOX-API-KEY": self._connection.api_key} if self._connection.api_key else {}
+        timeout_s = float(self._connection.request_timeout_s) if self._connection.request_timeout_s else 30.0
+        # Same certificate policy as the SDK transport and the PTY sockets (connection.tls_verify).
+        tls: dict[str, Any] = {} if self._connection.tls_verify else {"ssl": False}
+        newest: tuple[str, str] | None = None
+        page = 1
+        while True:
+            response = await request(
+                "GET",
+                f"{base_url}/v1/snapshots",
+                headers=headers,
+                params={"sandboxId": handle.sandbox_id, "page": str(page), "pageSize": "100"},
+                timeout=aiohttp.ClientTimeout(total=timeout_s),
+                _control=True,
+                **tls,
+            )
+            async with response:
+                if response.status >= 400:
+                    raise RuntimeError(
+                        f"OpenSandbox snapshot listing for sandbox {handle.sandbox_id!r} failed -> HTTP {response.status}"
+                    )
+                payload = await response.json(content_type=None)
+            items = payload.get("items") if isinstance(payload, dict) else None
+            if not isinstance(items, list):
+                raise RuntimeError("OpenSandbox snapshot listing response is missing items")
+            for item in items:
+                if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
+                    # createdAt is ISO 8601 from one server, so it orders as a string.
+                    key = (str(item.get("createdAt") or ""), item["id"])
+                    if newest is None or key > newest:
+                        newest = key
+            pagination = payload.get("pagination")
+            if not (isinstance(pagination, dict) and pagination.get("hasNextPage") is True):
+                break
+            page += 1
+        return newest[1] if newest is not None else None
 
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
         """Rebuild a live handle from an OpenSandbox sandbox id via the SDK.
