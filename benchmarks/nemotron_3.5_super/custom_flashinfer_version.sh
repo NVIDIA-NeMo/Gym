@@ -7,10 +7,18 @@
 #   SLURM_ACCOUNT=my_account BASE_IMAGE=/lustre/images/custom-vllm.sqsh \
 #     FLASHINFER_BRANCH=my-branch bash custom_flashinfer_version.sh /lustre/images/custom-flashinfer.sqsh
 # Optional: FLASHINFER_REPO, EXPECTED_FLASHINFER_SHA, SLURM_PARTITION,
-# SLURM_QOS, SLURM_TIME. Keep the CUDA toolkit in the image for runtime JIT.
+# SLURM_QOS, SLURM_TIME (default 04:00:00), MAX_JOBS (default 4),
+# FLASHINFER_NVCC_THREADS (default 1), FLASHINFER_CUDA_ARCH_LIST (10.0a or 10.0f).
+# Build the fork's full SM100 JIT-cache provider plus the FP16 ReplaySSM variants.
+# Keep the CUDA toolkit in the image for other kernels' runtime JIT.
 set -Eeuo pipefail
 
 export FLASHINFER_REPO="${FLASHINFER_REPO:-https://github.com/bxyu-nvidia/flashinfer.git}"
+export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-10.0a}"
+case "${FLASHINFER_CUDA_ARCH_LIST}" in
+    10.0a|10.0f) ;;
+    *) echo "ERROR: FLASHINFER_CUDA_ARCH_LIST must be 10.0a or 10.0f for this SM100 image." >&2; exit 2 ;;
+esac
 BUILD_ROOT=/opt/super-vl-evals
 
 ###############################################################################
@@ -39,6 +47,10 @@ if [[ "${1:-}" == __inside_build ]]; then
     git checkout --detach FETCH_HEAD
     test "$(git rev-parse HEAD)" = "${FLASHINFER_HEAD_SHA}"
     git submodule update --init --recursive --depth=1
+    if [[ ! -f flashinfer-jit-cache-provider/pyproject.toml ]]; then
+        echo "ERROR: this FlashInfer branch does not support architecture-specific JIT-cache provider builds." >&2
+        exit 1
+    fi
 
     # Prevent dependency resolution from replacing the image's CUDA/PyTorch stack.
     # Other FlashInfer dependencies can be installed/upgraded as the branch requires.
@@ -48,6 +60,9 @@ import re
 import sys
 import tomllib
 from pathlib import Path
+
+import torch
+from build_utils import get_build_dependency_requirements
 
 build_dir = Path(sys.argv[1])
 constraints = []
@@ -62,8 +77,9 @@ for dist in metadata.distributions():
 (build_dir / "constraints.txt").write_text("\n".join(constraints) + "\n")
 (build_dir / "uninstall.txt").write_text("".join(f"{name}\n" for name in remove))
 requirements = {"wheel"}
-for project in (Path("."), Path("flashinfer-cubin")):
+for project in map(Path, (".", "flashinfer-cubin", "flashinfer-jit-cache-provider", "flashinfer-jit-cache")):
     requirements.update(tomllib.loads((project / "pyproject.toml").read_text())["build-system"]["requires"])
+requirements.update(get_build_dependency_requirements(torch.version.cuda.split(".")[0]))
 (build_dir / "build-requirements.txt").write_text("\n".join(sorted(requirements)) + "\n")
 PY
 
@@ -87,36 +103,198 @@ PY
     # proprietary precompiled kernels. Editable CUDA sources use runtime JIT.
     uv pip install --system --no-deps --no-build-isolation ./flashinfer-cubin
 
-    # Verify the installed packages outside the checkout, using a fresh JIT cache.
+    # Build the broad AOT kernel set from the same pinned source and version as
+    # flashinfer-python. --no-deps prevents the shim from fetching stock providers.
+    export FLASHINFER_JIT_CACHE_PROVIDER_ARCH="${FLASHINFER_CUDA_ARCH_LIST}"
+    export FLASHINFER_JIT_CACHE_PROVIDER_ARCHS="${FLASHINFER_CUDA_ARCH_LIST}"
+    export MAX_JOBS="${MAX_JOBS:-4}"
+    export FLASHINFER_NVCC_THREADS="${FLASHINFER_NVCC_THREADS:-1}"
+    echo ">>> Build FlashInfer JIT-cache provider for ${FLASHINFER_JIT_CACHE_PROVIDER_ARCH}"
+    uv pip install --system --no-deps --no-build-isolation --verbose ./flashinfer-jit-cache-provider
+    uv pip install --system --no-deps --no-build-isolation ./flashinfer-jit-cache
+
+    # Verify discovery, provenance, and a real GPU operation from the installed
+    # provider outside the checkout, with an empty workspace and JIT disabled.
     cd /
-    FLASHINFER_WORKSPACE_BASE="${BUILD_DIR}/smoke-cache" python3 - <<'PY'
+    FLASHINFER_WORKSPACE_BASE="${BUILD_DIR}/smoke-cache" FLASHINFER_DISABLE_JIT=1 \
+        python3 - "${BUILD_DIR}/jit-cache.env" <<'PY'
+import importlib
 import os
+import sys
+from pathlib import Path
 
 import flashinfer
 import flashinfer_cubin
+import flashinfer_jit_cache
 import torch
 import vllm
 from flashinfer._build_meta import __git_commit__
+from flashinfer.jit import env as jit_env
+from flashinfer.jit.norm import gen_norm_module
 
 assert __git_commit__ == os.environ["FLASHINFER_HEAD_SHA"], __git_commit__
-assert flashinfer.__version__ == flashinfer_cubin.__version__
+assert flashinfer.__version__ == flashinfer_cubin.__version__ == flashinfer_jit_cache.__version__
+assert flashinfer_jit_cache.__git_version__ == __git_commit__
+provider_id = "sm" + os.environ["FLASHINFER_JIT_CACHE_PROVIDER_ARCH"].replace(".", "")
+providers = jit_env.FLASHINFER_AOT_PROVIDERS
+assert len(providers) == 1 and providers[0].provider_id == provider_id, providers
+provider = providers[0]
+package = importlib.import_module(f"flashinfer_jit_cache.providers.{provider_id}")
+assert package.__git_version__ == __git_commit__, package.__git_version__
+assert provider.version == package.__version__ == flashinfer.__version__
+assert {"norm", "fmha_gen", "fused_moe_trtllm_sm100"} <= provider.modules, provider.modules
+for name in provider.modules:
+    library = provider.jit_cache_dir / name / f"{name}.so"
+    assert library.is_file() and library.stat().st_size > 0, f"Missing provider module: {library}"
+assert gen_norm_module().aot_path == provider.jit_cache_dir / "norm" / "norm.so"
 assert torch.cuda.is_available(), "The build job needs a GPU for its JIT smoke check"
 x = torch.randn(16, 1024, device="cuda", dtype=torch.bfloat16)
 weight = torch.ones(1024, device="cuda", dtype=torch.bfloat16)
-actual = flashinfer.rmsnorm(x, weight, eps=1e-6)
+# Exercise the provider's CUDA module directly; the public RMSNorm API can
+# choose a separate CuTe DSL implementation on newer FlashInfer branches.
+actual = torch.empty_like(x)
+gen_norm_module().build_and_load().rmsnorm(actual, x, weight, 1e-6, False)
 expected = x.float() * torch.rsqrt(x.float().square().mean(dim=-1, keepdim=True) + 1e-6)
 torch.testing.assert_close(actual, expected.to(x.dtype), rtol=1e-2, atol=1e-2)
 torch.cuda.synchronize()
 print(f"FlashInfer {flashinfer.__version__} from {flashinfer.__file__}")
 print(f"vLLM {vllm.__version__}; torch {torch.__version__}")
-print("Installed FlashInfer GPU JIT smoke check passed")
+print(f"Installed {provider.distribution} with {len(provider.modules)} precompiled modules")
+print("Installed FlashInfer GPU smoke check passed with JIT disabled")
+Path(sys.argv[1]).write_text(
+    f"FLASHINFER_JIT_CACHE_PROVIDER={provider.distribution}\n"
+    f"FLASHINFER_JIT_CACHE_VERSION={provider.version}\n"
+    f"FLASHINFER_JIT_CACHE_SHA={package.__git_version__}\n"
+    f"FLASHINFER_JIT_CACHE_ARCH={os.environ['FLASHINFER_JIT_CACHE_PROVIDER_ARCH']}\n"
+    f"FLASHINFER_JIT_CACHE_MODULE_COUNT={len(provider.modules)}\n"
+)
 PY
+
+    # Ported from build-super-vl-rl-v0251-thin.sh at 36e6e73cdc: compile the
+    # TRTLLM-GEN host dispatchers against this branch's cubins, plus the Mamba
+    # variants observed in the FP16-cache ReplaySSM run. Store them in the
+    # installed package's AOT directory so they survive cache cleanup and work
+    # even when runtime jobs mount a different HOME or FlashInfer workspace.
+    # Keep one module list for compilation and verification in a fresh process.
+    cat > "${BUILD_DIR}/warmup.py" <<'PY'
+import hashlib
+import shutil
+import sys
+from functools import partial
+from pathlib import Path
+
+import torch
+
+from flashinfer.artifacts import ArtifactPath, CheckSumHash
+from flashinfer.jit import env as jit_env
+from flashinfer.jit.attention.modules import gen_trtllm_gen_fmha_module
+from flashinfer.jit.core import build_jit_specs
+from flashinfer.jit.fused_moe import gen_trtllm_gen_fused_moe_sm100_module
+from flashinfer.jit.mamba.checkpointing_ssu import gen_checkpointing_ssu_module
+from flashinfer.jit.mamba.replayssm_materialize import gen_replayssm_materialize_module
+
+modules = (
+    ("FMHA", gen_trtllm_gen_fmha_module, ArtifactPath.TRTLLM_GEN_FMHA, CheckSumHash.TRTLLM_GEN_FMHA),
+    (
+        "FUSED_MOE_SM100",
+        gen_trtllm_gen_fused_moe_sm100_module,
+        ArtifactPath.TRTLLM_GEN_BMM,
+        CheckSumHash.TRTLLM_GEN_BMM,
+    ),
+    # Exact specializations from super_3.5_GA-BF16-p2d2-rssm-rustfrontend-mcfp16-bxyu.log.
+    (
+        "CHECKPOINTING_SSU",
+        partial(
+            gen_checkpointing_ssu_module,
+            state_dtype=torch.float16,
+            input_dtype=torch.bfloat16,
+            dt_dtype=torch.bfloat16,
+            weight_dtype=torch.bfloat16,
+            matrixA_dtype=torch.float32,
+            stateIndex_dtype=torch.int32,
+            state_scale_dtype=None,
+            dim=64,
+            dstate=128,
+            npredicted=6,
+            max_window=16,
+            heads_per_group=16,
+            num_groups=2,
+            philox_rounds=5,
+            enable_pdl=False,
+        ),
+        None,
+        None,
+    ),
+    (
+        "REPLAYSSM_MATERIALIZE",
+        partial(
+            gen_replayssm_materialize_module,
+            state_dtype=torch.float16,
+            input_dtype=torch.bfloat16,
+            matrixA_dtype=torch.float32,
+            dim=64,
+            dstate=128,
+            heads_per_group=16,
+            max_window=16,
+            philox_rounds=5,
+        ),
+        None,
+        None,
+    ),
+)
+verify_only = sys.argv[1] == "--verify"
+records = []
+for label, generate_spec, artifact, expected_sha in modules:
+    if artifact is not None and not verify_only:
+        manifest = jit_env.FLASHINFER_CUBIN_DIR / artifact / "checksums.txt"
+        manifest_sha = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        if manifest_sha != expected_sha:
+            raise RuntimeError(f"{label} cubin manifest does not match this FlashInfer branch: {manifest}")
+        records.append(f"{label}_ARTIFACT_PATH={artifact}\n{label}_MANIFEST_SHA256={manifest_sha}\n")
+
+    spec = generate_spec()
+    destination = jit_env.FLASHINFER_AOT_DIR / spec.name / f"{spec.name}.so"
+    if verify_only:
+        assert spec.aot_path == destination and destination.is_file(), f"Missing warmed module: {destination}"
+        spec.build_and_load()
+        print(f"Loaded warmed module with JIT disabled: {destination}")
+        continue
+
+    print(f"Warming JIT module: {spec.name}", flush=True)
+    build_jit_specs([spec], verbose=True, skip_prebuilt=False)
+    compiled = jit_env.FLASHINFER_JIT_DIR / spec.name / f"{spec.name}.so"
+    if artifact is not None and artifact.encode() not in compiled.read_bytes():
+        raise RuntimeError(f"Compiled {label} dispatcher does not reference the expected cubins: {artifact}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(compiled, destination)
+    dispatcher_sha = hashlib.sha256(destination.read_bytes()).hexdigest()
+    records.append(
+        f"{label}_MODULE_NAME={spec.name}\n"
+        f"{label}_DISPATCHER_PATH={destination}\n"
+        f"{label}_DISPATCHER_SHA256={dispatcher_sha}\n"
+    )
+    print(f"Saved warmed module: {destination}")
+if not verify_only:
+    Path(sys.argv[1]).write_text("".join(records))
+PY
+
+    echo ">>> Warm up TRTLLM-GEN and ReplaySSM JIT modules"
+    FLASHINFER_WORKSPACE_BASE="${BUILD_DIR}/warmup-cache" \
+        python3 "${BUILD_DIR}/warmup.py" "${BUILD_DIR}/warmup.env"
+
+    # Prove a fresh process can load all saved modules without their build
+    # workspace or permission to JIT compile a replacement.
+    rm -rf "${BUILD_DIR}/warmup-cache"
+    FLASHINFER_WORKSPACE_BASE="${BUILD_DIR}/warmup-verify-cache" FLASHINFER_DISABLE_JIT=1 \
+        python3 "${BUILD_DIR}/warmup.py" --verify
 
     # Leave the vLLM build manifest intact when layering onto a custom image.
     {
         printf 'BASE_IMAGE=%s\nFLASHINFER_REPO=%s\nFLASHINFER_BRANCH=%s\nFLASHINFER_SHA=%s\n' \
             "${BASE_IMAGE}" "${FLASHINFER_REPO}" "${FLASHINFER_BRANCH}" "${FLASHINFER_HEAD_SHA}"
         python3 -c 'import flashinfer; print(f"FLASHINFER_VERSION={flashinfer.__version__}")'
+        cat "${BUILD_DIR}/jit-cache.env"
+        cat "${BUILD_DIR}/warmup.env"
     } > "${BUILD_ROOT}/flashinfer-build.env"
     cat "${BUILD_ROOT}/flashinfer-build.env"
     uv cache clean
@@ -172,7 +350,7 @@ if ! srun \
     --job-name=super-vl-evals-flashinfer \
     --nodes=1 --ntasks=1 --segment=1 \
     --gpus-per-node=4 --mem=0 \
-    --time="${SLURM_TIME:-01:00:00}" \
+    --time="${SLURM_TIME:-04:00:00}" \
     --container-image="${BASE_IMAGE}" \
     --container-mounts="${MOUNTS}" \
     --no-container-mount-home \
