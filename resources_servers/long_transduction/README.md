@@ -29,10 +29,22 @@ answer. Set `++long_transduction.resources_servers.long_transduction.strip_reaso
 when starting the example server to disable this behavior. For the benchmark server,
 use the `long_transduction_resources_server` instance name instead.
 
-Aggregate metrics report accuracy by task type, difficulty, and their combination,
-plus `overall_accuracy`. Aggregation weights each rollout equally, not each input
-cell or expression. Compare context lengths separately; difficulty-only groups can
-combine different task families and do not replace the type-specific groups.
+Each rollout retains its task type (`type`) and approximate input-token budget
+(`target_tokens`). Aggregate metrics report accuracy by type, difficulty, context
+length, type plus difficulty, and type plus context length, plus `overall_accuracy`.
+For example, `target_tokens_2048` and `type_streaming_sum_target_tokens_2048` each
+contain `accuracy` and `n` (rollout count). Rows without `target_tokens` still
+contribute to the existing metrics but are excluded from context-length groups.
+Aggregation weights each rollout equally, not each input cell or expression.
+Difficulty-only groups can combine different task families.
+
+Arithmetic aggregate accuracy requires **both correct expression copying and a
+correct answer** for each item, matching the historical gym-evals plots. This rule
+applies to every accuracy group and `overall_accuracy`. The stored `reward` and
+`answer_correct` fields remain answer-only diagnostics, so generic reward summaries
+can differ from benchmark accuracy. Legacy arithmetic rows with missing or empty
+`item_scores` fall back to answer-only accuracy, as in gym-evals. Other task families
+use their existing answer-correctness scores.
 
 ## Prepare the benchmark
 
@@ -85,10 +97,31 @@ gym eval run --no-serve --agent long_transduction_simple_agent \
   --num-repeats 1 --max-output-tokens 4096 --temperature 0
 ```
 
-For the full benchmark, use `--config benchmarks/long_transduction/config.yaml`
-when starting servers, `--agent long_transduction_agent`, and the generated JSONL
-as input. The benchmark config materializes each row's `question` as the user message.
-Use an output-token limit large enough for the selected context sizes and tasks.
+## Run all context lengths together
+
+Start servers using `--config benchmarks/long_transduction/config.yaml` and your
+model settings, then collect the entire generated dataset in one run:
+
+```bash
+gym eval run --no-serve --agent long_transduction_agent \
+  --input benchmarks/long_transduction/data/long_transduction.jsonl \
+  --output results/long-transduction/rollouts.jsonl \
+  --num-repeats 1 --temperature 0 \
+  +prompt_config=benchmarks/prompts/generic/default.yaml
+```
+
+The prompt template materializes each row's `question` as the user message.
+Newly generated rows set `responses_create_params.max_output_tokens` to
+`target_tokens * 3 // 2`, matching the historical gym-evals output budget for each
+length. A global `--max-output-tokens` overrides these per-row budgets. Older cached
+datasets retain their contents; use the regeneration command above to generate
+these budgets, or supply an explicit global limit when evaluating an older dataset.
+Preserve the original dataset for comparisons because regenerating changes arithmetic tasks.
+
+All lengths share `rollouts.jsonl` and `rollouts_aggregate_metrics.json`; the latter
+includes the context-length and task-type groups. No per-length files or external
+aggregation script are needed. Arithmetic accuracy uses the same joint expression
+and answer correctness rule as the historical gym-evals plots.
 
 ## Validation and example provenance
 

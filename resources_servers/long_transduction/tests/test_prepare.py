@@ -10,6 +10,7 @@ from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
 from benchmarks.long_transduction import prepare as generator
+from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
 
 
 def test_prepare_returns_cached_path_without_dependencies(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -39,7 +40,7 @@ def test_prepare_generates_all_types(tmp_path: Path, monkeypatch: MonkeyPatch) -
     output = tmp_path / "generated.jsonl"
     monkeypatch.setattr(generator, "DATA_DIR", tmp_path)
     monkeypatch.setattr(generator, "OUTPUT_FPATH", output)
-    monkeypatch.setattr(generator, "TARGET_TOKENS_LIST", [2048])
+    monkeypatch.setattr(generator, "TARGET_TOKENS_LIST", [2048, 4096])
     monkeypatch.setattr(generator, "N_SAMPLES", 1)
     monkeypatch.setattr(generator, "MAX_OPERANDS_RANGE", [2])
     monkeypatch.setattr(generator, "N_VARIABLES_RANGE", [8])
@@ -48,10 +49,16 @@ def test_prepare_generates_all_types(tmp_path: Path, monkeypatch: MonkeyPatch) -
     output.write_text("old contents\n")
     assert generator.prepare(force=True) == output
     rows = [json.loads(line) for line in output.read_text().splitlines()]
-    assert len(rows) == 12
+    assert len(rows) == 24
     assert {row["type"] for row in rows} == set(generator.PROMPT_TEMPLATES)
     assert all(row["question"] and row["expected_output"] for row in rows)
-    assert all(row["target_tokens"] == 2048 for row in rows)
+    assert {row["target_tokens"] for row in rows} == {2048, 4096}
+    prompt_config = load_prompt_config("benchmarks/prompts/generic/default.yaml")
+    for row in rows:
+        materialized = apply_prompt_to_row(row, prompt_config)
+        assert materialized["responses_create_params"]["max_output_tokens"] == row["target_tokens"] * 3 // 2
+        assert materialized["responses_create_params"]["input"][-1]["content"] == row["question"]
+        assert materialized["target_tokens"] == row["target_tokens"]
 
     # Check against the scoring contract as well as the file shape.
     from resources_servers.long_transduction.parse import (

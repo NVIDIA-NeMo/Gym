@@ -99,6 +99,50 @@ async def test_partial_arithmetic_credit_and_default_type(server: LongTransducti
     assert result.item_scores == [[True, True, True], [True, False, False]]
 
 
+@pytest.mark.parametrize("kind", [None, "unnumbered_streaming_sum", "streaming_sum", "shuffled_streaming_sum"])
+async def test_arithmetic_metrics_require_correct_copy_and_answer(
+    server: LongTransductionServer, kind: str | None
+) -> None:
+    lines = ["3+0=3", "2+3=9", "3+4=7"]
+    if kind in {"streaming_sum", "shuffled_streaming_sum"}:
+        lines = [f"[{i}]{line}" for i, line in enumerate(lines, start=1)]
+    result = await server.verify(
+        make_request(
+            {
+                "type": kind,
+                "target_tokens": 2048,
+                "max_operands": 2,
+                "expressions": [
+                    {"expr": "1+2", "answer": 3},
+                    {"expr": "2+3", "answer": 5},
+                    {"expr": "3+4", "answer": 7},
+                    {"expr": "4+5", "answer": 9},
+                ],
+            },
+            "\n".join(lines),
+        )
+    )
+    assert result.reward == result.answer_correct == 0.5
+    assert result.item_scores == [
+        [False, True, True],
+        [True, False, False],
+        [True, True, True],
+        [False, False, False],
+    ]
+    metrics = server.compute_metrics([[result.model_dump()]])
+    task_type = kind or "unnumbered_streaming_sum"
+    for key in (
+        "difficulty_2",
+        f"type_{task_type}",
+        f"type_{task_type}_difficulty_2",
+        "target_tokens_2048",
+        f"type_{task_type}_target_tokens_2048",
+    ):
+        assert metrics[key] == {"accuracy": 0.25, "n": 1}
+        assert server.get_key_metrics(metrics)[key] == 0.25
+    assert metrics["overall_accuracy"] == 0.25
+
+
 async def test_partial_csv_credit(server: LongTransductionServer) -> None:
     result = await server.verify(
         make_request(
@@ -179,12 +223,54 @@ def test_metrics_group_types_and_difficulty(server: LongTransductionServer) -> N
     assert server.get_key_metrics({"empty": {"accuracy": None}}) == {}
 
 
+def test_metrics_group_mixed_context_lengths(server: LongTransductionServer) -> None:
+    tasks = [
+        [
+            {"type": "streaming_sum", "target_tokens": 2048, "answer_correct": 1.0},
+            {"type": "streaming_sum", "target_tokens": 2048, "answer_correct": 0.0},
+        ],
+        [{"type": "streaming_sum", "target_tokens": 4096, "answer_correct": 0.25}],
+        [{"type": "streaming_uuid_sort", "target_tokens": 2048, "answer_correct": 1.0}],
+        [{"target_tokens": 4096, "answer_correct": 0.75}],
+        [{"answer_correct": 0.0}, {"target_tokens": None, "answer_correct": 0.5}],
+        [{"target_tokens": 8192, "answer_correct": None}, {"target_tokens": 8192}],
+    ]
+    metrics = server.compute_metrics(tasks)
+    assert metrics["target_tokens_2048"] == {"accuracy": pytest.approx(2 / 3), "n": 3}
+    assert metrics["target_tokens_4096"] == {"accuracy": 0.5, "n": 2}
+    assert metrics["type_streaming_sum_target_tokens_2048"] == {"accuracy": 0.5, "n": 2}
+    assert metrics["type_streaming_sum_target_tokens_4096"] == {"accuracy": 0.25, "n": 1}
+    assert metrics["type_streaming_uuid_sort_target_tokens_2048"] == {"accuracy": 1.0, "n": 1}
+    assert metrics["type_unnumbered_streaming_sum_target_tokens_4096"] == {"accuracy": 0.75, "n": 1}
+    assert "target_tokens_8192" not in metrics
+    assert "target_tokens_None" not in metrics
+    assert metrics["overall_accuracy"] == 0.5
+    assert server.get_key_metrics(metrics)["target_tokens_2048"] == pytest.approx(2 / 3)
+
+
+@pytest.mark.parametrize("item_scores", [None, []])
+def test_arithmetic_metrics_fall_back_for_legacy_rows(
+    server: LongTransductionServer, item_scores: list[list[bool]] | None
+) -> None:
+    metrics = server.compute_metrics([[{"type": "streaming_sum", "answer_correct": 0.75, "item_scores": item_scores}]])
+    assert metrics["overall_accuracy"] == 0.75
+    assert metrics["type_streaming_sum"] == {"accuracy": 0.75, "n": 1}
+
+
 async def test_committed_real_rollouts_reproduce_rewards(server: LongTransductionServer) -> None:
     data_dir = Path(__file__).resolve().parents[1] / "data"
     examples = [json.loads(line) for line in (data_dir / "example.jsonl").read_text().splitlines()]
     rollouts = [json.loads(line) for line in (data_dir / "example_rollouts.jsonl").read_text().splitlines()]
     assert len(examples) == len(rollouts) == 5
+    verified = []
     for example, rollout in zip(examples, rollouts):
         result = await server.verify(LongTransductionVerifyRequest(**example, response=rollout["response"]))
         assert result.reward == pytest.approx(rollout["reward"])
         assert result.item_scores == rollout["item_scores"]
+        assert result.model_dump()["target_tokens"] == example["target_tokens"]
+        verified.append([result.model_dump()])
+    metrics = server.compute_metrics(verified)
+    assert metrics["target_tokens_2048"] == {
+        "accuracy": pytest.approx(sum(row["reward"] for row in rollouts) / len(rollouts)),
+        "n": 5,
+    }
