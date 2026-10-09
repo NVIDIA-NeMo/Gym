@@ -236,9 +236,9 @@ def test_env_wins_over_yaml(clean_otel_env):
 def test_lens_fallback_env_wins_over_yaml(clean_otel_env):
     """A `NEMO_LENS_*` setting must survive a YAML value for the same field.
 
-    Lens reads `NEMO_GYM_OTEL_*` before `NEMO_LENS_*`, so exporting the YAML value under the
-    Gym prefix would silently override the user's fallback. That is how a job-wide
-    `NEMO_LENS_SPAN_GROUPS` or `NEMO_LENS_EXPORTER` used to vanish in every Gym server.
+    Lens reads `NEMO_GYM_OTEL_*` before `NEMO_LENS_*`.
+    Exporting the YAML value under the Gym prefix would therefore override the user's fallback.
+    A job-wide `NEMO_LENS_SPAN_GROUPS` or `NEMO_LENS_EXPORTER` would then have no effect in any Gym server.
     """
     clean_otel_env.setenv("NEMO_LENS_EXPORTER", "otlp")
     clean_otel_env.setenv("NEMO_LENS_SPAN_GROUPS", "per_rollout")

@@ -104,8 +104,8 @@ _ENV_FIELD_MAP = {
     "instrument_aiohttp": f"{_OTEL_PREFIX}_INSTRUMENT_AIOHTTP",
 }
 
-#: The ``_ENV_FIELD_MAP`` fields nemo-lens itself reads, so a ``NEMO_LENS_<KEY>`` fallback
-#: exists for each. Exporting one as ``NEMO_GYM_OTEL_<KEY>`` would shadow that fallback.
+#: The ``_ENV_FIELD_MAP`` fields that nemo-lens itself reads, each with a ``NEMO_LENS_<KEY>`` fallback.
+#: Exporting one of them as ``NEMO_GYM_OTEL_<KEY>`` would shadow that fallback.
 _LENS_FIELDS = frozenset({"span_groups", "traces_enabled", "metrics_enabled", "logs_enabled", "exporter", "run_id"})
 
 _MEMORY_PROFILING_ENV_FIELD_MAP = {
@@ -230,8 +230,8 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
         value = getattr(telemetry_config, field, None)
         if value is None:
             continue
-        # The Gym prefix beats the lens fallback when lens reads them, so writing a YAML
-        # value here would silently override a NEMO_LENS_* value the user set.
+        # Lens reads the NEMO_GYM_OTEL_* name before its NEMO_LENS_* fallback.
+        # Writing the YAML value here would silently override a NEMO_LENS_* value the user set.
         if field in _LENS_FIELDS and _lens_fallback_is_set(env_name):
             continue
         os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
