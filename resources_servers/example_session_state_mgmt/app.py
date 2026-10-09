@@ -15,7 +15,7 @@
 from typing import Dict
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -54,8 +54,24 @@ class StatefulCounterSeedSessionRequest(BaseSeedSessionRequest):
 
 class StatefulCounterResourcesServer(SimpleResourcesServer):
     ray_enabled = False
+    checkpoint_mode = "exported"
     config: StatefulCounterResourcesServerConfig
     session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
+
+    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        return {session_id: {"count": self.session_id_to_counter.get(session_id, 0)} for session_id in session_ids}
+
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        counters = {}
+        for session_id, state in states.items():
+            count = state.get("count") if isinstance(state, dict) else None
+            if not isinstance(count, int):
+                raise ValueError(f"invalid counter state for session {session_id!r}: {state!r}")
+            counters[session_id] = count
+        self.session_id_to_counter.update(counters)
+
+    async def retire_session_state(self, session_id: str) -> None:
+        self.session_id_to_counter.pop(session_id, None)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
