@@ -33,7 +33,8 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    SimpleResourcesServer,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
 )
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.rollout_observability import SandboxObservation
@@ -41,6 +42,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
@@ -238,14 +240,9 @@ class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
 
 
-class SwebenchResourcesServer(SimpleResourcesServer):
+class SwebenchResourcesServer(SandboxSessionResourcesServer):
     ray_enabled = False
     config: SwebenchResourcesServerConfig
-
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-
-        self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
 
     async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
@@ -298,14 +295,36 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             env_image_tag=LATEST,
         )
 
-    async def seed_session(self, request: Request, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
+    async def seed_session(
+        self, request: Request, body: SWEBenchSeedSessionRequest | ResourcesSeedSessionRequest
+    ) -> SWEBenchSeedSessionResponse | ResourcesSeedSessionResponse:
+        """Create the task sandbox for a legacy instance body or a typed Environment Server seed.
+
+        A typed seed returns ``sandbox_access`` with the serialized task sandbox and the image's working
+        directory; a legacy seed returns the sandbox handle.
+        """
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return await self.seed_task_sandbox_session(request, body, SWEBenchInstanceRequest)
+        session_id = request.session[SESSION_ID_KEY]
+        await self._start_task_sandbox(session_id, body)
+        return SWEBenchSeedSessionResponse(sandbox_handle=self._session_id_to_sandbox[session_id]._handle.sandbox_id)
+
+    async def _start_task_sandbox(self, session_id: str, body: SWEBenchInstanceRequest) -> str:
+        """Create the task sandbox for ``session_id``, apply the anti-cheating setup, and return its WORKDIR.
+
+        The agent works where verify later extracts the patch: the image's WORKDIR.
+        """
         test_spec = self._make_test_spec(body)
         eval_sandbox = await self._create_sandbox(test_spec)
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
+        self._session_id_to_sandbox[session_id] = eval_sandbox
+
+        pwd = await eval_sandbox.exec("pwd")
+        wd = (pwd.stdout or "").strip()
+        if pwd.return_code != 0 or not wd:
+            raise RuntimeError(f"Could not resolve the task sandbox workdir: {pwd.stderr}")
 
         if self.config.apply_anti_cheating:
             # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
-            wd = (await eval_sandbox.exec("pwd")).stdout.strip()
             anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
             await eval_sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
             result = await eval_sandbox.exec(
@@ -318,7 +337,7 @@ Stdout:
 Stderr:
 {result.stderr}""")
 
-        return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
+        return wd
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
         """
@@ -342,6 +361,11 @@ Stderr:
         5. Restrict number of turns - same as interleaved thinking, we could add in Responses API model proxy
         """
 
+        session_id = request.session[SESSION_ID_KEY]
+        if not self.config.is_verifying_golden_patch:
+            # Before the evaluation sandbox starts, so a rejected repeat leaks nothing.
+            self._claim_task_sandbox(session_id)
+
         test_spec = self._make_test_spec(body)
 
         verifier_sandbox_lifecycle_started_at = monotonic()
@@ -352,19 +376,16 @@ Stderr:
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
-            original_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
+            original_sandbox = self._session_id_to_sandbox.pop(session_id)
             try:
                 original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
                 model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
                 model_patch = model_patch_result.stdout
             except:
                 print("Failed to extract patch from container", format_exc(), file=sys.stderr)
-            try:
-                await original_sandbox.stop()
-            except:
-                print("Failed to stop original sandbox", format_exc(), file=sys.stderr)
+            await self._release_task_sandbox(session_id, original_sandbox)
 
-        run_id = request.session[SESSION_ID_KEY]
+        run_id = session_id
         mock_container = DockerContainer(id=run_id, instance_id=test_spec.instance_id)
         mock_container._inner_container = eval_sandbox
 
