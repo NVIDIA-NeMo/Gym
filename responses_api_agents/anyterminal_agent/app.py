@@ -31,7 +31,7 @@ from typing import Any, Dict, Optional
 import ray
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef
@@ -314,6 +314,13 @@ class GymAgentHarnessProcessor(BaseModel):
         return Path(__file__).parent
 
     @property
+    def _runtime_root(self) -> Path:
+        # Runtime prefixes contain complete Python/Node installations. Keep
+        # them outside the importable source tree so setuptools cannot walk or
+        # copy a live environment while another harness is being installed.
+        return CACHE_DIR / "anyterminal_agent"
+
+    @property
     def _agent_key(self) -> str:
         # responses_api_agents.hermes_agent.app -> hermes_agent
         return self.config.agent_server_module.split(".")[-2]
@@ -321,7 +328,8 @@ class GymAgentHarnessProcessor(BaseModel):
     def setup(self) -> Path:
         """Install agent deps into a portable prefix (idempotent, hash-keyed)."""
         agent_dir = PARENT_DIR / "responses_api_agents" / self._agent_key
-        deps_dir = self._parent / "deps" / f"anyterminal_{self._agent_key}_deps"
+        deps_root = self._runtime_root / "deps"
+        deps_dir = deps_root / f"anyterminal_{self._agent_key}_deps"
         sentinel = deps_dir / ".installed"
         script = agent_dir / "scripts" / f"{self._agent_key}_deps.sh"
         shared = self._parent / "setup_scripts" / "_portable_python.sh"
@@ -364,7 +372,7 @@ class GymAgentHarnessProcessor(BaseModel):
             # Every harness installer builds Gym from the same source checkout. Setuptools writes
             # into <checkout>/build, so concurrent first-time installs can corrupt one another even
             # though their destination prefixes differ. Serialize that shared build across agents.
-            runtime_install_lock = self._parent / "deps" / "runtime-install"
+            runtime_install_lock = deps_root / "runtime-install"
             with _file_lock(runtime_install_lock, "shared Gym runtime install"):
                 proc = Popen(
                     f"PORTABLE_PYTHON_SH={shared} DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}",
@@ -818,14 +826,16 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             if not agent_deps_archive.is_file():
                 raise ValueError(f"agent runtime archive not found: {agent_deps_archive}")
         if remote_provider and runtime_source == "auto":
-            agent_deps_archive = workspace / f".{agent_deps_dir.name}.tar.gz"
+            archive_dir = CACHE_DIR / "anyterminal_agent" / "archives"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            agent_deps_archive = archive_dir / f"{agent_deps_dir.name}.tar.gz"
             sentinel = agent_deps_dir / ".installed"
             if not agent_deps_archive.exists() or agent_deps_archive.stat().st_mtime < sentinel.stat().st_mtime:
                 temporary = agent_deps_archive.with_suffix(".tmp")
                 with tarfile.open(temporary, "w:gz", compresslevel=1) as archive:
                     archive.add(agent_deps_dir, arcname=".")
                 temporary.replace(agent_deps_archive)
-        results_dir = workspace / "results"
+        results_dir = RESULTS_DIR / "anyterminal_agent"
         results_dir.mkdir(parents=True, exist_ok=True)
         base_results_dir = self.config.results_dir
         if base_results_dir is None:
