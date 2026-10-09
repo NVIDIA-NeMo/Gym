@@ -248,7 +248,9 @@ async def test_install_failure_preserves_stdout_and_stderr(setup):
     agent, sandbox = setup
     sandbox.exec.side_effect = [
         SimpleNamespace(return_code=0, error_type=None, stdout="", stderr=""),
-        SimpleNamespace(return_code=1, stdout="Node cannot load libstdc++.so.6", stderr="exit status 1"),
+        SimpleNamespace(
+            return_code=1, error_type=None, stdout="Node cannot load libstdc++.so.6", stderr="exit status 1"
+        ),
         SimpleNamespace(return_code=0, error_type=None, stdout="", stderr=""),
     ]
     with pytest.raises(RuntimeError) as error:
@@ -259,6 +261,37 @@ async def test_install_failure_preserves_stdout_and_stderr(setup):
     sandbox.launch.assert_not_awaited()
     sandbox.stop.assert_not_awaited()
     agent.server_client.post.assert_not_called()
+
+
+@pytest.mark.parametrize("stage", ["prepare", "install"])
+@pytest.mark.parametrize("error_type", ["timeout", "sandbox"])
+@pytest.mark.parametrize("owned", [False, True])
+async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage, error_type, owned):
+    agent, sandbox = setup
+    request = Request({"type": "http", "session": {}})
+    body = seed()
+    if owned:
+        agent.config.sandbox_provider = "sandbox"
+        body = body.model_copy(update={"sandbox_access": None})
+        sandbox.start = AsyncMock()
+    ok = SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+    error = SimpleNamespace(return_code=0, error_type=error_type, stdout="bootstrap output", stderr="provider failed")
+    sandbox.exec.side_effect = ([ok] if owned else []) + ([error, ok] if stage == "prepare" else [ok, error, ok])
+    with patch("responses_api_agents.pi_agent.app.AsyncSandbox", return_value=sandbox) as sandbox_class:
+        sandbox_class.connect = AsyncMock(return_value=sandbox)
+        with pytest.raises(RuntimeError, match=f"error_type={error_type}") as failed:
+            await agent.seed_agent_session(request, body)
+    assert "bootstrap output" in str(failed.value)
+    assert "provider failed" in str(failed.value)
+    assert not request.session
+    sandbox.launch.assert_not_awaited()
+    if owned:
+        sandbox.start.assert_awaited_once()
+        sandbox.stop.assert_awaited_once()
+    else:
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
+    assert not any(record.state is not None for record in agent._session_records.values())
 
 
 @pytest.mark.parametrize("limit", [0, -1, 128, 2**53])
@@ -376,6 +409,31 @@ def test_unsupported_request_is_not_silently_ignored(setup, override):
         assert result.status_code == 422, result.text
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
     sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("return_code", [1, 137])
+@pytest.mark.parametrize("timed_out", [False, True])
+def test_aborted_preserves_worker_failure_unless_deadline_confirmed(setup, return_code, timed_out):
+    agent, sandbox = setup
+    sandbox.events = events(stop_reason="aborted")
+    sandbox.result.update(return_code=return_code, timed_out=timed_out)
+    app = agent.setup_webserver()
+    agent.setup_exception_middleware(app)
+    with TestClient(app) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
+        if timed_out:
+            assert result.status_code == 200
+            assert result.json()["status"] == "incomplete"
+            assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
+        else:
+            assert result.status_code == 500
+            assert f"Pi exited with code {return_code}" in result.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200
+        assert closed.json()["agent_observations"]["records"]
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
 
 
 def test_rejected_request_does_not_consume_activation(setup):
@@ -653,7 +711,7 @@ async def test_install_failure_disconnects_without_stopping_owner(setup):
     agent, sandbox = setup
     sandbox.exec.side_effect = [
         SimpleNamespace(return_code=0, error_type=None),
-        SimpleNamespace(return_code=1, stderr="npm failed", stdout=""),
+        SimpleNamespace(return_code=1, error_type=None, stderr="npm failed", stdout=""),
         SimpleNamespace(return_code=0, error_type=None),
     ]
     request = Request({"type": "http", "session": {}})
@@ -1090,7 +1148,6 @@ async def test_cancelled_http_waiter_does_not_cancel_shared_activation(setup):
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
-@pytest.mark.parametrize("session", [False, True])
 @pytest.mark.parametrize(
     "control",
     [
@@ -1101,11 +1158,10 @@ async def test_cancelled_http_waiter_does_not_cancel_shared_activation(setup):
         {"store": True},
     ],
 )
-async def test_local_and_sandbox_reject_unsupported_controls(setup, session, control):
+async def test_sandbox_rejects_unsupported_controls(setup, control):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": "pi-smoke-a2"}})
-    if session:
-        await agent.seed_agent_session(request, seed())
+    await agent.seed_agent_session(request, seed())
     with patch.object(agent, "_run_pi", AsyncMock()) as run:
         with pytest.raises(HTTPException) as error:
             await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task", **control))

@@ -35,13 +35,14 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import call_judge
+from nemo_gym.judge import call_judge, normalize_math_judge_verdict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
@@ -388,23 +389,10 @@ Example output: "My final verdict is different [[A!=B]]"."""
         if last_content.type != "output_text":
             return False, judge_evaluation
 
-        output_text = last_content.text
-        equal_choice_position = output_text.find(self.JUDGE_EQUAL_LABEL)
-        not_equal_choice_position = output_text.find(self.JUDGE_NOT_EQUAL_LABEL)
-
-        # The first label that appears in the text is used for the evaluation.
-        if equal_choice_position < 0:
-            if not_equal_choice_position < 0:
-                return False, judge_evaluation
-            else:
-                return False, judge_evaluation
-        else:
-            if not_equal_choice_position < 0:
-                return True, judge_evaluation
-            elif equal_choice_position < not_equal_choice_position:
-                return True, judge_evaluation
-            else:
-                return False, judge_evaluation
+        output_text = normalize_math_judge_verdict(last_content.text)
+        equal_choice_position = output_text.rfind(self.JUDGE_EQUAL_LABEL)
+        not_equal_choice_position = output_text.rfind(self.JUDGE_NOT_EQUAL_LABEL)
+        return equal_choice_position > not_equal_choice_position, judge_evaluation
 
     # ──────────────────────────────────────────────────────────
     # Aggregate metrics overrides
@@ -444,3 +432,5 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
 if __name__ == "__main__":
     LibraryJudgeMathResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = LibraryJudgeMathResourcesServer.run_webserver()  # noqa: F401

@@ -56,6 +56,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
 )
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.rollout_observability import (
     AgentEpisode,
     AgentInvocation,
@@ -76,6 +77,28 @@ from responses_api_agents.pi_agent.setup_pi import ensure_pi
 LOG = logging.getLogger(__name__)
 MCP_SETUP_ERROR_EXIT_CODE = 78  # Must match gym_mcp.mjs (EX_CONFIG).
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
+
+
+def _sandbox_prepare_command(directory: str) -> str:
+    # Keep the bootstrap POSIX sh: Bash must exist before its installer can run.
+    bootstrap = """set -eu
+set --
+command -v python3 >/dev/null 2>&1 || set -- "$@" python3
+command -v bash >/dev/null 2>&1 || set -- "$@" bash
+if [ "$#" -gt 0 ]; then
+    [ "$(id -u)" = 0 ] || { echo "Native Pi requires $*: preinstall these tools or use a root image." >&2; exit 1; }
+    if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache "$@"
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+    else
+        echo "Native Pi requires $*: preinstall these tools (automatic installation requires apt-get or apk)." >&2
+        exit 1
+    fi
+fi
+"""
+    return bootstrap + f"mkdir -p {shlex.quote(directory + '/home/.pi/agent')}"
 
 
 def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
@@ -116,13 +139,11 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
             output_tokens += int(usage.get("output") or 0)
             texts = [b["text"] for b in content if isinstance(b, dict) and (b.get("text") or "").strip()]
             if texts:
-                output_items.append(
-                    NeMoGymResponseOutputMessage(
-                        id=f"msg-{len(output_items)}",
-                        content=[NeMoGymResponseOutputText(type="output_text", text="\n".join(texts), annotations=[])],
-                        role="assistant",
-                        status="completed",
-                        type="message",
+                # Match the other adapters: reasoning belongs in reasoning items,
+                # not in the final text consumed by benchmark verifiers.
+                output_items.extend(
+                    ResponsesConverter(return_token_id_information=False).postprocess_assistant_message_dict(
+                        {"role": "assistant", "content": "\n".join(texts)}
                     )
                 )
             for block in content:
@@ -549,9 +570,15 @@ class PiAgent(SimpleResponsesAPIAgent):
                     raise RuntimeError(
                         f"Cannot create Pi sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
-            prepared = await sandbox.exec(f"mkdir -p {shlex.quote(directory + '/home/.pi/agent')}", timeout_s=30)
-            if prepared.return_code != 0:
-                raise RuntimeError(prepared.stderr or "Cannot create Pi sandbox session directory")
+            prepared = await sandbox.exec(
+                _sandbox_prepare_command(directory), timeout_s=self.config.sandbox_install_timeout_seconds
+            )
+            if prepared.return_code != 0 or prepared.error_type:
+                details = "\n".join(part for part in (prepared.stderr, prepared.stdout) if part)
+                raise RuntimeError(
+                    f"Cannot prepare Pi session (exit {prepared.return_code}, "
+                    f"error_type={prepared.error_type}): {details[-16000:]}"
+                )
             # Install only the agent runtime in the existing task sandbox.
             # Resources has already prepared the task repository and its dependencies.
             installer = "install_pi_runtime.sh"
@@ -562,12 +589,13 @@ class PiAgent(SimpleResponsesAPIAgent):
                 cwd=workdir,
                 timeout_s=self.config.sandbox_install_timeout_seconds,
             )
-            if installed.return_code != 0:
+            if installed.return_code != 0 or installed.error_type:
                 # Background execution puts the installer log in stdout and may
                 # leave only a generic "exit status 1" in stderr. Preserve both.
                 details = "\n".join(part for part in (installed.stderr, installed.stdout) if part)
                 raise RuntimeError(
-                    f"Pi sandbox installation failed (exit {installed.return_code}): {details[-16000:]}"
+                    f"Pi sandbox installation failed (exit {installed.return_code}, "
+                    f"error_type={installed.error_type}): {details[-16000:]}"
                 )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
         except BaseException as error:
@@ -592,7 +620,7 @@ class PiAgent(SimpleResponsesAPIAgent):
     def _validate_request(
         self, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponseCreateParamsNonStreaming:
-        """Apply the same supported-control boundary to local and sandbox execution."""
+        """Validate the supported controls for a native sandbox activation."""
         if body.model is not None and body.model != self.config.model:
             raise HTTPException(422, "Pi model must match the configured model")
         if body.max_output_tokens is not None:
@@ -784,8 +812,12 @@ class PiAgent(SimpleResponsesAPIAgent):
         cleanup = state.session.cleanup
         runtime = state.runtime_info
         assert cleanup is not None
-        error = cleanup["error"] or terminal_error
         model_limit = bool(stop_reasons and stop_reasons[-1] == "error" and context_overflow)
+        if model_limit or (stop_reasons and stop_reasons[-1] == "aborted"):
+            # Expected model limits/interruptions do not invalidate partial work.
+            # They must not erase an independently confirmed worker or cleanup failure.
+            terminal_error = None
+        error = cleanup["error"] or terminal_error
         if cleanup["return_code"] not in (None, 0) and not cleanup["timed_out"] and not model_limit:
             error = error or f"Pi exited with code {cleanup['return_code']}"
         if not stop_reasons:
@@ -796,8 +828,6 @@ class PiAgent(SimpleResponsesAPIAgent):
         incomplete = (
             cleanup["timed_out"] or model_limit or (stop_reasons and stop_reasons[-1] in ("length", "aborted"))
         )
-        if model_limit or (stop_reasons and stop_reasons[-1] == "aborted"):
-            error = cleanup["error"]  # Model limits/interruptions preserve a gradable partial patch.
         if cleanup["timed_out"] and not stop_reasons and cleanup["error"] is None:
             error = None
         response = NeMoGymResponse(
@@ -1110,9 +1140,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        body = self._validate_request(body)
         session_id = self._agent_session_id_from_request(request)
         if session_id is not None:
+            body = self._validate_request(body)
             state = self._require_agent_session(session_id)
             assert isinstance(state, PiSandboxSession)
             rollout_id = request.path_params.get("rollout_id")
@@ -1129,6 +1159,9 @@ class PiAgent(SimpleResponsesAPIAgent):
                 raise HTTPException(409, "Pi sandbox sessions support one activation; retry the same request")
             # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
+        # AnySWE, AnyTerminal and HarnessAgent pass generic Responses fields here.
+        # Preserve their local CLI contract; only native sessions enforce the new
+        # request boundary. Legacy model selection and caps remain config-owned.
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         episode = await self._create_episode(

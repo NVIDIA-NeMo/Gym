@@ -96,6 +96,18 @@ jobs:
     with:
       base-ref: ${{ needs.pre-flight.outputs.base_ref }}
 
+  # P0 is published separately; requiring that check is a repository rules decision.
+  harness_conformance:
+    name: Harness conformance
+    needs: [pre-flight]
+    uses: ./.github/workflows/harness-conformance.yml
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    with:
+      base-ref: ${{ needs.pre-flight.outputs.base_ref }}
+
   container_build:
     name: Build Gym container
     needs: [pre-flight, classify_changes, unit_tests]

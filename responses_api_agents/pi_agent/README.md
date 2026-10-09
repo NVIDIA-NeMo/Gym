@@ -84,8 +84,10 @@ Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is r
 only for its compatibility `/run`, not native sessions.
 
 Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with Python 3.8+,
-bash, tar/gzip, and SHA-256 utilities. Missing bootstrap packages are installed with apt-get
-or apk when running as root; otherwise preinstall them in the image. Older Alpine images
+bash, tar/gzip, and SHA-256 utilities. Session setup uses POSIX sh to install missing Python/Bash
+with apt-get or apk when running as root, before launching the Bash runtime installer;
+otherwise preinstall them in the image. Setup fails on either a nonzero exit or a provider error.
+Older Alpine images
 also need patchelf so Pi's Node can use a private, checksum-verified C++ library without
 replacing the task's system library. The pinned Node version has no arm64 musl build.
 The provider must support sandbox exec and file upload/download.
@@ -107,15 +109,15 @@ extra-argument, and environment overrides; those remain available on the local p
 
 ## Requests and settings
 
-Input is one text user message, optionally preceded by a system message. Both sandbox
+Native sandbox input is one text user message, optionally preceded by a system message. Both sandbox
 and local execution combine the configured system prompt, request `instructions`, and input
 system message in that order. Sampling and chat-template settings belong on the Gym Model Server.
-Unsupported request controls are rejected before execution.
+Native sandbox sessions reject unsupported request controls before execution.
 
 Set the agent configuration's `max_output_tokens` for a per-model-call output cap, including
 reasoning tokens. An adapter-owned Pi extension applies it as `max_tokens`, preserving any
 smaller upstream cap. Limits must be positive JavaScript-safe integers. Request-level
-`max_output_tokens` is rejected because a total-response budget is not implemented. Model Server
+`max_output_tokens` is rejected in native sessions because a total-response budget is not implemented. Model Server
 configuration must not replace the agent's cap with a larger value. Enforcement is tested with Pi 0.80.2.
 
 ## Lifecycle and ownership
@@ -208,6 +210,11 @@ required Resources tool access rather than silently ignoring it.
 Calls without an agent session retain local CLI compatibility. They do not use the
 Resources-owned task sandbox. Configure a Gym `model_server`, or supply an explicit Pi provider
 configuration as below. The self-contained math example keeps its local execution settings.
+
+AnySWE, AnyTerminal, and HarnessAgent can continue forwarding their existing Responses
+request fields. On this compatibility path, the configured model and per-call token cap
+remain authoritative; forwarding request-level sampling fields or `max_output_tokens`
+does not add support for them or enforce a total-response budget.
 
 pi must be on PATH (auto-installed on the first local invocation, or `npm install -g @earendil-works/pi-coding-agent`).
 Put `policy_base_url`, `policy_api_key`, and `policy_model_name` in `env.yaml`.
