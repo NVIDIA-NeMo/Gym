@@ -651,7 +651,10 @@ class TestRolloutCollection:
             )
         )
 
-        with pytest.raises(ConfigError, match="dataset_sha256 mismatch"):
+        message = (
+            "legacy cache is incomplete" if resume_from_cache and not existing_rollouts else "dataset_sha256 mismatch"
+        )
+        with pytest.raises(ConfigError, match=message):
             await RolloutCollectionHelper().run_from_config(config)
 
         for path, content in saved_artifacts.items():

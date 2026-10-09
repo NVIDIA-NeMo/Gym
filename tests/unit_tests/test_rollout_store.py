@@ -268,10 +268,11 @@ def test_prepared_but_never_opened_run_can_resume(prepared_run):
 
 @pytest.mark.parametrize("allow_unsafe", [False, True])
 @pytest.mark.parametrize("artifact", ["materialized", "output", "failures"])
-def test_incomplete_legacy_cache_restarts_from_current_inputs(prepared_run, capsys, artifact, allow_unsafe):
+def test_incomplete_initial_cache_restarts_from_current_inputs(prepared_run, capsys, artifact, allow_unsafe):
     output, prepare = prepared_run
     paths = {"materialized": materialized_path_for(output), "output": output, "failures": failures_path_for(output)}
-    paths[artifact].write_bytes(b'{"old_partial_run":true}\n')
+    # Preparation can restart only before any result or failure has been saved.
+    paths[artifact].write_bytes(b'{"old_partial_run":true}\n' if artifact == "materialized" else b"")
     with RolloutStore.start_or_resume(output, prepare, resume=True, allow_unsafe=allow_unsafe) as store:
         assert store.coverage()["attempts"] == 0
         assert len(store.pending(3)) == 2

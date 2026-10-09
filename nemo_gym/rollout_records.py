@@ -61,26 +61,36 @@ def materialized_path_for(output: Path) -> Path:
     return output.with_name(output.stem + "_materialized_inputs.jsonl")
 
 
-def resolve_rollout_path(output: Path) -> Path:
-    """Resolve aliases without abandoning legacy companions beside the alias."""
+def resolve_rollout_path(output: Path, *, read_only: bool = False) -> Path:
+    """Resolve an output without losing its companions.
+
+    Readers may retain an unambiguous legacy alias layout. Writers require all
+    recovery files beside the resolved output, so aliases cannot split a run.
+    Derived coverage reports do not establish ownership of a run.
+    """
     resolved = output.resolve()
-    for companion in (
-        manifest_path_for,
-        journal_path_for,
-        materialized_path_for,
-        failures_path_for,
-        coverage_path_for,
+    companions = (manifest_path_for, journal_path_for, materialized_path_for, failures_path_for)
+    misplaced = [
+        companion(output)
+        for companion in companions
+        if companion(output).resolve() != companion(resolved).resolve()
+        and (companion(output).exists() or companion(output).is_symlink())
+    ]
+    if not misplaced:
+        return resolved
+    if read_only and not any(
+        companion(path).exists() or companion(path).is_symlink()
+        for path in (output, resolved)
+        for companion in (manifest_path_for, journal_path_for)
     ):
-        alias_artifact, target_artifact = companion(output), companion(resolved)
-        if alias_artifact.resolve() != target_artifact.resolve() and (
-            alias_artifact.exists() or alias_artifact.is_symlink()
-        ):
-            raise ConfigError(
-                f"Recovery artifacts exist beside the rollout alias ({alias_artifact}). "
-                "Use the original Gym revision, or move all companions beside the resolved output "
-                f"({resolved}) after backing up the run. Saved artifacts were not changed."
-            )
-    return resolved
+        # Do not mix or silently discard two competing sets of legacy files.
+        if not any(companion(resolved).exists() or companion(resolved).is_symlink() for companion in companions):
+            return output.absolute()
+    raise ConfigError(
+        f"Recovery artifacts exist beside the rollout alias ({misplaced[0]}). "
+        "Use the original Gym revision, or move all companions beside the resolved output "
+        f"({resolved}) after backing up the run. Saved artifacts were not changed."
+    )
 
 
 def logical_rollout_id(row: dict) -> str:

@@ -1111,7 +1111,13 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         return self
 
     def check_completion(
-        self, *, expected: int, results: List[Dict[str, Any]], completed: int | None = None, retryable: bool = True
+        self,
+        *,
+        expected: int,
+        results: List[Dict[str, Any]],
+        completed: int | None = None,
+        retryable: bool = True,
+        made_progress: bool = True,
     ) -> None:
         """Reject incomplete submitted runs after saving their partial artifacts."""
         if not self.require_complete:
@@ -1130,6 +1136,7 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
                 f"Partial artifacts retained at {self.output_jsonl_fpath}."
                 + (" No tasks are eligible for retry." if not retryable else ""),
                 retryable=retryable,
+                made_progress=made_progress,
             )
 
 
@@ -2908,7 +2915,7 @@ class RolloutCollectionHelper(BaseModel):
                 if structured_failure:
                     compatibility = _failure_compatibility_row(result, verification_response)
                     # Keep producer evidence without making it the canonical failure reason.
-                    if "error" in diagnostics:
+                    if diagnostics.get("error"):
                         compatibility.pop("error")
                     result = diagnostics | compatibility
 
@@ -3026,7 +3033,7 @@ class RolloutCollectionHelper(BaseModel):
                     failure_counts[failure_class] += 1
                     # Every dropped rollout says so as it happens, whichever layer classified it.
                     # tqdm.write keeps the line off the progress bar it would otherwise collide with.
-                    detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]
+                    detail = str(result.get("error") or result.get("_ng_failure_message") or "")[:200]
                     tqdm.write(
                         "🚨 [rollout_collection] rollout dropped from the score: "
                         f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
@@ -3181,6 +3188,7 @@ class RolloutCollectionHelper(BaseModel):
                 f"None of the {len(input_rows)} dispatched rollouts produced a result "
                 f"{dict(failure_counts)}.{drained_note} Inspect {failures_fpath}; the run has no score to report.",
                 retryable=store.coverage()["retryable"] > 0,
+                made_progress=store.outcomes_recorded > 0,
             )
         print(latency_tracker.summary())
 
@@ -3309,6 +3317,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             results=persisted_results,
             completed=completion["successful"],
             retryable=completion["retryable"] > 0,
+            made_progress=store.outcomes_recorded > 0,
         )
         return results
 
@@ -3894,7 +3903,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     if not (route_failures_to_sidecar or typed_outcomes) or not isinstance(
                         e, (*_RUN_FAILURE_ERRORS, InvalidRolloutResult)
                     ):
-                        if isinstance(e, InvalidRolloutResult):
+                        if isinstance(e, StaleRolloutResult):
+                            e.add_note(
+                                "Set +route_failures_to_sidecar=true to save this stale reply as a failure "
+                                "and continue independent tasks; resume to retry the unfinished task."
+                            )
+                        elif isinstance(e, InvalidRolloutResult):
                             e.add_note(
                                 "Set +route_failures_to_sidecar=true to save this invalid reply as a failure "
                                 "and continue independent tasks; fix the producer before retrying the failed task."
@@ -4195,11 +4209,27 @@ def _expand_input_glob(input_glob: str) -> List[str]:
     seen: Dict[Path, str] = {}  # source identity includes its companion recovery files
     for pattern in patterns:
         for path in sorted(glob_module.glob(pattern)):
-            resolved = resolve_rollout_path(Path(path))
-            if resolved.stem.endswith(("_attempts", "_failures", "_materialized_inputs")):
+            resolved = resolve_rollout_path(Path(path), read_only=True)
+            if (
+                resolved.stem.endswith(("_attempts", "_failures", "_materialized_inputs"))
+                and not manifest_path_for(resolved).exists()
+            ):
                 # Broad shard globs must not score recovery artifacts as results.
                 continue
-            seen.setdefault(resolved, str(resolved))
+            identity = resolved.resolve()
+            if (
+                identity in seen
+                and Path(seen[identity]) != identity
+                and resolved != identity
+                and str(resolved) != seen[identity]
+            ):
+                raise ConfigError(
+                    f"Multiple legacy companion layouts refer to the same output: {seen[identity]}, {resolved}"
+                )
+            if identity not in seen or resolved != identity:
+                # A permitted legacy alias owns the only companion files; keep
+                # that spelling when the glob also includes its bare target.
+                seen[identity] = str(resolved)
     return list(seen.values())
 
 

@@ -62,7 +62,7 @@ from nemo_gym.rollout_collection import (
     is_terminal_failure,
     migrate_invalid_judge_main_rows,
 )
-from nemo_gym.rollout_records import journal_path_for
+from nemo_gym.rollout_records import coverage_path_for, journal_path_for, materialized_path_for, resolve_rollout_path
 from nemo_gym.rollout_recovery import manifest_path_for
 from nemo_gym.rollout_store import raw_outcomes_are_selected
 from nemo_gym.server_utils import (
@@ -963,6 +963,8 @@ def _prepare_output_fpaths(
     resume_from_cache: bool,
     overwrite: bool,
     append: bool,
+    *,
+    protected_sources: tuple[Path, ...] = (),
 ) -> OutputPaths:
     output_fpath = Path(output_jsonl_fpath)
     output_fpath = output_fpath.with_name(output_name_prefix + output_fpath.name)
@@ -976,7 +978,20 @@ def _prepare_output_fpaths(
                     "Cannot overwrite a manifest-backed run with reverification; choose a new output path."
                 )
             raise ConfigError("Manifest-backed reverification is a follow-up; choose a selected-result projection.")
-    failures_fpath = failures_path_for(output_fpath)
+    # Explicit fresh overwrite replaces an alias itself, as before. Append and
+    # resume follow it; put their companions beside the actual destination.
+    replacing_alias = overwrite and not (append or resume_from_cache) and output_fpath.is_symlink()
+    destination = output_fpath.absolute() if replacing_alias else resolve_rollout_path(output_fpath)
+    failures_fpath = failures_path_for(destination)
+    for written in (output_fpath, failures_fpath, aggregate_metrics_path_for(destination)):
+        for source in protected_sources:
+            if written.resolve() == source.resolve() or (
+                written.exists() and source.exists() and written.samefile(source)
+            ):
+                raise ConfigError(
+                    "Reverification output must not overwrite source rollout artifacts or its recovery files. "
+                    "Choose a separate output path. Saved artifacts were not changed."
+                )
     if not (append or resume_from_cache):
         # A fresh run must not silently clobber a prior run's rollouts: delete only when the user
         # explicitly opts in via overwrite, otherwise refuse. resume_from_cache and append reuse the file.
@@ -991,7 +1006,7 @@ def _prepare_output_fpaths(
                     f"Output file already exists: '{fpath}'. Pass --overwrite to delete it and start fresh, "
                     "or --resume to continue from it."
                 )
-    return OutputPaths(output=output_fpath, failures=failures_fpath)
+    return OutputPaths(output=destination, failures=failures_fpath)
 
 
 def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]]:
@@ -1031,7 +1046,8 @@ class RolloutReverificationHelper(BaseModel):
                 "Reverification of histories with superseded outcomes is a follow-up to evaluation resume. "
                 "Use a selected-result projection in a separate output. Saved artifacts were not changed."
             )
-        # Output guards in _prepare_output_fpaths still forbid modifying an established run.
+        # Check every actual destination after applying the optional unsafe_
+        # prefix, before output preparation can unlink or append any source.
         force_warning: Optional[str] = None
         output_name_prefix = ""
         if config.input_format != "atif":
@@ -1056,10 +1072,27 @@ class RolloutReverificationHelper(BaseModel):
                 config.resume_from_cache,
                 config.overwrite,
                 config.append,
+                protected_sources=(materialized_inputs_jsonl_fpath, atif_manifest_jsonl_fpath),
             )
         else:
             assert config.rollouts_jsonl_fpath is not None
-            rollouts_jsonl_fpath = _resolve_under_cwd_or_install(config.rollouts_jsonl_fpath)
+            source_path = _resolve_under_cwd_or_install(config.rollouts_jsonl_fpath)
+            rollouts_jsonl_fpath = resolve_rollout_path(source_path, read_only=True)
+            protected_sources = {materialized_inputs_jsonl_fpath}
+            if manifest_path_for(rollouts_jsonl_fpath).exists() or journal_path_for(rollouts_jsonl_fpath).exists():
+                for source in (source_path, rollouts_jsonl_fpath):
+                    protected_sources.update(
+                        (
+                            source,
+                            failures_path_for(source),
+                            materialized_path_for(source),
+                            manifest_path_for(source),
+                            journal_path_for(source),
+                            coverage_path_for(source),
+                            aggregate_metrics_path_for(source),
+                            source.with_name(source.stem + "_run.lock"),
+                        )
+                    )
             if config.judge_failed_only:
                 _reject_multistage_recovery_source(
                     rollouts_jsonl_fpath, retry_invalid_judge_responses=config.retry_invalid_judge_responses
@@ -1070,6 +1103,7 @@ class RolloutReverificationHelper(BaseModel):
                 config.resume_from_cache,
                 config.overwrite,
                 config.append,
+                protected_sources=tuple(protected_sources),
             )
             reverify_source_fpath = rollouts_jsonl_fpath
             rollout_predicate = None

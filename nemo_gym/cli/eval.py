@@ -583,6 +583,8 @@ def _check_saved_completion(output: Path) -> None:
                 f"{report['successful']}/{report['expected']} samples completed. "
                 f"Partial artifacts retained at {output}. {guidance}",
                 retryable=retryable,
+                # Older coverage reports predate per-invocation progress.
+                made_progress=report.get("outcomes_recorded", 1) > 0,
             )
 
 

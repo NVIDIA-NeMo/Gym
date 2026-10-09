@@ -66,7 +66,9 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         echo "Previous evaluation is incomplete with no eligible retries. Stopping chain; inspect its artifacts."
         exit 0
     elif [[ $_prev_state == 'FAILED' && $_prev_exit == '75:0' ]]; then
-        echo "Previous evaluation has retryable unfinished work. Resuming..."
+        # The collector uses exit 1 if no new outcome was saved, so repeated
+        # empty invocations take the bounded infrastructure-retry branch below.
+        echo "Previous evaluation made progress and has retryable unfinished work. Resuming..."
 {max_walltime_check}
     elif [[ $_prev_state == 'TIMEOUT' || $_prev_state == 'PREEMPTED' || $_prev_state == 'NODE_FAIL' ]]; then
         echo "Previous job $_prev_slurm_job_id: $_prev_state. Resuming..."

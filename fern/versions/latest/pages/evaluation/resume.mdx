@@ -81,7 +81,8 @@ reserved by the controller in the run manifest. An execution number is separate 
 
 `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS` limits counted failures per logical rollout (default: 3). Only a recorded,
 nonterminal failure whose request was delivered or possibly delivered consumes that budget. A collector interruption,
-a checkpoint continuation, or a failure known to occur before sending does not consume it. Terminal failures and
+a checkpoint continuation, or a failure known to occur before sending does not consume it. The shared record supports
+`delivery: "not_sent"`; current collector transport failures conservatively use `possibly_delivered`. Terminal failures and
 intentional omissions stop retrying independently of the budget. The explicit terminal-timeout override makes those
 otherwise terminal failures eligible and counted under its existing opt-in policy.
 
@@ -129,6 +130,8 @@ Gym writes `<output_stem>_coverage.json` with an exact inventory:
 | `failed` | Rollouts whose selected attempt reported a no-result failure. |
 | `intentionally_omitted` | Explicit producer omissions, including terminal `skipped` outcomes. |
 | `unknown` | Rollouts with no saved outcome, including work never dispatched. |
+| `retryable` | Rollouts eligible for another attempt under the active retry policy. Aggregate reports expose this per shard. |
+| `outcomes_recorded` | Outcomes saved during this collector invocation; used to distinguish productive continuation from an empty restart. |
 
 The existing `successful` field remains the completed-result total. The measurement split is additive:
 
@@ -193,16 +196,17 @@ If an explicitly fresh replacement is interrupted during setup, old metadata may
 files. Resume refuses that inconsistent history, including with `allow_unsafe_resume=true`. Repeat the fresh command
 without `--resume` to finish replacing that run, or choose a new output path; this cannot recover the overwritten run.
 
-If only part of a legacy cache exists and there is no manifest, journal, or run-tagged outcome, Gym prints `Skipping resume_from_cache`
-and starts fresh from the current inputs, replacing the incomplete cache. This also covers interruption during initial
-preparation before the run identity was published. If a manifest or journal exists, missing required artifacts remain
-an error rather than causing an automatic restart.
+If only part of an initial cache exists, there is no manifest or journal, and both outcome files are absent or empty,
+Gym prints `Skipping resume_from_cache` and starts fresh from the current inputs. This covers interruption during
+initial preparation before the run identity was published. Non-empty saved results or failures are never erased by
+this fallback, including older untagged results and incomplete JSONL tails. Restore missing files or choose a new output
+path. If a manifest or journal exists, missing required artifacts remain an error.
 
 The unsafe override permits an explicitly unverified legacy import or a deliberate experiment-identity override.
 It does not recreate lost execution reservations: if a current-format manifest is missing, restore it from a backup or
 start at a new output path. Conflicting records, foreign run IDs, and corrupt metadata remain errors.
 
-This revision uses manifest version 2. Artifacts from earlier, unmerged versions of this PR that used an attempt
+This revision uses manifest version 2. Artifacts from earlier development revisions that used an attempt
 journal must be read with their original revision or retained separately before starting a new run. Gym reports this
 format mismatch instead of silently dropping history.
 
@@ -272,7 +276,7 @@ diagnostic evidence only: it is neither a scored response nor an eligible saved 
 
 For a legacy `judge_failed` or `judge_invalid` result that includes the actual generated response, the sidecar preserves it outside
 the canonical failure record, without a reward. Diagnostic token and trajectory evidence is retained too.
-Judge-only recovery from these manifest-backed runs is a separate follow-up: this PR resumes unfinished tasks
+Judge-only recovery from these manifest-backed runs is a separate follow-up: evaluation resume restarts unfinished tasks
 from their inputs. Ordinary `gym eval reverify` re-scores saved answers into a separate output when the source
 has no superseded records, including fresh manifest-backed runs. Histories containing older attempts must first
 be exported with `gym eval aggregate` to a selected-result projection. That projection contains completed answers,
@@ -280,9 +284,11 @@ not failed answers for `--judge-failed-only` recovery. Judge-only recovery of ma
 reverified results back into an established run remain blocked until the follow-up.
 
 Aggregation resolves source file symlinks before locating their companion history, and deduplicates aliases of the
-same rollout file. Older runs may have companions beside an output symlink instead of its target; Gym refuses
-these ambiguous layouts without changing files. Back up the run and move all companions beside the resolved
-output, or use the original Gym revision. Health and reverification apply the same history protections through aliases. For a merged output
+same rollout file. Readers also accept older runs whose companions exist only beside the alias, when neither location
+has a manifest or journal. Competing companion sets remain an error. Collection and resume require companions beside
+the resolved output: back up and move an older run's files together before writing it. Health and reverification preserve
+the same checks against superseded history through aliases. Reverification protects the source run's supporting files
+as well as its main output, including aliases and the `unsafe_` output prefix. For a merged output
 symlink, aggregation replaces the target file and preserves the symlink. It refuses to replace an input or an established
 recovery history through either spelling. Copied manifest-backed runs
 are rejected by run identity. Legacy runs have no trustworthy run identifier: independent evaluations may share the
@@ -312,11 +318,20 @@ Both paths must use the same controller rules:
   target; it must not independently add one. Failed restore reserves a new target before starting from input.
 - Continuation and interruption do not consume the failure budget. Only saved eligible failures do.
 
-After normal collection returns, the CLI exits with **75** if the evaluation is incomplete and tasks remain eligible
-for resume, including after a dispatch-budget drain. It exits with **76** if the evaluation is incomplete but only
-terminal failures, intentional omissions or exhausted retry budgets remain. Neither status reports a complete score.
-The Slurm auto-resume chain continues after 75 without spending an infrastructure retry, subject to its walltime cap;
-it stops after 76. Coverage reports expose the number of eligible tasks as `retryable`.
+After normal collection, the CLI exits with **75** if the evaluation is incomplete, tasks remain eligible for resume,
+and this invocation saved new outcomes. It exits with **1** if work remains retryable but no new outcomes were saved,
+including a dispatch budget that drains every task. Such work can still resume after correcting the cause; automatic
+restarts spend the configured infrastructure retry limit instead of continuing forever. Increase the dispatch budget
+or reduce the drain margin if they prevented all work.
+
+The CLI exits with **76** if the evaluation is incomplete but only terminal failures, intentional omissions or exhausted
+retry budgets remain. This is a compatibility change from older collection commands that could return 0 for partial
+results: Slurm marks these evaluations FAILED, even when every missing task was intentionally skipped.
+None of these nonzero statuses reports a complete evaluation.
+
+The Slurm auto-resume chain continues after 75 without spending an infrastructure retry and stops after 76.
+Its accumulated walltime cap applies only when `max_walltime` is configured. Collection coverage exposes eligible
+tasks as `retryable` and new outcomes as `outcomes_recorded`; aggregate coverage includes `retryable` within each shard.
 
 Code 0 means a completed evaluation after normal collection. An explicit Ctrl-C in `gym eval run` retains the existing
 cancellation behavior: it can return 0 with partial artifacts when `require_complete=false`. Inspect coverage to determine

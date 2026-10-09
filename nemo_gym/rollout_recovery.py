@@ -513,7 +513,10 @@ class IncompleteEvaluationError(RuntimeError):
 
     exit_code = 75
 
-    def __init__(self, message: str, *, retryable: bool = True):
+    def __init__(self, message: str, *, retryable: bool = True, made_progress: bool = True) -> None:
+        if retryable and not made_progress:
+            message += " No new outcomes were saved; automatic restarts use the infrastructure retry limit."
         super().__init__(message)
-        # Keep incomplete measurements nonzero, even when retry cannot help.
-        self.exit_code = 75 if retryable else 76
+        # 75 continues productive work; an empty invocation must spend a bounded
+        # infrastructure retry. 76 stops when another attempt cannot help.
+        self.exit_code = (75 if made_progress else 1) if retryable else 76

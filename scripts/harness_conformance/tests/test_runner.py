@@ -17,6 +17,7 @@ from scripts.harness_conformance.runner import _fingerprint, inspect_episode, ma
 from scripts.harness_conformance.scenarios import SCENARIOS
 
 from nemo_gym.base_responses_api_model import build_model_call_record
+from nemo_gym.config_types import ConfigError
 from nemo_gym.harness_capabilities.cli import json_rows
 from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
 
@@ -349,7 +350,8 @@ def test_witness_detects_changed_payload_even_when_attempt_identity_matches(reta
     assert "canonical" in " ".join(result["issues"])
 
 
-def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("error", [ValueError, ConfigError])
+def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch, error):
     from scripts.harness_conformance import runner
 
     inspected = []
@@ -357,7 +359,7 @@ def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch
 
     def fail_inspection(scenario, directory, execution):
         inspected.append(scenario.name)
-        raise ValueError("truncated rollout")
+        raise error("truncated rollout")
 
     monkeypatch.setattr(runner, "inspect_episode", fail_inspection)
     summary, code = run_suite(harnesses=["pi"], scenarios=SCENARIOS[:2], output=tmp_path / "run", timeout=1)
@@ -490,3 +492,33 @@ def test_chat_fingerprint_ignores_creation_clock():
     response = {"id": "r", "object": "chat.completion", "created": 123, "choices": []}
     without_clock = {key: value for key, value in response.items() if key != "created"}
     assert _fingerprint(request, 200, response) == _fingerprint(request, 200, without_clock)
+
+
+def test_manifest_backed_episode_reaches_conformance_report(retained_episode):
+    from nemo_gym.rollout_recovery import RunManifest
+    from nemo_gym.rollout_store import RolloutStore
+
+    directory, _ = retained_episode
+    output = directory / "rollouts.jsonl"
+    result = json.loads(output.read_text())
+    rows = [{"_ng_task_index": 0, "_ng_rollout_index": 0}]
+    source = directory / "inputs.jsonl"
+    source.write_text(json.dumps(rows[0]) + "\n")
+    manifest = RunManifest.create(source, rows, {}, {})
+    with RolloutStore.start_or_resume(output, lambda: (rows, manifest), resume=False) as store:
+        row = store.pending(3)[0]
+        store.record_dispatch(row)
+        store.record_outcome(result | row)
+    report = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
+    assert report["verdict"] == "fulfilled", report["issues"]
+
+
+def test_cli_reports_configuration_error_as_execution_error(tmp_path, monkeypatch, capsys):
+    from scripts.harness_conformance import runner
+
+    def fail(**kwargs):
+        raise ConfigError("conflicting recovery history")
+
+    monkeypatch.setattr(runner, "run_suite", fail)
+    assert main(["--output", str(tmp_path / "run")]) == 2
+    assert "runner_error: conflicting recovery history" in capsys.readouterr().err

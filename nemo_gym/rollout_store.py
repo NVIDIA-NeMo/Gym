@@ -57,10 +57,14 @@ def raw_outcomes_are_selected(path: Path) -> bool:
     including answers superseded by interrupted attempts, do. Validate the whole
     run even when the caller reads only the success file or only its sidecar.
     """
-    output = (
-        path.with_name(path.stem.removesuffix("_failures") + path.suffix) if path.stem.endswith("_failures") else path
-    )
-    output = resolve_rollout_path(output)
+    output = resolve_rollout_path(path, read_only=True)
+    # An output may itself end in "_failures". Its own history takes priority
+    # over the naming convention for sidecars.
+    if not manifest_path_for(output).exists() and not journal_path_for(output).exists():
+        if output.stem.endswith("_failures"):
+            output = resolve_rollout_path(
+                output.with_name(output.stem.removesuffix("_failures") + output.suffix), read_only=True
+            )
     if journal_path_for(output).exists():
         return False
     if not manifest_path_for(output).exists():
@@ -90,6 +94,7 @@ class RolloutStore:
         self._files = None
         self._results_file = self._failures_file = None
         self._allocated: set[tuple[str, int]] = set()
+        self.outcomes_recorded: int = 0
 
     @staticmethod
     def _unverified_manifest(output: Path) -> RunManifest:
@@ -145,6 +150,11 @@ class RolloutStore:
             ):
                 raise ConfigError(
                     "Run-tagged outcomes have lost their manifest. Restore it from backup or use a new output path."
+                )
+            if any(path.exists() and path.stat().st_size for path in (output, failures_path_for(output))):
+                raise ConfigError(
+                    "Cannot resume: the legacy cache is incomplete and contains saved outcomes. "
+                    "Restore the missing files or choose a new output path. Saved artifacts were not changed."
                 )
             print("Skipping resume_from_cache because the legacy cache is incomplete; starting fresh.")
             resume = False
@@ -206,7 +216,7 @@ class RolloutStore:
         cls, output: Path, *, import_legacy: bool = True, retry_terminal_timeouts: bool = False
     ) -> "RolloutStore | None":
         """Read selected outcomes without modifying files or acquiring a writer lock."""
-        output = resolve_rollout_path(output)
+        output = resolve_rollout_path(output, read_only=True)
         path = manifest_path_for(output)
         if journal_path_for(output).exists():
             raise ConfigError(
@@ -321,6 +331,7 @@ class RolloutStore:
         if sync:
             os.fsync(file.fileno())
         self._state.outcome(result, record=record)
+        self.outcomes_recorded += 1
 
     def record_omission(self, row: dict, reason: str) -> None:
         """Save intentional omissions separately from scored results and failures."""
@@ -401,4 +412,6 @@ class RolloutStore:
         return self._state.coverage()
 
     def write_coverage(self, **reporting: int) -> None:
-        atomic_write_json(coverage_path_for(self.output), self.coverage() | reporting)
+        atomic_write_json(
+            coverage_path_for(self.output), self.coverage() | reporting | {"outcomes_recorded": self.outcomes_recorded}
+        )

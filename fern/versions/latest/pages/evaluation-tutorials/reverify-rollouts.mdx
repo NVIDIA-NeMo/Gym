@@ -193,7 +193,14 @@ gym eval reverify \
 # Output written to: results/unsafe_rollouts_reverified.jsonl
 ```
 
-## Recover judge failures
+## Recover judge failures from legacy runs
+
+<Note>
+The `--judge-failed-only` and in-place `--append` examples in this section apply only to legacy runs without a recovery
+manifest. New manifest-backed runs currently retry unfinished tasks from their inputs with
+[evaluation resume](/main/evaluation/resume); judge-only recovery for those runs is a separate follow-up.
+Ordinary re-scoring into a separate output remains available when the saved source has no superseded outcomes.
+</Note>
 
 When a run uses an LLM-as-judge verifier, the judge is a second model call made *after* the expensive policy inference. If that judge call fails (bad key, unreachable or rate-limited endpoint), the sample fails even though the policy `response` is already computed and stored in `<rollouts>_failures.jsonl`. `--judge-failed-only` re-runs the judge on **only** those rollouts, reusing the stored responses — no inference — and merges the recovered rows back with the ones that already scored, so the metrics match a clean run.
 
