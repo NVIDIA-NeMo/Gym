@@ -4,7 +4,11 @@
 
 It stands in for the sandbox control plane, which outlives a Gym crash. Each sandbox is a tiny in-memory
 filesystem driven by a two-word command grammar: ``append <file> <text>`` adds a line, ``read <file>``
-prints the file, ``ls`` lists files. Pausing a sandbox records a snapshot (a copy of its files); creating a
+prints the file, ``ls`` lists files. ``run <file> <n> [interval]`` stands in for an agent harness: it appends
+``line k`` every ``interval`` seconds until the file holds ``n`` lines, continuing from however many lines the
+file already has (as ``opencode run --continue`` picks a session back up), and ``interrupt <file>`` stops a
+running ``run`` (as SIGINT stops OpenCode). A paused sandbox makes no progress: a ``run`` in flight ends.
+Pausing a sandbox records a snapshot (a copy of its files); creating a
 sandbox with ``snapshot_id`` starts from that copy; resuming requires a paused sandbox; a stopped sandbox
 rejects everything. Snapshots are listed and deleted like OpenSandbox's ``/v1/snapshots``.
 
@@ -14,6 +18,7 @@ Control routes:
 - ``POST /_ctl/fail {"op": ..., "sandbox_id": ...}``: fail the next call of that operation on that sandbox.
 """
 
+import asyncio
 import sys
 import time
 import uuid
@@ -88,7 +93,29 @@ async def exec_command(sandbox_id: str, body: dict) -> dict:
         return {"stdout": box["files"][parts[1]], "stderr": "", "return_code": 0}
     if parts[0] == "ls":
         return {"stdout": "\n".join(sorted(box["files"])), "stderr": "", "return_code": 0}
+    if parts[0] == "interrupt" and len(parts) >= 2:
+        box.setdefault("interrupt", set()).add(parts[1])
+        return {"stdout": "", "stderr": "", "return_code": 0}
+    if parts[0] == "run" and len(parts) == 3:
+        return await _run_harness(box, parts[1], parts[2])
     return {"stdout": "", "stderr": f"{parts[0]}: command not found", "return_code": 127}
+
+
+async def _run_harness(box: dict[str, Any], file: str, args: str) -> dict:
+    words = args.split()
+    total, interval = int(words[0]), float(words[1]) if len(words) > 1 else 0.5
+    box.setdefault("interrupt", set()).discard(file)
+    while True:
+        lines = box["files"].get(file, "").splitlines()
+        if len(lines) >= total:
+            return {"stdout": "harness finished", "stderr": "", "return_code": 0}
+        await asyncio.sleep(interval)
+        if file in box.get("interrupt", set()):
+            box["interrupt"].discard(file)
+            return {"stdout": "", "stderr": "interrupted", "return_code": 130}
+        if box["state"] != "running":
+            return {"stdout": "", "stderr": f"sandbox is {box['state']}", "return_code": 137}
+        box["files"][file] = box["files"].get(file, "") + f"line {len(lines) + 1}\n"
 
 
 @app.post("/sandboxes/{sandbox_id}/pause")

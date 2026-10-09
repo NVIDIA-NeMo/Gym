@@ -112,6 +112,9 @@ class Deployment:
     - ``borrowed_sandbox``: ``single_agent_turn`` over the sandboxed notes resources server, which hands the
       agent access to its sandbox, and an agent that runs its tools there and refreshes that access after a
       restore (``borrower_refreshes_access`` turns the refresh off, as a negative control).
+    - ``harness``: the legacy relay over an OpenCode-shaped agent that runs a long, interruptible harness command
+      inside the sandboxed notes server's sandbox, and continues it after a checkpoint (``harness_lines`` and
+      ``harness_interval_s`` size the run).
 
     With ``inference_url``, the policy model serves from that endpoint and the fake backend's control
     routes are unavailable. ``policy_workers`` sets the policy model server's uvicorn workers, and
@@ -132,6 +135,8 @@ class Deployment:
         server_workers: int = 1,
         resources_mcp: bool = False,
         borrower_refreshes_access: bool = True,
+        harness_lines: int = 6,
+        harness_interval_s: float = 0.5,
         extra_config: Optional[dict[str, Any]] = None,
     ) -> None:
         self.topology = topology
@@ -151,6 +156,8 @@ class Deployment:
         # Expose the counter resources server's tools over MCP, as a CLI agent harness calls them.
         self.resources_mcp = resources_mcp
         self.borrower_refreshes_access = borrower_refreshes_access
+        self.harness_lines = harness_lines
+        self.harness_interval_s = harness_interval_s
         self.external_inference = inference_url is not None
         self.procs: dict[str, subprocess.Popen] = {}
         self.dirs: dict[str, Path] = {}
@@ -177,7 +184,7 @@ class Deployment:
             # Log every request with its status, not only errors, so a failure can be traced in the logs.
             "uvicorn_logging_show_200_ok": True,
         }
-        if self.topology in ("sandbox", "agent_sandbox", "borrowed_sandbox"):
+        if self.topology in ("sandbox", "agent_sandbox", "borrowed_sandbox", "harness"):
             # The named sandbox block a borrower resolves a handed-out SandboxAccess through.
             config["sandbox"] = {"fake_remote": {"base_url": f"http://127.0.0.1:{self.sandbox_port}"}}
         if token_capture:
@@ -224,7 +231,7 @@ class Deployment:
                 expose_tools_over_mcp=self.resources_mcp,
             )
             add("resources", "resources_servers/example_session_state_mgmt", resources)
-        elif self.topology in ("sandbox", "borrowed_sandbox"):
+        elif self.topology in ("sandbox", "borrowed_sandbox", "harness"):
             resources = _server(
                 "resources_servers",
                 "example_session_state_mgmt",
@@ -272,6 +279,16 @@ class Deployment:
                 refresh_access_after_restore=self.borrower_refreshes_access,
             )
             add("agent", str(HERE / "sandbox_notes_borrower"), agent)
+        elif self.topology == "harness":
+            agent = _server(
+                "responses_api_agents",
+                "simple_agent",
+                resources_server=_ref("resources_servers", "resources"),
+                sandbox_backend_url=f"http://127.0.0.1:{self.sandbox_port}",
+                lines=self.harness_lines,
+                interval_s=self.harness_interval_s,
+            )
+            add("agent", str(HERE / "fake_harness_agent"), agent)
         else:
             agent = _server(
                 "responses_api_agents",
@@ -346,7 +363,7 @@ class Deployment:
             stderr=subprocess.STDOUT,
         )
         self._wait_healthy("backend", f"http://127.0.0.1:{self.backend_port}/v1/models")
-        if self.topology in ("sandbox", "agent_sandbox", "borrowed_sandbox"):
+        if self.topology in ("sandbox", "agent_sandbox", "borrowed_sandbox", "harness"):
             log = open(self.log_dir / "sandbox_backend.log", "a")
             self.procs["sandbox_backend"] = subprocess.Popen(
                 [sys.executable, str(HERE / "fake_sandbox_backend.py"), str(self.sandbox_port)],
@@ -556,6 +573,16 @@ def notes_row(rollout_id: str, attempt: int = 0, expected: tuple[str, ...] = ("o
             "tools": [NOTES_TOOL],
         },
         "expected_notes": list(expected),
+        "_ng_rollout_id": rollout_id,
+        "_ng_attempt_index": attempt,
+    }
+
+
+def harness_row(rollout_id: str, attempt: int = 0, lines: int = 6) -> dict:
+    """A legacy ``/run`` row for the harness agent; verify expects exactly ``line 1`` .. ``line <lines>``."""
+    return {
+        "responses_create_params": {"input": [{"role": "user", "content": "run the harness"}]},
+        "expected_notes": [f"line {index}" for index in range(1, lines + 1)],
         "_ng_rollout_id": rollout_id,
         "_ng_attempt_index": attempt,
     }

@@ -51,6 +51,11 @@ class SandboxNotesVerifyRequest(BaseVerifyRequest):
     expected_notes: list[str]
 
 
+class SandboxNotesSeedSessionResponse(BaseSeedSessionResponse):
+    # For a legacy /run agent that runs its harness inside the session's sandbox, as the SWE-bench server's does.
+    sandbox_handle: str
+
+
 class SandboxNotesResourcesServer(SimpleResourcesServer):
     ray_enabled = False
     checkpoint_mode = "exported"
@@ -66,7 +71,7 @@ class SandboxNotesResourcesServer(SimpleResourcesServer):
 
     async def seed_session(
         self, request: Request, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest
-    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+    ) -> ResourcesSeedSessionResponse | SandboxNotesSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._sandboxes:
             await self._sandboxes.create(session_id, SandboxSpec(image="notes:1", workdir="/work"))
@@ -76,7 +81,8 @@ class SandboxNotesResourcesServer(SimpleResourcesServer):
                 resources_session_id=body.resources_session_id,
                 sandbox_access=await self.current_sandbox_access(session_id),
             )
-        return BaseSeedSessionResponse()
+        sandbox = await self._sandboxes.ensure_running(session_id)
+        return SandboxNotesSeedSessionResponse(sandbox_handle=sandbox.handle.sandbox_id)
 
     async def current_sandbox_access(self, session_id: str) -> SandboxAccess | None:
         if session_id not in self._sandboxes:
