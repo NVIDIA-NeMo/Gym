@@ -19,7 +19,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import ClientResponseError
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import (
@@ -505,11 +504,10 @@ class TestLiteLLMModelServer:
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(side_effect=provider_error)
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(ClientResponseError) as exc_info:
             await server.responses(body=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail == {"error": {"code": "context_length_exceeded"}}
+        assert exc_info.value is provider_error
 
     @pytest.mark.parametrize("allowed,expected", [([], 500), ([429], 500), ([400], 400)])
     @pytest.mark.parametrize("api", ["responses", "chat/completions"])
@@ -528,6 +526,6 @@ class TestLiteLLMModelServer:
         response = TestClient(app).post(f"/v1/{api}", json=body)
         assert response.status_code == expected
         if expected == 400:
-            assert response.json() == {"detail": {"error": {"code": "context_length_exceeded"}}}
+            assert response.json() == {"error": {"code": "context_length_exceeded"}}
         operation = server._client.create_response if api == "responses" else server._client.create_chat_completion
         operation.assert_awaited_once()

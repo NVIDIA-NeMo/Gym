@@ -61,7 +61,7 @@ assert.equal(records.length, count);
     "status,message,context_overflow",
     [(400, "This model's maximum context length is 262144 tokens.", True), (503, "Service unavailable", False)],
 )
-def test_pinned_pi_classifies_model_server_http_error(status, message, context_overflow):
+def test_pinned_pi_classifies_model_server_http_error(status: int, message: str, context_overflow: bool) -> None:
     node, pi = shutil.which("node"), shutil.which("pi")
     if not node or not pi:
         pytest.skip("Installed Pi and Node are required for the real SDK contract")
@@ -79,6 +79,7 @@ def test_pinned_pi_classifies_model_server_http_error(status, message, context_o
             openai_base_url="http://upstream.invalid/v1",
             openai_api_key="test",
             openai_model="test",
+            propagate_upstream_http_status_codes=frozenset({status}),
         ),
         server_client=MagicMock(spec=ServerClient, global_config_dict={}),
     )

@@ -20,7 +20,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import ClientResponseError
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -146,7 +145,7 @@ class TestApp:
 
         assert response.status_code == status
         assert response.headers["content-type"] == "application/json"
-        assert response.json() == {"detail": payload}
+        assert response.json() == payload
         calls = read_model_call_records(CaptureStore(tmp_path), "upstream-error")
         assert len(calls) == 1
         assert calls[0].status_code == status
@@ -842,11 +841,11 @@ class TestApp:
             )
         )
 
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(ClientResponseError) as exc_info:
             await server.responses(NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail == "Upstream provider request failed with HTTP 400"
+        assert exc_info.value.status == 400
+        assert exc_info.value.message == "bad request"
         assert server._client.create_response.await_count == 1
 
     @pytest.mark.asyncio
@@ -909,11 +908,11 @@ class TestApp:
 
         # Callers such as Harbor's Terminus 2 agent recognize the provider's error code in the body.
         assert response.status_code == 400
-        assert response.json() == {"detail": provider_body}
+        assert response.json() == provider_body
         operation.assert_awaited_once()
         [call] = read_model_call_records(CaptureStore(tmp_path), "propagated")
         assert (call.status_code, call.error_category) == (400, "client_error")
-        assert call.response == {"detail": provider_body}
+        assert call.response == provider_body
 
     def test_opt_in_propagation_applies_to_streaming_responses(self) -> None:
         provider_error = ClientResponseError(
@@ -932,7 +931,7 @@ class TestApp:
         response = TestClient(app).post("/v1/responses", json={"input": "hello", "stream": True})
 
         assert response.status_code == 400
-        assert response.json() == {"detail": {"error": {"code": "context_length_exceeded"}}}
+        assert response.json() == {"error": {"code": "context_length_exceeded"}}
 
     @pytest.mark.parametrize("endpoint", ["responses", "chat_completions"])
     @pytest.mark.parametrize("status_code", [429, 503])
