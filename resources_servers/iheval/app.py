@@ -714,6 +714,7 @@ class IHEvalVerifyResponse(BaseVerifyResponse):
 
 
 class IHEvalResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     config: IHEvalResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

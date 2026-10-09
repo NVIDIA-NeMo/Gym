@@ -14,12 +14,19 @@
 # limitations under the License.
 import asyncio
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiohttp import ClientResponseError
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import (
+    NeMoGymAsyncOpenAI,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.litellm_model.app import (
     LiteLLMModelServer,
@@ -110,7 +117,7 @@ CHAT_COMPLETION_TOOL_CALL_RESPONSE = {
 }
 
 
-def _make_server(max_concurrent_requests=None) -> LiteLLMModelServer:
+def _make_server(max_concurrent_requests=None, **kwargs) -> LiteLLMModelServer:
     config = LiteLLMModelServerConfig(
         host="0.0.0.0",
         port=8081,
@@ -120,6 +127,7 @@ def _make_server(max_concurrent_requests=None) -> LiteLLMModelServer:
         max_concurrent_requests=max_concurrent_requests,
         entrypoint="",
         name="",
+        **kwargs,
     )
     return LiteLLMModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
@@ -150,6 +158,69 @@ class TestNormalizeToResponse:
         data["reasoning"] = {"effort": "high"}
         result = _normalize_to_response(data)
         assert result["reasoning"]["effort"] == "high"
+
+    def test_native_response_null_usage_details_normalized(self) -> None:
+        """Native response with null usage details is normalized for NeMoGymResponse."""
+        data = deepcopy(NATIVE_RESPONSE)
+        data["usage"] = {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "input_tokens_details": None,
+            "output_tokens_details": None,
+        }
+        result = _normalize_to_response(data)
+        assert result["usage"]["input_tokens_details"] == {"cached_tokens": None}
+        assert result["usage"]["output_tokens_details"] == {"reasoning_tokens": None}
+        validated = NeMoGymResponse.model_validate(result)
+        assert validated.usage.input_tokens == 10
+        assert validated.usage.input_tokens_details.cached_tokens is None
+        assert validated.usage.output_tokens_details.reasoning_tokens is None
+
+    def test_native_response_reasoning_item_normalized(self) -> None:
+        """Native response reasoning item missing summary and with output_text is normalized."""
+        data = deepcopy(NATIVE_RESPONSE)
+        data["output"] = [
+            {
+                "type": "reasoning",
+                "id": "rs_123",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Reasoning steps", "annotations": []}],
+            },
+            {
+                "type": "message",
+                "id": "msg_123",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Answer", "annotations": []}],
+            },
+        ]
+        result = _normalize_to_response(data)
+        reasoning_item = result["output"][0]
+        assert reasoning_item["summary"] == []
+        assert reasoning_item["content"][0]["type"] == "reasoning_text"
+        validated = NeMoGymResponse.model_validate(result)
+        assert len(validated.output) == 2
+        assert validated.output[0].type == "reasoning"
+        assert validated.output[0].summary == []
+        assert validated.output[0].content[0].type == "reasoning_text"
+
+    def test_native_response_usage_details_preserved(self) -> None:
+        """Reported token counts in native response usage details are preserved."""
+        data = deepcopy(NATIVE_RESPONSE)
+        data["usage"] = {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "prompt_tokens_details": {"cached_tokens": 4},
+            "completion_tokens_details": {"reasoning_tokens": 3},
+        }
+        result = _normalize_to_response(data)
+        assert result["usage"]["input_tokens_details"]["cached_tokens"] == 4
+        assert result["usage"]["output_tokens_details"]["reasoning_tokens"] == 3
+        validated = NeMoGymResponse.model_validate(result)
+        assert validated.usage.input_tokens_details.cached_tokens == 4
+        assert validated.usage.output_tokens_details.reasoning_tokens == 3
 
     def test_chat_completion_normalization(self) -> None:
         """Standard chat.completion with choices[] is normalized."""
@@ -406,3 +477,57 @@ class TestLiteLLMModelServer:
             *(server.responses(body=NeMoGymResponseCreateParamsNonStreaming(input="hello")) for _ in range(8))
         )
         assert peak == 2
+
+    async def test_responses_applies_the_upstream_retry_policy(self) -> None:
+        server = _make_server(
+            upstream_max_num_tries=1,
+            upstream_retry_policy={"max_attempts": 2, "backoff_initial_seconds": 0},
+        )
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(
+            side_effect=[TimeoutError("transient provider timeout"), deepcopy(NATIVE_RESPONSE)]
+        )
+
+        response = await server.responses(body=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+        assert response.output[0].content[0].text == "Hello!"
+        assert server._client.create_response.await_count == 2
+
+    async def test_responses_propagates_configured_http_status(self) -> None:
+        provider_error = ClientResponseError(
+            SimpleNamespace(real_url="https://litellm.example.com/v1/responses"),
+            (),
+            status=400,
+            message="bad request",
+        )
+        provider_error.response_content = b'{"error":{"code":"context_length_exceeded"}}'
+        server = _make_server(propagate_upstream_http_status_codes=[400])
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=provider_error)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await server.responses(body=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == {"error": {"code": "context_length_exceeded"}}
+
+    @pytest.mark.parametrize("allowed,expected", [([], 500), ([429], 500), ([400], 400)])
+    @pytest.mark.parametrize("api", ["responses", "chat/completions"])
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_http_routes_respect_propagation_policy(self, allowed, expected, api, stream) -> None:
+        server = _make_server(propagate_upstream_http_status_codes=allowed)
+        error = ClientResponseError(SimpleNamespace(real_url="https://litellm.example/v1"), (), status=400)
+        error.response_content = b'{"error":{"code":"context_length_exceeded"}}'
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=error)
+        server._client.create_chat_completion = AsyncMock(side_effect=error)
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        body = {"input": "hello"} if api == "responses" else {"messages": [{"role": "user", "content": "hello"}]}
+        body["stream"] = stream
+        response = TestClient(app).post(f"/v1/{api}", json=body)
+        assert response.status_code == expected
+        if expected == 400:
+            assert response.json() == {"detail": {"error": {"code": "context_length_exceeded"}}}
+        operation = server._client.create_response if api == "responses" else server._client.create_chat_completion
+        operation.assert_awaited_once()

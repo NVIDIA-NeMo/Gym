@@ -198,8 +198,48 @@ class TestDiscoverEnvironmentsAcrossRoots:
 
 
 class TestEnvironmentCatalog:
+    def test_nested_manifest_resolves_named_config_and_preserves_catalog_names(self, tmp_path, monkeypatch) -> None:
+        manifest_path = _write_manifest(
+            tmp_path,
+            "benchmarks",
+            "foo/config_web",
+            _manifest("foo/config_web", "benchmark", config_path="../config_web.yaml"),
+            with_config=False,
+        )
+        config = manifest_path.parent.parent / "config_web.yaml"
+        config.write_text("agent:\n  responses_api_agents:\n    a:\n      datasets:\n      - {type: benchmark}\n")
+        other = config.with_name("config_other.yaml")
+        other.write_text(config.read_text())
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        entries = {entry.name: entry for entry in discover_environment_catalog()}
+
+        assert set(entries) == {"foo/config_web", "foo/config_other"}
+        assert entries["foo/config_web"].config_path == config.resolve()
+        assert entries["foo/config_web"].manifest_path == manifest_path
+        assert entries["foo/config_other"].status == "no-manifest"
+
+    def test_manifest_suppresses_legacy_alias_by_resolved_config_path(self, tmp_path, monkeypatch) -> None:
+        path = _write_manifest(
+            tmp_path,
+            "benchmarks",
+            "foo/web",
+            _manifest("foo/web", "benchmark", config_path="../config_web.yaml"),
+            with_config=False,
+        )
+        path.parent.parent.joinpath("config_web.yaml").write_text(
+            "agent:\n  responses_api_agents:\n    a:\n      datasets:\n      - {type: benchmark}\n"
+        )
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+        assert [entry.name for entry in discover_environment_catalog()] == ["foo/web"]
+
     def test_discovers_manifest_and_legacy_union(self, tmp_path: Path, monkeypatch) -> None:
-        manifest_path = _write_manifest(tmp_path, "environments", "manifest_env", _manifest("manifest_env"))
+        manifest_path = _write_manifest(
+            tmp_path,
+            "environments",
+            "manifest_env",
+            _manifest("manifest_env", experimental=False),
+        )
         _make_env(tmp_path / "environments", "legacy_env", _ENV_CONFIG.format(name="legacy_env"))
         benchmark = tmp_path / "benchmarks" / "legacy_benchmark" / "config.yaml"
         benchmark.parent.mkdir(parents=True)
@@ -223,7 +263,7 @@ class TestEnvironmentCatalog:
             ("benchmark", "legacy_benchmark"),
         }
         manifest_entry = entries[("environment", "manifest_env")]
-        assert manifest_entry.status == "experimental"
+        assert manifest_entry.status is None
         assert manifest_entry.manifest_path == manifest_path
         assert manifest_entry.version == "0.1.0"
         assert manifest_entry.integration_profile == "custom-gym-verifier"

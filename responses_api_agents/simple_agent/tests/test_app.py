@@ -17,28 +17,38 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 import orjson
 import pytest
-from fastapi import Response
+from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    TASK_SOURCE_KEY_NAME,
+)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseReasoningItem,
-    NeMoGymSummary,
 )
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
     SimpleAgent,
     SimpleAgentConfig,
     SimpleAgentRunRequest,
+    SimpleAgentVerifyRequest,
 )
 
 
@@ -214,6 +224,399 @@ class TestApp:
         )
         assert prefixed_response.status_code == 200
         assert prefixed_response.json()["_ng_trajectory"]["rollout_id"] == "0-0"
+
+    @pytest.mark.parametrize("observability_enabled", [False, True])
+    async def test_agent_session_uses_seeded_direct_http_tool_access(
+        self, monkeypatch: MonkeyPatch, observability_enabled: bool
+    ) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="simple",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {"observability_enabled": observability_enabled}
+        server = SimpleAgent(config=config, server_client=server_client)
+
+        response_base = {
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        server_client.post = AsyncMock(
+            side_effect=[
+                _mock_response(
+                    response_base
+                    | {
+                        "id": "resp-tool",
+                        "output": [
+                            {
+                                "id": "fc-1",
+                                "call_id": "call-1",
+                                "name": "get_weather",
+                                "arguments": '{"city":"San Francisco"}',
+                                "type": "function_call",
+                                "status": "completed",
+                            }
+                        ],
+                    }
+                ),
+                _mock_response(
+                    response_base
+                    | {
+                        "id": "resp-final",
+                        "output": [
+                            {
+                                "id": "msg-1",
+                                "content": [{"annotations": [], "text": "Cold.", "type": "output_text"}],
+                                "role": "assistant",
+                                "status": "completed",
+                                "type": "message",
+                            }
+                        ],
+                    }
+                ),
+            ]
+        )
+        tool_response = _mock_response(content='{"city":"San Francisco","weather_description":"cold"}')
+        tool_response.cookies = {"session_id": MagicMock(value="updated-resource-cookie")}
+        direct_request = AsyncMock(return_value=tool_response)
+        monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", direct_request)
+
+        app = server.setup_webserver()
+        client = TestClient(app)
+        episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+        seed = client.post(
+            "/v1/agent_sessions",
+            json=AgentSeedSessionRequest(
+                agent_session_id="agent-session",
+                episode_id=episode_id,
+                task_id=TaskId(taskset="example", task_id="0"),
+                tool_accesses=[
+                    DirectHTTPToolAccess(
+                        name="weather.direct_http",
+                        required=True,
+                        base_url="http://resources:8000",
+                        cookies={"session_id": "seeded-resource-cookie"},
+                        headers={"X-Scoped-Access": "token"},
+                    )
+                ],
+            ).model_dump(mode="json"),
+        )
+        assert seed.status_code == 200
+
+        # The Environment Server calls the attempt-qualified route, which enables trajectory collection.
+        result = client.post(
+            "/ng-rollout/rollout/v1/responses" if observability_enabled else "/v1/responses",
+            json={
+                "input": [{"role": "user", "content": "weather?"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather",
+                        "description": "",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                            "additionalProperties": False,
+                        },
+                        "strict": True,
+                    }
+                ],
+            },
+        )
+        assert result.status_code == 200
+        assert result.json()["output"][-1]["content"][0]["text"] == "Cold."
+        direct_request.assert_awaited_once_with(
+            method="POST",
+            url="http://resources:8000/get_weather",
+            json={"city": "San Francisco"},
+            cookies={"session_id": "seeded-resource-cookie"},
+            headers={"X-Scoped-Access": "token"},
+            _internal=True,
+        )
+        assert [item.kwargs["server_name"] for item in server_client.post.await_args_list] == ["model", "model"]
+
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json=AgentCloseSessionRequest(
+                agent_session_id=seed.json()["agent_session_id"],
+                episode_id=episode_id,
+            ).model_dump(mode="json"),
+        )
+        assert close.status_code == 200
+        assert close.json()["resources_cookies"] == {"session_id": "updated-resource-cookie"}
+        # A session returns its agent evidence at close, which becomes the episode's ng_agent_observations.
+        observations = close.json()["agent_observations"]
+        if observability_enabled:
+            assert [record["kind"] for record in observations["records"]] == ["agent_invocation"]
+            assert observations["source"] == "simple_agent"
+        else:
+            assert observations is None
+
+    async def test_agent_session_returns_observations_from_every_activation(self) -> None:
+        server, server_client = _make_agent(True)
+        response_base = {
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+        def message_response(response_id: str, text: str) -> MagicMock:
+            return _mock_response(
+                response_base
+                | {
+                    "id": response_id,
+                    "output": [
+                        {
+                            "id": f"msg-{response_id}",
+                            "content": [{"annotations": [], "text": text, "type": "output_text"}],
+                            "role": "assistant",
+                            "status": "completed",
+                            "type": "message",
+                        }
+                    ],
+                }
+            )
+
+        server_client.post = AsyncMock(
+            side_effect=[message_response("resp-1", "First."), message_response("resp-2", "Second.")]
+        )
+        client = TestClient(server.setup_webserver())
+        episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+        seed = client.post(
+            "/v1/agent_sessions",
+            json=AgentSeedSessionRequest(
+                agent_session_id="agent-session",
+                episode_id=episode_id,
+                task_id=TaskId(taskset="example", task_id="0"),
+            ).model_dump(mode="json"),
+        )
+        assert seed.status_code == 200
+
+        for question in ("first?", "second?"):
+            result = client.post("/ng-rollout/rollout/v1/responses", json={"input": question})
+            assert result.status_code == 200
+
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json=AgentCloseSessionRequest(
+                agent_session_id=seed.json()["agent_session_id"], episode_id=episode_id
+            ).model_dump(mode="json"),
+        )
+
+        assert close.status_code == 200
+        records = close.json()["agent_observations"]["records"]
+        assert [record["invocation_id"] for record in records] == ["root", "activation-2"]
+        assert [record["model_calls"][0]["response_id"] for record in records] == ["resp-1", "resp-2"]
+
+    async def test_agent_session_can_return_unresolved_tool_calls(self) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="simple",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            execute_tools=False,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {"observability_enabled": False}
+        server_client.post = AsyncMock(
+            return_value=_mock_response(
+                {
+                    "id": "resp-tool",
+                    "created_at": 1.0,
+                    "model": "model",
+                    "object": "response",
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "output": [
+                        {
+                            "id": "fc-1",
+                            "call_id": "call-1",
+                            "name": "get_weather",
+                            "arguments": '{"city":"San Francisco"}',
+                            "type": "function_call",
+                            "status": "completed",
+                        }
+                    ],
+                }
+            )
+        )
+        client = TestClient(SimpleAgent(config=config, server_client=server_client).setup_webserver())
+        seed = client.post(
+            "/v1/agent_sessions",
+            json=AgentSeedSessionRequest(
+                agent_session_id="agent-session",
+                episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+                task_id=TaskId(taskset="example", task_id="0"),
+            ).model_dump(mode="json"),
+        )
+        assert seed.status_code == 200
+
+        result = client.post("/v1/responses", json={"input": "weather?"})
+
+        assert result.status_code == 200
+        assert [item["type"] for item in result.json()["output"]] == ["function_call"]
+        assert result.json()["output"][0]["call_id"] == "call-1"
+        server_client.post.assert_awaited_once()
+        assert server_client.post.await_args.kwargs["server_name"] == "model"
+
+    def test_execute_tools_defaults_to_true(self) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="simple",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+        )
+
+        assert config.execute_tools is True
+        assert "agent-session" in SimpleAgentConfig.model_fields["execute_tools"].description
+
+    async def test_execute_tools_false_is_rejected_outside_agent_session(self) -> None:
+        server, server_client = _make_agent(False)
+        server = type(server)(
+            config=server.config.model_copy(update={"execute_tools": False}), server_client=server_client
+        )
+        request = MagicMock(session={}, path_params={}, cookies={})
+        error = "execute_tools=false is supported only for agent-session requests"
+
+        with pytest.raises(ValueError, match=error):
+            await server.responses(
+                request,
+                Response(),
+                NeMoGymResponseCreateParamsNonStreaming(input="question"),
+            )
+        with pytest.raises(ValueError, match=error):
+            await server.run(request, SimpleAgentRunRequest(responses_create_params={"input": "question"}))
+        server_client.post.assert_not_called()
+
+    async def test_agent_session_rejects_required_mcp_access(self) -> None:
+        server, _ = _make_agent(False)
+        request = MagicMock(session={})
+        body = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="example", task_id="0"),
+            tool_accesses=[
+                MCPToolAccess(
+                    name="resources",
+                    required=True,
+                    connection=MCPStreamableHTTPConnection(url="http://resources:8000/mcp"),
+                )
+            ],
+        )
+
+        with pytest.raises(ValueError, match="does not support required MCP"):
+            await server.seed_agent_session(request, body)
+
+    async def test_several_workers_are_allowed_but_reject_sessions(self) -> None:
+        """The legacy /run path keeps no session, so only session seeding needs a single worker."""
+        server, _ = _make_agent(False)
+        server = type(server)(
+            config=server.config.model_copy(update={"num_workers": 2}), server_client=server.server_client
+        )
+        body = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="example", task_id="0"),
+        )
+
+        with pytest.raises(ValueError, match="sessions require num_workers=1"):
+            await server.seed_agent_session(MagicMock(session={}), body)
+
+    async def test_agent_session_without_a_grant_refuses_tool_calls(self, monkeypatch: MonkeyPatch) -> None:
+        # The configured resources_server has no session for this episode, so a tool call must not fall back to it.
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="simple",
+            resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            # The model keeps calling the tool; a step limit ends the loop if a regression falls back.
+            max_steps=2,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client.post = AsyncMock(
+            return_value=_mock_response(
+                {
+                    "id": "resp-tool",
+                    "created_at": 1.0,
+                    "model": "model",
+                    "object": "response",
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "output": [
+                        {
+                            "id": "fc-1",
+                            "call_id": "call-1",
+                            "name": "get_weather",
+                            "arguments": '{"city":"San Francisco"}',
+                            "type": "function_call",
+                            "status": "completed",
+                        }
+                    ],
+                }
+            )
+        )
+        direct_request = AsyncMock()
+        monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", direct_request)
+        client = TestClient(SimpleAgent(config=config, server_client=server_client).setup_webserver())
+
+        seed = client.post(
+            "/v1/agent_sessions",
+            json=AgentSeedSessionRequest(
+                agent_session_id="agent-session",
+                episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+                task_id=TaskId(taskset="example", task_id="0"),
+            ).model_dump(mode="json"),
+        )
+        assert seed.status_code == 200
+
+        with pytest.raises(RuntimeError, match="no direct HTTP tool access"):
+            client.post("/v1/responses", json={"input": [{"role": "user", "content": "weather?"}]})
+        assert [call.kwargs["server_name"] for call in server_client.post.await_args_list] == ["model"]
+        direct_request.assert_not_awaited()
+
+    async def test_agent_session_seed_and_close_are_idempotent(self) -> None:
+        server, _ = _make_agent(False)
+        request = MagicMock(session={})
+        body = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="example:test", task_id="0"),
+        )
+
+        first = await server.seed_agent_session(request, body)
+        second = await server.seed_agent_session(request, body)
+        assert first == second
+
+        close_body = AgentCloseSessionRequest(
+            agent_session_id=body.agent_session_id,
+            episode_id=body.episode_id,
+        )
+        first_close = await server.close_agent_session(request, close_body)
+        second_close = await server.close_agent_session(request, close_body)
+        assert second_close == first_close
+
+        # The base session bookkeeping rejects a seed after close with a conflict, which callers do not retry.
+        with pytest.raises(HTTPException) as error:
+            await server.seed_agent_session(request, body)
+        assert error.value.status_code == 409
 
     @pytest.mark.parametrize("resolved", [False, None])
     async def test_run_emits_standard_turns_and_tool_observation(self, resolved: bool | None) -> None:
@@ -402,6 +805,155 @@ class TestApp:
         ]
         assert "ng_trajectory" not in result.model_dump(mode="json")
 
+    async def test_run_sends_legacy_equivalent_verify_payload(self) -> None:
+        server, server_client = _make_agent(True)
+        response_payload = NeMoGymResponse.model_validate(
+            {
+                "id": "response-1",
+                "created_at": 1.0,
+                "model": "model",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "message-1",
+                        "content": [{"annotations": [], "text": "answer", "type": "output_text"}],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                        "prompt_token_ids": [10, 11],
+                        "generation_token_ids": [12, 13],
+                        "generation_log_probs": [-0.1, -0.2],
+                        "routed_experts": [[[0, 1]], [[1, 0]]],
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        ).model_dump(mode="json")
+        response_with_trajectory = response_payload | {
+            "_ng_trajectory": TrajectoryRecord(task_id="unscoped", rollout_id="unscoped").model_dump(mode="json")
+        }
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            if url_path.endswith("/v1/responses"):
+                return _mock_response(response_with_trajectory)
+            assert url_path == "/verify"
+            return _mock_response(kwargs["json"] | {"reward": 1.0, "resolved": True})
+
+        server_client.post = AsyncMock(side_effect=post)
+        run_payload = {
+            "responses_create_params": {
+                "input": [{"role": "user", "content": "question"}],
+                "max_output_tokens": 128,
+                "metadata": {"extra_body": '{"seed": 7}'},
+                "temperature": 0.25,
+            },
+            "verifier_metadata": {"expected_answer": "answer", "weight": 2},
+            "task_id": "task-7",
+            "dataset_field": {"nested": ["value"]},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            ATTEMPT_INDEX_KEY_NAME: 2,
+            ROLLOUT_ID_KEY_NAME: "explicit-rollout",
+            AGENT_REF_KEY_NAME: {"type": "responses_api_agents", "name": "simple"},
+            TASK_SOURCE_KEY_NAME: "resources",
+        }
+        body = SimpleAgentRunRequest.model_validate(run_payload)
+        body_before = body.model_dump()
+
+        result = await server.run(MagicMock(cookies={}), body)
+
+        verify_payload = server_client.post.await_args_list[-1].kwargs["json"]
+        legacy_payload = SimpleAgentVerifyRequest.model_validate(
+            body_before | {"response": response_payload}
+        ).model_dump()
+        assert verify_payload == legacy_payload
+        assert verify_payload["responses_create_params"] == body_before["responses_create_params"]
+        assert verify_payload["verifier_metadata"] == run_payload["verifier_metadata"]
+        assert verify_payload["task_id"] == "task-7"
+        assert verify_payload["dataset_field"] == {"nested": ["value"]}
+        assert verify_payload["response"] == response_payload
+        assert verify_payload["response"]["output"][0]["generation_token_ids"] == [12, 13]
+        assert {
+            key: verify_payload[key]
+            for key in (
+                TASK_INDEX_KEY_NAME,
+                ROLLOUT_INDEX_KEY_NAME,
+                ATTEMPT_INDEX_KEY_NAME,
+                AGENT_REF_KEY_NAME,
+                TASK_SOURCE_KEY_NAME,
+            )
+        } == {
+            key: body_before[key]
+            for key in (
+                TASK_INDEX_KEY_NAME,
+                ROLLOUT_INDEX_KEY_NAME,
+                ATTEMPT_INDEX_KEY_NAME,
+                AGENT_REF_KEY_NAME,
+                TASK_SOURCE_KEY_NAME,
+            )
+        }
+        assert "_ng_trajectory" not in verify_payload["response"]
+        assert "ng_trajectory" not in verify_payload
+        assert result.ng_trajectory is not None
+        assert result.ng_trajectory["rollout_id"] == "explicit-rollout-a2"
+        assert body.model_dump() == body_before
+
+    async def test_run_preserves_response_aliases_in_verify_payload(self) -> None:
+        server, server_client = _make_agent(False)
+        json_schema_format = {
+            "type": "json_schema",
+            "name": "answer",
+            "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+            "strict": True,
+        }
+        # FastAPI serializes the model server response by alias, so the wire field is `schema`, not `schema_`.
+        response_payload = NeMoGymResponse.model_validate(
+            {
+                "id": "response-1",
+                "created_at": 1.0,
+                "model": "model",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "message-1",
+                        "content": [{"annotations": [], "text": '{"answer": "yes"}', "type": "output_text"}],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "text": {"format": json_schema_format},
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        ).model_dump(mode="json", by_alias=True)
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            if url_path.endswith("/v1/responses"):
+                return _mock_response(response_payload)
+            assert url_path == "/verify"
+            return _mock_response(kwargs["json"] | {"reward": 1.0})
+
+        server_client.post = AsyncMock(side_effect=post)
+        body = SimpleAgentRunRequest.model_validate(
+            {"responses_create_params": {"input": "question", "text": {"format": json_schema_format}}}
+        )
+
+        await server.run(MagicMock(cookies={}), body)
+
+        verify_payload = server_client.post.await_args_list[-1].kwargs["json"]
+        assert verify_payload["response"]["text"]["format"]["schema"] == json_schema_format["schema"]
+        assert "schema_" not in verify_payload["response"]["text"]["format"]
+        verify_request = SimpleAgentVerifyRequest.model_validate(verify_payload)
+        assert verify_request.response.text.format.schema_ == json_schema_format["schema"]
+
     async def test_responses_continues_on_malformed_tool_call_arguments(self, monkeypatch: MonkeyPatch) -> None:
         """Malformed JSON in a tool-call's arguments must not crash the rollout.
 
@@ -510,7 +1062,8 @@ class TestApp:
         # JSONDecodeError starts with the class name.
         assert "JSONDecodeError" in error_payload["error"]
 
-    async def test_responses_continues_on_reasoning_only(self, monkeypatch: MonkeyPatch) -> None:
+    @pytest.mark.parametrize("empty_output", [False, True])
+    async def test_responses_stops_without_message_or_tool_calls(self, caplog, empty_output) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
             port=8080,
@@ -552,137 +1105,132 @@ class TestApp:
             "tools": [],
         }
 
-        mock_response_chat_data = {
-            "id": "resp_688babb004988199b26c5250ba69c1e80abdf302bcd600d3",
-            "created_at": 1753983920.0,
-            "model": "dummy_model",
-            "object": "response",
-            "output": [
-                {
-                    "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
-                    "content": [
-                        {
-                            "annotations": [],
-                            "text": "Hello! How can I help you today?",
-                            "type": "output_text",
-                        }
-                    ],
-                    "role": "assistant",
-                    "status": "completed",
-                    "type": "message",
-                }
-            ],
-            "parallel_tool_calls": True,
-            "tool_choice": "auto",
-            "tools": [],
-        }
-
+        if empty_output:
+            mock_response_reasoning_data["output"] = []
+        mock_response_reasoning_data["status"] = "completed"
+        mock_response_reasoning_data["metadata"] = {"existing_key": "preserved"}
         dotjson_mock = AsyncMock()
-        dotjson_mock.read.side_effect = [json.dumps(mock_response_reasoning_data), json.dumps(mock_response_chat_data)]
-        dotjson_mock.cookies = MagicMock()
+        dotjson_mock.read.side_effect = [json.dumps(mock_response_reasoning_data)]
+        dotjson_mock.cookies = {}
         server.server_client.post.return_value = dotjson_mock
 
-        # No model provided should use the one from the config
-        res_no_model = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
-        assert res_no_model.status_code == 200
+        res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
 
-        expected_calls = [
-            call(
-                server_name="my server name",
-                url_path="/v1/responses",
-                json=NeMoGymResponseCreateParamsNonStreaming(
-                    input=[NeMoGymEasyInputMessage(content="hello", role="user", type="message")]
-                ),
-                cookies=None,
-            ),
-            call().ok.__bool__(),
-            call().read(),
-            call(
-                server_name="my server name",
-                url_path="/v1/responses",
-                json=NeMoGymResponseCreateParamsNonStreaming(
-                    input=[
-                        NeMoGymEasyInputMessage(content="hello", role="user", type="message"),
-                        NeMoGymResponseReasoningItem(
-                            id="msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
-                            summary=[NeMoGymSummary(text="I'm thinking how to respond", type="summary_text")],
-                            type="reasoning",
-                            encrypted_content=None,
-                            status="completed",
-                        ),
-                    ]
-                ),
-                cookies=dotjson_mock.cookies,
-            ),
-            call().ok.__bool__(),
-            call().read(),
-            call().cookies.items(),
-            call().cookies.items().__iter__(),
-            call().cookies.items().__len__(),
-        ]
-        server.server_client.post.assert_has_calls(expected_calls)
+        assert res.status_code == 200
+        server.server_client.post.assert_awaited_once()
+        assert res.json()["status"] == "incomplete"
+        assert res.json()["incomplete_details"] is None
+        assert res.json()["metadata"]["existing_key"] == "preserved"
+        assert res.json()["metadata"]["ng_termination_reason"] == (
+            "empty_output" if empty_output else "incomplete_reasoning"
+        )
+        assert res.json()["metadata"]["ng_termination_message"] in caplog.text
+        assert [item["type"] for item in res.json()["output"]] == ([] if empty_output else ["reasoning"])
+        if not empty_output:
+            assert res.json()["output"][0]["summary"] == mock_response_reasoning_data["output"][0]["summary"]
+        assert "Ending trajectory" in caplog.text
+        assert "finish_reason='stop'" in caplog.text
+        assert "finish_reason='length', handled separately" in caplog.text
+        assert "badly trained model requiring training-level fixes" in caplog.text
+        assert "bug in the inference engine" in caplog.text
+        assert mock_response_reasoning_data["id"] in caplog.text
 
-        actual_responses_dict = res_no_model.json()
-        expected_responses_dict = {
-            "id": "resp_688babb004988199b26c5250ba69c1e80abdf302bcd600d3",
-            "created_at": 1753983920.0,
-            "error": None,
-            "incomplete_details": None,
-            "instructions": None,
-            "metadata": None,
-            "model": "dummy_model",
+    async def test_reasoning_only_trajectory_is_incomplete(self) -> None:
+        server, server_client = _make_agent(True)
+        payload = {
+            "id": "reasoning-response",
+            "created_at": 1.0,
+            "model": "model",
             "object": "response",
-            "output": [
-                {
-                    "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
-                    "content": None,
-                    "encrypted_content": None,
-                    "summary": [
-                        {
-                            "text": "I'm thinking how to respond",
-                            "type": "summary_text",
-                        }
-                    ],
-                    "type": "reasoning",
-                },
-                {
-                    "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
-                    "content": [
-                        {
-                            "annotations": [],
-                            "text": "Hello! How can I help you today?",
-                            "type": "output_text",
-                            "logprobs": None,
-                        }
-                    ],
-                    "role": "assistant",
-                    "status": "completed",
-                    "type": "message",
-                },
-            ],
+            "output": [{"id": "reasoning-1", "type": "reasoning", "summary": []}],
             "parallel_tool_calls": True,
-            "temperature": None,
             "tool_choice": "auto",
             "tools": [],
-            "top_p": None,
-            "background": None,
-            "max_output_tokens": None,
-            "max_tool_calls": None,
-            "previous_response_id": None,
-            "prompt": None,
-            "reasoning": None,
-            "service_tier": None,
-            "status": None,
-            "text": None,
-            "top_logprobs": None,
-            "truncation": None,
-            "usage": None,
-            "user": None,
-            "conversation": None,
-            "prompt_cache_key": None,
-            "safety_identifier": None,
+            "usage": {
+                "input_tokens": 3,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 5,
+                "output_tokens_details": {"reasoning_tokens": 5},
+                "total_tokens": 8,
+            },
         }
-        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
+        server_client.post = AsyncMock(return_value=_mock_response(payload))
+
+        response, trajectory, _, _ = await server._create_episode(
+            NeMoGymResponseCreateParamsNonStreaming(input="question"),
+            model_url_path="/v1/responses",
+            rollout_id="reasoning-rollout",
+            collect_trajectory=True,
+        )
+
+        server_client.post.assert_awaited_once()
+        assert response.usage.total_tokens == 8
+        assert [item.type for item in response.output] == ["reasoning"]
+        assert trajectory.invocations[0].status == "incomplete"
+        assert len(trajectory.turns) == 1
+        assert trajectory.turns[0].answer == []
+        assert trajectory.turns[0].reasoning_content[0]["id"] == "reasoning-1"
+        assert trajectory.tool_calls == []
+
+    @pytest.mark.parametrize("with_compaction", [False, True])
+    @pytest.mark.parametrize("skip_verification", [False, True])
+    async def test_termination_metadata_survives_run(self, with_compaction, skip_verification) -> None:
+        from responses_api_agents.simple_agent_with_compaction.app import (
+            SimpleAgentWithCompaction,
+            SimpleAgentWithCompactionConfig,
+            SimpleAgentWithCompactionRunRequest,
+        )
+
+        agent_cls = SimpleAgentWithCompaction if with_compaction else SimpleAgent
+        config_cls = SimpleAgentWithCompactionConfig if with_compaction else SimpleAgentConfig
+        request_cls = SimpleAgentWithCompactionRunRequest if with_compaction else SimpleAgentRunRequest
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": False}
+        server = agent_cls(
+            config=config_cls(
+                host="localhost",
+                port=8080,
+                entrypoint="",
+                name="agent",
+                model_server=ModelServerRef(type="responses_api_models", name="model"),
+                resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+                skip_verification=skip_verification,
+            ),
+            server_client=client,
+        )
+        payload = {
+            "id": "reasoning-response",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "output": [{"id": "reasoning-1", "type": "reasoning", "summary": []}],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "status": "completed",
+        }
+        request = MagicMock(cookies={})
+
+        async def post(*, server_name, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            if server_name == "agent":
+                response = await server.responses(request, Response(), kwargs["json"])
+                return _mock_response(response.model_dump(mode="json"))
+            if server_name == "model":
+                return _mock_response(payload)
+            assert url_path == "/verify"
+            assert kwargs["json"]["response"]["metadata"]["ng_termination_reason"] == "incomplete_reasoning"
+            return _mock_response(kwargs["json"] | {"reward": 0.0})
+
+        client.post = AsyncMock(side_effect=post)
+        result = await server.run(request, request_cls(responses_create_params={"input": "question"}))
+        saved = json.loads(result.model_dump_json())
+        assert "ng_trajectory" not in saved
+        assert saved["response"]["status"] == "incomplete"
+        assert saved["response"]["metadata"]["ng_termination_reason"] == "incomplete_reasoning"
+        assert "training-level fixes" in saved["response"]["metadata"]["ng_termination_message"]
+        assert sum(call.kwargs["server_name"] == "model" for call in client.post.await_args_list) == 1
 
     async def test_usage_sanity(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
@@ -711,15 +1259,11 @@ class TestApp:
             "object": "response",
             "output": [
                 {
-                    "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
-                    "summary": [
-                        {
-                            "text": "Hello! How can I help you today?",
-                            "type": "summary_text",
-                        }
-                    ],
-                    "status": "completed",
-                    "type": "reasoning",
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "my_tool",
+                    "arguments": "{invalid json",
                 }
             ],
             "parallel_tool_calls": True,
@@ -767,9 +1311,10 @@ class TestApp:
         }
         assert expected_usage_dict == actual_usage_dict
 
-    async def test_incomplete_details(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_incomplete_details(self, monkeypatch: MonkeyPatch, caplog) -> None:
         await self._test_incomplete_details_helper(monkeypatch, {"reason": "max_output_tokens"})
         await self._test_incomplete_details_helper(monkeypatch, {"reason": "content_filter"})
+        assert "Ending trajectory" not in caplog.text
 
     async def _test_incomplete_details_helper(self, monkeypatch: MonkeyPatch, incomplete_details) -> None:
         config = SimpleAgentConfig(

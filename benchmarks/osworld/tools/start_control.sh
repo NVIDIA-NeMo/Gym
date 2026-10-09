@@ -8,7 +8,7 @@ RUN_ID=${OSWORLD_RUN_ID:?set OSWORLD_RUN_ID}
 CONTROL_HOST=${NEMO_GYM_CONTROL_HOST:-127.0.0.1}
 GYM_BIN=${GYM_BIN:-${GYM_ROOT}/.venv/bin/gym}
 GYM_PYTHON=${GYM_PYTHON:-$(dirname "${GYM_BIN}")/python}
-ENV_FILE=${GYM_ROOT}/benchmarks/osworld/env.yaml
+ENV_FILE=${OSWORLD_ENV_FILE:-${GYM_ROOT}/benchmarks/osworld/env.yaml}
 RUNTIME_DEPS_CHECKER=${GYM_ROOT}/responses_api_agents/osworld_agent/runtime_dependencies.py
 RUNTIME_DEPS_INSTALLER=${GYM_ROOT}/responses_api_agents/osworld_agent/install_optional_runtime_deps.sh
 STATE_DIR=${RUN_ROOT}/run/osworld/${RUN_ID}
@@ -30,6 +30,11 @@ python_include=$("${GYM_PYTHON}" -c 'import sysconfig; print(sysconfig.get_path(
     echo "Python development headers are required (for example: apt install python3-dev)" >&2
     exit 2
 }
+[[ $(basename "${ENV_FILE}") == env.yaml ]] || {
+    echo "OSWORLD_ENV_FILE must name env.yaml because Gym loads it from the working directory: ${ENV_FILE}" >&2
+    exit 2
+}
+ENV_DIR="$(cd "$(dirname "${ENV_FILE}")" && pwd)"
 
 if [[ -z "${OSWORLD_AGENT_VENV:-}" ]]; then
     OSWORLD_AGENT_VENV=$("${GYM_PYTHON}" "${RUNTIME_DEPS_CHECKER}" resolve-venv \
@@ -84,7 +89,7 @@ export OSWORLD_TASK_ARTIFACT_ROOT=${OSWORLD_TASK_ARTIFACT_ROOT:-${RUN_ROOT}/resu
 export OSWORLD_RESOURCES_IO_LOG=${OSWORLD_RESOURCES_IO_LOG:-${RUN_ROOT}/results/${RUN_ID}/resources-io.jsonl}
 export OSWORLD_VM_EXEC_LOG=${OSWORLD_VM_EXEC_LOG:-${RUN_ROOT}/results/${RUN_ID}/vm-exec.jsonl}
 
-cd "${GYM_ROOT}/benchmarks/osworld"
+cd "${ENV_DIR}"
 exec "${GYM_BIN}" env start \
   +use_absolute_ip=false \
   +default_host="${CONTROL_HOST}"

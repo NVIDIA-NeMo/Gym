@@ -30,6 +30,11 @@ Usage:
     python prefetch_sec_metadata.py \
         --cache_dir /path/to/gym_cache/finance_sec_search \
         --tickers AAPL MSFT NVDA
+
+    python prefetch_sec_metadata.py \
+        --cache_dir /path/to/gym_cache/finance_sec_search \
+        --ticker_config /path/to/sp500.yaml \
+        --supplementary_tickers benchmarks/finance_sec_search/data/supplementary_tickers.json
 """
 
 from __future__ import annotations
@@ -41,7 +46,7 @@ import logging
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 import aiohttp
 
@@ -161,6 +166,58 @@ async def fetch_company_filings(
         return {}
 
 
+def load_supplementary_tickers(path: str) -> Dict[str, Any]:
+    with open(path, "r") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Supplementary tickers file must be a JSON object: {path}")
+    return data
+
+
+def overlay_tickers_registry(raw: Dict[str, Any], supplementary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge an overlay onto an SEC registry. Overlay wins; one row per ticker.
+
+    Registry keys are positional and carry no meaning, so overlay keys are
+    namespaced to keep them from colliding with SEC's own numbering.
+    """
+    if not supplementary:
+        return raw
+    overridden = {item["ticker"].upper() for item in supplementary.values()}
+    merged = {key: item for key, item in raw.items() if item["ticker"].upper() not in overridden}
+    for key, item in supplementary.items():
+        merged[f"supplementary-{key}"] = item
+    return merged
+
+
+def registry_lookup(raw: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    lookup: Dict[str, Dict[str, str]] = {}
+    for item in raw.values():
+        t = item["ticker"].upper()
+        lookup[t] = {"cik": str(item["cik_str"]).zfill(10), "name": item["title"]}
+    return lookup
+
+
+def tickers_from_supplementary(supplementary: Dict[str, Any]) -> list[str]:
+    return [item["ticker"].upper() for item in supplementary.values()]
+
+
+def write_tickers_json(cache_dir: str, raw: Dict[str, Any]) -> Path:
+    cache = Path(cache_dir)
+    cache.mkdir(parents=True, exist_ok=True)
+    path = cache / "tickers.json"
+    with open(path, "w") as f:
+        json.dump(raw, f)
+    return path
+
+
+def unique_tickers(*groups: Iterable[str]) -> list[str]:
+    seen: dict[str, None] = {}
+    for group in groups:
+        for ticker in group:
+            seen[ticker.strip().upper()] = None
+    return list(seen)
+
+
 def load_ticker_list(ticker_config: str) -> list[str]:
     """Load tickers from a YAML config file (expects a 'tickers' key with a list)."""
     import yaml
@@ -177,22 +234,20 @@ def load_ticker_list(ticker_config: str) -> list[str]:
     raise ValueError(f"Cannot find ticker list in {ticker_config}. Expected a list or dict with 'tickers' key.")
 
 
-async def resolve_tickers(
+async def fetch_sec_tickers_registry(
     session: aiohttp.ClientSession,
-    tickers: list[str],
     rate_limiter: RateLimiter,
-) -> Dict[str, Dict[str, str]]:
-    """Resolve tickers to CIKs using SEC company_tickers.json."""
+) -> Dict[str, Any]:
     data = await fetch_with_retry(session, SEC_TICKERS_URL, rate_limiter)
     if not data:
         raise RuntimeError("Failed to fetch SEC company tickers")
+    return json.loads(data)
 
-    raw = json.loads(data)
-    lookup: Dict[str, Dict[str, str]] = {}
-    for item in raw.values():
-        t = item["ticker"].upper()
-        lookup[t] = {"cik": str(item["cik_str"]).zfill(10), "name": item["title"]}
 
+def resolve_against_lookup(
+    tickers: list[str],
+    lookup: Dict[str, Dict[str, str]],
+) -> Dict[str, Dict[str, str]]:
     resolved = {}
     for t in tickers:
         t_upper = t.strip().upper()
@@ -203,15 +258,41 @@ async def resolve_tickers(
     return resolved
 
 
-async def prefetch(cache_dir: str, tickers: list[str], force: bool = False) -> None:
+async def resolve_tickers(
+    session: aiohttp.ClientSession,
+    tickers: list[str],
+    rate_limiter: RateLimiter,
+    supplementary_tickers: Optional[str] = None,
+    cache_dir: Optional[str] = None,
+) -> Dict[str, Dict[str, str]]:
+    """Resolve tickers to CIKs using SEC company_tickers.json plus an optional overlay."""
+    extra = load_supplementary_tickers(supplementary_tickers) if supplementary_tickers else None
+    raw = overlay_tickers_registry(await fetch_sec_tickers_registry(session, rate_limiter), extra)
+    if cache_dir:
+        write_tickers_json(cache_dir, raw)
+    lookup = registry_lookup(raw)
+    return resolve_against_lookup(tickers, lookup)
+
+
+async def prefetch(
+    cache_dir: str,
+    tickers: list[str],
+    force: bool = False,
+    supplementary_tickers: Optional[str] = None,
+) -> None:
     metadata_dir = Path(cache_dir) / "filings_metadata"
     metadata_dir.mkdir(parents=True, exist_ok=True)
+
+    extra = load_supplementary_tickers(supplementary_tickers) if supplementary_tickers else None
+    prefetch_tickers = unique_tickers(tickers, tickers_from_supplementary(extra) if extra else [])
 
     rate_limiter = RateLimiter()
     connector = aiohttp.TCPConnector(limit=50, limit_per_host=10)
     async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}, connector=connector) as session:
-        companies = await resolve_tickers(session, tickers, rate_limiter)
-        logger.info("Resolved %d / %d tickers", len(companies), len(tickers))
+        raw = overlay_tickers_registry(await fetch_sec_tickers_registry(session, rate_limiter), extra)
+        write_tickers_json(cache_dir, raw)
+        companies = resolve_against_lookup(prefetch_tickers, registry_lookup(raw))
+        logger.info("Resolved %d / %d tickers", len(companies), len(prefetch_tickers))
 
         skipped = 0
         fetched = 0
@@ -253,6 +334,11 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--ticker_config", help="YAML file with ticker list")
     group.add_argument("--tickers", nargs="+", help="Explicit list of tickers")
+    parser.add_argument(
+        "--supplementary_tickers",
+        default=None,
+        help="Optional JSON overlay of extra ticker mappings (SEC company_tickers.json schema)",
+    )
     args = parser.parse_args()
 
     if args.ticker_config:
@@ -261,7 +347,14 @@ def main():
         tickers = args.tickers
 
     logger.info("Prefetching metadata for %d tickers into %s", len(tickers), args.cache_dir)
-    asyncio.run(prefetch(args.cache_dir, tickers, force=args.force))
+    asyncio.run(
+        prefetch(
+            args.cache_dir,
+            tickers,
+            force=args.force,
+            supplementary_tickers=args.supplementary_tickers,
+        )
+    )
 
 
 if __name__ == "__main__":

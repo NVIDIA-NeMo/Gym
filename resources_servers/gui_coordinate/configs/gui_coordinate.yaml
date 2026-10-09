@@ -20,3 +20,11 @@ gui_coordinate_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/gui_coordinate/data/example.jsonl
+
+gui_coordinate_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: gui_coordinate_simple_agent

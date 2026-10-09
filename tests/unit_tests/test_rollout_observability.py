@@ -158,6 +158,96 @@ def test_join_model_calls_resolves_exact_references_and_reports_unowned_calls() 
     assert [gap.detail for gap in ownership_gaps] == ["direct_provider", "capture:call-2:call_index=1"]
 
 
+def test_join_model_calls_uses_exact_client_session_ownership() -> None:
+    bundle = AgentObservationBundle(
+        source="test",
+        records=[
+            AgentInvocation(invocation_id="root"),
+            AgentInvocation(invocation_id="child", parent_invocation_id="root"),
+        ],
+    )
+    calls = [
+        ModelCallRecord(model_call_id="call-root", client_session_id="root", call_index=0),
+        ModelCallRecord(model_call_id="call-child", client_session_id="child", call_index=1),
+        ModelCallRecord(model_call_id="call-unknown", client_session_id="unknown", call_index=2),
+    ]
+
+    joined = join_model_call_observations(bundle, calls)
+    joined_again = join_model_call_observations(joined, calls)
+
+    assert all(not invocation.model_calls for invocation in bundle.records)
+    assert joined_again.model_dump() == joined.model_dump()
+    invocations = {record.invocation_id: record for record in joined.records if isinstance(record, AgentInvocation)}
+    assert [reference.model_call_id for reference in invocations["root"].model_calls] == ["call-root"]
+    assert [reference.model_call_id for reference in invocations["child"].model_calls] == ["call-child"]
+    assert [gap.detail for gap in joined.gaps if gap.code == "model_call_ownership_unavailable"] == [
+        "capture:call-unknown:call_index=2"
+    ]
+
+
+def test_client_session_association_does_not_mutate_or_retain_phantom_calls() -> None:
+    bundle = AgentObservationBundle(source="test", records=[AgentInvocation(invocation_id="root")])
+    first = [ModelCallRecord(model_call_id="first", client_session_id="root", call_index=0)]
+    second = [ModelCallRecord(model_call_id="second", client_session_id="root", call_index=0)]
+
+    first_result = join_model_call_observations(bundle, first)
+    second_result = join_model_call_observations(bundle, second)
+
+    assert not bundle.records[0].model_calls
+    assert [reference.model_call_id for reference in first_result.records[0].model_calls] == ["first"]
+    assert [reference.model_call_id for reference in second_result.records[0].model_calls] == ["second"]
+
+
+def test_client_session_association_skips_calls_without_a_session_id() -> None:
+    bundle = AgentObservationBundle(source="test", records=[AgentInvocation(invocation_id="")])
+    calls = [ModelCallRecord(model_call_id="unowned", call_index=0)]
+
+    joined = join_model_call_observations(bundle, calls)
+
+    assert not joined.records[0].model_calls
+    assert [gap.detail for gap in joined.gaps if gap.code == "model_call_ownership_unavailable"] == [
+        "capture:unowned:call_index=0"
+    ]
+
+
+def test_client_session_association_deduplicates_existing_exact_references() -> None:
+    model_ref = ModelServerRef(name="policy", type="responses_api_models")
+    bundle = AgentObservationBundle(
+        source="test",
+        records=[
+            AgentInvocation(
+                invocation_id="root",
+                model_calls=[ModelCallRef(model_ref=model_ref, response_id="response")],
+            )
+        ],
+    )
+    calls = [
+        ModelCallRecord(
+            model_call_id="call",
+            client_session_id="root",
+            model_ref=model_ref,
+            response_id="response",
+            call_index=0,
+        )
+    ]
+
+    associated = join_model_call_observations(bundle, calls)
+
+    assert len(associated.records[0].model_calls) == 1
+
+
+def test_client_session_association_scales_to_long_rollouts() -> None:
+    bundle = AgentObservationBundle(source="test", records=[AgentInvocation(invocation_id="root")])
+    calls = [
+        ModelCallRecord(model_call_id=f"call-{index}", client_session_id="root", call_index=index)
+        for index in range(2_000)
+    ]
+
+    associated = join_model_call_observations(bundle, calls)
+
+    assert len(associated.records[0].model_calls) == len(calls)
+
+
 def test_join_model_calls_does_not_guess_ambiguous_response_ids() -> None:
     model_ref = ModelServerRef(name="policy", type="responses_api_models")
     bundle = AgentObservationBundle(
@@ -315,3 +405,69 @@ def test_join_model_calls_rejects_cross_invocation_compaction_ownership() -> Non
 def test_sandbox_observation_rejects_negative_usage() -> None:
     with pytest.raises(ValidationError):
         SandboxObservation(role="agent", cpu_time_s=-1)
+
+
+def test_capture_merge_joins_declared_message_ids_for_any_harness(tmp_path):
+    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+    from nemo_gym.rollout_observability import TrajectoryTurn
+
+    model = ModelServerRef(type="responses_api_models", name="policy")
+    bundle = AgentObservationBundle(
+        source="custom_harness",
+        records=[
+            AgentInvocation(invocation_id="root"),
+            AgentInvocation(invocation_id="child", parent_invocation_id="root"),
+            ContextCompactionObservation(invocation_id="root", source_message_ids=["summary"], source_model_ref=model),
+        ],
+    )
+    trajectory = TrajectoryRecord(
+        task_id="0",
+        rollout_id="0-0",
+        turns=[
+            TrajectoryTurn(
+                invocation_id=session,
+                source_message_id="reply",
+                source_model_ref=model,
+                task_id="0",
+                rollout_id="0-0",
+                turn_no=1,
+                step_count=1,
+                timestamp=0,
+            )
+            for session in ("root", "child")
+        ],
+    )
+    store = CaptureStore(tmp_path)
+    for call_id, session, message in [
+        ("retry", "root", "reply"),
+        ("success", "root", "reply"),
+        ("child-call", "child", "reply"),
+        ("summary-call", "root", "summary"),
+    ]:
+        store.record(
+            "0-0",
+            {
+                "model_call_id": call_id,
+                "client_session_id": session,
+                "client_assistant_message_id": message,
+                "model_ref": model.model_dump(),
+            },
+        )
+    row = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "ng_agent_observations": bundle.model_dump(mode="json"),
+        "ng_trajectory": trajectory.model_dump(mode="json"),
+    }
+    merge_model_call_capture_into_record(row, [tmp_path])
+    joined = TrajectoryRecord.model_validate(row["ng_trajectory"])
+    assert [[call.model_call_id for call in turn.model_calls] for turn in joined.turns] == [
+        ["retry", "success"],
+        ["child-call"],
+    ]
+    observations = AgentObservationBundle.model_validate(row["ng_agent_observations"])
+    assert observations.source == "custom_harness"
+    [compaction] = [r for r in observations.records if isinstance(r, ContextCompactionObservation)]
+    assert [call.model_call_id for call in compaction.model_calls] == ["summary-call"]
+    assert not observations.gaps
+    assert all(not turn.model_calls for turn in trajectory.turns)
