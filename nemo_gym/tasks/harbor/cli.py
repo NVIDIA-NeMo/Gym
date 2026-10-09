@@ -139,8 +139,10 @@ def runs_in_sandbox(impl_name: str, impl_config: Any) -> bool:
 def resolve_agent(agent: str) -> AgentSelection:
     """Map ``--agent NAME[/FLAVOR]`` to ``responses_api_agents/<NAME>/configs/<FLAVOR>.yaml``.
 
-    ``NAME`` may omit a trailing ``_agent`` or ``_sandboxed_agent`` (``hermes`` selects ``hermes_agent``,
-    ``terminus_2`` selects ``terminus_2_sandboxed_agent``).
+    ``NAME`` may omit a trailing ``_agent`` or ``_sandboxed_agent`` (``simple`` selects ``simple_agent``).
+    A short name that matches two harnesses, such as ``hermes`` (``hermes_agent`` and
+    ``hermes_sandboxed_agent``) or ``terminus_2``, is refused with both full names, so a run never
+    lands on the wrong harness by default.
     """
     name, _, flavor = agent.partition("/")
     candidates = [name] if name.endswith("_agent") else [name, f"{name}_agent", f"{name}_sandboxed_agent"]
